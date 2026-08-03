@@ -946,6 +946,21 @@ fn poseAfter(
             }
             return false;
         },
+        // All NINE components in winding order, lexicographically — the same discipline
+        // the box arm follows and for the same reason: a partial key (an area, a centroid)
+        // would let two distinct triangles compare equal and break the strictness this
+        // order needs.
+        .triangle => |va| {
+            const vb = shape_b.core.triangle;
+            inline for (0..3) |i| {
+                const a = va[i].toArray();
+                const b = vb[i].toArray();
+                inline for (0..3) |k| {
+                    if (a[k] != b[k]) return a[k] > b[k];
+                }
+            }
+            return false;
+        },
     }
 }
 
@@ -955,6 +970,7 @@ fn coreKind(comptime T: type, shape: support.SupportShape(T)) u8 {
         .point => 0,
         .segment => 1,
         .box => 2,
+        .triangle => 3,
     };
 }
 

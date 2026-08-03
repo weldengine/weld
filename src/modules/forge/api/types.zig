@@ -66,8 +66,9 @@ pub const BodyType = enum(u8) {
 /// Collision-shape kind. `u8`-backed (component tag). C1.1-complete set —
 /// the spec §1 enum is a subset; the extension (plane, tapered_cylinder,
 /// height_field, mutable_compound, empty) is additive and pre-freeze
-/// (Notes decision 3b). `createShape` constructs sphere/box/capsule (M1.1.0) and
-/// plane (M1.1.11); every other variant returns `error.UnsupportedShape` until its
+/// (Notes decision 3b). `createShape` constructs sphere/box/capsule (M1.1.0),
+/// plane (M1.1.11) and triangle_mesh (M1.1.11.1 — the twelfth and LAST shape of the
+/// C1.1 list); every other variant returns `error.UnsupportedShape` until its
 /// own sub-milestone.
 pub const ShapeType = enum(u8) {
     /// Sphere (radius).
@@ -148,8 +149,56 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// and not a tolerance, the same pattern the typed rejection of a `collision_layer`
     /// outside `[0, 32)` exists to close (§1.11.4).
     plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
-    /// Placeholder — payload lands at the triangle-mesh sub-milestone.
-    triangle_mesh: void,
+    /// Static triangle mesh (M1.1.11.1, `engine-physics-forge.md` §1.11.17). A
+    /// SURFACE and not a solid, and that is CATEGORICAL rather than a setting:
+    /// membership is false everywhere, `pointQuery` never returns a body carrying
+    /// one, and `closestPoint` measures to the surface and is never zero by
+    /// interiority. There is no mesh counterpart to `treat_convex_as_solid`.
+    ///
+    /// The body carrying it must be STATIC: `addBody` rejects a dynamic or kinematic
+    /// one with `error.ShapeMustBeStatic`. The motive is NOT the half-space's — a mesh
+    /// has a valid local AABB, hence a defined sleep radius; what it lacks is a
+    /// VOLUME, an open surface enclosing nothing, so no inertia tensor derives from it
+    /// and `unit_inertia` is NaN.
+    ///
+    /// `vertices` and `indices` are BORROWED for the duration of the call:
+    /// `createShape` takes an owned copy, and the caller is free to release them on
+    /// return. WINDING is counter-clockwise seen from the front face, and the outward
+    /// normal is `normalize((v₁−v₀) × (v₂−v₀))` in that FIXED order, so its value is a
+    /// deterministic function of the stored vertices (§1.5).
+    ///
+    /// **Domain, refused by typed error and never sanitised.** Rejected at creation: an
+    /// index count that is not a multiple of three, an index outside the vertex array, a
+    /// non-finite vertex, a mesh with no triangle, and a triangle whose cross product is
+    /// EXACTLY zero — the true-zero guard of §1.11.4 on its largest absolute component,
+    /// applied verbatim. A sliver of tiny but non-zero area normalises exactly and MUST
+    /// be served; no area threshold appears anywhere.
+    ///
+    /// The refusal never REMOVES the offending triangle. The reference sanitises
+    /// (`MeshShapeSettings::Sanitize` drops duplicate and degenerate triangles); Weld
+    /// refuses, because a removal RENUMBERS and that number IS the `subshape_id`
+    /// (§1.11.16) — caller and engine would then designate different triangles with no
+    /// diagnostic at all, the same silent-wrong-answer class the `[0, 32)` bound on
+    /// `collision_layer` already exists to close.
+    ///
+    /// `active_edge_cos_threshold` is the cosine below which a CONVEX edge is treated as
+    /// ACTIVE, and it is authored HERE because the flags are baked at creation: this is
+    /// the only path a caller has to them, and after the M1.1.15 freeze the field could
+    /// not land at all. Same pre-freeze window as `BackFaceMode`, and it closes at this
+    /// shape. A named PHYSICAL parameter of the same class as `restitution_threshold` and
+    /// `penetration_slop` — it selects a modelling behaviour, not a numerical tolerance,
+    /// so §1.11.2's `k · floatEps(T) · coordScale` discipline does not apply to it. It is
+    /// `f32` like the rest of this surface (§1.11.8), so the same descriptor names the
+    /// same threshold in an `f32` and an `f64` build; the solver widens it once.
+    /// `forge_3d/mesh.zig`'s `default_active_edge_cos_threshold` is the source of truth
+    /// for this default, and the equality of the two is pinned by a test there.
+    triangle_mesh: struct {
+        vertices: []const Vec3,
+        indices: []const u32,
+        /// `cos(5°)`, whose nearest `f32` is `0.9961947202682495` — the reference's
+        /// `mActiveEdgeCosThresholdAngle` default.
+        active_edge_cos_threshold: f32 = 0.99619472,
+    },
     /// Placeholder — payload lands at the height-field sub-milestone.
     height_field: void,
     /// Placeholder — payload lands at the compound sub-milestone.
@@ -236,6 +285,35 @@ pub const PhysicsQueryFilter = struct {
     exclude: []const BodyId = &.{},
 };
 
+/// Which side of a TRIANGLE an entry answers on (`engine-physics-forge.md` §1.11.17).
+/// The front face is the side the outward normal points to.
+///
+/// Carried only by the entries whose ANSWER differs between the two modes. It is
+/// meaningless outside a mesh: a convex is SOLID and has no back (§1.11.4), and neither
+/// has a half-space. It is absent from `overlapAabb`, which sees no triangle, from
+/// `pointQuery`, which never returns a mesh, and from `closestPoint`, whose distance to
+/// a surface is not signed.
+///
+/// Weld carries ONE field where the reference carries two — `RayCastSettings` and
+/// `ShapeCastSettings` each declare a triangle mode AND a convex mode, both at
+/// `IgnoreBackFaces`. The convex half is already settled here, and not by a setting.
+///
+/// PRE-FREEZE EXTENSION, last window: after the M1.1.15 freeze of `PhysicsModule` this
+/// field could not land at all.
+pub const BackFaceMode = enum(u8) {
+    /// A triangle met from behind does not answer. The default, aligned with the
+    /// reference and with the three real consumers — line of sight, ground probe,
+    /// step probe.
+    ignore,
+    /// It answers, and the returned normal is FLIPPED. §1.11.4 declares
+    /// `normal · direction <= 0` on EVERY hit, and the `−direction` choice at distance
+    /// zero draws its justification from that invariant; returning the outward normal
+    /// unchanged would puncture it. Assumed divergence from the reference, which returns
+    /// it unchanged. Nothing is lost — the caller ASKED for this mode, and the real side
+    /// stays reachable through `subshape_id`.
+    collide,
+};
+
 /// A world-space ray query. `direction` need not be normalised — it is at the
 /// entry. The tested interval is CLOSED, `[0, max_distance]`, and an origin
 /// inside a shape produces a hit at distance zero (convexes are solid, §1.11.4).
@@ -248,6 +326,8 @@ pub const RaycastQuery = struct {
     max_distance: f32,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers. Vacuous on every other shape.
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// A cast of an arbitrary shape. Replaces the former `SphereCastQuery`: ONE entry
@@ -267,6 +347,10 @@ pub const ShapeCastQuery = struct {
     max_distance: f32,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers. Vacuous on every other shape. Under
+    /// `.collide` the normal a back-face hit returns FACES the sweep, which is what the two
+    /// real consumers — slope and ground probe — read.
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// An overlap test of an arbitrary shape. Same construction as the cast: the
@@ -280,6 +364,28 @@ pub const OverlapQuery = struct {
     rotation: Quatf = Quatf.identity,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers: under `.ignore` a triangle whose probe lies
+    /// ENTIRELY in the rear half-space of its plane is discarded, while a probe STRADDLING the
+    /// plane touches from the front and counts in both modes (§1.11.17).
+    ///
+    /// **MEASURED INERTIA, and you should know it before setting this.** On THIS entry the two
+    /// modes agree on the answer except inside GJK's own contact margin. A triangle lies IN its
+    /// plane, so any probe that overlaps a triangle necessarily reaches that plane and
+    /// straddles it; and a probe entirely behind the plane cannot overlap the triangle at all,
+    /// so every triangle the predicate discards is one GJK already classifies `separated`. What
+    /// is left is a band a few ULPs wide, where a core sitting just behind the plane reads as
+    /// `.shallow`. Setting this field expecting a different set of bodies back will disappoint.
+    ///
+    /// **It exists anyway, and not for symmetry.** This entry returns BODIES, which is a Weld
+    /// choice and not a fact of the world; the reference carries the same field on
+    /// `CollideShapeSettings` precisely because its equivalent returns points and normals. The
+    /// day this entry gains a normal, the field becomes load-bearing — and after the M1.1.15
+    /// freeze of `PhysicsModule` it could not be added at all. So the cost is one nearly inert
+    /// field, against a dead end that would be permanent.
+    ///
+    /// On the SWEEP (`ShapeCastQuery`) the mode is fully observable: a cast reaches a back face
+    /// from a distance, and the two modes return different answers on the same geometry.
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// One ray hit.
@@ -392,6 +498,20 @@ test "ShapeDescriptor payload defaults" {
     try testing.expect(p.plane.normal.eql(Vec3.unit_y));
     try testing.expectEqual(@as(f32, 0), p.plane.distance);
     try testing.expectEqual(@as(f32, 1), p.plane.normal.lengthSq());
+
+    // The mesh payload (M1.1.11.1) carries NO default, and that is deliberate rather
+    // than an omission: both fields are BORROWED slices, an empty one would describe a
+    // mesh with no triangle, and that is precisely what `createShape` refuses. So the
+    // pin is on the field NAMES and the ELEMENT types — the public boundary is f32
+    // (§1.11.8), so the vertices are `math.Vec3` and not the solver scalar, and the
+    // indices are `u32` because that is the width `subshape_id` carries.
+    const verts = [_]Vec3{ Vec3.zero, Vec3.unit_x, Vec3.unit_y };
+    const idx = [_]u32{ 0, 1, 2 };
+    const m = ShapeDescriptor{ .triangle_mesh = .{ .vertices = &verts, .indices = &idx } };
+    try testing.expectEqual([]const Vec3, @TypeOf(m.triangle_mesh.vertices));
+    try testing.expectEqual([]const u32, @TypeOf(m.triangle_mesh.indices));
+    try testing.expectEqual(@as(usize, 3), m.triangle_mesh.vertices.len);
+    try testing.expectEqual(@as(usize, 3), m.triangle_mesh.indices.len);
 }
 
 test "BodyDescriptor defaults match the brief" {

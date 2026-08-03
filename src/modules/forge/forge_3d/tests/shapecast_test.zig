@@ -576,7 +576,7 @@ test "the adapters call the kernel, bit for bit, and do not reimplement it" {
         const cast_shape = sphere(1);
         const relpose = RP.init(Vec3r.zero, Quatr.identity, v(10, 0, 0), Quatr.identity);
         const direct = narrowphase.castShape(Real, cast_shape, relpose, body_shape, v(1, 0, 0), 100).?;
-        const through = world.bm.castShapeBody(&world.store, body, cast_shape, Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+        const through = world.bm.castShapeBody(&world.store, body, cast_shape, Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore).?;
         try testing.expectEqual(direct.distance, through.distance);
         inline for (0..3) |i| {
             try testing.expectEqual(direct.point.toArray()[i], through.position.toArray()[i]);
@@ -592,7 +592,7 @@ test "the adapters call the kernel, bit for bit, and do not reimplement it" {
         const probe = sphere(1);
         for ([_]Real{ 8, 12.9, 13.5 }) |x| {
             const direct = narrowphase.gjk(Real, probe, v(x, 0, 0), Quatr.identity, body_shape, v(10, 0, 0), Quatr.identity);
-            const through = world.bm.overlapShapeBody(&world.store, body, probe, v(x, 0, 0), Quatr.identity).?;
+            const through = world.bm.overlapShapeBody(&world.store, body, probe, v(x, 0, 0), Quatr.identity, .ignore).?;
             try testing.expectEqual(direct.status != .separated, through);
         }
     }
@@ -641,7 +641,7 @@ test "the adapters honour a rotated body pose" {
     });
 
     // A unit sphere sweeping +X from the origin reaches x = 9 − 1 = 8.
-    const hit = world.bm.castShapeBody(&world.store, body, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+    const hit = world.bm.castShapeBody(&world.store, body, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
     try testing.expectApproxEqAbs(@as(Real, 9), hit.position.toArray()[0], tol);
@@ -679,18 +679,18 @@ test "a rotated cast frame is transported, not ignored" {
         .entity = .{ .index = 0, .generation = 0 },
     });
 
-    const upright = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+    const upright = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 8.5), upright.distance, tol);
 
     // A CAST rotation is at the solver scalar (`Quatr`), unlike a descriptor rotation
     // which is `f32` by design (§1.11.8). The two coincide at f32 and do not at f64,
     // so building this one with `Quatf` compiles in one leg and not the other.
     const laid = Quatr.fromAxisAngle(v(0, 0, 1), -std.math.pi / 2.0);
-    const along = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, laid, v(1, 0, 0), 100).?;
+    const along = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, laid, v(1, 0, 0), 100, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 6.5), along.distance, tol);
     // A cast origin offset moves the answer by exactly that offset, the sweep being a
     // pure translation.
-    const offset = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), v(1, 0, 0), laid, v(1, 0, 0), 100).?;
+    const offset = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), v(1, 0, 0), laid, v(1, 0, 0), 100, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 5.5), offset.distance, tol);
 }
 
@@ -708,24 +708,24 @@ test "every adapter answers null on a stale handle and on a stale shape" {
 
     // Everything answers while both are live — otherwise "null afterwards" would
     // prove nothing.
-    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) != null);
-    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity) != null);
+    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore) != null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity, .ignore) != null);
     try testing.expect(world.bm.containsPointBody(&world.store, doomed, v(10, 0, 0)) != null);
     try testing.expect(world.bm.closestPointBody(&world.store, doomed, v(20, 0, 0)) != null);
 
     // (a) STALE SHAPE, live handle: destroy the shape and leave the body alone.
-    world.store.destroyShape(doomed_body.shape);
+    world.store.destroyShape(gpa, doomed_body.shape);
     try testing.expect(world.bm.isValid(doomed)); // the handle really is still live
-    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) == null);
-    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity) == null);
+    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore) == null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity, .ignore) == null);
     try testing.expect(world.bm.containsPointBody(&world.store, doomed, v(10, 0, 0)) == null);
     try testing.expect(world.bm.closestPointBody(&world.store, doomed, v(20, 0, 0)) == null);
 
     // (b) STALE HANDLE, on a body whose shape is untouched.
     world.removeBody(survivor);
     try testing.expect(!world.bm.isValid(survivor));
-    try testing.expect(world.bm.castShapeBody(&world.store, survivor, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) == null);
-    try testing.expect(world.bm.overlapShapeBody(&world.store, survivor, sphere(1), v(30, 0, 0), Quatr.identity) == null);
+    try testing.expect(world.bm.castShapeBody(&world.store, survivor, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100, .ignore) == null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, survivor, sphere(1), v(30, 0, 0), Quatr.identity, .ignore) == null);
     try testing.expect(world.bm.containsPointBody(&world.store, survivor, v(30, 0, 0)) == null);
     try testing.expect(world.bm.closestPointBody(&world.store, survivor, v(40, 0, 0)) == null);
 }
@@ -778,12 +778,12 @@ test "a sleeping body answers every adapter and stays asleep" {
     // (1) A cast from above reaches the sleeper: a unit sphere dropped along −Y from
     // 10 m up must stop at or before its centre.
     const cast_origin = v(centre.toArray()[0], 10, centre.toArray()[2]);
-    const hit = world.bm.castShapeBody(&world.store, sleeper, sphere(0.25), cast_origin, Quatr.identity, v(0, -1, 0), 100).?;
+    const hit = world.bm.castShapeBody(&world.store, sleeper, sphere(0.25), cast_origin, Quatr.identity, v(0, -1, 0), 100, .ignore).?;
     try testing.expect(hit.distance > 0 and hit.distance < 10 - centre.toArray()[1]);
     try testing.expect(world.bm.isSleeping(sleeper).?);
 
     // (2) A probe sphere centred on the sleeper overlaps it.
-    try testing.expect(world.bm.overlapShapeBody(&world.store, sleeper, sphere(0.25), centre, Quatr.identity).?);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, sleeper, sphere(0.25), centre, Quatr.identity, .ignore).?);
     try testing.expect(world.bm.isSleeping(sleeper).?);
 
     // (3) Its own centre is inside it.
@@ -944,6 +944,7 @@ test "initial contact returns a witness on the hit body" {
         shape_mod.supportShape(world.store.get(bar).?),
         cast_origin,
         Quatr.identity,
+        .ignore,
     ).?);
 
     const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
@@ -1127,7 +1128,7 @@ test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
     const plane = try world.store.createShape(gpa, .{ .plane = .{} });
     const doomed = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-    world.store.destroyShape(doomed);
+    world.store.destroyShape(gpa, doomed);
     _ = try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 1);
 
     // (1) STALE HANDLE → a typed error. The shape the caller named is gone.

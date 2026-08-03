@@ -19,6 +19,15 @@
 //! (a small body resting on a big one would sink by the big one's slop — a
 //! non-uniform rest offset in a stack), and a contact-coordinate-derived one would
 //! make it depend on where in the world the contact is.
+//!
+//! **A THIRD member of that family lives elsewhere, and deliberately.**
+//! `mesh.default_active_edge_cos_threshold` (M1.1.11.1, default `cos(5°)`) is a physical
+//! parameter of exactly this class — it selects a modelling behaviour, not a numerical
+//! tolerance, and the `k · floatEps(T) · coordScale` discipline does not apply to it. It
+//! is NOT declared here because the mesh's active-edge flags are BAKED AT CREATION: a
+//! field on this struct would be read long after the decision it governs had been taken,
+//! and changing it at runtime would silently rebuild nothing. This cross-reference is
+//! what keeps the family readable from one place; see that declaration for the rest.
 
 const std = @import("std");
 const config = @import("../config.zig");

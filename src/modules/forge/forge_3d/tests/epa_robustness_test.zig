@@ -489,12 +489,17 @@ fn satTieCount(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec
             .box => |heb| return satBoxBox(pa, ra, hea, pb, rb, heb).tie_count,
             .segment => |hh| return satSegBox(pb, rb, hh, pa, ra, hea).tie_count,
             .point => return 0,
+            .triangle => return 0,
         },
         .segment => |hh| switch (sb.core) {
             .box => |heb| return satSegBox(pa, ra, hh, pb, rb, heb).tie_count,
             else => return 0,
         },
         .point => return 0,
+        // No MTV oracle against a triangle, so an unclassified divergence there is a
+        // genuine defect and is never tie-excused — the same answer `.point` gets, and
+        // this sweep does not generate triangle cores anyway.
+        .triangle => return 0,
     }
 }
 

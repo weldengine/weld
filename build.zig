@@ -987,6 +987,34 @@ pub fn build(b: *std.Build) void {
     );
     forge_cast_bench_step.dependOn(&forge_cast_bench_run.step);
 
+    // ---------------------------------- M1.1.11.1 forge mesh bench -----------
+    //
+    // Build time and traversal time against triangle count, at three sizes, PLUS the
+    // `worldAabb` O(V) pass on the `aabbOverlapsBody` path measured against the per-body
+    // cache that would replace it — the decision promised at gate A and taken on figures.
+    // Writes `bench/results/forge_3d_mesh.md`. REPORTED, not gated.
+    const forge_mesh_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_3d_mesh.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_mesh_bench_module.addImport("forge_3d", forge_3d_module);
+    forge_mesh_bench_module.addImport("weld_forge", forge_api_module);
+    const forge_mesh_bench_exe = b.addExecutable(.{
+        .name = "forge-mesh-bench",
+        .root_module = forge_mesh_bench_module,
+    });
+    b.installArtifact(forge_mesh_bench_exe);
+    const forge_mesh_bench_run = b.addRunArtifact(forge_mesh_bench_exe);
+    forge_mesh_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_mesh_bench_run.addArgs(args);
+    const forge_mesh_bench_step = b.step(
+        "bench-forge-mesh",
+        "Run the M1.1.11.1 forge mesh bench (build + traversal against triangle count, writes bench/results/forge_3d_mesh.md)",
+    );
+    forge_mesh_bench_step.dependOn(&forge_mesh_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the

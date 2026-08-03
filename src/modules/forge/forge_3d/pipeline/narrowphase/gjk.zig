@@ -408,7 +408,7 @@ pub fn gjk(
     const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
     const dup_rel_sq: T = if (T == f32) 1.0e-10 else 1.0e-20;
     const noise_k: T = 2;
-    const conv_k: T = 16;
+    const conv_k: T = contact_margin_conv_k;
     const mach_eps: T = noise_k * std.math.floatEps(T);
 
     const relpose = support.RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
@@ -569,16 +569,53 @@ fn maxVertexMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
     return m;
 }
 
+/// ULP multiplier of the shallow/separated CONTACT MARGIN — the conservative bound on the
+/// ACCUMULATED rounding of the whole GJK pipeline (rotate-by-conjugate, the Voronoi tetrahedron
+/// solve, the final square root) on the reported distance, at the coordinate scale.
+///
+/// Promoted to a file-level `pub const` at the M1.1.11.1 closure. It was a local inside `gjk`,
+/// which was fine while the only consumer was the classification itself; it is not, once a
+/// CANDIDATE FILTER upstream of the kernel has to be conservative with respect to the same
+/// margin. A mesh bounds its candidate triangles by a box, and a triangle separated by less than
+/// this margin is `shallow` to the kernel — so the box must be inflated by exactly this quantity
+/// and by no invented second epsilon.
+///
+/// DISTINCT from `noise_k ≈ 2`, and the two must not be aligned: that one is the tight POINT-noise
+/// floor of the deep test, and widening it recreates a proximity-as-deep false positive.
+pub const contact_margin_conv_k: comptime_int = 16;
+
+/// The shallow/separated contact margin at a given coordinate scale —
+/// `contact_margin_conv_k · floatEps(T) · coord_scale`, the SAME expression and the same
+/// operation order the classification uses, so a filter built on it and the kernel it feeds
+/// cannot disagree about where the band ends.
+pub fn contactMargin(comptime T: type, coord_scale: T) T {
+    return @as(T, contact_margin_conv_k) * std.math.floatEps(T) * coord_scale;
+}
+
+/// The symmetric coordinate scale of a pair — `|Δpos| + coreExtent(a) + coreExtent(b)` — which is
+/// what makes the shallow/separated decision invariant under an A/B swap. Exposed alongside
+/// `contactMargin` because a filter that bounds candidates ahead of the kernel has to compute the
+/// same scale, and computing it a second way is how the two come to differ.
+pub fn coordScale(comptime T: type, delta_position: T, shape_a: support.SupportShape(T), shape_b: support.SupportShape(T)) T {
+    return delta_position + coreExtent(T, shape_a) + coreExtent(T, shape_b);
+}
+
 /// A core's maximal local support magnitude, radius EXCLUDED: 0 for a point
 /// (sphere), the half-height for a segment (capsule), `|half_extents|` for a
 /// box. Summed over both cores plus the relative-centre distance, it forms the
 /// SYMMETRIC coordinate-scale bound for the contact margin (`gjk`), so the
 /// shallow/separated decision is invariant under an A/B swap.
-fn coreExtent(comptime T: type, shape: support.SupportShape(T)) T {
+pub fn coreExtent(comptime T: type, shape: support.SupportShape(T)) T {
     return switch (shape.core) {
         .point => 0,
         .segment => |half_height| half_height,
         .box => |half_extents| half_extents.length(),
+        // A triangle's core extent is its furthest vertex from the local origin — the same
+        // quantity as a box's `|half_extents|`, read off three explicit points instead of
+        // a symmetry. Note it is NOT the edge length: what this bounds is the coordinate
+        // scale of the support subtraction, which a triangle far from its own local origin
+        // has regardless of how small it is.
+        .triangle => |verts| @max(@max(verts[0].length(), verts[1].length()), verts[2].length()),
     };
 }
 

@@ -28,6 +28,7 @@ const Ray = root.Ray;
 const Filter = root.Filter;
 const RayHit = root.RayHit;
 const hitLess = root.hitLess;
+const BackFaceMode = api.BackFaceMode;
 
 /// The exact per-candidate test every collector runs: filter, then kernel, then
 /// world-space assembly. `null` means "no hit to offer" — a filtered candidate, a
@@ -44,6 +45,7 @@ fn evaluate(
     store: *const ShapeStore,
     filter: Filter,
     ray: Ray,
+    back_face_mode: BackFaceMode,
     user_data: u32,
 ) ?RayHit {
     const body: BodyId = user_data;
@@ -51,12 +53,20 @@ fn evaluate(
     const layer = bm.collisionLayer(body) orelse return null;
     if (!filter.accepts(layer, body)) return null;
 
-    const local = bm.raycastBody(store, body, ray) orelse return null;
+    // ONE hit per body, whatever the shape: the adapter resolves a mesh's nearest accepted
+    // triangle itself, so nothing here changed for the mesh and nothing had to (§1.11.17).
+    // The mode is passed through because a mesh is the only shape whose ANSWER depends on
+    // it.
+    const local = bm.raycastBody(store, body, ray, back_face_mode) orelse return null;
     const rotation = bm.rotation(body) orelse return null;
     const owner = bm.entity(body) orelse return null;
     return .{
         .body = body,
         .entity = owner,
+        // The SUB-SHAPE the kernel hit — a mesh's triangle index, and `0` for every other
+        // shape, which consumes zero bits of the path (§1.11.16). Filled for the FIRST
+        // time here: until M1.1.11.1 nothing wrote it and the default WAS the value.
+        .subshape_id = local.subshape_id,
         .position = ray.origin.add(ray.direction.scale(local.distance)),
         // The kernel answers in the body's local frame; the distance is invariant
         // under a rigid transform (a rotation and a translation preserve it, and
@@ -75,10 +85,11 @@ pub const ClosestCollector = struct {
     filter: Filter,
     ray: Ray,
     bound: Real,
+    back_face_mode: BackFaceMode = .ignore,
     best: ?RayHit = null,
 
     pub fn add(self: *ClosestCollector, user_data: u32) void {
-        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, self.back_face_mode, user_data) orelse return;
         if (hit.distance > self.bound) return; // beyond the window, closed at the bound
         if (self.best) |best| {
             // The SAME total order the sort uses (`(distance, entity, BodyId)`,
@@ -114,11 +125,12 @@ pub const AnyCollector = struct {
     filter: Filter,
     ray: Ray,
     bound: Real,
+    back_face_mode: BackFaceMode = .ignore,
     found: bool = false,
 
     pub fn add(self: *AnyCollector, user_data: u32) void {
         if (self.found) return;
-        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, self.back_face_mode, user_data) orelse return;
         if (hit.distance > self.bound) return;
         self.found = true;
         self.bound = 0;
@@ -141,11 +153,12 @@ pub const AllCollector = struct {
     filter: Filter,
     ray: Ray,
     bound: Real,
+    back_face_mode: BackFaceMode = .ignore,
     out: []RayHit,
     count: u32 = 0,
 
     pub fn add(self: *AllCollector, user_data: u32) void {
-        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, self.back_face_mode, user_data) orelse return;
         if (hit.distance > self.bound) return;
 
         if (self.count < self.out.len) {

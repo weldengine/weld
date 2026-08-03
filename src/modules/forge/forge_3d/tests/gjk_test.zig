@@ -315,6 +315,12 @@ fn onCore(shape: SupportShape, pos: Vec3r, rot: Quatr, world_pt: Vec3r, eps: Rea
             const he = he_v.toArray();
             return @abs(local[0]) <= he[0] + eps and @abs(local[1]) <= he[1] + eps and @abs(local[2]) <= he[2] + eps;
         },
+        // A point is on a triangle's core when it is in the triangle's plane and inside
+        // it — a containment this sweep never asks for, since it generates no triangle
+        // core. Written as a refusal rather than as an untested containment test: a wrong
+        // answer here would silently weaken an assertion, and `false` can only make one
+        // fail.
+        .triangle => return false,
     }
 }
 

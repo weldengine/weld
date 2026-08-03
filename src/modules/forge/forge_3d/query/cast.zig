@@ -44,6 +44,8 @@ pub const CastCollector = struct {
     /// World-space unit direction, normalised once at the entry.
     direction: Vec3r,
     bound: Real,
+    /// Which side of a mesh TRIANGLE answers. Vacuous on every other shape.
+    back_face_mode: api.BackFaceMode = .ignore,
     best: ?CastHit = null,
 
     pub fn add(self: *CastCollector, user_data: u32) void {
@@ -62,12 +64,17 @@ pub const CastCollector = struct {
             self.rotation,
             self.direction,
             self.bound,
+            self.back_face_mode,
         ) orelse return;
         const owner = self.bm.entity(body) orelse return;
 
         const hit: CastHit = .{
             .body = body,
             .entity = owner,
+            // The sub-shape the kernel touched — a mesh's triangle index, `0` for a shape with
+            // no sub-shape (§1.11.16). `cast_subshape_id` stays 0: the PROBE is a single
+            // convex, so it has no sub-shape of its own until compounds land.
+            .subshape_id = local.subshape_id,
             .position = local.position,
             .normal = local.normal,
             .distance = local.distance,

@@ -24,6 +24,17 @@ pub const Vec3 = vec.Vec3;
 pub const Vec4 = vec.Vec4;
 /// Reinterpret `[]const Vec3` as a flat `[]const f32` for the SIMD kernels.
 pub const asFloatSlice = vec.asFloatSlice;
+/// The DIRECTION of a triangle's area vector — NOT a flatness classifier. See `CrossOutcome` for
+/// the asymmetry: `.degenerate` is a reliable flatness verdict, `.direction` is not a reliable
+/// verdict of non-flatness. The classifier is `triangleIsFlat`.
+pub const triangleCross = vec.triangleCross;
+/// What `triangleCross` can conclude, and in which direction that conclusion is trustworthy.
+pub const CrossOutcome = vec.CrossOutcome;
+/// Whether a triangle is EXACTLY flat, decided in integer arithmetic. THE classifier: callers that
+/// must not admit a flat triangle ask this, never `triangleCross`.
+pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;
+/// The power-of-two exponent that reduces three points below unit magnitude.
+pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 
 /// Generic quaternion constructor `Quat(T)`.
 pub const Quat = quat.Quat;

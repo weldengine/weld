@@ -134,6 +134,33 @@ pub const Body = struct {
     sleep_radius: Real,
     /// Owning ECS entity.
     entity: EntityId,
+    /// The body's TIGHT world AABB, cached at creation — **valid ONLY while the shape is a
+    /// `.triangle_soup`**, NaN on every other body.
+    ///
+    /// **Why it exists, and it is a measured decision and not a precaution.** A mesh's world
+    /// box is the tight bound over its TRANSPORTED VERTICES, an O(V) pass, and
+    /// `aabbOverlapsBody` runs it once per candidate body per query. Measured in ReleaseFast
+    /// on `bench/forge_3d_mesh.zig`: 9.0 µs at 1 000 triangles, 20.4 µs at 4 000 and
+    /// **72.8 µs at 16 000**, against **11.5 ns** for the same value read back — some 6 300×
+    /// — with `overlapAabb` end to end at 85.8 µs, i.e. dominated by that one pass. The
+    /// cheapest entry of the family was the most expensive.
+    ///
+    /// **Why it needs no invalidation LOGIC.** A mesh forces a STATIC body
+    /// (`error.ShapeMustBeStatic`), whose pose no solver pass writes: both integrators skip
+    /// a non-dynamic body, and the NGS position pass guards its pose writes at EXACT ZERO
+    /// precisely so a non-dynamic body stays bit-unchanged. So the cached box cannot go
+    /// stale from inside the simulation.
+    ///
+    /// **What it does instead of invalidating: it POISONS.** The only way the pose can move
+    /// is an external teleport, and `setPosition` / `setRotation` set this field back to NaN
+    /// for any non-dynamic body rather than trying to recompute it — they hold no store and
+    /// could not. The mesh arm then falls back to the O(V) pass, which is the pre-cache
+    /// behaviour: slower, never wrong. That is what keeps the correctness of this cache from
+    /// resting on a promise about a milestone that does not exist yet.
+    ///
+    /// NaN and not a sentinel box, for the reason `local_aabb` and `sleep_radius` carry NaN:
+    /// a plausible finite value would be read by mistake and never noticed.
+    world_aabb: config.Aabbr,
 };
 
 /// The body's sleep radius: the distance from its centre to the furthest corner
@@ -142,15 +169,28 @@ pub const Body = struct {
 /// enumerating all eight — the furthest one is the one furthest along every axis
 /// at once. Computed once, at body creation: it is pose-invariant.
 ///
-/// **PRECONDITION: the shape is a bounded CONVEX** (M1.1.11, §1.11.15). This reads
-/// `local_aabb`, and a half-space has none — the field is NaN there. `addBody`
-/// never asks: a non-static body carrying a half-space is rejected with
-/// `error.ShapeMustBeStatic` before the `Body` literal is built, and for a static
-/// one the literal branches on the class instead of calling this, a static body
-/// having no sleep window at all (`sleep.updateWindows` and the island seeding both
-/// skip a non-dynamic body before reading the radius).
+/// **PRECONDITION: the shape has a local AABB.** This reads `local_aabb`, so it is a
+/// DISPATCH on the class and not an assert on one variant of it (M1.1.11.1): a bounded
+/// convex and a triangle soup both have a valid local box and the same formula answers
+/// both, a half-space has none at all — the field is NaN there.
+///
+/// The two admitted categories differ in one respect the formula already handles: a
+/// mesh's local box is NOT centred on the origin, and taking the corner furthest from
+/// the body CENTRE is what this computes either way.
+///
+/// A mesh body's radius is never read in practice, a mesh forcing a static body just as
+/// a half-space does; it is returned rather than poisoned because it is DEFINED, and
+/// answering a defined quantity costs nothing while poisoning it would need a reader to
+/// justify it. `addBody` never asks the half-space: a non-static body carrying one is
+/// rejected with `error.ShapeMustBeStatic` before the `Body` literal is built, and for a
+/// static one the literal dispatches on the class instead of calling this
+/// (`sleep.updateWindows` and the island seeding both skip a non-dynamic body before
+/// reading the radius).
 pub fn computeSleepRadius(shape: Shape) Real {
-    std.debug.assert(shape.class() == .convex);
+    switch (shape.class()) {
+        .convex, .triangle_soup => {},
+        .half_space => unreachable,
+    }
     return shape.local_aabb.min.abs().max(shape.local_aabb.max.abs()).length();
 }
 
@@ -159,9 +199,9 @@ pub fn computeSleepRadius(shape: Shape) Real {
 /// Static/kinematic bodies get zero inverse mass and inertia.
 ///
 /// The class precondition is on the DYNAMIC PATH ONLY, and deliberately not at the
-/// entry: a STATIC body carrying a half-space is legal (§1.11.15) and takes the
-/// early return below without ever touching `unit_inertia`. Asserting at the entry
-/// would refuse the one body type a half-space is allowed to have.
+/// entry: a STATIC body carrying a half-space — or a mesh — is legal (§1.11.15,
+/// §1.11.17) and takes the early return below without ever touching `unit_inertia`.
+/// Asserting at the entry would refuse the one body type those two are allowed to have.
 pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
     const ld: Real = desc.linear_damping;
     const ad: Real = desc.angular_damping;
@@ -177,12 +217,18 @@ pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
         };
     }
 
-    // The dynamic path reads `unit_inertia`, which a half-space does not have (NaN
-    // there). Unreachable from `addBody`, which rejects a dynamic body carrying one
-    // with `error.ShapeMustBeStatic` before building the `Body` — this is what makes
-    // that rejection's ORDERING load-bearing rather than stylistic (§1.11.15): move
-    // it after the literal and a dynamic half-space lands here instead.
-    std.debug.assert(shape.class() == .convex);
+    // The dynamic path reads `unit_inertia`, which NEITHER a half-space NOR a mesh has
+    // (NaN in both). A DISPATCH on the class rather than an assert on one variant of it
+    // (M1.1.11.1), so a fourth category is a compile error here and must state whether
+    // it has an inertia tensor. Both non-convex arms are unreachable from `addBody`,
+    // which rejects a dynamic body carrying either with `error.ShapeMustBeStatic` before
+    // building the `Body` — this is what makes that rejection's ORDERING load-bearing
+    // rather than stylistic (§1.11.15): move it after the literal and a dynamic
+    // half-space or mesh lands here instead.
+    switch (shape.class()) {
+        .convex => {},
+        .half_space, .triangle_soup => unreachable,
+    }
     // A dynamic body must have positive mass (inv_mass/inertia divide by it).
     // Full descriptor validation (typed errors, degenerate geometry) is a later
     // milestone; this guards the unchecked dynamic path.

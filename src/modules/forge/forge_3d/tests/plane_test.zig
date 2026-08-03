@@ -77,11 +77,15 @@ test "a plane carries the half_space class and sphere, box and capsule carry con
         try testing.expectEqual(ShapeClass.convex, store.get(id).?.class());
     }
 
-    // Two variants exactly. The mesh is the THIRD category of §1.11.15 and arrives
-    // at M1.1.11.1; pinning the count is what makes its arrival a deliberate act
-    // rather than a silent widening, since every switch on the class is exhaustive
-    // and will stop compiling.
-    try testing.expectEqual(@as(usize, 2), @typeInfo(ShapeClass).@"enum".fields.len);
+    // THREE variants exactly, since M1.1.11.1 brought the third category of §1.11.15.
+    // The count is pinned so a fourth arrival is a deliberate act rather than a silent
+    // widening; it fired on this line when the mesh landed, which is the whole reason
+    // it is written this way. The pin is EXTENDED and not relaxed: the count moved 2 → 3
+    // and the three variants are named, so a rename is caught as well as an addition.
+    try testing.expectEqual(@as(usize, 3), @typeInfo(ShapeClass).@"enum".fields.len);
+    try testing.expectEqual(ShapeClass.convex, @as(ShapeClass, @enumFromInt(0)));
+    try testing.expectEqual(ShapeClass.half_space, @as(ShapeClass, @enumFromInt(1)));
+    try testing.expectEqual(ShapeClass.triangle_soup, @as(ShapeClass, @enumFromInt(2)));
 }
 
 test "the stored plane normal is unit, and independent of distance" {
@@ -198,7 +202,7 @@ test "a plane shape occupies a store slot like any other and reuses it LIFO" {
     const b = try store.createShape(gpa, .{ .plane = .{ .normal = av3(1, 0, 0), .distance = -2 } });
     try testing.expectEqual(@as(u32, 2), store.count());
 
-    store.destroyShape(b);
+    store.destroyShape(gpa, b);
     try testing.expect(store.get(b) == null); // stale ⇒ the safe getter says so
     const c = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } }); // reuses b's slot
     try testing.expectEqual(api.PackedId.unpack(b).index, api.PackedId.unpack(c).index);
@@ -666,7 +670,7 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
 
     // A world ray from `(0, 1, 2)` along `+X` reaches the boundary `x = 10` after 10 m.
     const ray = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_x);
-    const hit = scene.bm.raycastBody(&scene.store, scene.body, ray).?;
+    const hit = scene.bm.raycastBody(&scene.store, scene.body, ray, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 10), hit.distance, tol);
     // The kernel answers in the BODY's local frame; the query layer rotates the normal
     // to world. Doing that here shows the local normal IS the transported plane's.
@@ -676,7 +680,7 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
 
     // Away from the solid: `+X` reversed recedes, so no hit.
     const receding = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_x.neg());
-    try testing.expect(scene.bm.raycastBody(&scene.store, scene.body, receding) == null);
+    try testing.expect(scene.bm.raycastBody(&scene.store, scene.body, receding, .ignore) == null);
     // PARALLEL to the boundary, from outside — and §1.11.15 is explicit about what this
     // composition does: **a true-zero guard is exact in the frame it is evaluated in, and
     // that does not compose.** A rigid transform does not preserve EXACT orthogonality:
@@ -708,11 +712,11 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
     // business inventing a geometric epsilon to fabricate one. The EXACTLY-parallel
     // case, where the guard does fire, is the kernel-level test above.
     const parallel = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_y);
-    const grazing = scene.bm.raycastBody(&scene.store, scene.body, parallel).?;
+    const grazing = scene.bm.raycastBody(&scene.store, scene.body, parallel, .ignore).?;
     try testing.expect(grazing.distance >= 10 / (8 * std.math.floatEps(Real)));
     // From INSIDE the solid: distance 0, normal `−direction` once back in world.
     const inside = broadphase_mod.Ray(Real).init(vr(50, 1, 2), Vec3r.unit_y);
-    const in_hit = scene.bm.raycastBody(&scene.store, scene.body, inside).?;
+    const in_hit = scene.bm.raycastBody(&scene.store, scene.body, inside, .ignore).?;
     try testing.expectEqual(@as(Real, 0), in_hit.distance);
     try testing.expect(scene.bm.rotation(scene.body).?.rotateVec3(in_hit.normal).approxEql(Vec3r.unit_y.neg(), tol));
 }
@@ -753,6 +757,7 @@ test "castShapeBody sweeps onto the world boundary" {
         Quatr.identity,
         Vec3r.unit_x,
         100,
+        .ignore,
     ).?;
     try testing.expectApproxEqAbs(@as(Real, 9.5), hit.distance, tol);
     try testing.expect(hit.position.approxEql(vr(10, 1, 2), tol));
@@ -760,11 +765,11 @@ test "castShapeBody sweeps onto the world boundary" {
     try testing.expect(hit.normal.dot(Vec3r.unit_x) <= 0);
 
     // Receding and grazing both miss, at the body grain as at the kernel grain.
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x.neg(), 1e6) == null);
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_z, 1e6) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x.neg(), 1e6, .ignore) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_z, 1e6, .ignore) == null);
     // A bound shorter than the answer misses; one exactly at it hits (closed interval).
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 - 8 * tol) == null);
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 + 8 * tol) != null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 - 8 * tol, .ignore) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 + 8 * tol, .ignore) != null);
 }
 
 test "overlapShapeBody answers by the sign of the separation" {
@@ -790,13 +795,14 @@ test "overlapShapeBody answers by the sign of the separation" {
             probe,
             vr(c.x, 1, 2),
             Quatr.identity,
+            .ignore,
         ).?);
     }
     // A BOX probe, so the answer is not a property of the point core alone: half-extents
     // (2, 1, 1) at `x = 7` reach `x = 9`, one metre short; at `x = 8.5` they reach 10.5.
     const box_probe = narrowphase.SupportShape(Real){ .core = .{ .box = vr(2, 1, 1) }, .radius = 0 };
-    try testing.expect(!scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(7, 1, 2), Quatr.identity).?);
-    try testing.expect(scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(8.5, 1, 2), Quatr.identity).?);
+    try testing.expect(!scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(7, 1, 2), Quatr.identity, .ignore).?);
+    try testing.expect(scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(8.5, 1, 2), Quatr.identity, .ignore).?);
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1417,7 @@ test "overlapShapeBody and collidePlane agree to the bit on whether a pair touch
                 probe,
                 vr(0, h, 0),
                 Quatr.identity,
+                .ignore,
             ).?;
             const by_manifold = world.bm.collidePair(&world.store, ground, body) != null;
             try testing.expectEqual(by_overlap, by_manifold);
@@ -1528,7 +1535,7 @@ test "castShapeBody transports the normal without disturbing the invariant" {
     // deep inside it and every direction below is an initial overlap.
     const probe = narrowphase.SupportShape(Real){ .core = .point, .radius = 0.5 };
     for ([_]Vec3r{ Vec3r.unit_x, Vec3r.unit_x.neg(), Vec3r.unit_y, vr(1, 1, 1).normalize() }) |d| {
-        const hit = scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(50, 1, 2), Quatr.identity, d, 100).?;
+        const hit = scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(50, 1, 2), Quatr.identity, d, 100, .ignore).?;
         try testing.expectEqual(@as(Real, 0), hit.distance);
         try testing.expect(hit.normal.dot(d) <= 0);
         try testing.expect(hit.normal.approxEql(d.neg(), 8 * std.math.floatEps(Real)));

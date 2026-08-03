@@ -67,6 +67,15 @@ pub fn LocalHit(comptime T: type) type {
         distance: T,
         /// Outward unit surface normal at the hit point, local frame.
         normal: math.Vec(3, T),
+        /// Which SUB-SHAPE of the shape was hit — an opaque path decoded by the root
+        /// shape, and `0` for a shape with no sub-shape, which is then not read at all
+        /// (`engine-physics-forge.md` §1.11.16).
+        ///
+        /// A triangle mesh is the FIRST shape to fill it: being root, its path IS its
+        /// triangle index. Every other kernel leaves the default, and that is not
+        /// laziness — sphere, box, capsule and half-space consume ZERO BITS of the path,
+        /// so the value carries no information for them.
+        subshape_id: u32 = 0,
     };
 }
 
@@ -139,6 +148,29 @@ pub fn SupportShape(comptime T: type) type {
             segment: T,
             /// Box core: half-extents (full box, no shrink).
             box: math.Vec(3, T),
+            /// Triangle core: three vertices in the shape's local frame, in WINDING
+            /// order (`engine-physics-forge.md` §1.11.17).
+            ///
+            /// **A triangle is a BOUNDED convex, and that is the only property GJK, EPA,
+            /// the manifold generator and the cast kernel require** — its support map is
+            /// the max of three dot products. Those four therefore serve a whole mesh
+            /// with no kernel of their own, which is why one `Core` variant buys what
+            /// four families would have cost. Only the RAY kernel gains an analytic arm,
+            /// for the reason §1.11.3 gives ray kernels their existence at all: a
+            /// configuration-space march against a FLAT core is ill-conditioned where
+            /// ray↔triangle has a closed form.
+            ///
+            /// Stored INLINE, three vectors, and that costs: it is the widest payload of
+            /// this union and it widens `SupportShape`, which is passed by value on the
+            /// hot support path. A pointer would keep it at eight bytes and was refused —
+            /// `SupportShape` is stored in collectors (`CastCollector.shape`), so a
+            /// pointer to a caller's stack triple would outlive its frame. The cost is
+            /// measured and reported at the closing bench rather than argued here.
+            ///
+            /// A triangle core with a NON-ZERO inflation radius is a rounded triangle,
+            /// which no arm below measures: it is an asserted precondition of the ray
+            /// kernel, exactly the form the rounded box already has.
+            triangle: [3]math.Vec(3, T),
         };
 
         /// Support point of the **core** (the inflation radius is excluded), in
@@ -167,6 +199,24 @@ pub fn SupportShape(comptime T: type) type {
                         if (d[1] >= 0) he[1] else -he[1],
                         if (d[2] >= 0) he[2] else -he[2],
                     });
+                },
+                .triangle => |verts| {
+                    // The max of three dot products — the whole support map of a
+                    // triangle, and the whole reason it can be a core at all.
+                    //
+                    // Strict `>` scanning ascending, so vertex 0 wins an exact tie: a
+                    // FIXED tie-break, the convention of this file (the box's `>= 0` and
+                    // `supportingFace`'s first-index rule).
+                    var best: usize = 0;
+                    var best_dot = dir.dot(verts[0]);
+                    inline for (1..3) |i| {
+                        const value = dir.dot(verts[i]);
+                        if (value > best_dot) {
+                            best_dot = value;
+                            best = i;
+                        }
+                    }
+                    return verts[best];
                 },
             }
         }
@@ -240,6 +290,22 @@ pub fn SupportShape(comptime T: type) type {
                         face.vert_ids[i] = (@as(u8, @intFromBool(sgn[0] > 0))) | (@as(u8, @intFromBool(sgn[1] > 0)) << 1) | (@as(u8, @intFromBool(sgn[2] > 0)) << 2);
                     }
                     return face;
+                },
+                .triangle => |verts| return .{
+                    // The WHOLE triangle, always — the same choice the box arm makes,
+                    // which returns its full quad rather than an edge or a corner for an
+                    // oblique direction. The clipper is what narrows a face down to the
+                    // real contact, and giving it a superset is what it is written for;
+                    // giving it a vertex when the contact is a face would lose points it
+                    // cannot recover.
+                    //
+                    // `vert_ids` are the winding positions and `face_id` is 8, the next
+                    // free value after the box's 0..5, the segment's 6 and the point's 7.
+                    // A triangle has exactly one face, so one id is all it needs.
+                    .verts = .{ verts[0], verts[1], verts[2], zero },
+                    .vert_ids = .{ 0, 1, 2, 0 },
+                    .count = 3,
+                    .face_id = 8,
                 },
             }
         }

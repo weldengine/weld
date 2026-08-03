@@ -746,6 +746,14 @@ fn scaleShape(sh: SupportShape, s: Real) SupportShape {
         .point => .{ .core = .point, .radius = sh.radius * s },
         .segment => |h| .{ .core = .{ .segment = h * s }, .radius = sh.radius * s },
         .box => |he| .{ .core = .{ .box = he.scale(s) }, .radius = sh.radius * s },
+        // Every vertex scales, which is what "scale the core" means for an explicit
+        // point set. This sweep exercises the four fast-path pairs and generates no
+        // triangle core, so the arm is written for the compiler's exhaustiveness and
+        // not for a case it reaches.
+        .triangle => |verts| .{
+            .core = .{ .triangle = .{ verts[0].scale(s), verts[1].scale(s), verts[2].scale(s) } },
+            .radius = sh.radius * s,
+        },
     };
 }
 

@@ -85,9 +85,11 @@ pub const layer_bits: u8 = api.collision_layer_count;
 ///     destroying a shape and casting with its id; same name and same meaning as
 ///     `addBody`'s, not a second vocabulary for one situation.
 ///   - `UnsupportedShape` — the probe is a shape the exact kernel cannot express.
-///     Reachable TODAY by passing a plane handle: the cast kernel is a ray march on
-///     the Minkowski difference of the two cores (§1.11.11) and the shape overlap is
-///     GJK on those cores (§1.11.12), and a half-space has no bounded core.
+///     Reachable by passing a plane handle or, since M1.1.11.1, a MESH handle: the
+///     cast kernel is a ray march on the Minkowski difference of the two cores
+///     (§1.11.11) and the shape overlap is GJK on those cores (§1.11.12), so a
+///     half-space is not bounded there and a mesh is not convex (§1.11.7's fourth
+///     principle).
 ///
 /// A real miss is `null` / `0`, and a ZERO DIRECTION is a miss too — a degenerate
 /// query with an empty answer, not a malformed one (§1.11.11's domain table).
@@ -104,14 +106,19 @@ pub const Error = error{ InvalidShape, UnsupportedShape };
 /// Whether a caller-supplied probe shape is admissible for the two entries that take
 /// one, i.e. a bounded convex the support map describes.
 ///
-/// Exhaustive on the CLASS with no `else` arm: the mesh (M1.1.11.1) is a compile
-/// error here and must state its own answer. A named function rather than an inline
+/// Exhaustive on the CLASS with no `else` arm, so a fourth category is a compile error
+/// here and must state its own answer. A named function rather than an inline
 /// comparison so both entries test the SAME condition and the tests can exercise it
 /// on both answers without restating it.
+///
+/// A MESH is inadmissible, and the reason is not the half-space's: a half-space is not
+/// BOUNDED, a mesh is not CONVEX. Each triangle of it is a bounded convex, which is
+/// what lets a mesh be the TARGET of a cast or an overlap; being a probe would require
+/// the whole soup to have one support map, which it does not (§1.11.7, §1.11.17).
 fn probeAdmissible(record: shape_mod.Shape) bool {
     return switch (record.class()) {
         .convex => true,
-        .half_space => false,
+        .half_space, .triangle_soup => false,
     };
 }
 
@@ -151,6 +158,11 @@ pub const RayQuery = struct {
     direction: Vec3r,
     max_distance: Real,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (M1.1.11.1, `engine-physics-forge.md`
+    /// §1.11.17). Vacuous on every other shape: a convex is SOLID and has no back, and
+    /// neither has a half-space. Under `.collide` the returned normal is FLIPPED on a
+    /// back-face hit, because §1.11.4 declares `normal · direction <= 0` on EVERY hit.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// One ray hit at solver precision — the mirror of the public `RaycastHit`
@@ -186,6 +198,8 @@ pub const CastQuery = struct {
     direction: Vec3r,
     max_distance: Real,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (§1.11.17). Vacuous on every other shape.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// One cast hit at solver precision — the mirror of the public `ShapeCastHit`.
@@ -216,6 +230,9 @@ pub const OverlapRequest = struct {
     position: Vec3r,
     rotation: Quatr = Quatr.identity,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (§1.11.17). The overlap form of the test is
+    /// whether the probe lies ENTIRELY in the rear half-space of the triangle's plane.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// The closest point on the closest body at solver precision — the mirror of the
@@ -249,6 +266,7 @@ pub fn raycast(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryRay(ray, &collector);
     return collector.best;
@@ -271,6 +289,7 @@ pub fn raycastAny(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryRay(ray, &collector);
     return collector.found;
@@ -300,6 +319,7 @@ pub fn raycastAll(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
         .out = out,
     };
     _ = bp.queryRay(ray, &collector);
@@ -378,6 +398,7 @@ pub fn shapeCast(
         .rotation = query.rotation,
         .direction = direction,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &collector);
     return collector.best;
@@ -412,6 +433,7 @@ pub fn overlapShape(
             .shape = shape_mod.supportShape(record),
             .position = request.position,
             .rotation = request.rotation,
+            .back_face_mode = request.back_face_mode,
         } },
         .out = out,
     };
@@ -675,8 +697,8 @@ fn assertUnitRotation(rotation: Quatr) void {
 /// the defect reappears at the other end of the range. The `scale == 0` test is at
 /// TRUE ZERO — the largest absolute component is zero exactly when all three are.
 pub fn unitDirection(direction: Vec3r) ?Vec3r {
-    const scale = @reduce(.Max, @abs(direction.data));
-    if (scale == 0) return null;
-    const reduced: Vec3r = .{ .data = direction.data / @as(@Vector(3, Real), @splat(scale)) };
-    return reduced.scale(1 / reduced.length());
+    // `foundation`'s shared form since the M1.1.11.1 closure — the same three operations in the
+    // same order, so this is BIT-IDENTICAL to the body it replaces, and the reasoning above is
+    // now stated once at the declaration instead of at each of its three consumers.
+    return direction.normalizeScaled();
 }

@@ -52,6 +52,9 @@ pub const collision_layer_count = types.collision_layer_count;
 /// Filtering shared by the whole query family (object-layer mask + exclusions).
 /// Distinct from the `QueryFilter` of §6 `AIModule`.
 pub const PhysicsQueryFilter = types.PhysicsQueryFilter;
+/// Which side of a mesh TRIANGLE an entry answers on. Carried only by the entries whose
+/// answer differs between the two modes; vacuous on every other shape (M1.1.11.1).
+pub const BackFaceMode = types.BackFaceMode;
 /// A world-space ray query.
 pub const RaycastQuery = types.RaycastQuery;
 /// A cast of an arbitrary shape (one entry for sphere / box / capsule).

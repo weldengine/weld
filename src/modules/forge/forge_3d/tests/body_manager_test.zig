@@ -502,7 +502,7 @@ test "a dynamic or kinematic body carrying a half-space is rejected, before any 
     var doomed = ShapeStore{};
     defer doomed.deinit(gpa);
     const gone = try doomed.createShape(gpa, .{ .plane = .{} });
-    doomed.destroyShape(gone);
+    doomed.destroyShape(gpa, gone);
     try testing.expectError(
         error.InvalidShape,
         bm.addBody(gpa, &doomed, descOf(1, .dynamic, gone)),

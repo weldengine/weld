@@ -12,6 +12,9 @@
 
 const config = @import("config.zig");
 const shape = @import("shape.zig");
+// M1.1.11.1 — the owned triangle-mesh payload a `.triangle_mesh` shape holds.
+// Re-exported below; the comptime pin analyses its acceptance suite.
+const mesh_mod = @import("mesh.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
@@ -61,6 +64,13 @@ pub const Shape = shape.Shape;
 pub const ShapeClass = shape.ShapeClass;
 /// Generational store of collision shapes.
 pub const ShapeStore = shape.ShapeStore;
+/// The OWNED triangle-mesh data a `.triangle_mesh` shape holds — vertices and indices
+/// at solver precision (M1.1.11.1, `engine-physics-forge.md` §1.11.17). The store owns
+/// it: `createShape` copies the borrowed descriptor arrays, `destroyShape` releases.
+pub const MeshData = mesh_mod.MeshData;
+/// The five ways a triangle-mesh descriptor can be malformed, each refused by its own
+/// typed error and never sanitised away.
+pub const MeshError = mesh_mod.MeshError;
 
 // --- Bodies ---
 
@@ -72,6 +82,11 @@ pub const BodyFlags = body.BodyFlags;
 pub const Body = body.Body;
 /// SoA store of rigid bodies with generational handles.
 pub const BodyManager = body_manager.BodyManager;
+
+/// Exact world AABB of a shape at a pose — the body-free form `BodyManager.bodyAabb` wraps.
+/// Re-exported at `Real` for the mesh bench, which measures its O(V) pass against the
+/// per-body cache that could replace it (M1.1.11.1).
+pub const worldAabb = body_manager.worldAabb;
 
 // --- Pipeline (shared by both solver branches) ---
 
@@ -180,6 +195,16 @@ pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) ?L
     return narrowphase.rayShape(Real, support_shape, origin, direction);
 }
 
+/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
+/// `engine-physics-forge.md` §1.11.17): `rayTriangle`, `isBackFace`, and `localHit`, which
+/// is where the back-face normal FLIP lives. Scalar-generic, so re-exported as a namespace;
+/// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
+///
+/// Only the RAY gains a kernel. A triangle is a bounded convex, so GJK, EPA, the manifold
+/// generator and the cast kernel serve a mesh through `SupportShape.Core.triangle`
+/// unchanged — one variant against four reused families.
+pub const triangle = narrowphase.triangle;
+
 /// Whether the ray kernels cover `support_shape` — `rayShape`'s asserted
 /// precondition at solver precision (M1.1.11). Every box the `ShapeStore` converts
 /// carries `radius = 0`, so this is false only for a `SupportShape` a caller built by
@@ -229,6 +254,7 @@ pub const rigid = rigid_mod;
 comptime {
     _ = config;
     _ = shape;
+    _ = mesh_mod;
     _ = body;
     _ = body_manager;
     _ = broadphase;
@@ -254,4 +280,5 @@ comptime {
     _ = @import("tests/shapecast_test.zig");
     _ = @import("tests/overlap_test.zig");
     _ = @import("tests/plane_test.zig");
+    _ = @import("tests/mesh_test.zig");
 }

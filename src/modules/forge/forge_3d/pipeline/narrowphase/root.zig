@@ -20,6 +20,9 @@ const fast_paths = @import("fast_paths.zig");
 const raycast_mod = @import("raycast.zig");
 const shapecast_mod = @import("shapecast.zig");
 const plane_mod = @import("plane.zig");
+// M1.1.11.1 — the analytic ray↔triangle kernel + the back-face predicate. Re-exported as
+// a namespace below; the comptime pin analyses its inline tests.
+const triangle_mod = @import("triangle.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -106,7 +109,25 @@ pub const fastSeed = fast_paths.fastSeed;
 
 /// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
 /// Precondition: `raySupportsShape` (no error channel since M1.1.11).
+/// The shallow/separated contact margin at a coordinate scale, and the symmetric coordinate
+/// scale of a pair — the two quantities a CANDIDATE FILTER upstream of GJK must reuse rather than
+/// re-derive, so the filter and the classification cannot disagree about where the band ends
+/// (M1.1.11.1 closure, finding F1).
+pub const contactMargin = gjk_mod.contactMargin;
+/// The symmetric coordinate scale of a pair — `|Δpos| + coreExtent(a) + coreExtent(b)`.
+pub const coordScale = gjk_mod.coordScale;
+/// A core's maximal local support magnitude, radius excluded.
+pub const coreExtent = gjk_mod.coreExtent;
+/// ULP multiplier of the contact margin — the accumulated-rounding bound, not a tolerance.
+pub const contact_margin_conv_k = gjk_mod.contact_margin_conv_k;
+
+/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
+/// Precondition: `raySupportsShape` (no error channel since M1.1.11).
 pub const rayShape = raycast_mod.rayShape;
+/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
+/// `engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
+/// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
+pub const triangle = triangle_mod;
 /// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed
 /// so a caller can decide admissibility instead of relying on a debug assert.
 pub const raySupportsShape = raycast_mod.raySupportsShape;
@@ -149,4 +170,5 @@ comptime {
     _ = raycast_mod;
     _ = shapecast_mod;
     _ = plane_mod;
+    _ = triangle_mod;
 }
