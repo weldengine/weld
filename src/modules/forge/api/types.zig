@@ -31,9 +31,21 @@ pub const BodyId = u32;
 /// generation:8` packing as `BodyId`.
 pub const ShapeId = u32;
 
-/// The `index:24 | generation:8` bit layout shared by `BodyId` and `ShapeId`
-/// (index in the low 24 bits, generation in the high 8). Stale-handle
-/// detection for the free-list slot reuse in `ShapeStore`/`BodyManager` (E3).
+/// Opaque character-controller handle (M1.1.12, `engine-physics-forge.md` §1.12) —
+/// same `u32` boundary and `index:24 | generation:8` packing as `BodyId`.
+///
+/// The GENERATION is not decoration here: §1.12 requires a typed error on a stale
+/// handle from `moveCharacter`, `resizeCharacter` and `getCharacterInnerBody`, and
+/// a bare slot index cannot tell a recycled slot from the handle that used to own
+/// it. Without the generation that contract would be unenforceable rather than
+/// merely unenforced.
+pub const CharacterId = u32;
+
+/// The `index:24 | generation:8` bit layout shared by `BodyId`, `ShapeId` and
+/// `CharacterId` (index in the low 24 bits, generation in the high 8).
+/// Stale-handle detection for the free-list slot reuse in
+/// `ShapeStore`/`BodyManager` (M1.1.0 E3), and for the character store from
+/// M1.1.12.
 pub const PackedId = packed struct(u32) {
     /// Slot index into the owning pool (low 24 bits).
     index: u24,
@@ -246,6 +258,237 @@ pub const BodyDescriptor = struct {
     /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
     /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
     can_sleep: bool = true,
+};
+
+// --- Body pose and velocity entries — semantics frozen here ---
+//
+// `PhysicsModule`'s function declarations live in `src/interfaces/PhysicsModule.zig`,
+// which does not exist yet: it lands at M1.1.15 with `ModuleContext`, and this file is
+// the day-1 mirror of `engine-tier-interfaces.md` §1 until then (see the file header).
+// So the SEMANTICS of three body entries are recorded here, next to the frozen types
+// they traffic in, and they move with the declarations when that file lands.
+//
+//   - `setBodyTransform(id, position, rotation)` is a TELEPORTATION. It writes the pose
+//     and derives NO velocity: a kinematic body moved through it keeps velocity columns
+//     of exactly zero. That is not an oversight to be repaired — it is the same split the
+//     reference draws between `SetPositionAndRotation` and `MoveKinematic`.
+//
+//     The consequence is load-bearing for the character controller and it is why this
+//     note exists: `CharacterMoveResult.ground_velocity` is measured AT THE CONTACT
+//     POINT, so it reads the support's `v + ω × r`. A platform teleported through this
+//     entry therefore reports a ground velocity of ZERO while visibly moving
+//     (`engine-physics-forge.md` §1.12.5). The fix is to drive such a platform with
+//     `moveKinematic`, never to make this entry guess a velocity from two poses it was
+//     not given a `dt` for.
+//
+//   - `moveKinematic(id, target_position, target_rotation, dt)` is what DERIVES both
+//     velocities from a target pose over a `dt`, on the shape of
+//     `BodyInterface::MoveKinematic`. Its signature freezes at M1.1.12; its body is a
+//     typed stub until M1.1.15, deriving a velocity belonging to the tick cycle and the
+//     wake composition, which arrive with `PhysicsWorld`. Same pattern C1.1 authorises by
+//     name for `createJoint` and M1.1.9 already executed on five query entries.
+//
+//   - `setAngularVelocity(id, ω)` closes a gap dating from M1.1.0: `PhysicsModule2D`
+//     carries `setAngularVelocity2D` and the reference carries both, while 3D carried only
+//     the linear setter — so `ω` was authorable by NO caller at all, and the rotational
+//     term of `ground_velocity` had no source. `BodyManager` has had the column setter
+//     since M1.1.8; what was missing is the interface entry.
+//
+// Write intent, unchanged from §1.8.4: a pose or velocity WRITE is non-activating (it is
+// the solver's own path), while an external mutation — force, torque, impulse — wakes. The
+// interface tier composes wake + write for every setter it exposes to gameplay, and a
+// character presence moved by pose write is wake cause W4, never W3 (§1.12.10).
+
+/// Everything needed to create one character controller
+/// (`engine-physics-forge.md` §1.12). A controller is VIRTUAL: it takes part in no
+/// solver pass — no inverse mass, no inertia tensor, no contact constraint, no island
+/// membership — and its pose is written by `moveCharacter` and by that entry alone.
+///
+/// There is NO rotation field, and the absence is argued rather than suffered: the
+/// capsule is symmetric about Y, the engine's up is Y
+/// (`engine-coordinate-system.md`), so no orientation changes a collision answer. That
+/// validity is CONDITIONAL on the presence carrying the same capsule — were an
+/// arbitrary presence shape ever admitted, rotation would become necessary again,
+/// which is one more reason not to admit one (§1.12.3).
+///
+/// Absent for reasons recorded rather than forgotten: `max_speed` is kinematics and
+/// belongs to `MovementConfig` (`engine-movement.md`) — `moveCharacter` takes a
+/// displacement already computed; and `friction` has no meaning on a body that never
+/// reaches the contact solver, ground braking being `MovementConfig.ground_friction`.
+pub const CharacterDescriptor = struct {
+    /// Owning ECS entity.
+    entity: EntityId,
+
+    /// Position of the capsule's BASE, NEVER its centre (§1.12.3). A body's pose is the
+    /// centre of its shape — the capsule being symmetric about the origin — so the
+    /// presence sits at this position plus half the height along up. That offset exists in
+    /// exactly ONE named place in the solver: computed twice, it will diverge once.
+    ///
+    /// The anchor is FIXED where the reference PARAMETERISES it through `mShapeOffset` —
+    /// a deliberate divergence, this descriptor carrying only `radius` and `height`, hence
+    /// a capsule and nothing else.
+    position: Vec3 = Vec3.zero,
+
+    /// Capsule radius (metres).
+    radius: f32 = 0.3,
+    /// Total capsule height, base to top (metres).
+    height: f32 = 1.8,
+    /// Tallest riser the controller climbs rather than being blocked by (metres).
+    step_height: f32 = 0.3,
+
+    /// Steepest walkable slope, in RADIANS. A named PHYSICAL parameter of the class of
+    /// `restitution_threshold`, `penetration_slop` and `active_edge_cos_threshold`: it
+    /// selects a modelling behaviour, not a numerical tolerance, so §1.11.2's
+    /// `k · floatEps(T) · coordScale` discipline DOES NOT GOVERN IT. A reviewer applying
+    /// that rule here will be wrong.
+    ///
+    /// RADIANS here and DEGREES in the Etch components, the conversion belonging to the
+    /// `@unit(.degrees)` annotation — the divergence is written down so that nobody
+    /// "corrects" either side. The solver stores its COSINE, computed once at creation,
+    /// and tests `n · up >= cos_max_slope`: an `acos` per contact per frame is exactly
+    /// what M1.1.14 would have to make reproducible, `engine-phase-1-plan.md` naming
+    /// internal trigonometric functions among its determinism hazards (§1.12.5).
+    ///
+    /// A value outside `[0, π/2]` is a DOMAIN ERROR and is never clamped: silently
+    /// clamping would make a caller's mistake look like a modelling choice.
+    max_slope: f32 = 0.785, // ~45°
+
+    /// Distance the capsule is held off surfaces (metres). Same class as `max_slope` — a
+    /// physical parameter, not a tolerance, and §1.11.2 governs it no more than the
+    /// other. Without a margin the capsule sits flush and GJK's own contact-margin band
+    /// then decides the verdict from one frame to the next. The reference's
+    /// `mCharacterPadding` value.
+    padding: f32 = 0.02,
+
+    /// How far OUTSIDE the shape to sweep for contacts not yet touching (metres). The
+    /// reference documents that a value of zero most likely gets the character stuck, the
+    /// sliding direction no longer being computable (`mPredictiveContactDistance`).
+    ///
+    /// THE ONE FIELD OF THIS DESCRIPTOR THE ALGORITHM HAS NOT YET JUSTIFIED. It ships
+    /// because the pre-freeze window closes at M1.1.15 and the only known production
+    /// realisation of this algorithm declares it load-bearing. The gate that writes
+    /// sliding CONSUMES it or DELETES it — both stay inside the window; leaving it inert
+    /// does not.
+    predictive_contact_distance: f32 = 0.1,
+
+    /// What the character IS, read by others through the mask of THEIR queries.
+    ///
+    /// Bounded to `[0, collision_layer_count)`: `createCharacter` rejects anything beyond
+    /// with `error.InvalidCollisionLayer`, the same error and the same reason as `addBody`
+    /// (§1.11.5) — the mask is 32 bits, and a character declared past it would be
+    /// invisible to every query with no diagnostic at all.
+    ///
+    /// It serves as the PRESENCE layer too, with no dedicated field: the reference carries
+    /// a separate `mInnerBodyLayer` because it does not split the character's layer, and
+    /// our split with `layer_mask` already does that work (§1.12.2).
+    collision_layer: u8 = 0,
+
+    /// What the character SEES, read by itself alone in its own sweeps. Two questions
+    /// with no shared path (§1.12.4). The object-layer matrix of
+    /// `engine-physics-forge.md` §3 does not govern a controller: it filters simulation
+    /// PAIRS, which a sweep is not (§1.11.1).
+    layer_mask: u32 = 0xFFFFFFFF,
+
+    /// Mass serving the push impulse (kg). The character receives NOTHING in return: it
+    /// is kinematic, so the push is unilateral by construction (§1.12.9). The reference's
+    /// `mMass` value.
+    mass: f32 = 70.0,
+
+    /// Ceiling on the push force (N). Zero disables pushing with no special case. The
+    /// reference's `mMaxStrength` value.
+    max_push_force: f32 = 100.0,
+
+    /// Whether the character carries a broadphase PRESENCE — a kinematic body holding ITS
+    /// OWN capsule (§1.12.2). Without one it is invisible to every query, which
+    /// `engine-phase-1-criteria.md` C1.8 refuses twice: the player's attack deals its
+    /// damage through raycast/overlap, and the follow camera carries an anti-wall sweep
+    /// that starts from the player and must therefore exclude it.
+    ///
+    /// There is NO `inner_body_shape` field: two shapes that can diverge are a
+    /// synchronisation contract with no counterpart, and `resizeCharacter` would have to
+    /// resize both. That absence is also what keeps the missing rotation field valid.
+    ///
+    /// DEFAULT `true`, a deliberate divergence from the reference, which defaults to
+    /// `nullptr`: the failure mode of a default-off is a character nobody can shoot,
+    /// discovered late.
+    inner_body: bool = true,
+};
+
+/// The ground verdict, TERNARY (`engine-physics-forge.md` §1.12.5). Zig mirror of the
+/// Etch enum declared in `engine-movement.md` §2 — same order, same values, the same
+/// mirror contract `BodyType` keeps with the `body_type` field of the `RigidBody`
+/// component.
+///
+/// A boolean would force the consumer to re-derive the angle from the normal, hence to
+/// recompute `max_slope` OUTSIDE the engine that holds it, hence to be able to disagree
+/// with it. It also could not carry `on_steep_ground`, which is precisely the state
+/// `engine-movement.md` §5 transitions on.
+pub const GroundState = enum(u8) {
+    /// On ground whose slope is walkable.
+    grounded,
+    /// Bearing on a slope too steep to walk.
+    on_steep_ground,
+    /// No ground. THE DEFAULT EVERYWHERE, and it is a failure DIRECTION: a `.grounded`
+    /// default on an unknown verdict means gravity not applied, hence a character that
+    /// floats — a symptom that does not correct itself; `.in_air` means one tick of
+    /// gravity, hence a sub-millimetre sink that does. Same reasoning as the
+    /// contact-announced-early of §1.11.11.
+    in_air,
+};
+
+/// Result of one `moveCharacter`.
+///
+/// The former `collisions: u8` field is DELETED: a counter with no named consumer in the
+/// corpus, saturating at 255, and a counter belongs only to a shape that is allowed to
+/// fail. `CharacterMoveResult2D` carries the same field and SURVIVES this removal — the
+/// 2D symmetry is consigned for M1.8.11, where `PhysicsModule2D` freezes, on the M1.1.11
+/// precedent of listing a 2D symmetry in OUT with its freeze date rather than touching 2D
+/// from a 3D milestone.
+///
+/// **`ground_state` is the discriminator, and the other four are only readable through
+/// it.** `ground_body`'s default of `0` is NOT a sentinel — `PackedId.pack(0, 0)` is `0`,
+/// a perfectly valid handle to slot 0 generation 0 — so there is no value of that field
+/// meaning "no support". On `.in_air` the caller must not read it, exactly as §1.12.5's
+/// table states; `ground_normal` is the one field with a meaningful value in every state,
+/// and that is deliberate (see its own doc).
+pub const CharacterMoveResult = struct {
+    /// Position of the BASE after resolution (§1.12.3) — what gameplay writes into
+    /// `Transform.position`, and where every probe of the caller starts from.
+    position: Vec3,
+
+    /// The VERDICT. A direction does not mix into it.
+    ground_state: GroundState = .in_air,
+
+    /// The DIRECTION. `Vec3.up` on `.in_air` — spelled `Vec3.unit_y` here, `foundation`
+    /// math naming its basis vectors by axis while `engine-coordinate-system.md` names
+    /// this one semantically; under the engine's Y-up convention the two are the same
+    /// value, `(0, 1, 0)`.
+    ///
+    /// NEVER a poisoned value, and this is the one `ground_*` field that holds in every
+    /// state: three documents read it inside a `@replicated` component
+    /// (`engine-movement.md`, `engine-animation-kinesis.md`,
+    /// `engine-gameplay-systems.md`) and a NaN here would cross the rollback. The
+    /// poisoning discipline of §1.11.17 does not extend to this struct.
+    ground_normal: Vec3 = Vec3.unit_y,
+
+    /// Entity of the support. `EntityId.dead` outside `.grounded` / `.on_steep_ground`.
+    /// Required by the moving-platform velocity inheritance of `engine-movement.md` §4.
+    ///
+    /// NON-NULL on `.on_steep_ground` as much as on `.grounded`: a steep slope is still a
+    /// support, and the field is null only on `.in_air` (§1.12.5).
+    ground_entity: EntityId,
+
+    /// Body of the support — what the caller interrogates it through without searching
+    /// for it. See the type doc on why `0` is a default and not a sentinel.
+    ground_body: BodyId = 0,
+
+    /// Velocity AT THE CONTACT POINT, hence `v + ω × r` and not the support's linear
+    /// velocity: without the rotational term a character standing at the rim of a
+    /// rotating platform drifts. Zero on `.in_air`.
+    ///
+    /// This field is the reason `setAngularVelocity` and `moveKinematic` ship at all —
+    /// without them `ω` has no authorable source (see the body-entry block above).
+    ground_velocity: Vec3 = Vec3.zero,
 };
 
 // --- Queries (the complete family, frozen before the interface freeze) ---
@@ -597,4 +840,137 @@ test "the frozen query family mirrors engine-tier-interfaces.md §1" {
     try testing.expectEqual(f32, @TypeOf(hit.distance));
     try testing.expectEqual(f32, @TypeOf(ray.max_distance));
     try testing.expectEqual(f32, @TypeOf(closest.distance));
+}
+
+test "CharacterId carries the PackedId layout, so a stale handle is detectable" {
+    // `u32` at the interface boundary, `index:24 | generation:8` inside — the same
+    // packing as `BodyId` and `ShapeId`, reached through the same one helper.
+    try testing.expectEqual(u32, CharacterId);
+
+    const id: CharacterId = PackedId.pack(7, 3);
+    try testing.expectEqual(@as(u24, 7), PackedId.unpack(id).index);
+    try testing.expectEqual(@as(u8, 3), PackedId.unpack(id).generation);
+
+    // THE property §1.12 needs from this handle: a recycled slot and the handle that used
+    // to own it differ, so `moveCharacter` can answer with a typed error instead of
+    // silently moving whoever took the slot over. Without the generation the two are the
+    // same integer and that contract is unenforceable, not merely unenforced.
+    try testing.expect(PackedId.pack(7, 3) != PackedId.pack(7, 4));
+
+    // And the limit of that, stated rather than discovered: all three handles are `u32`,
+    // so they are NOT distinct types and the compiler cannot stop a `BodyId` being passed
+    // where a `CharacterId` is wanted. That is the frozen boundary's own choice
+    // (`engine-tier-interfaces.md` §1 declares all of them `u32`); the generation guards
+    // slot recycling, never handle confusion.
+    try testing.expectEqual(BodyId, CharacterId);
+}
+
+test "GroundState is the ternary verdict, u8-backed, in engine-movement.md's order" {
+    // The Etch enum in `engine-movement.md` §2 is the owner declaration and this is its
+    // Zig mirror: same order, same values. Four documents read this verdict, so a
+    // reordering here is a silent change of meaning in all of them.
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(GroundState.grounded));
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(GroundState.on_steep_ground));
+    try testing.expectEqual(@as(u8, 2), @intFromEnum(GroundState.in_air));
+    try testing.expectEqual(u8, @typeInfo(GroundState).@"enum".tag_type);
+
+    // THREE values, and the count is asserted because §1.12.8 REFUSES a fourth: inventing
+    // an `unknown` to report an invalidated verdict would cost more than the safe failure
+    // direction earns, `.in_air` already being that direction. Counter-factual: appending a
+    // fourth value leaves the three asserts above passing and fails HERE (measured).
+    try testing.expectEqual(@as(usize, 3), @typeInfo(GroundState).@"enum".fields.len);
+}
+
+test "CharacterDescriptor mirrors engine-tier-interfaces.md §1 field for field" {
+    // Field NAMES and defaults are the contract. Referencing each field by name makes a
+    // rename or a removal a COMPILE error; the field-COUNT assert is what makes an
+    // ADDITION visible, which no by-name reference can catch. Both directions matter here
+    // and not merely in principle: after the M1.1.15 freeze, `engine-c-api.md` carrying no
+    // `struct_size` and no minor version, adding one defaulted field to this descriptor is
+    // an ABI break for every Tier 3 plugin rather than a source-compatible addition.
+    const d = CharacterDescriptor{ .entity = EntityId.dead };
+
+    try testing.expect(d.position.eql(Vec3.zero));
+    try testing.expectEqual(@as(f32, 0.3), d.radius);
+    try testing.expectEqual(@as(f32, 1.8), d.height);
+    try testing.expectEqual(@as(f32, 0.3), d.step_height);
+    try testing.expectEqual(@as(f32, 0.785), d.max_slope);
+    try testing.expectEqual(@as(f32, 0.02), d.padding);
+    try testing.expectEqual(@as(f32, 0.1), d.predictive_contact_distance);
+    try testing.expectEqual(@as(u8, 0), d.collision_layer);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), d.layer_mask);
+    try testing.expectEqual(@as(f32, 70.0), d.mass);
+    try testing.expectEqual(@as(f32, 100.0), d.max_push_force);
+    try testing.expectEqual(true, d.inner_body);
+
+    // `entity` carries NO default, and that is transcribed rather than improved: a
+    // controller belonging to no entity is not a thing this descriptor should be able to
+    // express by omission.
+    try testing.expectEqual(EntityId, @TypeOf(d.entity));
+
+    // Counter-factual measured: appending one field leaves every assert above passing and
+    // fails HERE, which is the only reason this line is not decoration.
+    try testing.expectEqual(@as(usize, 13), @typeInfo(CharacterDescriptor).@"struct".fields.len);
+
+    // Four absences, each argued in the spec and each pinned so that a later milestone
+    // re-adding one has to delete the argument first rather than quietly outvote it:
+    // rotation (§1.12.3 — the capsule is symmetric about the engine's Y up),
+    // `inner_body_shape` (§1.12.2 — two shapes that can diverge), and `max_speed` /
+    // `friction` (§9 — kinematics and a solver coefficient a virtual controller never
+    // reaches).
+    try testing.expect(!@hasField(CharacterDescriptor, "rotation"));
+    try testing.expect(!@hasField(CharacterDescriptor, "inner_body_shape"));
+    try testing.expect(!@hasField(CharacterDescriptor, "max_speed"));
+    try testing.expect(!@hasField(CharacterDescriptor, "friction"));
+
+    // The public surface is f32 (§1.11.8, §1.12.11) — pinned, because widening it is ONE
+    // decision over `BodyDescriptor`, the interface pose, the query results and the ECS
+    // `Transform` together, at M1.1.15, and never over one member of that set alone.
+    try testing.expectEqual(f32, @TypeOf(d.radius));
+    try testing.expectEqual(f32, @TypeOf(d.height));
+    try testing.expectEqual(f32, @TypeOf(d.max_slope));
+    try testing.expectEqual(f32, @TypeOf(d.padding));
+    try testing.expectEqual(math.Vec3, @TypeOf(d.position));
+
+    // `collision_layer` is bounded by the SAME constant `addBody` reads, not by a second
+    // copy of 32 (§1.12.4): the mask is 32 bits, and a character declared past it would be
+    // invisible to every query with no diagnostic.
+    try testing.expect(d.collision_layer < collision_layer_count);
+    try testing.expectEqual(@as(u8, 32), collision_layer_count);
+}
+
+test "CharacterMoveResult mirrors engine-tier-interfaces.md §1 field for field" {
+    const r = CharacterMoveResult{ .position = Vec3.zero, .ground_entity = EntityId.dead };
+
+    // The verdict, and its default is the safe failure direction in every state (§1.12.5).
+    try testing.expectEqual(GroundState.in_air, r.ground_state);
+
+    // The direction, and the ONE `ground_*` field that holds a meaningful value even on
+    // `.in_air`. Asserted EXACTLY unit rather than approximately: three documents read it
+    // inside a `@replicated` component and a NaN would cross the rollback, so `lengthSq`
+    // being exactly 1 is the strongest available statement that it is never poisoned —
+    // `Vec3.unit_y` is `engine-coordinate-system.md`'s `Vec3.up` under Y-up, the same
+    // value `(0, 1, 0)`.
+    try testing.expect(r.ground_normal.eql(Vec3.unit_y));
+    try testing.expectEqual(@as(f32, 1), r.ground_normal.lengthSq());
+
+    try testing.expectEqual(@as(BodyId, 0), r.ground_body);
+    try testing.expect(r.ground_velocity.eql(Vec3.zero));
+
+    // `position` and `ground_entity` carry no default — transcribed as frozen.
+    try testing.expectEqual(math.Vec3, @TypeOf(r.position));
+    try testing.expectEqual(EntityId, @TypeOf(r.ground_entity));
+
+    // Counter-factual measured, same shape as the descriptor's.
+    try testing.expectEqual(@as(usize, 6), @typeInfo(CharacterMoveResult).@"struct".fields.len);
+
+    // `collisions: u8` is DELETED and its absence is pinned: an aggregated counter with no
+    // named consumer in the corpus, saturating at 255. `CharacterMoveResult2D` still
+    // carries it, and that asymmetry is consigned for M1.8.11 rather than resolved from a
+    // 3D milestone.
+    try testing.expect(!@hasField(CharacterMoveResult, "collisions"));
+
+    // f32 boundary, same single decision as the descriptor above.
+    try testing.expectEqual(math.Vec3, @TypeOf(r.ground_normal));
+    try testing.expectEqual(math.Vec3, @TypeOf(r.ground_velocity));
 }

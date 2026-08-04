@@ -31,7 +31,10 @@ pub const EntityId = types.EntityId;
 pub const BodyId = types.BodyId;
 /// Opaque collision-shape handle (`u32`, same packing as `BodyId`).
 pub const ShapeId = types.ShapeId;
-/// The `index:24 | generation:8` packing shared by `BodyId`/`ShapeId`.
+/// Opaque character-controller handle (`u32`, same packing as `BodyId`).
+pub const CharacterId = types.CharacterId;
+/// The `index:24 | generation:8` packing shared by `BodyId`, `ShapeId` and
+/// `CharacterId`.
 pub const PackedId = types.PackedId;
 /// Simulation class of a body (static / kinematic / dynamic).
 pub const BodyType = types.BodyType;
@@ -43,6 +46,18 @@ pub const ShapeDescriptor = types.ShapeDescriptor;
 pub const BodyDescriptor = types.BodyDescriptor;
 /// Physics pose (position + rotation, no scale).
 pub const Transform = types.Transform;
+
+// --- Character controller (`engine-physics-forge.md` §1.12) ---
+
+/// Everything needed to create one character controller. A controller is VIRTUAL —
+/// it takes part in no solver pass, and its pose is written by `moveCharacter` alone.
+pub const CharacterDescriptor = types.CharacterDescriptor;
+/// The TERNARY ground verdict. Zig mirror of the Etch enum owned by
+/// `engine-movement.md` §2 — same order, same values.
+pub const GroundState = types.GroundState;
+/// Result of one `moveCharacter`: the resolved BASE position plus the five ground
+/// quantities, of which `ground_state` is the discriminator.
+pub const CharacterMoveResult = types.CharacterMoveResult;
 
 // --- Queries (the complete frozen family, `engine-tier-interfaces.md` §1) ---
 
