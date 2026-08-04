@@ -138,6 +138,15 @@ pub const Character = struct {
     /// stays so across a resize (gate F): a resize is not a re-creation, and an exclusion
     /// the caller memorised survives it.
     inner_body: ?BodyId,
+    /// The ground verdict LAST REPORTED by a `moveCharacter` (§1.12.8).
+    ///
+    /// `setCharacterPosition` INVALIDATES it back to `.in_air`, because a teleport moves the
+    /// character somewhere the previous verdict describes nothing about — and `.in_air` is the safe
+    /// failure direction, one tick of gravity rather than a floating character. The poisoning
+    /// discipline of §1.11.17 does not apply: `GroundState` has three values that four documents
+    /// share, and inventing a fourth to mean "unknown" would cost more than the safe direction
+    /// earns.
+    reported_ground: GroundState = .in_air,
     /// The presence's broadphase proxy, once its owner has registered it through
     /// `setPresenceProxy`.
     ///
@@ -171,7 +180,7 @@ pub fn baseToCentre(comptime T: type, height: T) math.Vec(3, T) {
 ///
 /// Its non-negativity is why `height >= 2 · radius` is a domain condition and not a
 /// suggestion — a smaller height describes no capsule at all.
-fn capsuleHalfHeight(comptime T: type, radius: T, height: T) T {
+pub fn capsuleHalfHeight(comptime T: type, radius: T, height: T) T {
     return height * 0.5 - radius;
 }
 
@@ -633,10 +642,26 @@ fn slideNormal(
 /// product; subtracting that component zeroes it exactly and leaves the tangential part untouched.
 /// Zeroing both would pass a "the normal component is zero" test and be wrong, which is why the
 /// wall test asserts the tangential part against a closed form as well.
-fn slideAlongPlane(motion: Vec3r, normal: Vec3r) Vec3r {
+fn slideAlongPlane(motion: Vec3r, normal: Vec3r, cos_max_slope: Real) Vec3r {
     const into = motion.dot(normal);
     if (into >= 0) return motion; // already leaving the surface
-    return motion.sub(normal.scale(into));
+    const slid = motion.sub(normal.scale(into));
+
+    // **THE SLOPE CONSTRAINT (§1.12.6).** A contact plane whose normal FAILS the slope test may not
+    // be used to GAIN height: the up component of the projected motion is capped at the up component
+    // of the motion BEFORE projection. Without it a character climbs any face up to 90°−ε simply by
+    // walking into it — measured before the rule existed: 0.583 m of rise in one call against a 50°
+    // face under a 45° limit, and the verdict said `.on_steep_ground` throughout, so the engine was
+    // telling the truth while the pose climbed.
+    //
+    // A CAP and not a cancellation, which is what makes the four cases right at once: a walkable
+    // plane is untouched; a caller that ASKS to rise keeps its rise, because the cap is on the
+    // increase; and a motion already leaving the surface never reaches here at all.
+    if (normal.dot(up) >= cos_max_slope) return slid;
+    const before = motion.dot(up);
+    const after = slid.dot(up);
+    if (after <= before) return slid;
+    return slid.sub(up.scale(after - before));
 }
 
 /// Constrain `motion` against a crease formed by two contact planes.
@@ -647,7 +672,7 @@ fn slideAlongPlane(motion: Vec3r, normal: Vec3r) Vec3r {
 /// `Attempt` lesson of §1.11.17 applied to a crease. The exact tier is what makes that null
 /// trustworthy: `math.triangleCross`'s float `.direction` would return a rounding residue here and
 /// read as a valid crease.
-fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r) ?Vec3r {
+fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r, cos_max_slope: Real) ?Vec3r {
     const edge = math.triangleCrossDirection(Real, Vec3r.zero, n0, n1) orelse return null;
     // The magnitude carries no meaning by contract — only the direction — so it is normalised here
     // and never used as a length.
@@ -665,8 +690,44 @@ fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r) ?Vec3r {
     // it was already going and not backwards along it.
     const along = motion.dot(axis);
     if (along < 0) axis = axis.neg();
-    return axis.scale(@abs(along));
+    const slid = axis.scale(@abs(along));
+
+    // **THE SLOPE CONSTRAINT APPLIES TO A CREASE TOO, and it has to.** §1.12.6 governs the slide, and
+    // an edge between two planes of which at least one is unwalkable is as much a way to gain height
+    // as the plane itself — measured: against a 50° ramp built as a ROTATED BOX, the character
+    // contacts both its top face and a side feature, giving two normals whose crease has an upward
+    // component, and it rose 0.0186 m per call through that path while the single-plane cap held its
+    // own path at exactly zero. Capping only the plane would have left the rule true of one branch
+    // and false of the other.
+    if (n0.dot(up) >= cos_max_slope and n1.dot(up) >= cos_max_slope) return slid;
+    const before = motion.dot(up);
+    const after = slid.dot(up);
+    if (after <= before) return slid;
+    return slid.sub(up.scale(after - before));
 }
+
+/// Wakes every broadphase CANDIDATE of a volume, without consulting the narrowphase.
+///
+/// A SUPERSET of what is actually touched, and that is the safe direction for a wake: W4 exists so a
+/// sleeper is never MISSED, and waking one that turns out not to be in contact costs it a tick of
+/// simulation and nothing else. Being a superset also removes the capacity question entirely —
+/// nothing is accumulated, so there is no bound to overflow, which is what lets the two pose-writing
+/// entries handle an unbounded number of overlaps where the move's exact-capacity list could not.
+///
+/// It can hold a MUTABLE `BodyManager` precisely because it calls no adapter: `castShapeBody` and
+/// `collideShapeBody` both take a `*const`, which is what forces the move to accumulate instead.
+const CandidateWaker = struct {
+    bm: *BodyManager,
+    exclude: ?BodyId,
+
+    pub fn add(self: *CandidateWaker, user_data: u32) void {
+        const body: BodyId = user_data;
+        if (self.exclude) |own| {
+            if (own == body) return;
+        }
+        self.bm.wakeBody(body);
+    }
+};
 
 /// One swept contact, resolved over every candidate body.
 const SweepHit = struct {
@@ -839,6 +900,41 @@ fn stepDown(
     if (normal.dot(up) < c.cos_max_slope) return centre;
     touched.add(hit.body);
     return centre.sub(up.scale(paddedAdvance(hit, c.step_height, c.padding)));
+}
+
+/// Push a DYNAMIC body the character walked into, and take nothing in return.
+///
+/// **Unilateral by construction** (§1.12.9): the character is kinematic, so no impulse is ever
+/// applied to it and its own resolution is untouched — it stops `padding` short of the body whether
+/// the body yields or not. That is what distinguishes a push from an elastic collision, and it is
+/// asserted as a differential rather than described.
+///
+/// The impulse is what it would take to bring the body up to the character's own speed along the push
+/// direction, clamped to `max_push_force · dt` — a force ceiling times a time IS an impulse, which is
+/// what makes `max_push_force` a force in newtons rather than a fudge factor. `max_push_force = 0`
+/// disables pushing with no special case, and so does a body already moving away faster than the
+/// character.
+///
+/// `dt` is one of the two DERIVED terms §1.12.1 reserves it for; the character is never integrated
+/// with it.
+fn pushBody(
+    bm: *BodyManager,
+    body: BodyId,
+    normal: Vec3r,
+    character_velocity: Vec3r,
+    c: Character,
+    dt: Real,
+) void {
+    if (c.max_push_force <= 0 or dt <= 0) return;
+    if (bm.bodyType(body) != .dynamic) return;
+    // `normal` runs surface → character, so the character pushes along its negation.
+    const direction = normal.neg();
+    const body_velocity = bm.linearVelocity(body) orelse return;
+    const closing = character_velocity.dot(direction) - body_velocity.dot(direction);
+    if (closing <= 0) return; // the body is already leaving at least as fast
+    const impulse = @min(c.mass * closing, c.max_push_force * dt);
+    // ACTIVATING by contract (§1.8.4) — an external mutation, and W1 rather than W4.
+    bm.addImpulse(body, direction.scale(impulse));
 }
 
 /// Push the capsule out of everything it overlaps, deepest first, and record whose wake that owes.
@@ -1078,15 +1174,16 @@ pub const CharacterStore = struct {
         displacement: Vec3r,
         dt: Real,
     ) !MoveResult {
-        // `dt` reaches no term of this gate: the derived ones are the support velocity, which the
-        // ground probe reads from the support's own columns, and the push impulse of gate F.
-        _ = dt;
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
         const c = self.characters.items[idx];
         const record = store.get(c.shape) orelse unreachable;
         const probe = shape_mod.supportShape(record);
 
         var touched = TouchedBodies{};
+        // The character's own speed, DERIVED from the displacement and `dt` — the caller owns the
+        // kinematics, so this is the only place the engine reconstructs a velocity, and it exists
+        // solely to size the push impulse (§1.12.1).
+        const character_velocity = if (dt > 0) displacement.scale(1 / dt) else Vec3r.zero;
 
         // 0 — the ground state BEFORE anything moves, which is the only thing the engine knows
         // about the caller's intention (see `stepDown`). Read here and not after, because after the
@@ -1141,6 +1238,11 @@ pub const CharacterStore = struct {
                 break;
             };
 
+            // PUSH what was hit, if it is dynamic and yields. Before the climb and the slide, because
+            // whether the body moves does not change the character's own resolution — the push is
+            // unilateral, so the two are independent and the order is readability alone.
+            pushBody(bm, hit.body, normal, character_velocity, c, dt);
+
             // **CLIMB BEFORE SLIDING**, once per call. Attempted only against a surface too steep
             // to walk on: something walkable is ground to stand on, not an obstacle to step over.
             // On failure NOTHING has moved — `tryStepUp` returns the landing pose or nothing at all
@@ -1173,9 +1275,9 @@ pub const CharacterStore = struct {
             }
 
             if (plane_count == 1) {
-                remaining = slideAlongPlane(remaining, planes[0]);
+                remaining = slideAlongPlane(remaining, planes[0], c.cos_max_slope);
             } else {
-                remaining = slideAlongCrease(remaining, planes[0], planes[1]) orelse {
+                remaining = slideAlongCrease(remaining, planes[0], planes[1], c.cos_max_slope) orelse {
                     // EXACTLY parallel normals — a third answer, not an absent edge. There is no
                     // crease to slide along, so the motion stops.
                     remaining = Vec3r.zero;
@@ -1210,10 +1312,136 @@ pub const CharacterStore = struct {
         // `*const BodyManager`.
         for (touched.slice()) |body| bm.wakeBody(body);
 
-        return .{
-            .position = new_base,
-            .ground = try self.groundOf(bp, bm, store, id),
+        const ground = try self.groundOf(bp, bm, store, id);
+        // Recorded so `setCharacterPosition` has something to INVALIDATE (§1.12.8).
+        self.characters.items[idx].reported_ground = ground.state;
+        return .{ .position = new_base, .ground = ground };
+    }
+
+    /// Resize a character, ATOMICALLY and ANCHORED AT THE FEET: the base does not move, the volume
+    /// grows or shrinks upward, and the controller and its presence change together or not at all.
+    ///
+    /// **The presence's `BodyId` is KEPT** (§1.12.2): a resize is not a re-creation, so an exclusion
+    /// the caller memorised survives it. That is what `BodyManager.setShape` exists for.
+    ///
+    /// THREE outcomes, which a bare `bool` would conflate — the same split as `shapeCast` (§1.11.7):
+    /// a typed ERROR for the caller's fault (stale handle, or the SAME domain bounds
+    /// `createCharacter` applies, `height >= 2 · radius` included); `false` for a target volume that
+    /// is OCCUPIED, which is a legitimate gameplay answer and not an error; `true` for success.
+    ///
+    /// A refusal changes NOTHING — not the pose, not the dimensions, not the presence — and the new
+    /// capsule it had to build to ask the question is destroyed on the way out.
+    ///
+    /// Shrinking always succeeds: the target volume is contained in the current one. Growing under a
+    /// low ceiling returns `false`.
+    pub fn resizeCharacter(
+        self: *CharacterStore,
+        gpa: std.mem.Allocator,
+        bp: *Broadphase,
+        bm: *BodyManager,
+        store: *ShapeStore,
+        id: CharacterId,
+        radius: f32,
+        height: f32,
+    ) !bool {
+        const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        // The same three length bounds `validateDescriptor` applies, and for the same reasons — a
+        // resize is a second door onto the same domain, so it cannot be a laxer one.
+        if (!std.math.isFinite(radius) or radius <= 0) return error.InvalidDimensions;
+        if (!std.math.isFinite(height) or height <= 0) return error.InvalidDimensions;
+        if (height < 2 * radius) return error.InvalidDimensions;
+
+        const c = self.characters.items[idx];
+        const new_shape = try store.createShape(gpa, .{ .capsule = .{
+            .radius = radius,
+            .half_height = capsuleHalfHeight(f32, radius, height),
+        } });
+        errdefer store.destroyShape(gpa, new_shape);
+        const new_record = store.get(new_shape) orelse unreachable;
+        const new_probe = shape_mod.supportShape(new_record);
+        // ANCHORED AT THE FEET: the base is unchanged, so the new centre is derived from the NEW
+        // height through the one named offset.
+        const new_centre = c.position.add(baseToCentre(Real, height));
+
+        // Is the target volume free? The character's OWN presence is excluded — it still carries the
+        // old capsule, which the new one overlaps by construction, so including it would refuse
+        // every resize.
+        var probe_overlap = WorstOverlap{
+            .bm = bm,
+            .store = store,
+            .probe = new_probe,
+            .centre = new_centre,
+            .layer_mask = c.layer_mask,
+            .exclude = c.inner_body,
         };
+        _ = bp.queryAabb(body_manager_mod.worldAabb(new_record, new_centre, Quatr.identity), &probe_overlap);
+        if (probe_overlap.best != null) {
+            store.destroyShape(gpa, new_shape);
+            return false;
+        }
+
+        // Commit. The record is written FIRST so `syncPresence` mirrors the new size and pose from
+        // it, and the presence's shape is swapped BEFORE that sync so `bodyAabb` — hence the
+        // broadphase proxy — reflects the new SIZE and not only the new centre.
+        const old_shape = c.shape;
+        self.characters.items[idx].radius = radius;
+        self.characters.items[idx].height = height;
+        self.characters.items[idx].shape = new_shape;
+        if (c.inner_body) |body| bm.setShape(store, body, new_shape);
+        try self.syncPresence(gpa, bp, bm, store, idx);
+        store.destroyShape(gpa, old_shape);
+
+        // W4: whatever the NEW volume reaches. A superset, which is the safe direction.
+        var waker = CandidateWaker{ .bm = bm, .exclude = c.inner_body };
+        _ = bp.queryAabb(body_manager_mod.worldAabb(new_record, new_centre, Quatr.identity), &waker);
+        return true;
+    }
+
+    /// Teleport a character: move it WITHOUT sweeping and without resolving (§1.12.8).
+    ///
+    /// It may leave the character interpenetrated, and that is the contract rather than a limitation
+    /// — the caller asked to be somewhere, not to be moved toward somewhere. It INVALIDATES the
+    /// reported ground verdict, which returns to `.in_air`.
+    ///
+    /// Errors: `error.StaleCharacter` on a dead handle, like every other entry of this store. An
+    /// earlier version was a silent no-op here on the `removeBody` precedent, which is the wrong
+    /// precedent: a destroy is idempotent, so ignoring a dead handle is its natural answer, whereas a
+    /// teleport that goes nowhere is a write the caller has to know did not happen — and it was the
+    /// ONLY one of the store's five entries that answered the same question in a different way.
+    ///
+    /// **The frozen signature is `void` and this one is not, and that is a gap in the frozen surface
+    /// rather than a liberty taken here.** Keeping the broadphase proxy fresh is part of this entry's
+    /// contract (§1.12.2), `Broadphase.update` allocates, and a `void` entry has nowhere to put that
+    /// failure. The interface tier will have to decide at M1.1.15 — and §1.11.7 forbids the easy
+    /// answer, converting an error into an absent result. Recorded so the freeze meets it knowingly.
+    pub fn setCharacterPosition(
+        self: *CharacterStore,
+        gpa: std.mem.Allocator,
+        bp: *Broadphase,
+        bm: *BodyManager,
+        store: *const ShapeStore,
+        id: CharacterId,
+        position: Vec3r,
+    ) !void {
+        const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        self.characters.items[idx].position = position;
+        self.characters.items[idx].reported_ground = .in_air;
+        try self.syncPresence(gpa, bp, bm, store, idx);
+
+        const c = self.characters.items[idx];
+        const record = store.get(c.shape) orelse unreachable;
+        var waker = CandidateWaker{ .bm = bm, .exclude = c.inner_body };
+        _ = bp.queryAabb(
+            body_manager_mod.worldAabb(record, position.add(baseToCentre(Real, c.height)), Quatr.identity),
+            &waker,
+        );
+    }
+
+    /// The verdict the last `moveCharacter` reported, or null on a stale handle. `.in_air` after a
+    /// `setCharacterPosition`, which invalidates it.
+    pub fn reportedGround(self: *const CharacterStore, id: CharacterId) ?GroundState {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.characters.items[idx].reported_ground;
     }
 
     /// Mirror the authoritative record pose onto the presence — the body AND its broadphase proxy.

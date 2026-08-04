@@ -249,6 +249,10 @@ pub const CharacterMoveResult = character_mod.MoveResult;
 pub const max_slide_iterations = character_mod.max_slide_iterations;
 /// The depenetration loop's iteration ceiling, same discipline and same failure direction.
 pub const max_depenetration_iterations = character_mod.max_depenetration_iterations;
+/// The CYLINDER half-height of a capsule of a given total height and radius. Re-exported for the
+/// same reason as `baseToCentre` below: it is the one named place that conversion exists, and
+/// `resizeCharacter` shares it with creation so a resize cannot derive it differently.
+pub const capsuleHalfHeight = character_mod.capsuleHalfHeight;
 /// The offset from a character's BASE to the CENTRE of its capsule — half the height along
 /// `+Y`. Re-exported because it is THE one named place that offset exists, and a consumer
 /// deriving it a second time is the defect the single definition prevents.

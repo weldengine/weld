@@ -337,6 +337,30 @@ pub const BodyManager = struct {
         return self.bodies.items(.shape)[idx];
     }
 
+    /// Replace the shape a body carries, KEEPING its `BodyId`. Stale-safe no-op.
+    ///
+    /// **Restricted to a NON-DYNAMIC body, asserted.** `computeMotion` returns an inverse mass and
+    /// an inverse inertia of exactly zero for anything but `.dynamic`, INDEPENDENT of the shape, so
+    /// a swap leaves `motion` correct with nothing to recompute. On a dynamic body the same swap
+    /// would silently keep an inertia tensor belonging to the old geometry, so that case is refused
+    /// rather than half-handled.
+    ///
+    /// Added at M1.1.12 for `resizeCharacter`, which MUST keep the presence's handle (§1.12.2) — a
+    /// resize is not a re-creation, and an exclusion the caller memorised survives it.
+    /// Destroy-and-add is the only alternative and it changes the `BodyId`.
+    ///
+    /// NON-ACTIVATING, like the other write paths of §1.8.4: the wake the caller owes is composed by
+    /// the caller from what the new volume touches.
+    pub fn setShape(self: *BodyManager, store: *const ShapeStore, id: BodyId, shape_id: api.ShapeId) void {
+        const idx = self.alloc.validate(id) orelse return;
+        std.debug.assert(self.bodies.items(.body_type)[idx] != .dynamic);
+        const shape = store.get(shape_id) orelse return;
+        self.bodies.items(.shape)[idx] = shape_id;
+        // The sleep radius is geometry-derived, so it is recomputed even though a non-dynamic body's
+        // is never read — a stale derived value is worse than a redundant assignment.
+        self.bodies.items(.sleep_radius)[idx] = body_mod.computeSleepRadius(shape);
+    }
+
     /// Safe getter: the ECS entity owning this body, or null if `id` is
     /// stale/invalid.
     ///
