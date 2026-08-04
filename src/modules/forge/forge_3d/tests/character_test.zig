@@ -20,6 +20,7 @@ const query = @import("../query/root.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
 const harness = @import("solver_test.zig");
+const sleep_mod = @import("../pipeline/sleep.zig");
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
@@ -1229,4 +1230,375 @@ test "the sweep band is padding plus predictive_contact_distance" {
         const g = try store.groundOf(&scene.bp, &scene.bm, &scene.store, who);
         try testing.expectEqual(case.expected, g.state);
     }
+}
+
+// ---------------------------------------------------------------------------
+// D — the move. No step height.
+// ---------------------------------------------------------------------------
+
+/// A character plus its presence's broadphase proxy REGISTERED with the store, so pose writes
+/// keep the tree fresh. `addCharacter` above deliberately does not register it — the gate-B
+/// tests had no pose write to keep fresh — and the difference is what the freshness test rides on.
+fn addMover(
+    gpa: std.mem.Allocator,
+    world: *harness.World,
+    chars: *CharacterStore,
+    desc: api.CharacterDescriptor,
+) !api.CharacterId {
+    const id = try chars.createCharacter(gpa, &world.store, &world.bm, desc);
+    if (try chars.getCharacterInnerBody(id)) |presence| {
+        const proxy = try world.bp.insert(
+            gpa,
+            .dynamic,
+            world.bm.bodyAabb(&world.store, presence).?,
+            presence,
+        );
+        chars.setPresenceProxy(id, proxy);
+    }
+    return id;
+}
+
+/// A static box body of the given half-extents at the given centre.
+fn addBox(gpa: std.mem.Allocator, world: *harness.World, half: ApiVec3, centre: ApiVec3, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = half } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = centre,
+    });
+}
+
+test "an unobstructed move serves the whole displacement" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 5, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // Nothing in the scene: the base moves by exactly the displacement asked for, and the verdict
+    // at the new pose is `.in_air`.
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, -3), 1.0 / 60.0);
+    try testing.expect(r.position.approxEql(v(2, 5, -3), tol));
+    try testing.expectEqual(api.GroundState.in_air, r.ground.state);
+    // The record is authoritative and now agrees with the result.
+    try testing.expect(chars.get(id).?.position.approxEql(v(2, 5, -3), tol));
+}
+
+test "a move into a wall keeps the tangential component and cancels the normal one" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A wall occupying x >= 2: half-extents (1, 5, 5) centred at x = 3, so its −X face is at x = 2.
+    _ = try addBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 100);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // Asked for (3, 0, 1) — into the wall, plus a metre along +Z the wall does not oppose.
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+
+    // **THE MOTION IS OBLIQUE, AND THAT CHANGES THE CLOSED FORM.** The capsule's radius is 0.3, so
+    // its surface reaches the wall when the centre is at x = 1.7; but the character travels along
+    // `d = (3,0,1)/√10`, and the sweep stops `padding` short ALONG d — so the shortfall projected
+    // onto x is `padding · dₓ` and not `padding`:
+    //
+    //   x = 1.7 − padding · 3/√10 = 1.7 − 0.02 · 0.9486833 = 1.6810263
+    //
+    // A first version of this test wrote 1.68, which is the axis-aligned answer, and an oblique
+    // sweep is precisely the case §1.11.4 bis makes mandatory.
+    const root10: Real = @sqrt(@as(Real, 10));
+    try testing.expectApproxEqAbs(1.7 - 0.02 * (3.0 / root10), r.position.toArray()[0], api_tol);
+
+    // The TANGENTIAL component is SERVED IN FULL, and asserting it is what separates "slid along
+    // the wall" from "stopped dead" — cancelling both would pass the assertion above and be wrong.
+    //
+    // Exactly 1, and the padding cancels out of it algebraically: the z travelled before the
+    // contact is `dz·(t_hit − padding)` and what remains after the slide is `dz·(|D| − t_hit +
+    // padding)`, whose sum is `dz·|D| = 1`.
+    try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[2], api_tol);
+    try testing.expectApproxEqAbs(@as(Real, 0), r.position.toArray()[1], api_tol);
+}
+
+test "a move into a crease slides along the edge, and exactly parallel normals are a THIRD answer" {
+    const gpa = testing.allocator;
+
+    // Two walls meeting at a vertical edge: one at x >= 2 (outward normal −X) and one at z >= 2
+    // (outward normal −Z). Their crease is `(−1,0,0) × (0,0,−1)` — parallel to ±Y — so a character
+    // driven diagonally into the corner slides VERTICALLY along the edge and nowhere else.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 110);
+        _ = try addBox(gpa, &world, av(5, 5, 1), av(0, 0, 3), 111);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        // Driven into both walls AND upward. The two horizontal components are cancelled by the
+        // two planes and the +Y component survives along the crease.
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 1, 3), 1.0 / 60.0);
+
+        // Same oblique correction as the wall test, now along `d = (3,1,3)/√19`: both horizontal
+        // components stop at `1.7 − padding · 3/√19 = 1.7 − 0.02 · 0.6882472 = 1.6862350`. The two
+        // walls are hit at the SAME sweep distance — `dₓ == d_z` — so the tie-break picks the
+        // smaller `BodyId` for the first plane and the second is met on the next iteration, where
+        // its own hit already sits inside the padding margin and the advance clamps to zero.
+        const root19: Real = @sqrt(@as(Real, 19));
+        const stop = 1.7 - 0.02 * (3.0 / root19);
+        try testing.expectApproxEqAbs(stop, r.position.toArray()[0], api_tol);
+        try testing.expectApproxEqAbs(stop, r.position.toArray()[2], api_tol);
+
+        // And the vertical component is served IN FULL along the crease — exactly 1, by the same
+        // cancellation the wall test's tangential component enjoys. If the second plane had stopped
+        // the motion instead of yielding an edge, this would be the 0.562 reached before the second
+        // contact, so the assertion discriminates between "slid along the edge" and "stopped in the
+        // corner" rather than merely being non-zero.
+        try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[1], api_tol);
+    }
+
+    // THE THIRD ANSWER, asserted separately from "no edge". Two exactly parallel normals have NO
+    // crease, and `triangleCrossDirection` says so with an exact `null` rather than a rounding
+    // residue that reads as a valid direction. The primitive is asserted directly, because the
+    // move's own path replaces a parallel re-contact instead of treating it as a second plane —
+    // so the two situations must be distinguishable at the primitive, and they are.
+    {
+        const n = v(0, 1, 0);
+        // Exactly parallel: no edge exists.
+        try testing.expectEqual(
+            @as(?Vec3r, null),
+            foundation.math.triangleCrossDirection(Real, Vec3r.zero, n, n),
+        );
+        // Exactly ANTI-parallel: also no edge, and also an exact null rather than a small vector.
+        try testing.expectEqual(
+            @as(?Vec3r, null),
+            foundation.math.triangleCrossDirection(Real, Vec3r.zero, n, n.neg()),
+        );
+        // A genuine pair of distinct normals DOES yield an edge, so the null above is a real
+        // discrimination and not a function that always returns null.
+        const edge = foundation.math.triangleCrossDirection(Real, Vec3r.zero, v(-1, 0, 0), v(0, 0, -1));
+        try testing.expect(edge != null);
+        // Parallel to ±Y: the x and z components are exactly zero.
+        try testing.expectEqual(@as(Real, 0), edge.?.toArray()[0]);
+        try testing.expectEqual(@as(Real, 0), edge.?.toArray()[2]);
+        try testing.expect(edge.?.toArray()[1] != 0);
+    }
+}
+
+test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by the sweep" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A 30° slope as a half-space, positioned so the capsule starts 2 cm INSIDE the solid — the
+    // same construction as the gate-C fallback test, and for the same reason.
+    const n = slopeNormal(30);
+    _ = try addPlane(gpa, &world, n, -0.0202, 120);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // Asked for nothing at all, so the ONLY thing that can move the character is depenetration.
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+
+    // **THE TWO ANSWERS DIFFER MEASURABLY, which is what makes this test discriminate.** The
+    // manifold pushes along the SLOPE's normal (0.5, 0.866, 0), so the correction has a non-zero X
+    // component; the sweep's `−direction` at distance zero would have pushed along `+up`, i.e.
+    // purely in Y. The push is 2 cm along the slope normal, so
+    //   Δx = 0.02 · 0.5   = 0.01
+    //   Δy = 0.02 · 0.866 = 0.01732
+    try testing.expectApproxEqAbs(@as(Real, 0.01), r.position.toArray()[0], api_tol);
+    try testing.expectApproxEqAbs(@as(Real, 0.017320508), r.position.toArray()[1], api_tol);
+    // The X component is the discriminator: a sweep-driven push would leave it at exactly zero.
+    try testing.expect(@abs(r.position.toArray()[0]) > 0.005);
+    // And the character is no longer inside: the verdict is a real one on the slope.
+    try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+}
+
+test "self-exclusion is what lets a character move at all" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // Nothing in the scene but the character and its own presence, which sits exactly where the
+    // probe does. Without self-exclusion the very first sweep hits it at distance zero, the
+    // advance is `max(0, 0 − padding) = 0`, and the character cannot move a millimetre. At gate C
+    // the mechanism was NOT observable — measured — and here it is, which is why the assertion
+    // lives at this gate.
+    var desc = baseDescriptor();
+    desc.position = av(0, 5, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+    try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
+}
+
+test "after a move a ray finds the entity at the NEW pose and never at the old one" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    var desc = baseDescriptor();
+    desc.entity = ent(130);
+    desc.position = av(0, 0, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+
+    // Before: the capsule's cylinder wall is at x = ±0.3 about the Y axis, so a ray from
+    // (−10, 0.9, 0) along +X hits at 10 − 0.3 = 9.7.
+    const before = query.RayQuery{ .origin = v(-10, 0.9, 0), .direction = v(1, 0, 0), .max_distance = 100 };
+    try testing.expectApproxEqAbs(
+        @as(Real, 9.7),
+        (query.raycast(&world.bp, &world.bm, &world.store, before)).?.distance,
+        api_tol,
+    );
+
+    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
+
+    // After: the capsule is at x = 5, so the same ray hits at 15 − 0.3 = 14.7. Both halves matter —
+    // the NEW distance, and the fact that nothing answers at the OLD one any more, which is what
+    // catches a stale broadphase proxy. A body-only update would leave the tree at the old box and
+    // the ray would still find something near 9.7.
+    const hit = (query.raycast(&world.bp, &world.bm, &world.store, before)).?;
+    try testing.expectEqual(presence, hit.body);
+    try testing.expectEqual(ent(130), hit.entity);
+    try testing.expectApproxEqAbs(@as(Real, 14.7), hit.distance, api_tol);
+
+    // And a ray aimed at where the character USED to be finds nothing: bounded just short of the
+    // new position so a hit there cannot be the new pose answering.
+    const at_old = query.RayQuery{ .origin = v(-10, 0.9, 0), .direction = v(1, 0, 0), .max_distance = 12 };
+    try testing.expectEqual(
+        @as(?query.RayHit, null),
+        query.raycast(&world.bp, &world.bm, &world.store, at_old),
+    );
+
+    // **THE ASSERTION THAT ACTUALLY CATCHES A STALE BROADPHASE PROXY, and none of the three above
+    // does.** MEASURED: with the proxy update removed, every assertion so far still passes. The
+    // reason is structural — the broadphase box is only a CONSERVATIVE FILTER, and the exact answer
+    // comes from the body's pose, which the same write path updates. A stale fat box that the ray
+    // still crosses therefore yields the correct distance anyway.
+    //
+    // What a stale proxy loses is a candidate the tree no longer offers at all. So the ray has to
+    // approach the NEW position from a direction the OLD box does not intersect: from −Z at x = 5,
+    // where the stale box sits around x = 0 with a 0.1 m fat margin and is nowhere near. Without
+    // the update the presence is never offered and this MISSES.
+    const across = query.RayQuery{ .origin = v(5, 0.9, -10), .direction = v(0, 0, 1), .max_distance = 100 };
+    const side = query.raycast(&world.bp, &world.bm, &world.store, across);
+    // Checked before unwrapping so a stale proxy reads as a failed expectation rather than as a
+    // panic on a null optional — the failure mode is "the tree no longer offers the candidate",
+    // which deserves to say so.
+    try testing.expect(side != null);
+    const side_hit = side.?;
+    try testing.expectEqual(presence, side_hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 9.7), side_hit.distance, api_tol);
+}
+
+test "moveCharacter wakes a sleeping body it touches" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A dynamic box the character will walk into, put to sleep DIRECTLY rather than by running
+    // thirty ticks: the tick count is not what this test is about, and `sleep.putToSleep` is the
+    // same transition step 11 of the cycle applies.
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const sleeper = try world.addBody(gpa, .{
+        .entity = ent(140),
+        .body_type = .dynamic,
+        .shape = box_shape,
+        .position = av(2, 0, 0),
+    });
+    sleep_mod.putToSleep(&world.bm, sleeper);
+    try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // Walk into it. The box's −X face is at x = 1.5, the capsule's radius is 0.3, so contact is
+    // made and the sweep reports it.
+    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+
+    // WAKE CAUSE W4, and not W3: a presence moved by pose write keeps velocity columns of exactly
+    // zero while it crosses the scene, so W3's true-zero velocity test never sees it move
+    // (§1.12.10). What this entry owes is the bodies it TOUCHED; the wider W4 — waking sleepers
+    // merely RETAINED in a pair with the presence — belongs to the orchestrator that owns the
+    // retained set, at M1.1.15.
+    try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
+}
+
+test "the move consumes no predictive_contact_distance, and the ceilings stop short" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // The sweep's distance is the REMAINING DISPLACEMENT and nothing else, so two characters
+    // differing only in `predictive_contact_distance` reach the same place against the same wall.
+    // That is the answer to gate D's question about the field: the ground probe is still its only
+    // consumer, and the move does not read it.
+    _ = try addBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 150);
+
+    var lean = baseDescriptor();
+    lean.entity = ent(151);
+    lean.position = av(0, 0, 0);
+    lean.predictive_contact_distance = 0;
+    const a = try addMover(gpa, &world, &chars, lean);
+
+    var generous = baseDescriptor();
+    generous.entity = ent(152);
+    generous.position = av(0, 0, 3);
+    generous.predictive_contact_distance = 0.5;
+    const b = try addMover(gpa, &world, &chars, generous);
+
+    const ra = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, a, v(3, 0, 0), 1.0 / 60.0);
+    const rb = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, b, v(3, 0, 0), 1.0 / 60.0);
+    // Both stop at 2 − 0.3 − 0.02 = 1.68, the wall face minus the radius minus the padding.
+    try testing.expectApproxEqAbs(@as(Real, 1.68), ra.position.toArray()[0], api_tol);
+    try testing.expectApproxEqAbs(ra.position.toArray()[0], rb.position.toArray()[0], api_tol);
+
+    // The two ceilings are NAMED and their failure direction is SHORT: a character never ends up
+    // further along than it asked for. Pinned as an inequality on the served distance, which holds
+    // whatever the scene does to the loop.
+    try testing.expect(ra.position.toArray()[0] <= 3);
+    try testing.expectEqual(@as(u32, 4), character_mod.max_slide_iterations);
+    try testing.expectEqual(@as(u32, 4), character_mod.max_depenetration_iterations);
+}
+
+test "moveCharacter reports a stale handle as a typed error" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    const id = try addMover(gpa, &world, &chars, baseDescriptor());
+    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    try testing.expectError(
+        error.StaleCharacter,
+        chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0),
+    );
 }
