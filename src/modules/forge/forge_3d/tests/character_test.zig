@@ -1602,3 +1602,297 @@ test "moveCharacter reports a stale handle as a typed error" {
         chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0),
     );
 }
+
+// ---------------------------------------------------------------------------
+// E — step height: climbing and descending.
+// ---------------------------------------------------------------------------
+
+/// A ground plane plus a step of height `h` whose front face is at x = 1, spanning x ∈ [1, 3].
+/// Returns the character, placed at x = 0 and `padding` above the ground so it enters `.grounded`.
+fn stepScene(
+    gpa: std.mem.Allocator,
+    world: *harness.World,
+    chars: *CharacterStore,
+    h: f32,
+    step_height: f32,
+) !api.CharacterId {
+    _ = try addPlane(gpa, world, av(0, 1, 0), 0, 200);
+    _ = try addBox(gpa, world, av(1, h / 2, 1), av(2, h / 2, 0), 201);
+    var desc = baseDescriptor();
+    desc.entity = ent(202);
+    desc.position = av(0, 0.02, 0);
+    desc.step_height = step_height;
+    return addMover(gpa, world, chars, desc);
+}
+
+test "a step below step_height is climbed and a step above it blocks — both directions" {
+    const gpa = testing.allocator;
+
+    // CLIMBED: a 0.25 m step against the default 0.3 m `step_height`.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        const id = try stepScene(gpa, &world, &chars, 0.25, 0.3);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+
+        // The character ends RESTING on the step top: `padding` above y = 0.25, so base = 0.27.
+        // The lift is exactly `step_height` — the padding cancels between the two resting
+        // configurations — so the base rises to 0.32, the down-sweep finds the top 0.07 below and
+        // stops `padding` short of it, landing at 0.32 − 0.05 = 0.27.
+        try testing.expectApproxEqAbs(@as(Real, 0.27), r.position.toArray()[1], api_tol);
+        // And it is PAST the riser at x = 1, which a blocked character never is.
+        try testing.expect(r.position.toArray()[0] > 1);
+        // Standing on the step, not falling off it.
+        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+    }
+
+    // BLOCKED: a 0.35 m step against the same 0.3 m `step_height`. Both directions asserted, and
+    // this half is the one that would pass vacuously if the climb simply never fired.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        const id = try stepScene(gpa, &world, &chars, 0.35, 0.3);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+
+        // The height is UNCHANGED: no lift survives a failed attempt.
+        try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
+        // And the normal component is cancelled — it stops short of the riser at x = 1. The capsule
+        // is widest 0.3 m from its axis, so the slide stops at 1 − 0.3 − padding = 0.68.
+        try testing.expectApproxEqAbs(@as(Real, 0.68), r.position.toArray()[0], api_tol);
+        try testing.expect(r.position.toArray()[0] < 1);
+    }
+}
+
+test "a step is NOT a slope: a climb onto something too steep to stand on is refused" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A ramp at 70° from horizontal, well past the default 45° limit, whose surface passes through
+    // the region the character would step onto. If the landing surface were not slope-tested, the
+    // character would climb it in `step_height` increments — each increment individually legitimate
+    // — and the slope limit the engine holds would be unenforceable. That is the case, not a remark.
+    const n = slopeNormal(70);
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 210);
+    // Positioned so the ramp's surface sits just ahead of the character: with the lower core
+    // endpoint at (0, 0.32, 0), `n·P = cos70 · 0.32 = 0.10944`, and a distance of
+    // 0.10944 − 0.3 − 0.4 = −0.59056 leaves it 0.4 m ahead along the normal.
+    _ = try addPlane(gpa, &world, n, -0.59056, 211);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+
+    // It never ends up standing on the ramp: the verdict is not `.grounded` on a 70° face, and the
+    // height has not been ratcheted upward by a climb that should not have been accepted.
+    try testing.expect(r.position.toArray()[1] < 0.1);
+    if (r.ground.state == .grounded) {
+        // If it is grounded at all it is on the FLOOR, whose normal is +Y — never on the ramp.
+        try testing.expect(r.ground.normal.approxEql(v(0, 1, 0), api_tol));
+    }
+}
+
+test "descent sticks to the floor only when the character ENTERED grounded" {
+    const gpa = testing.allocator;
+
+    // TWO SCENES and not one parameterised pair, because the two halves need different geometry and
+    // a first version shared one — measured, and the shared form could not fail. Both halves ask
+    // "does the floor-sticking fire", so BOTH must put a floor inside the 0.3 m sweep's reach; the
+    // shared version left the airborne character 0.4 m above the lower floor, out of reach, where
+    // nothing could be stuck whatever the condition said.
+
+    // (a) ENTERED GROUNDED — walking off a ledge onto a floor 0.2 m below, inside `step_height`.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        // Upper floor top at y = 0 spanning x ∈ [−2, 0]; lower floor top at y = −0.2 beyond it.
+        _ = try addBox(gpa, &world, av(1, 0.5, 1), av(-1, -0.5, 0), 220);
+        _ = try addBox(gpa, &world, av(2, 0.5, 1), av(2, -0.7, 0), 221);
+
+        var desc = baseDescriptor();
+        desc.position = av(-0.5, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        // Landed on the lower floor, `padding` above it: −0.2 + 0.02 = −0.18.
+        try testing.expectApproxEqAbs(@as(Real, -0.18), r.position.toArray()[1], api_tol);
+        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+    }
+
+    // (b) ENTERED IN THE AIR, with the floor WELL INSIDE reach so the entry condition is the only
+    // thing that can decide. One flat floor, and the character starts 0.2 m above it: the ground
+    // band is `padding + predictive_contact_distance = 0.12`, so 0.2 reads `.in_air`, while
+    // 0.2 < `step_height` = 0.3 puts that same floor inside the step-down sweep.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 222);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.2, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        // Verified in the fixture rather than assumed: the premise of this half is that the entry
+        // state really is `.in_air`.
+        try testing.expectEqual(api.GroundState.in_air, (try chars.groundOf(&world.bp, &world.bm, &world.store, id)).state);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        // Height UNCHANGED: a falling character is not pulled down, even with the floor in reach.
+        // Without the entry condition it would be stuck to 0.02 — which is what makes this the
+        // discriminating half.
+        try testing.expectApproxEqAbs(@as(Real, 0.2), r.position.toArray()[1], api_tol);
+        try testing.expectEqual(api.GroundState.in_air, r.ground.state);
+    }
+}
+
+test "an intermediate wall buys no horizontal progress — the reference's v5.6.0 bug class" {
+    const gpa = testing.allocator;
+
+    // The case the reference names: a wall LOW ENOUGH to arm stair walking and HIGH ENOUGH that the
+    // climb cannot complete. Quoted from `jrouwe/JoltPhysics` release notes v5.6.0, Bug Fixes,
+    // verified on the source: "Fixed `CharacterVirtual` speeding up beyond requested speed when
+    // sliding along a wall that was low enough to trigger stair walking yet high enough to not step
+    // up completely."
+    //
+    // THE DIFFERENTIAL IS THE ASSERTION. The same scene is run twice, differing only in
+    // `step_height`: at 0 no climb is possible at all, at 0.3 the attempt fires and fails. If the
+    // failed attempt bought any horizontal progress, the two would end at different x — which is
+    // exactly the speed-up the reference fixed. A bound on "no further than requested" would NOT
+    // catch it: 0.849 against a request of 1.5 violates no such bound.
+    const requested = v(1.5, 0, 0);
+
+    // TWO intermediate heights, because the two halves of the acceptance condition reject two
+    // DIFFERENT failures and one height exercises only one of them — measured, after a first version
+    // of this test used 0.35 alone and left the second half unexercised:
+    //
+    //   0.35 m — the lifted capsule ends WEDGED against the obstacle's top edge, `drop` clamping to
+    //            zero. Rejected by the `drop > 0` half.
+    //   0.45 m — the lifted capsule's cross-section is narrower there (half-width 0.247 against
+    //            0.3 unlifted), so it SQUEEZES 0.053 m closer, and the down-sweep then finds the
+    //            ground with `drop = 0.3 > 0` and lands it back where it started. Rejected by the
+    //            climbed-higher half alone.
+    for ([_]f32{ 0.35, 0.45 }) |h| {
+        var reached: [2]Real = @splat(0);
+        for ([_]f32{ 0, 0.3 }, 0..) |step_height, i| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            var chars: CharacterStore = .{};
+            defer chars.deinit(gpa);
+            const id = try stepScene(gpa, &world, &chars, h, step_height);
+
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, requested, 1.0 / 60.0);
+            reached[i] = r.position.toArray()[0];
+            // No lift survives either way.
+            try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
+        }
+
+        // The same stopping place: the failed climb bought nothing at all.
+        try testing.expectApproxEqAbs(reached[0], reached[1], api_tol);
+
+        // And the invariant the reference's bug violated, on the HORIZONTAL component — a legitimate
+        // climb adds vertical displacement, which is what climbing IS, so the bound belongs on the
+        // horizontal part and not on the norm of the whole.
+        try testing.expect(reached[1] <= @sqrt(requested.lengthSq()) + api_tol);
+    }
+}
+
+test "a slope steeper than max_slope is never reported grounded, and the CLIMB is not what lifts the character there" {
+    const gpa = testing.allocator;
+
+    // A 50° ramp — just past the default 45° limit — built as a BOX rotated about +Z, so its top
+    // face normal is `(−sin50, cos50, 0) = (−0.766, 0.643, 0)`. Fifty and not seventy because a face
+    // rises `tan(θ)` per metre of forward reach while a lift buys only `step_height / tan(θ)` of it:
+    // at 70° the face climbs 0.75 m over the 0.11 m afforded and nothing can land on it.
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 230);
+    const theta: f32 = 50.0 * std.math.pi / 180.0;
+    const ramp = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(2, 0.5, 2) } });
+    _ = try world.addBody(gpa, .{
+        .entity = ent(231),
+        .body_type = .static,
+        .shape = ramp,
+        // Top face through (0.5, 0, 0), just ahead of the character: `centre = p − 0.5 · n`.
+        .position = av(0.883, -0.3215, 0),
+        .rotation = math.Quatf.fromAxisAngle(av(0, 0, 1), theta),
+    });
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+
+    // THE VERDICT is enforced: 50° is past the limit, so the character is on steep ground and never
+    // `.grounded`, and the normal reported is the ramp's own `cos50 = 0.6428`.
+    try testing.expectEqual(api.GroundState.on_steep_ground, r.ground.state);
+    // `cos(50°) = 0.6427876097`, to more digits than `api_tol` needs — a four-decimal rounding of it
+    // is 1.2e-5 away and fails, which is the tolerance doing its job.
+    try testing.expectApproxEqAbs(@as(Real, 0.6427876), r.ground.normal.toArray()[1], api_tol);
+
+    // **AND THE HEIGHT GAIN IS THE SLIDE'S, NOT THE CLIMB'S — measured, and pinned here because the
+    // next milestone will meet it.** Projecting a horizontal displacement onto a 50° plane leaves an
+    // upward component, so a character pushed into the ramp rises whether or not any step was
+    // accepted: 0.583 m in one call. Running the same scene with `max_slope` at 80°, which makes the
+    // ramp walkable and suppresses the step attempt entirely, gives 0.579 m — the same height by a
+    // different route. So the step's landing slope test cannot be what governs this scene, and an
+    // absolute assertion on the height would measure the slide while appearing to measure the climb.
+    //
+    // Whether SLIDING should itself be slope-constrained is a real question and it is not this
+    // gate's: the verdict is correct, the position climbs, and nothing in §1.12 settles it.
+    try testing.expectApproxEqAbs(@as(Real, 0.583), r.position.toArray()[1], 0.01);
+}
+
+test "the touched-body capacity accounts for the step's sweeps exactly" {
+    // The bound is a sum of iteration ceilings and not a guess: the depenetration iterations, the
+    // slide iterations, the three sweeps of the single step attempt, and the one step-down sweep.
+    // Asserted so a later gate that adds a sweep has to revisit the arithmetic rather than
+    // discovering the assert at runtime.
+    try testing.expectEqual(@as(u32, 4), character_mod.max_depenetration_iterations);
+    try testing.expectEqual(@as(u32, 4), character_mod.max_slide_iterations);
+}
+
+test "a low kerb with level ground either side is stepped OVER, and the move is served in full" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 240);
+    // A THIN kerb 0.2 m high at x ∈ [1, 1.1], flat ground on both sides. Well inside the 0.3 m
+    // `step_height`, and the landing is at the SAME height the character started from — which is
+    // what makes this the discriminating case for the acceptance condition.
+    _ = try addBox(gpa, &world, av(0.05, 0.1, 2), av(1.05, 0.1, 0), 241);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
+
+    // The whole 2 m is served and the height is unchanged: over the kerb and down the other side.
+    try testing.expectApproxEqAbs(@as(Real, 2), r.position.toArray()[0], api_tol);
+    try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
+    try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+
+    // MEASURED counter-factual, and it is why a "the landing must be higher than the start"
+    // condition was removed from `tryStepUp`: with it, this move ends at x = 0.912 and y = 0.495 —
+    // blocked by a 0.2 m kerb AND half a metre in the air, having ratcheted up its edge.
+}
