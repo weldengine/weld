@@ -234,6 +234,13 @@ pub const Character = character_mod.Character;
 /// Every way a `CharacterDescriptor` can be malformed, plus the stale handle — each its own
 /// typed error, and never sanitised.
 pub const CharacterError = character_mod.CharacterError;
+/// The ground verdict and its four companion quantities at solver precision — the internal
+/// mirror of `CharacterMoveResult`'s five `ground_*` fields (§1.12.5). Every default is the
+/// `.in_air` answer, so the safe failure direction is the struct's zero value.
+pub const GroundInfo = character_mod.GroundInfo;
+/// How far down the ground probe looks: `padding + predictive_contact_distance`, the band in
+/// which "the ground I am standing on" is a meaningful question.
+pub const groundSweepDistance = character_mod.groundSweepDistance;
 /// The offset from a character's BASE to the CENTRE of its capsule — half the height along
 /// `+Y`. Re-exported because it is THE one named place that offset exists, and a consumer
 /// deriving it a second time is the defect the single definition prevents.

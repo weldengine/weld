@@ -28,18 +28,33 @@ const api = @import("weld_forge");
 const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_manager_mod = @import("body_manager.zig");
+const broadphase_mod = @import("pipeline/broadphase.zig");
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 const math = @import("foundation").math;
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
+const Quatr = config.Quatr;
 const ShapeStore = shape_mod.ShapeStore;
 const BodyManager = body_manager_mod.BodyManager;
+const Broadphase = broadphase_mod.Broadphase(Real);
+const Ray = broadphase_mod.Ray(Real);
+const SupportShape = narrowphase.SupportShape(Real);
+const ContactManifold = narrowphase.ContactManifold(Real);
 const BodyId = api.BodyId;
 const ShapeId = api.ShapeId;
 const CharacterId = api.CharacterId;
 const CharacterDescriptor = api.CharacterDescriptor;
 const EntityId = api.EntityId;
+const GroundState = api.GroundState;
+
+/// The engine's up axis. `+Y` (`engine-coordinate-system.md`), which is also why
+/// `CharacterDescriptor` carries no rotation field — the capsule is symmetric about it.
+///
+/// Named once here rather than written as a literal at each of the five sites that need it,
+/// so "up" is one thing and not five agreeing by luck.
+const up: Vec3r = Vec3r.unit_y;
 
 /// Every way a `CharacterDescriptor` can be malformed, plus the stale handle — each refused
 /// by its own typed error and NEVER sanitised.
@@ -203,6 +218,189 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     if (desc.collision_layer >= api.collision_layer_count) return error.InvalidCollisionLayer;
 }
 
+/// The ground verdict and its four companion quantities, at SOLVER precision — the internal
+/// mirror of `CharacterMoveResult`'s five `ground_*` fields (§1.12.5). Narrowing it to the
+/// public `f32` form is the interface tier's business at M1.1.15; nothing here does it.
+///
+/// **Every default is the `.in_air` answer**, so that state is the struct's zero value rather
+/// than something the code has to remember to write. `.in_air` is the safe failure direction:
+/// a `.grounded` default on an unknown verdict means gravity not applied, hence a character
+/// that floats, a symptom that does not correct itself.
+///
+/// `normal` is `up` on `.in_air` and NEVER a poisoned value — three documents read that field
+/// inside a `@replicated` component and a NaN would cross the rollback. The two support
+/// handles carry their explicit "no handle" sentinels instead.
+pub const GroundInfo = struct {
+    /// The VERDICT. A direction does not mix into it.
+    state: GroundState = .in_air,
+    /// Outward normal of the winning surface, pointing FROM the surface TOWARD the character.
+    normal: Vec3r = up,
+    /// Entity of the support. NON-NULL on `.on_steep_ground` as much as on `.grounded` — a
+    /// steep slope is still a support — and `EntityId.dead` only on `.in_air`.
+    entity: EntityId = EntityId.dead,
+    /// Body of the support, `PackedId.dead` on `.in_air`.
+    body: BodyId = api.PackedId.dead,
+    /// Velocity AT THE CONTACT POINT, `v + ω × r`. Zero on `.in_air`.
+    velocity: Vec3r = Vec3r.zero,
+};
+
+/// One surface that qualified as ground, before the winner is chosen.
+const Candidate = struct {
+    body: BodyId,
+    subshape_id: u32,
+    /// Outward, surface → character.
+    normal: Vec3r,
+    /// World contact point, from which the lever arm of `ground_velocity` is built.
+    point: Vec3r,
+    /// `normal · up`, the selection key. Cached because it decides both the winner and the
+    /// verdict, and recomputing it is how the two would come to disagree.
+    align_up: Real,
+};
+
+/// Gathers the ground candidates of one downward sweep and keeps the winner.
+///
+/// **The bound NEVER tightens**, unlike the query family's `closest` collector: the winner is
+/// the FLATTEST surface within the band and not the nearest one, so a nearer steeper contact
+/// must not prune a flatter one behind it. That is what lets a character straddling an edge
+/// stand on the walkable face (§1.12.5).
+const GroundCollector = struct {
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    /// The character's capsule, as a support shape.
+    probe: SupportShape,
+    /// World CENTRE of that capsule — the pose the sweep starts from, base plus the offset.
+    centre: Vec3r,
+    /// How far down to look. Covers `padding` by construction; see `groundSweepDistance`.
+    max_sweep: Real,
+    /// What the character SEES (§1.12.4).
+    layer_mask: u32,
+    /// The character's OWN presence, excluded from its own sweeps. Self-exclusion is
+    /// UNILATERAL: no other character's presence is excluded, which is what gives
+    /// character-versus-character collision for free (§1.12.2).
+    exclude: ?BodyId,
+    best: ?Candidate = null,
+    /// Whether any contact at all faced upward — the difference between `.on_steep_ground`
+    /// and `.in_air` once no candidate passes the slope test.
+    any_candidate: bool = false,
+
+    pub fn add(self: *GroundCollector, user_data: u32) void {
+        const body: BodyId = user_data;
+        if (self.exclude) |own| {
+            if (own == body) return;
+        }
+        // The layer getter answers staleness too: a freed handle has no layer.
+        const layer = self.bm.collisionLayer(body) orelse return;
+        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+
+        const hit = self.bm.castShapeBody(
+            self.store,
+            body,
+            self.probe,
+            self.centre,
+            Quatr.identity,
+            up.neg(),
+            self.max_sweep,
+            .ignore,
+        ) orelse return;
+
+        // **THE TWO PATHS, and the whole reason gate B delivered two entries.**
+        //
+        // A sweep that TRAVELLED returns the outward normal of the surface it met
+        // (§1.11.11), which is exactly what `ground_normal` means — no sign work at all.
+        //
+        // At distance ZERO the capsule already overlaps, and the cast's normal is
+        // `−direction`, i.e. `+up` (§1.11.4). That value is not wrong — it preserves
+        // `normal · direction <= 0` — it is UNUSABLE: on a slope it would answer "perfectly
+        // horizontal" and a slope test against it would always pass. So the normal comes from
+        // the manifold at the current pose instead, which carries a real surface.
+        if (hit.distance > 0) {
+            self.consider(body, hit.subshape_id, hit.normal, hit.position);
+            return;
+        }
+        var sink = ManifoldSink{ .ground = self, .body = body };
+        self.bm.collideShapeBody(self.store, body, self.probe, self.centre, Quatr.identity, &sink);
+    }
+
+    /// Offer one surface to the selection.
+    fn consider(self: *GroundCollector, body: BodyId, subshape_id: u32, normal: Vec3r, point: Vec3r) void {
+        const align_up = normal.dot(up);
+        // A candidate is a contact whose normal has a STRICTLY positive component on up. A
+        // perfectly vertical wall is therefore never ground, whatever `max_slope` says — which
+        // is deliberate: `cos(π/2)` is zero to float noise, so admitting `align_up == 0` would
+        // make "can I stand on this wall" depend on that noise.
+        if (align_up <= 0) return;
+        self.any_candidate = true;
+
+        if (self.best) |b| {
+            // FLATTEST wins, not nearest.
+            if (align_up < b.align_up) return;
+            // Exact tie: the smaller `(BodyId, subshape_id)`, which is §1.11.14's total order.
+            // Without it the answer would follow the traversal order, hence the tree's shape.
+            if (align_up == b.align_up) {
+                if (body > b.body) return;
+                if (body == b.body and subshape_id >= b.subshape_id) return;
+            }
+        }
+        self.best = .{
+            .body = body,
+            .subshape_id = subshape_id,
+            .normal = normal,
+            .point = point,
+            .align_up = align_up,
+        };
+    }
+
+    /// Never tightens — see the type doc.
+    pub fn maxDistance(self: *const GroundCollector) Real {
+        return self.max_sweep;
+    }
+
+    /// Never stops early: the flattest surface is only known once the walk is done.
+    pub fn shouldStop(_: *const GroundCollector) bool {
+        return false;
+    }
+};
+
+/// Feeds every manifold of one body into the ground selection.
+///
+/// **THE one sign negation of this module.** `collideShapeBody` returns the normal
+/// probe → body: for a character on a floor it points from the capsule DOWN toward the floor.
+/// `ground_normal` is what the caller reads to know which way is up the slope, so it points
+/// from the surface TOWARD the character. Hence one negation, in this one named place — the
+/// class of error that cost M1.1.11.1 a spec correction on its own overlap predicate.
+const ManifoldSink = struct {
+    ground: *GroundCollector,
+    body: BodyId,
+
+    pub fn add(self: *ManifoldSink, subshape_id: u32, manifold: ContactManifold) void {
+        // The DEEPEST point represents the manifold, which is the convention §3 already uses
+        // when it maps a manifold onto the single `contact_point` of a gameplay event.
+        var deepest = manifold.points[0];
+        for (manifold.points[1..manifold.count]) |p| {
+            if (p.penetration > deepest.penetration) deepest = p;
+        }
+        self.ground.consider(self.body, subshape_id, manifold.normal.neg(), deepest.position);
+    }
+};
+
+/// How far down the ground probe looks: `padding + predictive_contact_distance`.
+///
+/// **This is `predictive_contact_distance`'s FIRST consumer**, which settles in advance the
+/// question the brief left to gate D. The two terms are the two reasons the ground is not at
+/// distance zero when a character rests on it: `padding` is how far the capsule is held OFF
+/// surfaces, so a resting character is at least that far above its floor; and
+/// `predictive_contact_distance` is, by its own definition, how far outside the shape to look
+/// for contacts not yet touching. Their sum is exactly the band in which "the ground I am
+/// standing on" is a meaningful question.
+///
+/// The bound has to be SMALL, and that is what makes "flattest wins" well posed rather than
+/// absurd: within 12 cm at the defaults, every candidate is genuinely underfoot, so preferring
+/// the flatter of two is choosing a face of the ground. Over metres it would let a distant
+/// flat floor outrank the steep slope actually under the character.
+pub fn groundSweepDistance(c: Character) Real {
+    return c.padding + c.predictive_contact_distance;
+}
+
 /// Generational store of character controllers.
 ///
 /// The `ShapeStore` pattern verbatim: stable slots, LIFO recycling, a generation on the
@@ -355,7 +553,85 @@ pub const CharacterStore = struct {
         const idx = self.alloc.validate(id) orelse return null;
         return self.characters.items[idx];
     }
+
+    /// The ground verdict for character `id` at its CURRENT pose — the controller is the
+    /// engine's single source of the ground (§1.12.5), and no system re-derives one by a
+    /// parallel raycast.
+    ///
+    /// **The verdict cannot come from manifolds at the current pose, and that is the trap of
+    /// this mechanism.** `collideOrdered` returns null on a separated pair, and a character at
+    /// rest is `padding` ABOVE its floor — so a manifold-only probe reports `.in_air` for a
+    /// character plainly standing up. The ground is found by a bounded DOWNWARD SWEEP of the
+    /// capsule instead, and the manifold is the fallback for the one case a sweep cannot answer
+    /// (see `GroundCollector.add`).
+    ///
+    /// Selection: candidates are contacts whose outward normal has a strictly positive
+    /// component on up; the winner is the FLATTEST of them, ties broken by the smaller
+    /// `(BodyId, subshape_id)`. Verdict: the winner passing `normal · up >= cos_max_slope` is
+    /// `.grounded`; a candidate existing but not passing is `.on_steep_ground`; no candidate at
+    /// all is `.in_air`.
+    ///
+    /// Errors: `error.StaleCharacter` on a dead handle. A live character whose capsule has
+    /// somehow left the store is a programming error rather than a caller's, and is asserted.
+    pub fn groundOf(
+        self: *const CharacterStore,
+        bp: *const Broadphase,
+        bm: *const BodyManager,
+        store: *const ShapeStore,
+        id: CharacterId,
+    ) CharacterError!GroundInfo {
+        const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        const c = self.characters.items[idx];
+        // The store owns this capsule for the character's whole life, so its absence is an
+        // internal invariant violation and not something a caller can provoke.
+        const record = store.get(c.shape) orelse unreachable;
+
+        const centre = c.position.add(baseToCentre(Real, c.height));
+        var collector = GroundCollector{
+            .bm = bm,
+            .store = store,
+            .probe = shape_mod.supportShape(record),
+            .centre = centre,
+            .max_sweep = groundSweepDistance(c),
+            .layer_mask = c.layer_mask,
+            .exclude = c.inner_body,
+        };
+        // The swept traversal of §1.11.10, in the form the query family already uses: nodes
+        // inflated by the probe's half-extents, and the ray starting at the CENTRE of the
+        // probe's world box. For a capsule that centre IS `centre`, the local box being
+        // origin-centred — but it is read from the box rather than assumed, because that
+        // equality is a property of this shape and not of the model.
+        const box = body_manager_mod.worldAabb(record, centre, Quatr.identity);
+        _ = bp.queryCast(Ray.init(box.center(), up.neg()), box.halfExtents(), &collector);
+
+        const winner = collector.best orelse return .{};
+        return .{
+            .state = if (winner.align_up >= c.cos_max_slope) .grounded else .on_steep_ground,
+            .normal = winner.normal,
+            .entity = bm.entity(winner.body) orelse EntityId.dead,
+            .body = winner.body,
+            .velocity = contactPointVelocity(bm, winner.body, winner.point),
+        };
+    }
 };
+
+/// Velocity of the support AT the contact point: `v + ω × r`, with `r` running from the
+/// support's centre of mass to that point.
+///
+/// **Without the rotational term a character standing at the rim of a rotating platform
+/// drifts** (§1.12.5) — the platform's linear velocity is zero there while the surface under
+/// the character is plainly moving. The centre of mass is the body's stored pose: every shape
+/// the store builds is centred on its own origin.
+///
+/// Zero for a body whose handle went stale between the traversal and here, which cannot happen
+/// within one call and is answered rather than asserted because zero is the correct velocity
+/// of a support that is not there.
+fn contactPointVelocity(bm: *const BodyManager, body: BodyId, point: Vec3r) Vec3r {
+    const linear = bm.linearVelocity(body) orelse return Vec3r.zero;
+    const angular = bm.angularVelocity(body) orelse return Vec3r.zero;
+    const centre_of_mass = bm.position(body) orelse return Vec3r.zero;
+    return linear.add(angular.cross(point.sub(centre_of_mass)));
+}
 
 /// Widen a descriptor `f32` `Vec3` to solver precision. The public surface is `f32`
 /// (§1.11.8, §1.12.11) and widening it is one grouped decision at M1.1.15; this is the
