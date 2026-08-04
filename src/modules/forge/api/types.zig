@@ -52,6 +52,12 @@ pub const PackedId = packed struct(u32) {
     /// Generation tag bumped on slot reuse (high 8 bits).
     generation: u8,
 
+    /// Bit pattern reserved for "no handle", shared by `BodyId`, `ShapeId` and
+    /// `CharacterId`. Never produced by a slot allocator — `index = maxInt(u24)`
+    /// would require 16.7 M live slots, well past any milestone target. Same
+    /// reservation `EntityId.dead` makes on the ECS side, and the same reason.
+    pub const dead: u32 = pack(std.math.maxInt(u24), std.math.maxInt(u8));
+
     /// Pack an index + generation into the `u32` handle.
     pub fn pack(index: u24, generation: u8) u32 {
         return @bitCast(PackedId{ .index = index, .generation = generation });
@@ -268,6 +274,10 @@ pub const BodyDescriptor = struct {
 // So the SEMANTICS of three body entries are recorded here, next to the frozen types
 // they traffic in, and they move with the declarations when that file lands.
 //
+// DESTINATION: M1.1.15 MOVES this block onto those three declarations in
+// `src/interfaces/PhysicsModule.zig`. It is not duplicated there — two copies of a
+// contract are two things that can disagree, which is the whole subject of the block.
+//
 //   - `setBodyTransform(id, position, rotation)` is a TELEPORTATION. It writes the pose
 //     and derives NO velocity: a kinematic body moved through it keeps velocity columns
 //     of exactly zero. That is not an oversight to be repaired — it is the same split the
@@ -445,12 +455,12 @@ pub const GroundState = enum(u8) {
 /// precedent of listing a 2D symmetry in OUT with its freeze date rather than touching 2D
 /// from a 3D milestone.
 ///
-/// **`ground_state` is the discriminator, and the other four are only readable through
-/// it.** `ground_body`'s default of `0` is NOT a sentinel — `PackedId.pack(0, 0)` is `0`,
-/// a perfectly valid handle to slot 0 generation 0 — so there is no value of that field
-/// meaning "no support". On `.in_air` the caller must not read it, exactly as §1.12.5's
-/// table states; `ground_normal` is the one field with a meaningful value in every state,
-/// and that is deliberate (see its own doc).
+/// **`ground_state` is the discriminator, and the two support handles carry an explicit
+/// "no support" value rather than relying on it.** `ground_entity` is `EntityId.dead` and
+/// `ground_body` is `PackedId.dead` outside `.grounded` / `.on_steep_ground`, so a caller
+/// that reads one without consulting the verdict gets an unmistakably absent handle
+/// instead of a plausible wrong answer. `ground_normal` is the one field carrying a
+/// meaningful value in every state, and that is deliberate (see its own doc).
 pub const CharacterMoveResult = struct {
     /// Position of the BASE after resolution (§1.12.3) — what gameplay writes into
     /// `Transform.position`, and where every probe of the caller starts from.
@@ -478,9 +488,17 @@ pub const CharacterMoveResult = struct {
     /// support, and the field is null only on `.in_air` (§1.12.5).
     ground_entity: EntityId,
 
-    /// Body of the support — what the caller interrogates it through without searching
-    /// for it. See the type doc on why `0` is a default and not a sentinel.
-    ground_body: BodyId = 0,
+    /// Body of the support — what the caller interrogates it through without searching for
+    /// it. `PackedId.dead` outside `.grounded` / `.on_steep_ground`, in step with
+    /// `ground_entity`.
+    ///
+    /// The default is the SENTINEL and not `0`, and the reason is a plausible wrong answer
+    /// rather than a crash: `PackedId.pack(0, 0)` is `0`, a valid handle to slot 0
+    /// generation 0, and in the arena the first body created is typically the ground. A
+    /// caller reading this field while airborne would therefore be told it is standing on
+    /// the ground — the false-negative class this module refuses, and one that no test on
+    /// a grounded character would ever surface.
+    ground_body: BodyId = PackedId.dead,
 
     /// Velocity AT THE CONTACT POINT, hence `v + ω × r` and not the support's linear
     /// velocity: without the rotational term a character standing at the rim of a
@@ -722,6 +740,23 @@ test "BodyId pack/unpack round-trip" {
     try testing.expectEqual(@as(u32, 0), PackedId.pack(0, 0));
 }
 
+test "PackedId.dead is the all-ones no-handle reservation" {
+    // All ones in both fields, so the whole `u32` is `0xFFFFFFFF`. Reserved rather than
+    // merely unlikely: a slot allocator would have to reach 16.7 M live slots to produce
+    // this index, which is the same argument `EntityId.dead` makes with 4 G on the ECS side.
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), PackedId.dead);
+    try testing.expectEqual(@as(u24, std.math.maxInt(u24)), PackedId.unpack(PackedId.dead).index);
+    try testing.expectEqual(@as(u8, std.math.maxInt(u8)), PackedId.unpack(PackedId.dead).generation);
+
+    // ONE constant for the three handles, because they share the packing. A per-type
+    // sentinel would be three values to keep equal, hence one to get wrong.
+    const as_body: BodyId = PackedId.dead;
+    const as_shape: ShapeId = PackedId.dead;
+    const as_character: CharacterId = PackedId.dead;
+    try testing.expectEqual(as_body, as_shape);
+    try testing.expectEqual(as_body, as_character);
+}
+
 test "ShapeDescriptor payload defaults" {
     const s = ShapeDescriptor{ .sphere = .{} };
     try testing.expectEqual(@as(f32, 0.5), s.sphere.radius);
@@ -954,7 +989,14 @@ test "CharacterMoveResult mirrors engine-tier-interfaces.md §1 field for field"
     try testing.expect(r.ground_normal.eql(Vec3.unit_y));
     try testing.expectEqual(@as(f32, 1), r.ground_normal.lengthSq());
 
-    try testing.expectEqual(@as(BodyId, 0), r.ground_body);
+    // The support handle's default is the SENTINEL, asserted in BOTH directions: equal to
+    // `PackedId.dead`, and DIFFERENT FROM 0. The second half is the one that catches a
+    // regression to the old default, which was `0` — a valid handle to slot 0 generation 0,
+    // typically the arena's ground, so a caller reading it while airborne was told it stood
+    // on the ground. `engine-c-api.md` carries no `struct_size` and no minor version, so
+    // after the M1.1.15 freeze that default would have been frozen into the ABI.
+    try testing.expectEqual(@as(BodyId, PackedId.dead), r.ground_body);
+    try testing.expect(r.ground_body != 0);
     try testing.expect(r.ground_velocity.eql(Vec3.zero));
 
     // `position` and `ground_entity` carry no default — transcribed as frozen.

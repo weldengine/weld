@@ -34,7 +34,8 @@ pub const ShapeId = types.ShapeId;
 /// Opaque character-controller handle (`u32`, same packing as `BodyId`).
 pub const CharacterId = types.CharacterId;
 /// The `index:24 | generation:8` packing shared by `BodyId`, `ShapeId` and
-/// `CharacterId`.
+/// `CharacterId`, and the `PackedId.dead` all-ones reservation those three use for
+/// "no handle".
 pub const PackedId = types.PackedId;
 /// Simulation class of a body (static / kinematic / dynamic).
 pub const BodyType = types.BodyType;
