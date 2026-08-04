@@ -427,9 +427,11 @@ pub const max_slide_iterations: u32 = 4;
 /// pushed by an unbounded loop is a hang.
 pub const max_depenetration_iterations: u32 = 4;
 
-/// Bodies whose wake this call owes, at most one per iteration of each bounded phase. The bound is
-/// EXACT rather than a guess: no phase can contact more bodies than it has iterations.
-const max_touched = max_slide_iterations + max_depenetration_iterations;
+/// Bodies whose wake this call owes. The bound is EXACT rather than a guess, and it is accounted
+/// sweep by sweep: `max_depenetration_iterations` pushes, `max_slide_iterations` slide sweeps, the
+/// THREE sweeps of the single step-up attempt (lift, forward, land), and the one step-down sweep.
+/// A step is attempted at most once per call, which is what keeps this a small constant.
+const max_touched = max_depenetration_iterations + max_slide_iterations + 3 + 1;
 
 /// The bodies one move touched, accumulated rather than woken on the spot.
 ///
@@ -647,16 +649,196 @@ fn slideAlongPlane(motion: Vec3r, normal: Vec3r) Vec3r {
 /// read as a valid crease.
 fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r) ?Vec3r {
     const edge = math.triangleCrossDirection(Real, Vec3r.zero, n0, n1) orelse return null;
-    // The magnitude carries no meaning by contract — only the direction — so it is normalised
-    // here and never used as a length.
-    const len_sq = edge.lengthSq();
-    if (len_sq == 0) return null;
-    var axis = edge.scale(1 / @sqrt(len_sq));
+    // The magnitude carries no meaning by contract — only the direction — so it is normalised here
+    // and never used as a length.
+    //
+    // **No zero-length guard, and its absence is PROVEN rather than assumed.** A non-null return
+    // always has a component in `[0.5, 1)`: the function brings its three exact determinants onto
+    // one common power of two chosen so the DOMINANT lane keeps a full mantissa, and for that lane
+    // `shift = bitLen − keep < bitLen`, so it is never dropped by the below-scale skip and never
+    // rounds to zero. Verified in `exact.zig`'s implementation, not inferred from its doc. So
+    // `lengthSq()` lies in `[0.25, 3)` and a guard on it could not fire — and a guard that cannot
+    // fire tells the reader the exact tier may return a zero vector, which that tier documents as
+    // impossible.
+    var axis = edge.scale(1 / @sqrt(edge.lengthSq()));
     // Oriented to agree with the motion, so the character slides ALONG the edge in the direction
     // it was already going and not backwards along it.
     const along = motion.dot(axis);
     if (along < 0) axis = axis.neg();
     return axis.scale(@abs(along));
+}
+
+/// One swept contact, resolved over every candidate body.
+const SweepHit = struct {
+    body: BodyId,
+    subshape_id: u32,
+    distance: Real,
+    /// As the CAST reports it — the surface's outward normal when the sweep travelled, and
+    /// `−direction` at distance zero. Pass it through `slideNormal` before using it.
+    normal: Vec3r,
+};
+
+/// Nearest contact of the capsule swept from `origin` along `direction` for at most `distance`.
+///
+/// Factored out because four callers need exactly this — the slide loop and the step's three
+/// sweeps — and a second copy is how two of them would come to disagree about the filter.
+fn sweepNearest(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    record: shape_mod.Shape,
+    probe: SupportShape,
+    origin: Vec3r,
+    direction: Vec3r,
+    distance: Real,
+    layer_mask: u32,
+    exclude: ?BodyId,
+) ?SweepHit {
+    var collector = SweepCollector{
+        .bm = bm,
+        .store = store,
+        .probe = probe,
+        .origin = origin,
+        .direction = direction,
+        .bound = distance,
+        .layer_mask = layer_mask,
+        .exclude = exclude,
+    };
+    const box = body_manager_mod.worldAabb(record, origin, Quatr.identity);
+    _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &collector);
+    const best = collector.best orelse return null;
+    return .{
+        .body = best.body,
+        .subshape_id = best.subshape_id,
+        .distance = best.distance,
+        .normal = best.normal,
+    };
+}
+
+/// How far the capsule may actually travel toward a contact: up to `padding` short of it, and the
+/// whole distance when nothing is in the way. Clamped at zero so a contact already inside the
+/// margin never pushes the character backwards.
+fn paddedAdvance(hit: ?SweepHit, distance: Real, padding: Real) Real {
+    const h = hit orelse return distance;
+    return @max(0, h.distance - padding);
+}
+
+/// What a successful step-up produced: where the capsule ended up, and how much of the horizontal
+/// request it consumed getting there.
+const StepUp = struct {
+    centre: Vec3r,
+    advance: Real,
+};
+
+/// Try to climb an obstacle instead of stopping at it: lift, advance, land, and accept only if what
+/// was landed on is WALKABLE.
+///
+/// **Where `padding` enters the geometry, and it is not only the stopping distance.** A character
+/// resting on the ground has its base `padding` above it, and after the climb it must be `padding`
+/// above the step's top — so the rise between the two resting configurations is exactly the step's
+/// height, and the lift to attempt is exactly `step_height` with no padding term. The padding
+/// reappears in each of the three sweeps, which each stop short of what they meet.
+///
+/// **A STEP IS NOT A SLOPE, and step 4 is the whole reason this returns an optional.** Without that
+/// check a character climbs an 80° ramp in increments the size of a stair, each increment
+/// individually legitimate, and the slope limit it holds becomes unenforceable. That is a case in
+/// the suite and not a remark.
+///
+/// Returns null — and moves NOTHING, so no lift survives a failed attempt — when there is no
+/// headroom, when the obstacle is taller than the lift, when nothing is under the far side (a ledge,
+/// not a step), or when the landing is too steep to stand on.
+fn tryStepUp(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    record: shape_mod.Shape,
+    probe: SupportShape,
+    centre: Vec3r,
+    direction: Vec3r,
+    remaining_distance: Real,
+    c: Character,
+    touched: *TouchedBodies,
+) ?StepUp {
+    // 1 — lift.
+    const up_hit = sweepNearest(bp, bm, store, record, probe, centre, up, c.step_height, c.layer_mask, c.inner_body);
+    if (up_hit) |h| touched.add(h.body);
+    const lift = paddedAdvance(up_hit, c.step_height, c.padding);
+    if (lift <= 0) return null;
+    const lifted = centre.add(up.scale(lift));
+
+    // 2 — forward, from the lifted pose. An advance of zero means the obstacle reaches above the
+    // lift, which is exactly the `step_height + ε` case: the climb must fail and the caller slides.
+    const fwd_hit = sweepNearest(bp, bm, store, record, probe, lifted, direction, remaining_distance, c.layer_mask, c.inner_body);
+    if (fwd_hit) |h| touched.add(h.body);
+    const forward_advance = paddedAdvance(fwd_hit, remaining_distance, c.padding);
+    if (forward_advance <= 0) return null;
+    const forward = lifted.add(direction.scale(forward_advance));
+
+    // 3 — land. The drop budget is the lift plus one more step height, so a step DOWN on the far
+    // side is still caught; finding nothing means there is no floor over there at all.
+    const down_hit = sweepNearest(bp, bm, store, record, probe, forward, up.neg(), lift + c.step_height, c.layer_mask, c.inner_body) orelse return null;
+    touched.add(down_hit.body);
+    const drop = paddedAdvance(down_hit, lift + c.step_height, c.padding);
+    const landed = forward.sub(up.scale(drop));
+
+    // 4 — the landing must be walkable.
+    const normal = slideNormal(bm, store, probe, landed, down_hit.body, down_hit.distance, down_hit.normal) orelse return null;
+    if (normal.dot(up) < c.cos_max_slope) return null;
+
+    // 5 — **THE CAPSULE MUST HAVE COME DOWN ONTO A SURFACE, and this is the reference's v5.6.0 bug
+    // class.** MEASURED on an obstacle of `step_height + ε`: lift 0.3, forward 0.169, and a
+    // down-sweep finding the obstacle only 0.0106 below, so `drop = max(0, 0.0106 − padding) = 0` —
+    // the character lands WEDGED against the obstacle's top edge at the lifted height, standing on
+    // nothing. The following slide then rides it up that edge's tilted normal onto a step it was
+    // never allowed to climb: 0.37 where 0.02 is correct.
+    //
+    // **A second condition — "the landing must be HIGHER than the start" — was written here and then
+    // REMOVED, measured in both directions.** Its purpose was the other squeeze mode: rise, advance
+    // at a pose where the capsule's cross-section is narrower, and drop back to where you began. But
+    // that is INDISTINGUISHABLE from stepping over a kerb onto level ground, which is legitimate and
+    // which it forbade — measured on a 0.2 m kerb with flat ground either side: with the condition
+    // the character stopped at x = 0.912 and ended 0.495 m in the AIR, having ratcheted up the
+    // kerb's edge; without it, x = 2.0 at its original height, which is the whole requested move
+    // served correctly.
+    //
+    // So the squeeze-onto-level-ground mode is NOT guarded, and that is recorded rather than
+    // papered over: telling it from a legitimate step-over needs a test that the landed pose is
+    // clear of the obstacle it was blocked by, which is a different mechanism from a height
+    // comparison. Named for whoever ports the reference's stair-walking in full.
+    if (drop <= 0) return null;
+
+    return .{ .centre = landed, .advance = forward_advance };
+}
+
+/// Stick to the floor when walking off a ledge, if it is within `step_height`.
+///
+/// **The engine cannot guess INTENTION, so it uses the one fact it has**: the ground state at the
+/// START of the move. A character that entered `.grounded` and walked off an edge is descending a
+/// step; a character that entered `.in_air` is falling and must not be dragged down. That is the
+/// reference's own condition for its floor-sticking.
+///
+/// A second condition is added and it is MEASURED, not stylistic: the move must not have asked to
+/// go UP. `engine-movement.md`'s default `jump_velocity` is 8 m/s, so a jump's first tick rises
+/// `8/60 = 0.133 m` — well inside the 0.3 m default `step_height`. On the entering tick the
+/// character is still grounded, so without this guard floor-sticking cancels every jump on its
+/// first frame, which is a behaviour nobody would attribute to a step-down feature.
+///
+/// A landing too steep to stand on is not a floor to stick to, so it is left alone.
+fn stepDown(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    record: shape_mod.Shape,
+    probe: SupportShape,
+    centre: Vec3r,
+    c: Character,
+    touched: *TouchedBodies,
+) Vec3r {
+    const hit = sweepNearest(bp, bm, store, record, probe, centre, up.neg(), c.step_height, c.layer_mask, c.inner_body) orelse return centre;
+    const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse return centre;
+    if (normal.dot(up) < c.cos_max_slope) return centre;
+    touched.add(hit.body);
+    return centre.sub(up.scale(paddedAdvance(hit, c.step_height, c.padding)));
 }
 
 /// Push the capsule out of everything it overlaps, deepest first, and record whose wake that owes.
@@ -906,6 +1088,11 @@ pub const CharacterStore = struct {
 
         var touched = TouchedBodies{};
 
+        // 0 — the ground state BEFORE anything moves, which is the only thing the engine knows
+        // about the caller's intention (see `stepDown`). Read here and not after, because after the
+        // move it is a different question.
+        const entered_grounded = (try self.groundOf(bp, bm, store, id)).state == .grounded;
+
         // 1 — depenetration.
         var centre = depenetrate(
             bp,
@@ -923,6 +1110,7 @@ pub const CharacterStore = struct {
         var remaining = displacement;
         var planes: [2]Vec3r = @splat(Vec3r.zero);
         var plane_count: u32 = 0;
+        var step_attempted = false;
         var iteration: u32 = 0;
         while (iteration < max_slide_iterations) : (iteration += 1) {
             const len_sq = remaining.lengthSq();
@@ -932,20 +1120,8 @@ pub const CharacterStore = struct {
             const distance = @sqrt(len_sq);
             const direction = remaining.scale(1 / distance);
 
-            var sweep = SweepCollector{
-                .bm = bm,
-                .store = store,
-                .probe = probe,
-                .origin = centre,
-                .direction = direction,
-                .bound = distance,
-                .layer_mask = c.layer_mask,
-                .exclude = c.inner_body,
-            };
-            const box = body_manager_mod.worldAabb(record, centre, Quatr.identity);
-            _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &sweep);
-
-            const hit = sweep.best orelse {
+            const maybe_hit = sweepNearest(bp, bm, store, record, probe, centre, direction, distance, c.layer_mask, c.inner_body);
+            const hit = maybe_hit orelse {
                 // Nothing in the way: the whole remaining displacement is served.
                 centre = centre.add(remaining);
                 remaining = Vec3r.zero;
@@ -955,7 +1131,7 @@ pub const CharacterStore = struct {
 
             // Advance to `padding` SHORT of the surface, clamped at zero so a contact already
             // inside the margin does not push the character backwards.
-            const advance = @max(0, hit.distance - c.padding);
+            const advance = paddedAdvance(hit, distance, c.padding);
             centre = centre.add(direction.scale(advance));
             remaining = remaining.sub(direction.scale(advance));
 
@@ -964,6 +1140,24 @@ pub const CharacterStore = struct {
                 remaining = Vec3r.zero;
                 break;
             };
+
+            // **CLIMB BEFORE SLIDING**, once per call. Attempted only against a surface too steep
+            // to walk on: something walkable is ground to stand on, not an obstacle to step over.
+            // On failure NOTHING has moved — `tryStepUp` returns the landing pose or nothing at all
+            // — so no lift survives a failed attempt, which is the reference's v5.6.0 bug class.
+            if (!step_attempted and normal.dot(up) < c.cos_max_slope) {
+                step_attempted = true;
+                const len = remaining.lengthSq();
+                if (len > 0) {
+                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, @sqrt(len), c, &touched)) |stepped| {
+                        centre = stepped.centre;
+                        remaining = remaining.sub(direction.scale(stepped.advance));
+                        // No plane is recorded: the character went OVER the obstacle, not along it,
+                        // so it is not a wall to slide on.
+                        continue;
+                    }
+                }
+            }
 
             // Record the plane. A normal parallel to one already held replaces it rather than
             // filling the second slot, so a re-contact with the same wall does not read as a crease.
@@ -998,7 +1192,13 @@ pub const CharacterStore = struct {
             }
         }
 
-        // 3 — publish. The record is AUTHORITATIVE and the presence mirrors it; the two are written
+        // 3 — stick to the floor on the way DOWN, under the two conditions `stepDown` argues: the
+        // character entered grounded, and it did not ask to go up.
+        if (entered_grounded and displacement.dot(up) <= 0) {
+            centre = stepDown(bp, bm, store, record, probe, centre, c, &touched);
+        }
+
+        // 4 — publish. The record is AUTHORITATIVE and the presence mirrors it; the two are written
         // in one place so they cannot drift (see the Notes on this being the likeliest silent bug).
         const new_base = centre.sub(baseToCentre(Real, c.height));
         self.characters.items[idx].position = new_base;
