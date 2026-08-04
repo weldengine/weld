@@ -1811,53 +1811,115 @@ test "an intermediate wall buys no horizontal progress — the reference's v5.6.
     }
 }
 
-test "a slope steeper than max_slope is never reported grounded, and the CLIMB is not what lifts the character there" {
+test "the slide is CONSTRAINED by the slope: four cases" {
     const gpa = testing.allocator;
 
-    // A 50° ramp — just past the default 45° limit — built as a BOX rotated about +Z, so its top
-    // face normal is `(−sin50, cos50, 0) = (−0.766, 0.643, 0)`. Fifty and not seventy because a face
-    // rises `tan(θ)` per metre of forward reach while a lift buys only `step_height / tan(θ)` of it:
-    // at 70° the face climbs 0.75 m over the 0.11 m afforded and nothing can land on it.
-    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-    defer world.deinit(gpa);
-    var chars: CharacterStore = .{};
-    defer chars.deinit(gpa);
-
-    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 230);
-    const theta: f32 = 50.0 * std.math.pi / 180.0;
-    const ramp = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(2, 0.5, 2) } });
-    _ = try world.addBody(gpa, .{
-        .entity = ent(231),
-        .body_type = .static,
-        .shape = ramp,
-        // Top face through (0.5, 0, 0), just ahead of the character: `centre = p − 0.5 · n`.
-        .position = av(0.883, -0.3215, 0),
-        .rotation = math.Quatf.fromAxisAngle(av(0, 0, 1), theta),
-    });
-
-    var desc = baseDescriptor();
-    desc.position = av(0, 0.02, 0);
-    const id = try addMover(gpa, &world, &chars, desc);
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
-
-    // THE VERDICT is enforced: 50° is past the limit, so the character is on steep ground and never
-    // `.grounded`, and the normal reported is the ramp's own `cos50 = 0.6428`.
-    try testing.expectEqual(api.GroundState.on_steep_ground, r.ground.state);
-    // `cos(50°) = 0.6427876097`, to more digits than `api_tol` needs — a four-decimal rounding of it
-    // is 1.2e-5 away and fails, which is the tolerance doing its job.
-    try testing.expectApproxEqAbs(@as(Real, 0.6427876), r.ground.normal.toArray()[1], api_tol);
-
-    // **AND THE HEIGHT GAIN IS THE SLIDE'S, NOT THE CLIMB'S — measured, and pinned here because the
-    // next milestone will meet it.** Projecting a horizontal displacement onto a 50° plane leaves an
-    // upward component, so a character pushed into the ramp rises whether or not any step was
-    // accepted: 0.583 m in one call. Running the same scene with `max_slope` at 80°, which makes the
-    // ramp walkable and suppresses the step attempt entirely, gives 0.579 m — the same height by a
-    // different route. So the step's landing slope test cannot be what governs this scene, and an
-    // absolute assertion on the height would measure the slide while appearing to measure the climb.
+    // §1.12.6's rule, added at gate F: when the slide projects onto a plane whose normal FAILS the
+    // slope test, the projected motion's up component is CAPPED at the pre-projection one. Before it,
+    // a character climbed any face up to 90°−ε by walking into it — measured at 0.583 m of rise in
+    // one call against a 50° face under a 45° limit, with the verdict correctly saying
+    // `.on_steep_ground` the whole time, so the engine told the truth while the pose climbed.
     //
-    // Whether SLIDING should itself be slope-constrained is a real question and it is not this
-    // gate's: the verdict is correct, the position climbs, and nothing in §1.12 settles it.
-    try testing.expectApproxEqAbs(@as(Real, 0.583), r.position.toArray()[1], 0.01);
+    // A cap and not a cancellation, which is what makes all four cases right at once.
+
+    // A ramp of `deg` degrees, as a box rotated about +Z so its top-face normal is
+    // `(−sin deg, cos deg, 0)`, with its top face passing through `(0.5, 0, 0)`.
+    const ramp = struct {
+        fn add(g: std.mem.Allocator, w: *harness.World, deg: f32) !void {
+            _ = try addPlane(g, w, av(0, 1, 0), 0, 250);
+            const rad = deg * std.math.pi / 180.0;
+            const shape = try w.store.createShape(g, .{ .box = .{ .half_extents = av(2, 0.5, 2) } });
+            const n = av(-@sin(rad), @cos(rad), 0);
+            _ = try w.addBody(g, .{
+                .entity = ent(251),
+                .body_type = .static,
+                .shape = shape,
+                .position = av(0.5 + 0.5 * @sin(rad), -0.5 * @cos(rad), 0),
+                .rotation = math.Quatf.fromAxisAngle(av(0, 0, 1), rad),
+            });
+            _ = n;
+        }
+    };
+
+    // CASE 1 — a WALKABLE ramp is untouched by the rule, and the character climbs it.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        try ramp.add(gpa, &world, 30);
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        // 30° is inside the 45° limit, so the rule does not apply and the rise is real.
+        try testing.expect(r.position.toArray()[1] > 0.2);
+        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+    }
+
+    // CASE 2 — a STEEP face walked into HORIZONTALLY gains no height at all. This is the case the
+    // rule exists for.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        try ramp.add(gpa, &world, 50);
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        // Height UNCHANGED, and the character is standing on the FLOOR (normal +Y) rather than on
+        // the cliff it was pushed into.
+        try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
+        try testing.expect(r.ground.normal.approxEql(v(0, 1, 0), api_tol));
+        // And it is blocked short of the 1 m it asked for — lateral slide or blocking, per the rule.
+        try testing.expect(r.position.toArray()[0] < 1);
+    }
+
+    // CASE 3 — a DOWNWARD motion against the same steep face still descends, and the cap does not
+    // trap the character against the cliff.
+    //
+    // **The rule's stated case 3 does not hold for a steep but SLOPED face, and this was computed
+    // before the test was written.** Against a 50° normal `(−0.766, 0.643, 0)`, a pure gravity step
+    // `(0,−1,0)` projects to an up component of `−0.587`, which is GREATER than the `−1` it came
+    // from, so the cap fires and restores the requested rate. The prediction that the projection is
+    // "already below, hence untouched" holds only for a VERTICAL face, where `after == before`
+    // exactly. Both were checked numerically.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        try ramp.add(gpa, &world, 50);
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.5, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.3, -0.3, 0), 1.0 / 60.0);
+        // It DESCENDS — the cap never turns a downward motion into an upward one, which is the half
+        // that says the guard does not over-fire.
+        try testing.expect(r.position.toArray()[1] < 0.5);
+    }
+
+    // CASE 4 — when the CALLER asks to rise, the cap allows it: the pre-projection up component is
+    // positive, and the cap is on the INCREASE. The engine does not fight its caller.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        try ramp.add(gpa, &world, 50);
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        // Diagonally INTO the steep face and upward, so the motion really is projected — a purely
+        // upward step would leave the surface and never reach the cap at all.
+        const asked: Real = 0.4;
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.3, asked, 0), 1.0 / 60.0);
+        // The requested rise is SERVED, and the second half is what makes this discriminating: it is
+        // not merely non-zero, it is the whole amount asked for.
+        try testing.expectApproxEqAbs(0.02 + asked, r.position.toArray()[1], api_tol);
+    }
 }
 
 test "the touched-body capacity accounts for the step's sweeps exactly" {
@@ -1895,4 +1957,423 @@ test "a low kerb with level ground either side is stepped OVER, and the move is 
     // MEASURED counter-factual, and it is why a "the landing must be higher than the start"
     // condition was removed from `tryStepUp`: with it, this move ends at x = 0.912 and y = 0.495 —
     // blocked by a 0.2 m kerb AND half a metre in the air, having ratcheted up its edge.
+}
+
+// ---------------------------------------------------------------------------
+// F — resize, push, teleport.
+// ---------------------------------------------------------------------------
+
+test "resizeCharacter is atomic, anchored at the feet, and keeps the presence BodyId" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 300);
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+
+    // SHRINK — always succeeds, the target volume being contained in the current one.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.0));
+    {
+        const c = chars.get(id).?;
+        try testing.expectApproxEqAbs(@as(Real, 1.0), c.height, api_tol);
+        // ANCHORED AT THE FEET: the base is exactly where it was.
+        try testing.expectApproxEqAbs(@as(Real, 0.02), c.position.toArray()[1], api_tol);
+        // The presence's pose follows the NEW half-height: 0.02 + 0.5 = 0.52.
+        try testing.expectApproxEqAbs(@as(Real, 0.52), world.bm.position(presence).?.toArray()[1], api_tol);
+        // And the capsule the store built has the new cylinder half-height, 1.0/2 − 0.3 = 0.2.
+        try testing.expectApproxEqAbs(@as(Real, 0.2), world.store.get(c.shape).?.half_height, api_tol);
+    }
+    // THE HANDLE IS THE SAME. A resize is not a re-creation, so an exclusion the caller memorised
+    // survives it — which is the whole reason `BodyManager.setShape` exists.
+    try testing.expectEqual(presence, (try chars.getCharacterInnerBody(id)).?);
+
+    // GROW back into a free volume — succeeds, base still unmoved.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+    try testing.expectApproxEqAbs(@as(Real, 0.02), chars.get(id).?.position.toArray()[1], api_tol);
+    try testing.expectEqual(presence, (try chars.getCharacterInnerBody(id)).?);
+    // Exactly ONE capsule is live besides the plane's shape: the old one was destroyed, not leaked.
+    try testing.expectEqual(@as(u32, 2), world.store.count());
+}
+
+test "growing under a low ceiling returns false and changes NOTHING" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 310);
+    // A ceiling slab whose underside is at y = 1.2, so a 1.0 m character fits and a 1.8 m one does
+    // not.
+    _ = try addBox(gpa, &world, av(2, 0.5, 2), av(0, 1.7, 0), 311);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    desc.height = 1.0;
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+    const before = chars.get(id).?;
+    const shape_before = before.shape;
+
+    // `false` and not an error: a blocked stand-up is a legitimate gameplay answer, and the caller
+    // will try again next tick. Same split as `shapeCast` — an error channel for an inadmissible
+    // input, an absent value for a real refusal.
+    try testing.expectEqual(false, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+
+    // NOTHING changed — asserted on all three, not just on the return value.
+    const after = chars.get(id).?;
+    try testing.expectApproxEqAbs(before.height, after.height, api_tol);
+    try testing.expectApproxEqAbs(before.radius, after.radius, api_tol);
+    try testing.expect(after.position.approxEql(before.position, api_tol));
+    try testing.expectEqual(shape_before, after.shape);
+    try testing.expectEqual(presence, (try chars.getCharacterInnerBody(id)).?);
+    try testing.expectEqual(shape_before, world.bm.shapeOf(presence).?);
+    // And the capsule built to ask the question was destroyed: THREE shapes live — the plane's, the
+    // ceiling box's and the character's — exactly as before the call. Three and not two: `addBox`
+    // creates a shape of its own, which a first version of this count forgot.
+    try testing.expectEqual(@as(u32, 3), world.store.count());
+
+    // Shrinking in the same scene still succeeds, which is what shows the `false` above was about
+    // the ceiling and not about resizing being broken.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 0.9));
+}
+
+test "resizeCharacter refuses the same domain as createCharacter, by typed error" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    const id = try addMover(gpa, &world, &chars, baseDescriptor());
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+
+    // A resize is a SECOND DOOR onto the same domain, so it cannot be a laxer one — including
+    // `height >= 2 · radius`, which is the bound a caller is most likely to trip while crouching.
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, nan, 1.8));
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0, 1.8));
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, -0.3, 1.8));
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, inf));
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 0));
+    try testing.expectError(error.InvalidDimensions, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 0.4));
+    // Nothing was built by any refusal: one capsule live, the character's own.
+    try testing.expectEqual(@as(u32, 1), world.store.count());
+
+    // And a stale handle is the caller's fault too.
+    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    try testing.expectError(error.StaleCharacter, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+}
+
+test "the push is unilateral: the box moves, the character does not react to it" {
+    const gpa = testing.allocator;
+
+    // Same scene twice, differing ONLY in `max_push_force`. The character's own resolution must be
+    // identical in both — which is what separates a push from an elastic collision — while the box
+    // moves in one and not the other.
+    var box_speed: [2]Real = @splat(0);
+    var char_x: [2]Real = @splat(0);
+
+    for ([_]f32{ 0, 100 }, 0..) |max_push, i| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        // A unit-mass dynamic box whose −X face is at x = 0.35, so the capsule (radius 0.3) contacts
+        // it when its centre reaches x = 0.05 — inside the 0.1 m step below.
+        const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+        const box = try world.addBody(gpa, .{
+            .entity = ent(320),
+            .body_type = .dynamic,
+            .shape = box_shape,
+            .position = av(0.85, 0, 0),
+            .mass = 1,
+        });
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        desc.max_push_force = max_push;
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.1, 0, 0), 1.0 / 60.0);
+        box_speed[i] = world.bm.linearVelocity(box).?.toArray()[0];
+        char_x[i] = r.position.toArray()[0];
+    }
+
+    // CLOSED FORM. The character's speed is `0.1 / (1/60) = 6 m/s`, the box is at rest, so the
+    // impulse wanted is `mass · closing = 70 · 6 = 420 N·s` and the ceiling is
+    // `max_push_force · dt = 100/60 = 1.6667 N·s` — the ceiling wins. The box has unit mass, so its
+    // speed becomes exactly that impulse.
+    try testing.expectApproxEqAbs(@as(Real, 100.0 / 60.0), box_speed[1], api_tol);
+    // `max_push_force = 0` disables pushing with no special case: not a millimetre per second.
+    try testing.expectEqual(@as(Real, 0), box_speed[0]);
+
+    // UNILATERAL: the character stops in exactly the same place whether or not the box yielded. This
+    // is the half that distinguishes a push from a collision, and it would fail if any impulse were
+    // applied back to the character or if its stop depended on the box's response.
+    try testing.expectApproxEqAbs(char_x[0], char_x[1], api_tol);
+}
+
+test "setCharacterPosition teleports without resolving and invalidates the reported verdict" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 330);
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // A move first, so there IS a reported verdict to invalidate.
+    const moved = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    try testing.expectEqual(api.GroundState.grounded, moved.ground.state);
+    try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
+
+    // Teleport INTO the floor — 0.5 m under it. It resolves nothing, so the character stays there:
+    // that is the contract and not a limitation, the caller having asked to BE somewhere.
+    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(3, -0.5, 0));
+    try testing.expect(chars.get(id).?.position.approxEql(v(3, -0.5, 0), tol));
+    // The reported verdict is INVALIDATED to `.in_air`, the safe failure direction: one tick of
+    // gravity rather than a character believed to be standing where it no longer is.
+    try testing.expectEqual(api.GroundState.in_air, chars.reportedGround(id).?);
+
+    // A stale handle is a TYPED refusal, like every other entry of the store: a teleport that goes
+    // nowhere is a write the caller has to know did not happen.
+    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    try testing.expectError(
+        CharacterError.StaleCharacter,
+        chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(9, 9, 9)),
+    );
+    try testing.expectEqual(@as(?character_mod.Character, null), chars.get(id));
+}
+
+test "presence freshness on the second and third write paths, and resize reflects the SIZE" {
+    const gpa = testing.allocator;
+
+    // Both assertions are written the same way as the move's, and for the reason measured at gate D:
+    // a stale fat box the ray still crosses yields the CORRECT distance anyway, because the exact
+    // answer comes from the body's pose. So each ray approaches the new pose from a direction the
+    // OLD box does not intersect.
+
+    // (a) setCharacterPosition.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        var desc = baseDescriptor();
+        desc.entity = ent(340);
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        const presence = (try chars.getCharacterInnerBody(id)).?;
+
+        try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0));
+
+        // From −Z at x = 5: the old box sits around x = 0 with a 0.1 m fat margin and is nowhere near
+        // this ray, so without the proxy update the presence is never offered and this misses.
+        const across = query.RayQuery{ .origin = v(5, 0.9, -10), .direction = v(0, 0, 1), .max_distance = 100 };
+        const hit = query.raycast(&world.bp, &world.bm, &world.store, across);
+        try testing.expect(hit != null);
+        try testing.expectEqual(presence, hit.?.body);
+        try testing.expectApproxEqAbs(@as(Real, 9.7), hit.?.distance, api_tol);
+    }
+
+    // (b) resizeCharacter — the same pose-freshness question, plus the one only a resize has.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        var desc = baseDescriptor();
+        desc.entity = ent(341);
+        desc.position = av(0, 0, 0);
+        desc.height = 1.0;
+        const id = try addMover(gpa, &world, &chars, desc);
+        const presence = (try chars.getCharacterInnerBody(id)).?;
+
+        // A ray at y = 1.5 passes ABOVE a 1.0 m capsule and finds nothing.
+        const high = query.RayQuery{ .origin = v(-10, 1.5, 0), .direction = v(1, 0, 0), .max_distance = 100 };
+        try testing.expectEqual(@as(?query.RayHit, null), query.raycast(&world.bp, &world.bm, &world.store, high));
+
+        try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+
+        // THE HALF ONLY A RESIZE HAS: the same ray must now HIT, because the capsule reaches y = 1.8.
+        // Nothing but a broadphase box reflecting the new SIZE makes that true — a box updated to the
+        // new pose but the old extents leaves this ray unoffered, and no pose-only assertion can tell
+        // the difference.
+        const grown = query.raycast(&world.bp, &world.bm, &world.store, high);
+        try testing.expect(grown != null);
+        try testing.expectEqual(presence, grown.?.body);
+        // The capsule's cylinder spans y ∈ [0.3, 1.5] at radius 0.3, so at y = 1.5 the ray grazes the
+        // top of the cylinder and the wall is at x = −0.3: distance 9.7.
+        try testing.expectApproxEqAbs(@as(Real, 9.7), grown.?.distance, api_tol);
+    }
+}
+
+test "resize and teleport both wake what their new volume reaches" {
+    const gpa = testing.allocator;
+
+    for ([_]enum { resize, teleport }{ .resize, .teleport }) |which| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 350);
+        // A sleeping dynamic box the new volume REACHES without overlapping it, so the resize
+        // SUCCEEDS and the wake is asserted on the success path. Half-extents 0.4 centred at
+        // x = 0.75, so its tight box starts at 0.35 while the capsule's surface stops at 0.3 — a
+        // 0.05 m gap, closed by the broadphase's 0.1 m fat margin, which is exactly the superset the
+        // waker is documented to be.
+        const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.4, 0.4, 0.4) } });
+        const sleeper = try world.addBody(gpa, .{
+            .entity = ent(351),
+            .body_type = .dynamic,
+            .shape = box_shape,
+            .position = if (which == .resize) av(0.75, 0.9, 0) else av(5, 0.9, 0),
+            .mass = 1,
+        });
+        sleep_mod.putToSleep(&world.bm, sleeper);
+        try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        desc.height = 1.0;
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        switch (which) {
+            // A SUCCESSFUL grow whose new volume reaches the sleeper without overlapping it.
+            .resize => {
+                try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+                try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
+            },
+            // A teleport ONTO the box wakes it: the new pose reaches it, and a presence moved by pose
+            // write has velocity columns of exactly zero, so W3 could never see it (§1.12.10).
+            .teleport => {
+                try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0.02, 0));
+                try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F.0bis — the unguarded squeeze mode, MEASURED, and the step path's padding
+// ---------------------------------------------------------------------------
+
+test "a character squeezed under a low ceiling is PINNED, never driven through the floor" {
+    const gpa = testing.allocator;
+
+    // A capsule needing 1.8 m of headroom under a ceiling offering 1.0 m, and the same at 1.7 m —
+    // any deficit at all, not just a large one. Both are unresolvable: no pose satisfies both
+    // surfaces, so what is measured is the FAILURE DIRECTION.
+    for ([_]f32{ 1.0, 1.7 }) |clear| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 340);
+        _ = try addBox(gpa, &world, av(4, 0.5, 4), av(0, clear + 0.5, 0), 341);
+        var desc = baseDescriptor();
+        desc.entity = ent(342);
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        // TWO calls, because a mode that is stable for one call and drifts on the next is the
+        // dangerous one: the caller keeps asking, and a per-call bias accumulates.
+        var previous: ?Vec3r = null;
+        var k: u32 = 0;
+        while (k < 2) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const p = r.position.toArray();
+
+            // MEASURED: the depenetration alternates between the two surfaces and lands the capsule
+            // FLUSH on the floor — base exactly 0, the 0.02 stand-off spent — and the horizontal
+            // request is consumed entirely by the four slide iterations against the ceiling's
+            // downward normal without ever being served. So the character is PINNED.
+            try testing.expectApproxEqAbs(@as(Real, 0), p[0], api_tol);
+            try testing.expectApproxEqAbs(@as(Real, 0), p[1], api_tol);
+            // NEVER below the ground plane. This is the assertion that matters, and it is the one
+            // thing about this mode that is not an accident: see the parity note below.
+            try testing.expect(p[1] >= -api_tol);
+            // And it does not drift: call two is bit-identical to call one.
+            if (previous) |q| try testing.expect(r.position.eql(q));
+            previous = r.position;
+        }
+    }
+}
+
+test "the depenetration's iteration count is EVEN, and the failure direction depends on it" {
+    // `max_depenetration_iterations` alternates between the two surfaces of an unresolvable squeeze,
+    // so the side the character ends on is the count's PARITY. MEASURED by changing the constant: at
+    // 3 and at 5 the base lands at −0.800000 — the full depth of the squeeze, on the far side of the
+    // ground plane — and at 4 and at 8 it lands at 0. Nothing else in the suite moved at any of the
+    // four values except the test that pins the constants themselves, so an odd count would have
+    // shipped silently.
+    //
+    // This is not a guard and no guard was built for it (the clearance test that would resolve the
+    // squeeze properly is named in `tryStepUp`). It is the record of a measurement, plus the one
+    // assertion that turns the parity from an accident into something a change has to answer for.
+    try testing.expectEqual(@as(u32, 0), character_mod.max_depenetration_iterations % 2);
+}
+
+test "the step's FORWARD sweep keeps the padding stand-off, which the lift's cannot show" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A 0.25 m step spanning x ∈ [1, 3], and a wall standing ON it whose −X face is at x = 2.25.
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 360);
+    _ = try addBox(gpa, &world, av(1, 0.125, 1), av(2, 0.125, 0), 361);
+    _ = try addBox(gpa, &world, av(0.25, 1, 1), av(2.5, 1.25, 0), 362);
+    var desc = baseDescriptor();
+    desc.entity = ent(363);
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+    const p = r.position.toArray();
+
+    // The step's forward sweep runs from the LIFTED pose, where the capsule clears the step top and
+    // the only thing ahead is the wall. Its advance is therefore `padding`-limited, and the pose it
+    // lands at survives to the end of the call: the next slide iteration finds the wall exactly
+    // `padding` away and advances by `max(0, 0.02 − 0.02) = 0`.
+    //
+    // So the answer is the wall's face minus the capsule radius minus the padding:
+    // 2.25 − 0.3 − 0.02 = 1.93.
+    //
+    // **The counterfactual was DERIVED as a lost stand-off and the MEASUREMENT refuted that.** With
+    // the padding dropped from the step's forward advance the character ends at 0.688, not at the
+    // predicted 1.95: the unpadded advance leaves the capsule EXACTLY flush against the wall, so the
+    // landing sweep — which runs downward from there — reports the WALL at distance zero instead of
+    // the plateau below, `drop` clamps to zero, and the whole climb is refused by condition 5. The
+    // character then slides to a stop against the step's riser. So the cost of losing the padding on
+    // this one sweep is not 0.02 m of stand-off, it is 1.24 m of a legitimate move never served —
+    // which is a far better account of why the reference shipped a fix for it.
+    try testing.expectApproxEqAbs(@as(Real, 1.93), p[0], api_tol);
+    // Resting on the step: 0.25 + padding.
+    try testing.expectApproxEqAbs(@as(Real, 0.27), p[1], api_tol);
+    try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+
+    // The LIFT's padding is deliberately NOT asserted, and the reason is that it CANNOT be: the lift
+    // and the landing drop both subtract it, and `drop > 0` is required, so the two subtractions
+    // cancel exactly in the final pose whatever the geometry. **CONFIRMED by probe rather than left
+    // as an argument**: dropping the padding from the lift alone breaks NOTHING in this suite, at
+    // either precision, while dropping it from the forward sweep breaks this test and from the
+    // landing sweep breaks two others. It is observable only as a change of VERDICT — a climb the raw
+    // lift would clear and the padded lift would not — which is a discrete boundary and not a
+    // stand-off. Recorded, and not asserted vacuously.
 }
