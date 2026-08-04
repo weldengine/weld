@@ -2377,3 +2377,56 @@ test "the step's FORWARD sweep keeps the padding stand-off, which the lift's can
     // lift would clear and the padded lift would not — which is a discrete boundary and not a
     // stand-off. Recorded, and not asserted vacuously.
 }
+
+test "on OOM a resize leaves the character UNCHANGED and is retryable" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 370);
+    var desc = baseDescriptor();
+    desc.entity = ent(371);
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    const before = chars.get(id).?;
+    const shapes_before = world.store.count();
+    const presence_before = (try chars.getCharacterInnerBody(id)).?;
+
+    // `resizeCharacter`'s only interceptable allocation is the new capsule, at index 0.
+    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try testing.expectError(
+        error.OutOfMemory,
+        chars.resizeCharacter(fa.allocator(), &world.bp, &world.bm, &world.store, id, 0.25, 1.2),
+    );
+
+    // UNCHANGED field by field, INCLUDING the shape handle and the live shape count.
+    const after = chars.get(id).?;
+    try testing.expect(after.position.eql(before.position));
+    try testing.expectEqual(before.radius, after.radius);
+    try testing.expectEqual(before.height, after.height);
+    try testing.expectEqual(before.shape, after.shape);
+    try testing.expectEqual(shapes_before, world.store.count());
+    try testing.expectEqual(presence_before, (try chars.getCharacterInnerBody(id)).?);
+
+    // RETRYABLE: the same call with a working allocator succeeds and takes effect.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.25, 1.2));
+    try testing.expectApproxEqAbs(@as(Real, 1.2), chars.get(id).?.height, api_tol);
+
+    // **THE OTHER FALLIBLE STEP OF THESE THREE ENTRIES COULD NOT BE MADE TO FAIL FROM A TEST, AND
+    // THAT IS RECORDED RATHER THAN GLOSSED.** `Broadphase.update` reserves a slot on its layer's
+    // moved log, so it can allocate — and `syncPresenceTo`'s ordering exists for exactly that. But
+    // `std.testing.FailingAllocator` at index 0 does not intercept it: MEASURED, a `moveCharacter`
+    // of 5 m on a freshly created character reports zero allocations seen, and 40 teleports of 5 m
+    // each — every one re-fitting the proxy well beyond the 0.1 m fat margin — report exactly one,
+    // because the list's growth goes through a resize the counter does not index.
+    //
+    // So the ordering in `syncPresenceTo` rests on a STRUCTURAL argument — the one fallible call
+    // precedes every mutation, and the box it publishes is the union of the old and new, so a failure
+    // leaves a proxy that still contains the body — and NOT on a pinned counterfactual. Consequently
+    // the use-after-free that ordering forecloses is a latent hazard and is NOT claimed as a
+    // demonstrated defect: what was demonstrated is that the allocation exists and that this test
+    // cannot make it fail.
+}

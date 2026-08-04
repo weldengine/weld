@@ -1303,8 +1303,10 @@ pub const CharacterStore = struct {
         // 4 — publish. The record is AUTHORITATIVE and the presence mirrors it; the two are written
         // in one place so they cannot drift (see the Notes on this being the likeliest silent bug).
         const new_base = centre.sub(baseToCentre(Real, c.height));
+        // The presence FIRST, because its proxy update is the one step that can fail: on OOM the
+        // record must be left exactly as it was and the call retryable (see `syncPresenceTo`).
+        try self.syncPresenceTo(gpa, bp, bm, store, idx, new_base, c.shape, c.height);
         self.characters.items[idx].position = new_base;
-        try self.syncPresence(gpa, bp, bm, store, idx);
 
         // The wake this call owes. W4 and not W3: a presence moved by POSE WRITE keeps velocity
         // columns of exactly zero while it crosses the scene, so W3's true-zero velocity test never
@@ -1380,15 +1382,18 @@ pub const CharacterStore = struct {
             return false;
         }
 
-        // Commit. The record is written FIRST so `syncPresence` mirrors the new size and pose from
-        // it, and the presence's shape is swapped BEFORE that sync so `bodyAabb` — hence the
-        // broadphase proxy — reflects the new SIZE and not only the new centre.
+        // The presence FIRST, with the NEW shape and height passed explicitly — so the proxy box
+        // reflects the new SIZE and not only the new centre, and so the one fallible step of the
+        // whole commit happens while the character is still entirely unchanged. A failure here
+        // reaches the `errdefer` above with nothing to undo but the new capsule itself.
+        try self.syncPresenceTo(gpa, bp, bm, store, idx, c.position, new_shape, height);
+
+        // Infallible commit.
         const old_shape = c.shape;
         self.characters.items[idx].radius = radius;
         self.characters.items[idx].height = height;
         self.characters.items[idx].shape = new_shape;
         if (c.inner_body) |body| bm.setShape(store, body, new_shape);
-        try self.syncPresence(gpa, bp, bm, store, idx);
         store.destroyShape(gpa, old_shape);
 
         // W4: whatever the NEW volume reaches. A superset, which is the safe direction.
@@ -1424,11 +1429,12 @@ pub const CharacterStore = struct {
         position: Vec3r,
     ) !void {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        const c = self.characters.items[idx];
+        // The presence FIRST — same reason as the other two write paths.
+        try self.syncPresenceTo(gpa, bp, bm, store, idx, position, c.shape, c.height);
         self.characters.items[idx].position = position;
         self.characters.items[idx].reported_ground = .in_air;
-        try self.syncPresence(gpa, bp, bm, store, idx);
 
-        const c = self.characters.items[idx];
         const record = store.get(c.shape) orelse unreachable;
         var waker = CandidateWaker{ .bm = bm, .exclude = c.inner_body };
         _ = bp.queryAabb(
@@ -1444,28 +1450,53 @@ pub const CharacterStore = struct {
         return self.characters.items[idx].reported_ground;
     }
 
-    /// Mirror the authoritative record pose onto the presence — the body AND its broadphase proxy.
+    /// Mirror a TARGET pose and size onto the presence — the body AND its broadphase proxy — for a
+    /// target the caller has not yet written into the record.
     ///
     /// **The one place that mirror is written.** The pose lives twice, in the record and in the
     /// body, and three entries write both; miss the proxy on any one of them and queries answer at
     /// the previous pose, which no test on a stationary character would find. So the three entries
     /// call this, and the freshness test is per write path rather than once on the move.
-    fn syncPresence(
+    ///
+    /// **It takes the target rather than reading the record, so that the ONE FALLIBLE STEP RUNS
+    /// BEFORE ANY MUTATION, and the box it publishes is the UNION of the old and the new.**
+    /// `Broadphase.update` reserves a slot on its layer's moved log, so it allocates and can fail,
+    /// and an earlier version called it AFTER the commit. Two distinct consequences, both real:
+    ///
+    ///  - In `resizeCharacter` the record and the presence body already pointed at the new shape,
+    ///    which the `errdefer` then destroyed — the character was left holding a freed shape, a
+    ///    use-after-free on its next move.
+    ///  - On the two pose paths the record and the body had moved while the proxy had not, so the
+    ///    stored box no longer contained the body and pairs were silently lost.
+    ///
+    /// Publishing the UNION is what makes a failure harmless in both directions: it is a superset of
+    /// the old box, so the proxy still contains the body, the record is untouched, and the call is
+    /// retryable — the repository's reserve-then-mutate invariant (M1.1.1-HF1 D3/D4). The extra fat
+    /// on the success path is the broadphase's own normal regime — its stored boxes are fat by
+    /// construction — and the next call refits it.
+    fn syncPresenceTo(
         self: *const CharacterStore,
         gpa: std.mem.Allocator,
         bp: *Broadphase,
         bm: *BodyManager,
         store: *const ShapeStore,
         idx: u24,
+        base: Vec3r,
+        shape: api.ShapeId,
+        height: Real,
     ) !void {
         const c = self.characters.items[idx];
         const body = c.inner_body orelse return;
-        // NON-ACTIVATING by contract (§1.8.4) — this is the controller's own write path, and the
-        // wake it owes is composed by the caller from the bodies it TOUCHED.
-        bm.setPosition(body, c.position.add(baseToCentre(Real, c.height)));
+        const record = store.get(shape) orelse unreachable;
+        const centre = base.add(baseToCentre(Real, height));
         if (c.presence_proxy) |proxy| {
-            try bp.update(gpa, proxy, bm.bodyAabb(store, body).?);
+            const old_box = bm.bodyAabb(store, body).?;
+            const new_box = body_manager_mod.worldAabb(record, centre, Quatr.identity);
+            try bp.update(gpa, proxy, old_box.merge(new_box));
         }
+        // Infallible from here. NON-ACTIVATING by contract (§1.8.4) — this is the controller's own
+        // write path, and the wake it owes is composed by the caller from the bodies it TOUCHED.
+        bm.setPosition(body, centre);
     }
 
     /// The ground verdict for character `id` at its CURRENT pose — the controller is the
