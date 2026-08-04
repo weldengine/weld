@@ -409,10 +409,13 @@ pub const CharacterDescriptor = struct {
     max_push_force: f32 = 100.0,
 
     /// Whether the character carries a broadphase PRESENCE — a kinematic body holding ITS
-    /// OWN capsule (§1.12.2). Without one it is invisible to every query, which
-    /// `engine-phase-1-criteria.md` C1.8 refuses twice: the player's attack deals its
-    /// damage through raycast/overlap, and the follow camera carries an anti-wall sweep
-    /// that starts from the player and must therefore exclude it.
+    /// OWN capsule (§1.12.2). Without one it is invisible to every query, and the argument
+    /// for that being unacceptable is internal to this descriptor rather than borrowed from
+    /// any scene: `collision_layer` above is the mechanism by which an object declares
+    /// itself VISIBLE to other callers' queries (§1.11.5 — the layer tested is the touched
+    /// shape's, and the caller declares by mask what it wants to see). So either the
+    /// character carries a presence, or `collision_layer` is a field with no observable
+    /// effect. This surface has promised query visibility since it was written.
     ///
     /// There is NO `inner_body_shape` field: two shapes that can diverge are a
     /// synchronisation contract with no counterpart, and `resizeCharacter` would have to
@@ -492,12 +495,13 @@ pub const CharacterMoveResult = struct {
     /// it. `PackedId.dead` outside `.grounded` / `.on_steep_ground`, in step with
     /// `ground_entity`.
     ///
-    /// The default is the SENTINEL and not `0`, and the reason is a plausible wrong answer
-    /// rather than a crash: `PackedId.pack(0, 0)` is `0`, a valid handle to slot 0
-    /// generation 0, and in the arena the first body created is typically the ground. A
-    /// caller reading this field while airborne would therefore be told it is standing on
-    /// the ground — the false-negative class this module refuses, and one that no test on
-    /// a grounded character would ever surface.
+    /// The default is the SENTINEL and not `0`, and the reason is structural:
+    /// `PackedId.pack(0, 0)` is `0`, so with `0` as the default NO bit configuration of this
+    /// field would mean absence. The field would be unreadable without consulting a
+    /// neighbouring one — and that coupling is invisible at the C ABI level. `engine-c-api.md`
+    /// carries neither `struct_size` nor a minor version, so a Tier 3 caller reading
+    /// `ground_body` alone has no way to learn it was supposed to read `ground_state` first,
+    /// and no future version can teach it.
     ground_body: BodyId = PackedId.dead,
 
     /// Velocity AT THE CONTACT POINT, hence `v + ω × r` and not the support's linear
@@ -992,9 +996,10 @@ test "CharacterMoveResult mirrors engine-tier-interfaces.md §1 field for field"
     // The support handle's default is the SENTINEL, asserted in BOTH directions: equal to
     // `PackedId.dead`, and DIFFERENT FROM 0. The second half is the one that catches a
     // regression to the old default, which was `0` — a valid handle to slot 0 generation 0,
-    // typically the arena's ground, so a caller reading it while airborne was told it stood
-    // on the ground. `engine-c-api.md` carries no `struct_size` and no minor version, so
-    // after the M1.1.15 freeze that default would have been frozen into the ABI.
+    // hence a field with no bit configuration meaning absence, readable only in company of
+    // `ground_state` and silently so across the C ABI. `engine-c-api.md` carries no
+    // `struct_size` and no minor version, so after the M1.1.15 freeze that default would
+    // have been frozen into the ABI.
     try testing.expectEqual(@as(BodyId, PackedId.dead), r.ground_body);
     try testing.expect(r.ground_body != 0);
     try testing.expect(r.ground_velocity.eql(Vec3.zero));
