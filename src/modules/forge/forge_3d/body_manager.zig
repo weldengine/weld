@@ -313,6 +313,30 @@ pub const BodyManager = struct {
         return self.bodies.items(.collision_layer)[idx];
     }
 
+    /// Safe getter: the body's simulation class, or null if `id` is stale/invalid.
+    ///
+    /// The column has existed since M1.1.0 and was never exposed. What needs it is
+    /// M1.1.12: §1.12.2 states normatively that a character's presence is a KINEMATIC body,
+    /// and `motionProperties` cannot answer that — a static and a kinematic body both carry
+    /// an inverse mass of exactly zero. A normative property nothing can assert is one that
+    /// regresses silently, which is the same argument that exposed `entity` at M1.1.10.
+    pub fn bodyType(self: *const BodyManager, id: BodyId) ?api.BodyType {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.body_type)[idx];
+    }
+
+    /// Safe getter: the handle of the shape this body carries, or null if `id` is
+    /// stale/invalid.
+    ///
+    /// Named `shapeOf` and not `shape` because it returns a `ShapeId` and not a `Shape`, and
+    /// the two live one `store.get` apart. Exposed for the same reason as `bodyType` above:
+    /// §1.12.2 states that a character's presence carries the CONTROLLER'S OWN capsule and
+    /// never a second shape, and handle equality is the direct form of that statement.
+    pub fn shapeOf(self: *const BodyManager, id: BodyId) ?api.ShapeId {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.shape)[idx];
+    }
+
     /// Safe getter: the ECS entity owning this body, or null if `id` is
     /// stale/invalid.
     ///
@@ -1100,6 +1124,102 @@ pub const BodyManager = struct {
         var single = SingleManifoldCollector{};
         self.collidePairEach(store, a, b, &single);
         return single.manifold;
+    }
+
+    /// Full narrowphase between a caller-supplied convex `probe` posed at
+    /// (`probe_position`, `probe_rotation`) and body `id`, calling
+    /// `collector.add(subshape_id, manifold)` for EVERY manifold the pair produces. Nothing
+    /// is called when the two are separated, or when the handle — or its shape — is
+    /// stale/invalid.
+    ///
+    /// **The seventh body-level adapter, and the one a VIRTUAL controller needs.** A
+    /// controller owns no body, so `collidePairEach` — which resolves both sides from
+    /// handles — cannot serve it at all. This is `castShapeBody`'s shape without the
+    /// direction: shape plus pose against a body, dispatched on the BODY's category alone,
+    /// the probe being a bounded convex by its type.
+    ///
+    /// **Only the general "Each" form exists.** There is deliberately no convenience
+    /// sibling asserting the body carries no sub-shape, the way `collidePair` wraps
+    /// `collidePairEach`: the controller is this entry's only consumer and it needs the
+    /// general form, a mesh floor being exactly the case it cannot afford to lose. Such a
+    /// wrapper is purely additive — zero call sites to touch — so the deferral rule lets it
+    /// wait for a caller that wants it.
+    ///
+    /// **Normal orientation: probe → body.** The probe is A and the body is B, in all three
+    /// arms. The half-space arm computes body→probe, §1.11.15's formulas being stated with
+    /// the plane as A, and negates; the mesh arm passes `mesh_is_a = false` so the shared
+    /// helper hands `collideOrdered` its arguments in that same order and needs no mirroring.
+    ///
+    /// **No `back_face_mode` parameter, and that is a decision rather than an omission.**
+    /// Contact generation culls back faces unconditionally: the mode is a solver-internal
+    /// setting and not part of the frozen surface (§1.11.17), because a contact generated on
+    /// the back of a wall pushes the body through it. The mesh arm therefore inherits both
+    /// the cull and the internal-edge correction from `collideConvexMesh` — which is the
+    /// whole reason this entry reuses that helper instead of walking the mesh itself.
+    ///
+    /// Internal: no interface entry corresponds to it, and it knows nothing about
+    /// characters. Self-exclusion belongs to the controller — the broadphase will offer a
+    /// character its own presence among the candidates of its own sweeps, and filtering that
+    /// out is the controller's business, not this adapter's.
+    pub fn collideShapeBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        probe: narrowphase.SupportShape(Real),
+        probe_position: Vec3r,
+        probe_rotation: Quatr,
+        collector: anytype,
+    ) void {
+        const idx = self.alloc.validate(id) orelse return;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return;
+        const body_position = self.bodies.items(.position)[idx];
+        const body_rotation = self.bodies.items(.rotation)[idx];
+
+        // Exhaustive on the body's class, no `else` — a fourth category is a compile error
+        // here and owes its own decision (§1.11.15, §1.11.17).
+        switch (shape.class()) {
+            .convex => {
+                const m = narrowphase.collideOrdered(
+                    Real,
+                    probe,
+                    probe_position,
+                    probe_rotation,
+                    shape_mod.supportShape(shape),
+                    body_position,
+                    body_rotation,
+                ) orelse return;
+                collector.add(0, m);
+            },
+            .half_space => {
+                var m = narrowphase.collidePlane(
+                    Real,
+                    shape_mod.halfSpace(shape),
+                    body_position,
+                    body_rotation,
+                    narrowphase.RelativePose(Real).init(
+                        body_position,
+                        body_rotation,
+                        probe_position,
+                        probe_rotation,
+                    ),
+                    probe,
+                ) orelse return;
+                m.normal = m.normal.neg(); // computed body→probe; the caller asked probe→body
+                collector.add(0, m);
+            },
+            // SEVERAL manifolds, one per contacting triangle — the one shape change a mesh
+            // imposes, and the reason this entry has no single-manifold form.
+            .triangle_soup => self.collideConvexMesh(
+                probe,
+                probe_position,
+                probe_rotation,
+                shape.mesh.?,
+                body_position,
+                body_rotation,
+                false, // the mesh is B, so the normal comes out probe→body already
+                collector,
+            ),
+        }
     }
 
     /// `collidePairEach` for a fixed (already-canonical body-id) order — validates both
