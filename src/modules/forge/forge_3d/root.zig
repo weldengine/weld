@@ -41,6 +41,9 @@ const sleep_mod = @import("pipeline/sleep.zig");
 // broadphase ray traversal + the exact kernels). Re-exported as the `query`
 // namespace below; the comptime pin analyses its acceptance tests.
 const query_mod = @import("query/root.zig");
+// M1.1.12 — the kinematic character controller's store. Re-exported below; the
+// comptime pin analyses its acceptance suite.
+const character_mod = @import("character.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -219,6 +222,23 @@ pub fn raySupportsShape(support_shape: SupportShape) bool {
 /// `(bp, bm, store)`.
 pub const query = query_mod;
 
+// --- Character controller (M1.1.12) ---
+
+/// Generational store of character controllers (`engine-physics-forge.md` §1.12). A
+/// controller is VIRTUAL: it takes part in no solver pass, and its pose is written by
+/// `moveCharacter` alone. Bound to `Real` through the module's own `config.zig`.
+pub const CharacterStore = character_mod.CharacterStore;
+/// One stored controller — authored parameters at solver precision, plus the capsule and
+/// the optional presence the store owns the lifetime of. `position` is the capsule's BASE.
+pub const Character = character_mod.Character;
+/// Every way a `CharacterDescriptor` can be malformed, plus the stale handle — each its own
+/// typed error, and never sanitised.
+pub const CharacterError = character_mod.CharacterError;
+/// The offset from a character's BASE to the CENTRE of its capsule — half the height along
+/// `+Y`. Re-exported because it is THE one named place that offset exists, and a consumer
+/// deriving it a second time is the defect the single definition prevents.
+pub const baseToCentre = character_mod.baseToCentre;
+
 // --- Islands (branch-neutral partition core) ---
 
 /// The island partition core: a union-find over opaque element indices, shared by
@@ -264,6 +284,7 @@ comptime {
     _ = island_mod;
     _ = sleep_mod;
     _ = query_mod;
+    _ = character_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
@@ -281,4 +302,5 @@ comptime {
     _ = @import("tests/overlap_test.zig");
     _ = @import("tests/plane_test.zig");
     _ = @import("tests/mesh_test.zig");
+    _ = @import("tests/character_test.zig");
 }
