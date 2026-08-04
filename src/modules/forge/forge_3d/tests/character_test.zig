@@ -526,12 +526,20 @@ test "the descriptor domain is refused by typed error and never sanitised" {
                 d.max_slope = std.math.pi;
             }
         }.f },
-        // padding, mass, max_push_force: non-finite.
+        // padding: non-finite, and NEGATIVE — which inflates the capsule inward, so the
+        // character sinks `|padding|` into every surface with nothing reporting it.
         .{ .expected = error.InvalidPadding, .mutate = struct {
             fn f(d: *api.CharacterDescriptor) void {
                 d.padding = nan;
             }
         }.f },
+        .{ .expected = error.InvalidPadding, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
+                d.padding = -0.01;
+            }
+        }.f },
+        // mass: non-finite, ZERO — which would duplicate `max_push_force = 0`, the documented
+        // disabler — and NEGATIVE, which inverts the impulse so the character pulls.
         .{ .expected = error.InvalidPushParameters, .mutate = struct {
             fn f(d: *api.CharacterDescriptor) void {
                 d.mass = inf;
@@ -539,7 +547,35 @@ test "the descriptor domain is refused by typed error and never sanitised" {
         }.f },
         .{ .expected = error.InvalidPushParameters, .mutate = struct {
             fn f(d: *api.CharacterDescriptor) void {
+                d.mass = 0;
+            }
+        }.f },
+        .{ .expected = error.InvalidPushParameters, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
+                d.mass = -70;
+            }
+        }.f },
+        // max_push_force: non-finite and negative. Zero is the disabler and stays legal.
+        .{ .expected = error.InvalidPushParameters, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
                 d.max_push_force = nan;
+            }
+        }.f },
+        .{ .expected = error.InvalidPushParameters, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
+                d.max_push_force = -1;
+            }
+        }.f },
+        // predictive_contact_distance: guarded because it is STORED, so a caller's NaN would
+        // sit in the record indistinguishable from this repository's DELIBERATE poison NaN.
+        .{ .expected = error.InvalidDimensions, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
+                d.predictive_contact_distance = nan;
+            }
+        }.f },
+        .{ .expected = error.InvalidDimensions, .mutate = struct {
+            fn f(d: *api.CharacterDescriptor) void {
+                d.predictive_contact_distance = -0.1;
             }
         }.f },
         // collision_layer: the mask is 32 bits, so 32 and 255 are both invisible-to-every-
@@ -568,14 +604,20 @@ test "the descriptor domain is refused by typed error and never sanitised" {
         try testing.expectEqual(@as(u32, 0), bm.count());
     }
 
-    // The legal boundaries of the same fields, so the rejections above are not merely a
-    // blanket refusal: `max_slope` exactly at `π/2` is admissible (a vertical wall counts as
-    // walkable), `max_push_force` of zero disables pushing with no special case, and a
-    // capsule whose height is exactly twice its radius is a sphere and is legal.
+    // The legal boundaries of the same fields, so the rejections above are not a blanket
+    // refusal — which is what a domain test asserts second and what makes the first half
+    // meaningful. `max_slope` exactly at `π/2` is admissible (a vertical wall counts as
+    // walkable); `max_push_force` of zero disables pushing with no special case, and is the
+    // ONLY way to do so now that `mass = 0` is refused; `padding` of zero is no margin;
+    // `predictive_contact_distance` of zero is legal domain even though the reference
+    // documents it as a value that gets the character stuck — a bad tuning value is not a
+    // malformed one; and a capsule whose height is exactly twice its radius is a sphere.
     {
         var ok = baseDescriptor();
         ok.max_slope = std.math.pi / 2.0;
         ok.max_push_force = 0;
+        ok.padding = 0;
+        ok.predictive_contact_distance = 0;
         ok.height = 0.6; // exactly 2 × 0.3 → cylinder half-height 0
         ok.collision_layer = 31; // the last legal layer
         const id = try chars.createCharacter(gpa, &store, &bm, ok);
@@ -797,4 +839,394 @@ test "baseToCentre is the one offset, and it agrees at both precisions" {
     const from_f32: Real = character_mod.baseToCentre(f32, h_f32).toArray()[1];
     const from_real = character_mod.baseToCentre(Real, h_real).toArray()[1];
     try testing.expectEqual(from_real, from_f32);
+}
+
+// ---------------------------------------------------------------------------
+// C — ground determination. No motion: a character is PLACED, and asked.
+// ---------------------------------------------------------------------------
+//
+// The mechanism is a bounded DOWNWARD SWEEP and not a manifold at the current pose, and the
+// scene layout of every test below depends on knowing why: `collideOrdered` returns null on a
+// separated pair, and a character at rest is `padding` ABOVE its floor, so a manifold-only
+// probe would report `.in_air` for a character plainly standing up. Most tests here therefore
+// place the capsule `padding` above its surface — the resting configuration — and one places
+// it OVERLAPPING, to exercise the manifold fallback the sweep cannot answer.
+
+/// A static half-space body, whose normal `groundOf` must return VERBATIM (§1.11.15).
+fn addPlane(gpa: std.mem.Allocator, world: *harness.World, normal: ApiVec3, distance: f32, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = normal, .distance = distance } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(0, 0, 0),
+    });
+}
+
+/// The unit normal of a plane tilted `deg` away from horizontal, in the XY plane: its up
+/// component is `cos(deg)`, so `deg` IS the slope angle the `max_slope` test compares against.
+fn slopeNormal(deg: f32) ApiVec3 {
+    const rad = deg * std.math.pi / 180.0;
+    return av(@sin(rad), @cos(rad), 0);
+}
+
+test "a capsule resting on a plane is grounded, with the plane's own normal" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    const floor = try addPlane(gpa, &world, av(0, 1, 0), 0, 11);
+
+    // Base at y = padding = 0.02, the resting configuration. The capsule's lower core endpoint
+    // is then at y = 0.02 + 0.3 = 0.32, so its separation from `{y <= 0}` is 0.32 − 0.3 = 0.02
+    // — inside the 0.02 + 0.1 = 0.12 m sweep band, and STRICTLY POSITIVE, so the sweep path
+    // answers and the manifold fallback is not taken.
+    var desc = baseDescriptor();
+    desc.entity = ent(50);
+    desc.position = av(0, 0.02, 0);
+    const id = try addCharacter(gpa, &world, &chars, desc);
+
+    const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+    try testing.expectEqual(api.GroundState.grounded, g.state);
+    try testing.expect(g.normal.approxEql(v(0, 1, 0), tol));
+    try testing.expectEqual(floor, g.body);
+    try testing.expectEqual(ent(11), g.entity);
+    // A static support has no velocity of its own, and the rotational term of a zero ω is zero.
+    try testing.expect(g.velocity.approxEql(Vec3r.zero, tol));
+}
+
+test "a slope below max_slope is grounded and above it is steep, both with the slope's normal" {
+    const gpa = testing.allocator;
+
+    // The default `max_slope` is 0.785 rad ≈ 44.977°, so 30° is walkable and 60° is not, with
+    // more than 14° of margin on either side — the verdict cannot turn on the f32 rendering of
+    // the angle. Their up components are cos(30°) = √3/2 and cos(60°) = 1/2.
+    const cases = [_]struct { deg: f32, distance: f32, expected: api.GroundState }{
+        // For a plane of normal n and a capsule core endpoint P, the separation is
+        // n·P − radius − distance. Base at y = 0 puts the lower endpoint at (0, 0.3, 0), so
+        //   30°: n·P = cos30 · 0.3 = 0.2598 → distance = 0.2598 − 0.3 − 0.05 = −0.0902
+        //   60°: n·P = cos60 · 0.3 = 0.15   → distance = 0.15   − 0.3 − 0.05 = −0.2
+        // both leaving a separation of 0.05 m, inside the 0.12 m band and strictly positive.
+        .{ .deg = 30, .distance = -0.0902, .expected = .grounded },
+        .{ .deg = 60, .distance = -0.2, .expected = .on_steep_ground },
+    };
+
+    for (cases) |case| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const n = slopeNormal(case.deg);
+        const slope = try addPlane(gpa, &world, n, case.distance, 12);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(case.expected, g.state);
+        // The normal is the SLOPE's in both verdicts — a steep slope is still a real surface,
+        // and the verdict is the only thing that differs.
+        try testing.expect(g.normal.approxEql(v(n.toArray()[0], n.toArray()[1], 0), api_tol));
+        try testing.expectEqual(slope, g.body);
+        // NON-NULL on `.on_steep_ground` as much as on `.grounded`: a steep slope is a support,
+        // and only `.in_air` has no support at all (§1.12.5).
+        try testing.expectEqual(ent(12), g.entity);
+        try testing.expect(g.entity.index != api.EntityId.dead.index);
+        try testing.expect(g.body != api.PackedId.dead);
+    }
+}
+
+test "a capsule over the void is in_air on all five quantities" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // NOTHING in the scene but the character — whose own presence IS in the broadphase, and is
+    // the only thing its downward sweep can find.
+    //
+    // **This does NOT prove self-exclusion, and an earlier version of this comment claimed it
+    // did.** MEASURED: with the exclusion removed, this test and the four others that pin
+    // `ground_body` to a real support all still pass. The reason is that what exclusion removes
+    // is a contact between the probe and a body BIT-IDENTICAL to it at the same pose, whose
+    // normal §3 declares geometrically UNDEFINED — and empirically that normal never qualifies
+    // as ground. So the mechanism is required by §1.12.2 and implemented, but it is not
+    // observable at this gate; it becomes observable at gate D, where the same contact would
+    // block motion outright. Asserting it here would mean asserting on a value the narrowphase
+    // documents as undefined.
+    var desc = baseDescriptor();
+    desc.position = av(0, 5, 0);
+    const id = try addCharacter(gpa, &world, &chars, desc);
+    try testing.expect((try chars.getCharacterInnerBody(id)) != null);
+
+    const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+    // All five quantities at their `.in_air` values, asserted one by one rather than by
+    // comparing the struct: `normal` is EXACTLY up and never a poisoned value, three documents
+    // reading it inside a `@replicated` component.
+    try testing.expectEqual(api.GroundState.in_air, g.state);
+    try testing.expect(g.normal.eql(Vec3r.unit_y));
+    try testing.expectEqual(@as(Real, 1), g.normal.lengthSq());
+    try testing.expectEqual(api.EntityId.dead, g.entity);
+    try testing.expectEqual(@as(api.BodyId, api.PackedId.dead), g.body);
+    try testing.expect(g.velocity.eql(Vec3r.zero));
+    // The one thing that IS assertable about self-exclusion here: whatever the verdict, the
+    // support is never the character's own presence. Cheap, and it would catch a future change
+    // that made the coincident self-contact start qualifying.
+    try testing.expect(g.body != (try chars.getCharacterInnerBody(id)).?);
+}
+
+test "straddling a walkable and a steep face stands on the FLATTER one" {
+    const gpa = testing.allocator;
+
+    // Two planes both within the sweep band. Base at y = 0.02:
+    //   floor  n = (0, 1, 0),  distance 0    → separation 0.32 − 0.3 = 0.02
+    //   steep  n = (sin60, cos60, 0)         → n·P = 0.5 · 0.32 = 0.16,
+    //                                          distance = 0.16 − 0.3 − 0.05 = −0.19
+    // The floor's up component is 1 and the steep one's is 0.5, so the FLATTER must win even
+    // though both qualify as contacts and the steep one is nearer in sweep distance.
+    const steep = slopeNormal(60);
+
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const floor = try addPlane(gpa, &world, av(0, 1, 0), 0, 20);
+        _ = try addPlane(gpa, &world, steep, -0.19, 21);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(api.GroundState.grounded, g.state);
+        try testing.expect(g.normal.approxEql(v(0, 1, 0), tol));
+        try testing.expectEqual(floor, g.body);
+        try testing.expectEqual(ent(20), g.entity);
+    }
+
+    // THE DISCRIMINATOR. Remove the floor and keep the steep plane at the same distance: the
+    // verdict must change to `.on_steep_ground` on the steep normal. Without this the test
+    // above would pass just as well if the steep plane were out of range and never a candidate
+    // at all — it would assert "the floor wins" against no competition.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const only_steep = try addPlane(gpa, &world, steep, -0.19, 21);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(api.GroundState.on_steep_ground, g.state);
+        try testing.expect(g.normal.approxEql(v(steep.toArray()[0], steep.toArray()[1], 0), api_tol));
+        try testing.expectEqual(only_steep, g.body);
+    }
+}
+
+test "at distance zero the manifold fallback answers, and NOT with up" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A 30° slope the capsule OVERLAPS rather than rests above. Base at y = 0 puts the lower
+    // core endpoint at (0, 0.3, 0), so n·P = cos30 · 0.3 = 0.2598 and a distance of
+    // 0.2598 − 0.3 + 0.02 = −0.0202 leaves a separation of −0.02 m: the capsule is 2 cm inside
+    // the solid, so the downward cast reports distance ZERO and its own normal is `−direction`,
+    // i.e. exactly `+up`.
+    const n = slopeNormal(30);
+    _ = try addPlane(gpa, &world, n, -0.0202, 30);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0, 0);
+    const id = try addCharacter(gpa, &world, &chars, desc);
+
+    const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+
+    // THE POINT OF THIS TEST is the second assertion. The first would pass on either path.
+    const expected = v(n.toArray()[0], n.toArray()[1], 0);
+    try testing.expect(g.normal.approxEql(expected, api_tol));
+    // `+up` is what the SWEEP would have returned at distance zero, and it is a lie on a
+    // slope — it would answer "perfectly horizontal" and make every slope test pass. cos 30°
+    // differs from 1 by 0.134 and the x component from 0 by 0.5, so the two answers are not
+    // near each other: this asserts the fallback was taken, not merely that a normal came back.
+    try testing.expect(!g.normal.approxEql(v(0, 1, 0), 0.1));
+    try testing.expectApproxEqAbs(@as(Real, 0.5), g.normal.toArray()[0], api_tol);
+    // 30° is walkable, so the verdict rides on the real normal and not on the sweep's.
+    try testing.expectEqual(api.GroundState.grounded, g.state);
+}
+
+test "ground_velocity is the velocity AT THE CONTACT POINT of a rotating platform" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A kinematic slab 4 m across and 1 m thick centred on the origin, so its top face is at
+    // y = 0.5. Kinematic because a controller's support is exactly the moving-platform case,
+    // and because a dynamic body would need the solver to hold it up.
+    const slab = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(2, 0.5, 2) } });
+    const platform = try world.addBody(gpa, .{
+        .entity = ent(60),
+        .body_type = .kinematic,
+        .shape = slab,
+        .position = av(0, 0, 0),
+    });
+
+    // Spin about +Y at 2 rad/s. This is the entry that makes the field testable at all: without
+    // it ω has no authorable source and the rotational term would be permanently zero.
+    world.bm.setAngularVelocity(platform, v(0, 2, 0));
+
+    // The character stands on the rim at x = 1.5, `padding` above the top face.
+    var desc = baseDescriptor();
+    desc.position = av(1.5, 0.52, 0);
+    const id = try addCharacter(gpa, &world, &chars, desc);
+
+    const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+    try testing.expectEqual(api.GroundState.grounded, g.state);
+    try testing.expectEqual(platform, g.body);
+
+    // CLOSED FORM. The contact point is the witness on the body, i.e. (1.5, 0.5, 0) on the top
+    // face; the centre of mass is the body's pose, the origin; so r = (1.5, 0.5, 0) and
+    //   ω × r = (0,2,0) × (1.5,0.5,0)
+    //         = (2·0 − 0·0.5,  0·1.5 − 0·0,  0·0.5 − 2·1.5)
+    //         = (0, 0, −3)
+    // with the platform's linear velocity zero. The tolerance is `api_tol` scaled by two,
+    // because an error δ in the contact point's x becomes 2δ in the z component.
+    try testing.expect(g.velocity.approxEql(v(0, 0, -3), 2 * api_tol));
+
+    // NON-VACUITY of the rotational term: without it the answer would be the platform's linear
+    // velocity, which is zero here. The measured value is 3 m/s, so the term is not a rounding
+    // residue that a loose tolerance could hide.
+    try testing.expect(g.velocity.length() > 2.9);
+}
+
+test "an exact tie is broken by the smaller BodyId under BOTH traversal orders" {
+    const gpa = testing.allocator;
+
+    // TWO IDENTICAL floors as two separate bodies, so both offer an up component of EXACTLY 1
+    // — a plane returns its stored normal verbatim, so the tie is exact and not near-exact.
+    //
+    // **BOTH traversal orders are exercised, and only one of them discriminates.** The
+    // unbounded list iterates by slot index, so the insertion order IS the traversal order.
+    // Without the tie-break the code keeps the LAST candidate offered, so:
+    //   forward  [first, second] → no tie-break would answer `second`; the rule answers `first`
+    //   reversed [second, first] → no tie-break would answer `first` too, same as the rule
+    // The forward case is therefore the one that pins the rule, and the reversed one shows the
+    // answer does not depend on the order. A first version of this test ran ONLY the reversed
+    // order and pinned nothing — measured: removing the tie-break broke no test at all.
+    for ([_]bool{ false, true }) |reversed| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const shape_a = try world.store.createShape(gpa, .{ .plane = .{ .normal = av(0, 1, 0), .distance = 0 } });
+        const shape_b = try world.store.createShape(gpa, .{ .plane = .{ .normal = av(0, 1, 0), .distance = 0 } });
+        const first = try world.bm.addBody(gpa, &world.store, .{
+            .entity = ent(70),
+            .body_type = .static,
+            .shape = shape_a,
+            .position = av(0, 0, 0),
+        });
+        const second = try world.bm.addBody(gpa, &world.store, .{
+            .entity = ent(71),
+            .body_type = .static,
+            .shape = shape_b,
+            .position = av(0, 0, 0),
+        });
+        // A slot index encodes creation order, so this is the premise the tie-break rests on.
+        try testing.expect(first < second);
+
+        const order = if (reversed) [_]api.BodyId{ second, first } else [_]api.BodyId{ first, second };
+        for (order) |body| {
+            const shape = world.store.get(world.bm.shapeOf(body).?).?;
+            const plane_world = shape_mod.halfSpace(shape).transformed(
+                world.bm.rotation(body).?,
+                world.bm.position(body).?,
+            );
+            _ = try world.bp.insertUnbounded(gpa, .static, .{
+                .normal = plane_world.normal,
+                .distance = plane_world.distance,
+            }, body);
+        }
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0.02, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(api.GroundState.grounded, g.state);
+        // The SMALLER `BodyId` wins in BOTH orders.
+        try testing.expectEqual(first, g.body);
+        try testing.expectEqual(ent(70), g.entity);
+    }
+}
+
+test "groundOf reports a stale handle as a typed error" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 80);
+    const id = try addCharacter(gpa, &world, &chars, baseDescriptor());
+    // Live first, so the error below is about the handle and not about the scene.
+    _ = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+
+    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    try testing.expectError(
+        error.StaleCharacter,
+        chars.groundOf(&world.bp, &world.bm, &world.store, id),
+    );
+}
+
+test "the sweep band is padding plus predictive_contact_distance" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // The band is a closed form of two descriptor fields, and this is the assertion that names
+    // `predictive_contact_distance`'s first consumer: 0.02 + 0.1 = 0.12 at the defaults.
+    const id = try addCharacter(gpa, &world, &chars, baseDescriptor());
+    const c = chars.get(id).?;
+    try testing.expectApproxEqAbs(@as(Real, 0.12), character_mod.groundSweepDistance(c), api_tol);
+
+    // And it BITES in both directions on a real scene. A floor 0.10 m below the capsule's lower
+    // core endpoint is inside the band and answers; the same floor 0.20 m below is outside it
+    // and the character is `.in_air`. Base at y = b puts that endpoint at y = b + 0.3, so a
+    // plane `{y <= 0}` sits `b + 0.3 − 0.3 = b` below it: b IS the separation.
+    for ([_]struct { base: f32, expected: api.GroundState }{
+        .{ .base = 0.10, .expected = .grounded },
+        .{ .base = 0.20, .expected = .in_air },
+    }) |case| {
+        var scene = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer scene.deinit(gpa);
+        var store: CharacterStore = .{};
+        defer store.deinit(gpa);
+
+        _ = try addPlane(gpa, &scene, av(0, 1, 0), 0, 90);
+        var desc = baseDescriptor();
+        desc.position = av(0, case.base, 0);
+        const who = try addCharacter(gpa, &scene, &store, desc);
+
+        const g = try store.groundOf(&scene.bp, &scene.bm, &scene.store, who);
+        try testing.expectEqual(case.expected, g.state);
+    }
 }
