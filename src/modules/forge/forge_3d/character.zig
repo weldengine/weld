@@ -53,14 +53,16 @@ const EntityId = api.EntityId;
 /// fixing a bug wants to know which field, and a single `error.InvalidDescriptor` would
 /// send it reading all of them.
 pub const CharacterError = error{
-    /// `radius` or `height` is non-finite or not strictly positive, or `height` is less than
-    /// twice `radius`.
+    /// A length is out of domain: `radius` or `height` non-finite or not strictly positive,
+    /// `height` less than twice `radius` (which asks for a negative cylinder half-height), or
+    /// `predictive_contact_distance` non-finite or negative.
     InvalidDimensions,
     /// `max_slope` is non-finite or outside `[0, π/2]`.
     InvalidSlope,
-    /// `padding` is non-finite.
+    /// `padding` is non-finite or negative.
     InvalidPadding,
-    /// `mass` or `max_push_force` is non-finite.
+    /// `mass` is non-finite or not strictly positive, or `max_push_force` is non-finite or
+    /// negative.
     InvalidPushParameters,
     /// `collision_layer` is outside `[0, collision_layer_count)`.
     InvalidCollisionLayer,
@@ -102,8 +104,8 @@ pub const Character = struct {
     /// §1.11.2's `k · floatEps(T) · coordScale` discipline does NOT govern it.
     padding: Real,
     /// How far outside the shape to sweep for contacts not yet touching (metres). Same
-    /// parameter class as `padding`. THE ONE FIELD THE ALGORITHM HAS NOT YET JUSTIFIED —
-    /// gate D consumes it or deletes it.
+    /// parameter class as `padding`. Its FIRST consumer is the ground probe of gate C, which
+    /// bounds its downward sweep at `padding + predictive_contact_distance`.
     predictive_contact_distance: Real,
     /// What the character IS, read by others through the mask of THEIR queries. Also the
     /// presence's layer, with no dedicated field (§1.12.2).
@@ -156,10 +158,10 @@ fn capsuleHalfHeight(comptime T: type, radius: T, height: T) T {
 /// rather than normative — unlike `addBody`'s, whose ordering is load-bearing because the
 /// body literal derives quantities from the local AABB.
 ///
-/// `predictive_contact_distance` is deliberately NOT validated here. It is the one field of
-/// this descriptor no code consumes yet, and gate D either consumes it — and then owns its
-/// domain, which it will know — or deletes it, in which case a check written now would be a
-/// check to delete.
+/// **THIRTEEN guards, and the rule that decides which conditions earn one**: a value the code
+/// would ACCEPT and that produces silently wrong geometry or dynamics is a domain error, and
+/// refusing it costs one comparison. Non-finiteness is not the whole class — a finite value in
+/// the wrong half of the line does the same damage without being detectable downstream.
 fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     if (!std.math.isFinite(desc.radius) or desc.radius <= 0) return error.InvalidDimensions;
     if (!std.math.isFinite(desc.height) or desc.height <= 0) return error.InvalidDimensions;
@@ -173,8 +175,27 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     if (desc.max_slope < 0 or desc.max_slope > std.math.pi / 2.0) return error.InvalidSlope;
 
     if (!std.math.isFinite(desc.padding)) return error.InvalidPadding;
+    // A NEGATIVE padding inflates the capsule INWARD: the character sinks `|padding|` into
+    // every surface it stands on, and nothing anywhere reports it. Zero is legal — no margin.
+    if (desc.padding < 0) return error.InvalidPadding;
+
     if (!std.math.isFinite(desc.mass)) return error.InvalidPushParameters;
+    // Zero would DUPLICATE `max_push_force = 0`, which is the documented way to disable
+    // pushing — two ways to express one thing is the duplication class refused elsewhere in
+    // this module. Negative INVERTS the impulse: the character pulls instead of pushing.
+    if (desc.mass <= 0) return error.InvalidPushParameters;
+
     if (!std.math.isFinite(desc.max_push_force)) return error.InvalidPushParameters;
+    // A negative force ceiling has no meaning; zero is the disabler.
+    if (desc.max_push_force < 0) return error.InvalidPushParameters;
+
+    // Guarded even though no algorithm consumes it yet, because it is STORED at solver
+    // precision: a NaN entered by the caller would live in the store, indistinguishable from
+    // the DELIBERATE poison NaN this repository writes on purpose into fields that have no
+    // meaning for a shape. That ambiguity is what cost M1.1.11.1 several rounds — not the NaN
+    // itself. If gate D deletes the field, this guard leaves with it: one line.
+    if (!std.math.isFinite(desc.predictive_contact_distance) or
+        desc.predictive_contact_distance < 0) return error.InvalidDimensions;
 
     // A TYPED error and not an assert, for the same reason `addBody` uses one: the query
     // mask is 32 bits, so a character declared past that domain would be invisible to every
