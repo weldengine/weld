@@ -241,6 +241,14 @@ pub const GroundInfo = character_mod.GroundInfo;
 /// How far down the ground probe looks: `padding + predictive_contact_distance`, the band in
 /// which "the ground I am standing on" is a meaningful question.
 pub const groundSweepDistance = character_mod.groundSweepDistance;
+/// What one `moveCharacter` returns: the resolved BASE position plus the ground verdict at that
+/// new pose. No remaining displacement and no collision counter — a caller that wants to know
+/// whether it was blocked compares what it asked for against what it got.
+pub const CharacterMoveResult = character_mod.MoveResult;
+/// The slide loop's iteration ceiling. Exhausting it stops the character SHORT, never further.
+pub const max_slide_iterations = character_mod.max_slide_iterations;
+/// The depenetration loop's iteration ceiling, same discipline and same failure direction.
+pub const max_depenetration_iterations = character_mod.max_depenetration_iterations;
 /// The offset from a character's BASE to the CENTRE of its capsule — half the height along
 /// `+Y`. Re-exported because it is THE one named place that offset exists, and a consumer
 /// deriving it a second time is the defect the single definition prevents.

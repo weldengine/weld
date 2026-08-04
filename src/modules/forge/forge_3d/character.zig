@@ -138,6 +138,15 @@ pub const Character = struct {
     /// stays so across a resize (gate F): a resize is not a re-creation, and an exclusion
     /// the caller memorised survives it.
     inner_body: ?BodyId,
+    /// The presence's broadphase proxy, once its owner has registered it through
+    /// `setPresenceProxy`.
+    ///
+    /// `createCharacter` cannot insert the proxy itself: the broad layer is an INSERTION ARGUMENT
+    /// and no `BodyType → BroadphaseLayer` wiring exists — that arrives with `PhysicsWorld` at
+    /// M1.1.15. So whoever owns the broadphase inserts, then hands the handle back here, and from
+    /// then on every pose write keeps it fresh. Null means "nobody registered one", and a pose
+    /// write then updates the body and not the tree.
+    presence_proxy: ?Broadphase.Proxy = null,
 };
 
 /// The offset from a character's BASE to the CENTRE of its capsule — half the height along
@@ -401,6 +410,294 @@ pub fn groundSweepDistance(c: Character) Real {
     return c.padding + c.predictive_contact_distance;
 }
 
+// --- The move (M1.1.12 gate D) ---
+
+/// How many times the slide loop may sweep before giving up. NAMED and mandatory: M1.1.14 forbids
+/// an unbounded loop on a path that must be reproducible, and the reference's own controller
+/// carries the same kind of ceiling.
+///
+/// Exhausting it stops the character SHORT of where it asked to go — it never moves further. That
+/// is the safe failure direction, the same one §1.11.11 chose for the cast kernel: a character that
+/// does not finish its step is a visible stutter, a character that finishes it through a wall is a
+/// hole in the world.
+pub const max_slide_iterations: u32 = 4;
+
+/// How many times depenetration may push before giving up. Same ceiling discipline, same safe
+/// failure direction: a character left slightly overlapping is corrected next call, a character
+/// pushed by an unbounded loop is a hang.
+pub const max_depenetration_iterations: u32 = 4;
+
+/// Bodies whose wake this call owes, at most one per iteration of each bounded phase. The bound is
+/// EXACT rather than a guess: no phase can contact more bodies than it has iterations.
+const max_touched = max_slide_iterations + max_depenetration_iterations;
+
+/// The bodies one move touched, accumulated rather than woken on the spot.
+///
+/// The collectors hold a `*const BodyManager` — `castShapeBody` and `collideShapeBody` both take
+/// one — so nothing inside them can wake anything. The same ordering M1.1.11.1 was forced into when
+/// its wake moved after `prepare`, and for the same reason.
+const TouchedBodies = struct {
+    items: [max_touched]BodyId = @splat(0),
+    len: u32 = 0,
+
+    fn add(self: *TouchedBodies, body: BodyId) void {
+        // The capacity is EXACT, one slot per iteration of each bounded phase, so this cannot
+        // overflow. Asserted rather than silently clamped: a DROPPED wake is precisely the defect
+        // W4 exists to prevent, so it must be loud and not absorbed.
+        std.debug.assert(self.len < max_touched);
+        if (self.len >= max_touched) return;
+        self.items[self.len] = body;
+        self.len += 1;
+    }
+
+    fn slice(self: *const TouchedBodies) []const BodyId {
+        return self.items[0..self.len];
+    }
+};
+
+/// What one `moveCharacter` returns, at solver precision.
+///
+/// **No remaining displacement and no collision counter.** A caller that wants to know whether it
+/// was blocked compares the position it asked for against the one it got — a caller-side
+/// derivation, not an engine quantity, and precisely why the former `collisions` field was deleted
+/// from the frozen `CharacterMoveResult`.
+pub const MoveResult = struct {
+    /// The resolved BASE position (§1.12.3) — what gameplay writes into `Transform.position`.
+    position: Vec3r,
+    /// The ground verdict at that NEW pose, by the same probe gate C delivered.
+    ground: GroundInfo,
+};
+
+/// One contact the move must react to: where it is and which way the surface faces.
+const Contact = struct {
+    body: BodyId,
+    /// Outward, surface → character — the same orientation `GroundInfo.normal` carries.
+    normal: Vec3r,
+    /// Overlap along `normal`, for the depenetration push. Zero for a swept contact.
+    penetration: Real = 0,
+};
+
+/// Nearest swept contact over every candidate body, with the character's own filter.
+///
+/// Tightens its bound TO each accepted distance, like the query family's `closest` — here that IS
+/// correct, unlike the ground probe's: a nearer surface genuinely stops the motion sooner, so
+/// pruning what is behind it loses nothing.
+const SweepCollector = struct {
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    probe: SupportShape,
+    origin: Vec3r,
+    direction: Vec3r,
+    bound: Real,
+    layer_mask: u32,
+    exclude: ?BodyId,
+    best: ?struct {
+        body: BodyId,
+        subshape_id: u32,
+        distance: Real,
+        normal: Vec3r,
+    } = null,
+
+    pub fn add(self: *SweepCollector, user_data: u32) void {
+        const body: BodyId = user_data;
+        if (self.exclude) |own| {
+            if (own == body) return;
+        }
+        const layer = self.bm.collisionLayer(body) orelse return;
+        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+
+        const hit = self.bm.castShapeBody(
+            self.store,
+            body,
+            self.probe,
+            self.origin,
+            Quatr.identity,
+            self.direction,
+            self.bound,
+            .ignore,
+        ) orelse return;
+
+        if (self.best) |b| {
+            if (hit.distance > b.distance) return;
+            // The same total order the ground selection uses, for the same reason: without it the
+            // answer would follow the traversal, hence the tree's shape.
+            if (hit.distance == b.distance) {
+                if (body > b.body) return;
+                if (body == b.body and hit.subshape_id >= b.subshape_id) return;
+            }
+        }
+        self.best = .{
+            .body = body,
+            .subshape_id = hit.subshape_id,
+            .distance = hit.distance,
+            .normal = hit.normal,
+        };
+        // Tightened TO, not below, so an equal distance still reaches the tie-break.
+        self.bound = hit.distance;
+    }
+
+    pub fn maxDistance(self: *const SweepCollector) Real {
+        return self.bound;
+    }
+
+    pub fn shouldStop(_: *const SweepCollector) bool {
+        return false;
+    }
+};
+
+/// The DEEPEST manifold of one body against the probe — the depenetration push direction, and the
+/// slide normal when a sweep reports distance zero.
+const DeepestManifold = struct {
+    best: ?Contact = null,
+    body: BodyId,
+
+    pub fn add(self: *DeepestManifold, subshape_id: u32, manifold: ContactManifold) void {
+        _ = subshape_id;
+        var deepest = manifold.points[0];
+        for (manifold.points[1..manifold.count]) |p| {
+            if (p.penetration > deepest.penetration) deepest = p;
+        }
+        if (self.best) |b| {
+            if (deepest.penetration <= b.penetration) return;
+        }
+        // The SAME single negation the ground probe makes: `collideShapeBody` returns probe → body,
+        // and every consumer here wants surface → character.
+        self.best = .{
+            .body = self.body,
+            .normal = manifold.normal.neg(),
+            .penetration = deepest.penetration,
+        };
+    }
+};
+
+/// The deepest overlap over every candidate body — what depenetration pushes out of first.
+const WorstOverlap = struct {
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    probe: SupportShape,
+    centre: Vec3r,
+    layer_mask: u32,
+    exclude: ?BodyId,
+    best: ?Contact = null,
+
+    pub fn add(self: *WorstOverlap, user_data: u32) void {
+        const body: BodyId = user_data;
+        if (self.exclude) |own| {
+            if (own == body) return;
+        }
+        const layer = self.bm.collisionLayer(body) orelse return;
+        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+
+        var one = DeepestManifold{ .body = body };
+        self.bm.collideShapeBody(self.store, body, self.probe, self.centre, Quatr.identity, &one);
+        const c = one.best orelse return;
+        if (self.best) |b| {
+            if (c.penetration < b.penetration) return;
+            // Exact tie on depth: the smaller `BodyId`, so the push is not a function of the
+            // traversal order.
+            if (c.penetration == b.penetration and body >= b.body) return;
+        }
+        self.best = c;
+    }
+};
+
+/// The real outward normal at a swept contact.
+///
+/// **The distance-zero trap, met a second time.** A sweep that TRAVELLED returns the surface's own
+/// outward normal (§1.11.11), already the orientation every consumer here wants. At distance ZERO
+/// it returns `−direction` — the direction travelled FROM, not the surface — which preserves
+/// `normal · direction <= 0` and is nonetheless useless for sliding: on a slope it would answer
+/// "perfectly horizontal". So the normal comes from the MANIFOLD instead, exactly as the ground
+/// probe does, and null when even that finds nothing.
+fn slideNormal(
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    probe: SupportShape,
+    centre: Vec3r,
+    body: BodyId,
+    distance: Real,
+    swept_normal: Vec3r,
+) ?Vec3r {
+    if (distance > 0) return swept_normal;
+    var deepest = DeepestManifold{ .body = body };
+    bm.collideShapeBody(store, body, probe, centre, Quatr.identity, &deepest);
+    const c = deepest.best orelse return null;
+    return c.normal;
+}
+
+/// Remove the component of `motion` that goes INTO the surface whose outward normal is `normal`.
+///
+/// The normal points from the surface toward the character, so moving into it is a NEGATIVE dot
+/// product; subtracting that component zeroes it exactly and leaves the tangential part untouched.
+/// Zeroing both would pass a "the normal component is zero" test and be wrong, which is why the
+/// wall test asserts the tangential part against a closed form as well.
+fn slideAlongPlane(motion: Vec3r, normal: Vec3r) Vec3r {
+    const into = motion.dot(normal);
+    if (into >= 0) return motion; // already leaving the surface
+    return motion.sub(normal.scale(into));
+}
+
+/// Constrain `motion` against a crease formed by two contact planes.
+///
+/// Returns null when the two normals are EXACTLY parallel — which is a THIRD answer and not an
+/// absence of edge. Two exactly parallel normals and a single contact plane are different
+/// situations, and conflating them is the false-negative class this module refuses; it is the
+/// `Attempt` lesson of §1.11.17 applied to a crease. The exact tier is what makes that null
+/// trustworthy: `math.triangleCross`'s float `.direction` would return a rounding residue here and
+/// read as a valid crease.
+fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r) ?Vec3r {
+    const edge = math.triangleCrossDirection(Real, Vec3r.zero, n0, n1) orelse return null;
+    // The magnitude carries no meaning by contract — only the direction — so it is normalised
+    // here and never used as a length.
+    const len_sq = edge.lengthSq();
+    if (len_sq == 0) return null;
+    var axis = edge.scale(1 / @sqrt(len_sq));
+    // Oriented to agree with the motion, so the character slides ALONG the edge in the direction
+    // it was already going and not backwards along it.
+    const along = motion.dot(axis);
+    if (along < 0) axis = axis.neg();
+    return axis.scale(@abs(along));
+}
+
+/// Push the capsule out of everything it overlaps, deepest first, and record whose wake that owes.
+///
+/// Bounded by `max_depenetration_iterations`. **Depenetration goes through the MANIFOLD and never
+/// through the sweep** (§1.12.6): at distance zero a cast returns `−direction`, the direction
+/// travelled from rather than the surface, which is correct for the cast's own invariant and
+/// unusable for pushing out.
+fn depenetrate(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    record: shape_mod.Shape,
+    probe: SupportShape,
+    start: Vec3r,
+    layer_mask: u32,
+    exclude: ?BodyId,
+    touched: *TouchedBodies,
+) Vec3r {
+    var centre = start;
+    var i: u32 = 0;
+    while (i < max_depenetration_iterations) : (i += 1) {
+        var worst = WorstOverlap{
+            .bm = bm,
+            .store = store,
+            .probe = probe,
+            .centre = centre,
+            .layer_mask = layer_mask,
+            .exclude = exclude,
+        };
+        _ = bp.queryAabb(body_manager_mod.worldAabb(record, centre, Quatr.identity), &worst);
+        const c = worst.best orelse break;
+        touched.add(c.body);
+        // Out along the outward normal by exactly the overlap, so the surfaces end up touching.
+        // The `padding` stand-off is the SWEEP's business, not this one's — maintained here too it
+        // would be two mechanisms holding one distance.
+        centre = centre.add(c.normal.scale(c.penetration));
+    }
+    return centre;
+}
+
 /// Generational store of character controllers.
 ///
 /// The `ShapeStore` pattern verbatim: stable slots, LIFO recycling, a generation on the
@@ -552,6 +849,195 @@ pub const CharacterStore = struct {
     pub fn get(self: *const CharacterStore, id: CharacterId) ?Character {
         const idx = self.alloc.validate(id) orelse return null;
         return self.characters.items[idx];
+    }
+
+    /// Register the broadphase proxy of a character's presence, so every later pose write keeps
+    /// the tree fresh as well as the body. No-op on a stale handle.
+    ///
+    /// A seam and not a design preference: the broad LAYER is an insertion argument and the
+    /// `BodyType → BroadphaseLayer` wiring arrives with `PhysicsWorld` at M1.1.15, so the store
+    /// cannot choose where the proxy goes. Whoever does the insertion — the orchestrator later, the
+    /// test harness now — hands the handle back through here.
+    pub fn setPresenceProxy(self: *CharacterStore, id: CharacterId, proxy: Broadphase.Proxy) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.characters.items[idx].presence_proxy = proxy;
+    }
+
+    /// Move character `id` by `displacement` metres, resolving collisions, and return its new BASE
+    /// position together with the ground verdict at that new pose.
+    ///
+    /// **A DISPLACEMENT, not a velocity** (§1.12.1). The kinematics belong to the caller
+    /// (`engine-movement.md`) and the geometry to the engine, and `dt` serves only the DERIVED
+    /// terms — the support velocity, and the push impulse at gate F — never to integrate the
+    /// character. It is accepted here so the signature is the frozen one and the derived terms have
+    /// their input the day they land.
+    ///
+    /// The algorithm, in the order it runs:
+    ///
+    ///   1. **Depenetrate** through the manifold, deepest overlap first, bounded.
+    ///   2. **Sweep and slide**, bounded: sweep along what remains, advance to `padding` short of
+    ///      the first contact, then constrain the rest against the accumulated contact planes —
+    ///      one plane projects, two slide along their crease, and anything more stops.
+    ///   3. **Publish**: write the record, mirror the pose onto the presence and its broadphase
+    ///      proxy, wake what was touched, and recompute the ground verdict at the new pose.
+    ///
+    /// Both loops are bounded by NAMED ceilings and exhausting either stops the character SHORT of
+    /// where it asked to go, never further — the safe failure direction (§1.11.11).
+    ///
+    /// Errors: `error.StaleCharacter` on a dead handle, and whatever the broadphase proxy update
+    /// allocates.
+    pub fn moveCharacter(
+        self: *CharacterStore,
+        gpa: std.mem.Allocator,
+        bp: *Broadphase,
+        bm: *BodyManager,
+        store: *const ShapeStore,
+        id: CharacterId,
+        displacement: Vec3r,
+        dt: Real,
+    ) !MoveResult {
+        // `dt` reaches no term of this gate: the derived ones are the support velocity, which the
+        // ground probe reads from the support's own columns, and the push impulse of gate F.
+        _ = dt;
+        const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        const c = self.characters.items[idx];
+        const record = store.get(c.shape) orelse unreachable;
+        const probe = shape_mod.supportShape(record);
+
+        var touched = TouchedBodies{};
+
+        // 1 — depenetration.
+        var centre = depenetrate(
+            bp,
+            bm,
+            store,
+            record,
+            probe,
+            c.position.add(baseToCentre(Real, c.height)),
+            c.layer_mask,
+            c.inner_body,
+            &touched,
+        );
+
+        // 2 — sweep and slide.
+        var remaining = displacement;
+        var planes: [2]Vec3r = @splat(Vec3r.zero);
+        var plane_count: u32 = 0;
+        var iteration: u32 = 0;
+        while (iteration < max_slide_iterations) : (iteration += 1) {
+            const len_sq = remaining.lengthSq();
+            // True zero, not an epsilon: a displacement of exactly nothing is done, and any
+            // representable non-zero displacement is a real request to be served.
+            if (len_sq == 0) break;
+            const distance = @sqrt(len_sq);
+            const direction = remaining.scale(1 / distance);
+
+            var sweep = SweepCollector{
+                .bm = bm,
+                .store = store,
+                .probe = probe,
+                .origin = centre,
+                .direction = direction,
+                .bound = distance,
+                .layer_mask = c.layer_mask,
+                .exclude = c.inner_body,
+            };
+            const box = body_manager_mod.worldAabb(record, centre, Quatr.identity);
+            _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &sweep);
+
+            const hit = sweep.best orelse {
+                // Nothing in the way: the whole remaining displacement is served.
+                centre = centre.add(remaining);
+                remaining = Vec3r.zero;
+                break;
+            };
+            touched.add(hit.body);
+
+            // Advance to `padding` SHORT of the surface, clamped at zero so a contact already
+            // inside the margin does not push the character backwards.
+            const advance = @max(0, hit.distance - c.padding);
+            centre = centre.add(direction.scale(advance));
+            remaining = remaining.sub(direction.scale(advance));
+
+            const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse {
+                // No usable normal: stop rather than guess a direction. Short, never further.
+                remaining = Vec3r.zero;
+                break;
+            };
+
+            // Record the plane. A normal parallel to one already held replaces it rather than
+            // filling the second slot, so a re-contact with the same wall does not read as a crease.
+            if (plane_count == 1 and math.triangleCrossDirection(Real, Vec3r.zero, planes[0], normal) == null) {
+                planes[0] = normal;
+            } else if (plane_count < 2) {
+                planes[plane_count] = normal;
+                plane_count += 1;
+            } else {
+                // A third distinct plane is a corner: nothing left to slide along.
+                remaining = Vec3r.zero;
+                break;
+            }
+
+            if (plane_count == 1) {
+                remaining = slideAlongPlane(remaining, planes[0]);
+            } else {
+                remaining = slideAlongCrease(remaining, planes[0], planes[1]) orelse {
+                    // EXACTLY parallel normals — a third answer, not an absent edge. There is no
+                    // crease to slide along, so the motion stops.
+                    remaining = Vec3r.zero;
+                    break;
+                };
+                // NO "still driving into a plane" check here, and its absence is a decision.
+                // The crease axis is the CROSS PRODUCT of the two normals, so it is perpendicular
+                // to both of them by construction and the motion projected onto it has a
+                // mathematically ZERO dot with each. Testing that dot against zero would be
+                // testing the SIGN OF FLOAT NOISE — measured: the box contact normals carry
+                // components a few ULPs off their exact axis, and a strict `< 0` on that noise
+                // stopped a legitimate edge slide dead. The corner case is already the third-plane
+                // branch above, which is a structural condition rather than a numerical one.
+            }
+        }
+
+        // 3 — publish. The record is AUTHORITATIVE and the presence mirrors it; the two are written
+        // in one place so they cannot drift (see the Notes on this being the likeliest silent bug).
+        const new_base = centre.sub(baseToCentre(Real, c.height));
+        self.characters.items[idx].position = new_base;
+        try self.syncPresence(gpa, bp, bm, store, idx);
+
+        // The wake this call owes. W4 and not W3: a presence moved by POSE WRITE keeps velocity
+        // columns of exactly zero while it crosses the scene, so W3's true-zero velocity test never
+        // sees it move (§1.12.10). Woken here rather than inside the collectors, which hold a
+        // `*const BodyManager`.
+        for (touched.slice()) |body| bm.wakeBody(body);
+
+        return .{
+            .position = new_base,
+            .ground = try self.groundOf(bp, bm, store, id),
+        };
+    }
+
+    /// Mirror the authoritative record pose onto the presence — the body AND its broadphase proxy.
+    ///
+    /// **The one place that mirror is written.** The pose lives twice, in the record and in the
+    /// body, and three entries write both; miss the proxy on any one of them and queries answer at
+    /// the previous pose, which no test on a stationary character would find. So the three entries
+    /// call this, and the freshness test is per write path rather than once on the move.
+    fn syncPresence(
+        self: *const CharacterStore,
+        gpa: std.mem.Allocator,
+        bp: *Broadphase,
+        bm: *BodyManager,
+        store: *const ShapeStore,
+        idx: u24,
+    ) !void {
+        const c = self.characters.items[idx];
+        const body = c.inner_body orelse return;
+        // NON-ACTIVATING by contract (§1.8.4) — this is the controller's own write path, and the
+        // wake it owes is composed by the caller from the bodies it TOUCHED.
+        bm.setPosition(body, c.position.add(baseToCentre(Real, c.height)));
+        if (c.presence_proxy) |proxy| {
+            try bp.update(gpa, proxy, bm.bodyAabb(store, body).?);
+        }
     }
 
     /// The ground verdict for character `id` at its CURRENT pose — the controller is the
