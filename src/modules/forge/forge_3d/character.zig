@@ -211,6 +211,20 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     // A NEGATIVE padding inflates the capsule INWARD: the character sinks `|padding|` into
     // every surface it stands on, and nothing anywhere reports it. Zero is legal — no margin.
     if (desc.padding < 0) return error.InvalidPadding;
+    // **AND AN UPPER BOUND, whose absence reproduced the freeze from the other end.**
+    // `paddedAdvance` returns `max(0, d − padding)`, so once `padding` exceeds a call's
+    // displacement the advance is zero at every sweep and the character stops moving — the same
+    // class the stand-off floor just closed at the BOTTOM of this range, through the other door
+    // of the same parameter. It does not take an absurd value: `padding = 0.5` against 0.1 m per
+    // tick (6 m/s at 60 Hz) freezes the character the moment a sweep finds anything within half
+    // a metre, and 0.5 is a factor-of-25 slip, not a delirious entry. The same `padding` enters
+    // the depenetration target, so it also catapults a character created near a wall by 0.5 m.
+    //
+    // A RELATION between fields, refused by typed error and never clamped — the same treatment as
+    // `height >= 2 · radius`, and reachable the same way, by a wrong entry rather than by the
+    // default. The motive is geometric: a stand-off shell thicker than the radius of the shape it
+    // surrounds is incoherent, and the reference carries 0.02 against a radius of 0.3.
+    if (desc.padding >= desc.radius) return error.InvalidPadding;
 
     if (!std.math.isFinite(desc.mass)) return error.InvalidPushParameters;
     // Zero would DUPLICATE `max_push_force = 0`, which is the documented way to disable
@@ -946,7 +960,7 @@ fn tryStepUp(
     // 1 — lift.
     const up_hit = sweepNearest(bp, bm, store, record, probe, centre, up, c.step_height, c.layer_mask, c.inner_body);
     if (up_hit) |h| touched.add(h.body);
-    const lift = paddedAdvance(up_hit, c.step_height, c.padding);
+    const lift = paddedAdvance(up_hit, c.step_height, standoffTarget(c.padding, probe, centre));
     if (lift <= 0) return null;
     const lifted = centre.add(up.scale(lift));
 
@@ -954,7 +968,7 @@ fn tryStepUp(
     // lift, which is exactly the `step_height + ε` case: the climb must fail and the caller slides.
     const fwd_hit = sweepNearest(bp, bm, store, record, probe, lifted, direction, remaining_distance, c.layer_mask, c.inner_body);
     if (fwd_hit) |h| touched.add(h.body);
-    const forward_advance = paddedAdvance(fwd_hit, remaining_distance, c.padding);
+    const forward_advance = paddedAdvance(fwd_hit, remaining_distance, standoffTarget(c.padding, probe, lifted));
     if (forward_advance <= 0) return null;
     const forward = lifted.add(direction.scale(forward_advance));
 
@@ -962,7 +976,7 @@ fn tryStepUp(
     // side is still caught; finding nothing means there is no floor over there at all.
     const down_hit = sweepNearest(bp, bm, store, record, probe, forward, up.neg(), lift + c.step_height, c.layer_mask, c.inner_body) orelse return null;
     touched.add(down_hit.body);
-    const drop = paddedAdvance(down_hit, lift + c.step_height, c.padding);
+    const drop = paddedAdvance(down_hit, lift + c.step_height, standoffTarget(c.padding, probe, forward));
     const landed = forward.sub(up.scale(drop));
 
     // 4 — the landing must be walkable.
@@ -1022,7 +1036,10 @@ fn stepDown(
     const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse return centre;
     if (normal.dot(up) < c.cos_max_slope) return centre;
     touched.add(hit.body);
-    return centre.sub(up.scale(paddedAdvance(hit, c.step_height, c.padding)));
+    // The SAME stand-off the depenetration establishes, not a bare `c.padding`: at `padding = 0` the
+    // bare value descends the full distance to the floor and re-seats the capsule exactly tangent,
+    // which froze the next call. See `standoffTarget`.
+    return centre.sub(up.scale(paddedAdvance(hit, c.step_height, standoffTarget(c.padding, probe, centre))));
 }
 
 /// Push a DYNAMIC body the character walked into, and take nothing in return.
@@ -1118,6 +1135,19 @@ fn coordScale(probe: SupportShape, centre: Vec3r) Real {
     return @sqrt(centre.lengthSq()) + narrowphase.coreExtent(Real, probe) + probe.radius;
 }
 
+/// The stand-off this controller leaves between the capsule and a surface it resolves against:
+/// `padding` when the caller asked for one, and the numerical floor otherwise.
+///
+/// **BOTH the depenetration and the floor-sticking descent use it, and using it in only one place was
+/// a defect found by enumerating the domain's bounds.** With `padding = 0`, `stepDown` passed a bare
+/// zero to `paddedAdvance` and therefore descended the FULL distance to the floor, re-seating the
+/// capsule exactly tangent — so the next call with any downward component in its displacement met a
+/// contact at distance zero and froze, undoing what the depenetration had just established. Measured:
+/// 0.2 m served on the first call and 0.0001 on every one after.
+fn standoffTarget(padding: Real, probe: SupportShape, centre: Vec3r) Real {
+    return @max(padding, standoff_floor_k * std.math.floatEps(Real) * coordScale(probe, centre));
+}
+
 fn depenetrate(
     bp: *const Broadphase,
     bm: *const BodyManager,
@@ -1193,7 +1223,7 @@ fn depenetrate(
         // `standoff_floor` above its floor rather than exactly on it, and that is correct rather than a
         // compromise: `padding = 0` means "no physical margin", not "stand inside the numerical band
         // where the GJK classification decides the verdict from one frame to the next".
-        const target = @max(padding, standoff_floor_k * std.math.floatEps(Real) * coordScale(probe, centre));
+        const target = standoffTarget(padding, probe, centre);
         centre = centre.add(c.normal.scale(c.penetration + target));
     }
     return centre;
@@ -1463,9 +1493,20 @@ pub const CharacterStore = struct {
             };
             touched.add(hit.body);
 
-            // Advance to `padding` SHORT of the surface, clamped at zero so a contact already
+            // Advance to the STAND-OFF short of the surface, clamped at zero so a contact already
             // inside the margin does not push the character backwards.
-            const advance = paddedAdvance(hit, distance, c.padding);
+            //
+            // **`standoffTarget` and not a bare `c.padding`, and this is the site that made it a CLASS
+            // rather than an instance.** With `padding = 0` a DIAGONAL advance stops exactly at contact,
+            // so the capsule lands exactly tangent INSIDE this loop, and every later iteration then
+            // finds distance zero and advances nothing — the freeze, re-manufactured per call from the
+            // stand-off the depenetration had just established. Traced: `hit = 0.000000000`,
+            // `adv = 0.000000000`, three dead iterations, 0.3 m of the request dropped.
+            //
+            // Fixing the depenetration and the descent alone left this path open, which is the third
+            // instance of one class in this file: EVERY `paddedAdvance` call site owes the stand-off,
+            // so the target belongs to all five and not to whichever one a probe happened to catch.
+            const advance = paddedAdvance(hit, distance, standoffTarget(c.padding, probe, centre));
             centre = centre.add(direction.scale(advance));
             remaining = remaining.sub(direction.scale(advance));
 
@@ -1596,6 +1637,10 @@ pub const CharacterStore = struct {
         if (!std.math.isFinite(radius) or radius <= 0) return error.InvalidDimensions;
         if (!std.math.isFinite(height) or height <= 0) return error.InvalidDimensions;
         if (height < 2 * radius) return error.InvalidDimensions;
+        // `padding < radius` is a domain of the PAIR, so SHRINKING the radius can violate it while
+        // neither field is individually out of range — which is exactly why the resize has to
+        // re-check it and not only the three length bounds. Same door, same typed refusal.
+        if (self.characters.items[idx].padding >= radius) return error.InvalidPadding;
 
         const c = self.characters.items[idx];
         const new_shape = try store.createShape(gpa, .{ .capsule = .{

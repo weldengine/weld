@@ -374,6 +374,15 @@ pub const CharacterDescriptor = struct {
     /// other. Without a margin the capsule sits flush and GJK's own contact-margin band
     /// then decides the verdict from one frame to the next. The reference's
     /// `mCharacterPadding` value.
+    ///
+    /// Domain `[0, radius)`, and BOTH ends are load-bearing — both found by enumerating the
+    /// legal bounds and asking what the code does at each, not by intuition. Zero is legal and
+    /// means no PHYSICAL margin, the solver then holding the capsule off by a numerical floor so
+    /// that the classification band cannot decide the verdict from frame to frame. And
+    /// `padding >= radius` is REFUSED: `max(0, d − padding)` is zero at every sweep once
+    /// `padding` exceeds a call's displacement, so the character stops moving. A stand-off shell
+    /// thicker than the radius it surrounds is incoherent, and the reference carries 0.02
+    /// against 0.3.
     padding: f32 = 0.02,
 
     /// How far OUTSIDE the shape to sweep for contacts not yet touching (metres). The
