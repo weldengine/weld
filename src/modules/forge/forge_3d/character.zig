@@ -222,6 +222,13 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     // A negative force ceiling has no meaning; zero is the disabler.
     if (desc.max_push_force < 0) return error.InvalidPushParameters;
 
+    // `step_height` is a SWEEP DISTANCE — `tryStepUp`'s lift and `stepDown`'s probe both pass it
+    // straight to `sweepNearest` — and every other stored physical parameter here is guarded, so its
+    // absence was an omission and not a decision. A NaN reaches the cast kernel's own domain assert,
+    // which holds in Debug only; a negative value would ask for a sweep backwards. Zero is legal and
+    // is the disabler the suite already exercises: no climb, no floor-sticking.
+    if (!std.math.isFinite(desc.step_height) or desc.step_height < 0) return error.InvalidDimensions;
+
     // Guarded even though no algorithm consumes it yet, because it is STORED at solver
     // precision: a NaN entered by the caller would live in the store, indistinguishable from
     // the DELIBERATE poison NaN this repository writes on purpose into fields that have no
@@ -397,7 +404,17 @@ const ManifoldSink = struct {
         for (manifold.points[1..manifold.count]) |p| {
             if (p.penetration > deepest.penetration) deepest = p;
         }
-        self.ground.consider(self.body, subshape_id, manifold.normal.neg(), deepest.position);
+        // The SAME single negation the ground probe makes: `collideShapeBody` returns probe → body,
+        // and every consumer here wants surface → character.
+        const outward = manifold.normal.neg();
+        // **THE MANIFOLD POINT IS THE MIDPOINT OF THE TWO SURFACE POINTS, NOT THE GROUND'S SURFACE**,
+        // and `ground_velocity` is read at the point the CHARACTER stands on. For a capsule sunk `p`
+        // into a floor the midpoint sits at `−p/2` while the body's surface is at `0`, so the lever
+        // arm was short by half the penetration and a rotating platform reported a velocity taken
+        // half a penetration inside itself. Moved out along the outward normal by `p/2`, which is
+        // the same reconstruction `prepare` performs on the same field (§1.7.2).
+        const surface = deepest.position.add(outward.scale(deepest.penetration / 2));
+        self.ground.consider(self.body, subshape_id, outward, surface);
     }
 };
 
@@ -463,6 +480,39 @@ const TouchedBodies = struct {
 
     fn slice(self: *const TouchedBodies) []const BodyId {
         return self.items[0..self.len];
+    }
+};
+
+/// The pushes one move owes, accumulated rather than applied on the spot.
+///
+/// **Applied AFTER the publication, for the reason the wake already is.** `syncPresenceTo` can still
+/// fail after the slide loop has run, and a failure returns an error with the record deliberately
+/// intact — so a push applied inside the loop survived a call that reported having done nothing, and
+/// the caller's retry applied it a second time. Held here and drained beside the `wakeBody` loop,
+/// which sits post-publication for exactly that reason.
+///
+/// The bound is `max_touched` and it is EXACT, not a guess: a push can only target a body the move
+/// TOUCHED, and only the dynamic ones that yield, so this set is a subset of one already bounded
+/// slot for slot. Asserted rather than clamped — a dropped push is a silent divergence between what
+/// the character resolved against and what the world did.
+const PendingPushes = struct {
+    const Entry = struct { body: BodyId, impulse: Vec3r };
+
+    items: [max_touched]Entry = @splat(.{ .body = 0, .impulse = Vec3r.zero }),
+    len: u32 = 0,
+
+    fn add(self: *PendingPushes, body: BodyId, impulse: Vec3r) void {
+        std.debug.assert(self.len < max_touched);
+        if (self.len >= max_touched) return;
+        self.items[self.len] = .{ .body = body, .impulse = impulse };
+        self.len += 1;
+    }
+
+    fn apply(self: *const PendingPushes, bm: *BodyManager) void {
+        for (self.items[0..self.len]) |e| {
+            // ACTIVATING by contract (§1.8.4) — an external mutation, and W1 rather than W4.
+            bm.addImpulse(e.body, e.impulse);
+        }
     }
 };
 
@@ -947,24 +997,32 @@ fn stepDown(
 ///
 /// `dt` is one of the two DERIVED terms §1.12.1 reserves it for; the character is never integrated
 /// with it.
-fn pushBody(
-    bm: *BodyManager,
+/// The impulse this contact owes the body, or null if it owes none. PLANS, never applies —
+/// `PendingPushes.apply` is the only writer, and it runs after the publication.
+///
+/// One consequence of deferring, stated rather than left to be discovered: if two slide iterations
+/// hit the SAME body, both now plan against the velocity it had at the start of the call, where the
+/// applied form let the second read the first's result and ask for less. The per-entry ceiling is
+/// unchanged, so the worst case is the same `n · max_push_force · dt` it always was; only the actual
+/// sum can come out slightly larger. The alternative — re-reading a velocity that has not been
+/// written yet — is not available to a planner.
+fn plannedPush(
+    bm: *const BodyManager,
     body: BodyId,
     normal: Vec3r,
     character_velocity: Vec3r,
     c: Character,
     dt: Real,
-) void {
-    if (c.max_push_force <= 0 or dt <= 0) return;
-    if (bm.bodyType(body) != .dynamic) return;
+) ?Vec3r {
+    if (c.max_push_force <= 0 or dt <= 0) return null;
+    if (bm.bodyType(body) != .dynamic) return null;
     // `normal` runs surface → character, so the character pushes along its negation.
     const direction = normal.neg();
-    const body_velocity = bm.linearVelocity(body) orelse return;
+    const body_velocity = bm.linearVelocity(body) orelse return null;
     const closing = character_velocity.dot(direction) - body_velocity.dot(direction);
-    if (closing <= 0) return; // the body is already leaving at least as fast
+    if (closing <= 0) return null; // the body is already leaving at least as fast
     const impulse = @min(c.mass * closing, c.max_push_force * dt);
-    // ACTIVATING by contract (§1.8.4) — an external mutation, and W1 rather than W4.
-    bm.addImpulse(body, direction.scale(impulse));
+    return direction.scale(impulse);
 }
 
 /// Push the capsule out of everything it overlaps, deepest first, and record whose wake that owes.
@@ -1085,7 +1143,7 @@ pub const CharacterStore = struct {
 
     /// Create a controller, returning its handle.
     ///
-    /// **TRANSACTIONAL.** Three resources are acquired — the capsule in `store`, the
+    /// **TRANSACTIONAL.** Three resources are acquired here — the capsule in `store`, the
     /// presence in `bm` when `desc.inner_body` is set, and this store's own slot — and a
     /// failure at any of them leaves NO live slot, NO orphan shape and NO orphan body. The
     /// discipline is the `createShape` one applied across three stores: validate first
@@ -1169,18 +1227,29 @@ pub const CharacterStore = struct {
         return a.id;
     }
 
-    /// Destroy a controller, releasing all three of its resources. No-op on a stale/invalid
-    /// handle, like `removeBody` — and in particular it releases NOTHING there, which is what
-    /// keeps a double destroy from double-freeing the capsule.
+    /// Destroy a controller, releasing all FOUR of its resources: the broadphase proxy, the presence
+    /// body, the capsule in `store`, and the handle slot. No-op on a stale/invalid handle, like
+    /// `removeBody` — and in particular it releases NOTHING there, which is what keeps a double
+    /// destroy from double-freeing the capsule.
     pub fn destroyCharacter(
         self: *CharacterStore,
         gpa: std.mem.Allocator,
+        bp: *Broadphase,
         store: *ShapeStore,
         bm: *BodyManager,
         id: CharacterId,
     ) void {
         const idx = self.alloc.validate(id) orelse return;
         const record = self.characters.items[idx];
+        // **FOUR resources, and an earlier version released three.** The broadphase proxy was the one
+        // left behind, and its own doc comment counted three — a number the code contradicted. A
+        // leaked proxy is not merely untidy: the leaf stays in its tree with the last box the
+        // presence had, so every query along that region still visits it and pair generation still
+        // offers it, against a body handle that has been freed and whose slot will be recycled.
+        //
+        // Removed FIRST, and the order is not arbitrary: `Broadphase.remove` is INFALLIBLE, so this
+        // entry stays `void` and there is no partial-teardown state to reason about.
+        if (record.presence_proxy) |proxy| bp.remove(proxy);
         if (record.inner_body) |b| bm.removeBody(b);
         store.destroyShape(gpa, record.shape);
         _ = self.alloc.free(id);
@@ -1256,6 +1325,7 @@ pub const CharacterStore = struct {
         const probe = shape_mod.supportShape(record);
 
         var touched = TouchedBodies{};
+        var pushes = PendingPushes{};
         // The character's own speed, DERIVED from the displacement and `dt` — the caller owns the
         // kinematics, so this is the only place the engine reconstructs a velocity, and it exists
         // solely to size the push impulse (§1.12.1).
@@ -1315,10 +1385,12 @@ pub const CharacterStore = struct {
                 break;
             };
 
-            // PUSH what was hit, if it is dynamic and yields. Before the climb and the slide, because
-            // whether the body moves does not change the character's own resolution — the push is
-            // unilateral, so the two are independent and the order is readability alone.
-            pushBody(bm, hit.body, normal, character_velocity, c, dt);
+            // PLAN the push on what was hit, if it is dynamic and yields. Planned here and applied
+            // after the publication (see `PendingPushes`); the position in the loop is readability
+            // alone, since the push is unilateral and cannot change the character's own resolution.
+            if (plannedPush(bm, hit.body, normal, character_velocity, c, dt)) |impulse| {
+                pushes.add(hit.body, impulse);
+            }
 
             // **CLIMB BEFORE SLIDING**, once per call. Attempted only against a surface too steep
             // to walk on: something walkable is ground to stand on, not an obstacle to step over.
@@ -1390,6 +1462,10 @@ pub const CharacterStore = struct {
         // sees it move (§1.12.10). Woken here rather than inside the collectors, which hold a
         // `*const BodyManager`.
         for (touched.slice()) |body| bm.wakeBody(body);
+
+        // The pushes this call owes, drained here and not in the loop: everything above this line can
+        // still fail, and a failure must leave the world untouched so the retry is not a second push.
+        pushes.apply(bm);
 
         const ground = try self.groundOf(bp, bm, store, id);
         // Recorded so `setCharacterPosition` has something to INVALIDATE (§1.12.8).
@@ -1546,9 +1622,8 @@ pub const CharacterStore = struct {
     /// call this, and the freshness test is per write path rather than once on the move.
     ///
     /// **It takes the target rather than reading the record, so that the ONE FALLIBLE STEP RUNS
-    /// BEFORE ANY MUTATION, and the box it publishes is the UNION of the old and the new.**
-    /// `Broadphase.update` reserves a slot on its layer's moved log, so it allocates and can fail,
-    /// and an earlier version called it AFTER the commit. Two distinct consequences, both real:
+    /// BEFORE ANY MUTATION.** `Broadphase.update` allocates, and an earlier version called it AFTER
+    /// the commit. Two distinct consequences, both real:
     ///
     ///  - In `resizeCharacter` the record and the presence body already pointed at the new shape,
     ///    which the `errdefer` then destroyed — the character was left holding a freed shape, a
@@ -1556,11 +1631,19 @@ pub const CharacterStore = struct {
     ///  - On the two pose paths the record and the body had moved while the proxy had not, so the
     ///    stored box no longer contained the body and pairs were silently lost.
     ///
-    /// Publishing the UNION is what makes a failure harmless in both directions: it is a superset of
-    /// the old box, so the proxy still contains the body, the record is untouched, and the call is
-    /// retryable — the repository's reserve-then-mutate invariant (M1.1.1-HF1 D3/D4). The extra fat
-    /// on the success path is the broadphase's own normal regime — its stored boxes are fat by
-    /// construction — and the next call refits it.
+    /// The box published is the NEW one alone. An interim form published the UNION of the old and the
+    /// new, and it was wrong twice. `Bvh.update` returns WITHOUT refitting as soon as its stored fat
+    /// box already contains the new tight one, so a teleport's leaf covered the whole trajectory and
+    /// no later call ever shrank it — permanent false positives in queries and in pair generation all
+    /// along the path, from a form whose own comment claimed the next call would refit it. And the
+    /// failure mode the union was guarding does not exist: `Broadphase.update` RESERVES its moved-log
+    /// slot before touching the node, so on OOM neither the node's box nor the log has moved. That
+    /// entry is already atomic and already satisfies the reserve-then-mutate invariant
+    /// (M1.1.1-HF1 D3/D4) this one leans on.
+    ///
+    /// The containment short-circuit is therefore not a hazard but the fat margin's normal regime: a
+    /// small advance does not refit, and does not need to, because the stored box still contains the
+    /// body.
     fn syncPresenceTo(
         self: *const CharacterStore,
         gpa: std.mem.Allocator,
@@ -1577,9 +1660,7 @@ pub const CharacterStore = struct {
         const record = store.get(shape) orelse unreachable;
         const centre = base.add(baseToCentre(Real, height));
         if (c.presence_proxy) |proxy| {
-            const old_box = bm.bodyAabb(store, body).?;
-            const new_box = body_manager_mod.worldAabb(record, centre, Quatr.identity);
-            try bp.update(gpa, proxy, old_box.merge(new_box));
+            try bp.update(gpa, proxy, body_manager_mod.worldAabb(record, centre, Quatr.identity));
         }
         // Infallible from here. NON-ACTIVATING by contract (§1.8.4) — this is the controller's own
         // write path, and the wake it owes is composed by the caller from the bodies it TOUCHED.

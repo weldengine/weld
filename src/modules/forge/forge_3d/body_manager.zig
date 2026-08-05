@@ -349,12 +349,28 @@ pub const BodyManager = struct {
     /// resize is not a re-creation, and an exclusion the caller memorised survives it.
     /// Destroy-and-add is the only alternative and it changes the `BodyId`.
     ///
+    /// **AND restricted to a CONVEX on BOTH sides, asserted.** The body-type assert alone was not
+    /// enough, and the two other categories break a different consequence each: a mesh carries a
+    /// CACHED `world_aabb` computed at `addBody`, which a swap between two meshes would leave holding
+    /// the old geometry's box; and a half-space lives OUTSIDE the broadphase trees (§1.11.15), so
+    /// swapping a convex for one leaves a leaf in a tree for a shape that has no box at all. Both
+    /// fall away by construction under the restriction — a convex's cached box is NaN and never read,
+    /// and two bounded shapes keep the proxy in the tree where it belongs.
+    ///
+    /// The restriction is not a gap: the only need is capsule → capsule on a kinematic presence, and
+    /// widening it later is purely additive. Saying what this does NOT do is the point — the previous
+    /// comment described a general shape swap and the code maintained two of its four consequences.
+    ///
     /// NON-ACTIVATING, like the other write paths of §1.8.4: the wake the caller owes is composed by
     /// the caller from what the new volume touches.
     pub fn setShape(self: *BodyManager, store: *const ShapeStore, id: BodyId, shape_id: api.ShapeId) void {
         const idx = self.alloc.validate(id) orelse return;
         std.debug.assert(self.bodies.items(.body_type)[idx] != .dynamic);
         const shape = store.get(shape_id) orelse return;
+        std.debug.assert(shape.class() == .convex);
+        if (store.get(self.bodies.items(.shape)[idx])) |old| {
+            std.debug.assert(old.class() == .convex);
+        }
         self.bodies.items(.shape)[idx] = shape_id;
         // The sleep radius is geometry-derived, so it is recomputed even though a non-dynamic body's
         // is never read — a stale derived value is worse than a redundant assignment.
