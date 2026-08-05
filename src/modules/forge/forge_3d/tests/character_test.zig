@@ -2943,3 +2943,122 @@ test "a base EXACTLY on the floor is no longer frozen — seven heights, both di
         );
     }
 }
+
+test "the stand-off floor serves a zero padding, and its scale limit is MEASURED" {
+    const gpa = testing.allocator;
+
+    // `padding = 0` is legal — it means no PHYSICAL margin — and it stays in the domain: removing it
+    // would mask this defect instead of closing it. But `penetration + 0` at a tangency of `−0.0`
+    // moves nothing, so the freeze was intact on that path until the target gained a numerical floor.
+    //
+    // **The floor is a NUMERICAL TOLERANCE and §1.11.2 governs it**, unlike `padding`, `max_slope` and
+    // `predictive_contact_distance`, which are named physical parameters it deliberately does not
+    // reach. Its `k` must EXCEED `contact_margin_conv_k` rather than equal it: the point is to leave
+    // the contact margin, not to sit on its edge.
+    for ([_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05 }) |start_y| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 440);
+        var desc = baseDescriptor();
+        desc.entity = ent(441);
+        desc.position = av(0, start_y, 0);
+        desc.padding = 0;
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        // THREE calls, because a mode that works once and stalls on the next is the dangerous one.
+        var previous: Real = 0;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
+            previous = r.position.toArray()[0];
+        }
+    }
+
+    // A 5 m collider instead of a half-space, so the pair's coordinate scale is not degenerate.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addBox(gpa, &world, av(5, 5, 5), av(0, -5, 0), 442);
+        var desc = baseDescriptor();
+        desc.entity = ent(443);
+        desc.position = av(0, 0, 0);
+        desc.padding = 0;
+        const id = try addMover(gpa, &world, &chars, desc);
+        var previous: Real = 0;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
+            previous = r.position.toArray()[0];
+        }
+    }
+}
+
+test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and not padding" {
+    const gpa = testing.allocator;
+
+    // **A SEPARATE, PRE-EXISTING LIMIT, found while probing the stand-off floor and MEASURED not to be
+    // caused by it.** With the floor removed — the exact state of the previous push — the numbers are
+    // identical, and it happens at the DEFAULT `padding = 0.02` as much as at zero, so it is neither a
+    // residual of the floor nor a property of `padding`. My first version of this test asserted it as a
+    // zero-padding residual and was wrong; the default-padding leg refuted it.
+    //
+    // What it is: a large-collider precision limit at f32, the class `engine-physics-forge.md`
+    // §1.11.4 bis already characterises and deliberately does not fix. A 1 km box centred at
+    // `y = −1000` has its top face at zero known only to `ulp(1000) = 6.1e-5`, and the pair's contact
+    // margin is `16 · floatEps(f32) · 2733.6 = 5.2e-3`. The character rests 0.02 above the face, the
+    // ground probe does not find it, the verdict reads `.in_air`, and from the second call the move
+    // serves nothing.
+    //
+    // At f64 the same scene serves every call, which is what identifies the cause as precision rather
+    // than geometry — and `-Dphysics_f64` is exactly Phase 1's answer to this class.
+    for ([_]f32{ 0.02, 0 }) |pad| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addBox(gpa, &world, av(1000, 1000, 1000), av(0, -1000, 0), 450);
+        var desc = baseDescriptor();
+        desc.entity = ent(451);
+        desc.position = av(0, 0, 0);
+        desc.padding = pad;
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        // The FIRST call is served at both precisions: the stall needs the entry pose to be the one the
+        // previous call left.
+        const first = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        try testing.expectApproxEqAbs(@as(Real, 1), first.position.toArray()[0], api_tol);
+
+        const second = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        const served = second.position.toArray()[0] - first.position.toArray()[0];
+        try testing.expectApproxEqAbs(if (Real == f32) @as(Real, 0) else @as(Real, 1), served, api_tol);
+    }
+
+    // THE CONTRAST that makes the above a SCALE statement and not a box statement: the same geometry at
+    // 5 m serves every call at both precisions and at both paddings. Without this leg the test would
+    // read as "boxes stall the move", which is false.
+    for ([_]f32{ 0.02, 0 }) |pad| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addBox(gpa, &world, av(5, 5, 5), av(0, -5, 0), 460);
+        var desc = baseDescriptor();
+        desc.entity = ent(461);
+        desc.position = av(0, 0, 0);
+        desc.padding = pad;
+        const id = try addMover(gpa, &world, &chars, desc);
+        var previous: Real = 0;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
+            previous = r.position.toArray()[0];
+        }
+    }
+}
