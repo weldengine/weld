@@ -1031,12 +1031,12 @@ fn stepDown(
 /// The impulse this contact owes the body, or null if it owes none. PLANS, never applies —
 /// `PendingPushes.apply` is the only writer, and it runs after the publication.
 ///
-/// One consequence of deferring, stated rather than left to be discovered: if two slide iterations
-/// hit the SAME body, both now plan against the velocity it had at the start of the call, where the
-/// applied form let the second read the first's result and ask for less. The per-entry ceiling is
-/// unchanged, so the worst case is the same `n · max_push_force · dt` it always was; only the actual
-/// sum can come out slightly larger. The alternative — re-reading a velocity that has not been
-/// written yet — is not available to a planner.
+/// If two slide iterations hit the SAME body, both plan against the velocity it had at the start of
+/// the call — re-reading a velocity that has not been written yet is not available to a planner.
+/// `PendingPushes` then SUMS the plans for one body and caps the magnitude of that sum ONCE, so the
+/// applied total is at most `max_push_force · dt` however many contacts a body took. An earlier
+/// paragraph here stated a worst case of `n · max_push_force · dt` and a sum that could come out
+/// "slightly larger"; coalescing made that false, and it is deleted rather than qualified.
 fn plannedPush(
     bm: *const BodyManager,
     body: BodyId,
@@ -1105,6 +1105,7 @@ fn depenetrate(
     base_start: Vec3r,
     layer_mask: u32,
     exclude: ?BodyId,
+    padding: Real,
     touched: *TouchedBodies,
 ) Vec3r {
     var centre = start;
@@ -1133,10 +1134,28 @@ fn depenetrate(
         const s_now = s_entry + centre.sub(start).dot(c.normal);
         if (s_entry >= 0 and s_now < 0) return start;
 
-        // Out along the outward normal by exactly the overlap, so the surfaces end up touching.
-        // The `padding` stand-off is the SWEEP's business, not this one's — maintained here too it
-        // would be two mechanisms holding one distance.
-        centre = centre.add(c.normal.scale(c.penetration));
+        // **OUT TO `padding` OF CLEARANCE, NOT TO TOUCHING — and pushing to touching FROZE a character
+        // permanently.** §1.12.6 makes the stand-off an obligation of the controller, and nothing
+        // established it: `paddedAdvance` cannot, having nothing to subtract it from when the advance
+        // is zero.
+        //
+        // A capsule left exactly tangent serves NO horizontal motion at all. The sweep reports a
+        // contact at distance zero, the padded advance clamps to zero, and the slide returns a
+        // horizontal motion projected on a horizontal plane unchanged — all four slide iterations are
+        // consumed with no progress and the remainder is dropped. TRACED: `pen = −0.000000000`, normal
+        // `+Y`, four identical rounds, final `x = 0`.
+        //
+        // And this pass MANUFACTURED that state rather than merely failing to leave it: a character
+        // starting 0.05 m inside the floor was resolved to a base of exactly `0.000000000` and then
+        // froze. The reachability is therefore not authoring alone — any interpenetration at all, from
+        // a spawn, a teleport, a resize or a platform pushing the character in, ended frozen.
+        //
+        // **The branch cannot over-fire, and that is bounded by CONSTRUCTION and not by a threshold**:
+        // a manifold exists only where the separation is at most the contact margin — `gjk.zig`
+        // classifies anything beyond it `.separated` and `collideOrdered` answers null there — so a
+        // capsule already standing off, even by 0.005, is invisible to this query and is not moved.
+        // TRACED at four heights: 0.005 and 0.02 produce no contact at all.
+        centre = centre.add(c.normal.scale(c.penetration + padding));
     }
     return centre;
 }
@@ -1378,6 +1397,7 @@ pub const CharacterStore = struct {
             c.position,
             c.layer_mask,
             c.inner_body,
+            c.padding,
             &touched,
         );
 

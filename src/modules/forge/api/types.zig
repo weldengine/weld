@@ -338,14 +338,11 @@ pub const CharacterDescriptor = struct {
     /// a deliberate divergence, this descriptor carrying only `radius` and `height`, hence
     /// a capsule and nothing else.
     ///
-    /// **PRECONDITION: a base placed EXACTLY tangent to a surface is a degenerate input.** The
-    /// controller's own resting pose is `padding` ABOVE its floor, and at exact tangency the
-    /// horizontal sweep reports a contact at distance zero which the padded advance cannot clear —
-    /// so the character serves no horizontal motion at all, permanently, and nothing reports it.
-    /// MEASURED at six starting heights: only exactly zero fails, `0.005` and above serve in full.
-    /// Place the base at `padding` or more above the surface. Documented rather than fixed — the
-    /// defect and its two candidate fixes are an open decision in `CLAUDE.md`, owned by the next
-    /// milestone that opens `character.zig`.
+    /// The DEFAULT is `Vec3.zero`, and a base placed exactly tangent to a surface — which that default
+    /// is, over a floor at `y = 0` — is served: `depenetrate` establishes the `padding` stand-off
+    /// §1.12.6 requires. An earlier version documented that configuration as a degenerate input the
+    /// caller had to avoid, which was a bug with an apology attached: a precondition the field's own
+    /// default violates is not a precondition.
     position: Vec3 = Vec3.zero,
 
     /// Capsule radius (metres).
