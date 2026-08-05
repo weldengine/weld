@@ -2617,9 +2617,9 @@ test "P1-1 the pushes are accumulated and applied ONCE, after the publication" {
     // The character stops `padding` short of the box: 8 − 0.5 − 0.3 − 0.02 = 7.18.
     try testing.expectApproxEqAbs(@as(Real, 7.18), r.position.toArray()[0], api_tol);
 
-    // **EVERY APPLIED PUSH IS EXACTLY THE PLANNED `mass · closing = 1 · 10 = 10`**, under a ceiling of
-    // `1000 · 1` that does not bind — that is the invariant, and it holds because a planner cannot
-    // read a velocity that has not been written yet.
+    // **EVERY PLANNED PUSH IS EXACTLY `mass · closing = 1 · 10 = 10`**, and they are SUMMED per body —
+    // a planner cannot read a velocity that has not been written yet, so each contact plans against
+    // the same pre-call value.
     //
     // **THE NUMBER OF CONTACTS AGAINST THE BOX DIFFERS BY PRECISION, and it is measured rather than
     // designed: two at f32, one at f64.** A head-on wall's slide cancels the whole motion, so the
@@ -2627,14 +2627,53 @@ test "P1-1 the pushes are accumulated and applied ONCE, after the publication" {
     // FLOAT NOISE, not a path this engine plans. Asserting `20` at both precisions would have been
     // pinning that noise, and it is what made the f64 leg of the matrix red on the first attempt.
     //
-    // So the expectation is per-precision, and the invariant is stated as the multiple: the applied
-    // total is `n · 10` for whatever `n` the geometry produced. Applied INSIDE the loop the f32 answer
-    // would be `10` — the second iteration seeing the box already leaving at 10 m/s and computing a
-    // closing speed of exactly zero — so the f32 leg does discriminate the two forms, which is what
-    // the probe table records; the f64 leg cannot, having only one contact.
+    // So with a SLACK ceiling the answer is per-precision, `n · 10` for whatever `n` the geometry
+    // produced. Applied INSIDE the loop the f32 answer would be `10` — the second iteration seeing the
+    // box already leaving at 10 m/s and computing a closing speed of exactly zero.
     const expected_push: Real = if (Real == f32) 20 else 10;
     try testing.expectApproxEqAbs(expected_push, world.bm.linearVelocity(box).?.toArray()[0], api_tol);
     try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+}
+
+test "P1-1 the force ceiling holds however many contacts one body takes" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // The same scene as above, with a ceiling that BINDS.
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 430);
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const box = try world.addBody(gpa, .{
+        .entity = ent(431),
+        .body_type = .dynamic,
+        .shape = box_shape,
+        .position = av(8, 0.5, 0),
+        .mass = 1,
+    });
+    var desc = baseDescriptor();
+    desc.entity = ent(432);
+    desc.position = av(0, 0.02, 0);
+    desc.mass = 1;
+    desc.max_push_force = 5;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
+
+    // **`max_push_force` IS A CEILING PER CALL, NOT PER CONTACT**, and an earlier form broke that: the
+    // pushes were appended without coalescing and applied one `addImpulse` per entry, each capped at
+    // `max_push_force · dt`, so two contacts on one body delivered TWICE the declared ceiling and
+    // three would have delivered three times. A ceiling one can exceed by being touched twice is not a
+    // ceiling. The per-body sum is now capped ONCE.
+    //
+    // Ceiling `5 · 1 = 5`, each contact planning `1 · 10 = 10`, so the summed 10 or 20 clamps to 5 and
+    // the unit-mass box leaves at exactly 5 m/s.
+    //
+    // **AND THIS NUMBER IS THE SAME AT BOTH PRECISIONS**, where the slack-ceiling test's is not — which
+    // is the second half of what coalescing bought: the answer stops depending on how many contacts
+    // the sweep happened to make against one body, an iteration detail and not a physical quantity.
+    try testing.expectApproxEqAbs(@as(Real, 5), world.bm.linearVelocity(box).?.toArray()[0], api_tol);
 }
 
 test "P1-1 a publication that fails leaves every body velocity untouched" {
