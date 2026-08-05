@@ -1430,11 +1430,26 @@ test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by
     // **THE TWO ANSWERS DIFFER MEASURABLY, which is what makes this test discriminate.** The
     // manifold pushes along the SLOPE's normal (0.5, 0.866, 0), so the correction has a non-zero X
     // component; the sweep's `−direction` at distance zero would have pushed along `+up`, i.e.
-    // purely in Y. The push is 2 cm along the slope normal, so
-    //   Δx = 0.02 · 0.5   = 0.01
-    //   Δy = 0.02 · 0.866 = 0.01732
-    try testing.expectApproxEqAbs(@as(Real, 0.01), r.position.toArray()[0], api_tol);
-    try testing.expectApproxEqAbs(@as(Real, 0.017320508), r.position.toArray()[1], api_tol);
+    // purely in Y.
+    //
+    // The push is the 2 cm overlap PLUS the `padding` stand-off — depenetration resolves to `padding`
+    // of clearance and not to touching, because a capsule left exactly tangent serves no horizontal
+    // motion at all. So along the slope normal the distance is `0.02 + 0.02 = 0.04`:
+    //   Δx = 0.04 · 0.5      = 0.02
+    //   Δy = 0.04 · cos 30°  = 0.0346410
+    //
+    // **AND THEN FLOOR-STICKING RE-SEATS IT, which the previous expectation did not have to account
+    // for — because the previous behaviour was the defect.** With the base left exactly tangent, the
+    // down-sweep of `stepDown` found the surface at distance zero and its padded advance clamped to
+    // zero, so it moved nothing and Δy was a pure normal push. Now the base stands `padding` clear
+    // along the NORMAL, which is `padding / cos 30° = 0.0230940` clear VERTICALLY, and the down-sweep
+    // advances the excess:
+    //   Δy = 0.0346410 − (0.0230940 − 0.02) = 0.0315470
+    //
+    // The old clean `0.0173205` was itself a consequence of the freeze. Worth saying, because a
+    // reader comparing the two would otherwise read this as a regression.
+    try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[0], api_tol);
+    try testing.expectApproxEqAbs(@as(Real, 0.0315470), r.position.toArray()[1], api_tol);
     // The X component is the discriminator: a sweep-driven push would leave it at exactly zero.
     try testing.expect(@abs(r.position.toArray()[0]) > 0.005);
     // And the character is no longer inside: the verdict is a real one on the slope.
@@ -2537,9 +2552,13 @@ test "a doorway narrower than the character NEVER ejects it, whatever the iterat
 
         // CLOSED FORM. The capsule overlaps each wall by `radius − width/2`, and the depenetration
         // resolves the deeper one — at entry they are equal, the tie broken on the smaller `BodyId`.
-        // So the resolved offset is exactly that overlap, alternating side from call to call, and it
-        // is `0.1`, `0.05`, `0.01` for the three widths.
-        const offset: Real = 0.3 - width / 2;
+        // The resolved offset is that overlap PLUS the `padding` stand-off, since depenetration
+        // resolves to `padding` of clearance and not to touching: `0.12`, `0.07`, `0.03` for the three
+        // widths, alternating side from call to call.
+        //
+        // The EJECTION invariant below is what matters and it is unaffected: `0.12 < 0.20`,
+        // `0.07 < 0.25`, `0.03 < 0.29`. Only the number moved, and it moved by exactly `padding`.
+        const offset: Real = 0.3 - width / 2 + 0.02;
         var k: u32 = 0;
         while (k < 3) : (k += 1) {
             // Along +Z, which neither wall blocks — and which is nonetheless never served: the two
@@ -2865,26 +2884,28 @@ test "P2-2 step_height is validated like every other stored physical parameter" 
     try testing.expectEqual(@as(u32, 1), bm.count());
 }
 
-test "a base EXACTLY on the floor serves no horizontal motion — measured, not fixed here" {
+test "a base EXACTLY on the floor is no longer frozen — seven heights, both directions" {
     const gpa = testing.allocator;
 
-    // **A SEVENTH FINDING, found while building the P1-1 probe rather than by review, and PINNED
-    // rather than fixed: gate G adds no behaviour line.**
+    // **THE DEFECT THIS PINNED IS NOW FIXED, and the comment that described it as pinned-not-fixed is
+    // DELETED rather than amended — it described a state that no longer exists.**
     //
-    // At a base of exactly zero the capsule is exactly tangent to `{ y <= 0 }`, so the horizontal
-    // sweep reports an initial contact at distance zero on the face-inclusive convention, the padded
-    // advance clamps to zero, and the plane's `+Y` normal opposes nothing — `slideAlongPlane` returns
-    // the motion unchanged because `into >= 0`. The next iteration finds the same contact. All four
-    // slide iterations are consumed with no progress and the remaining displacement is DROPPED.
+    // At exact tangency the horizontal sweep reported a contact at distance zero, `paddedAdvance`
+    // returned `max(0, 0 − padding) = 0`, and the slide returned a horizontal motion projected on a
+    // horizontal plane unchanged — so all four slide iterations were consumed with no progress and the
+    // remainder was dropped. The character never moved again, since it never left zero.
     //
-    // MEASURED at six starting heights: only EXACTLY zero fails. 0.005, 0.01, 0.019, 0.02 and 0.05
-    // all serve the whole 1 m. So the trigger is exact tangency and not "below `padding`", which is
-    // what a guess would have said.
+    // Closed in `depenetrate`, which resolves to `padding` of clearance instead of to touching. That
+    // pass was MANUFACTURING the frozen state, not merely failing to leave it: a character starting
+    // 0.05 m inside the floor was resolved to a base of exactly `0.000000000` and froze, so the
+    // reachability was never authoring alone.
     //
-    // Not reachable from ordinary play — a move leaves the character resting at `padding` above its
-    // floor, never at zero — but reachable from AUTHORING, "put the character on the ground" being a
-    // natural thing to write. Consigned with its owner.
-    for ([_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05 }) |start_y| {
+    // BOTH DIRECTIONS, and the second is the half whose absence let a slope bound through at gate F:
+    // `0` now serves the whole metre like the others, AND the six clear heights keep exactly the
+    // behaviour they had — a capsule already standing off is invisible to the overlap query, so
+    // nothing lifts it.
+    const heights = [_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05, 0.2 };
+    for (heights) |start_y| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         var chars: CharacterStore = .{};
@@ -2896,9 +2917,29 @@ test "a base EXACTLY on the floor serves no horizontal motion — measured, not 
         const id = try addMover(gpa, &world, &chars, desc);
 
         const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        const expected_x: Real = if (start_y == 0) 0 else 1;
-        try testing.expectApproxEqAbs(expected_x, r.position.toArray()[0], api_tol);
-        // The verdict is honest either way — there IS ground under it.
-        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+
+        // The whole metre, at EVERY height including zero.
+        try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
+
+        // **THE GUARD DOES NOT OVER-FIRE, and the resting height is the composition of THREE mechanisms
+        // whose split this asserts.** Depenetration lifts an exactly-tangent base to `padding`, and it
+        // reaches nothing else: a capsule already standing off is `.separated`, hence invisible to the
+        // overlap query. Floor-sticking then pulls a GROUNDED character above `padding` down to
+        // `padding`, which is pre-existing and not part of this fix. And a base strictly inside
+        // `(0, padding)` is touched by neither — no contact for the overlap query, and a padded advance
+        // that clamps to zero for the down-sweep — so it stays exactly where it was.
+        //
+        // 0.2 is the third case and it is the NON-VACUITY one: the entry ground probe is bounded by
+        // `padding + predictive_contact_distance` and does not reach the floor from there, so the
+        // character enters NOT grounded, floor-sticking is skipped, and it stays at 0.2 reporting
+        // `.in_air`. MEASURED, and it is what proves the new branch does not touch a character that is
+        // in contact with nothing — a formula covering only "grounded" cases would have hidden it.
+        const airborne = start_y > 0.1;
+        const expected_y: Real = if (airborne) start_y else if (start_y > 0 and start_y < 0.02) start_y else 0.02;
+        try testing.expectApproxEqAbs(expected_y, r.position.toArray()[1], api_tol);
+        try testing.expectEqual(
+            if (airborne) api.GroundState.in_air else api.GroundState.grounded,
+            r.ground.state,
+        );
     }
 }
