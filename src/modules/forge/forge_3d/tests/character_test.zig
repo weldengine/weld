@@ -3062,3 +3062,155 @@ test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and no
         }
     }
 }
+
+test "padding has an UPPER bound too, refused at creation and at resize" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+    var bp = Bp.init(.{});
+    defer bp.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A stand-off shell thicker than the radius of the shape it surrounds is geometrically
+    // incoherent, and the reference carries 0.02 against a radius of 0.3 — two orders below. A
+    // RELATION between fields, refused by typed error and never clamped, the same treatment as
+    // `height >= 2 · radius`.
+    for ([_]f32{ 0.3, 0.5, 1.0 }) |bad| {
+        var d = baseDescriptor();
+        d.padding = bad; // radius is 0.3
+        try testing.expectError(CharacterError.InvalidPadding, chars.createCharacter(gpa, &store, &bm, d));
+    }
+    // Just inside is legal, and so is zero — both ends of the domain are exercised here so the
+    // guard cannot be read as "padding must be small".
+    for ([_]f32{ 0, 0.29999 }) |ok| {
+        var d = baseDescriptor();
+        d.padding = ok;
+        const id = try chars.createCharacter(gpa, &store, &bm, d);
+        chars.destroyCharacter(gpa, &bp, &store, &bm, id);
+    }
+
+    // **THE RESIZE MUST RE-CHECK IT, because the relation is a domain of the PAIR**: shrinking the
+    // radius under a legal padding violates it while neither field is individually out of range.
+    var d = baseDescriptor();
+    d.padding = 0.25;
+    const id = try chars.createCharacter(gpa, &store, &bm, d);
+    // 0.25 padding against a 0.2 radius — refused, and nothing changed.
+    try testing.expectError(
+        CharacterError.InvalidPadding,
+        chars.resizeCharacter(gpa, &bp, &bm, &store, id, 0.2, 1.8),
+    );
+    try testing.expectApproxEqAbs(@as(Real, 0.3), chars.get(id).?.radius, api_tol);
+    // And a radius that still clears the padding is accepted.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &bp, &bm, &store, id, 0.26, 1.8));
+}
+
+test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor" {
+    const gpa = testing.allocator;
+
+    // **This table exists because NO gate of this milestone enumerated the legal bounds and asked what
+    // the code does at each.** Gate F decided which values to REJECT and never asked that question, and
+    // `padding = 0` and the `padding` upper region both fell into that hole — the first froze the
+    // character, and it took three rounds and five `paddedAdvance` call sites to close.
+    //
+    // Every row is MEASURED against one scene: a ground half-space, a 0.2 m step at `x >= 1.5`, and four
+    // calls of `(0.5, −0.05, 0)`. The reference row is the default descriptor, which walks and climbs.
+    const Row = struct {
+        name: []const u8,
+        mut: *const fn (*api.CharacterDescriptor) void,
+        /// Expected served distance on each of the four calls.
+        served: [4]Real,
+        /// Expected final base height.
+        y: Real,
+    };
+    const M = struct {
+        fn base(_: *api.CharacterDescriptor) void {}
+        fn padZero(d: *api.CharacterDescriptor) void {
+            d.padding = 0;
+        }
+        fn padHi(d: *api.CharacterDescriptor) void {
+            d.padding = 0.29999;
+        }
+        fn pushZero(d: *api.CharacterDescriptor) void {
+            d.max_push_force = 0;
+        }
+        fn stepZero(d: *api.CharacterDescriptor) void {
+            d.step_height = 0;
+        }
+        fn predZero(d: *api.CharacterDescriptor) void {
+            d.predictive_contact_distance = 0;
+        }
+        fn massMin(d: *api.CharacterDescriptor) void {
+            d.mass = std.math.floatMin(f32);
+        }
+        fn slopeZero(d: *api.CharacterDescriptor) void {
+            d.max_slope = 0;
+        }
+        fn slopeMax(d: *api.CharacterDescriptor) void {
+            d.max_slope = std.math.pi / 2.0;
+        }
+        fn layerMax(d: *api.CharacterDescriptor) void {
+            d.collision_layer = 31;
+        }
+        fn sphere(d: *api.CharacterDescriptor) void {
+            d.height = 0.6;
+        }
+    };
+    const rows = [_]Row{
+        // The reference: walks 0.5 a call and ends standing on the step, `padding` above it.
+        .{ .name = "defaults", .mut = M.base, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // CLOSED this round. It ends on the step at exactly 0.2 — no physical margin, as asked.
+        .{ .name = "padding = 0", .mut = M.padZero, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.2 },
+        // **NOT a defect: the declared stand-off HONOURED.** A character demanding 0.3 m of clearance
+        // cannot approach the riser closer than 0.3 m and cannot fit onto a 0.2 m step with 0.3 m of
+        // clearance above it — so it stops short and does not climb. The guard above refuses
+        // `padding >= radius` on the geometric-incoherence motive, not on this.
+        .{ .name = "padding = r - eps", .mut = M.padHi, .served = .{ 0.5, 0.5, 0, 0 }, .y = 0.02 },
+        // Pushing disabled changes nothing here — no dynamic body in the scene.
+        .{ .name = "max_push_force = 0", .mut = M.pushZero, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // No climb and no floor-sticking: blocked by the riser, which is the correct answer.
+        .{ .name = "step_height = 0", .mut = M.stepZero, .served = .{ 0.5, 0.5, 0.1979, 0 }, .y = 0.00199 },
+        // Inert today, and this row is what says so — the field the algorithm has not yet justified.
+        .{ .name = "predictive = 0", .mut = M.predZero, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // The smallest normal mass: only the push impulse reads it, and there is nothing to push.
+        .{ .name = "mass = floatMin", .mut = M.massMin, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // `cos 0 = 1` and the floor's normal is exactly `+Y`, so `1 >= 1` holds: a perfectly flat floor
+        // stays walkable at a zero slope limit. Anything tilted would not be.
+        .{ .name = "max_slope = 0", .mut = M.slopeZero, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // Everything walkable, including the riser — so the character WALKS UP the vertical face
+        // instead of climbing it as a step, and ends part-way up. The bound's consequence, not a bug.
+        .{ .name = "max_slope = pi/2", .mut = M.slopeMax, .served = .{ 0.5, 0.5, 0.1979, 0.0399 }, .y = 0.06572 },
+        // The top layer index is as usable as the bottom one — the mask is 32 bits and 31 is in it.
+        .{ .name = "collision_layer = 31", .mut = M.layerMax, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+        // `height == 2 · radius` is the limiting relation: a capsule degenerate to a SPHERE, still served.
+        .{ .name = "height = 2r", .mut = M.sphere, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
+    };
+
+    for (rows) |row| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 900);
+        _ = try addBox(gpa, &world, av(0.5, 0.1, 2), av(2, 0.1, 0), 901);
+        var desc = baseDescriptor();
+        desc.entity = ent(902);
+        desc.position = av(0, 0.02, 0);
+        row.mut(&desc);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        var prev: Real = 0;
+        for (row.served, 0..) |expected, k| {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.5, -0.05, 0), 1.0 / 60.0);
+            const served = r.position.toArray()[0] - prev;
+            prev = r.position.toArray()[0];
+            errdefer std.debug.print("row {s}, call {d}\n", .{ row.name, k });
+            try testing.expectApproxEqAbs(expected, served, 1e-3);
+        }
+        try testing.expectApproxEqAbs(row.y, prev * 0 + chars.get(id).?.position.toArray()[1], 1e-3);
+        // Every row ends GROUNDED — none of the legal bounds loses the floor.
+        try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
+    }
+}
