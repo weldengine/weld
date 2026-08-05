@@ -486,6 +486,10 @@ const Contact = struct {
     normal: Vec3r,
     /// Overlap along `normal`, for the depenetration push. Zero for a swept contact.
     penetration: Real = 0,
+    /// The manifold point, which is the MIDPOINT of the two surface points — so the body's own
+    /// surface lies half the penetration further along `normal`. Zero for a swept contact, which
+    /// has no manifold; only the depenetration reads it.
+    position: Vec3r = Vec3r.zero,
 };
 
 /// Nearest swept contact over every candidate body, with the character's own filter.
@@ -577,6 +581,7 @@ const DeepestManifold = struct {
             .body = self.body,
             .normal = manifold.normal.neg(),
             .penetration = deepest.penetration,
+            .position = deepest.position,
         };
     }
 };
@@ -657,11 +662,22 @@ fn slideAlongPlane(motion: Vec3r, normal: Vec3r, cos_max_slope: Real) Vec3r {
     // A CAP and not a cancellation, which is what makes the four cases right at once: a walkable
     // plane is untouched; a caller that ASKS to rise keeps its rise, because the cap is on the
     // increase; and a motion already leaving the surface never reaches here at all.
+    //
+    // **THE BOUND IS `max(before, 0)` AND NOT `before`, and the difference is a defect the first
+    // form shipped.** Capping at `before` PENETRATES the plane on a sloped face, computed on a 50°
+    // ramp with normal `(−0.766, 0.643, 0)` and a pure gravity step `(0, −1, 0)`: the projection is
+    // `(−0.4925, −0.5866, 0)`, so `after = −0.5866` exceeds `before = −1`, the cap bit, and the
+    // output `(−0.4925, −1, 0)` had a dot of `−0.2657` with the normal — driving INTO the surface.
+    // And the projection was the physically right answer: a body sliding down a 50° slope descends
+    // more slowly than in free fall, the surface carrying part of the motion, and capping at
+    // `before` annulled exactly that. Bounding at zero instead makes the rule what it is meant to
+    // be — the ENGINE does not climb on the character's behalf — while leaving every descent the
+    // geometry produces untouched.
     if (normal.dot(up) >= cos_max_slope) return slid;
-    const before = motion.dot(up);
+    const cap = @max(motion.dot(up), 0);
     const after = slid.dot(up);
-    if (after <= before) return slid;
-    return slid.sub(up.scale(after - before));
+    if (after <= cap) return slid;
+    return slid.sub(up.scale(after - cap));
 }
 
 /// Constrain `motion` against a crease formed by two contact planes.
@@ -699,11 +715,25 @@ fn slideAlongCrease(motion: Vec3r, n0: Vec3r, n1: Vec3r, cos_max_slope: Real) ?V
     // component, and it rose 0.0186 m per call through that path while the single-plane cap held its
     // own path at exactly zero. Capping only the plane would have left the rule true of one branch
     // and false of the other.
+    //
+    // The bound is `max(before, 0)`, exactly as on the plane branch and for the same measured
+    // reason: capping at `before` cancels a descent the geometry produced and drives the motion into
+    // the surface.
+    //
+    // **On THIS branch that bound is UNDISCRIMINATED by the suite, and the honest statement is
+    // weaker than the plane's.** Capping at `before` here breaks nothing, at either precision — and
+    // unlike the step lift's padding, which is provably unobservable because it cancels against the
+    // landing drop, this one is merely a case no scene built for it produced. Five were tried: a pure
+    // descent at the foot of a ramp never reaches the crease at all, the first plane being the
+    // walkable ground whose earlier branch cancels the downward component; and four mixed
+    // descend-and-push motions against a rotated box gave outcomes identical under both bounds to
+    // six decimals. So it stands on consistency with the plane branch, which is a reason and not a
+    // proof.
     if (n0.dot(up) >= cos_max_slope and n1.dot(up) >= cos_max_slope) return slid;
-    const before = motion.dot(up);
+    const cap = @max(motion.dot(up), 0);
     const after = slid.dot(up);
-    if (after <= before) return slid;
-    return slid.sub(up.scale(after - before));
+    if (after <= cap) return slid;
+    return slid.sub(up.scale(after - cap));
 }
 
 /// Wakes every broadphase CANDIDATE of a volume, without consulting the narrowphase.
@@ -943,6 +973,39 @@ fn pushBody(
 /// through the sweep** (§1.12.6): at distance zero a cast returns `−direction`, the direction
 /// travelled from rather than the surface, which is correct for the cast's own invariant and
 /// unusable for pushing out.
+/// Push the character out of whatever it overlaps, deepest first, at most
+/// `max_depenetration_iterations` times.
+///
+/// **IT PUSHES OUT, NEVER THROUGH (§1.12.6).** The pass resolves one body at a time, so in a squeeze
+/// it alternates between two opposing surfaces and where it stops is the ITERATION COUNT'S PARITY —
+/// MEASURED: with a capsule needing 1.8 m of headroom under a ceiling offering 1.0 m, a count of 3
+/// or 5 leaves the base at −0.800000, the full depth of the squeeze and on the far side of the ground
+/// plane, while 4 or 8 leaves it at 0. A guarantee cannot rest on the parity of a constant, and an
+/// assertion on that parity protects the constant while saying nothing about the algorithm. So the
+/// pass carries an invariant instead:
+///
+///   The depenetration NEVER moves the character to the far side of a contact plane it was on the
+///   good side of at the ENTRY of the call.
+///
+/// Written that way the failure direction of an unresolvable squeeze is sayable, which is what the
+/// brief requires of a guarantee: the character keeps the pose it came in with, and a residual
+/// overlap, and does not tunnel. Enforced by reverting to the entry pose the moment a contact is
+/// found whose plane the BASE has crossed since entry — resolving further would be tunnelling and
+/// not depenetration. The base and not the centre: it is the reference point gameplay writes
+/// (§1.12.3), and it is what "under the floor" means; the centre of a 1.8 m capsule is still 0.10 m
+/// above a plane its feet have passed 0.80 m below, so a centre-based test does not fire at all.
+///
+/// The side test does NOT fire for a character that entered ALREADY on the wrong side — which is the
+/// ordinary case of resting a few millimetres sunk into the ground — so no legitimate resolution is
+/// refused. And it cannot refuse one by accident either: pushing out of a floor raises the base and
+/// pushing out of a wall moves it sideways, so no push a resolvable overlap needs can cross a plane
+/// the character was above.
+///
+/// A narrow door was examined as a second instance and is NOT one, measured rather than assumed: at
+/// widths of 0.40, 0.50 and 0.58 m against a 0.60 m capsule, and at counts of 3, 4 and 5, the
+/// character oscillates between ±(radius − half-width) and NEVER leaves the doorway. The two walls
+/// are symmetric about its entry pose, so the alternation stays bounded; the ceiling case tunnels
+/// because the floor is NOT a contact at entry, which makes the first push large and unopposed.
 fn depenetrate(
     bp: *const Broadphase,
     bm: *const BodyManager,
@@ -950,6 +1013,7 @@ fn depenetrate(
     record: shape_mod.Shape,
     probe: SupportShape,
     start: Vec3r,
+    base_start: Vec3r,
     layer_mask: u32,
     exclude: ?BodyId,
     touched: *TouchedBodies,
@@ -968,6 +1032,18 @@ fn depenetrate(
         _ = bp.queryAabb(body_manager_mod.worldAabb(record, centre, Quatr.identity), &worst);
         const c = worst.best orelse break;
         touched.add(c.body);
+
+        // THE INVARIANT. The manifold point is the MIDPOINT of the two surface points, so the body's
+        // surface is half the penetration further along the outward normal. `s` is the base's signed
+        // clearance from that surface, and the accumulated push changes it by exactly its projection
+        // on the normal — so the entry value is the only thing this needs to carry. Both comparisons
+        // are at TRUE ZERO: no tolerance can be right here, the question being which side of a plane
+        // a point is on and not how far.
+        const surface = c.position.add(c.normal.scale(c.penetration / 2));
+        const s_entry = base_start.sub(surface).dot(c.normal);
+        const s_now = s_entry + centre.sub(start).dot(c.normal);
+        if (s_entry >= 0 and s_now < 0) return start;
+
         // Out along the outward normal by exactly the overlap, so the surfaces end up touching.
         // The `padding` stand-off is the SWEEP's business, not this one's — maintained here too it
         // would be two mechanisms holding one distance.
@@ -1198,6 +1274,7 @@ pub const CharacterStore = struct {
             record,
             probe,
             c.position.add(baseToCentre(Real, c.height)),
+            c.position,
             c.layer_mask,
             c.inner_body,
             &touched,
@@ -1408,17 +1485,27 @@ pub const CharacterStore = struct {
     /// — the caller asked to be somewhere, not to be moved toward somewhere. It INVALIDATES the
     /// reported ground verdict, which returns to `.in_air`.
     ///
-    /// Errors: `error.StaleCharacter` on a dead handle, like every other entry of this store. An
-    /// earlier version was a silent no-op here on the `removeBody` precedent, which is the wrong
-    /// precedent: a destroy is idempotent, so ignoring a dead handle is its natural answer, whereas a
-    /// teleport that goes nowhere is a write the caller has to know did not happen — and it was the
-    /// ONLY one of the store's five entries that answered the same question in a different way.
+    /// **NO-OP on a stale handle, and the discriminant is whether the entry RETURNS A VALUE.**
+    /// `createCharacter`, `moveCharacter`, `resizeCharacter` and `getCharacterInnerBody` all return
+    /// something, so a dead handle has no honest answer and they carry an error channel;
+    /// `destroyCharacter` and this entry return nothing, so the no-op IS a coherent answer. Without
+    /// exception across the repository, and it is why `moveCharacter` has a channel and this does not.
     ///
-    /// **The frozen signature is `void` and this one is not, and that is a gap in the frozen surface
-    /// rather than a liberty taken here.** Keeping the broadphase proxy fresh is part of this entry's
-    /// contract (§1.12.2), `Broadphase.update` allocates, and a `void` entry has nowhere to put that
-    /// failure. The interface tier will have to decide at M1.1.15 — and §1.11.7 forbids the easy
-    /// answer, converting an error into an absent result. Recorded so the freeze meets it knowingly.
+    /// A version of this shipped `error.StaleCharacter` here, argued from "a write the caller has to
+    /// know did not happen". That argument proves too much: it holds identically for
+    /// `setBodyTransform`, `setLinearVelocity` and `setAngularVelocity`, all `void` in the frozen
+    /// surface, so applied to its end it makes every setter fallible — a decision about the whole
+    /// Tier 0 surface and not about one entry. Whether setters should be fallible is recorded for
+    /// M1.1.15, where the interface layer is built and the question covers all of it at once.
+    ///
+    /// **The frozen signature is `void` and this one is `!void`, and the residual `!` is NOT a
+    /// semantic refusal — it is the broadphase's allocation.** Keeping the proxy fresh is part of this
+    /// entry's contract (§1.12.2), `Broadphase.update` reserves a slot on its layer's moved log, and a
+    /// `void` entry has nowhere to put that failure; making it truly `void` needs a reservation seam
+    /// in the broadphase, which this milestone does not own. So the gap is in the frozen surface
+    /// rather than a liberty taken here, it is disjoint from the stale-handle question settled above,
+    /// and §1.11.7 forbids the easy answer of converting an error into an absent result. Recorded so
+    /// the freeze meets it knowingly, alongside the setter-fallibility convention.
     pub fn setCharacterPosition(
         self: *CharacterStore,
         gpa: std.mem.Allocator,
@@ -1428,7 +1515,7 @@ pub const CharacterStore = struct {
         id: CharacterId,
         position: Vec3r,
     ) !void {
-        const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        const idx = self.alloc.validate(id) orelse return;
         const c = self.characters.items[idx];
         // The presence FIRST — same reason as the other two write paths.
         try self.syncPresenceTo(gpa, bp, bm, store, idx, position, c.shape, c.height);
