@@ -495,23 +495,54 @@ const TouchedBodies = struct {
 /// TOUCHED, and only the dynamic ones that yield, so this set is a subset of one already bounded
 /// slot for slot. Asserted rather than clamped — a dropped push is a silent divergence between what
 /// the character resolved against and what the world did.
+///
+/// **COALESCED BY BODY, and the first version was not — which broke the force ceiling.** `add` used
+/// to append unconditionally and `apply` called `addImpulse` once per entry, each entry capped at
+/// `max_push_force · dt`. So two contacts on one body in one call delivered TWICE the declared
+/// ceiling, three would deliver three times, and nothing bounded the factor. A ceiling one can exceed
+/// by being touched twice is not a ceiling — `max_push_force` is documented in newtons, and the
+/// per-entry cap being "unchanged" WAS the defect rather than a mitigation of it.
+///
+/// Summing per body and capping the sum ONCE closes three things at once: the ceiling means what it
+/// says, the atomicity is untouched since nothing leaves before the publication, and the answer stops
+/// depending on how many contacts the sweep happened to make against one body — an iteration detail,
+/// not a physical quantity.
 const PendingPushes = struct {
     const Entry = struct { body: BodyId, impulse: Vec3r };
 
     items: [max_touched]Entry = @splat(.{ .body = 0, .impulse = Vec3r.zero }),
     len: u32 = 0,
 
+    /// Accumulate onto `body`'s entry if it already has one. The scan is linear over at most
+    /// `max_touched` entries, which is twelve — a hash container on a path M1.1.14 must make
+    /// reproducible would be the wrong trade even if the set were large.
     fn add(self: *PendingPushes, body: BodyId, impulse: Vec3r) void {
+        for (self.items[0..self.len]) |*e| {
+            if (e.body == body) {
+                e.impulse = e.impulse.add(impulse);
+                return;
+            }
+        }
         std.debug.assert(self.len < max_touched);
         if (self.len >= max_touched) return;
         self.items[self.len] = .{ .body = body, .impulse = impulse };
         self.len += 1;
     }
 
-    fn apply(self: *const PendingPushes, bm: *BodyManager) void {
+    /// One impulse per body, its MAGNITUDE capped at `max_impulse = max_push_force · dt`.
+    ///
+    /// The division is reached only when `mag_sq > max_impulse²`, which forces `mag_sq > 0` since the
+    /// right-hand side is non-negative — so the true-zero guard is structural here and no epsilon is
+    /// invented for it.
+    fn apply(self: *const PendingPushes, bm: *BodyManager, max_impulse: Real) void {
         for (self.items[0..self.len]) |e| {
+            var impulse = e.impulse;
+            const mag_sq = impulse.lengthSq();
+            if (mag_sq > max_impulse * max_impulse) {
+                impulse = impulse.scale(max_impulse / @sqrt(mag_sq));
+            }
             // ACTIVATING by contract (§1.8.4) — an external mutation, and W1 rather than W4.
-            bm.addImpulse(e.body, e.impulse);
+            bm.addImpulse(e.body, impulse);
         }
     }
 };
@@ -1465,7 +1496,8 @@ pub const CharacterStore = struct {
 
         // The pushes this call owes, drained here and not in the loop: everything above this line can
         // still fail, and a failure must leave the world untouched so the retry is not a second push.
-        pushes.apply(bm);
+        // One impulse per body, the per-body SUM capped once — see `PendingPushes`.
+        pushes.apply(bm, c.max_push_force * dt);
 
         const ground = try self.groundOf(bp, bm, store, id);
         // Recorded so `setCharacterPosition` has something to INVALIDATE (§1.12.8).
