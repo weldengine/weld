@@ -211,20 +211,19 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     // A NEGATIVE padding inflates the capsule INWARD: the character sinks `|padding|` into
     // every surface it stands on, and nothing anywhere reports it. Zero is legal — no margin.
     if (desc.padding < 0) return error.InvalidPadding;
-    // **AND AN UPPER BOUND, whose absence reproduced the freeze from the other end.**
-    // `paddedAdvance` returns `max(0, d − padding)`, so once `padding` exceeds a call's
-    // displacement the advance is zero at every sweep and the character stops moving — the same
-    // class the stand-off floor just closed at the BOTTOM of this range, through the other door
-    // of the same parameter. It does not take an absurd value: `padding = 0.5` against 0.1 m per
-    // tick (6 m/s at 60 Hz) freezes the character the moment a sweep finds anything within half
-    // a metre, and 0.5 is a factor-of-25 slip, not a delirious entry. The same `padding` enters
-    // the depenetration target, so it also catapults a character created near a wall by 0.5 m.
+    // **AND NO UPPER BOUND, which was ordered, written, then MEASURED AWAY.** A `padding >= radius`
+    // guard shipped for one round on two motives and neither survived. The freeze motive fell first:
+    // a large `padding` does stop the character short of an obstacle, but that IS the declared
+    // stand-off being honoured — a character demanding 0.3 m of clearance cannot approach a riser
+    // closer than 0.3 m. What remained was that a push larger than the shape might carry the capsule
+    // THROUGH thin geometry. Measured across fourteen configurations — `padding` at `2 · radius` and
+    // at `3.3 · radius`, against a 0.1 m wall, at seven entry depths straddling its mid-plane — and
+    // the capsule exits on the side it entered from EVERY time: the push-out invariant reverts to the
+    // entry pose the moment it finds a plane the base has crossed, so a larger push goes further out
+    // and never through.
     //
-    // A RELATION between fields, refused by typed error and never clamped — the same treatment as
-    // `height >= 2 · radius`, and reachable the same way, by a wrong entry rather than by the
-    // default. The motive is geometric: a stand-off shell thicker than the radius of the shape it
-    // surrounds is incoherent, and the reference carries 0.02 against a radius of 0.3.
-    if (desc.padding >= desc.radius) return error.InvalidPadding;
+    // So the guard rejected valid descriptors and valid resizes on no basis, and it is gone. Left as a
+    // comment because a guard removed by measurement is worth more to the next reader than its absence.
 
     if (!std.math.isFinite(desc.mass)) return error.InvalidPushParameters;
     // Zero would DUPLICATE `max_push_force = 0`, which is the documented way to disable
@@ -1145,7 +1144,22 @@ fn coordScale(probe: SupportShape, centre: Vec3r) Real {
 /// contact at distance zero and froze, undoing what the depenetration had just established. Measured:
 /// 0.2 m served on the first call and 0.0001 on every one after.
 fn standoffTarget(padding: Real, probe: SupportShape, centre: Vec3r) Real {
-    return @max(padding, standoff_floor_k * std.math.floatEps(Real) * coordScale(probe, centre));
+    // **NOT `@max`, and the difference is a silent lie against a loud failure.** `@max` let the floor
+    // OVERRIDE a padding the caller asked for: `64 · floatEps(f32) = 7.6e-6`, so the floor crosses the
+    // 0.02 default at 2 632 m and reaches 3.8 cm at 5 km. A caller asking for 2 cm silently got 3.8, and
+    // two identical scenes translated apart stopped at different distances — a supported region
+    // answering wrongly without saying so.
+    //
+    // The floor exists to serve a caller who asked for NO stand-off, not to overwrite one who asked for
+    // some. So a non-zero `padding` is honoured EXACTLY, at every scale, invariant under translation.
+    //
+    // The freeze regime returns where `padding` itself falls under the contact margin, which at the 0.02
+    // default is a `coordScale` beyond about 10 km — inside the region §1.11.4 bis already declares f64.
+    // And that failure is LOUD: the character does not move. A loud failure in a region declared
+    // unsupported beats a silently wrong answer in a supported one, which is the direction of failure
+    // this whole milestone has been choosing.
+    if (padding > 0) return padding;
+    return standoff_floor_k * std.math.floatEps(Real) * coordScale(probe, centre);
 }
 
 fn depenetrate(
@@ -1203,15 +1217,17 @@ fn depenetrate(
         // froze. The reachability is therefore not authoring alone — any interpenetration at all, from
         // a spawn, a teleport, a resize or a platform pushing the character in, ended frozen.
         //
-        // **A capsule already standing off is not moved, and that is the CONTRACT rather than a happy
-        // bound of the implementation.** `padding` is what a SWEEP RESERVES — a move leaves the capsule
-        // `padding` clear of what it touched, which is all `paddedAdvance` establishes and all the
-        // reference promises, `mCharacterPadding` being a parameter of `CastShape`/`CollideShape`. The
-        // POSE invariant is narrower: the controller never leaves the capsule INSIDE the contact
-        // margin, where the GJK band decides the verdict from one frame to the next. An authored pose
-        // closer than `padding` but clear of the margin is NOT normalised, and must not be —
-        // normalising it would be a pose write nobody asked for. TRACED: 0.005 and 0.02 produce no
-        // contact at all, and 0.005 already serves a whole metre.
+        // A capsule already standing off is not moved: a manifold exists only within the contact margin,
+        // so anything clear of it is `.separated` and invisible to this query. TRACED: 0.005 and 0.02
+        // produce no contact at all, and 0.005 already serves a whole metre.
+        //
+        // **THE CODE IS AHEAD OF THE SPEC HERE, and that is recorded rather than argued away.**
+        // `engine-physics-forge.md` §1.12.6 still reads as a POSE invariant — the `padding` keeps the
+        // capsule clear of surfaces — which this behaviour does not satisfy for an authored pose closer
+        // than `padding`. A narrowing is being delivered upstream: `padding` becomes what a SWEEP
+        // reserves, matching the reference, where `mCharacterPadding` is a parameter of
+        // `CastShape`/`CollideShape` and normalises no authored pose. Until that patch lands the
+        // divergence is real, and an implementation comment cannot close it — only the document can.
         // **THE TARGET HAS A NUMERICAL FLOOR, and without it `padding = 0` reproduced the freeze
         // exactly.** Zero is a legal value and a meaningful one — no PHYSICAL margin — and it stays in
         // the domain: removing it would have masked this defect instead of closing it, which is how the
@@ -1637,10 +1653,6 @@ pub const CharacterStore = struct {
         if (!std.math.isFinite(radius) or radius <= 0) return error.InvalidDimensions;
         if (!std.math.isFinite(height) or height <= 0) return error.InvalidDimensions;
         if (height < 2 * radius) return error.InvalidDimensions;
-        // `padding < radius` is a domain of the PAIR, so SHRINKING the radius can violate it while
-        // neither field is individually out of range — which is exactly why the resize has to
-        // re-check it and not only the three length bounds. Same door, same typed refusal.
-        if (self.characters.items[idx].padding >= radius) return error.InvalidPadding;
 
         const c = self.characters.items[idx];
         const new_shape = try store.createShape(gpa, .{ .capsule = .{

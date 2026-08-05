@@ -375,14 +375,16 @@ pub const CharacterDescriptor = struct {
     /// then decides the verdict from one frame to the next. The reference's
     /// `mCharacterPadding` value.
     ///
-    /// Domain `[0, radius)`, and BOTH ends are load-bearing — both found by enumerating the
-    /// legal bounds and asking what the code does at each, not by intuition. Zero is legal and
-    /// means no PHYSICAL margin, the solver then holding the capsule off by a numerical floor so
-    /// that the classification band cannot decide the verdict from frame to frame. And
-    /// `padding >= radius` is REFUSED: `max(0, d − padding)` is zero at every sweep once
-    /// `padding` exceeds a call's displacement, so the character stops moving. A stand-off shell
-    /// thicker than the radius it surrounds is incoherent, and the reference carries 0.02
-    /// against 0.3.
+    /// Domain `[0, ∞)`, and the lower end is the one that took work. ZERO is legal and means no
+    /// PHYSICAL margin; the solver then holds the capsule off by a numerical floor so the
+    /// classification band cannot decide the verdict from one frame to the next, and that floor
+    /// applies ONLY at zero — a `padding` the caller asked for is honoured exactly, at every
+    /// scale, invariant under translation.
+    ///
+    /// There is deliberately NO upper bound. A large value stops the character further from
+    /// obstacles, which is what a large stand-off means, and it was measured NOT to push the
+    /// capsule through thin geometry: at `2 ·` and `3.3 · radius`, against a 0.1 m wall, at seven
+    /// entry depths straddling its mid-plane, it exits on the side it entered from every time.
     padding: f32 = 0.02,
 
     /// How far OUTSIDE the shape to sweep for contacts not yet touching (metres). The
