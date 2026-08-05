@@ -448,6 +448,18 @@ pub fn groundSweepDistance(c: Character) Real {
 /// hole in the world.
 pub const max_slide_iterations: u32 = 4;
 
+/// The multiplier of the DEPENETRATION STAND-OFF FLOOR, and it must exceed
+/// `narrowphase.contact_margin_conv_k` (16) rather than merely equal it: the floor exists to put the
+/// capsule OUT of the contact margin, not to place it on the margin's edge.
+///
+/// **THIS ONE IS A NUMERICAL TOLERANCE AND §1.11.2 GOVERNS IT — the opposite of every other constant
+/// in this file, and worth saying because this module spends its length saying the opposite.**
+/// `padding`, `max_slope` and `predictive_contact_distance` are named PHYSICAL parameters that select a
+/// modelling behaviour, and the `k · floatEps(T) · coordScale` discipline deliberately does not reach
+/// them. This floor selects nothing: it absorbs float noise, and it is written in that discipline's own
+/// form for that reason.
+const standoff_floor_k: Real = 64;
+
 /// How many times depenetration may push before giving up. Same ceiling discipline, same safe
 /// failure direction: a character left slightly overlapping is corrected next call, a character
 /// pushed by an unbounded loop is a hang.
@@ -1095,6 +1107,17 @@ fn plannedPush(
 /// character oscillates between ±(radius − half-width) and NEVER leaves the doorway. The two walls
 /// are symmetric about its entry pose, so the alternation stays bounded; the ceiling case tunnels
 /// because the floor is NOT a contact at entry, which makes the first push large and unopposed.
+/// The coordinate scale the stand-off floor is measured in: the capsule's own extent plus its distance
+/// from the origin, which is where float noise at this pose actually lives.
+///
+/// It is NOT `gjk.zig`'s symmetric pair scale, which also carries the other body's core extent — that
+/// quantity is not reachable from here, the other side being a half-space or a per-triangle support
+/// shape as often as a convex. The consequence is bounded and MEASURED rather than argued: see the
+/// large-collider case in the acceptance suite.
+fn coordScale(probe: SupportShape, centre: Vec3r) Real {
+    return @sqrt(centre.lengthSq()) + narrowphase.coreExtent(Real, probe) + probe.radius;
+}
+
 fn depenetrate(
     bp: *const Broadphase,
     bm: *const BodyManager,
@@ -1150,12 +1173,28 @@ fn depenetrate(
         // froze. The reachability is therefore not authoring alone — any interpenetration at all, from
         // a spawn, a teleport, a resize or a platform pushing the character in, ended frozen.
         //
-        // **The branch cannot over-fire, and that is bounded by CONSTRUCTION and not by a threshold**:
-        // a manifold exists only where the separation is at most the contact margin — `gjk.zig`
-        // classifies anything beyond it `.separated` and `collideOrdered` answers null there — so a
-        // capsule already standing off, even by 0.005, is invisible to this query and is not moved.
-        // TRACED at four heights: 0.005 and 0.02 produce no contact at all.
-        centre = centre.add(c.normal.scale(c.penetration + padding));
+        // **A capsule already standing off is not moved, and that is the CONTRACT rather than a happy
+        // bound of the implementation.** `padding` is what a SWEEP RESERVES — a move leaves the capsule
+        // `padding` clear of what it touched, which is all `paddedAdvance` establishes and all the
+        // reference promises, `mCharacterPadding` being a parameter of `CastShape`/`CollideShape`. The
+        // POSE invariant is narrower: the controller never leaves the capsule INSIDE the contact
+        // margin, where the GJK band decides the verdict from one frame to the next. An authored pose
+        // closer than `padding` but clear of the margin is NOT normalised, and must not be —
+        // normalising it would be a pose write nobody asked for. TRACED: 0.005 and 0.02 produce no
+        // contact at all, and 0.005 already serves a whole metre.
+        // **THE TARGET HAS A NUMERICAL FLOOR, and without it `padding = 0` reproduced the freeze
+        // exactly.** Zero is a legal value and a meaningful one — no PHYSICAL margin — and it stays in
+        // the domain: removing it would have masked this defect instead of closing it, which is how the
+        // freeze got here in the first place. But `penetration + 0` at a tangency of `−0.0` moves the
+        // capsule by nothing, the sweep finds the same zero-distance contact, and the four iterations
+        // burn again.
+        //
+        // So the target is `max(padding, standoff_floor)`. With `padding = 0` a resting character stands
+        // `standoff_floor` above its floor rather than exactly on it, and that is correct rather than a
+        // compromise: `padding = 0` means "no physical margin", not "stand inside the numerical band
+        // where the GJK classification decides the verdict from one frame to the next".
+        const target = @max(padding, standoff_floor_k * std.math.floatEps(Real) * coordScale(probe, centre));
+        centre = centre.add(c.normal.scale(c.penetration + target));
     }
     return centre;
 }
