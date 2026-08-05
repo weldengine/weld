@@ -2145,13 +2145,11 @@ test "setCharacterPosition teleports without resolving and invalidates the repor
     // gravity rather than a character believed to be standing where it no longer is.
     try testing.expectEqual(api.GroundState.in_air, chars.reportedGround(id).?);
 
-    // A stale handle is a TYPED refusal, like every other entry of the store: a teleport that goes
-    // nowhere is a write the caller has to know did not happen.
+    // NO-OP on a stale handle, and the discriminant is whether the entry RETURNS A VALUE: the four
+    // entries that return something have no honest answer for a dead handle and carry an error
+    // channel, while `destroyCharacter` and this one return nothing, so the no-op IS the answer.
     chars.destroyCharacter(gpa, &world.store, &world.bm, id);
-    try testing.expectError(
-        CharacterError.StaleCharacter,
-        chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(9, 9, 9)),
-    );
+    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(9, 9, 9));
     try testing.expectEqual(@as(?character_mod.Character, null), chars.get(id));
 }
 
@@ -2298,14 +2296,16 @@ test "a character squeezed under a low ceiling is PINNED, never driven through t
             const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
             const p = r.position.toArray();
 
-            // MEASURED: the depenetration alternates between the two surfaces and lands the capsule
-            // FLUSH on the floor — base exactly 0, the 0.02 stand-off spent — and the horizontal
-            // request is consumed entirely by the four slide iterations against the ceiling's
-            // downward normal without ever being served. So the character is PINNED.
+            // The character KEEPS THE POSE IT CAME IN WITH, with a residual overlap into the
+            // ceiling, and does not tunnel — which is the failure direction §1.12.6's depenetration
+            // invariant makes sayable. The horizontal request is consumed entirely by the four slide
+            // iterations against the ceiling's downward normal without ever being served, and the
+            // depenetration reverts rather than push the base through the floor. So: PINNED at its
+            // entry base of 0.02, not flush at 0, and never below.
             try testing.expectApproxEqAbs(@as(Real, 0), p[0], api_tol);
-            try testing.expectApproxEqAbs(@as(Real, 0), p[1], api_tol);
-            // NEVER below the ground plane. This is the assertion that matters, and it is the one
-            // thing about this mode that is not an accident: see the parity note below.
+            try testing.expectApproxEqAbs(@as(Real, 0.02), p[1], api_tol);
+            // NEVER below the ground plane, and this no longer depends on the iteration count's
+            // parity: see the invariant on `depenetrate` and the parity record below.
             try testing.expect(p[1] >= -api_tol);
             // And it does not drift: call two is bit-identical to call one.
             if (previous) |q| try testing.expect(r.position.eql(q));
@@ -2314,17 +2314,18 @@ test "a character squeezed under a low ceiling is PINNED, never driven through t
     }
 }
 
-test "the depenetration's iteration count is EVEN, and the failure direction depends on it" {
-    // `max_depenetration_iterations` alternates between the two surfaces of an unresolvable squeeze,
-    // so the side the character ends on is the count's PARITY. MEASURED by changing the constant: at
-    // 3 and at 5 the base lands at −0.800000 — the full depth of the squeeze, on the far side of the
-    // ground plane — and at 4 and at 8 it lands at 0. Nothing else in the suite moved at any of the
-    // four values except the test that pins the constants themselves, so an odd count would have
-    // shipped silently.
+test "the depenetration's iteration count is even — a record, no longer a correction" {
+    // **THE HISTORY, KEPT BECAUSE IT IS WHY THE INVARIANT EXISTS.** Before the §1.12.6 depenetration
+    // invariant, `max_depenetration_iterations` alternating between the two surfaces of an
+    // unresolvable squeeze meant the side the character ended on was the count's PARITY: measured by
+    // changing the constant, at 3 and at 5 the base landed at −0.800000 — the full depth of the
+    // squeeze, on the far side of the ground plane — and at 4 and at 8 it landed at 0. Nothing else
+    // in the suite moved at any of the four values, so an odd count would have shipped silently.
     //
-    // This is not a guard and no guard was built for it (the clearance test that would resolve the
-    // squeeze properly is named in `tryStepUp`). It is the record of a measurement, plus the one
-    // assertion that turns the parity from an accident into something a change has to answer for.
+    // A guarantee cannot rest on the parity of a constant, and this assertion protected the constant
+    // while saying nothing about the algorithm. The invariant replaced it as the load-bearing
+    // statement, and the outcome no longer depends on the count at all — verified at 3, 4, 5 and 8.
+    // This line stays as the RECORD of that measurement and carries no correction.
     try testing.expectEqual(@as(u32, 0), character_mod.max_depenetration_iterations % 2);
 }
 
@@ -2429,4 +2430,123 @@ test "on OOM a resize leaves the character UNCHANGED and is retryable" {
     // the use-after-free that ordering forecloses is a latent hazard and is NOT claimed as a
     // demonstrated defect: what was demonstrated is that the allocation exists and that this test
     // cannot make it fail.
+}
+
+test "gravity on a steep face slides DOWN it, and the cap does not cancel the descent" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // **THE DIRECTION "THE GUARD DOES NOT OVER-FIRE", AND ITS ABSENCE IS WHAT LET A DEFECTIVE BOUND
+    // SHIP.** §1.12.6's cap was first written as "capped at the component BEFORE projection". On a
+    // sloped face that PENETRATES the plane: on a 50° normal `(−0.766, 0.643, 0)` a pure gravity
+    // step `(0, −1, 0)` projects to `(−0.4925, −0.5866, 0)`, whose up component `−0.5866` exceeds the
+    // `−1` it came from, so the cap bit and the output `(−0.4925, −1, 0)` had a dot of `−0.2657`
+    // with the normal — driving INTO the surface. And the projection was the physically correct
+    // answer: a body sliding down a 50° slope descends more slowly than in free fall because the
+    // surface carries part of the motion. The bound is `max(before, 0)`.
+    //
+    // A 60° face, so the trigonometry is closed form: `cos 60° = 1/2`, `sin 60° = √3/2`, hence
+    // `sin² = 3/4` and `sin·cos = √3/4`. Built as a box rotated about +Z, top-face normal
+    // `(−sin, cos, 0)`, the face passing through `(0.5, 0, 0)`.
+    const rad: f32 = 60.0 * std.math.pi / 180.0;
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(3, 0.5, 3) } });
+    _ = try world.addBody(gpa, .{
+        .entity = ent(380),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(0.5 + 0.5 * @sin(rad), -0.5 * @cos(rad), 0),
+        .rotation = math.Quatf.fromAxisAngle(av(0, 0, 1), rad),
+    });
+
+    // A capsule's closest approach to a plane comes from its bottom AXIS endpoint, not from its base,
+    // so the offset placing the SURFACE `c0` clear of the face is `radius·(1 − cos) + c0`. With
+    // `radius = 0.3` and `c0 = 0.12` that is `0.15 + 0.12 = 0.27`.
+    var desc = baseDescriptor();
+    desc.entity = ent(381);
+    desc.position = av(0.5 - 0.27 * @sin(rad), 0.27 * @cos(rad), 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const start = chars.get(id).?.position;
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0, -0.5, 0), 1.0 / 60.0);
+    const moved = r.position.sub(start).toArray();
+
+    // CLOSED FORM. Travelling along −Y closes the clearance at the rate `cos 60° = 1/2`, so contact
+    // is at `c0 / cos = 0.24`, and the padded advance is `0.24 − padding = 0.22` — the padding coming
+    // off the TRAVEL and not off the normal, the distinction that cost a first derivation here. The
+    // remaining `0.5 − 0.22 = 0.28` is projected onto the face and, `before` being negative, is left
+    // intact by the cap:
+    //
+    //     dy = −0.22 − 0.28·(3/4)   = −0.43
+    //     dx = −0.28·(√3/4)         = −0.1212436
+    const rem: Real = 0.28;
+    try testing.expectApproxEqAbs(@as(Real, -0.43), moved[1], api_tol);
+    try testing.expectApproxEqAbs(-rem * @sqrt(@as(Real, 3.0)) / 4.0, moved[0], api_tol);
+    try testing.expectEqual(api.GroundState.on_steep_ground, r.ground.state);
+
+    // **MEASURED against the counterfactual**, which is what makes this discriminating rather than
+    // merely true: with the bound at `before` the same scene gives `dy = −0.281645` and
+    // `dx = −0.026694` — a third of the descent lost and the lateral slide cut by 4.5×. And at exact
+    // contact the old bound is worse still than the account that produced it: on a 50° face under
+    // pure gravity the character does not move AT ALL, `dy = 0.00000`, frozen on the cliff.
+    //
+    // The cap's purpose is that the ENGINE does not climb on the character's behalf. It is NOT a
+    // guarantee that the output never points into the plane: when the CALLER asks to rise, the cap
+    // preserves that rise by construction and the result can still have a component into the
+    // surface, which the next sweep and the depenetration answer. Stated so no reader takes the
+    // first property for the second.
+}
+
+test "a doorway narrower than the character NEVER ejects it, whatever the iteration count" {
+    const gpa = testing.allocator;
+
+    // The ordinary form of the same unresolvable mode as the low ceiling — two opposing contacts —
+    // and it is NOT a second instance of the tunnelling, which was measured rather than assumed. The
+    // two walls are symmetric about the entry pose, so the alternation stays bounded; the ceiling
+    // tunnels because the floor is not a contact at entry, which makes the first push large and
+    // unopposed. Kept as a pin all the same: this is what a future change to `depenetrate` has to
+    // keep true, and the doorway is the case a game actually walks into.
+    //
+    // Three widths against a 0.60 m capsule, so a small deficit as well as a large one.
+    for ([_]f32{ 0.4, 0.5, 0.58 }) |width| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 390);
+        _ = try addBox(gpa, &world, av(1, 2, 2), av(-1 - width / 2, 2, 0), 391);
+        _ = try addBox(gpa, &world, av(1, 2, 2), av(1 + width / 2, 2, 0), 392);
+        var desc = baseDescriptor();
+        desc.entity = ent(393);
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        // CLOSED FORM. The capsule overlaps each wall by `radius − width/2`, and the depenetration
+        // resolves the deeper one — at entry they are equal, the tie broken on the smaller `BodyId`.
+        // So the resolved offset is exactly that overlap, alternating side from call to call, and it
+        // is `0.1`, `0.05`, `0.01` for the three widths.
+        const offset: Real = 0.3 - width / 2;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            // Along +Z, which neither wall blocks — and which is nonetheless never served: the two
+            // wall normals are ANTIPARALLEL, so their crease is exactly parallel and
+            // `slideAlongCrease` returns its documented third answer, no edge to slide along.
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0, 0, 0.2), 1.0 / 60.0);
+            const p = r.position.toArray();
+
+            try testing.expectApproxEqAbs(offset, @abs(p[0]), api_tol);
+            // INSIDE the doorway — the assertion that matters, and the one a tunnelling
+            // depenetration would break.
+            try testing.expect(@abs(p[0]) < width / 2);
+            // The base is unmoved and the +Z request unserved: pinned, not ejected.
+            try testing.expectApproxEqAbs(@as(Real, 0.02), p[1], api_tol);
+            try testing.expectApproxEqAbs(@as(Real, 0), p[2], api_tol);
+        }
+        // The SIGN alternates from call to call and the magnitude does not, so nothing above reads
+        // the sign. Measured identical at iteration counts of 3, 4 and 5 — the alternation is per
+        // CALL, not per iteration, which is why the count does not enter this answer at all.
+    }
 }
