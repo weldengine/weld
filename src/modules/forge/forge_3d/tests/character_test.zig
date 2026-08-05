@@ -32,6 +32,7 @@ const CharacterError = character_mod.CharacterError;
 const math = foundation.math;
 const ApiVec3 = math.Vec3;
 const SupportShapeR = narrowphase.SupportShape(Real);
+const Bp = @import("../pipeline/broadphase.zig").Broadphase(Real);
 const testing = std.testing;
 
 /// Absolute tolerance for a quantity computed at SOLVER precision — float noise at the
@@ -360,7 +361,7 @@ test "the stored cosine is the single trigonometric call, and a larger cosine is
     try testing.expectApproxEqAbs(@as(Real, 1), chars.get(c).?.cos_max_slope, api_tol);
 }
 
-test "destroyCharacter releases all three resources and is a no-op on a stale handle" {
+test "destroyCharacter releases all four resources and is a no-op on a stale handle" {
     const gpa = testing.allocator;
     var store: ShapeStore = .{};
     defer store.deinit(gpa);
@@ -368,6 +369,8 @@ test "destroyCharacter releases all three resources and is a no-op on a stale ha
     defer bm.deinit(gpa);
     var chars: CharacterStore = .{};
     defer chars.deinit(gpa);
+    var bp = Bp.init(.{});
+    defer bp.deinit(gpa);
 
     const id = try chars.createCharacter(gpa, &store, &bm, baseDescriptor());
     const presence = (try chars.getCharacterInnerBody(id)).?;
@@ -375,9 +378,11 @@ test "destroyCharacter releases all three resources and is a no-op on a stale ha
     try testing.expectEqual(@as(u32, 1), store.count());
     try testing.expectEqual(@as(u32, 1), bm.count());
 
-    chars.destroyCharacter(gpa, &store, &bm, id);
+    chars.destroyCharacter(gpa, &bp, &store, &bm, id);
 
-    // All three counts back to zero: the character, its capsule and its presence.
+    // All three of THESE counts back to zero: the character, its capsule and its presence. The
+    // FOURTH resource is the broadphase proxy, which this test's character never had — the test
+    // below builds one that does, because a count of nodes would not say the leaf was reachable.
     try testing.expectEqual(@as(u32, 0), chars.count());
     try testing.expectEqual(@as(u32, 0), store.count());
     try testing.expectEqual(@as(u32, 0), bm.count());
@@ -387,7 +392,7 @@ test "destroyCharacter releases all three resources and is a no-op on a stale ha
     // A SECOND destroy releases nothing — which is what keeps a double destroy from
     // double-freeing the capsule. It must not fault, and the counts must not go negative
     // or wrap.
-    chars.destroyCharacter(gpa, &store, &bm, id);
+    chars.destroyCharacter(gpa, &bp, &store, &bm, id);
     try testing.expectEqual(@as(u32, 0), chars.count());
     try testing.expectEqual(@as(u32, 0), store.count());
     try testing.expectEqual(@as(u32, 0), bm.count());
@@ -401,9 +406,11 @@ test "a recycled slot yields a different handle, so a stale one stays detectable
     defer bm.deinit(gpa);
     var chars: CharacterStore = .{};
     defer chars.deinit(gpa);
+    var bp = Bp.init(.{});
+    defer bp.deinit(gpa);
 
     const first = try chars.createCharacter(gpa, &store, &bm, baseDescriptor());
-    chars.destroyCharacter(gpa, &store, &bm, first);
+    chars.destroyCharacter(gpa, &bp, &store, &bm, first);
     const second = try chars.createCharacter(gpa, &store, &bm, baseDescriptor());
 
     // LIFO recycling puts the second character in the freed slot, so the two handles share
@@ -426,6 +433,8 @@ test "getCharacterInnerBody has three outcomes and never conflates two of them" 
     defer bm.deinit(gpa);
     var chars: CharacterStore = .{};
     defer chars.deinit(gpa);
+    var bp = Bp.init(.{});
+    defer bp.deinit(gpa);
 
     // 1 — a live character WITH a presence: the handle.
     const with = try chars.createCharacter(gpa, &store, &bm, baseDescriptor());
@@ -445,7 +454,7 @@ test "getCharacterInnerBody has three outcomes and never conflates two of them" 
 
     // 3 — a stale handle: a typed ERROR, not `null`. Conflating it with outcome 2 would
     // make a dead handle indistinguishable from a live presence-less character.
-    chars.destroyCharacter(gpa, &store, &bm, with);
+    chars.destroyCharacter(gpa, &bp, &store, &bm, with);
     try testing.expectError(error.StaleCharacter, chars.getCharacterInnerBody(with));
 }
 
@@ -457,6 +466,8 @@ test "the descriptor domain is refused by typed error and never sanitised" {
     defer bm.deinit(gpa);
     var chars: CharacterStore = .{};
     defer chars.deinit(gpa);
+    var bp = Bp.init(.{});
+    defer bp.deinit(gpa);
 
     const nan = std.math.nan(f32);
     const inf = std.math.inf(f32);
@@ -626,7 +637,7 @@ test "the descriptor domain is refused by typed error and never sanitised" {
         // cos(π/2) = 0 exactly in mathematics; in floating point it is the tiny residue of
         // the argument reduction, so the assertion is on the tolerance and not on equality.
         try testing.expectApproxEqAbs(@as(Real, 0), chars.get(id).?.cos_max_slope, api_tol);
-        chars.destroyCharacter(gpa, &store, &bm, id);
+        chars.destroyCharacter(gpa, &bp, &store, &bm, id);
     }
 }
 
@@ -1189,7 +1200,7 @@ test "groundOf reports a stale handle as a typed error" {
     // Live first, so the error below is about the handle and not about the scene.
     _ = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
 
-    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
     try testing.expectError(
         error.StaleCharacter,
         chars.groundOf(&world.bp, &world.bm, &world.store, id),
@@ -1596,7 +1607,7 @@ test "moveCharacter reports a stale handle as a typed error" {
 
     const id = try addMover(gpa, &world, &chars, baseDescriptor());
     _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
-    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
     try testing.expectError(
         error.StaleCharacter,
         chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0),
@@ -2066,7 +2077,7 @@ test "resizeCharacter refuses the same domain as createCharacter, by typed error
     try testing.expectEqual(@as(u32, 1), world.store.count());
 
     // And a stale handle is the caller's fault too.
-    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
     try testing.expectError(error.StaleCharacter, chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
 }
 
@@ -2148,7 +2159,7 @@ test "setCharacterPosition teleports without resolving and invalidates the repor
     // NO-OP on a stale handle, and the discriminant is whether the entry RETURNS A VALUE: the four
     // entries that return something have no honest answer for a dead handle and carry an error
     // channel, while `destroyCharacter` and this one return nothing, so the no-op IS the answer.
-    chars.destroyCharacter(gpa, &world.store, &world.bm, id);
+    chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
     try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(9, 9, 9));
     try testing.expectEqual(@as(?character_mod.Character, null), chars.get(id));
 }
@@ -2548,5 +2559,307 @@ test "a doorway narrower than the character NEVER ejects it, whatever the iterat
         // The SIGN alternates from call to call and the magnitude does not, so nothing above reads
         // the sign. Measured identical at iteration counts of 3, 4 and 5 — the alternation is per
         // CALL, not per iteration, which is why the count does not enter this answer at all.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gate G closing round — six findings from external review
+// ---------------------------------------------------------------------------
+
+/// Counts how many broadphase candidates a box query is offered, and whether one of them is a
+/// particular body. `queryAabb`'s collector contract is `add(user_data: u32)`.
+const CandidateCount = struct {
+    looking_for: api.BodyId,
+    total: u32 = 0,
+    found: bool = false,
+
+    pub fn add(self: *CandidateCount, user_data: u32) void {
+        self.total += 1;
+        if (user_data == self.looking_for) self.found = true;
+    }
+};
+
+test "P1-1 the pushes are accumulated and applied ONCE, after the publication" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // The box sits 8 m away, so the move ADVANCES before it pushes — which is what makes the
+    // accumulator observable at all: a move that pushes from a standing start barely advances.
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 380);
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const box = try world.addBody(gpa, .{
+        .entity = ent(381),
+        .body_type = .dynamic,
+        .shape = box_shape,
+        .position = av(8, 0.5, 0),
+        .mass = 1,
+    });
+    var desc = baseDescriptor();
+    desc.entity = ent(382);
+    desc.position = av(0, 0.02, 0);
+    // **THE FORCE CEILING IS DELIBERATELY SLACK AND THE MASSES ARE UNITY, and without that this test
+    // does not discriminate.** A first version used the default 70 kg against a ceiling of `100/60`,
+    // and both forms then answer `2 · 100/60` — the ceiling binds on every iteration, so whether the
+    // second one reads the first one's result changes nothing. Confirmed by probe: re-applying the
+    // push inside the slide loop broke NO test. With the ceiling slack the `closing` term decides
+    // instead, and the two forms differ by exactly a factor of two.
+    desc.mass = 1;
+    desc.max_push_force = 1000;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // `dt = 1 s` so the derived speed is `10 / 1 = 10 m/s`, a sane number rather than the 600 m/s a
+    // 10 m displacement at 60 Hz implies.
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
+
+    // The character stops `padding` short of the box: 8 − 0.5 − 0.3 − 0.02 = 7.18.
+    try testing.expectApproxEqAbs(@as(Real, 7.18), r.position.toArray()[0], api_tol);
+
+    // **EVERY APPLIED PUSH IS EXACTLY THE PLANNED `mass · closing = 1 · 10 = 10`**, under a ceiling of
+    // `1000 · 1` that does not bind — that is the invariant, and it holds because a planner cannot
+    // read a velocity that has not been written yet.
+    //
+    // **THE NUMBER OF CONTACTS AGAINST THE BOX DIFFERS BY PRECISION, and it is measured rather than
+    // designed: two at f32, one at f64.** A head-on wall's slide cancels the whole motion, so the
+    // second contact exists only because an f32 residue leaves a sliver of `remaining` behind — it is
+    // FLOAT NOISE, not a path this engine plans. Asserting `20` at both precisions would have been
+    // pinning that noise, and it is what made the f64 leg of the matrix red on the first attempt.
+    //
+    // So the expectation is per-precision, and the invariant is stated as the multiple: the applied
+    // total is `n · 10` for whatever `n` the geometry produced. Applied INSIDE the loop the f32 answer
+    // would be `10` — the second iteration seeing the box already leaving at 10 m/s and computing a
+    // closing speed of exactly zero — so the f32 leg does discriminate the two forms, which is what
+    // the probe table records; the f64 leg cannot, having only one contact.
+    const expected_push: Real = if (Real == f32) 20 else 10;
+    try testing.expectApproxEqAbs(expected_push, world.bm.linearVelocity(box).?.toArray()[0], api_tol);
+    try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+}
+
+test "P1-1 a publication that fails leaves every body velocity untouched" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 385);
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const box = try world.addBody(gpa, .{
+        .entity = ent(386),
+        .body_type = .dynamic,
+        .shape = box_shape,
+        .position = av(3, 0.5, 0),
+        .mass = 1,
+    });
+    var desc = baseDescriptor();
+    desc.entity = ent(387);
+    desc.position = av(0, 0.02, 0);
+    desc.max_push_force = 100;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // **The injection needs BOTH fail indices, and the second one is why gate F recorded this
+    // failure as un-injectable.** `syncPresenceTo`'s only fallible call is `Broadphase.update`, whose
+    // reservation grows an `ArrayListUnmanaged`, and a list grows through `remap` first, falling back
+    // to `alloc` only when that returns null. With `fail_index` alone the growth went through `remap`
+    // and the call reported ZERO allocations seen. `resize_fail_index` closes the other door.
+    //
+    // **MEASURED LIMIT, stated rather than implied.** The growth lands on the 34th append for this
+    // operation sequence, and an append happens only when a proxy leaves its fat box — so it lands on
+    // a POSE WRITE that travels. Five constructions were tried to land it on a call that also pushes,
+    // and none did: a move that pushes is a move that barely advances, hence does not refit, hence
+    // never grows the log. So what this test pins is the invariant on the reachable half — a failed
+    // publication changes no velocity anywhere — and the ORDERING that protects the push is carried
+    // by the structural argument in `PendingPushes`, not by a counterfactual here.
+    var fired = false;
+    var round: u32 = 0;
+    while (round < 60) : (round += 1) {
+        const f: Real = @floatFromInt(round);
+        var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0, .resize_fail_index = 0 });
+        chars.setCharacterPosition(fa.allocator(), &world.bp, &world.bm, &world.store, id, v(20 + f * 5, 0.02, 0)) catch |e| {
+            try testing.expectEqual(error.OutOfMemory, e);
+            fired = true;
+            break;
+        };
+    }
+    // NON-VACUITY: without this the loop could pass by never having injected anything.
+    try testing.expect(fired);
+
+    // Nothing in the world moved — no velocity, and the character's own record is where it was.
+    try testing.expect(world.bm.linearVelocity(box).?.eql(Vec3r.zero));
+
+    // RETRYABLE with a working allocator, and the push then happens exactly once per contact.
+    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(0, 0.02, 0));
+    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
+    try testing.expect(world.bm.linearVelocity(box).?.toArray()[0] > 0);
+}
+
+test "P1-2 a teleport leaves no permanently fat leaf behind it" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 390);
+    var desc = baseDescriptor();
+    desc.entity = ent(391);
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+
+    // 50 m in one teleport, far beyond the 0.1 m fat margin.
+    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(50, 0.02, 0));
+
+    // A small box at the MIDPOINT of that trajectory, where the character has never been and is not
+    // now. An interim form published the UNION of the old and the new box, and `Bvh.update` returns
+    // WITHOUT refitting once its stored fat box contains the new tight one — so that leaf covered the
+    // whole 50 m permanently and no later call shrank it. The presence must not be a candidate here.
+    var mid = CandidateCount{ .looking_for = presence };
+    _ = world.bp.queryAabb(math.Aabb(Real).fromMinMax(v(24, 0, -1), v(26, 2, 1)), &mid);
+    try testing.expect(!mid.found);
+
+    // NON-VACUITY: the same query AT the new pose does find it, so the collector and the traversal
+    // both work and the assertion above is about the box's extent and not about a broken probe.
+    var at_new = CandidateCount{ .looking_for = presence };
+    _ = world.bp.queryAabb(math.Aabb(Real).fromMinMax(v(49, 0, -1), v(51, 2, 1)), &at_new);
+    try testing.expect(at_new.found);
+}
+
+test "P1-3 destroying a character removes its broadphase proxy, leaf and all" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    var desc = baseDescriptor();
+    desc.entity = ent(401);
+    desc.position = av(0, 0.02, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+
+    const box = math.Aabb(Real).fromMinMax(v(-1, 0, -1), v(1, 2, 1));
+
+    // Before: the query traverses the leaf and is offered it.
+    var before = CandidateCount{ .looking_for = presence };
+    _ = world.bp.queryAabb(box, &before);
+    try testing.expect(before.found);
+
+    chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
+
+    // After: nothing at all. **Asserted on REACHABILITY and not on a node count**, which is the whole
+    // point: a leaked leaf keeps its last box and every query over that region keeps visiting it,
+    // against a body handle that has been freed and whose slot will be recycled. A count of nodes
+    // would not have said the leaf was still reachable.
+    var after = CandidateCount{ .looking_for = presence };
+    _ = world.bp.queryAabb(box, &after);
+    try testing.expect(!after.found);
+    try testing.expectEqual(@as(u32, 0), after.total);
+}
+
+test "P2-1 ground_velocity is read at the body's SURFACE, not at the penetration midpoint" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // A platform spinning about +Z, so the point's HEIGHT is what the cross product reads: for
+    // `ω = (0,0,ω)` and `r = (0,y,0)` the velocity is `(−ω·y, 0, 0)`. About +Y — the obvious choice —
+    // the height cancels out entirely and this fix would be unobservable, which is why the axis is +Z.
+    const plat_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(4, 0.5, 4) } });
+    const platform = try world.addBody(gpa, .{
+        .entity = ent(410),
+        .body_type = .kinematic,
+        .shape = plat_shape,
+        .position = av(0, 0, 0),
+    });
+    world.bm.setAngularVelocity(platform, v(0, 0, 2));
+
+    // FRANK INTERPENETRATION, which is what puts the verdict on the MANIFOLD path: the ground sweep
+    // starts overlapping, returns distance zero, and its normal is `−direction` and unusable. The
+    // rotating-platform test that already existed has the character separated by `padding`, so it
+    // goes through the SWEEP and never reaches this point at all.
+    var desc = baseDescriptor();
+    desc.entity = ent(411);
+    desc.position = av(0, 0.3, 0); // capsule bottom at 0.3, platform top at 0.5 ⇒ 0.2 m of overlap
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    const ground = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+    try testing.expectEqual(api.GroundState.grounded, ground.state);
+
+    // CLOSED FORM. The manifold point is the MIDPOINT of the two surface points, `(0.3+0.5)/2 = 0.4`;
+    // the platform's own surface is at `0.5`. So `r = (0, 0.5, 0)` and
+    // `ω × r = (0,0,2) × (0,0.5,0) = (−1, 0, 0)`.
+    try testing.expectApproxEqAbs(@as(Real, -1), ground.velocity.toArray()[0], api_tol);
+    // And the REFUTED value is named, so the test discriminates instead of merely accepting: the
+    // midpoint would give `−0.8`, which this bound excludes.
+    try testing.expect(@abs(ground.velocity.toArray()[0] - (-0.8)) > 0.1);
+}
+
+test "P2-2 step_height is validated like every other stored physical parameter" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // It is a SWEEP DISTANCE — `tryStepUp`'s lift and `stepDown`'s probe hand it straight to
+    // `sweepNearest` — and it was the one stored physical parameter with no guard.
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -0.1 }) |bad| {
+        var d = baseDescriptor();
+        d.step_height = bad;
+        try testing.expectError(CharacterError.InvalidDimensions, chars.createCharacter(gpa, &store, &bm, d));
+    }
+    // ZERO is legal and is the disabler the suite already exercises: no climb, no floor-sticking.
+    var ok = baseDescriptor();
+    ok.step_height = 0;
+    const id = try chars.createCharacter(gpa, &store, &bm, ok);
+    try testing.expectApproxEqAbs(@as(Real, 0), chars.get(id).?.step_height, api_tol);
+    // Nothing was left behind by the three refusals: one character, one capsule, one presence.
+    try testing.expectEqual(@as(u32, 1), chars.count());
+    try testing.expectEqual(@as(u32, 1), store.count());
+    try testing.expectEqual(@as(u32, 1), bm.count());
+}
+
+test "a base EXACTLY on the floor serves no horizontal motion — measured, not fixed here" {
+    const gpa = testing.allocator;
+
+    // **A SEVENTH FINDING, found while building the P1-1 probe rather than by review, and PINNED
+    // rather than fixed: gate G adds no behaviour line.**
+    //
+    // At a base of exactly zero the capsule is exactly tangent to `{ y <= 0 }`, so the horizontal
+    // sweep reports an initial contact at distance zero on the face-inclusive convention, the padded
+    // advance clamps to zero, and the plane's `+Y` normal opposes nothing — `slideAlongPlane` returns
+    // the motion unchanged because `into >= 0`. The next iteration finds the same contact. All four
+    // slide iterations are consumed with no progress and the remaining displacement is DROPPED.
+    //
+    // MEASURED at six starting heights: only EXACTLY zero fails. 0.005, 0.01, 0.019, 0.02 and 0.05
+    // all serve the whole 1 m. So the trigger is exact tangency and not "below `padding`", which is
+    // what a guess would have said.
+    //
+    // Not reachable from ordinary play — a move leaves the character resting at `padding` above its
+    // floor, never at zero — but reachable from AUTHORING, "put the character on the ground" being a
+    // natural thing to write. Consigned with its owner.
+    for ([_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05 }) |start_y| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 420);
+        var desc = baseDescriptor();
+        desc.entity = ent(421);
+        desc.position = av(0, start_y, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        const expected_x: Real = if (start_y == 0) 0 else 1;
+        try testing.expectApproxEqAbs(expected_x, r.position.toArray()[0], api_tol);
+        // The verdict is honest either way — there IS ground under it.
+        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
     }
 }
