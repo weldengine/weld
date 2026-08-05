@@ -3063,50 +3063,6 @@ test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and no
     }
 }
 
-test "padding has an UPPER bound too, refused at creation and at resize" {
-    const gpa = testing.allocator;
-    var store: ShapeStore = .{};
-    defer store.deinit(gpa);
-    var bm: BodyManager = .{};
-    defer bm.deinit(gpa);
-    var bp = Bp.init(.{});
-    defer bp.deinit(gpa);
-    var chars: CharacterStore = .{};
-    defer chars.deinit(gpa);
-
-    // A stand-off shell thicker than the radius of the shape it surrounds is geometrically
-    // incoherent, and the reference carries 0.02 against a radius of 0.3 — two orders below. A
-    // RELATION between fields, refused by typed error and never clamped, the same treatment as
-    // `height >= 2 · radius`.
-    for ([_]f32{ 0.3, 0.5, 1.0 }) |bad| {
-        var d = baseDescriptor();
-        d.padding = bad; // radius is 0.3
-        try testing.expectError(CharacterError.InvalidPadding, chars.createCharacter(gpa, &store, &bm, d));
-    }
-    // Just inside is legal, and so is zero — both ends of the domain are exercised here so the
-    // guard cannot be read as "padding must be small".
-    for ([_]f32{ 0, 0.29999 }) |ok| {
-        var d = baseDescriptor();
-        d.padding = ok;
-        const id = try chars.createCharacter(gpa, &store, &bm, d);
-        chars.destroyCharacter(gpa, &bp, &store, &bm, id);
-    }
-
-    // **THE RESIZE MUST RE-CHECK IT, because the relation is a domain of the PAIR**: shrinking the
-    // radius under a legal padding violates it while neither field is individually out of range.
-    var d = baseDescriptor();
-    d.padding = 0.25;
-    const id = try chars.createCharacter(gpa, &store, &bm, d);
-    // 0.25 padding against a 0.2 radius — refused, and nothing changed.
-    try testing.expectError(
-        CharacterError.InvalidPadding,
-        chars.resizeCharacter(gpa, &bp, &bm, &store, id, 0.2, 1.8),
-    );
-    try testing.expectApproxEqAbs(@as(Real, 0.3), chars.get(id).?.radius, api_tol);
-    // And a radius that still clears the padding is accepted.
-    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &bp, &bm, &store, id, 0.26, 1.8));
-}
-
 test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor" {
     const gpa = testing.allocator;
 
@@ -3132,6 +3088,9 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
         }
         fn padHi(d: *api.CharacterDescriptor) void {
             d.padding = 0.29999;
+        }
+        fn padOverR(d: *api.CharacterDescriptor) void {
+            d.padding = 0.6;
         }
         fn pushZero(d: *api.CharacterDescriptor) void {
             d.max_push_force = 0;
@@ -3168,6 +3127,8 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
         // clearance above it — so it stops short and does not climb. The guard above refuses
         // `padding >= radius` on the geometric-incoherence motive, not on this.
         .{ .name = "padding = r - eps", .mut = M.padHi, .served = .{ 0.5, 0.5, 0, 0 }, .y = 0.02 },
+        // **NO upper bound**, the guard that briefly rejected this having been measured away.
+        .{ .name = "padding = 2r", .mut = M.padOverR, .served = .{ 0.5, 0.5, 0, 0 }, .y = 0.02 },
         // Pushing disabled changes nothing here — no dynamic body in the scene.
         .{ .name = "max_push_force = 0", .mut = M.pushZero, .served = .{ 0.5, 0.5, 0.5, 0.5 }, .y = 0.20199 },
         // No climb and no floor-sticking: blocked by the riser, which is the correct answer.
@@ -3212,5 +3173,65 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
         try testing.expectApproxEqAbs(row.y, prev * 0 + chars.get(id).?.position.toArray()[1], 1e-3);
         // Every row ends GROUNDED — none of the legal bounds loses the floor.
         try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
+    }
+}
+
+test "the stand-off floor never overrides a requested padding, and the stall is COLLIDER-SIZE bound" {
+    const gpa = testing.allocator;
+
+    // **The floor applies only at `padding == 0`, and an earlier `@max` form let it OVERRIDE a padding
+    // the caller had asked for.** `64 · floatEps(f32) = 7.6e-6`, so that floor crossed the 0.02 default
+    // at 2 632 m and reached 3.8 cm at 5 km: a caller asking for 2 cm silently got 3.8, and two identical
+    // scenes translated apart stopped at different distances. A supported region answering wrongly
+    // without saying so, which is the one failure direction this milestone refuses.
+    //
+    // Now a non-zero `padding` is honoured EXACTLY and is invariant under translation. Measured over five
+    // decades of distance against a half-space floor: the whole metre, every call, at both precisions.
+    for ([_]f32{ 0, 1000, 5000, 20000, 50000 }) |x0| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 930);
+        var desc = baseDescriptor();
+        desc.entity = ent(931);
+        desc.position = av(x0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+        var prev: Real = x0;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            try testing.expectApproxEqAbs(prev + 1, r.position.toArray()[0], @max(api_tol, @abs(prev) * 1e-6));
+            prev = r.position.toArray()[0];
+        }
+    }
+
+    // **AND THE STALL REGIME IS NOT A DISTANCE, which is what the measurement corrected.** The prediction
+    // was that it returns where `padding` falls under the contact margin, at a `coordScale` beyond about
+    // 10 km — and there is NO stall at 50 km, because `gjk.zig`'s coordScale is RELATIVE,
+    // `|Δpos| + coreExtent(a) + coreExtent(b)`, which the M1.1.2/P1c symmetry fixed and which does not
+    // grow with distance from the origin. What grows it is the OTHER BODY'S SIZE.
+    //
+    // Measured boundary at f32: a 100 m half-extent collider serves every call, a 500 m one stalls from
+    // the second. At f64, 2 km still serves — so it is a precision regime and `-Dphysics_f64` is Phase
+    // 1's answer, exactly as §1.11.4 bis says for its own class.
+    for ([_]f32{ 100, 500 }) |half| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addBox(gpa, &world, av(half, half, half), av(0, -half, 0), 940);
+        var desc = baseDescriptor();
+        desc.entity = ent(941);
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const first = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        try testing.expectApproxEqAbs(@as(Real, 1), first.position.toArray()[0], api_tol);
+
+        const second = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        const served = second.position.toArray()[0] - first.position.toArray()[0];
+        const stalls = Real == f32 and half >= 500;
+        try testing.expectApproxEqAbs(if (stalls) @as(Real, 0) else @as(Real, 1), served, api_tol);
     }
 }
