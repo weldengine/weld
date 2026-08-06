@@ -2295,12 +2295,16 @@ test "resize and teleport both wake what their new volume reaches" {
 // F.0bis — the unguarded squeeze mode, MEASURED, and the step path's padding
 // ---------------------------------------------------------------------------
 
-test "a character squeezed under a low ceiling is PINNED, never driven through the floor" {
+test "a character squeezed under a low ceiling WALKS, and is never driven through the floor" {
     const gpa = testing.allocator;
 
-    // A capsule needing 1.8 m of headroom under a ceiling offering 1.0 m, and the same at 1.7 m —
-    // any deficit at all, not just a large one. Both are unresolvable: no pose satisfies both
-    // surfaces, so what is measured is the FAILURE DIRECTION.
+    // **This test pinned a stall and the stall is gone.** It used to assert that a squeezed character
+    // was PINNED at base zero, serving nothing. That was the tangency consequence: the ceiling's
+    // downward normal does not oppose a horizontal motion, so the contact obstructed nothing and yet
+    // consumed all four slide iterations. The loop now sets such a contact aside for one free retry, and
+    // the character walks.
+    //
+    // What the test still protects is the half that mattered: it is never driven THROUGH the floor.
     for ([_]f32{ 1.0, 1.7 }) |clear| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
@@ -2314,28 +2318,18 @@ test "a character squeezed under a low ceiling is PINNED, never driven through t
         desc.position = av(0, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        // TWO calls, because a mode that is stable for one call and drifts on the next is the
-        // dangerous one: the caller keeps asking, and a per-call bias accumulates.
-        var previous: ?Vec3r = null;
+        var previous: Real = 0;
         var k: u32 = 0;
         while (k < 2) : (k += 1) {
             const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
             const p = r.position.toArray();
-
-            // The character KEEPS THE POSE IT CAME IN WITH, with a residual overlap into the
-            // ceiling, and does not tunnel — which is the failure direction §1.12.6's depenetration
-            // invariant makes sayable. The horizontal request is consumed entirely by the four slide
-            // iterations against the ceiling's downward normal without ever being served, and the
-            // depenetration reverts rather than push the base through the floor. So: PINNED at its
-            // entry base of 0.02, not flush at 0, and never below.
-            try testing.expectApproxEqAbs(@as(Real, 0), p[0], api_tol);
+            // The whole metre, both calls: a character squeezed VERTICALLY with clear horizontal space
+            // has no reason not to walk.
+            try testing.expectApproxEqAbs(previous + 1, p[0], api_tol);
+            previous = p[0];
+            // Resting on the floor at `padding`, and NEVER below it — the assertion this test exists for.
             try testing.expectApproxEqAbs(@as(Real, 0.02), p[1], api_tol);
-            // NEVER below the ground plane, and this no longer depends on the iteration count's
-            // parity: see the invariant on `depenetrate` and the parity record below.
             try testing.expect(p[1] >= -api_tol);
-            // And it does not drift: call two is bit-identical to call one.
-            if (previous) |q| try testing.expect(r.position.eql(q));
-            previous = r.position;
         }
     }
 }
@@ -2571,9 +2565,13 @@ test "a doorway narrower than the character NEVER ejects it, whatever the iterat
             // INSIDE the doorway — the assertion that matters, and the one a tunnelling
             // depenetration would break.
             try testing.expect(@abs(p[0]) < width / 2);
-            // The base is unmoved and the +Z request unserved: pinned, not ejected.
             try testing.expectApproxEqAbs(@as(Real, 0.02), p[1], api_tol);
-            try testing.expectApproxEqAbs(@as(Real, 0), p[2], api_tol);
+            // **THE +Z REQUEST IS NOW SERVED, where this test used to assert it was not.** The two wall
+            // normals are antiparallel and neither opposes a motion along +Z, so both contacts obstruct
+            // nothing — and the loop now sets a non-obstructing contact aside instead of spending an
+            // iteration on it. Walking down a corridor is the case a game actually walks into, and it
+            // used to serve nothing at all.
+            try testing.expectApproxEqAbs(0.2 * @as(Real, @floatFromInt(k + 1)), p[2], api_tol);
         }
         // The SIGN alternates from call to call and the magnitude does not, so nothing above reads
         // the sign. Measured identical at iteration counts of 3, 4 and 5 — the alternation is per
@@ -2999,25 +2997,20 @@ test "the stand-off floor serves a zero padding, and its scale limit is MEASURED
     }
 }
 
-test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and not padding" {
+test "a 1 km collider stalls because slideNormal cannot resolve — a FOURTH mechanism" {
     const gpa = testing.allocator;
 
-    // **A SEPARATE, PRE-EXISTING LIMIT, found while probing the stand-off floor and MEASURED not to be
-    // caused by it.** With the floor removed — the exact state of the previous push — the numbers are
-    // identical, and it happens at the DEFAULT `padding = 0.02` as much as at zero, so it is neither a
-    // residual of the floor nor a property of `padding`. My first version of this test asserted it as a
-    // zero-padding residual and was wrong; the default-padding leg refuted it.
+    // **This stall was expected to fall with the tangency consequence and it did NOT, and the trace says
+    // why: it is a different mechanism.** `slideNormal` returns NULL at that scale — traced,
+    // `hit = 0.000000000`, `adv = 0.000000000`, `normal = false` — so the loop takes its documented
+    // "no usable normal: stop rather than guess a direction" exit, zeroes the remainder and serves
+    // nothing. It never reaches the non-opposing test, which is why setting a contact aside cannot help.
     //
-    // What it is: a large-collider precision limit at f32, the class `engine-physics-forge.md`
-    // §1.11.4 bis already characterises and deliberately does not fix. A 1 km box centred at
-    // `y = −1000` has its top face at zero known only to `ulp(1000) = 6.1e-5`, and the pair's contact
-    // margin is `16 · floatEps(f32) · 2733.6 = 5.2e-3`. The character rests 0.02 above the face, the
-    // ground probe does not find it, the verdict reads `.in_air`, and from the second call the move
-    // serves nothing.
-    //
-    // At f64 the same scene serves every call, which is what identifies the cause as precision rather
-    // than geometry — and `-Dphysics_f64` is exactly Phase 1's answer to this class.
-    for ([_]f32{ 0.02, 0 }) |pad| {
+    // Serving it would mean inventing a direction the narrowphase declines to supply, which this loop
+    // refuses by design and which is the right refusal. So the stall stays, now with a precise cause
+    // instead of the vague large-collider one it carried, and it belongs with the §1.11.4 bis class:
+    // f64 serves every call on the same scene.
+    for ([_]f32{ 0.02, std.math.floatMin(f32) }) |pad| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         var chars: CharacterStore = .{};
@@ -3025,12 +3018,10 @@ test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and no
         _ = try addBox(gpa, &world, av(1000, 1000, 1000), av(0, -1000, 0), 450);
         var desc = baseDescriptor();
         desc.entity = ent(451);
-        desc.position = av(0, 0, 0);
+        desc.position = av(0, 0.02, 0);
         desc.padding = pad;
         const id = try addMover(gpa, &world, &chars, desc);
 
-        // The FIRST call is served at both precisions: the stall needs the entry pose to be the one the
-        // previous call left.
         const first = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
         try testing.expectApproxEqAbs(@as(Real, 1), first.position.toArray()[0], api_tol);
 
@@ -3039,10 +3030,10 @@ test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and no
         try testing.expectApproxEqAbs(if (Real == f32) @as(Real, 0) else @as(Real, 1), served, api_tol);
     }
 
-    // THE CONTRAST that makes the above a SCALE statement and not a box statement: the same geometry at
-    // 5 m serves every call at both precisions and at both paddings. Without this leg the test would
-    // read as "boxes stall the move", which is false.
-    for ([_]f32{ 0.02, 0 }) |pad| {
+    // The 5 m contrast, which keeps this a SCALE statement and not a box statement — and it carries the
+    // `padding = floatMin` leg too, the path the `padding > 0` branch opens and which the tangency fix
+    // had to close: a positive padding whose addition changes no bit.
+    for ([_]f32{ 0.02, std.math.floatMin(f32) }) |pad| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         var chars: CharacterStore = .{};
@@ -3050,7 +3041,7 @@ test "a 1 km collider stalls the move at f32 — NOT the tangency defect, and no
         _ = try addBox(gpa, &world, av(5, 5, 5), av(0, -5, 0), 460);
         var desc = baseDescriptor();
         desc.entity = ent(461);
-        desc.position = av(0, 0, 0);
+        desc.position = av(0, 0.02, 0);
         desc.padding = pad;
         const id = try addMover(gpa, &world, &chars, desc);
         var previous: Real = 0;
@@ -3187,23 +3178,38 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
     //
     // Now a non-zero `padding` is honoured EXACTLY and is invariant under translation. Measured over five
     // decades of distance against a half-space floor: the whole metre, every call, at both precisions.
-    for ([_]f32{ 0, 1000, 5000, 20000, 50000 }) |x0| {
+    // **THE ASSERTION IS THE FINAL CLEARANCE, NOT THE ADVANCE, and the first version of this test was
+    // VACUOUS because it asserted the advance.** Starting at `y = padding` with a purely horizontal
+    // motion and checking `x` alone, the old `@max(padding, floor)` passes too: nothing there ever
+    // exercises `standoffTarget`. Confirmed by probe — restoring `@max` broke NOTHING. So the character
+    // walks into a WALL and the test measures how far short of it it stops.
+    //
+    // At 5 km the floor is `64 · floatEps(f32) · 5000.9 = 3.81e-2`, so `@max` would stop the character
+    // 3.8 cm short of the wall where it asked for 2 — an 1.8 cm gap, three orders above the tolerance.
+    for ([_]f32{ 0, 1000, 5000 }) |x0| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         var chars: CharacterStore = .{};
         defer chars.deinit(gpa);
         _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 930);
+        // A wall whose −X face stands 3 m ahead of the character's start.
+        const wall_face: f32 = x0 + 3;
+        _ = try addBox(gpa, &world, av(1, 2, 2), av(wall_face + 1, 2, 0), 932);
         var desc = baseDescriptor();
         desc.entity = ent(931);
         desc.position = av(x0, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
-        var prev: Real = x0;
+
+        // Walk into it, generously, so the stop is the wall and not the request running out.
         var k: u32 = 0;
-        while (k < 3) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-            try testing.expectApproxEqAbs(prev + 1, r.position.toArray()[0], @max(api_tol, @abs(prev) * 1e-6));
-            prev = r.position.toArray()[0];
+        while (k < 4) : (k += 1) {
+            _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
         }
+        // The capsule's surface reaches `radius` ahead of its base, so the base rests at
+        // `wall_face − radius − padding`. `padding` and NOT the floor: that is the whole assertion.
+        const expected: Real = @as(Real, wall_face) - 0.3 - 0.02;
+        const got = chars.get(id).?.position.toArray()[0];
+        try testing.expectApproxEqAbs(expected, got, @max(api_tol, @abs(expected) * 1e-6));
     }
 
     // **AND THE STALL REGIME IS NOT A DISTANCE, which is what the measurement corrected.** The prediction
