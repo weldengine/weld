@@ -612,6 +612,9 @@ const SweepCollector = struct {
     bound: Real,
     layer_mask: u32,
     exclude: ?BodyId,
+    /// A SECOND body to ignore, used by the slide loop for a contact it has established does not
+    /// oppose the motion. See `sweepNearest`.
+    exclude_also: ?BodyId = null,
     best: ?struct {
         body: BodyId,
         subshape_id: u32,
@@ -623,6 +626,9 @@ const SweepCollector = struct {
         const body: BodyId = user_data;
         if (self.exclude) |own| {
             if (own == body) return;
+        }
+        if (self.exclude_also) |other| {
+            if (other == body) return;
         }
         const layer = self.bm.collisionLayer(body) orelse return;
         if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
@@ -890,6 +896,10 @@ fn sweepNearest(
     distance: Real,
     layer_mask: u32,
     exclude: ?BodyId,
+    /// A second body to ignore. Only the slide loop passes one — for a contact it has ESTABLISHED
+    /// does not oppose the motion — and every other caller passes `null`, so their contract is
+    /// unchanged in meaning.
+    exclude_also: ?BodyId,
 ) ?SweepHit {
     var collector = SweepCollector{
         .bm = bm,
@@ -900,6 +910,7 @@ fn sweepNearest(
         .bound = distance,
         .layer_mask = layer_mask,
         .exclude = exclude,
+        .exclude_also = exclude_also,
     };
     const box = body_manager_mod.worldAabb(record, origin, Quatr.identity);
     _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &collector);
@@ -957,7 +968,7 @@ fn tryStepUp(
     touched: *TouchedBodies,
 ) ?StepUp {
     // 1 — lift.
-    const up_hit = sweepNearest(bp, bm, store, record, probe, centre, up, c.step_height, c.layer_mask, c.inner_body);
+    const up_hit = sweepNearest(bp, bm, store, record, probe, centre, up, c.step_height, c.layer_mask, c.inner_body, null);
     if (up_hit) |h| touched.add(h.body);
     const lift = paddedAdvance(up_hit, c.step_height, standoffTarget(c.padding, probe, centre));
     if (lift <= 0) return null;
@@ -965,7 +976,7 @@ fn tryStepUp(
 
     // 2 — forward, from the lifted pose. An advance of zero means the obstacle reaches above the
     // lift, which is exactly the `step_height + ε` case: the climb must fail and the caller slides.
-    const fwd_hit = sweepNearest(bp, bm, store, record, probe, lifted, direction, remaining_distance, c.layer_mask, c.inner_body);
+    const fwd_hit = sweepNearest(bp, bm, store, record, probe, lifted, direction, remaining_distance, c.layer_mask, c.inner_body, null);
     if (fwd_hit) |h| touched.add(h.body);
     const forward_advance = paddedAdvance(fwd_hit, remaining_distance, standoffTarget(c.padding, probe, lifted));
     if (forward_advance <= 0) return null;
@@ -973,7 +984,7 @@ fn tryStepUp(
 
     // 3 — land. The drop budget is the lift plus one more step height, so a step DOWN on the far
     // side is still caught; finding nothing means there is no floor over there at all.
-    const down_hit = sweepNearest(bp, bm, store, record, probe, forward, up.neg(), lift + c.step_height, c.layer_mask, c.inner_body) orelse return null;
+    const down_hit = sweepNearest(bp, bm, store, record, probe, forward, up.neg(), lift + c.step_height, c.layer_mask, c.inner_body, null) orelse return null;
     touched.add(down_hit.body);
     const drop = paddedAdvance(down_hit, lift + c.step_height, standoffTarget(c.padding, probe, forward));
     const landed = forward.sub(up.scale(drop));
@@ -1031,7 +1042,7 @@ fn stepDown(
     c: Character,
     touched: *TouchedBodies,
 ) Vec3r {
-    const hit = sweepNearest(bp, bm, store, record, probe, centre, up.neg(), c.step_height, c.layer_mask, c.inner_body) orelse return centre;
+    const hit = sweepNearest(bp, bm, store, record, probe, centre, up.neg(), c.step_height, c.layer_mask, c.inner_body, null) orelse return centre;
     const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse return centre;
     if (normal.dot(up) < c.cos_max_slope) return centre;
     touched.add(hit.body);
@@ -1491,8 +1502,30 @@ pub const CharacterStore = struct {
         var planes: [2]Vec3r = @splat(Vec3r.zero);
         var plane_count: u32 = 0;
         var step_attempted = false;
+        // **A CONTACT THAT DOES NOT OPPOSE THE MOTION MUST NOT CONSUME THE BUDGET.**
+        //
+        // This is the CONSEQUENCE the last four rounds kept approaching by its arrival paths. Each of
+        // them closed one way of ending up exactly tangent — the depenetration's stand-off, then the
+        // same stand-off at all five advance sites, then scoping it to `padding == 0` — and each time
+        // another path appeared, because arrival at tangency is a float-resolution phenomenon and there
+        // are as many paths as one likes: a 500 m collider whose resolution reseats the capsule
+        // whatever the floor, a `padding` of `floatMin` whose addition changes no bit. What is FINITE
+        // is what tangency then does, and it does it in exactly one place — here.
+        //
+        // A zero advance against a surface that does not oppose the travel direction is not an
+        // obstruction: the slide leaves the motion unchanged, the next iteration finds the same
+        // contact, and the budget burns with the remainder dropped. So that body is set aside for ONE
+        // retry that does not spend the budget, and the sweep then reports the next REAL obstacle.
+        // TRACED: with the resting floor set aside and self-exclusion kept, the sweep returns null and
+        // the whole remaining metre is free.
+        //
+        // Bounded by construction: a single slot, so at most one free retry per call, and a second
+        // non-opposing body spends its iteration normally. No epsilon anywhere — the advance test is
+        // exact zero and the opposition test is the sign of a dot product.
+        var ignored: ?BodyId = null;
+        var budget: u32 = max_slide_iterations;
         var iteration: u32 = 0;
-        while (iteration < max_slide_iterations) : (iteration += 1) {
+        while (iteration < budget) : (iteration += 1) {
             const len_sq = remaining.lengthSq();
             // True zero, not an epsilon: a displacement of exactly nothing is done, and any
             // representable non-zero displacement is a real request to be served.
@@ -1500,7 +1533,7 @@ pub const CharacterStore = struct {
             const distance = @sqrt(len_sq);
             const direction = remaining.scale(1 / distance);
 
-            const maybe_hit = sweepNearest(bp, bm, store, record, probe, centre, direction, distance, c.layer_mask, c.inner_body);
+            const maybe_hit = sweepNearest(bp, bm, store, record, probe, centre, direction, distance, c.layer_mask, c.inner_body, ignored);
             const hit = maybe_hit orelse {
                 // Nothing in the way: the whole remaining displacement is served.
                 centre = centre.add(remaining);
@@ -1531,6 +1564,15 @@ pub const CharacterStore = struct {
                 remaining = Vec3r.zero;
                 break;
             };
+
+            // The non-opposing zero-advance contact: set it aside and retry for free. `>= 0` is the
+            // exact test — a surface the motion runs ALONG (dot exactly zero) obstructs nothing, and
+            // one it runs away from even less.
+            if (advance == 0 and ignored == null and normal.dot(direction) >= 0) {
+                ignored = hit.body;
+                budget += 1;
+                continue;
+            }
 
             // PLAN the push on what was hit, if it is dynamic and yields. Planned here and applied
             // after the publication (see `PendingPushes`); the position in the loop is readability
