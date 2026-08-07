@@ -3041,7 +3041,11 @@ test "a 1 km collider stalls because slideNormal cannot resolve — a FOURTH mec
         _ = try addBox(gpa, &world, av(5, 5, 5), av(0, -5, 0), 460);
         var desc = baseDescriptor();
         desc.entity = ent(461);
-        desc.position = av(0, 0.02, 0);
+        // **BASE AT EXACTLY ZERO, and the previous `0.02` is why this leg proved nothing.** Starting
+        // `padding` above the floor, the horizontal sweep never meets it, so the non-opposing retry is
+        // never reached and the leg passed with the retry removed. Tangent, it is the `floatMin` path
+        // the `padding > 0` branch opens: a positive padding whose addition changes no bit.
+        desc.position = av(0, 0, 0);
         desc.padding = pad;
         const id = try addMover(gpa, &world, &chars, desc);
         var previous: Real = 0;
@@ -3240,4 +3244,135 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
         const stalls = Real == f32 and half >= 500;
         try testing.expectApproxEqAbs(if (stalls) @as(Real, 0) else @as(Real, 1), served, api_tol);
     }
+}
+
+test "one mesh carrying both floor and wall: the wall still blocks" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // **THE COUNTER-TEST FOR AN EXCLUSION COARSER THAN ITS VERDICT.** The non-opposing retry sets a
+    // contact aside; if it set aside the whole BODY, a single mesh carrying a floor and a wall would
+    // lose the wall along with the floor triangle, and the character would walk straight through it.
+    // The key is the pair `(body, subshape_id)`, and this is what measures that.
+    //
+    // ONE mesh, ONE body: a floor spanning x ∈ [−2, 4] at y = 0, and a wall standing on it at x = 2,
+    // rising to y = 3. Two quads, four triangles, all in the same index buffer.
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const verts = [_]V{
+        // floor at y = 0, wound so the face normal is +Y
+        .{ .data = .{ -2, 0, -2 } }, // 0
+        .{ .data = .{ 4, 0, -2 } }, // 1
+        .{ .data = .{ -2, 0, 2 } }, // 2
+        .{ .data = .{ 4, 0, 2 } }, // 3
+        // wall at x = 2. A mesh is SINGLE-SIDED, so the winding decides whether the wall exists at
+        // all from where the character comes: a first version wound both triangles to +X and the
+        // character walked to x = 12, through the wall and off the end of the floor. That was the
+        // test's own defect, not the engine's, and it is written here because a back-facing wall
+        // reads exactly like a traversable one.
+        .{ .data = .{ 2, 3, -2 } }, // 4
+        .{ .data = .{ 2, 3, 2 } }, // 5
+        .{ .data = .{ 2, 0, -2 } }, // 6
+        .{ .data = .{ 2, 0, 2 } }, // 7
+        // CEILING at y = 1, normal −Y, low enough to squeeze a 1.8 m capsule. It is what makes the
+        // retry fire at all: a ceiling's downward normal does not oppose a horizontal motion, so the
+        // contact is set aside — and it is on the SAME body as the wall, which is the whole point.
+        .{ .data = .{ -2, 1, -2 } }, // 8
+        .{ .data = .{ 4, 1, -2 } }, // 9
+        .{ .data = .{ -2, 1, 2 } }, // 10
+        .{ .data = .{ 4, 1, 2 } }, // 11
+    };
+    const tris = [_]u32{
+        0, 2, 1, 1, 2, 3, // floor, +Y
+        6, 7, 4, 7, 5, 4, // wall, −X
+        8, 9, 10, 9, 11, 10, // ceiling, −Y
+    };
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    const body = try world.addBody(gpa, .{
+        .entity = ent(470),
+        .body_type = .static,
+        .shape = shape,
+    });
+    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+
+    var desc = baseDescriptor();
+    desc.entity = ent(471);
+    desc.position = av(0, 0, 0);
+    desc.padding = 0;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    // Walk hard into the wall, several calls, so a leak would show as unbounded travel.
+    var k: u32 = 0;
+    while (k < 4) : (k += 1) {
+        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+    }
+    const p = chars.get(id).?.position.toArray();
+
+    // **THE JUDGE OF THE TUNNELING FIX, and it is precision-INDEPENDENT.** Never past the wall. With
+    // the exclusion applied ABOVE the cast — the state this replaces — the character walks through at
+    // BOTH precisions, so this single inequality discriminates the fix exactly and needs no per-
+    // precision shape.
+    try testing.expect(p[0] < 2);
+    // Standing on the floor triangle it set aside, not fallen through it.
+    try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
+}
+
+test "the same mesh scene FREEZES at f64 — a separate defect, named and not entrenched" {
+    const gpa = testing.allocator;
+
+    // **A SECOND DEFECT THAT THE TUNNELING COUNTER-TEST WAS CONFLATING WITH THE FIRST, separated by
+    // measurement.** On the previous code the character walked THROUGH the wall at both precisions;
+    // with the exclusion inside the traversal it blocks at f32 and does not move at all at f64.
+    //
+    // So the fix strictly improves both — a tunnel became a block at f32 and a stutter at f64, which is
+    // this module's stated failure direction: a character that does not finish its step is visible, a
+    // character that finishes it through a wall is a hole in the world. But the f64 half is NOT the
+    // defect the fix closes, and folding it into that test would have made one assertion answer two
+    // questions.
+    //
+    // Asserted at its MEASURED value and labelled a defect, the same treatment the tangency pin had
+    // before it was closed and the 1 km stall has now. The cause is untraced: at f64 the base ends at
+    // exactly `0` where at f32 the numerical floor lifts it to `2.77e-5` and it walks. Owner: the next
+    // milestone that opens `character.zig`.
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const verts = [_]V{
+        .{ .data = .{ -2, 0, -2 } }, .{ .data = .{ 4, 0, -2 } }, .{ .data = .{ -2, 0, 2 } }, .{ .data = .{ 4, 0, 2 } },
+        .{ .data = .{ 2, 3, -2 } },  .{ .data = .{ 2, 3, 2 } },  .{ .data = .{ 2, 0, -2 } }, .{ .data = .{ 2, 0, 2 } },
+        .{ .data = .{ -2, 1, -2 } }, .{ .data = .{ 4, 1, -2 } }, .{ .data = .{ -2, 1, 2 } }, .{ .data = .{ 4, 1, 2 } },
+    };
+    const tris = [_]u32{ 0, 2, 1, 1, 2, 3, 6, 7, 4, 7, 5, 4, 8, 9, 10, 9, 11, 10 };
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    const body = try world.addBody(gpa, .{ .entity = ent(480), .body_type = .static, .shape = shape });
+    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+
+    var desc = baseDescriptor();
+    desc.entity = ent(481);
+    desc.position = av(0, 0, 0);
+    desc.padding = 0;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    var k: u32 = 0;
+    while (k < 4) : (k += 1) {
+        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+    }
+    const p = chars.get(id).?.position.toArray();
+
+    if (Real == f32) {
+        // Served, and stopped by the wall: `2 − radius` with no padding.
+        try testing.expectApproxEqAbs(@as(Real, 1.7), p[0], 1e-4);
+        try testing.expect(p[0] > 1);
+    } else {
+        // **THE DEFECT.** Not a single millimetre, and the base never leaves exact tangency.
+        try testing.expectApproxEqAbs(@as(Real, 0), p[0], 1e-9);
+        try testing.expectApproxEqAbs(@as(Real, 0), p[1], 1e-9);
+    }
+    // What holds at BOTH precisions, and the reason this is a stutter and not a hole: never past the wall.
+    try testing.expect(p[0] < 2);
 }
