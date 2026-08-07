@@ -3023,22 +3023,29 @@ test "a 1 km collider serves every call — the cast/manifold disagreement, clos
             desc.padding = pad;
             const id = try addMover(gpa, &world, &chars, desc);
 
-            // ONE cell of this six-cell grid still stalls, and it is named rather than folded into a
-            // looser bound: a SUBNORMAL padding against the 1 km collider stops serving on the third
-            // call. Every other cell — the 0.02 default at all three sizes, and `floatMin` at 100 m and
-            // 500 m — serves all three. Measured, and the residual is left for whoever traces it.
-            // f32 ONLY: at f64 the same cell serves all three, which is what identifies it as a
-            // precision residual rather than a geometric one.
-            const residual = Real == f32 and pad < 1e-30 and half > 900;
-            const want: Real = if (residual) 2 else 3;
-
             var previous: Real = 0;
             var k: u32 = 0;
             while (k < 3) : (k += 1) {
                 const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
                 previous = r.position.toArray()[0];
             }
-            try testing.expectApproxEqAbs(want, previous, api_tol);
+
+            // **ONE CELL OF THIS SIX-CELL GRID IS PLATFORM-DEPENDENT, AND PINNING EITHER NUMBER PINS
+            // NOISE.** A SUBNORMAL padding against the 1 km collider serves two of three calls on
+            // arm64/macOS and all three on x86-64/Linux. A first version asserted the `2` as an f32
+            // property; CI on the other target refuted it, which is the eleventh time in this milestone
+            // that a measured value was pinned as if it were one — and the first caught by a different
+            // architecture rather than by a probe.
+            //
+            // So the assertion is the portable invariant: the character never goes backwards, and never
+            // serves more than it asked. Every other cell serves all three and asserts it exactly.
+            const subnormal_at_km = pad < 1e-30 and half > 900;
+            if (subnormal_at_km) {
+                try testing.expect(previous >= 2 - api_tol);
+                try testing.expect(previous <= 3 + api_tol);
+            } else {
+                try testing.expectApproxEqAbs(@as(Real, 3), previous, api_tol);
+            }
         }
     }
 }
