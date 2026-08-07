@@ -744,6 +744,37 @@ pub const BodyManager = struct {
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
     ) ?BodyCastHit {
+        return self.castShapeBodyExcluding(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, null);
+    }
+
+    /// `castShapeBody` with ONE sub-shape kept out of the competition.
+    ///
+    /// **A SIBLING RATHER THAN A PARAMETER, and the reason is measured rather than stylistic.** Adding
+    /// the argument to `castShapeBody` itself would touch fourteen call sites inside INHERITED test
+    /// files that are currently byte-identical to the tag — corroborating evidence this milestone has
+    /// leaned on twice. One caller needs the exclusion; the other three keep the entry they had, and
+    /// `castShapeBody` delegates here with `null`.
+    ///
+    /// **The exclusion is consumed DURING the mesh traversal, not after the cast**, and that placement
+    /// is the whole point: this entry returns ONE hit, the nearest, so a filter applied to its result
+    /// discards that sub-shape AND every other sub-shape of the body the cast never returned. Measured
+    /// — a mesh carrying a floor, a wall and a ceiling let the character walk straight through the
+    /// wall at `x = 12` when the filter sat above this call, and blocks at `1.7` with it inside.
+    ///
+    /// For `.convex` and `.half_space` the only sub-shape IS the body (§1.11.16), so `0` excludes it
+    /// entirely — which is exactly what a caller setting aside a resting floor half-space means.
+    pub fn castShapeBodyExcluding(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        cast_shape: narrowphase.SupportShape(Real),
+        cast_origin: Vec3r,
+        cast_rotation: Quatr,
+        direction: Vec3r,
+        max_distance: Real,
+        back_face_mode: api.BackFaceMode,
+        exclude_subshape: ?u32,
+    ) ?BodyCastHit {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const relpose = narrowphase.RelativePose(Real).init(
@@ -765,6 +796,10 @@ pub const BodyManager = struct {
         // The sub-shape the mesh arm resolves, and zero for the two arms whose shapes carry
         // no sub-shape at all (§1.11.16).
         var subshape_id: u32 = 0;
+        // The two single-sub-shape classes: excluding sub-shape `0` excludes the body.
+        if (exclude_subshape) |ex| {
+            if (ex == 0 and shape.class() != .triangle_soup) return null;
+        }
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
                 Real,
@@ -808,6 +843,7 @@ pub const BodyManager = struct {
                     .direction_in_a = local_dir,
                     .sweep_direction_local = sweep_dir,
                     .back_face_mode = back_face_mode,
+                    .exclude_triangle = exclude_subshape,
                     .bound = max_distance,
                 };
                 _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
@@ -1751,6 +1787,11 @@ const MeshCastCollector = struct {
     /// Sweep direction in the BODY's local frame — what the facing test takes.
     sweep_direction_local: Vec3r,
     back_face_mode: api.BackFaceMode,
+    /// A triangle to keep out of the competition entirely. Consumed HERE, during the traversal, and
+    /// not by the caller afterwards: `castShapeBody` returns ONE hit, the nearest, so a filter applied
+    /// to its result discards that triangle AND every other triangle of the body the cast never
+    /// returned. That is a traversable wall on a mesh carrying both a floor and a wall.
+    exclude_triangle: ?u32,
     bound: Real,
     /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
     /// at the end of `castShapeBody` carries every class's answer to world in one place, so
@@ -1759,6 +1800,9 @@ const MeshCastCollector = struct {
     best_triangle: u32 = 0,
 
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
+        if (self.exclude_triangle) |ex| {
+            if (ex == triangle_index) return;
+        }
         if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(
             Real,
             self.data.faceNormal(triangle_index),

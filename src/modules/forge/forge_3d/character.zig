@@ -603,6 +603,11 @@ const Contact = struct {
 /// Tightens its bound TO each accepted distance, like the query family's `closest` — here that IS
 /// correct, unlike the ground probe's: a nearer surface genuinely stops the motion sooner, so
 /// pruning what is behind it loses nothing.
+/// One sub-shape of one body — the grain a contact verdict actually has. A body handle alone is
+/// coarser than any statement about a contact, and a mesh is the case where that difference is a
+/// traversable wall rather than a nuance.
+const SubShapeKey = struct { body: BodyId, subshape_id: u32 };
+
 const SweepCollector = struct {
     bm: *const BodyManager,
     store: *const ShapeStore,
@@ -612,9 +617,15 @@ const SweepCollector = struct {
     bound: Real,
     layer_mask: u32,
     exclude: ?BodyId,
-    /// A SECOND body to ignore, used by the slide loop for a contact it has established does not
+    /// A second SUB-SHAPE to ignore, used by the slide loop for a contact it has established does not
     /// oppose the motion. See `sweepNearest`.
-    exclude_also: ?BodyId = null,
+    ///
+    /// **The key is the PAIR `(body, subshape_id)` and not the body, because the verdict it carries is
+    /// about a CONTACT.** An earlier form excluded the whole body and returned BEFORE `castShapeBody`,
+    /// so a single mesh carrying both a floor and a wall lost every triangle at once: the floor's
+    /// triangle was set aside for not opposing the motion, and the wall went with it. A traversable
+    /// wall, from an exclusion coarser than the verdict that justified it.
+    exclude_also: ?SubShapeKey = null,
     best: ?struct {
         body: BodyId,
         subshape_id: u32,
@@ -627,13 +638,16 @@ const SweepCollector = struct {
         if (self.exclude) |own| {
             if (own == body) return;
         }
-        if (self.exclude_also) |other| {
-            if (other == body) return;
-        }
         const layer = self.bm.collisionLayer(body) orelse return;
         if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
 
-        const hit = self.bm.castShapeBody(
+        // **THE EXCLUSION GOES INTO THE CAST, not around it.** `castShapeBody` returns ONE hit — the
+        // nearest sub-shape — so filtering its RESULT discards that sub-shape and, with it, every other
+        // sub-shape of the body the cast never returned. Measured on a mesh carrying a floor, a wall
+        // and a ceiling: filtering afterwards let the character walk through the wall to `x = 12`;
+        // excluding inside the traversal blocks it at `1.7`. Three rounds put this filter one level
+        // too high — body, then pair above the cast — while the sub-shape is chosen one level below.
+        const hit = self.bm.castShapeBodyExcluding(
             self.store,
             body,
             self.probe,
@@ -642,6 +656,7 @@ const SweepCollector = struct {
             self.direction,
             self.bound,
             .ignore,
+            if (self.exclude_also) |key| (if (key.body == body) key.subshape_id else null) else null,
         ) orelse return;
 
         if (self.best) |b| {
@@ -896,10 +911,10 @@ fn sweepNearest(
     distance: Real,
     layer_mask: u32,
     exclude: ?BodyId,
-    /// A second body to ignore. Only the slide loop passes one — for a contact it has ESTABLISHED
-    /// does not oppose the motion — and every other caller passes `null`, so their contract is
-    /// unchanged in meaning.
-    exclude_also: ?BodyId,
+    /// A second SUB-SHAPE to ignore, as the pair `(body, subshape_id)`. Only the slide loop passes
+    /// one — for a contact it has ESTABLISHED does not oppose the motion — and every other caller
+    /// passes `null`, so their contract is unchanged in meaning.
+    exclude_also: ?SubShapeKey,
 ) ?SweepHit {
     var collector = SweepCollector{
         .bm = bm,
@@ -1232,24 +1247,11 @@ fn depenetrate(
         // so anything clear of it is `.separated` and invisible to this query. TRACED: 0.005 and 0.02
         // produce no contact at all, and 0.005 already serves a whole metre.
         //
-        // **THE CODE IS AHEAD OF THE SPEC HERE, and that is recorded rather than argued away.**
-        // `engine-physics-forge.md` §1.12.6 still reads as a POSE invariant — the `padding` keeps the
-        // capsule clear of surfaces — which this behaviour does not satisfy for an authored pose closer
-        // than `padding`. A narrowing is being delivered upstream: `padding` becomes what a SWEEP
-        // reserves, matching the reference, where `mCharacterPadding` is a parameter of
-        // `CastShape`/`CollideShape` and normalises no authored pose. Until that patch lands the
-        // divergence is real, and an implementation comment cannot close it — only the document can.
-        // **THE TARGET HAS A NUMERICAL FLOOR, and without it `padding = 0` reproduced the freeze
-        // exactly.** Zero is a legal value and a meaningful one — no PHYSICAL margin — and it stays in
-        // the domain: removing it would have masked this defect instead of closing it, which is how the
-        // freeze got here in the first place. But `penetration + 0` at a tangency of `−0.0` moves the
-        // capsule by nothing, the sweep finds the same zero-distance contact, and the four iterations
-        // burn again.
-        //
-        // So the target is `max(padding, standoff_floor)`. With `padding = 0` a resting character stands
-        // `standoff_floor` above its floor rather than exactly on it, and that is correct rather than a
-        // compromise: `padding = 0` means "no physical margin", not "stand inside the numerical band
-        // where the GJK classification decides the verdict from one frame to the next".
+        // That is the contract, not a limitation. `engine-physics-forge.md` §1.12.6: `padding` is what a
+        // SWEEP RESERVES and not an invariant of pose, an authored pose closer than `padding` but clear
+        // of the contact margin is deliberately not normalised, and the invariant actually held is the
+        // narrower one — the controller never leaves the capsule inside the contact margin, where the
+        // GJK band would decide the verdict from one frame to the next.
         const target = standoffTarget(padding, probe, centre);
         centre = centre.add(c.normal.scale(c.penetration + target));
     }
@@ -1522,7 +1524,11 @@ pub const CharacterStore = struct {
         // Bounded by construction: a single slot, so at most one free retry per call, and a second
         // non-opposing body spends its iteration normally. No epsilon anywhere — the advance test is
         // exact zero and the opposition test is the sign of a dot product.
-        var ignored: ?BodyId = null;
+        // Held with the DIRECTION it was judged against, and dropped the moment that direction
+        // changes: "does not oppose" is a statement about a contact AND a direction, so it expires
+        // when the slide reprojects the motion. Without that, a surface set aside once stayed set
+        // aside for the rest of the call even after becoming opposing.
+        var ignored: ?struct { key: SubShapeKey, direction: Vec3r } = null;
         var budget: u32 = max_slide_iterations;
         var iteration: u32 = 0;
         while (iteration < budget) : (iteration += 1) {
@@ -1533,7 +1539,23 @@ pub const CharacterStore = struct {
             const distance = @sqrt(len_sq);
             const direction = remaining.scale(1 / distance);
 
-            const maybe_hit = sweepNearest(bp, bm, store, record, probe, centre, direction, distance, c.layer_mask, c.inner_body, ignored);
+            // The exclusion expires with the direction it was judged against.
+            if (ignored) |ig| {
+                if (!ig.direction.eql(direction)) ignored = null;
+            }
+            const maybe_hit = sweepNearest(
+                bp,
+                bm,
+                store,
+                record,
+                probe,
+                centre,
+                direction,
+                distance,
+                c.layer_mask,
+                c.inner_body,
+                if (ignored) |ig| ig.key else null,
+            );
             const hit = maybe_hit orelse {
                 // Nothing in the way: the whole remaining displacement is served.
                 centre = centre.add(remaining);
@@ -1569,7 +1591,10 @@ pub const CharacterStore = struct {
             // exact test — a surface the motion runs ALONG (dot exactly zero) obstructs nothing, and
             // one it runs away from even less.
             if (advance == 0 and ignored == null and normal.dot(direction) >= 0) {
-                ignored = hit.body;
+                ignored = .{
+                    .key = .{ .body = hit.body, .subshape_id = hit.subshape_id },
+                    .direction = direction,
+                };
                 budget += 1;
                 continue;
             }
