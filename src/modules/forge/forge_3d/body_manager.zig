@@ -744,7 +744,7 @@ pub const BodyManager = struct {
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
     ) ?BodyCastHit {
-        return self.castShapeBodyExcluding(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, &.{});
+        return self.castShapeBodyOpposing(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, false);
     }
 
     /// `castShapeBody` with ONE sub-shape kept out of the competition.
@@ -763,7 +763,7 @@ pub const BodyManager = struct {
     ///
     /// For `.convex` and `.half_space` the only sub-shape IS the body (§1.11.16), so `0` excludes it
     /// entirely — which is exactly what a caller setting aside a resting floor half-space means.
-    pub fn castShapeBodyExcluding(
+    pub fn castShapeBodyOpposing(
         self: *const BodyManager,
         store: *const ShapeStore,
         id: BodyId,
@@ -773,7 +773,7 @@ pub const BodyManager = struct {
         direction: Vec3r,
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
-        exclude_subshapes: []const u32,
+        skip_non_opposing: bool,
     ) ?BodyCastHit {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
@@ -797,10 +797,11 @@ pub const BodyManager = struct {
         // no sub-shape at all (§1.11.16).
         var subshape_id: u32 = 0;
         // The two single-sub-shape classes: excluding sub-shape `0` excludes the body.
-        if (shape.class() != .triangle_soup) {
-            for (exclude_subshapes) |ex| {
-                if (ex == 0) return null;
-            }
+        // The half-space's predicate uses the STORED plane normal, transported: at an initial overlap
+        // `plane.castShape` returns `direction.neg()`, which carries no surface information at all.
+        if (skip_non_opposing and shape.class() == .half_space) {
+            const hs = shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel);
+            if (hs.normal.dot(local_dir) >= 0) return null;
         }
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
@@ -845,7 +846,7 @@ pub const BodyManager = struct {
                     .direction_in_a = local_dir,
                     .sweep_direction_local = sweep_dir,
                     .back_face_mode = back_face_mode,
-                    .exclude_triangles = exclude_subshapes,
+                    .skip_non_opposing = skip_non_opposing,
                     .bound = max_distance,
                 };
                 _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
@@ -853,6 +854,30 @@ pub const BodyManager = struct {
                 break :blk collector.best;
             },
         } orelse return null;
+        // **THE CONVEX PREDICATE, AND ITS INPUT CHANGES AT DISTANCE ZERO.**
+        //
+        // At `d > 0` the cast's normal IS the surface normal and the test uses it directly. At `d == 0`
+        // it is not: `terminal` takes `outward = unitOf(v)` where `v` separates the CORES, so in a
+        // squeeze — the capsule's segment core deep inside the box's — it returns a minimal-translation
+        // direction of the polytope and not a face normal. MEASURED on a capsule squeezed under a box
+        // ceiling: the cast says `(−0.062267, 0.996115, −0.062267)`, tilted 3.6° and symmetric in X and
+        // Z, which is a simplex direction's signature; the manifold on the SAME contact says
+        // `(0, −1, 0)` exactly. An earlier measurement at 1 mm of overlap gave the face normal and did
+        // NOT transport to a squeeze.
+        //
+        // So at zero the input is the MANIFOLD's normal, which is the same source `slideNormal` has used
+        // since gate C and for the same stated reason. The other two arms need none of this: the mesh
+        // tests `faceNormal` and the half-space its stored plane, both valid at every distance.
+        if (skip_non_opposing and shape.class() == .convex) {
+            const opposing_normal = if (hit.distance > 0) hit.normal else blk: {
+                var probe_manifold = FirstManifoldNormal{};
+                self.collideShapeBody(store, id, cast_shape, cast_origin, cast_rotation, &probe_manifold);
+                // No manifold at all: the cast reports a contact the narrowphase denies — the spurious
+                // hit of the cast/manifold disagreement. Nothing real to oppose the motion.
+                break :blk (probe_manifold.normal orelse return null).neg();
+            };
+            if (opposing_normal.dot(if (hit.distance > 0) local_dir else direction) >= 0) return null;
+        }
         return .{
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
@@ -1778,6 +1803,17 @@ fn MeshContactCollector(comptime Sink: type) type {
 /// already guarantees `normal · direction <= 0` on every hit, so on this family the flip is
 /// STRUCTURAL rather than applied — a back-face hit's normal IS the negated triangle normal
 /// because that is the axis facing the probe. Asserted rather than assumed, in the suite.
+/// The first manifold normal a body offers, probe → body — the deepest-point selection the character
+/// makes is not needed here, the question being only which way the surface faces.
+const FirstManifoldNormal = struct {
+    normal: ?Vec3r = null,
+
+    pub fn add(self: *FirstManifoldNormal, subshape_id: u32, manifold: narrowphase.ContactManifold(Real)) void {
+        _ = subshape_id;
+        if (self.normal == null) self.normal = manifold.normal;
+    }
+};
+
 const MeshCastCollector = struct {
     data: *const MeshData,
     /// The probe, in its own frame — the caller owns it, it is not a body.
@@ -1793,8 +1829,8 @@ const MeshCastCollector = struct {
     /// triangles and one slot was built for one contact. Consumed HERE, during the traversal, and
     /// not by the caller afterwards: `castShapeBody` returns ONE hit, the nearest, so a filter applied
     /// to its result discards that triangle AND every other triangle of the body the cast never
-    /// returned. That is a traversable wall on a mesh carrying both a floor and a wall.
-    exclude_triangles: []const u32,
+    /// Skip any triangle whose plane does not OPPOSE the sweep. See `castShapeBodyOpposing`.
+    skip_non_opposing: bool,
     bound: Real,
     /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
     /// at the end of `castShapeBody` carries every class's answer to world in one place, so
@@ -1803,14 +1839,19 @@ const MeshCastCollector = struct {
     best_triangle: u32 = 0,
 
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
-        for (self.exclude_triangles) |ex| {
-            if (ex == triangle_index) return;
-        }
-        if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(
-            Real,
-            self.data.faceNormal(triangle_index),
-            self.sweep_direction_local,
-        )) return;
+        const face = self.data.faceNormal(triangle_index);
+        if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(Real, face, self.sweep_direction_local)) return;
+        // **THE NON-OPPOSING TEST, HERE — during selection and not after it.** A surface the sweep runs
+        // ALONG obstructs nothing: a translation cannot reach a plane it is parallel to unless it is
+        // already touching, and then the depenetration owns it. It is the back-face test's boundary
+        // case, `n · d == 0` exactly, which `isBackFace` leaves in on a strict `>`.
+        //
+        // Three rounds filtered AFTER selection — by body, by pair, by a bounded set — and each left a
+        // hole somewhere else, because this entry returns ONE hit and discarding it discards every
+        // sub-shape it never returned. Choosing the nearest OPPOSING triangle instead of the nearest
+        // one has no such gap, and it deletes the set, the budget, the expiry and the tessellation
+        // ceiling with it.
+        if (self.skip_non_opposing and face.dot(self.sweep_direction_local) >= 0) return;
         const hit = narrowphase.castShape(
             Real,
             self.cast_shape,

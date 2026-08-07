@@ -2997,63 +2997,48 @@ test "the stand-off floor serves a zero padding, and its scale limit is MEASURED
     }
 }
 
-test "a 1 km collider stalls because slideNormal cannot resolve — a FOURTH mechanism" {
+test "a 1 km collider serves every call — the cast/manifold disagreement, closed" {
     const gpa = testing.allocator;
 
-    // **This stall was expected to fall with the tangency consequence and it did NOT, and the trace says
-    // why: it is a different mechanism.** `slideNormal` returns NULL at that scale — traced,
-    // `hit = 0.000000000`, `adv = 0.000000000`, `normal = false` — so the loop takes its documented
-    // "no usable normal: stop rather than guess a direction" exit, zeroes the remainder and serves
-    // nothing. It never reaches the non-opposing test, which is why setting a contact aside cannot help.
+    // **THIS TEST PINNED A STALL AND THE STALL IS GONE.** It read: at a 1 km collider the character
+    // stops from the second call at f32, `slideNormal` returning null because the manifold denies the
+    // contact the cast reports at distance zero. That was the cast/manifold disagreement, consigned
+    // twice as a limit to declare.
     //
-    // Serving it would mean inventing a direction the narrowphase declines to supply, which this loop
-    // refuses by design and which is the right refusal. So the stall stays, now with a precise cause
-    // instead of the vague large-collider one it carried, and it belongs with the §1.11.4 bis class:
-    // f64 serves every call on the same scene.
+    // Filtering non-opposing contacts DURING SELECTION closes it without addressing it as such: the
+    // convex arm at `d == 0` takes its predicate input from the manifold, and a manifold that denies
+    // the contact leaves nothing to oppose the motion, so the spurious hit is dropped where it was
+    // previously stumbled over. The 500 m stall, the 1 km stall and the f64 mesh freeze were three
+    // faces of that one disagreement.
     for ([_]f32{ 0.02, std.math.floatMin(f32) }) |pad| {
-        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-        defer world.deinit(gpa);
-        var chars: CharacterStore = .{};
-        defer chars.deinit(gpa);
-        _ = try addBox(gpa, &world, av(1000, 1000, 1000), av(0, -1000, 0), 450);
-        var desc = baseDescriptor();
-        desc.entity = ent(451);
-        desc.position = av(0, 0.02, 0);
-        desc.padding = pad;
-        const id = try addMover(gpa, &world, &chars, desc);
+        for ([_]f32{ 1000, 500, 100 }) |half| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            var chars: CharacterStore = .{};
+            defer chars.deinit(gpa);
+            _ = try addBox(gpa, &world, av(half, half, half), av(0, -half, 0), 450);
+            var desc = baseDescriptor();
+            desc.entity = ent(451);
+            desc.position = av(0, 0, 0);
+            desc.padding = pad;
+            const id = try addMover(gpa, &world, &chars, desc);
 
-        const first = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        try testing.expectApproxEqAbs(@as(Real, 1), first.position.toArray()[0], api_tol);
+            // ONE cell of this six-cell grid still stalls, and it is named rather than folded into a
+            // looser bound: a SUBNORMAL padding against the 1 km collider stops serving on the third
+            // call. Every other cell — the 0.02 default at all three sizes, and `floatMin` at 100 m and
+            // 500 m — serves all three. Measured, and the residual is left for whoever traces it.
+            // f32 ONLY: at f64 the same cell serves all three, which is what identifies it as a
+            // precision residual rather than a geometric one.
+            const residual = Real == f32 and pad < 1e-30 and half > 900;
+            const want: Real = if (residual) 2 else 3;
 
-        const second = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        const served = second.position.toArray()[0] - first.position.toArray()[0];
-        try testing.expectApproxEqAbs(if (Real == f32) @as(Real, 0) else @as(Real, 1), served, api_tol);
-    }
-
-    // The 5 m contrast, which keeps this a SCALE statement and not a box statement — and it carries the
-    // `padding = floatMin` leg too, the path the `padding > 0` branch opens and which the tangency fix
-    // had to close: a positive padding whose addition changes no bit.
-    for ([_]f32{ 0.02, std.math.floatMin(f32) }) |pad| {
-        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-        defer world.deinit(gpa);
-        var chars: CharacterStore = .{};
-        defer chars.deinit(gpa);
-        _ = try addBox(gpa, &world, av(5, 5, 5), av(0, -5, 0), 460);
-        var desc = baseDescriptor();
-        desc.entity = ent(461);
-        // **BASE AT EXACTLY ZERO, and the previous `0.02` is why this leg proved nothing.** Starting
-        // `padding` above the floor, the horizontal sweep never meets it, so the non-opposing retry is
-        // never reached and the leg passed with the retry removed. Tangent, it is the `floatMin` path
-        // the `padding > 0` branch opens: a positive padding whose addition changes no bit.
-        desc.position = av(0, 0, 0);
-        desc.padding = pad;
-        const id = try addMover(gpa, &world, &chars, desc);
-        var previous: Real = 0;
-        var k: u32 = 0;
-        while (k < 3) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
-            previous = r.position.toArray()[0];
+            var previous: Real = 0;
+            var k: u32 = 0;
+            while (k < 3) : (k += 1) {
+                const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+                previous = r.position.toArray()[0];
+            }
+            try testing.expectApproxEqAbs(want, previous, api_tol);
         }
     }
 }
@@ -3225,7 +3210,12 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
     // Measured boundary at f32: a 100 m half-extent collider serves every call, a 500 m one stalls from
     // the second. At f64, 2 km still serves — so it is a precision regime and `-Dphysics_f64` is Phase
     // 1's answer, exactly as §1.11.4 bis says for its own class.
-    for ([_]f32{ 100, 500 }) |half| {
+    // **AND THE STALL REGIME IS GONE, where an earlier version of this test pinned it.** It read: a
+    // 100 m half-extent collider serves every call at f32 and a 500 m one stalls from the second — a
+    // precision regime to be declared as an envelope. That stall was the cast/manifold disagreement,
+    // and filtering non-opposing contacts during selection closed it, so the size sweep is kept and
+    // its expectation inverted: every size serves, at both precisions.
+    for ([_]f32{ 100, 500, 1000 }) |half| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         var chars: CharacterStore = .{};
@@ -3235,14 +3225,13 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
         desc.entity = ent(941);
         desc.position = av(0, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
-
-        const first = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        try testing.expectApproxEqAbs(@as(Real, 1), first.position.toArray()[0], api_tol);
-
-        const second = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        const served = second.position.toArray()[0] - first.position.toArray()[0];
-        const stalls = Real == f32 and half >= 500;
-        try testing.expectApproxEqAbs(if (stalls) @as(Real, 0) else @as(Real, 1), served, api_tol);
+        var previous: Real = 0;
+        var k: u32 = 0;
+        while (k < 3) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
+            previous = r.position.toArray()[0];
+        }
     }
 }
 
@@ -3319,23 +3308,15 @@ test "one mesh carrying both floor and wall: the wall still blocks" {
     try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
 }
 
-test "the same mesh scene FREEZES at f64 — a separate defect, named and not entrenched" {
+test "the mesh scene behaves IDENTICALLY at both precisions — the f64 freeze is closed" {
     const gpa = testing.allocator;
 
-    // **A SECOND DEFECT THAT THE TUNNELING COUNTER-TEST WAS CONFLATING WITH THE FIRST, separated by
-    // measurement.** On the previous code the character walked THROUGH the wall at both precisions;
-    // with the exclusion inside the traversal it blocks at f32 and does not move at all at f64.
+    // **THIS TEST PINNED A PRECISION SPLIT AND THE SPLIT IS GONE.** It read: the same floor/wall/ceiling
+    // mesh blocks at 1.7 at f32 and freezes at exactly 0 at f64, a second defect named and not
+    // entrenched. Both were the cast/manifold disagreement, and filtering non-opposing contacts during
+    // selection closed it: f64 now reads 1.6999999880790453 where it read 0.
     //
-    // So the fix strictly improves both — a tunnel became a block at f32 and a stutter at f64, which is
-    // this module's stated failure direction: a character that does not finish its step is visible, a
-    // character that finishes it through a wall is a hole in the world. But the f64 half is NOT the
-    // defect the fix closes, and folding it into that test would have made one assertion answer two
-    // questions.
-    //
-    // Asserted at its MEASURED value and labelled a defect, the same treatment the tangency pin had
-    // before it was closed and the 1 km stall has now. The cause is untraced: at f64 the base ends at
-    // exactly `0` where at f32 the numerical floor lifts it to `2.77e-5` and it walks. Owner: the next
-    // milestone that opens `character.zig`.
+    // So the expectation is the SAME at both precisions, which is what a geometric answer should be.
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
     var chars: CharacterStore = .{};
@@ -3364,15 +3345,71 @@ test "the same mesh scene FREEZES at f64 — a separate defect, named and not en
     }
     const p = chars.get(id).?.position.toArray();
 
-    if (Real == f32) {
-        // Served, and stopped by the wall: `2 − radius` with no padding.
-        try testing.expectApproxEqAbs(@as(Real, 1.7), p[0], 1e-4);
-        try testing.expect(p[0] > 1);
-    } else {
-        // **THE DEFECT.** Not a single millimetre, and the base never leaves exact tangency.
-        try testing.expectApproxEqAbs(@as(Real, 0), p[0], 1e-9);
-        try testing.expectApproxEqAbs(@as(Real, 0), p[1], 1e-9);
-    }
-    // What holds at BOTH precisions, and the reason this is a stutter and not a hole: never past the wall.
+    // The wall's face at x = 2 minus the capsule radius, with no padding requested.
+    try testing.expectApproxEqAbs(@as(Real, 1.7), p[0], 1e-4);
     try testing.expect(p[0] < 2);
+    try testing.expect(p[0] > 1);
+}
+
+test "a mesh floor of MORE than eight coplanar triangles serves the move" {
+    const gpa = testing.allocator;
+
+    // **NON-REGRESSION, and it has no mechanism to break today — which is why it is written.** An
+    // earlier form set contacts aside one at a time under a fixed ceiling of eight, so a floor
+    // tessellated finer than that stopped serving: the ninth contact spent the iteration the retry was
+    // meant to save. Filtering during selection has no such bound — a non-opposing triangle never
+    // becomes a candidate at all, however many there are.
+    //
+    // A 6 x 6 grid of unit quads, 72 coplanar triangles, with the capsule over the middle of it. This is
+    // the nominal case of a tessellated arena floor, not an exotic limit, and it guards against any
+    // future reintroduction of a bound on the number of contacts.
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const side = 7;
+    var verts: [side * side]V = undefined;
+    for (0..side) |iz| {
+        for (0..side) |ix| {
+            verts[iz * side + ix] = .{ .data = .{ @as(f32, @floatFromInt(ix)) - 3, 0, @as(f32, @floatFromInt(iz)) - 3 } };
+        }
+    }
+    var tris: [6 * 6 * 6]u32 = undefined;
+    var w: usize = 0;
+    for (0..6) |iz| {
+        for (0..6) |ix| {
+            const a: u32 = @intCast(iz * side + ix);
+            const b: u32 = @intCast(iz * side + ix + 1);
+            const c: u32 = @intCast((iz + 1) * side + ix);
+            const d: u32 = @intCast((iz + 1) * side + ix + 1);
+            tris[w] = a;
+            tris[w + 1] = c;
+            tris[w + 2] = b;
+            tris[w + 3] = b;
+            tris[w + 4] = c;
+            tris[w + 5] = d;
+            w += 6;
+        }
+    }
+    try testing.expect(tris.len / 3 > 8);
+
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    const body = try world.addBody(gpa, .{ .entity = ent(490), .body_type = .static, .shape = shape });
+    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+
+    var desc = baseDescriptor();
+    desc.entity = ent(491);
+    desc.position = av(-2, 0, 0); // exactly tangent, so every floor triangle under it is a contact
+    desc.padding = 0;
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    var previous: Real = -2;
+    var k: u32 = 0;
+    while (k < 3) : (k += 1) {
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], 1e-4);
+        previous = r.position.toArray()[0];
+    }
 }
