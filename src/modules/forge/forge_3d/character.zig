@@ -479,10 +479,14 @@ const standoff_floor_k: Real = 64;
 pub const max_depenetration_iterations: u32 = 4;
 
 /// Bodies whose wake this call owes. The bound is EXACT rather than a guess, and it is accounted
-/// sweep by sweep: `max_depenetration_iterations` pushes, `max_slide_iterations` slide sweeps, the
-/// THREE sweeps of the single step-up attempt (lift, forward, land), and the one step-down sweep.
-/// A step is attempted at most once per call, which is what keeps this a small constant.
-const max_touched = max_depenetration_iterations + max_slide_iterations + 3 + 1;
+/// sweep by sweep: `max_depenetration_iterations` pushes, `max_slide_iterations` slide sweeps,
+/// `max_set_aside` FREE RETRIES — each one is a sweep of its own and each touches a body — the THREE
+/// sweeps of the single step-up attempt (lift, forward, land), and the one step-down sweep. A step is
+/// attempted at most once per call, which is what keeps this a small constant.
+///
+/// The retry term was missing when the set replaced the single slot, and the suite caught it as an
+/// assertion failure rather than a silent drop — which is exactly why that entry asserts.
+const max_touched = max_depenetration_iterations + max_slide_iterations + max_set_aside + 3 + 1;
 
 /// The bodies one move touched, accumulated rather than woken on the spot.
 ///
@@ -588,6 +592,11 @@ pub const MoveResult = struct {
 /// One contact the move must react to: where it is and which way the surface faces.
 const Contact = struct {
     body: BodyId,
+    /// The sub-shape the normal came from. **Discarded by an earlier version, and that was the whole
+    /// defect**: `DeepestManifold` selects the deepest point over ALL sub-shapes of the body, so the
+    /// normal justifying a set-aside could come from one triangle while the cast had returned another
+    /// — a ceiling's normal excluding a wall.
+    subshape_id: u32 = 0,
     /// Outward, surface → character — the same orientation `GroundInfo.normal` carries.
     normal: Vec3r,
     /// Overlap along `normal`, for the depenetration push. Zero for a swept contact.
@@ -608,6 +617,54 @@ const Contact = struct {
 /// traversable wall rather than a nuance.
 const SubShapeKey = struct { body: BodyId, subshape_id: u32 };
 
+/// How many sub-shapes one slide call may set aside. **A SURFACE IS N COPLANAR TRIANGLES, and a single
+/// slot was built for a single contact**: a mesh floor under a capsule presents several at once, so
+/// setting one aside leaves the next to consume the iteration the retry was meant to save.
+///
+/// A named ceiling of `max_slide_iterations`' class, and NOT an exact bound derived from the geometry —
+/// there is none, a tessellation being as fine as its author chose. Its exhaustion is SAFE and that is
+/// what earns it: a full set simply stops granting free retries, so the contact spends its iteration as
+/// it did before the mechanism existed. Short, never further. That is why it clamps where
+/// `TouchedBodies` asserts — there a dropped entry is a lost wake and a real defect, here it is one
+/// fewer retry.
+const max_set_aside: u32 = 8;
+
+/// The sub-shapes set aside for the CURRENT direction, and the direction they were judged against.
+///
+/// One set and not one slot, one direction for the whole set: "does not oppose" is a statement about a
+/// contact AND a direction, so the entire set expires together when the slide reprojects the motion.
+const IgnoredSet = struct {
+    items: [max_set_aside]SubShapeKey = @splat(.{ .body = 0, .subshape_id = 0 }),
+    len: u32 = 0,
+    direction: Vec3r = Vec3r.zero,
+
+    /// True if the set took it. False when full — the caller then spends its iteration normally.
+    fn add(self: *IgnoredSet, key: SubShapeKey, direction: Vec3r) bool {
+        if (self.len == 0) self.direction = direction;
+        if (self.len >= max_set_aside) return false;
+        self.items[self.len] = key;
+        self.len += 1;
+        return true;
+    }
+
+    /// Drop everything if the direction has changed since the set was opened.
+    fn expire(self: *IgnoredSet, direction: Vec3r) void {
+        if (self.len != 0 and !self.direction.eql(direction)) self.len = 0;
+    }
+
+    /// The sub-shapes of `body` currently set aside, written into `out`.
+    fn subshapesOf(self: *const IgnoredSet, body: BodyId, out: *[max_set_aside]u32) []const u32 {
+        var n: u32 = 0;
+        for (self.items[0..self.len]) |k| {
+            if (k.body == body) {
+                out[n] = k.subshape_id;
+                n += 1;
+            }
+        }
+        return out[0..n];
+    }
+};
+
 const SweepCollector = struct {
     bm: *const BodyManager,
     store: *const ShapeStore,
@@ -617,15 +674,15 @@ const SweepCollector = struct {
     bound: Real,
     layer_mask: u32,
     exclude: ?BodyId,
-    /// A second SUB-SHAPE to ignore, used by the slide loop for a contact it has established does not
-    /// oppose the motion. See `sweepNearest`.
+    /// The sub-shapes set aside by the slide loop for contacts it has established do not oppose the
+    /// motion. See `sweepNearest`.
     ///
     /// **The key is the PAIR `(body, subshape_id)` and not the body, because the verdict it carries is
     /// about a CONTACT.** An earlier form excluded the whole body and returned BEFORE `castShapeBody`,
     /// so a single mesh carrying both a floor and a wall lost every triangle at once: the floor's
     /// triangle was set aside for not opposing the motion, and the wall went with it. A traversable
     /// wall, from an exclusion coarser than the verdict that justified it.
-    exclude_also: ?SubShapeKey = null,
+    exclude_also: ?*const IgnoredSet = null,
     best: ?struct {
         body: BodyId,
         subshape_id: u32,
@@ -641,6 +698,7 @@ const SweepCollector = struct {
         const layer = self.bm.collisionLayer(body) orelse return;
         if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
 
+        var scratch: [max_set_aside]u32 = undefined;
         // **THE EXCLUSION GOES INTO THE CAST, not around it.** `castShapeBody` returns ONE hit — the
         // nearest sub-shape — so filtering its RESULT discards that sub-shape and, with it, every other
         // sub-shape of the body the cast never returned. Measured on a mesh carrying a floor, a wall
@@ -656,7 +714,7 @@ const SweepCollector = struct {
             self.direction,
             self.bound,
             .ignore,
-            if (self.exclude_also) |key| (if (key.body == body) key.subshape_id else null) else null,
+            if (self.exclude_also) |set| set.subshapesOf(body, &scratch) else &.{},
         ) orelse return;
 
         if (self.best) |b| {
@@ -694,7 +752,6 @@ const DeepestManifold = struct {
     body: BodyId,
 
     pub fn add(self: *DeepestManifold, subshape_id: u32, manifold: ContactManifold) void {
-        _ = subshape_id;
         var deepest = manifold.points[0];
         for (manifold.points[1..manifold.count]) |p| {
             if (p.penetration > deepest.penetration) deepest = p;
@@ -706,6 +763,7 @@ const DeepestManifold = struct {
         // and every consumer here wants surface → character.
         self.best = .{
             .body = self.body,
+            .subshape_id = subshape_id,
             .normal = manifold.normal.neg(),
             .penetration = deepest.penetration,
             .position = deepest.position,
@@ -752,6 +810,14 @@ const WorstOverlap = struct {
 /// `normal · direction <= 0` and is nonetheless useless for sliding: on a slope it would answer
 /// "perfectly horizontal". So the normal comes from the MANIFOLD instead, exactly as the ground
 /// probe does, and null when even that finds nothing.
+/// The slide normal AND the sub-shape it belongs to.
+///
+/// **The pair, and not the normal alone**: a caller that sets a contact aside on the strength of this
+/// normal must set aside the sub-shape the normal actually came from. At distance zero the manifold is
+/// collected over every sub-shape of the body and the deepest wins, which need not be the one the cast
+/// returned — measured as a ceiling's normal excluding a wall on the same mesh.
+const SlideNormal = struct { normal: Vec3r, subshape_id: u32 };
+
 fn slideNormal(
     bm: *const BodyManager,
     store: *const ShapeStore,
@@ -760,12 +826,13 @@ fn slideNormal(
     body: BodyId,
     distance: Real,
     swept_normal: Vec3r,
-) ?Vec3r {
-    if (distance > 0) return swept_normal;
+    swept_subshape: u32,
+) ?SlideNormal {
+    if (distance > 0) return .{ .normal = swept_normal, .subshape_id = swept_subshape };
     var deepest = DeepestManifold{ .body = body };
     bm.collideShapeBody(store, body, probe, centre, Quatr.identity, &deepest);
     const c = deepest.best orelse return null;
-    return c.normal;
+    return .{ .normal = c.normal, .subshape_id = c.subshape_id };
 }
 
 /// Remove the component of `motion` that goes INTO the surface whose outward normal is `normal`.
@@ -914,7 +981,7 @@ fn sweepNearest(
     /// A second SUB-SHAPE to ignore, as the pair `(body, subshape_id)`. Only the slide loop passes
     /// one — for a contact it has ESTABLISHED does not oppose the motion — and every other caller
     /// passes `null`, so their contract is unchanged in meaning.
-    exclude_also: ?SubShapeKey,
+    exclude_also: ?*const IgnoredSet,
 ) ?SweepHit {
     var collector = SweepCollector{
         .bm = bm,
@@ -1005,8 +1072,8 @@ fn tryStepUp(
     const landed = forward.sub(up.scale(drop));
 
     // 4 — the landing must be walkable.
-    const normal = slideNormal(bm, store, probe, landed, down_hit.body, down_hit.distance, down_hit.normal) orelse return null;
-    if (normal.dot(up) < c.cos_max_slope) return null;
+    const sn = slideNormal(bm, store, probe, landed, down_hit.body, down_hit.distance, down_hit.normal, down_hit.subshape_id) orelse return null;
+    if (sn.normal.dot(up) < c.cos_max_slope) return null;
 
     // 5 — **THE CAPSULE MUST HAVE COME DOWN ONTO A SURFACE, and this is the reference's v5.6.0 bug
     // class.** MEASURED on an obstacle of `step_height + ε`: lift 0.3, forward 0.169, and a
@@ -1058,8 +1125,8 @@ fn stepDown(
     touched: *TouchedBodies,
 ) Vec3r {
     const hit = sweepNearest(bp, bm, store, record, probe, centre, up.neg(), c.step_height, c.layer_mask, c.inner_body, null) orelse return centre;
-    const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse return centre;
-    if (normal.dot(up) < c.cos_max_slope) return centre;
+    const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id) orelse return centre;
+    if (sn.normal.dot(up) < c.cos_max_slope) return centre;
     touched.add(hit.body);
     // The SAME stand-off the depenetration establishes, not a bare `c.padding`: at `padding = 0` the
     // bare value descends the full distance to the floor and re-seats the capsule exactly tangent,
@@ -1528,7 +1595,7 @@ pub const CharacterStore = struct {
         // changes: "does not oppose" is a statement about a contact AND a direction, so it expires
         // when the slide reprojects the motion. Without that, a surface set aside once stayed set
         // aside for the rest of the call even after becoming opposing.
-        var ignored: ?struct { key: SubShapeKey, direction: Vec3r } = null;
+        var ignored = IgnoredSet{};
         var budget: u32 = max_slide_iterations;
         var iteration: u32 = 0;
         while (iteration < budget) : (iteration += 1) {
@@ -1539,10 +1606,8 @@ pub const CharacterStore = struct {
             const distance = @sqrt(len_sq);
             const direction = remaining.scale(1 / distance);
 
-            // The exclusion expires with the direction it was judged against.
-            if (ignored) |ig| {
-                if (!ig.direction.eql(direction)) ignored = null;
-            }
+            // The whole set expires with the direction it was judged against.
+            ignored.expire(direction);
             const maybe_hit = sweepNearest(
                 bp,
                 bm,
@@ -1554,7 +1619,7 @@ pub const CharacterStore = struct {
                 distance,
                 c.layer_mask,
                 c.inner_body,
-                if (ignored) |ig| ig.key else null,
+                &ignored,
             );
             const hit = maybe_hit orelse {
                 // Nothing in the way: the whole remaining displacement is served.
@@ -1581,22 +1646,27 @@ pub const CharacterStore = struct {
             centre = centre.add(direction.scale(advance));
             remaining = remaining.sub(direction.scale(advance));
 
-            const normal = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal) orelse {
+            const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id) orelse {
                 // No usable normal: stop rather than guess a direction. Short, never further.
                 remaining = Vec3r.zero;
                 break;
             };
+            const normal = sn.normal;
 
             // The non-opposing zero-advance contact: set it aside and retry for free. `>= 0` is the
             // exact test — a surface the motion runs ALONG (dot exactly zero) obstructs nothing, and
             // one it runs away from even less.
-            if (advance == 0 and ignored == null and normal.dot(direction) >= 0) {
-                ignored = .{
-                    .key = .{ .body = hit.body, .subshape_id = hit.subshape_id },
-                    .direction = direction,
-                };
-                budget += 1;
-                continue;
+            // **THE KEY IS `sn.subshape_id` AND NOT `hit.subshape_id`, which is the defect this closes.**
+            // At distance zero the normal comes from the manifold, collected over every sub-shape of the
+            // body with the deepest winning — so it need not belong to the sub-shape the cast returned.
+            // Setting aside the cast's sub-shape on the strength of another's normal is how a ceiling's
+            // downward normal came to exclude a wall on the same mesh.
+            if (advance == 0 and normal.dot(direction) >= 0) {
+                if (ignored.add(.{ .body = hit.body, .subshape_id = sn.subshape_id }, direction)) {
+                    budget += 1;
+                    continue;
+                }
+                // The set is full: spend the iteration as before the mechanism existed.
             }
 
             // PLAN the push on what was hit, if it is dynamic and yields. Planned here and applied

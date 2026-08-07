@@ -744,7 +744,7 @@ pub const BodyManager = struct {
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
     ) ?BodyCastHit {
-        return self.castShapeBodyExcluding(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, null);
+        return self.castShapeBodyExcluding(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, &.{});
     }
 
     /// `castShapeBody` with ONE sub-shape kept out of the competition.
@@ -773,7 +773,7 @@ pub const BodyManager = struct {
         direction: Vec3r,
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
-        exclude_subshape: ?u32,
+        exclude_subshapes: []const u32,
     ) ?BodyCastHit {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
@@ -797,8 +797,10 @@ pub const BodyManager = struct {
         // no sub-shape at all (§1.11.16).
         var subshape_id: u32 = 0;
         // The two single-sub-shape classes: excluding sub-shape `0` excludes the body.
-        if (exclude_subshape) |ex| {
-            if (ex == 0 and shape.class() != .triangle_soup) return null;
+        if (shape.class() != .triangle_soup) {
+            for (exclude_subshapes) |ex| {
+                if (ex == 0) return null;
+            }
         }
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
@@ -843,7 +845,7 @@ pub const BodyManager = struct {
                     .direction_in_a = local_dir,
                     .sweep_direction_local = sweep_dir,
                     .back_face_mode = back_face_mode,
-                    .exclude_triangle = exclude_subshape,
+                    .exclude_triangles = exclude_subshapes,
                     .bound = max_distance,
                 };
                 _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
@@ -1787,11 +1789,12 @@ const MeshCastCollector = struct {
     /// Sweep direction in the BODY's local frame — what the facing test takes.
     sweep_direction_local: Vec3r,
     back_face_mode: api.BackFaceMode,
-    /// A triangle to keep out of the competition entirely. Consumed HERE, during the traversal, and
+    /// The triangles to keep out of the competition entirely — a SET, because a surface is N coplanar
+    /// triangles and one slot was built for one contact. Consumed HERE, during the traversal, and
     /// not by the caller afterwards: `castShapeBody` returns ONE hit, the nearest, so a filter applied
     /// to its result discards that triangle AND every other triangle of the body the cast never
     /// returned. That is a traversable wall on a mesh carrying both a floor and a wall.
-    exclude_triangle: ?u32,
+    exclude_triangles: []const u32,
     bound: Real,
     /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
     /// at the end of `castShapeBody` carries every class's answer to world in one place, so
@@ -1800,7 +1803,7 @@ const MeshCastCollector = struct {
     best_triangle: u32 = 0,
 
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
-        if (self.exclude_triangle) |ex| {
+        for (self.exclude_triangles) |ex| {
             if (ex == triangle_index) return;
         }
         if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(
