@@ -3518,6 +3518,22 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                 // 2^29 tighter there. So the residue has a further cause again, and no common value is
                 // pinned.
                 if (Real == f32) try testing.expect(along > 0.1);
+
+                // **AND THE INTERNAL-EDGE CELL IS PINNED TO ITS VALUE, because the magnitude bound
+                // above does NOT discriminate it.** That cell read 0.459 before the correction was
+                // branched onto the character's cast path and ~1.700 after, and `> 0.1` accepts both —
+                // so removing the `internalEdgeNormal` call outright would leave this test green. A
+                // bound is the right shape for the no-freeze property and the wrong one for a fix whose
+                // whole effect is WHICH value is served.
+                //
+                // The stop is the wall face at `x = 2` less the capsule radius, less the stand-off
+                // floor. That floor is `64 · floatEps(Real) · coordScale`, so it is ~2.4e-5 at f32 and
+                // vanishes at f64 — measured 1.699976100 and 1.699999988, a gap that IS the floor and
+                // not noise, which is why the value is split by precision and not by platform.
+                if (yaw == 0 and y0 == 0) {
+                    const expected: Real = if (Real == f32) 1.699976100 else 1.699999988;
+                    try testing.expectApproxEqAbs(expected, along, api_tol);
+                }
             }
         }
     }
