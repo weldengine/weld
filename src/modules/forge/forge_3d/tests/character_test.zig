@@ -3419,16 +3419,19 @@ test "one mesh carrying both floor and wall: the wall still blocks, at six yaws"
 test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
     const gpa = testing.allocator;
 
-    // **THIS TEST PINNED A PRECISION SPLIT AND THE SPLIT IS GONE.** It read: the same floor/wall/ceiling
-    // mesh blocks at 1.7 at f32 and freezes at exactly 0 at f64, a second defect named and not
-    // entrenched. Both were the cast/manifold disagreement, and filtering non-opposing contacts during
-    // selection closed it: f64 now reads 1.6999999880790453 where it read 0.
+    // **THIS TEST PINNED A PRECISION SPLIT THREE TIMES AND THE SPLIT IS GONE.** Each time it read as
+    // one defect and was three: the same floor/wall/ceiling mesh blocked at 1.7 at f32 and froze at
+    // exactly 0 at f64, then froze at six yaws of twenty-eight, then served 0.459 at three of them.
+    // The causes were, in order, a cast/manifold disagreement resolved by filtering during selection;
+    // a whole-body re-query displacing the contact the cast had SELECTED; the character's cast path
+    // bypassing `internalEdgeNormal`; and the opposing test reading transport rounding as opposition.
     //
-    // So the expectation is the SAME at both precisions, which is what a geometric answer should be.
+    // The expectation is now the SAME at both precisions, which is what a geometric answer should be,
+    // and the title is true rather than aspirational.
     //
     // The rotation axis applies here too: a precision claim and a frame claim are different claims, and
     // a scene that carries one should carry the other rather than leave a second blind spot beside the
-    // first. Scene and query turn together, so the expectation below is unchanged.
+    // first. Scene and query turn together, so the expectation below is unchanged by the yaw.
     for (corpus_yaws) |yaw| {
         for ([_]f32{ 0, 0.05 }) |y0| {
             for ([_]bool{ true, false }) |ceiling| {
@@ -3517,19 +3520,35 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                 // was the tangent base. At f64 nothing moved at all, the correction's noise gate being
                 // 2^29 tighter there. So the residue has a further cause again, and no common value is
                 // pinned.
-                if (Real == f32) try testing.expect(along > 0.1);
-
-                // **AND THE INTERNAL-EDGE CELL IS PINNED TO ITS VALUE, because the magnitude bound
-                // above does NOT discriminate it.** That cell read 0.459 before the correction was
-                // branched onto the character's cast path and ~1.700 after, and `> 0.1` accepts both —
-                // so removing the `internalEdgeNormal` call outright would leave this test green. A
-                // bound is the right shape for the no-freeze property and the wrong one for a fix whose
-                // whole effect is WHICH value is served.
+                // **THE COMMON EXPECTATION, AT BOTH PRECISIONS — which is what this test's title has
+                // always claimed and what it now checks.** The stop is the wall face at `x = 2` less
+                // the capsule radius: `1.7` at every yaw, both start heights, f32 and f64.
                 //
-                // The stop is the wall face at `x = 2` less the capsule radius, less the stand-off
-                // floor. That floor is `64 · floatEps(Real) · coordScale`, so it is ~2.4e-5 at f32 and
-                // vanishes at f64 — measured 1.699976100 and 1.699999988, a gap that IS the floor and
-                // not noise, which is why the value is split by precision and not by platform.
+                // It reached this form by closing three causes in turn, and the last one is why a
+                // magnitude bound is no longer needed here. The freeze class went when the SELECTED
+                // contact's normal reached the slide instead of a whole-body re-query. One partial
+                // serve went when the character's cast path was wired onto `internalEdgeNormal`, whose
+                // active-edge flags it had been bypassing. The rest went when the opposing test stopped
+                // reading transport rounding as opposition — see `opposing_noise_k`.
+                //
+                // **The tolerance is f32-GRADE in BOTH builds, and the discriminant is the quantity's
+                // ORIGIN (§1.11.2).** The scene's geometry enters through the `f32` public surface, and
+                // the stop sits one stand-off floor short of the wall — `64 · floatEps(f32) ·
+                // coordScale`, measured between 1.3e-5 and 2.4e-5 here and vanishing at f64. Measured
+                // spread over fourteen yaws and both heights: f32 in [1.699976300, 1.699986600], f64 in
+                // [1.699999905, 1.700000054]. The band is 2x the widest offset and still 24 000 times
+                // tighter than the nearest competing outcome, the 0.459 partial serve.
+                try testing.expectApproxEqAbs(@as(Real, 1.7), along, 5e-5);
+
+                // **AND ONE CELL IS PINNED TIGHTER THAN THE BAND ABOVE, to its exact value.** The
+                // common expectation deliberately absorbs the stand-off floor; this one measures it.
+                // The stop is the wall face at `x = 2` less the capsule radius, less that floor —
+                // `64 · floatEps(Real) · coordScale`, ~2.4e-5 at f32 and vanishing at f64, measured
+                // 1.699976100 and 1.699999988. The gap between the two IS the floor and not noise,
+                // which is why the value is split by PRECISION with a named cause and never by
+                // platform. It was written when the band above was a magnitude bound that accepted
+                // 0.459 as readily as 1.700; the band is now an equality and would catch that too, so
+                // what this adds is the tighter grain, not the discrimination.
                 if (yaw == 0 and y0 == 0) {
                     const expected: Real = if (Real == f32) 1.699976100 else 1.699999988;
                     try testing.expectApproxEqAbs(expected, along, api_tol);

@@ -821,7 +821,7 @@ pub const BodyManager = struct {
         // The half-space's predicate uses the STORED plane normal, transported: at an initial overlap
         // `plane.castShape` returns `direction.neg()`, which carries no surface information at all.
         if (skip_non_opposing and shape.class() == .half_space) {
-            if (hs.?.normal.dot(local_dir) >= 0) return null;
+            if (!opposes(hs.?.normal, local_dir)) return null;
         }
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
@@ -898,7 +898,7 @@ pub const BodyManager = struct {
                 // hit of the cast/manifold disagreement. Nothing real to oppose the motion.
                 break :blk (probe_manifold.normal orelse return null).neg();
             };
-            if (opposing_normal.dot(if (hit.distance > 0) local_dir else direction) >= 0) return null;
+            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else direction)) return null;
             // Already WORLD on this arm: `collideShapeBody` is a world-space call, which is why the
             // predicate above dots it with `direction` and not with `local_dir`.
             if (hit.distance <= 0) contact_normal = opposing_normal;
@@ -1643,6 +1643,47 @@ const SingleManifoldCollector = struct {
     }
 };
 
+/// Slack, in ULPs of 1, on the test that decides whether a surface OPPOSES a sweep.
+///
+/// **`k · floatEps(Real)` and nothing else — no coordinate scale.** `n · d` is the product of two
+/// UNIT vectors and is therefore DIMENSIONLESS, so a length scale has no business in it. That is what
+/// separates this constant from `contactMargin`, whose operand is a distance and which is right to
+/// carry `coordScale`.
+///
+/// **It IS governed by §1.11.2's tolerance discipline**, unlike `max_slope`, `padding` and
+/// `predictive_contact_distance`, which are named PHYSICAL parameters of the character and
+/// deliberately escape it. This one absorbs transport rounding and expresses no modelling intent.
+///
+/// **Why a band exists here at all, and it is measured rather than argued.** A horizontal triangle's
+/// normal does not survive a quaternion yaw exactly: transported through 90° it reads
+/// `(7.4e-16, 1, 1.1e-15)` at f64 and `(3.97e-7, 1, 3.97e-7)` at f32. Its dot with a horizontal sweep
+/// is then a small NEGATIVE residue where the geometry has an exact zero — so an exact `>= 0` admitted
+/// a FLOOR as an obstacle to horizontal travel. The advance is zero, the iteration is spent, a plane
+/// slot is spent; the slide against that near-vertical normal then injects a vertical residue into the
+/// motion, which admits the CEILING by the same route; and two near-anti-parallel planes form a crease
+/// whose axis is their cross product, i.e. pure noise. At f64 that noise axis re-found the floor and
+/// the character froze at exactly zero, every call; at f32 it happened to find a real contact and
+/// served. A coin toss arbitrated by rounding, which is what this closes.
+///
+/// **The direction of the band is decided and not symmetric**: it reads NON-OPPOSING, so a contact
+/// within it is DISCARDED. Discarding one that opposed by a hair advances by a hair into a surface,
+/// and the depenetration at the head of the next call recovers that; reading it as opposing FREEZES,
+/// and a freeze recovers from nothing.
+///
+/// `k = 16` against measured residues of `3.3 · floatEps` at f32 and `5 · floatEps` at f64 — a 3×
+/// margin, and the same value `contact_margin_conv_k` carries for the same reason: the residue is
+/// ACCUMULATED across the transport, the direction's normalisation and the dot's own three products.
+/// What it costs in angle is `asin(16 · floatEps)` — `1.1e-4` degrees at f32, `2.0e-13` at f64. No
+/// modelling notices that. The 3.6° cone this milestone REFUSED is thirty thousand times wider and is
+/// closed by `internalEdgeNormal` instead, which is a different mechanism for a different cause.
+const opposing_noise_k: comptime_int = 16;
+
+/// Whether a surface with outward normal `n` opposes travel along unit direction `d`, by more than
+/// float noise. One predicate for all four arms, so they cannot drift apart.
+fn opposes(n: Vec3r, d: Vec3r) bool {
+    return n.dot(d) < -@as(Real, opposing_noise_k) * std.math.floatEps(Real);
+}
+
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
 /// the tie band that decides which edges a contact could have come from. Both compare
 /// quantities of order 1 (a dot product of two unit vectors) or a length against the triangle's
@@ -1912,7 +1953,7 @@ const MeshCastCollector = struct {
         var contact_normal: ?Vec3r = null;
         if (self.skip_non_opposing) {
             if (hit.distance > 0) {
-                if (hit.normal.dot(self.direction_in_a) >= 0) return;
+                if (!opposes(hit.normal, self.direction_in_a)) return;
             } else {
                 // The triangle alone, in A's frame: A at the origin, B at the relative pose the kernel
                 // already holds. `null` means the narrowphase denies the contact the cast reported — the
@@ -1953,7 +1994,7 @@ const MeshCastCollector = struct {
                 )) |face_world| contact.normal = face_world.neg();
                 // `collideOrdered` returns probe → body; the opposing test wants surface → probe.
                 const n = contact.normal.neg();
-                if (n.dot(self.direction_in_a) >= 0) return;
+                if (!opposes(n, self.direction_in_a)) return;
                 contact_normal = n;
             }
         }
