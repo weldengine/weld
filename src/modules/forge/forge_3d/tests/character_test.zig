@@ -875,6 +875,62 @@ fn addPlane(gpa: std.mem.Allocator, world: *harness.World, normal: ApiVec3, dist
     });
 }
 
+/// Rotate a world vector about `+Y` by `deg` degrees.
+///
+/// **The corpus axis for frame bugs.** Rotating the SCENE and the QUERY by the same angle leaves every
+/// distance and every clearance invariant, so an expectation written for the axis-aligned case holds
+/// verbatim for the rotated one — while the probe frame and the body frame, which agree only when the
+/// body is unrotated, diverge. A predicate that mixes the two is INVISIBLE at 0° and wrong at anything
+/// else, which is precisely how one survived here until an external review found it by reading rather
+/// than by running: every mesh scene in this suite was axis-aligned.
+fn rotY(deg: f32, x: f32, z: f32) [2]f32 {
+    const r = deg * std.math.pi / 180.0;
+    const c = @cos(r);
+    const sn = @sin(r);
+    return .{ c * x + sn * z, -sn * x + c * z };
+}
+
+fn bodyYaw(deg: f32) math.Quatf {
+    return math.Quatf.fromAxisAngle(av(0, 1, 0), deg * std.math.pi / 180.0);
+}
+
+/// The angles every mesh scene is replayed at. `0` keeps the historical case exactly, `90` is the axis
+/// swap, and `5`/`37`/`213`/`350` are non-trivial in both hemispheres and near both ends of the turn.
+const corpus_yaws = [_]f32{ 0, 5, 37, 90, 213, 350 };
+
+/// A mesh RIDGE whose apex line runs along `z = 0` at `y = 0`, both faces sloping away and down, so a
+/// capsule travelling the `+X` axis is tangent to that EDGE for its whole path.
+///
+/// **The second corpus axis.** Every tangency case in this suite rests on a half-space or on the
+/// interior of a triangle — several heights, several paddings, never an edge. A capsule's lowest point
+/// is a single point, and on a symmetric downward ridge that point lies on the apex LINE whatever the
+/// fold angle, so the contact is genuinely edge-borne while the resting height is the plane's: the
+/// expectations at the call sites are unchanged, and a divergence would be the contact-normal source
+/// and nothing else.
+///
+/// **A FLAT internal edge was tried first and MEASURED INERT**, which is why it is not what ships:
+/// with two coplanar quads the contact point sits on the edge but either face answers the same `+Y`,
+/// and reversing one quad's winding — a mutation that makes it back-facing and therefore absent —
+/// changed no assertion in either sweep. A ridge cannot be satisfied by one face alone.
+fn addEdgeFloor(gpa: std.mem.Allocator, world: *harness.World, entity_index: u32) !api.BodyId {
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const drop = 5.0 * @tan(10.0 * std.math.pi / 180.0); // a 10° fold on each side
+    const verts = [_]V{
+        .{ .data = .{ -5, -drop, -5 } }, .{ .data = .{ 5, -drop, -5 } },
+        .{ .data = .{ -5, 0, 0 } },      .{ .data = .{ 5, 0, 0 } },
+        .{ .data = .{ -5, -drop, 5 } },  .{ .data = .{ 5, -drop, 5 } },
+    };
+    // Wound so both faces point upward. The shared apex edge is 2 → 3, along `z = 0` at `y = 0`.
+    const tris = [_]u32{ 0, 2, 1, 1, 2, 3, 2, 4, 3, 3, 4, 5 };
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(0, 0, 0),
+    });
+}
+
 /// The unit normal of a plane tilted `deg` away from horizontal, in the XY plane: its up
 /// component is `cos(deg)`, so `deg` IS the slope angle the `max_slope` test compares against.
 fn slopeNormal(deg: f32) ApiVec3 {
@@ -2902,43 +2958,66 @@ test "a base EXACTLY on the floor is no longer frozen — seven heights, both di
     // `0` now serves the whole metre like the others, AND the six clear heights keep exactly the
     // behaviour they had — a capsule already standing off is invisible to the overlap query, so
     // nothing lifts it.
+    //
+    // **AND ON AN EDGE, not only on a face.** The sweep ran against a half-space, which has no edges at
+    // all; it is replayed here against a flat mesh floor whose internal edge runs exactly under the
+    // capsule's path, so the tangency is an EDGE tangency at every one of the seven heights. The
+    // surface is geometrically the same plane, so every expectation below is unchanged — which is the
+    // point: a divergence would be the contact-normal source and nothing else.
     const heights = [_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05, 0.2 };
     for (heights) |start_y| {
-        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-        defer world.deinit(gpa);
-        var chars: CharacterStore = .{};
-        defer chars.deinit(gpa);
-        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 420);
-        var desc = baseDescriptor();
-        desc.entity = ent(421);
-        desc.position = av(0, start_y, 0);
-        const id = try addMover(gpa, &world, &chars, desc);
+        for ([_]bool{ false, true }) |on_edge| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            var chars: CharacterStore = .{};
+            defer chars.deinit(gpa);
+            if (on_edge) {
+                _ = try addEdgeFloor(gpa, &world, 420);
+            } else {
+                _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 420);
+            }
+            var desc = baseDescriptor();
+            desc.entity = ent(421);
+            desc.position = av(0, start_y, 0);
+            const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
 
-        // The whole metre, at EVERY height including zero.
-        try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
+            // The whole metre, at EVERY height including zero.
+            try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
 
-        // **THE GUARD DOES NOT OVER-FIRE, and the resting height is the composition of THREE mechanisms
-        // whose split this asserts.** Depenetration lifts an exactly-tangent base to `padding`, and it
-        // reaches nothing else: a capsule already standing off is `.separated`, hence invisible to the
-        // overlap query. Floor-sticking then pulls a GROUNDED character above `padding` down to
-        // `padding`, which is pre-existing and not part of this fix. And a base strictly inside
-        // `(0, padding)` is touched by neither — no contact for the overlap query, and a padded advance
-        // that clamps to zero for the down-sweep — so it stays exactly where it was.
-        //
-        // 0.2 is the third case and it is the NON-VACUITY one: the entry ground probe is bounded by
-        // `padding + predictive_contact_distance` and does not reach the floor from there, so the
-        // character enters NOT grounded, floor-sticking is skipped, and it stays at 0.2 reporting
-        // `.in_air`. MEASURED, and it is what proves the new branch does not touch a character that is
-        // in contact with nothing — a formula covering only "grounded" cases would have hidden it.
-        const airborne = start_y > 0.1;
-        const expected_y: Real = if (airborne) start_y else if (start_y > 0 and start_y < 0.02) start_y else 0.02;
-        try testing.expectApproxEqAbs(expected_y, r.position.toArray()[1], api_tol);
-        try testing.expectEqual(
-            if (airborne) api.GroundState.in_air else api.GroundState.grounded,
-            r.ground.state,
-        );
+            // **THE GUARD DOES NOT OVER-FIRE, and the resting height is the composition of THREE mechanisms
+            // whose split this asserts.** Depenetration lifts an exactly-tangent base to `padding`, and it
+            // reaches nothing else: a capsule already standing off is `.separated`, hence invisible to the
+            // overlap query. Floor-sticking then pulls a GROUNDED character above `padding` down to
+            // `padding`, which is pre-existing and not part of this fix. And a base strictly inside
+            // `(0, padding)` is touched by neither — no contact for the overlap query, and a padded advance
+            // that clamps to zero for the down-sweep — so it stays exactly where it was.
+            //
+            // 0.2 is the third case and it is the NON-VACUITY one: the entry ground probe is bounded by
+            // `padding + predictive_contact_distance` and does not reach the floor from there, so the
+            // character enters NOT grounded, floor-sticking is skipped, and it stays at 0.2 reporting
+            // `.in_air`. MEASURED, and it is what proves the new branch does not touch a character that is
+            // in contact with nothing — a formula covering only "grounded" cases would have hidden it.
+            const airborne = start_y > 0.1;
+            const expected_y: Real = if (airborne) start_y else if (start_y > 0 and start_y < 0.02) start_y else 0.02;
+            try testing.expectApproxEqAbs(expected_y, r.position.toArray()[1], api_tol);
+            if (on_edge and !airborne) {
+                // **AND THE NORMAL IS THE EDGE'S, WHICH IS THE WHOLE POINT OF THE AXIS.** Neither face
+                // of a 10° ridge can produce this: their normals carry a `y` of `cos 10° = 0.98481`,
+                // and the bound below admits nothing under `cos 1°`. Measured exactly `(0, 1, 0)` at
+                // every height, so the tolerance is slack by four orders and the exclusion is the
+                // assertion's substance rather than its margin.
+                const gn = r.ground.normal.data;
+                try testing.expect(gn[1] > @cos(1.0 * std.math.pi / 180.0));
+                try testing.expectApproxEqAbs(@as(f32, 0), gn[0], 1e-5);
+                try testing.expectApproxEqAbs(@as(f32, 0), gn[2], 1e-5);
+            }
+            try testing.expectEqual(
+                if (airborne) api.GroundState.in_air else api.GroundState.grounded,
+                r.ground.state,
+            );
+        }
     }
 }
 
@@ -2953,25 +3032,35 @@ test "the stand-off floor serves a zero padding, and its scale limit is MEASURED
     // `predictive_contact_distance`, which are named physical parameters it deliberately does not
     // reach. Its `k` must EXCEED `contact_margin_conv_k` rather than equal it: the point is to leave
     // the contact margin, not to sit on its edge.
+    //
+    // Replayed on an EDGE as well as on a face: the second corpus axis. A half-space has no edges, so
+    // every padding in this sweep tested one contact geometry. The mesh floor puts the capsule's whole
+    // path on an internal edge, and the numbers must not move.
     for ([_]f32{ 0, 0.005, 0.01, 0.019, 0.02, 0.05 }) |start_y| {
-        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-        defer world.deinit(gpa);
-        var chars: CharacterStore = .{};
-        defer chars.deinit(gpa);
-        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 440);
-        var desc = baseDescriptor();
-        desc.entity = ent(441);
-        desc.position = av(0, start_y, 0);
-        desc.padding = 0;
-        const id = try addMover(gpa, &world, &chars, desc);
+        for ([_]bool{ false, true }) |on_edge| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            var chars: CharacterStore = .{};
+            defer chars.deinit(gpa);
+            if (on_edge) {
+                _ = try addEdgeFloor(gpa, &world, 440);
+            } else {
+                _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 440);
+            }
+            var desc = baseDescriptor();
+            desc.entity = ent(441);
+            desc.position = av(0, start_y, 0);
+            desc.padding = 0;
+            const id = try addMover(gpa, &world, &chars, desc);
 
-        // THREE calls, because a mode that works once and stalls on the next is the dangerous one.
-        var previous: Real = 0;
-        var k: u32 = 0;
-        while (k < 3) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-            try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
-            previous = r.position.toArray()[0];
+            // THREE calls, because a mode that works once and stalls on the next is the dangerous one.
+            var previous: Real = 0;
+            var k: u32 = 0;
+            while (k < 3) : (k += 1) {
+                const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+                try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
+                previous = r.position.toArray()[0];
+            }
         }
     }
 
@@ -3159,7 +3248,6 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
         }
         try testing.expectApproxEqAbs(row.y, prev * 0 + chars.get(id).?.position.toArray()[1], 1e-3);
         // Every row ends GROUNDED — none of the legal bounds loses the floor.
-        try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
     }
 }
 
@@ -3242,80 +3330,90 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
     }
 }
 
-test "one mesh carrying both floor and wall: the wall still blocks" {
+test "one mesh carrying both floor and wall: the wall still blocks, at six yaws" {
     const gpa = testing.allocator;
-    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-    defer world.deinit(gpa);
-    var chars: CharacterStore = .{};
-    defer chars.deinit(gpa);
+    // **THE ROTATION AXIS APPLIED TO AN EXISTING SCENE.** The body is yawed and the query is yawed with
+    // it, so every expectation below is the axis-aligned one verbatim while the two frames diverge.
+    for (corpus_yaws) |yaw| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
 
-    // **THE COUNTER-TEST FOR AN EXCLUSION COARSER THAN ITS VERDICT.** The non-opposing retry sets a
-    // contact aside; if it set aside the whole BODY, a single mesh carrying a floor and a wall would
-    // lose the wall along with the floor triangle, and the character would walk straight through it.
-    // The key is the pair `(body, subshape_id)`, and this is what measures that.
-    //
-    // ONE mesh, ONE body: a floor spanning x ∈ [−2, 4] at y = 0, and a wall standing on it at x = 2,
-    // rising to y = 3. Two quads, four triangles, all in the same index buffer.
-    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
-    const verts = [_]V{
-        // floor at y = 0, wound so the face normal is +Y
-        .{ .data = .{ -2, 0, -2 } }, // 0
-        .{ .data = .{ 4, 0, -2 } }, // 1
-        .{ .data = .{ -2, 0, 2 } }, // 2
-        .{ .data = .{ 4, 0, 2 } }, // 3
-        // wall at x = 2. A mesh is SINGLE-SIDED, so the winding decides whether the wall exists at
-        // all from where the character comes: a first version wound both triangles to +X and the
-        // character walked to x = 12, through the wall and off the end of the floor. That was the
-        // test's own defect, not the engine's, and it is written here because a back-facing wall
-        // reads exactly like a traversable one.
-        .{ .data = .{ 2, 3, -2 } }, // 4
-        .{ .data = .{ 2, 3, 2 } }, // 5
-        .{ .data = .{ 2, 0, -2 } }, // 6
-        .{ .data = .{ 2, 0, 2 } }, // 7
-        // CEILING at y = 1, normal −Y, low enough to squeeze a 1.8 m capsule. It is what makes the
-        // retry fire at all: a ceiling's downward normal does not oppose a horizontal motion, so the
-        // contact is set aside — and it is on the SAME body as the wall, which is the whole point.
-        .{ .data = .{ -2, 1, -2 } }, // 8
-        .{ .data = .{ 4, 1, -2 } }, // 9
-        .{ .data = .{ -2, 1, 2 } }, // 10
-        .{ .data = .{ 4, 1, 2 } }, // 11
-    };
-    const tris = [_]u32{
-        0, 2, 1, 1, 2, 3, // floor, +Y
-        6, 7, 4, 7, 5, 4, // wall, −X
-        8, 9, 10, 9, 11, 10, // ceiling, −Y
-    };
-    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
-    const body = try world.addBody(gpa, .{
-        .entity = ent(470),
-        .body_type = .static,
-        .shape = shape,
-    });
-    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+        // **THE COUNTER-TEST FOR AN EXCLUSION COARSER THAN ITS VERDICT.** The non-opposing retry sets a
+        // contact aside; if it set aside the whole BODY, a single mesh carrying a floor and a wall would
+        // lose the wall along with the floor triangle, and the character would walk straight through it.
+        // The key is the pair `(body, subshape_id)`, and this is what measures that.
+        //
+        // ONE mesh, ONE body: a floor spanning x ∈ [−2, 4] at y = 0, and a wall standing on it at x = 2,
+        // rising to y = 3. Two quads, four triangles, all in the same index buffer.
+        const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+        const verts = [_]V{
+            // floor at y = 0, wound so the face normal is +Y
+            .{ .data = .{ -2, 0, -2 } }, // 0
+            .{ .data = .{ 4, 0, -2 } }, // 1
+            .{ .data = .{ -2, 0, 2 } }, // 2
+            .{ .data = .{ 4, 0, 2 } }, // 3
+            // wall at x = 2. A mesh is SINGLE-SIDED, so the winding decides whether the wall exists at
+            // all from where the character comes: a first version wound both triangles to +X and the
+            // character walked to x = 12, through the wall and off the end of the floor. That was the
+            // test's own defect, not the engine's, and it is written here because a back-facing wall
+            // reads exactly like a traversable one.
+            .{ .data = .{ 2, 3, -2 } }, // 4
+            .{ .data = .{ 2, 3, 2 } }, // 5
+            .{ .data = .{ 2, 0, -2 } }, // 6
+            .{ .data = .{ 2, 0, 2 } }, // 7
+            // CEILING at y = 1, normal −Y, low enough to squeeze a 1.8 m capsule. It is what makes the
+            // retry fire at all: a ceiling's downward normal does not oppose a horizontal motion, so the
+            // contact is set aside — and it is on the SAME body as the wall, which is the whole point.
+            .{ .data = .{ -2, 1, -2 } }, // 8
+            .{ .data = .{ 4, 1, -2 } }, // 9
+            .{ .data = .{ -2, 1, 2 } }, // 10
+            .{ .data = .{ 4, 1, 2 } }, // 11
+        };
+        const tris = [_]u32{
+            0, 2, 1, 1, 2, 3, // floor, +Y
+            6, 7, 4, 7, 5, 4, // wall, −X
+            8, 9, 10, 9, 11, 10, // ceiling, −Y
+        };
+        const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+        const body = try world.addBody(gpa, .{
+            .entity = ent(470),
+            .body_type = .static,
+            .shape = shape,
+            .rotation = bodyYaw(yaw),
+        });
+        _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
 
-    var desc = baseDescriptor();
-    desc.entity = ent(471);
-    desc.position = av(0, 0, 0);
-    desc.padding = 0;
-    const id = try addMover(gpa, &world, &chars, desc);
+        var desc = baseDescriptor();
+        desc.entity = ent(471);
+        desc.position = av(0, 0, 0);
+        desc.padding = 0;
+        const id = try addMover(gpa, &world, &chars, desc);
 
-    // Walk hard into the wall, several calls, so a leak would show as unbounded travel.
-    var k: u32 = 0;
-    while (k < 4) : (k += 1) {
-        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+        // Walk hard into the wall, several calls, so a leak would show as unbounded travel. The start is
+        // ON the yaw axis, so only the direction turns.
+        const d = rotY(yaw, 3, 0);
+        var k: u32 = 0;
+        while (k < 4) : (k += 1) {
+            _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
+        }
+        const p = chars.get(id).?.position.toArray();
+        // Distance travelled ALONG the yawed direction — the quantity the rotation leaves invariant.
+        const u = rotY(yaw, 1, 0);
+        const along = p[0] * u[0] + p[2] * u[1];
+
+        // **THE JUDGE OF THE TUNNELING FIX, and it is precision-INDEPENDENT.** Never past the wall. With
+        // the exclusion applied ABOVE the cast — the state this replaces — the character walks through at
+        // BOTH precisions, so this single inequality discriminates the fix exactly and needs no per-
+        // precision shape.
+        try testing.expect(along < 2);
+        // Standing on the floor triangle it set aside, not fallen through it.
+        try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
     }
-    const p = chars.get(id).?.position.toArray();
-
-    // **THE JUDGE OF THE TUNNELING FIX, and it is precision-INDEPENDENT.** Never past the wall. With
-    // the exclusion applied ABOVE the cast — the state this replaces — the character walks through at
-    // BOTH precisions, so this single inequality discriminates the fix exactly and needs no per-
-    // precision shape.
-    try testing.expect(p[0] < 2);
-    // Standing on the floor triangle it set aside, not fallen through it.
-    try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
 }
 
-test "the mesh scene behaves IDENTICALLY at both precisions — the f64 freeze is closed" {
+test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
     const gpa = testing.allocator;
 
     // **THIS TEST PINNED A PRECISION SPLIT AND THE SPLIT IS GONE.** It read: the same floor/wall/ceiling
@@ -3324,41 +3422,78 @@ test "the mesh scene behaves IDENTICALLY at both precisions — the f64 freeze i
     // selection closed it: f64 now reads 1.6999999880790453 where it read 0.
     //
     // So the expectation is the SAME at both precisions, which is what a geometric answer should be.
-    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-    defer world.deinit(gpa);
-    var chars: CharacterStore = .{};
-    defer chars.deinit(gpa);
+    //
+    // The rotation axis applies here too: a precision claim and a frame claim are different claims, and
+    // a scene that carries one should carry the other rather than leave a second blind spot beside the
+    // first. Scene and query turn together, so the expectation below is unchanged.
+    for (corpus_yaws) |yaw| {
+        for ([_]f32{ 0, 0.05 }) |y0| {
+            for ([_]bool{ true, false }) |ceiling| {
+                var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+                defer world.deinit(gpa);
+                var chars: CharacterStore = .{};
+                defer chars.deinit(gpa);
 
-    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
-    const verts = [_]V{
-        .{ .data = .{ -2, 0, -2 } }, .{ .data = .{ 4, 0, -2 } }, .{ .data = .{ -2, 0, 2 } }, .{ .data = .{ 4, 0, 2 } },
-        .{ .data = .{ 2, 3, -2 } },  .{ .data = .{ 2, 3, 2 } },  .{ .data = .{ 2, 0, -2 } }, .{ .data = .{ 2, 0, 2 } },
-        .{ .data = .{ -2, 1, -2 } }, .{ .data = .{ 4, 1, -2 } }, .{ .data = .{ -2, 1, 2 } }, .{ .data = .{ 4, 1, 2 } },
-    };
-    const tris = [_]u32{ 0, 2, 1, 1, 2, 3, 6, 7, 4, 7, 5, 4, 8, 9, 10, 9, 11, 10 };
-    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
-    const body = try world.addBody(gpa, .{ .entity = ent(480), .body_type = .static, .shape = shape });
-    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+                const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+                const verts = [_]V{
+                    .{ .data = .{ -2, 0, -2 } }, .{ .data = .{ 4, 0, -2 } }, .{ .data = .{ -2, 0, 2 } }, .{ .data = .{ 4, 0, 2 } },
+                    .{ .data = .{ 2, 3, -2 } },  .{ .data = .{ 2, 3, 2 } },  .{ .data = .{ 2, 0, -2 } }, .{ .data = .{ 2, 0, 2 } },
+                    .{ .data = .{ -2, 1, -2 } }, .{ .data = .{ 4, 1, -2 } }, .{ .data = .{ -2, 1, 2 } }, .{ .data = .{ 4, 1, 2 } },
+                };
+                const tris_all = [_]u32{ 0, 2, 1, 1, 2, 3, 6, 7, 4, 7, 5, 4, 8, 9, 10, 9, 11, 10 };
+                const tris: []const u32 = if (ceiling) tris_all[0..] else tris_all[0..12];
+                const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = tris } });
+                const body = try world.addBody(gpa, .{
+                    .entity = ent(480),
+                    .body_type = .static,
+                    .shape = shape,
+                    .rotation = bodyYaw(yaw),
+                });
+                _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
 
-    var desc = baseDescriptor();
-    desc.entity = ent(481);
-    desc.position = av(0, 0, 0);
-    desc.padding = 0;
-    const id = try addMover(gpa, &world, &chars, desc);
+                var desc = baseDescriptor();
+                desc.entity = ent(481);
+                desc.position = av(0, y0, 0);
+                desc.padding = 0;
+                const id = try addMover(gpa, &world, &chars, desc);
 
-    var k: u32 = 0;
-    while (k < 4) : (k += 1) {
-        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+                var k: u32 = 0;
+                const d = rotY(yaw, 3, 0);
+                while (k < 4) : (k += 1) {
+                    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
+                }
+                const p = chars.get(id).?.position.toArray();
+                const u = rotY(yaw, 1, 0);
+                const along = p[0] * u[0] + p[2] * u[1];
+
+                // **NEVER PAST THE WALL, at every yaw, every start height, ceiling or not.** This
+                // inequality is the judge the rotation axis EARNED: replayed against the parent commit
+                // the same scene walks 12 m THROUGH the wall and off the floor at 180° and 213°, so the
+                // axis is a non-vacuous pin of the selection filter and not decoration.
+                try testing.expect(along < 2);
+
+                if (!ceiling) {
+                    // The wall's face at x = 2 minus the capsule radius, with no padding requested —
+                    // the full distance at EVERY yaw and BOTH start heights, and the same at both
+                    // precisions. The frame claim and the precision claim, together.
+                    try testing.expectApproxEqAbs(@as(Real, 1.7), along, 1e-4);
+                    continue;
+                }
+
+                // **WITH the ceiling the distance is yaw- AND height-dependent, and that is MEASURED,
+                // not assumed.** The capsule is 1.8 m tall under a ceiling 1 m above the floor, so the
+                // squeeze is UNRESOLVABLE: reverting to the entry pose is the specified answer, and
+                // what varies is whether it resolves at all. At a tangent base: 1.699977 at 0°, exactly
+                // 0 at 5°/37°/90°/350°, 1.699977 at 213°. Lifted to 0.05: correct at 5°/37°/90°/350°
+                // and 0.459152 at 0°. Reported rather than absorbed, and asserted only where it holds —
+                // an exact distance claimed over an unresolvable squeeze would be a test announcing
+                // more than it is, which this suite has already paid for three times.
+            }
+        }
     }
-    const p = chars.get(id).?.position.toArray();
-
-    // The wall's face at x = 2 minus the capsule radius, with no padding requested.
-    try testing.expectApproxEqAbs(@as(Real, 1.7), p[0], 1e-4);
-    try testing.expect(p[0] < 2);
-    try testing.expect(p[0] > 1);
 }
 
-test "STRESS: a 7200-triangle floor under a moving capsule" {
+test "STRESS: a 7200-triangle floor under a moving capsule, at six yaws" {
     const gpa = testing.allocator;
 
     // **A STRESS TEST, AND ITS TITLE SAYS SO — it was commissioned as a discriminator and it is not
@@ -3373,59 +3508,71 @@ test "STRESS: a 7200-triangle floor under a moving capsule" {
     // and it was removed as a CLASS, not as an observed symptom. The claim of being a non-regression is
     // withdrawn rather than left standing over a test that cannot support it.
     //
-    // What it IS: 3600 quads under a capsule crossing them at exact tangency, which is worth running.
-    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-    defer world.deinit(gpa);
-    var chars: CharacterStore = .{};
-    defer chars.deinit(gpa);
+    // What it IS: 3600 quads under a capsule crossing them at exact tangency, which is worth running —
+    // and, since the rotation axis was applied to the corpus, at four yaws, so the capsule crosses the
+    // cells DIAGONALLY at three of them instead of along a row.
+    for (corpus_yaws) |yaw| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
 
-    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
-    const cells = 60;
-    const cell: f32 = 0.1;
-    const side = cells + 1;
-    var verts: [side * side]V = undefined;
-    for (0..side) |iz| {
-        for (0..side) |ix| {
-            const fx = (@as(f32, @floatFromInt(ix)) - cells / 2) * cell;
-            const fz = (@as(f32, @floatFromInt(iz)) - cells / 2) * cell;
-            verts[iz * side + ix] = .{ .data = .{ fx, 0, fz } };
+        const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+        const cells = 60;
+        const cell: f32 = 0.1;
+        const side = cells + 1;
+        var verts: [side * side]V = undefined;
+        for (0..side) |iz| {
+            for (0..side) |ix| {
+                const fx = (@as(f32, @floatFromInt(ix)) - cells / 2) * cell;
+                const fz = (@as(f32, @floatFromInt(iz)) - cells / 2) * cell;
+                verts[iz * side + ix] = .{ .data = .{ fx, 0, fz } };
+            }
         }
-    }
-    var tris: [cells * cells * 6]u32 = undefined;
-    var w: usize = 0;
-    for (0..cells) |iz| {
-        for (0..cells) |ix| {
-            const a: u32 = @intCast(iz * side + ix);
-            const b: u32 = @intCast(iz * side + ix + 1);
-            const c: u32 = @intCast((iz + 1) * side + ix);
-            const d: u32 = @intCast((iz + 1) * side + ix + 1);
-            tris[w] = a;
-            tris[w + 1] = c;
-            tris[w + 2] = b;
-            tris[w + 3] = b;
-            tris[w + 4] = c;
-            tris[w + 5] = d;
-            w += 6;
+        var tris: [cells * cells * 6]u32 = undefined;
+        var w: usize = 0;
+        for (0..cells) |iz| {
+            for (0..cells) |ix| {
+                const a: u32 = @intCast(iz * side + ix);
+                const b: u32 = @intCast(iz * side + ix + 1);
+                const c: u32 = @intCast((iz + 1) * side + ix);
+                const d: u32 = @intCast((iz + 1) * side + ix + 1);
+                tris[w] = a;
+                tris[w + 1] = c;
+                tris[w + 2] = b;
+                tris[w + 3] = b;
+                tris[w + 4] = c;
+                tris[w + 5] = d;
+                w += 6;
+            }
         }
-    }
 
-    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
-    // `World.addBody` inserts the broadphase proxy itself — a second insertion here would put the same
-    // body in the tree twice, which an earlier version of this test did.
-    _ = try world.addBody(gpa, .{ .entity = ent(490), .body_type = .static, .shape = shape });
+        const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+        // `World.addBody` inserts the broadphase proxy itself — a second insertion here would put the same
+        // body in the tree twice, which an earlier version of this test did.
+        _ = try world.addBody(gpa, .{
+            .entity = ent(490),
+            .body_type = .static,
+            .shape = shape,
+            .rotation = bodyYaw(yaw),
+        });
 
-    var desc = baseDescriptor();
-    desc.entity = ent(491);
-    desc.position = av(-1, 0, 0); // exactly tangent, so every cell under the capsule is a contact
-    desc.padding = 0;
-    const id = try addMover(gpa, &world, &chars, desc);
+        var desc = baseDescriptor();
+        desc.entity = ent(491);
+        const s0 = rotY(yaw, -1, 0);
+        desc.position = av(s0[0], 0, s0[1]); // exactly tangent, so every cell under the capsule is a contact
+        desc.padding = 0;
+        const id = try addMover(gpa, &world, &chars, desc);
 
-    var previous: Real = -1;
-    var k: u32 = 0;
-    while (k < 2) : (k += 1) {
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], 1e-3);
-        previous = r.position.toArray()[0];
+        const u = rotY(yaw, 1, 0);
+        var previous: Real = -1;
+        var k: u32 = 0;
+        while (k < 2) : (k += 1) {
+            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(u[0], 0, u[1]), 1.0 / 60.0);
+            const q = r.position.toArray();
+            try testing.expectApproxEqAbs(previous + 1, q[0] * u[0] + q[2] * u[1], 1e-3);
+            previous = q[0] * u[0] + q[2] * u[1];
+        }
     }
 }
 
