@@ -1861,9 +1861,13 @@ const MeshCastCollector = struct {
         // into the edge of a platform, and starting SEPARATED the depenetration could not recover it.
         //
         // At `d > 0` the cast's normal IS the contact's. At `d == 0` it is `−direction` and useless, and
-        // the face normal is the right substitute there: a zero-distance triangle contact is the capsule
-        // RESTING on the face, which is the case the whole mechanism exists for. The trace says the two
-        // regimes do not overlap — every edge contact on approach came back at `d > 0`.
+        // the face normal stands in — **not because a zero-distance contact is a face contact**, which is
+        // false: a capsule at the exact rim of a platform touches an EDGE at zero. The reason is the
+        // other half of the sentence this fix corrects: at `d == 0` the capsule is ALREADY in contact, so
+        // the depenetration owns that case and works on the MANIFOLD, which carries the true normal,
+        // edges included. Only the `d > 0` half of that original argument was wrong, and only it is
+        // changed here — the trace says the two regimes do not overlap, every edge contact on approach
+        // coming back at `d > 0`.
         const contact_normal = if (hit.distance > 0) hit.normal else face;
         if (self.skip_non_opposing and contact_normal.dot(self.sweep_direction_local) >= 0) return;
         if (self.best) |best| {
