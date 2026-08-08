@@ -1825,11 +1825,7 @@ const MeshCastCollector = struct {
     /// Sweep direction in the BODY's local frame — what the facing test takes.
     sweep_direction_local: Vec3r,
     back_face_mode: api.BackFaceMode,
-    /// The triangles to keep out of the competition entirely — a SET, because a surface is N coplanar
-    /// triangles and one slot was built for one contact. Consumed HERE, during the traversal, and
-    /// not by the caller afterwards: `castShapeBody` returns ONE hit, the nearest, so a filter applied
-    /// to its result discards that triangle AND every other triangle of the body the cast never
-    /// Skip any triangle whose plane does not OPPOSE the sweep. See `castShapeBodyOpposing`.
+    /// Skip any triangle whose CONTACT does not oppose the sweep. See `castShapeBodyOpposing`.
     skip_non_opposing: bool,
     bound: Real,
     /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
@@ -1860,16 +1856,40 @@ const MeshCastCollector = struct {
         // `(−1, 0, 0)` — and the face-normal filter answered `null` at every one. A character walked
         // into the edge of a platform, and starting SEPARATED the depenetration could not recover it.
         //
-        // At `d > 0` the cast's normal IS the contact's. At `d == 0` it is `−direction` and useless, and
-        // the face normal stands in — **not because a zero-distance contact is a face contact**, which is
-        // false: a capsule at the exact rim of a platform touches an EDGE at zero. The reason is the
-        // other half of the sentence this fix corrects: at `d == 0` the capsule is ALREADY in contact, so
-        // the depenetration owns that case and works on the MANIFOLD, which carries the true normal,
-        // edges included. Only the `d > 0` half of that original argument was wrong, and only it is
-        // changed here — the trace says the two regimes do not overlap, every edge contact on approach
-        // coming back at `d > 0`.
-        const contact_normal = if (hit.distance > 0) hit.normal else face;
-        if (self.skip_non_opposing and contact_normal.dot(self.sweep_direction_local) >= 0) return;
+        // **BOTH REGIMES CLASSIFY ON THE CONTACT, AND EACH IN ITS OWN FRAME.**
+        //
+        // At `d > 0` the cast's normal IS the contact's, and it lives in the PROBE's frame — so it is
+        // dotted with `direction_in_a` and never with `sweep_direction_local`, which is the BODY's. An
+        // earlier form mixed the two, and on a ROTATED mesh the product had no geometric meaning at all:
+        // a local `+Y` face turned into a world `−X` wall was hit by the plain cast and rejected by this
+        // one, at both precisions.
+        //
+        // At `d == 0` the cast's normal is `−direction` and carries nothing, so the contact is resolved
+        // by the MANIFOLD of that one triangle. The face normal was used here and it is NOT enough: a
+        // capsule exactly tangent to an ACTIVE EDGE, moving parallel to the triangle's plane, is rejected
+        // on the face normal and traverses — measured from `x = −0.3` to `x = 0.672` with the base still
+        // at `y = −0.3`, at both precisions. The hypothesis that "the depenetration owns that case" is
+        // refuted by that measurement, and the manifold is what carries an edge's real normal.
+        if (self.skip_non_opposing) {
+            if (hit.distance > 0) {
+                if (hit.normal.dot(self.direction_in_a) >= 0) return;
+            } else {
+                // The triangle alone, in A's frame: A at the origin, B at the relative pose the kernel
+                // already holds. `null` means the narrowphase denies the contact the cast reported — the
+                // spurious hit — and nothing there opposes the motion either.
+                const m = narrowphase.collideOrdered(
+                    Real,
+                    self.cast_shape,
+                    Vec3r.zero,
+                    Quatr.identity,
+                    shape_mod.triangleSupportShape(self.data, triangle_index),
+                    self.relpose.pos_rel,
+                    self.relpose.rot_rel,
+                ) orelse return;
+                // `collideOrdered` returns probe → body; the opposing test wants surface → probe.
+                if (m.normal.neg().dot(self.direction_in_a) >= 0) return;
+            }
+        }
         if (self.best) |best| {
             if (hit.distance > best.distance) return;
             // Equal time of impact: the smaller triangle index wins, so the answer is a

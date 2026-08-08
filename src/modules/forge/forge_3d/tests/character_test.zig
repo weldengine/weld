@@ -3358,19 +3358,22 @@ test "the mesh scene behaves IDENTICALLY at both precisions — the f64 freeze i
     try testing.expect(p[0] > 1);
 }
 
-test "a mesh floor presenting MORE THAN EIGHT SIMULTANEOUS CONTACTS serves the move" {
+test "STRESS: a 7200-triangle floor under a moving capsule" {
     const gpa = testing.allocator;
 
-    // **THE FIRST VERSION OF THIS TEST COUNTED THE WRONG THING AND PROVED NOTHING.** It asserted
-    // `tris.len / 3 > 8` — the mesh's triangle count — and passed against the very implementation it
-    // was written to catch, the one that set contacts aside one at a time under a ceiling of eight.
-    // What saturates that ceiling is the number of triangles a SINGLE CALL must set aside, and with
-    // 1 m cells under a 0.3 m radius fewer than eight are ever in contact at once.
+    // **A STRESS TEST, AND ITS TITLE SAYS SO — it was commissioned as a discriminator and it is not
+    // one.** The intent was to catch a form that set contacts aside one at a time under a fixed ceiling
+    // of eight, so a floor tessellated finer than that would stop serving. Two versions were written:
+    // the first counted the mesh's TRIANGLES, which is not what saturates such a ceiling; the second
+    // shrank the cells to 0.1 m so the capsule spans six of them. **Both pass against the bounded
+    // implementation**, replayed against it directly.
     //
-    // So the cells are 0.1 m: a capsule of radius 0.3 spans six of them across, and its footprint plus
-    // the metre it travels crosses far more than eight in one call. Sized on the CONTACT count, and the
-    // judge is the mutation — this must fail against the bounded-set implementation, not merely pass
-    // against this one.
+    // So no scene was found in which that ceiling was reachable. The dependency on tessellation was
+    // structurally real — a fixed bound on the contacts one call may set aside is a bound on the mesh —
+    // and it was removed as a CLASS, not as an observed symptom. The claim of being a non-regression is
+    // withdrawn rather than left standing over a test that cannot support it.
+    //
+    // What it IS: 3600 quads under a capsule crossing them at exact tangency, which is worth running.
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
     var chars: CharacterStore = .{};
@@ -3424,4 +3427,83 @@ test "a mesh floor presenting MORE THAN EIGHT SIMULTANEOUS CONTACTS serves the m
         try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], 1e-3);
         previous = r.position.toArray()[0];
     }
+}
+
+test "a ROTATED mesh: the opposing filter must not mix frames" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+
+    // **THE FRAME MIX, REPRODUCED.** The cast's normal lives in the PROBE's frame and the face normal in
+    // the BODY's. Dotting the first against `sweep_direction_local` is meaningless the moment the body
+    // is rotated, and it rejected a real wall: a local `+Y` face turned into a world `−X` wall is found
+    // by the plain cast and was answered `null` by the filtering one.
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    // A quad in the local XZ plane, face normal local +Y.
+    const verts = [_]V{
+        .{ .data = .{ -2, 0, -2 } }, .{ .data = .{ 2, 0, -2 } }, .{ .data = .{ -2, 0, 2 } }, .{ .data = .{ 2, 0, 2 } },
+    };
+    const tris = [_]u32{ 0, 2, 1, 1, 2, 3 };
+    const shape = try store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    // Rotated +90° about Z: local +Y becomes world −X, i.e. a wall facing an approach from −X.
+    const body = try bm.addBody(gpa, &store, .{
+        .entity = ent(884),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(2, 0, 0),
+        .rotation = math.Quatf.fromAxisAngle(av(0, 0, 1), std.math.pi / 2.0),
+    });
+
+    const probe = SupportShapeR{ .core = .{ .segment = 0.6 }, .radius = 0.3 };
+    const plain = bm.castShapeBody(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(1, 0, 0), 10, .ignore);
+    const filtered = bm.castShapeBodyOpposing(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(1, 0, 0), 10, .ignore, true);
+
+    // The wall opposes the sweep, so BOTH must find it and at the same distance.
+    try testing.expect(plain != null);
+    try testing.expect(filtered != null);
+    try testing.expectApproxEqAbs(plain.?.distance, filtered.?.distance, api_tol);
+}
+
+test "an ACTIVE EDGE at exact tangency blocks — the face normal is not enough" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // **THE EDGE-TANGENCY CASE, REPRODUCED.** A capsule exactly tangent to a platform's open boundary
+    // edge, moving PARALLEL to the triangle's plane. Classified on the FACE normal that contact is
+    // non-opposing — the motion runs along the plane — so it was skipped and the character traversed:
+    // measured from `x = −0.3` to `x = 0.672`, base still at `y = −0.3`, at both precisions. The face
+    // normal is not the contact's here; the edge's is, and only the manifold carries it.
+    //
+    // `step_height = 0` so no climb can rescue the case and hide the traversal.
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const verts = [_]V{
+        .{ .data = .{ 0, 0, -2 } }, .{ .data = .{ 4, 0, -2 } }, .{ .data = .{ 0, 0, 2 } }, .{ .data = .{ 4, 0, 2 } },
+    };
+    const tris = [_]u32{ 0, 2, 1, 1, 2, 3 };
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    _ = try world.addBody(gpa, .{ .entity = ent(886), .body_type = .static, .shape = shape });
+
+    var desc = baseDescriptor();
+    desc.entity = ent(887);
+    desc.step_height = 0;
+    desc.padding = 0;
+    // Base at −0.3: the capsule's widest point is level with the platform's plane, so its surface meets
+    // the boundary edge at x = 0 exactly, and the motion is parallel to that plane.
+    desc.position = av(-0.3, -0.3, 0);
+    const id = try addMover(gpa, &world, &chars, desc);
+
+    var k: u32 = 0;
+    while (k < 3) : (k += 1) {
+        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+    }
+    const p = chars.get(id).?.position.toArray();
+
+    // BLOCKED by the edge: the capsule's surface reaches `radius` ahead of its base, so the base cannot
+    // pass `0 − 0.3`. The measured traversal put it at 0.672, three quarters of a metre past that.
+    try testing.expect(p[0] <= -0.3 + 1e-3);
 }
