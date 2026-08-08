@@ -747,22 +747,22 @@ pub const BodyManager = struct {
         return self.castShapeBodyOpposing(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, false);
     }
 
-    /// `castShapeBody` with ONE sub-shape kept out of the competition.
+    /// `castShapeBody` restricted to contacts whose surface OPPOSES the sweep.
+    ///
+    /// A surface the sweep runs along or away from obstructs nothing, and a caller that resolves motion
+    /// wants the nearest OBSTACLE rather than the nearest contact. Selecting on that predicate instead
+    /// of selecting and then discarding is what makes it gapless: this entry returns ONE hit, so any
+    /// filter applied to its RESULT throws away every other sub-shape the cast never returned — three
+    /// earlier forms did exactly that, by body, by pair and by a bounded set, and each left a hole.
     ///
     /// **A SIBLING RATHER THAN A PARAMETER, and the reason is measured rather than stylistic.** Adding
     /// the argument to `castShapeBody` itself would touch fourteen call sites inside INHERITED test
-    /// files that are currently byte-identical to the tag — corroborating evidence this milestone has
-    /// leaned on twice. One caller needs the exclusion; the other three keep the entry they had, and
-    /// `castShapeBody` delegates here with `null`.
+    /// files that are byte-identical to the tag. One caller needs the predicate; the others keep the
+    /// entry they had, and `castShapeBody` delegates here with `false`.
     ///
-    /// **The exclusion is consumed DURING the mesh traversal, not after the cast**, and that placement
-    /// is the whole point: this entry returns ONE hit, the nearest, so a filter applied to its result
-    /// discards that sub-shape AND every other sub-shape of the body the cast never returned. Measured
-    /// — a mesh carrying a floor, a wall and a ceiling let the character walk straight through the
-    /// wall at `x = 12` when the filter sat above this call, and blocks at `1.7` with it inside.
-    ///
-    /// For `.convex` and `.half_space` the only sub-shape IS the body (§1.11.16), so `0` excludes it
-    /// entirely — which is exactly what a caller setting aside a resting floor half-space means.
+    /// Each shape class supplies the normal it actually has: the mesh classifies per triangle AFTER its
+    /// cast, on the contact's own normal; the half-space uses its STORED plane; the convex uses the
+    /// cast's normal, or the manifold's at distance zero where the cast's is `−direction`.
     pub fn castShapeBodyOpposing(
         self: *const BodyManager,
         store: *const ShapeStore,
@@ -1841,17 +1841,6 @@ const MeshCastCollector = struct {
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
         const face = self.data.faceNormal(triangle_index);
         if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(Real, face, self.sweep_direction_local)) return;
-        // **THE NON-OPPOSING TEST, HERE — during selection and not after it.** A surface the sweep runs
-        // ALONG obstructs nothing: a translation cannot reach a plane it is parallel to unless it is
-        // already touching, and then the depenetration owns it. It is the back-face test's boundary
-        // case, `n · d == 0` exactly, which `isBackFace` leaves in on a strict `>`.
-        //
-        // Three rounds filtered AFTER selection — by body, by pair, by a bounded set — and each left a
-        // hole somewhere else, because this entry returns ONE hit and discarding it discards every
-        // sub-shape it never returned. Choosing the nearest OPPOSING triangle instead of the nearest
-        // one has no such gap, and it deletes the set, the budget, the expiry and the tessellation
-        // ceiling with it.
-        if (self.skip_non_opposing and face.dot(self.sweep_direction_local) >= 0) return;
         const hit = narrowphase.castShape(
             Real,
             self.cast_shape,
@@ -1860,6 +1849,23 @@ const MeshCastCollector = struct {
             self.direction_in_a,
             self.bound,
         ) orelse return;
+
+        // **THE NON-OPPOSING TEST, ON THE CONTACT'S OWN NORMAL AND AFTER THE CAST.**
+        //
+        // An earlier form rejected the triangle BEFORE the cast, on its FACE normal, justified by "a
+        // translation cannot reach a plane it is parallel to". That is true of a PLANE and false of a
+        // TRIANGLE, which is finite and reachable by its EDGE. MEASURED on a quad platform with an open
+        // boundary edge, a capsule sweeping `+X` at four heights: the plain cast finds the edge at
+        // `d = 1.70` to `2.00` with real opposing normals — `(−0.55, 0.83, 0)`, `(−0.94, 0.33, 0)`,
+        // `(−1, 0, 0)` — and the face-normal filter answered `null` at every one. A character walked
+        // into the edge of a platform, and starting SEPARATED the depenetration could not recover it.
+        //
+        // At `d > 0` the cast's normal IS the contact's. At `d == 0` it is `−direction` and useless, and
+        // the face normal is the right substitute there: a zero-distance triangle contact is the capsule
+        // RESTING on the face, which is the case the whole mechanism exists for. The trace says the two
+        // regimes do not overlap — every edge contact on approach came back at `d > 0`.
+        const contact_normal = if (hit.distance > 0) hit.normal else face;
+        if (self.skip_non_opposing and contact_normal.dot(self.sweep_direction_local) >= 0) return;
         if (self.best) |best| {
             if (hit.distance > best.distance) return;
             // Equal time of impact: the smaller triangle index wins, so the answer is a

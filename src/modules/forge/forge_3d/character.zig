@@ -1516,22 +1516,15 @@ pub const CharacterStore = struct {
         // another path appeared, because arrival at tangency is a float-resolution phenomenon and there
         // are as many paths as one likes: a 500 m collider whose resolution reseats the capsule
         // whatever the floor, a `padding` of `floatMin` whose addition changes no bit. What is FINITE
-        // is what tangency then does, and it does it in exactly one place — here.
+        // is what tangency then does — a zero advance against a surface that does not oppose the travel
+        // direction obstructs nothing, yet the slide leaves the motion unchanged and the budget burns
+        // with the remainder dropped.
         //
-        // A zero advance against a surface that does not oppose the travel direction is not an
-        // obstruction: the slide leaves the motion unchanged, the next iteration finds the same
-        // contact, and the budget burns with the remainder dropped. So that body is set aside for ONE
-        // retry that does not spend the budget, and the sweep then reports the next REAL obstacle.
-        // TRACED: with the resting floor set aside and self-exclusion kept, the sweep returns null and
-        // the whole remaining metre is free.
-        //
-        // Bounded by construction: a single slot, so at most one free retry per call, and a second
-        // non-opposing body spends its iteration normally. No epsilon anywhere — the advance test is
-        // exact zero and the opposition test is the sign of a dot product.
-        // Held with the DIRECTION it was judged against, and dropped the moment that direction
-        // changes: "does not oppose" is a statement about a contact AND a direction, so it expires
-        // when the slide reprojects the motion. Without that, a surface set aside once stayed set
-        // aside for the rest of the call even after becoming opposing.
+        // It is closed one level down: `sweepNearest` is asked for the nearest OPPOSING contact rather
+        // than the nearest one, so a non-obstructing surface never becomes a candidate and this loop
+        // needs no set, no budget and no expiry of its own. Four earlier forms lived here — a body slot,
+        // a pair key, a bounded set, and their retry accounting — and each was a filter placed above the
+        // data it judged.
         var iteration: u32 = 0;
         while (iteration < max_slide_iterations) : (iteration += 1) {
             const len_sq = remaining.lengthSq();

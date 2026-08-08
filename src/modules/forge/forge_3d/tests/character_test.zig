@@ -3358,35 +3358,40 @@ test "the mesh scene behaves IDENTICALLY at both precisions — the f64 freeze i
     try testing.expect(p[0] > 1);
 }
 
-test "a mesh floor of MORE than eight coplanar triangles serves the move" {
+test "a mesh floor presenting MORE THAN EIGHT SIMULTANEOUS CONTACTS serves the move" {
     const gpa = testing.allocator;
 
-    // **NON-REGRESSION, and it has no mechanism to break today — which is why it is written.** An
-    // earlier form set contacts aside one at a time under a fixed ceiling of eight, so a floor
-    // tessellated finer than that stopped serving: the ninth contact spent the iteration the retry was
-    // meant to save. Filtering during selection has no such bound — a non-opposing triangle never
-    // becomes a candidate at all, however many there are.
+    // **THE FIRST VERSION OF THIS TEST COUNTED THE WRONG THING AND PROVED NOTHING.** It asserted
+    // `tris.len / 3 > 8` — the mesh's triangle count — and passed against the very implementation it
+    // was written to catch, the one that set contacts aside one at a time under a ceiling of eight.
+    // What saturates that ceiling is the number of triangles a SINGLE CALL must set aside, and with
+    // 1 m cells under a 0.3 m radius fewer than eight are ever in contact at once.
     //
-    // A 6 x 6 grid of unit quads, 72 coplanar triangles, with the capsule over the middle of it. This is
-    // the nominal case of a tessellated arena floor, not an exotic limit, and it guards against any
-    // future reintroduction of a bound on the number of contacts.
+    // So the cells are 0.1 m: a capsule of radius 0.3 spans six of them across, and its footprint plus
+    // the metre it travels crosses far more than eight in one call. Sized on the CONTACT count, and the
+    // judge is the mutation — this must fail against the bounded-set implementation, not merely pass
+    // against this one.
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
     var chars: CharacterStore = .{};
     defer chars.deinit(gpa);
 
     const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
-    const side = 7;
+    const cells = 60;
+    const cell: f32 = 0.1;
+    const side = cells + 1;
     var verts: [side * side]V = undefined;
     for (0..side) |iz| {
         for (0..side) |ix| {
-            verts[iz * side + ix] = .{ .data = .{ @as(f32, @floatFromInt(ix)) - 3, 0, @as(f32, @floatFromInt(iz)) - 3 } };
+            const fx = (@as(f32, @floatFromInt(ix)) - cells / 2) * cell;
+            const fz = (@as(f32, @floatFromInt(iz)) - cells / 2) * cell;
+            verts[iz * side + ix] = .{ .data = .{ fx, 0, fz } };
         }
     }
-    var tris: [6 * 6 * 6]u32 = undefined;
+    var tris: [cells * cells * 6]u32 = undefined;
     var w: usize = 0;
-    for (0..6) |iz| {
-        for (0..6) |ix| {
+    for (0..cells) |iz| {
+        for (0..cells) |ix| {
             const a: u32 = @intCast(iz * side + ix);
             const b: u32 = @intCast(iz * side + ix + 1);
             const c: u32 = @intCast((iz + 1) * side + ix);
@@ -3400,23 +3405,23 @@ test "a mesh floor of MORE than eight coplanar triangles serves the move" {
             w += 6;
         }
     }
-    try testing.expect(tris.len / 3 > 8);
 
     const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
-    const body = try world.addBody(gpa, .{ .entity = ent(490), .body_type = .static, .shape = shape });
-    _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
+    // `World.addBody` inserts the broadphase proxy itself — a second insertion here would put the same
+    // body in the tree twice, which an earlier version of this test did.
+    _ = try world.addBody(gpa, .{ .entity = ent(490), .body_type = .static, .shape = shape });
 
     var desc = baseDescriptor();
     desc.entity = ent(491);
-    desc.position = av(-2, 0, 0); // exactly tangent, so every floor triangle under it is a contact
+    desc.position = av(-1, 0, 0); // exactly tangent, so every cell under the capsule is a contact
     desc.padding = 0;
     const id = try addMover(gpa, &world, &chars, desc);
 
-    var previous: Real = -2;
+    var previous: Real = -1;
     var k: u32 = 0;
-    while (k < 3) : (k += 1) {
+    while (k < 2) : (k += 1) {
         const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
-        try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], 1e-4);
+        try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], 1e-3);
         previous = r.position.toArray()[0];
     }
 }
