@@ -3492,11 +3492,21 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                 // 0.459167 at 15°/0.00 and an exact freeze at 90°/0.00.
                 //
                 // **The residue's CELLS differ between the two precisions, so a second source is still
-                // open** — `slideNormal`'s whole-body fallback stays live for the callers that ask for
-                // no verdict, and `depenetrate` selects over the whole body too. That is reported and
-                // NOT dressed as an envelope, and no common expectation is pinned here until it is
-                // settled: an exact distance asserted over cells that disagree would be the fifteenth
-                // green assertion of this milestone to prove nothing.
+                // open**, which `CLAUDE.md` carries with its owner. No common VALUE is pinned here,
+                // because none is available and an exact distance asserted over cells that disagree
+                // would be the fifteenth green assertion of this milestone to prove nothing.
+                //
+                // **What IS pinned is the property that holds: no cell freezes.** Before the fix six of
+                // twenty-eight cells returned exactly zero — a character that never moves again — and
+                // after it none does. The two populations are `0` and `>= 0.459`, so any bound strictly
+                // between them separates them; `0.1` is far from both and is not a tolerance on
+                // anything. A bound and not `!= 0` on purpose: a dribble of `1e-9` is a freeze in every
+                // sense that matters, and `!= 0` would accept it.
+                //
+                // f32 ONLY, and the gate is the measurement's: at f64 one cell of the twenty-eight
+                // still freezes (90°, base 0), so the same assertion there would be false. Claiming it
+                // at both precisions is exactly what this suite has been caught doing.
+                if (Real == f32) try testing.expect(along > 0.1);
             }
         }
     }
