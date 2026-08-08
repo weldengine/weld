@@ -627,6 +627,7 @@ const SweepCollector = struct {
         subshape_id: u32,
         distance: Real,
         normal: Vec3r,
+        contact_normal: ?Vec3r,
     } = null,
 
     pub fn add(self: *SweepCollector, user_data: u32) void {
@@ -669,6 +670,7 @@ const SweepCollector = struct {
             .subshape_id = hit.subshape_id,
             .distance = hit.distance,
             .normal = hit.normal,
+            .contact_normal = hit.contact_normal,
         };
         // Tightened TO, not below, so an equal distance still reaches the tie-break.
         self.bound = hit.distance;
@@ -751,9 +753,18 @@ const WorstOverlap = struct {
 /// The slide normal AND the sub-shape it belongs to.
 ///
 /// **The pair, and not the normal alone**: a caller that sets a contact aside on the strength of this
-/// normal must set aside the sub-shape the normal actually came from. At distance zero the manifold is
-/// collected over every sub-shape of the body and the deepest wins, which need not be the one the cast
-/// returned — measured as a ceiling's normal excluding a wall on the same mesh.
+/// normal must set aside the sub-shape the normal actually came from.
+///
+/// **AND AT DISTANCE ZERO THE CAST'S OWN ANSWER IS PREFERRED TO A SECOND OPINION.** The whole-body
+/// fallback below collects the manifold over EVERY sub-shape and keeps the deepest, which need not be
+/// the one the cast retained — measured as a ceiling's normal displacing a wall's on the same mesh,
+/// with the body's YAW deciding which won, and a character frozen at six of fourteen angles as a
+/// result. That was never "no answer is correct in an insoluble squeeze": the right answer had been
+/// computed, one call earlier, and dropped. A caller that asked the cast for an opposing verdict now
+/// receives the normal that verdict was rendered on, and this function asks nobody.
+///
+/// The fallback remains for the callers that ask for no verdict — the ground probe and the step's
+/// sweeps — where it is the ONLY source and therefore not a second one.
 const SlideNormal = struct { normal: Vec3r, subshape_id: u32 };
 
 fn slideNormal(
@@ -765,8 +776,10 @@ fn slideNormal(
     distance: Real,
     swept_normal: Vec3r,
     swept_subshape: u32,
+    swept_contact_normal: ?Vec3r,
 ) ?SlideNormal {
     if (distance > 0) return .{ .normal = swept_normal, .subshape_id = swept_subshape };
+    if (swept_contact_normal) |n| return .{ .normal = n, .subshape_id = swept_subshape };
     var deepest = DeepestManifold{ .body = body };
     bm.collideShapeBody(store, body, probe, centre, Quatr.identity, &deepest);
     const c = deepest.best orelse return null;
@@ -899,6 +912,9 @@ const SweepHit = struct {
     /// As the CAST reports it — the surface's outward normal when the sweep travelled, and
     /// `−direction` at distance zero. Pass it through `slideNormal` before using it.
     normal: Vec3r,
+    /// The contact's own normal at distance zero, from the manifold the cast's own verdict was
+    /// rendered on. Null when the sweep travelled, and null for a caller that asked for no verdict.
+    contact_normal: ?Vec3r,
 };
 
 /// Nearest contact of the capsule swept from `origin` along `direction` for at most `distance`.
@@ -939,6 +955,7 @@ fn sweepNearest(
         .subshape_id = best.subshape_id,
         .distance = best.distance,
         .normal = best.normal,
+        .contact_normal = best.contact_normal,
     };
 }
 
@@ -1009,7 +1026,7 @@ fn tryStepUp(
     const landed = forward.sub(up.scale(drop));
 
     // 4 — the landing must be walkable.
-    const sn = slideNormal(bm, store, probe, landed, down_hit.body, down_hit.distance, down_hit.normal, down_hit.subshape_id) orelse return null;
+    const sn = slideNormal(bm, store, probe, landed, down_hit.body, down_hit.distance, down_hit.normal, down_hit.subshape_id, down_hit.contact_normal) orelse return null;
     if (sn.normal.dot(up) < c.cos_max_slope) return null;
 
     // 5 — **THE CAPSULE MUST HAVE COME DOWN ONTO A SURFACE, and this is the reference's v5.6.0 bug
@@ -1062,7 +1079,7 @@ fn stepDown(
     touched: *TouchedBodies,
 ) Vec3r {
     const hit = sweepNearest(bp, bm, store, record, probe, centre, up.neg(), c.step_height, c.layer_mask, c.inner_body, false) orelse return centre;
-    const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id) orelse return centre;
+    const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id, hit.contact_normal) orelse return centre;
     if (sn.normal.dot(up) < c.cos_max_slope) return centre;
     touched.add(hit.body);
     // The SAME stand-off the depenetration establishes, not a bare `c.padding`: at `padding = 0` the
@@ -1572,7 +1589,7 @@ pub const CharacterStore = struct {
             centre = centre.add(direction.scale(advance));
             remaining = remaining.sub(direction.scale(advance));
 
-            const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id) orelse {
+            const sn = slideNormal(bm, store, probe, centre, hit.body, hit.distance, hit.normal, hit.subshape_id, hit.contact_normal) orelse {
                 // No usable normal: stop rather than guess a direction. Short, never further.
                 remaining = Vec3r.zero;
                 break;

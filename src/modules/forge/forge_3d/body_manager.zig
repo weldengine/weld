@@ -76,6 +76,16 @@ const ApiQuat = @import("foundation").math.Quatf;
 /// the kernel's `CastHit`, whose fields are in the cast shape's frame: the frames
 /// differ, so the types do too rather than one being quietly reinterpreted.
 pub const BodyCastHit = struct {
+    /// The CONTACT's own normal at an initial overlap, in WORLD, surface → probe — or null when the
+    /// sweep travelled, where `normal` already is it, and null when nobody asked.
+    ///
+    /// **It exists because the answer was computed and thrown away.** At distance zero every arm of
+    /// `castShapeBodyOpposing` derives a real surface normal to render its opposing verdict — the
+    /// manifold of the retained triangle, the manifold of the convex, the stored plane — and `normal`
+    /// carries none of them: §1.11.11 fixes it at `−direction` there, which is a contract this field
+    /// does NOT touch. Without this channel the caller had to ask a second time, over the whole body,
+    /// and could be answered about a different sub-shape than the one the cast retained.
+    contact_normal: ?Vec3r = null,
     /// Distance along the cast direction at first touch, in `[0, max_distance]`.
     distance: Real,
     /// Which SUB-SHAPE of the hit body was touched — a mesh's triangle index, and `0` for a
@@ -796,12 +806,22 @@ pub const BodyManager = struct {
         // The sub-shape the mesh arm resolves, and zero for the two arms whose shapes carry
         // no sub-shape at all (§1.11.16).
         var subshape_id: u32 = 0;
+        // **THE SURFACE NORMAL EACH ARM ALREADY DERIVES, KEPT INSTEAD OF DISCARDED.** World frame,
+        // surface → probe, filled only at distance zero and only when the verdict was asked for —
+        // `castShapeBody` delegates with `skip_non_opposing = false`, so the query family pays
+        // nothing and its §1.11.11 contract is untouched.
+        var contact_normal: ?Vec3r = null;
+        // Transported ONCE and read twice — by the predicate below and by the cast arm. Two calls
+        // computed the same plane from the same inputs, which is a drift risk for no gain.
+        const hs: ?@TypeOf(shape_mod.halfSpace(shape)) = if (shape.class() == .half_space)
+            shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel)
+        else
+            null;
         // The two single-sub-shape classes: excluding sub-shape `0` excludes the body.
         // The half-space's predicate uses the STORED plane normal, transported: at an initial overlap
         // `plane.castShape` returns `direction.neg()`, which carries no surface information at all.
         if (skip_non_opposing and shape.class() == .half_space) {
-            const hs = shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel);
-            if (hs.normal.dot(local_dir) >= 0) return null;
+            if (hs.?.normal.dot(local_dir) >= 0) return null;
         }
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
@@ -814,7 +834,7 @@ pub const BodyManager = struct {
             ),
             .half_space => narrowphase.plane.castShape(
                 Real,
-                shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel),
+                hs.?,
                 cast_shape,
                 local_dir,
                 max_distance,
@@ -851,6 +871,8 @@ pub const BodyManager = struct {
                 };
                 _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
                 subshape_id = collector.best_triangle;
+                // A's frame, like everything the collector holds — carried to world with `normal`.
+                if (collector.best_contact_normal) |n| contact_normal = cast_rotation.rotateVec3(n);
                 break :blk collector.best;
             },
         } orelse return null;
@@ -877,8 +899,17 @@ pub const BodyManager = struct {
                 break :blk (probe_manifold.normal orelse return null).neg();
             };
             if (opposing_normal.dot(if (hit.distance > 0) local_dir else direction) >= 0) return null;
+            // Already WORLD on this arm: `collideShapeBody` is a world-space call, which is why the
+            // predicate above dots it with `direction` and not with `local_dir`.
+            if (hit.distance <= 0) contact_normal = opposing_normal;
+        }
+        // The half-space's plane is the contact normal at every distance; at zero it is the only arm
+        // whose answer needs no second computation of any kind.
+        if (skip_non_opposing and shape.class() == .half_space and hit.distance <= 0) {
+            contact_normal = cast_rotation.rotateVec3(hs.?.normal);
         }
         return .{
+            .contact_normal = contact_normal,
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
             // The mesh arm is the only one that fills this; the other two carry zero
@@ -1833,6 +1864,9 @@ const MeshCastCollector = struct {
     /// this arm must hand it the same frame the other two do.
     best: ?narrowphase.CastHit(Real) = null,
     best_triangle: u32 = 0,
+    /// The retained triangle's CONTACT normal in A's frame, surface → probe — set only at distance
+    /// zero, where it is the manifold this collector already computes for its verdict.
+    best_contact_normal: ?Vec3r = null,
 
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
         const face = self.data.faceNormal(triangle_index);
@@ -1870,6 +1904,12 @@ const MeshCastCollector = struct {
         // on the face normal and traverses — measured from `x = −0.3` to `x = 0.672` with the base still
         // at `y = −0.3`, at both precisions. The hypothesis that "the depenetration owns that case" is
         // refuted by that measurement, and the manifold is what carries an edge's real normal.
+        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** An earlier form
+        // computed the manifold below, used it, and dropped it; the caller then asked again over the
+        // WHOLE body and could be answered about the ceiling where this collector had retained the
+        // wall. Two answers to one geometric fact, with the body's yaw deciding which — the class this
+        // module refuses, and the reason the field exists rather than the recomputation.
+        var contact_normal: ?Vec3r = null;
         if (self.skip_non_opposing) {
             if (hit.distance > 0) {
                 if (hit.normal.dot(self.direction_in_a) >= 0) return;
@@ -1887,7 +1927,9 @@ const MeshCastCollector = struct {
                     self.relpose.rot_rel,
                 ) orelse return;
                 // `collideOrdered` returns probe → body; the opposing test wants surface → probe.
-                if (m.normal.neg().dot(self.direction_in_a) >= 0) return;
+                const n = m.normal.neg();
+                if (n.dot(self.direction_in_a) >= 0) return;
+                contact_normal = n;
             }
         }
         if (self.best) |best| {
@@ -1898,6 +1940,7 @@ const MeshCastCollector = struct {
         }
         self.best = hit;
         self.best_triangle = triangle_index;
+        self.best_contact_normal = contact_normal;
         self.bound = hit.distance;
     }
 

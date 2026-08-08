@@ -3247,7 +3247,11 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
             try testing.expectApproxEqAbs(expected, served, 1e-3);
         }
         try testing.expectApproxEqAbs(row.y, prev * 0 + chars.get(id).?.position.toArray()[1], 1e-3);
-        // Every row ends GROUNDED — none of the legal bounds loses the floor.
+        // Every row ends GROUNDED — none of the legal bounds loses the floor. **The sentence stood here
+        // WITHOUT the assertion under it**, a text claiming a property of every row that the code had
+        // stopped checking. Restored rather than deleted: it is a real property and worth pinning.
+        errdefer std.debug.print("row {s} ground\n", .{row.name});
+        try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
     }
 }
 
@@ -3377,13 +3381,12 @@ test "one mesh carrying both floor and wall: the wall still blocks, at six yaws"
             8, 9, 10, 9, 11, 10, // ceiling, −Y
         };
         const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
-        const body = try world.addBody(gpa, .{
+        _ = try world.addBody(gpa, .{
             .entity = ent(470),
             .body_type = .static,
             .shape = shape,
             .rotation = bodyYaw(yaw),
         });
-        _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
 
         var desc = baseDescriptor();
         desc.entity = ent(471);
@@ -3443,13 +3446,12 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                 const tris_all = [_]u32{ 0, 2, 1, 1, 2, 3, 6, 7, 4, 7, 5, 4, 8, 9, 10, 9, 11, 10 };
                 const tris: []const u32 = if (ceiling) tris_all[0..] else tris_all[0..12];
                 const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = tris } });
-                const body = try world.addBody(gpa, .{
+                _ = try world.addBody(gpa, .{
                     .entity = ent(480),
                     .body_type = .static,
                     .shape = shape,
                     .rotation = bodyYaw(yaw),
                 });
-                _ = try world.bp.insert(gpa, .static, world.bm.bodyAabb(&world.store, body).?, body);
 
                 var desc = baseDescriptor();
                 desc.entity = ent(481);
@@ -3480,14 +3482,21 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                     continue;
                 }
 
-                // **WITH the ceiling the distance is yaw- AND height-dependent, and that is MEASURED,
-                // not assumed.** The capsule is 1.8 m tall under a ceiling 1 m above the floor, so the
-                // squeeze is UNRESOLVABLE: reverting to the entry pose is the specified answer, and
-                // what varies is whether it resolves at all. At a tangent base: 1.699977 at 0°, exactly
-                // 0 at 5°/37°/90°/350°, 1.699977 at 213°. Lifted to 0.05: correct at 5°/37°/90°/350°
-                // and 0.459152 at 0°. Reported rather than absorbed, and asserted only where it holds —
-                // an exact distance claimed over an unresolvable squeeze would be a test announcing
-                // more than it is, which this suite has already paid for three times.
+                // **WITH the ceiling a RESIDUE remains, and the numbers here are the post-fix ones.**
+                //
+                // Transporting the retained contact's normal to the slide removed the FREEZE class
+                // entirely at f32 and most of the yaw dependence with it. Swept over fourteen yaws and
+                // both start heights, 28 cells: at f32, 25 read 1.6999 and NOT ONE reads zero, against
+                // six frozen cells before the fix; the three left are 0.459218 at 0°/0.00, 0.506016 at
+                // 90°/0.05 and 0.459151 at 315°/0.05. At f64, 26 read 1.700000 and the two left are
+                // 0.459167 at 15°/0.00 and an exact freeze at 90°/0.00.
+                //
+                // **The residue's CELLS differ between the two precisions, so a second source is still
+                // open** — `slideNormal`'s whole-body fallback stays live for the callers that ask for
+                // no verdict, and `depenetrate` selects over the whole body too. That is reported and
+                // NOT dressed as an envelope, and no common expectation is pinned here until it is
+                // settled: an exact distance asserted over cells that disagree would be the fifteenth
+                // green assertion of this milestone to prove nothing.
             }
         }
     }
