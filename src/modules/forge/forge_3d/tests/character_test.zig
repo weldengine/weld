@@ -3506,6 +3506,17 @@ test "the mesh scene behaves IDENTICALLY at both precisions, at six yaws" {
                 // f32 ONLY, and the gate is the measurement's: at f64 one cell of the twenty-eight
                 // still freezes (90°, base 0), so the same assertion there would be false. Claiming it
                 // at both precisions is exactly what this suite has been caught doing.
+                //
+                // **The internal-edge correction closed one of the three residual cells and not the
+                // other two.** The character's cast path called `collideOrdered` directly and bypassed
+                // the consumer of the active-edge flags that the CONTACT path has used since
+                // M1.1.11.1, so a capsule deep under a flat quad received the normal of the quad's
+                // internal diagonal — horizontal, and opposite on the two triangles sharing it. With
+                // the correction branched in, f32 reads 26 of 28 converged, the two left being 0.506016
+                // at 90°/0.05 and 0.459151 at 315°/0.05 — both at the LIFTED base, where the closed one
+                // was the tangent base. At f64 nothing moved at all, the correction's noise gate being
+                // 2^29 tighter there. So the residue has a further cause again, and no common value is
+                // pinned.
                 if (Real == f32) try testing.expect(along > 0.1);
             }
         }

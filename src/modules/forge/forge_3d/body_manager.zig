@@ -1926,8 +1926,33 @@ const MeshCastCollector = struct {
                     self.relpose.pos_rel,
                     self.relpose.rot_rel,
                 ) orelse return;
+                // **THE INTERNAL-EDGE CORRECTION, ON THIS PATH TOO.** The contact path has consumed
+                // the flags baked at creation since M1.1.11.1; this one called `collideOrdered`
+                // directly and bypassed the consumer, so a capsule DEEP under a flat quad received
+                // the normal of the quad's internal diagonal — horizontal, and OPPOSITE on the two
+                // triangles sharing it. The slide read the pair as a crease, then a third plane as a
+                // corner, and stopped: traced as the residual partial serve of ~0.459 where ~1.700 is
+                // the norm.
+                //
+                // The edge is recovered from the contact POINT's distance to the three segments, not
+                // from `feature_id` — which decodes here as a reference face on the SEGMENT (id 6) and
+                // incident winding VERTICES, never `class_edge`, and for a single-point manifold
+                // carries no edge information at all. So this is the existing function reused with the
+                // data this collector already holds, and not a second way of naming an edge.
+                //
+                // The mesh is B in this call — A is the probe at the origin — so `mesh_is_a` is false
+                // and the returned face normal is negated to stay A→B like `m.normal`.
+                var contact = m;
+                if (internalEdgeNormal(
+                    self.data,
+                    triangle_index,
+                    self.relpose.pos_rel,
+                    self.relpose.rot_rel,
+                    m,
+                    false,
+                )) |face_world| contact.normal = face_world.neg();
                 // `collideOrdered` returns probe → body; the opposing test wants surface → probe.
-                const n = m.normal.neg();
+                const n = contact.normal.neg();
                 if (n.dot(self.direction_in_a) >= 0) return;
                 contact_normal = n;
             }
