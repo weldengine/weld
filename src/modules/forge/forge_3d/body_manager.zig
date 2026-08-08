@@ -1678,10 +1678,21 @@ const SingleManifoldCollector = struct {
 /// closed by `internalEdgeNormal` instead, which is a different mechanism for a different cause.
 const opposing_noise_k: comptime_int = 16;
 
-/// Whether a surface with outward normal `n` opposes travel along unit direction `d`, by more than
-/// float noise. One predicate for all four arms, so they cannot drift apart.
+/// Whether a surface with outward normal `n` opposes travel along `d`, by more than float noise.
+/// One predicate for all four arms, so they cannot drift apart.
+///
+/// **`d` NEED NOT BE UNIT, and the threshold is scaled by its length rather than assuming it.** The
+/// kernels normalise the direction themselves, so a caller is entitled to hand this path a direction
+/// of any length — and a FIRST version compared `n · d` against an absolute threshold, which made the
+/// verdict depend on `‖d‖`: the same geometry, with the direction handed over twice as long, changed
+/// sides. No geometry justifies that. Multiplying the threshold by `‖d‖` is exactly normalising `d`
+/// without paying a division, and it is guarded at TRUE zero by construction: at `‖d‖ = 0` the dot is
+/// zero too and `0 < 0` is false, so a null direction opposes nothing and no epsilon is invented.
+///
+/// `n` IS unit at all four call sites by the narrowphase's own contract — a cast normal, a manifold
+/// normal, a transported stored plane — so only `d` needs the scaling.
 fn opposes(n: Vec3r, d: Vec3r) bool {
-    return n.dot(d) < -@as(Real, opposing_noise_k) * std.math.floatEps(Real);
+    return n.dot(d) < -@as(Real, opposing_noise_k) * std.math.floatEps(Real) * d.length();
 }
 
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
