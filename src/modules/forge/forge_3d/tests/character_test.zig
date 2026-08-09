@@ -3921,8 +3921,15 @@ test "a DENORMAL displacement is served, not read as empty" {
     // **THE SLIDE ASKED `lengthSq() == 0` FOR EMPTINESS AND THE SQUARE UNDERFLOWS**, so a denormal
     // remainder read as nothing and the displacement was dropped. One reduction by the largest
     // absolute component answers emptiness, direction and distance together and has no such hole.
-    const tiny = std.math.floatTrueMin(Real);
-    try testing.expectEqual(@as(Real, 0), tiny * tiny); // the square really does underflow
+    // **`floatTrueMin(f32)` AND NOT `floatTrueMin(Real)` — one input at both precisions.** The domain
+    // under test is the PUBLIC entry's, so a `Real`-scoped literal hands the two builds two different
+    // vectors: an `f32` denormal in one and an `f64` denormal in the other. Third instance of that
+    // class in this file, after the reproducer and the HUGE case.
+    const tiny: Real = std.math.floatTrueMin(f32);
+    // The square underflows at `f32`; in `f64` that same value squares to an ordinary number, so the
+    // mechanism this guards is live at one precision and the assertion says which — as in the HUGE
+    // case, rather than a second literal that would make the other leg look like it tested the same.
+    if (Real == f32) try testing.expectEqual(@as(Real, 0), tiny * tiny);
 
     const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(tiny, 0, 0), 1.0 / 60.0);
 
