@@ -83,13 +83,14 @@ pub const CharacterError = error{
     InvalidCollisionLayer,
     /// The handle is stale: its slot was freed, or its generation does not match.
     StaleCharacter,
-    /// `displacement` is out of domain: a non-finite component, or a norm greater than
-    /// `floatMax(f32)`.
+    /// `displacement` is out of domain: a non-finite component, or a COMPUTED norm greater than
+    /// `floatMax(f32)` — computed in the evaluation arithmetic §1.12.6 fixes, and not the
+    /// mathematical norm.
     ///
     /// NORMATIVE in `engine-physics-forge.md` §1.12.6 and mirrored on the frozen entry in
-    /// `engine-tier-interfaces.md`: the bound and why it is deliberately CONSERVATIVE rather than the
-    /// exact overflow threshold, the arithmetic that decides it and why the rule fixes the domain and
-    /// not that arithmetic, and the two ends the domain leaves served. Not restated here — a second
+    /// `engine-tier-interfaces.md`: why no fixed-width arithmetic decides the mathematical form
+    /// exactly, why the domain is therefore declared on what is DECIDABLE, what that costs and what
+    /// it protects, and the two ends the domain leaves served. Not restated here — a second
     /// formulation of a normative rule is a second source, and this module spends its length refusing
     /// those.
     InvalidDisplacement,
@@ -1501,8 +1502,8 @@ pub const CharacterStore = struct {
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
         // The call parameter's domain (§1.12.6), at the entry and not mid-loop. `f64` is not a choice
-        // made here: it is the arithmetic §1.12.6 requires, the one that can decide that bound
-        // without rounding.
+        // made here: it is the evaluation arithmetic §1.12.6 fixes, and the bound is on the norm as
+        // computed IN it — no fixed-width arithmetic decides the mathematical form exactly.
         //
         // What IS decided here, and is written because it is nowhere else: no reduction by the
         // largest component is needed at this one site, unlike everywhere else this norm is taken.
