@@ -1500,15 +1500,11 @@ pub const CharacterStore = struct {
         dt: Real,
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
-        // The call parameter's domain (§1.12.6), at the entry and not mid-loop. `f64` is not a choice
-        // made here: it is the evaluation arithmetic §1.12.6 FIXES, and the bound is on the norm as
-        // computed in it.
-        //
-        // What IS decided here, and is written because it is nowhere else: no reduction by the
-        // largest component is needed at this one site, unlike everywhere else this norm is taken.
-        // The widening makes the square safe for every `f32`-origin input, and a square that
-        // overflows `f64` can only come from a component already past the bound — the same verdict
-        // by a shorter route.
+        // **THE EXPRESSION BELOW IS THE DOMAIN, not an implementation of it.** §1.12.6 transcribes
+        // it and makes it NORMATIVE — the widening, the summation order, the square root and the
+        // comparison — because a domain declared on what is COMPUTED is defined only if the
+        // computation is. A different reduction is a different domain, so anyone changing a line of
+        // it changes what the engine accepts, and changes §1.12.6 first.
         const displacement_limit: f64 = std.math.floatMax(f32);
         var displacement_norm_sq: f64 = 0;
         for (displacement.toArray()) |component| {

@@ -3998,6 +3998,21 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     const edge_y: Real = @as(f32, 0.0002 * std.math.floatMax(f32));
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, edge_y, 0), 1.0 / 60.0));
 
+    // **AND THE ACCEPTED SIDE OF THE SAME FRONTIER, which is what keeps the predicate pinned rather
+    // than merely bounded.** §1.12.6 declares both sides normative because the expression itself is:
+    // a finer form — `hypot`, a wider arithmetic, a different summation order — would refuse this
+    // vector, and a suite that only tested the refused side would call that an improvement. Its true
+    // norm is `M · (1 + 5e-19)`, above `floatMax(f32)` and far below the real overflow threshold
+    // `2^128 − 2^103`, so it is a deliberate consequence of the computed form and not an oversight.
+    // The second component points DOWN, into the floor, so both axes of the request are blocked and
+    // the pose stays near the origin — the norm, hence the verdict, is unchanged by the sign. Without
+    // that, the vertical component carries the character to `3.4e29` and the run aborts in the
+    // BROADPHASE, on the far-field limit this file already records: a node box that far out has
+    // `(min + max) · 0.5` overflowing. A different limit, and not the one under test.
+    const near_y: Real = @as(f32, 1e-9 * std.math.floatMax(f32));
+    const served_edge = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, -near_y, 0), 1.0 / 60.0);
+    for (served_edge.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
+
     // A NON-FINITE component is the same class and the same answer.
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
 
