@@ -3683,6 +3683,72 @@ test "a ROTATED mesh: the opposing filter must not mix frames" {
     try testing.expectApproxEqAbs(plain.?.distance, filtered.?.distance, api_tol);
 }
 
+test "the opposing filter serves a DENORMAL direction where the cast does" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+
+    // **THE CONTRACT IS THE KERNEL'S AND THE FILTER OWED IT TOO.** `shapecast_test.zig` pins that every
+    // non-zero direction is served, a denormal included, because `unitOf` reduces by the largest
+    // absolute component instead of squaring. The opposing filter reproduced the direction handling
+    // instead of sharing it and got it wrong twice: an ABSOLUTE threshold made the verdict depend on
+    // `‖d‖`, so the same geometry changed sides when the direction arrived twice as long; then a bare
+    // sign test UNDERFLOWED — for a denormal `d` a product `n_i · d_i` with a small `n_i` flushes to
+    // exactly zero, the sign is destroyed, and a real wall reads non-opposing and is discarded.
+    //
+    // **The test lives at the BODY level and not at the kernel's, which is the gap that let both forms
+    // through.** The kernel's own denormal test passed the whole time: it never goes near this
+    // predicate. A contract tested one tier below the code that breaks it is not a test of that code.
+    //
+    // **Scope, and it is MEASURED rather than assumed.** The claim is the FILTER's: it must answer what
+    // the unfiltered cast answers. The convex arm is where that has content — the plain cast serves a
+    // denormal there. The other two arms were tried and excluded on evidence, not convenience:
+    //   * TRIANGLE SOUP — the plain cast returns `null` for a denormal too (`plainDen=false`,
+    //     `filtDen=false`), so the two AGREE and the filter is not implicated. The direction is lost
+    //     upstream of it, in the swept traversal rather than in the kernel. Recorded, not fixed here.
+    //   * HALF-SPACE — `plane.zig:297` ASSERTS `|‖d‖² − 1| <= unit_k · floatEps` and conditions
+    //     nothing, where `shapecast.zig:199` conditions through `unitOf`. Two kernels, one parameter,
+    //     two contracts; the entry normalises once (`query/root.zig:703`) and the half-space arm relies
+    //     on it. A denormal is out of its DOMAIN, and the assert fires as designed.
+    const tiny = std.math.floatTrueMin(Real);
+    // Non-vacuity: the square really does underflow, so this is the hard case and not merely a small one.
+    try testing.expectEqual(@as(Real, 0), tiny * tiny);
+
+    // **THE WALL IS TILTED, AND AN AXIS-ALIGNED ONE PROVES NOTHING — measured, and the first version of
+    // this test made exactly that mistake.** Against a wall whose normal is `(−1, 0, 0)` the product
+    // `n_x · d_x` is `−1 · tiny`, which is representable, so the sign survives and the broken predicate
+    // passes. The product underflows only when `|n_x| < 0.5`, since `0.5 · floatTrueMin` is the
+    // rounding boundary: computed, `cos 45°` survives and `cos 60°` and beyond flush to exactly zero.
+    // The tilt is chosen by MEASUREMENT and not by trigonometry on the box: what reaches the predicate
+    // is the CONTACT normal, which is not the face normal one draws on paper. Swept over ten yaws, the
+    // raw product is `−1e-45` and survives at 20°–50° and again at 70°–85°, and is exactly `0e0` at 60°
+    // and 65°, where the contact normal's X component reads `−0.4999997` and `−0.4226`. 65° is taken,
+    // and the axis-aligned version this replaces was caught by the mutation probe passing — twice.
+    const probe = SupportShapeR{ .core = .{ .segment = 0.6 }, .radius = 0.3 };
+    const body = try bm.addBody(gpa, &store, .{
+        .entity = ent(890),
+        .body_type = .static,
+        .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 2, 2) } }),
+        .position = av(2.5, 0, 0),
+        .rotation = math.Quatf.fromAxisAngle(av(0, 1, 0), 65.0 * std.math.pi / 180.0),
+    });
+
+    const plain = bm.castShapeBody(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(tiny, 0, 0), 10, .ignore);
+    const filtered = bm.castShapeBodyOpposing(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(tiny, 0, 0), 10, .ignore, true);
+    const unit = bm.castShapeBodyOpposing(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(1, 0, 0), 10, .ignore, true);
+
+    // The premise: the unfiltered cast DOES serve it, so the filter has something to be wrong about.
+    try testing.expect(plain != null);
+    // The claim: the wall opposes the sweep either way, the direction's MAGNITUDE being no geometric
+    // fact — so the filter answers what the cast answers, and at the unit direction's distance.
+    try testing.expect(filtered != null);
+    try testing.expect(unit != null);
+    try testing.expectApproxEqAbs(plain.?.distance, filtered.?.distance, api_tol);
+    try testing.expectApproxEqAbs(unit.?.distance, filtered.?.distance, api_tol);
+}
+
 test "an ACTIVE EDGE at exact tangency blocks — the face normal is not enough" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);

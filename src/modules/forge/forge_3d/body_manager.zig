@@ -1667,14 +1667,25 @@ const SingleManifoldCollector = struct {
 /// whether a path exists that does not DEGRADE an axis-aligned quad's face normal under a yaw, rather
 /// than tolerating the degradation after the fact.
 ///
-/// **The verdict does not depend on `‖d‖`, and at an exact zero that is STRUCTURAL rather than
-/// arranged.** Scaling `d` by any positive factor scales the dot by the same factor and cannot change
-/// its sign. The `‖d‖` term the band needed — and needed rightly, since an absolute threshold made the
-/// same geometry change sides when the direction was handed over twice as long — would now multiply a
-/// zero, which is not merely inert: `0 · inf` is a NaN, and `x < NaN` is false, so writing it would
-/// introduce a path where an infinite direction opposes nothing. The sign test has no such path.
+/// **`d` IS CONDITIONED BY THE KERNEL'S OWN `unitOf`, and that is the point rather than a detail.**
+/// Two earlier forms of this predicate were wrong about the direction and each in a different way: an
+/// ABSOLUTE threshold made the verdict depend on `‖d‖`, so the same geometry changed sides when the
+/// direction arrived twice as long; and a bare sign test on the raw `d` UNDERFLOWS, because for a
+/// denormal direction a product `n_i · d_i` with a small `n_i` flushes to exactly zero and the sign is
+/// destroyed — which would read a real wall as non-opposing and discard it, contradicting the contract
+/// `shapecast_test.zig` already pins, that every non-zero direction including a denormal is served.
+///
+/// Both mistakes have one root: this predicate was conditioning the direction ITSELF instead of taking
+/// the conditioning the kernel already performs. `unitOf` reduces by the largest absolute component
+/// before normalising, so it neither squares a denormal into zero nor overflows a huge one, and it
+/// returns `null` at EXACT zero and nowhere else. Sharing it means there are no longer two answers to
+/// the question of what direction this cast is travelling in.
+///
+/// A null direction opposes nothing, which is the same answer the sign test gave and for a better
+/// stated reason: there is no direction to oppose.
 fn opposes(n: Vec3r, d: Vec3r) bool {
-    return n.dot(d) < 0;
+    const u = narrowphase.unitOf(Real, d) orelse return false;
+    return n.dot(u) < 0;
 }
 
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
