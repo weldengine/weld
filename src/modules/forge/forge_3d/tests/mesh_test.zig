@@ -2376,7 +2376,14 @@ test "the five remaining entries agree exactly with brute force over the mesh" {
                 var brute_index: u32 = 0;
                 var t: u32 = 0;
                 while (t < n) : (t += 1) {
-                    const hit = narrowphase.castShape(
+                    // **`castShapeUnit`, the SAME kernel entry the accelerated path takes — and this
+                    // is an ORACLE CORRECTION, not a weakening.** What this test measures is that the
+                    // BVH-accelerated answer agrees with brute force over every triangle; if the two
+                    // sides call different kernel entries, one reconditioning the direction and the
+                    // other not, it compares two things instead of comparing one, and the ULP it then
+                    // reports is the difference between the entries and not between the paths.
+                    // Aligned, it measures the acceleration again, which is what it was written for.
+                    const hit = narrowphase.castShapeUnit(
                         Real,
                         probe,
                         relpose,

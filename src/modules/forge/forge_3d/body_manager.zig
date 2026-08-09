@@ -848,7 +848,11 @@ pub const BodyManager = struct {
             if (!opposes(hs.?.normal, local_dir)) return null;
         }
         const hit = switch (shape.class()) {
-            .convex => narrowphase.castShape(
+            // `castShapeUnit` and not `castShape`: the direction is this entry's PRECONDITION, and a
+            // kernel that reconditioned it would consume different bits from `plane.castShape`, which
+            // takes it as given. That difference is what an assert cannot close — it bounds the
+            // vector, it does not canonicalise it.
+            .convex => narrowphase.castShapeUnit(
                 Real,
                 cast_shape,
                 relpose,
@@ -1949,7 +1953,8 @@ const MeshCastCollector = struct {
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
         const face = self.data.faceNormal(triangle_index);
         if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(Real, face, self.sweep_direction_local)) return;
-        const hit = narrowphase.castShape(
+        // Unit by the adapter's precondition, like the convex arm and for the same reason.
+        const hit = narrowphase.castShapeUnit(
             Real,
             self.cast_shape,
             self.relpose,

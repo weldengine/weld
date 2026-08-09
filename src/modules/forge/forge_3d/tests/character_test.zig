@@ -3939,3 +3939,49 @@ test "a DENORMAL and a HUGE displacement are both served, not dropped and not po
         }
     }
 }
+
+test "the two cast arms consume the SAME direction — the unit-band reproducer" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+
+    // **AN ASSERT BOUNDS A DIRECTION, IT DOES NOT CANONICALISE IT — which is why the entry's unit
+    // precondition did not close this and a second entry had to.** `(1 + 4ε, 0, 0)` passes every unit
+    // assert in the module, and inside that band the two arms consumed different vectors: the convex
+    // kernel reconditioned its copy through `unitOf` while `plane.zig` used the raw norm in
+    // `t = sep / −closing`. Measured against `ed3a8cf`, the same query answered `3.7` on one arm and
+    // `3.6999984` on the other, at BOTH precisions. `castShapeUnit` removes the reconditioning, so
+    // they consume the same bits and there is no band left to disagree inside.
+    const probe = SupportShapeR{ .core = .{ .point = {} }, .radius = 0.3 };
+    const origin = v(-2, 0, 0);
+    // Two geometrically equivalent walls, surface `x = 2`, facing `−X`.
+    const convex = try bm.addBody(gpa, &store, .{ .entity = ent(770), .body_type = .static, .position = av(2.5, 0, 0), .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 2, 2) } }) });
+    const half_space = try bm.addBody(gpa, &store, .{ .entity = ent(771), .body_type = .static, .shape = try store.createShape(gpa, .{ .plane = .{ .normal = av(-1, 0, 0), .distance = -2 } }) });
+
+    const eps = std.math.floatEps(Real);
+    const nudged = v(1 + 4 * eps, 0, 0);
+
+    // The answer with an EXACTLY unit direction, which both arms have always agreed on — the reference
+    // the band's two candidate answers sit around.
+    const unit_d = bm.castShapeBody(&store, convex, probe, origin, Quatr.identity, v(1, 0, 0), 10, .ignore).?.distance;
+    try testing.expectEqual(unit_d, bm.castShapeBody(&store, half_space, probe, origin, Quatr.identity, v(1, 0, 0), 10, .ignore).?.distance);
+
+    // 1 — BIT-EXACT agreement inside the band. Not `approxEq`: the whole defect is one ULP, and a
+    // tolerance wide enough to be comfortable would be wide enough to hide it.
+    const a = bm.castShapeBody(&store, convex, probe, origin, Quatr.identity, nudged, 10, .ignore);
+    const b = bm.castShapeBody(&store, half_space, probe, origin, Quatr.identity, nudged, 10, .ignore);
+    try testing.expect(a != null and b != null);
+    try testing.expectEqual(a.?.distance, b.?.distance);
+
+    // 2 — AND THE BOUND JUST BEFORE CONTACT, which is where one ULP stops being cosmetic. A
+    // reconditioning arm reports the unit distance and a non-reconditioning one reports it shortened
+    // by `4ε`, so a bound strictly between the two answers HIT on one arm and MISS on the other. Now
+    // they agree, whatever that shared answer is.
+    const bound = unit_d * (1 - 2 * eps);
+    const a_bounded = bm.castShapeBody(&store, convex, probe, origin, Quatr.identity, nudged, bound, .ignore);
+    const b_bounded = bm.castShapeBody(&store, half_space, probe, origin, Quatr.identity, nudged, bound, .ignore);
+    try testing.expectEqual(a_bounded != null, b_bounded != null);
+    if (a_bounded) |hit_a| try testing.expectEqual(hit_a.distance, b_bounded.?.distance);
+}

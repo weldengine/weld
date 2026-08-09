@@ -146,6 +146,10 @@ pub const max_shapecast_iterations = shapecast_mod.max_shapecast_iterations;
 /// Cast a shape along a direction against another; `null` on a miss. No error
 /// channel: a support map covers every bounded convex, so nothing is rejected.
 pub const castShape = shapecast_mod.castShape;
+
+/// `castShape` for a caller that GUARANTEES a unit direction — it does not recondition, so it and
+/// `plane.castShape` consume the same bits. See its declaration for why an assert could not do this.
+pub const castShapeUnit = shapecast_mod.castShapeUnit;
 /// `castShape` with the ceiling and the diagnostics exposed — the seam that makes the
 /// normative fallback observable rather than merely documented.
 pub const castShapeBounded = shapecast_mod.castShapeBounded;
