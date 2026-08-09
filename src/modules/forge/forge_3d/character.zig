@@ -1544,18 +1544,20 @@ pub const CharacterStore = struct {
         // data it judged.
         var iteration: u32 = 0;
         while (iteration < max_slide_iterations) : (iteration += 1) {
-            const len_sq = remaining.lengthSq();
-            // True zero, not an epsilon: a displacement of exactly nothing is done, and any
-            // representable non-zero displacement is a real request to be served.
-            if (len_sq == 0) break;
-            const distance = @sqrt(len_sq);
-            // **`normalizeScaled` and not `scale(1 / distance)`, which is the SAME formula the query
-            // family conditions with.** The division form fails at both ends of the range where the
-            // reduce-then-normalise form does not — a denormal remainder squares to zero and a huge one
-            // overflows — and the cast adapter now ASSERTS its direction is unit rather than
-            // re-establishing it, so producing one correctly is this caller's job. `len_sq == 0` is
-            // already excluded above, at true zero, so the optional cannot be empty here.
-            const direction = remaining.normalizeScaled().?;
+            // **THE EMPTINESS TEST, THE DIRECTION AND THE DISTANCE COME FROM ONE REDUCTION.** Asking
+            // three times gave three different domains: `lengthSq() == 0` UNDERFLOWS for a denormal
+            // remainder, so a real displacement read as nothing and was silently dropped; and
+            // `@sqrt(lengthSq())` OVERFLOWS for a large one, so an INFINITE distance went on to become
+            // the cast's `max_distance` and tripped the kernel's finiteness assert. Reducing by the
+            // largest absolute component has neither failure, and taking all three answers from it is
+            // what stops one of them being reconstructed the unsafe way.
+            //
+            // `null` is EXACT zero — a displacement of exactly nothing is done, and any representable
+            // non-zero displacement is a real request to be served. No epsilon, and no threshold that
+            // could disagree with the direction the same call is about to use.
+            const step = remaining.unitAndLength() orelse break;
+            const distance = step.length;
+            const direction = step.unit;
 
             const maybe_hit = sweepNearest(
                 bp,
@@ -1619,9 +1621,12 @@ pub const CharacterStore = struct {
             // — so no lift survives a failed attempt, which is the reference's v5.6.0 bug class.
             if (!step_attempted and normal.dot(up) < c.cos_max_slope) {
                 step_attempted = true;
-                const len = remaining.lengthSq();
-                if (len > 0) {
-                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, @sqrt(len), c, &touched)) |stepped| {
+                // The SAME reduction as the loop head, and for the same reason: `@sqrt(lengthSq())`
+                // here overflowed to an infinite step distance, which reached the kernel's
+                // `max_distance` assert. A second site of one class, on the only other path that
+                // derives a length from the remainder.
+                if (remaining.unitAndLength()) |step_left| {
+                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, step_left.length, c, &touched)) |stepped| {
                         centre = stepped.centre;
                         remaining = remaining.sub(direction.scale(stepped.advance));
                         // No plane is recorded: the character went OVER the obstacle, not along it,

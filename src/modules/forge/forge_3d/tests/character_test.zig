@@ -3898,3 +3898,44 @@ test "CONTRACT TABLE — the public cast conditions the direction, for all three
         try testing.expect(try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q) == null);
     }
 }
+
+test "a DENORMAL and a HUGE displacement are both served, not dropped and not poisoned" {
+    const gpa = testing.allocator;
+
+    // **THE TWO ENDS OF THE RANGE THAT THREE SEPARATE QUESTIONS LOST.** The slide asked
+    // `lengthSq() == 0` for emptiness and `@sqrt(lengthSq())` for the distance: the square underflows
+    // for a denormal remainder, so a real displacement read as nothing and the call served zero; and it
+    // overflows for a large one, so an INFINITE `max_distance` reached the kernel and tripped its
+    // finiteness assert. One reduction by the largest absolute component answers all three.
+    const tiny = std.math.floatTrueMin(Real);
+    try testing.expectEqual(@as(Real, 0), tiny * tiny); // the square really does underflow
+    const huge: Real = if (Real == f32) 1e30 else 1e200;
+    try testing.expect(!std.math.isFinite(huge * huge)); // and really does overflow
+
+    for ([_]Real{ tiny, huge }) |magnitude| {
+        errdefer std.debug.print("magnitude {e}\n", .{magnitude});
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 960);
+        // A wall at x = 2, so a huge request is BOUNDED by geometry rather than by arithmetic.
+        _ = try addBox(gpa, &world, av(0.5, 2, 2), av(2.5, 0, 0), 961);
+        var desc = baseDescriptor();
+        desc.entity = ent(962);
+        desc.position = av(0, 0.02, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(magnitude, 0, 0), 1.0 / 60.0);
+        const x = r.position.toArray()[0];
+        try testing.expect(std.math.isFinite(x));
+        if (magnitude == huge) {
+            // Served up to the wall and no further: the request is bounded by the geometry.
+            try testing.expectApproxEqAbs(@as(Real, 1.68), x, 1e-2);
+        } else {
+            // A denormal is a real request. It cannot move the pose measurably, but it must not be
+            // read as EMPTY — which is what the underflowing test did, and what dropped it.
+            try testing.expect(x >= 0);
+        }
+    }
+}
