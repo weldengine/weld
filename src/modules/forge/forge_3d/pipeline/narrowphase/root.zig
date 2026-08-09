@@ -146,11 +146,6 @@ pub const max_shapecast_iterations = shapecast_mod.max_shapecast_iterations;
 /// Cast a shape along a direction against another; `null` on a miss. No error
 /// channel: a support map covers every bounded convex, so nothing is rejected.
 pub const castShape = shapecast_mod.castShape;
-
-/// The kernel's own direction conditioning, SHARED rather than reproduced: reduce by the largest
-/// absolute component, then normalise. `null` at EXACT zero and nowhere else, so a denormal direction
-/// — whose square underflows — normalises exactly and is served (§1.11.4).
-pub const unitOf = shapecast_mod.unitOf;
 /// `castShape` with the ceiling and the diagnostics exposed — the seam that makes the
 /// normative fallback observable rather than merely documented.
 pub const castShapeBounded = shapecast_mod.castShapeBounded;

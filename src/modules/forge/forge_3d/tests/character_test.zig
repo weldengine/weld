@@ -3790,3 +3790,116 @@ test "an ACTIVE EDGE at exact tangency blocks — the face normal is not enough"
     // pass `0 − 0.3`. The measured traversal put it at 0.672, three quarters of a metre past that.
     try testing.expect(p[0] <= -0.3 + 1e-3);
 }
+
+test "CONTRACT TABLE — castShapeBody answers the same for all three shape classes" {
+    const gpa = testing.allocator;
+    var store: ShapeStore = .{};
+    defer store.deinit(gpa);
+    var bm: BodyManager = .{};
+    defer bm.deinit(gpa);
+
+    // **THIS TEST IS THE THING THAT WAS MISSING, and its absence is why the same defect arrived one
+    // cell at a time for four rounds.** `castShapeBody` has a contract per SHAPE CLASS and per call
+    // path, nobody had written it down, and each round found one cell of it. Measured across the three
+    // classes, four cells diverged — all of them about the DIRECTION: `plane.zig` asserted the vector
+    // was unit and conditioned nothing, so a non-unit, denormal or zero direction was a domain
+    // violation there and an ordinary answer on the other two arms; and the mesh arm lost a denormal
+    // in its swept traversal. Conditioning once at the entry took all four together.
+    //
+    // The rule this pins is not any single value: it is that the THREE ROWS AGREE. A future arm, or a
+    // future kernel that decides to condition differently, breaks this test rather than a character
+    // scene three milestones later.
+    const tiny = std.math.floatTrueMin(Real);
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+
+    // Three geometrically EQUIVALENT scenes: a wall whose surface is the plane `x = 2`, facing `−X`.
+    // Their agreement on the nominal cast is asserted first, so every later disagreement is about the
+    // property under test and not about the scenes having drifted apart.
+    const wall_verts = [_]V{
+        .{ .data = .{ 2, -2, -2 } }, .{ .data = .{ 2, -2, 2 } }, .{ .data = .{ 2, 2, -2 } }, .{ .data = .{ 2, 2, 2 } },
+    };
+    const wall_tris = [_]u32{ 0, 1, 2, 2, 1, 3 };
+    const walls = [_]api.BodyId{
+        try bm.addBody(gpa, &store, .{ .entity = ent(700), .body_type = .static, .position = av(2.5, 0, 0), .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 2, 2) } }) }),
+        try bm.addBody(gpa, &store, .{ .entity = ent(701), .body_type = .static, .shape = try store.createShape(gpa, .{ .plane = .{ .normal = av(-1, 0, 0), .distance = -2 } }) }),
+        try bm.addBody(gpa, &store, .{ .entity = ent(702), .body_type = .static, .shape = try store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &wall_verts, .indices = &wall_tris } }) }),
+    };
+    // Three equivalent FLOORS: surface `y = 0`, facing `+Y` — a surface that cannot oppose a `+X` sweep.
+    const floor_verts = [_]V{
+        .{ .data = .{ -3, 0, -3 } }, .{ .data = .{ 3, 0, -3 } }, .{ .data = .{ -3, 0, 3 } }, .{ .data = .{ 3, 0, 3 } },
+    };
+    const floor_tris = [_]u32{ 0, 2, 1, 1, 2, 3 };
+    const floors = [_]api.BodyId{
+        try bm.addBody(gpa, &store, .{ .entity = ent(710), .body_type = .static, .position = av(0, -0.5, 0), .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(3, 0.5, 3) } }) }),
+        try bm.addBody(gpa, &store, .{ .entity = ent(711), .body_type = .static, .shape = try store.createShape(gpa, .{ .plane = .{ .normal = av(0, 1, 0), .distance = 0 } }) }),
+        try bm.addBody(gpa, &store, .{ .entity = ent(712), .body_type = .static, .shape = try store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &floor_verts, .indices = &floor_tris } }) }),
+    };
+
+    // A SPHERE probe, because C3 rotates the probe and a capsule would change SHAPE when rotated —
+    // which would confound the frame question with a geometry change.
+    const probe = SupportShapeR{ .core = .{ .point = {} }, .radius = 0.3 };
+    const origin = v(-2, 0, 0);
+    const yawed = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 2.0);
+    // Wall face at `x = 2`, probe radius `0.3`, origin at `x = −2`.
+    const nominal: Real = 3.7;
+
+    for (walls, floors, 0..) |wall, floor, row| {
+        errdefer std.debug.print("shape class row {d}\n", .{row});
+
+        // C0 — the scenes are equivalent, asserted rather than assumed.
+        const unit = bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, v(1, 0, 0), 10, .ignore);
+        try testing.expect(unit != null);
+        try testing.expectApproxEqAbs(nominal, unit.?.distance, api_tol);
+
+        // C1 — a NON-UNIT direction is accepted, and answers what the unit one answers. This asserted
+        // nothing on the half-space arm before the entry conditioned: it tripped an assert.
+        const long = bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, v(2, 0, 0), 10, .ignore);
+        try testing.expect(long != null);
+        try testing.expectApproxEqAbs(nominal, long.?.distance, api_tol);
+
+        // C1 — a DENORMAL direction likewise, which is `shapecast_test.zig`'s contract lifted to the
+        // body level. It asserted on the half-space arm and returned null on the mesh arm.
+        const den = bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, v(tiny, 0, 0), 10, .ignore);
+        try testing.expect(den != null);
+        try testing.expectApproxEqAbs(nominal, den.?.distance, api_tol);
+
+        // C2 — EXACT zero is the one degenerate direction, and it answers `null` rather than asserting.
+        try testing.expect(bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, Vec3r.zero, 10, .ignore) == null);
+
+        // C5 — `max_distance` and the returned distance are in units of the NORMALISED direction: a
+        // direction twice as long does not halve the answer.
+        try testing.expectApproxEqAbs(unit.?.distance, long.?.distance, api_tol);
+
+        // C3 — the returned normal is in WORLD: rotating the PROBE does not rotate it.
+        const rot = bm.castShapeBody(&store, wall, probe, origin, yawed, v(1, 0, 0), 10, .ignore);
+        try testing.expect(rot != null);
+        for (0..3) |k| {
+            try testing.expectApproxEqAbs(unit.?.normal.toArray()[k], rot.?.normal.toArray()[k], api_tol);
+        }
+
+        // C4 — at distance zero, with an OBLIQUE direction so `−direction` and the surface normal are
+        // distinguishable. Two claims, and only the second is a value.
+        const oblique = v(0.8, 0.6, 0);
+        const deep_plain = bm.castShapeBody(&store, wall, probe, v(1.95, 0, 0), Quatr.identity, oblique, 10, .ignore);
+        const deep_filt = bm.castShapeBodyOpposing(&store, wall, probe, v(1.95, 0, 0), Quatr.identity, oblique, 10, .ignore, true);
+        try testing.expect(deep_plain != null);
+        try testing.expectEqual(@as(Real, 0), deep_plain.?.distance);
+        // `hit.normal` at an initial overlap is NOT pinned to a value, and that is deliberate: §1.11.11
+        // fixes `−direction` as the FALLBACK, and the arms differ in whether they have a terminal
+        // simplex to offer instead — measured, the half-space has none and answers `−direction` while
+        // the other two answer a separating direction. The guarantee the contract actually makes is
+        // this one, and all three keep it.
+        try testing.expect(deep_plain.?.normal.dot(oblique.normalizeScaled().?) <= 0);
+        // The manifold IS consulted under the filter, on all three arms, and it carries the SURFACE
+        // normal — which is the field the character path reads and the one that must agree.
+        try testing.expect(deep_plain.?.contact_normal == null);
+        try testing.expect(deep_filt != null);
+        try testing.expect(deep_filt.?.contact_normal != null);
+        for ([_]Real{ -1, 0, 0 }, 0..) |want, k| {
+            try testing.expectApproxEqAbs(want, deep_filt.?.contact_normal.?.toArray()[k], api_tol);
+        }
+
+        // C6 — the opposing verdict: a FLOOR cannot oppose a `+X` sweep, on any of the three.
+        try testing.expect(bm.castShapeBodyOpposing(&store, floor, probe, v(0, 0.3, 0), Quatr.identity, v(1, 0, 0), 10, .ignore, true) == null);
+    }
+}

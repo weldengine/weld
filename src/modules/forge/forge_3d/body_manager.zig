@@ -793,7 +793,37 @@ pub const BodyManager = struct {
             self.bodies.items(.position)[idx],
             self.bodies.items(.rotation)[idx],
         );
-        const local_dir = cast_rotation.conjugate().rotateVec3(direction);
+        // **THE DIRECTION IS CONDITIONED ONCE, HERE, BEFORE THE DISPATCH — and that single line is a
+        // contract table collapsing.** Measured across the three shape classes, this entry had FOUR
+        // divergent behaviours for one parameter: `plane.zig` ASSERTS the direction is unit and
+        // conditions nothing, so a non-unit, a denormal or a zero direction was a domain violation on
+        // that arm and an ordinary answer on the other two; `shapecast.zig` conditions through
+        // `unitOf`; and the mesh arm additionally lost a denormal in its swept traversal. Every one of
+        // those is the same defect: the callee was left to decide what direction it had been handed.
+        //
+        // Conditioned at the entry, all three arms receive a unit direction and the assert becomes
+        // satisfied BY CONSTRUCTION rather than a precondition charged to the caller — which is what
+        // makes it an invariant instead of a trap. A zero direction is the one degenerate case and it
+        // answers `null` uniformly, since `unitOf` is null at EXACT zero and nowhere else.
+        //
+        // `max_distance` is therefore in units of the NORMALISED direction on every arm, which is what
+        // the two conditioning arms already did and what the asserting one had no way to say.
+        //
+        // **AND IT CONDITIONS ONLY WHAT IS NOT ALREADY CONDITIONED, which is not an optimisation.** A
+        // first form normalised unconditionally and shifted every query answer by an ULP, caught by
+        // `mesh_test`'s bit-exact brute-force oracle: the query entry ALREADY normalises
+        // (`query/root.zig`), so an unconditional line here is a SECOND conditioning of the same vector
+        // — the very class this entry is collapsing, re-introduced by the collapse. The reduce-then-
+        // normalise round trip is not bit-idempotent, so applying it twice moves the result.
+        //
+        // The gate is the module's existing unit predicate, the same `16 · floatEps` slack
+        // `plane.zig` and `shapecast.zig` assert with, and no answer depends on which branch is taken:
+        // both produce a unit direction, one by passing it through untouched.
+        const dir = if (@abs(direction.lengthSq() - 1) <= 16 * std.math.floatEps(Real))
+            direction
+        else
+            direction.normalizeScaled() orelse return null;
+        const local_dir = cast_rotation.conjugate().rotateVec3(dir);
         // The CAST shape is always a bounded convex — the query entry refuses an
         // unbounded probe with a typed error (§1.11.7) — so only the HIT body's
         // category is dispatched on. Exhaustive, no `else`.
@@ -858,7 +888,7 @@ pub const BodyManager = struct {
                     inv_rot.rotateVec3(cast_origin.sub(self.bodies.items(.position)[idx])),
                     inv_rot.mul(cast_rotation),
                 );
-                const sweep_dir = inv_rot.rotateVec3(direction);
+                const sweep_dir = inv_rot.rotateVec3(dir);
                 var collector = MeshCastCollector{
                     .data = data,
                     .cast_shape = cast_shape,
@@ -898,7 +928,7 @@ pub const BodyManager = struct {
                 // hit of the cast/manifold disagreement. Nothing real to oppose the motion.
                 break :blk (probe_manifold.normal orelse return null).neg();
             };
-            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else direction)) return null;
+            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else dir)) return null;
             // Already WORLD on this arm: `collideShapeBody` is a world-space call, which is why the
             // predicate above dots it with `direction` and not with `local_dir`.
             if (hit.distance <= 0) contact_normal = opposing_normal;
@@ -1684,8 +1714,14 @@ const SingleManifoldCollector = struct {
 /// A null direction opposes nothing, which is the same answer the sign test gave and for a better
 /// stated reason: there is no direction to oppose.
 fn opposes(n: Vec3r, d: Vec3r) bool {
-    const u = narrowphase.unitOf(Real, d) orelse return false;
-    return n.dot(u) < 0;
+    // `d` is UNIT by the entry's conditioning, not by hope: `castShapeBodyOpposing` runs `unitOf`
+    // once before the dispatch, and every direction reaching here is that vector or a rotation of it,
+    // which preserves the norm to a few ULP. Asserted rather than re-established, with the same
+    // `16 · floatEps` slack `plane.zig` and `shapecast.zig` use for the identical claim — because
+    // re-normalising here would be a SECOND answer to what direction the cast travels in, which is
+    // the very class this entry has just finished collapsing.
+    std.debug.assert(@abs(d.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
+    return n.dot(d) < 0;
 }
 
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on

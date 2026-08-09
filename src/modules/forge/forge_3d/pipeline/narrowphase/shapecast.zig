@@ -440,7 +440,7 @@ fn terminal(
 /// finite vector and underflows for a legitimately tiny one, and `foundation`'s
 /// `normalize` is unguarded by design. The reduction is a component-wise DIVISION,
 /// never a multiplication by `1 / scale`, whose reciprocal overflows for a denormal.
-pub fn unitOf(comptime T: type, v: math.Vec(3, T)) ?math.Vec(3, T) {
+fn unitOf(comptime T: type, v: math.Vec(3, T)) ?math.Vec(3, T) {
     const Simd = @Vector(3, T);
     const scale = @reduce(.Max, @abs(v.data));
     if (scale == 0) return null;
