@@ -83,13 +83,15 @@ pub const CharacterError = error{
     InvalidCollisionLayer,
     /// The handle is stale: its slot was freed, or its generation does not match.
     StaleCharacter,
-    /// `displacement` is out of domain: a non-finite component, or a norm outside the `f32` range.
+    /// `displacement` is out of domain: a non-finite component, or a norm greater than
+    /// `floatMax(f32)`.
     ///
     /// NORMATIVE in `engine-physics-forge.md` §1.12.6 and mirrored on the frozen entry in
-    /// `engine-tier-interfaces.md`: the domain, the fact that the rule fixes which domain applies and
-    /// NOT which arithmetic decides it, the measurement behind that distinction, and the two ends the
-    /// domain leaves served. Not restated here — a second formulation of a normative rule is a second
-    /// source, and this module spends its length refusing those.
+    /// `engine-tier-interfaces.md`: the bound and why it is deliberately CONSERVATIVE rather than the
+    /// exact overflow threshold, the arithmetic that decides it and why the rule fixes the domain and
+    /// not that arithmetic, and the two ends the domain leaves served. Not restated here — a second
+    /// formulation of a normative rule is a second source, and this module spends its length refusing
+    /// those.
     InvalidDisplacement,
 };
 
@@ -1499,14 +1501,14 @@ pub const CharacterStore = struct {
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
         // The call parameter's domain (§1.12.6), at the entry and not mid-loop. `f64` is not a choice
-        // made here: it is the arithmetic §1.12.6 requires, the one that can decide the `f32` range
+        // made here: it is the arithmetic §1.12.6 requires, the one that can decide that bound
         // without rounding.
         //
         // What IS decided here, and is written because it is nowhere else: no reduction by the
         // largest component is needed at this one site, unlike everywhere else this norm is taken.
         // The widening makes the square safe for every `f32`-origin input, and a square that
-        // overflows `f64` can only come from a component already outside the `f32` range — the same
-        // verdict by a shorter route.
+        // overflows `f64` can only come from a component already past the bound — the same verdict
+        // by a shorter route.
         const displacement_limit: f64 = std.math.floatMax(f32);
         var displacement_norm_sq: f64 = 0;
         for (displacement.toArray()) |component| {
@@ -1583,7 +1585,7 @@ pub const CharacterStore = struct {
             // could disagree with the direction the same call is about to use.
             const step = remaining.unitAndLength() orelse break;
             const direction = step.unit;
-            // Representable by INVARIANT, not by hope: the entry refused an unrepresentable norm, and
+            // Within the bound by INVARIANT, not by hope: the entry refused a norm past it, and
             // `remaining` only ever shrinks from there — both slide forms are PROJECTIONS, which
             // cannot lengthen a vector. `.?` is that invariant, checked in Debug and ReleaseSafe.
             const distance = step.length.?;
