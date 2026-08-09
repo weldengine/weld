@@ -83,28 +83,18 @@ pub const CharacterError = error{
     InvalidCollisionLayer,
     /// The handle is stale: its slot was freed, or its generation does not match.
     StaleCharacter,
-    /// `displacement` is out of domain: a non-finite component, or a norm that is not representable
-    /// **in `f32`** — two components at `0.75 · floatMax(f32)` have a norm near `1.06 · floatMax(f32)`.
+    /// `displacement` is out of domain: a non-finite component, or a norm not representable in `f32`.
     ///
-    /// **THE DOMAIN IS THE PUBLIC `f32` SURFACE'S, EVALUATED AT THE BOUNDARY, and not the solver
-    /// scalar's.** A first form tested representability in `Real`, which made the domain depend on a
-    /// BUILD FLAG: the same public vector was refused at `f32` and accepted under `-Dphysics_f64`,
-    /// where its norm is an ordinary number. The interface takes a `Vec3` in `f32` (§1.12.11), so the
-    /// discriminant is the quantity's ORIGIN and not the precision that handles it afterwards — the
-    /// tolerance class this milestone made normative in §1.11.2, applied to a DOMAIN instead of to a
-    /// comparison.
+    /// The domain itself, its evaluation at the PUBLIC `f32` boundary rather than at the solver
+    /// scalar, and the prohibition on saturating instead of refusing are NORMATIVE in
+    /// `engine-physics-forge.md` §1.12.6, and mirrored on the frozen entry in
+    /// `engine-tier-interfaces.md`. Deliberately not restated: a second formulation of a normative
+    /// rule is a second source, and this module spends its length refusing those.
     ///
-    /// **This is the domain the call parameter did not have.** Every other guard in this module
-    /// belongs to the DESCRIPTOR, checked once at creation; `displacement` is checked per call and
-    /// was checked nowhere, which is what let an unrepresentable norm reach the sweep as an infinite
-    /// bound. Refused rather than saturated, for the reason stated at the head of this set: a clamp
-    /// makes a caller's mistake look like a modelling choice. Serving it would also mean segmenting
-    /// the move, which would make this entry a multi-segment integrator for a request no POSITION
-    /// can represent — `0.75 · floatMax(f32)` is outside any expressible world, and the broadphase's
-    /// own node arithmetic overflows well before it.
-    ///
-    /// EXACT zero stays legal and is a no-op, and a DENORMAL displacement stays served: the norm is
-    /// unrepresentable only by overflow, never by underflow, the direction being scale-free.
+    /// What belongs here is what the code does with the two ends the domain leaves open: EXACT zero
+    /// is legal and a no-op, `unitAndLength` answering `null` there; and a DENORMAL displacement is
+    /// served, the norm being unrepresentable only by overflow and never by underflow since the
+    /// direction is scale-free.
     InvalidDisplacement,
 };
 
@@ -1512,19 +1502,16 @@ pub const CharacterStore = struct {
         dt: Real,
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
-        // The call parameter's domain, at the entry and not mid-loop: finite components, and a norm
-        // representable at the PUBLIC `f32` surface this vector came through — never at `Real`, which
-        // would make the domain a function of the build flag and give one public vector two answers.
-        // Exact zero passes: `unitAndLength` answers `null` there, and a displacement of nothing is a
-        // legal no-op.
+        // The call parameter's domain (§1.12.6), at the entry and not mid-loop. Exact zero passes:
+        // `unitAndLength` answers `null` there, and a displacement of nothing is a legal no-op.
         const displacement_limit: Real = std.math.floatMax(f32);
         for (displacement.toArray()) |component| {
             if (!std.math.isFinite(component)) return error.InvalidDisplacement;
         }
         if (displacement.unitAndLength()) |whole| {
-            // `null` is the overflow of `Real` itself, which only `f32` can reach here; the bound is
-            // what refuses the same vector under `-Dphysics_f64`, where that norm is an ordinary
-            // number and nothing else would have stopped it.
+            // Two refusals, one domain: `null` is `Real`'s own overflow, which only `f32` reaches
+            // here, and the bound is what refuses the SAME vector under `-Dphysics_f64`, where that
+            // norm is an ordinary number and nothing else would have stopped it.
             const norm = whole.length orelse return error.InvalidDisplacement;
             if (!(norm <= displacement_limit)) return error.InvalidDisplacement;
         }

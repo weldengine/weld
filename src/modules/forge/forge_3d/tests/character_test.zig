@@ -3969,16 +3969,14 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     defer chars.deinit(gpa);
     const id = try magnitudeScene(gpa, &world, &chars);
 
-    // **THE REDUCTION PROTECTS THE INTERMEDIATE SQUARE AND NOT THE FINAL PRODUCT.** Two components at
-    // `0.75 · floatMax` have a norm near `1.06 · floatMax`, which no float here holds, so
-    // `largest · ‖reduced‖` left the range and `unitAndLength` answered `inf` — which became the sweep
-    // bound and tripped the kernel one call later.
+    // The domain and the prohibition on saturating are normative in `engine-physics-forge.md`
+    // §1.12.6; what this test adds is the measurement.
     //
-    // **REFUSED and not clamped, which is this module's rule and not a preference.** `CharacterError`
-    // says it at its head: a silent clamp makes a caller's mistake look like a modelling choice and
-    // leaves no diagnostic. An earlier form here saturated the sweep to `floatMax` — the module's only
-    // exception, and it lasted one round. Serving it would also make this entry a multi-segment
-    // integrator for a request no POSITION can represent.
+    // **THE REDUCTION PROTECTS THE INTERMEDIATE SQUARE AND NOT THE FINAL PRODUCT.** Two components at
+    // `0.75 · floatMax(f32)` have a norm near `1.06 · floatMax(f32)`, so `largest · ‖reduced‖` left
+    // the range and `unitAndLength` answered `inf` — which became the sweep bound and tripped the
+    // kernel one call later. An earlier form here saturated that bound instead of refusing, which was
+    // the module's only exception to its own rule and lasted one round.
     // **`floatMax(f32)` AND NOT `floatMax(Real)` — the same input at both precisions, which is the
     // whole point.** The domain belongs to the PUBLIC `f32` surface the vector came through, so a
     // `Real`-scaled literal would hand the two builds two different vectors and hide exactly the
