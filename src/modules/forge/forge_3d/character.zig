@@ -1489,8 +1489,9 @@ pub const CharacterStore = struct {
     /// Both loops are bounded by NAMED ceilings and exhausting either stops the character SHORT of
     /// where it asked to go, never further — the safe failure direction (§1.11.11).
     ///
-    /// Errors: `error.StaleCharacter` on a dead handle, and whatever the broadphase proxy update
-    /// allocates.
+    /// Errors: `error.StaleCharacter` on a dead handle, `error.InvalidDisplacement` when
+    /// `displacement` is outside the domain §1.12.6 gives it, and whatever the broadphase proxy
+    /// update allocates.
     pub fn moveCharacter(
         self: *CharacterStore,
         gpa: std.mem.Allocator,
