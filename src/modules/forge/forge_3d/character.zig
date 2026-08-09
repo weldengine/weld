@@ -83,6 +83,22 @@ pub const CharacterError = error{
     InvalidCollisionLayer,
     /// The handle is stale: its slot was freed, or its generation does not match.
     StaleCharacter,
+    /// `displacement` is out of domain: a non-finite component, or a norm that is not
+    /// REPRESENTABLE — two components at `0.75 · floatMax` have a norm near `1.06 · floatMax`,
+    /// which no float here holds.
+    ///
+    /// **This is the domain the call parameter did not have.** Every other guard in this module
+    /// belongs to the DESCRIPTOR, checked once at creation; `displacement` is checked per call and
+    /// was checked nowhere, which is what let an unrepresentable norm reach the sweep as an infinite
+    /// bound. Refused rather than saturated, for the reason stated at the head of this set: a clamp
+    /// makes a caller's mistake look like a modelling choice. Serving it would also mean segmenting
+    /// the move, which would make this entry a multi-segment integrator for a request no POSITION
+    /// can represent — `0.75 · floatMax` is outside any expressible world, and the broadphase's own
+    /// node arithmetic overflows there.
+    ///
+    /// EXACT zero stays legal and is a no-op, and a DENORMAL displacement stays served: the norm is
+    /// unrepresentable only by overflow, never by underflow, the direction being scale-free.
+    InvalidDisplacement,
 };
 
 /// One stored controller. Authored parameters at solver precision, plus the two handles the
@@ -1489,6 +1505,15 @@ pub const CharacterStore = struct {
         dt: Real,
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
+        // The call parameter's domain, at the entry and not mid-loop: finite components, and a norm
+        // this arithmetic can hold. Exact zero passes — `unitAndLength` answers `null` there and a
+        // displacement of nothing is a legal no-op.
+        for (displacement.toArray()) |component| {
+            if (!std.math.isFinite(component)) return error.InvalidDisplacement;
+        }
+        if (displacement.unitAndLength()) |whole| {
+            if (whole.length == null) return error.InvalidDisplacement;
+        }
         const c = self.characters.items[idx];
         const record = store.get(c.shape) orelse unreachable;
         const probe = shape_mod.supportShape(record);
@@ -1557,14 +1582,10 @@ pub const CharacterStore = struct {
             // could disagree with the direction the same call is about to use.
             const step = remaining.unitAndLength() orelse break;
             const direction = step.unit;
-            // **A NORM THAT IS NOT REPRESENTABLE IS STILL A REQUEST, and it is served to the limit of
-            // the arithmetic rather than refused.** Two components at `0.75 · floatMax` have a norm of
-            // about `1.06 · floatMax`, which no float here can hold; `unitAndLength` says so instead of
-            // answering `inf`, and `inf` is what previously became the sweep bound and tripped the
-            // kernel's finiteness assert one call later. `floatMax` is the largest distance this
-            // arithmetic can express, the world's colliders bound the sweep long before it, and a
-            // caller asking for more is asking for more than a POSITION can represent either.
-            const distance = step.length orelse std.math.floatMax(Real);
+            // Representable by INVARIANT, not by hope: the entry refused an unrepresentable norm, and
+            // `remaining` only ever shrinks from there — both slide forms are PROJECTIONS, which
+            // cannot lengthen a vector. `.?` is that invariant, checked in Debug and ReleaseSafe.
+            const distance = step.length.?;
 
             const maybe_hit = sweepNearest(
                 bp,
@@ -1633,9 +1654,8 @@ pub const CharacterStore = struct {
                 // `max_distance` assert. A second site of one class, on the only other path that
                 // derives a length from the remainder.
                 if (remaining.unitAndLength()) |step_left| {
-                    // Same clamp and the same reason as the loop head — the third site of one class.
-                    const step_distance = step_left.length orelse std.math.floatMax(Real);
-                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, step_distance, c, &touched)) |stepped| {
+                    // The same invariant as the loop head, and for the same reason.
+                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, step_left.length.?, c, &touched)) |stepped| {
                         centre = stepped.centre;
                         remaining = remaining.sub(direction.scale(stepped.advance));
                         // No plane is recorded: the character went OVER the obstacle, not along it,

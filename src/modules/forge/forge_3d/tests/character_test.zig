@@ -3953,7 +3953,7 @@ test "a HUGE displacement is bounded by the geometry, not by an infinity" {
     try testing.expectApproxEqAbs(@as(Real, 1.68), x, 1e-2);
 }
 
-test "a displacement whose NORM is not representable is served to the arithmetic's limit" {
+test "a displacement whose NORM is not representable is REFUSED, not saturated" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
@@ -3962,29 +3962,29 @@ test "a displacement whose NORM is not representable is served to the arithmetic
     const id = try magnitudeScene(gpa, &world, &chars);
 
     // **THE REDUCTION PROTECTS THE INTERMEDIATE SQUARE AND NOT THE FINAL PRODUCT.** Two components at
-    // `0.75 · floatMax` have a norm of about `1.06 · floatMax`, which no float here can hold, so
+    // `0.75 · floatMax` have a norm near `1.06 · floatMax`, which no float here holds, so
     // `largest · ‖reduced‖` left the range and `unitAndLength` answered `inf` — which became the sweep
-    // bound and tripped the kernel one call later. It now answers "not representable" at the site that
-    // produces the value, and the caller serves the request to the largest distance the arithmetic can
-    // express rather than refusing it or re-deriving the guard.
+    // bound and tripped the kernel one call later.
+    //
+    // **REFUSED and not clamped, which is this module's rule and not a preference.** `CharacterError`
+    // says it at its head: a silent clamp makes a caller's mistake look like a modelling choice and
+    // leaves no diagnostic. An earlier form here saturated the sweep to `floatMax` — the module's only
+    // exception, and it lasted one round. Serving it would also make this entry a multi-segment
+    // integrator for a request no POSITION can represent.
     const big = 0.75 * std.math.floatMax(Real);
     try testing.expect(!std.math.isFinite(v(big, big, 0).length()));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0));
 
-    // **THE SCENE IS CLOSED, and that is what isolates this defect from the next one.** An
-    // unrepresentable norm on an axis nothing blocks carries the pose to `0.75 · floatMax`, where the
-    // BROADPHASE's own arithmetic gives out — a node box that far from the origin has
-    // `(min + max) · 0.5` overflowing, so the ray origin it derives is infinite and a different assert
-    // fires. That limit is real, pre-existing and NOT this one; a wall on each horizontal axis keeps
-    // the pose where the question is about `unitAndLength` and nothing else.
-    _ = try addBox(gpa, &world, av(0.5, 4, 4), av(-3, 0, 0), 963);
-    _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, 3), 964);
-    _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, -3), 965);
+    // A NON-FINITE component is the same class and the same answer.
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0);
-    for (r.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
-    // Blocked by the walls, exactly as a finite request of the same direction would be.
-    try testing.expect(r.position.toArray()[0] < 2);
-    try testing.expect(r.position.toArray()[2] < 3);
+    // And the domain's two open ends stay open: EXACT zero is a legal no-op, and a component large
+    // enough to be interesting but whose norm IS representable is served.
+    const before = chars.get(id).?.position.toArray()[0];
+    const still = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    try testing.expectApproxEqAbs(before, still.position.toArray()[0], api_tol);
+    const served = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, 0), 1.0 / 60.0);
+    try testing.expect(std.math.isFinite(served.position.toArray()[0]));
 }
 
 test "the two cast arms consume the SAME direction — the unit-band reproducer" {
