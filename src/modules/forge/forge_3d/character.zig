@@ -1556,8 +1556,15 @@ pub const CharacterStore = struct {
             // non-zero displacement is a real request to be served. No epsilon, and no threshold that
             // could disagree with the direction the same call is about to use.
             const step = remaining.unitAndLength() orelse break;
-            const distance = step.length;
             const direction = step.unit;
+            // **A NORM THAT IS NOT REPRESENTABLE IS STILL A REQUEST, and it is served to the limit of
+            // the arithmetic rather than refused.** Two components at `0.75 · floatMax` have a norm of
+            // about `1.06 · floatMax`, which no float here can hold; `unitAndLength` says so instead of
+            // answering `inf`, and `inf` is what previously became the sweep bound and tripped the
+            // kernel's finiteness assert one call later. `floatMax` is the largest distance this
+            // arithmetic can express, the world's colliders bound the sweep long before it, and a
+            // caller asking for more is asking for more than a POSITION can represent either.
+            const distance = step.length orelse std.math.floatMax(Real);
 
             const maybe_hit = sweepNearest(
                 bp,
@@ -1626,7 +1633,9 @@ pub const CharacterStore = struct {
                 // `max_distance` assert. A second site of one class, on the only other path that
                 // derives a length from the remainder.
                 if (remaining.unitAndLength()) |step_left| {
-                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, step_left.length, c, &touched)) |stepped| {
+                    // Same clamp and the same reason as the loop head — the third site of one class.
+                    const step_distance = step_left.length orelse std.math.floatMax(Real);
+                    if (tryStepUp(bp, bm, store, record, probe, centre, direction, step_distance, c, &touched)) |stepped| {
                         centre = stepped.centre;
                         remaining = remaining.sub(direction.scale(stepped.advance));
                         // No plane is recorded: the character went OVER the obstacle, not along it,

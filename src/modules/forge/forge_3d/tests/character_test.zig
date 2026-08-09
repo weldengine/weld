@@ -3899,45 +3899,92 @@ test "CONTRACT TABLE — the public cast conditions the direction, for all three
     }
 }
 
-test "a DENORMAL and a HUGE displacement are both served, not dropped and not poisoned" {
-    const gpa = testing.allocator;
+/// One scene for the three displacement-magnitude tests: a floor, and a wall at `x = 2` so a request
+/// larger than the world is bounded by GEOMETRY rather than by arithmetic.
+fn magnitudeScene(gpa: std.mem.Allocator, world: *harness.World, chars: *CharacterStore) !api.CharacterId {
+    _ = try addPlane(gpa, world, av(0, 1, 0), 0, 960);
+    _ = try addBox(gpa, world, av(0.5, 2, 2), av(2.5, 0, 0), 961);
+    var desc = baseDescriptor();
+    desc.entity = ent(962);
+    desc.position = av(0, 0.02, 0);
+    return addMover(gpa, world, chars, desc);
+}
 
-    // **THE TWO ENDS OF THE RANGE THAT THREE SEPARATE QUESTIONS LOST.** The slide asked
-    // `lengthSq() == 0` for emptiness and `@sqrt(lengthSq())` for the distance: the square underflows
-    // for a denormal remainder, so a real displacement read as nothing and the call served zero; and it
-    // overflows for a large one, so an INFINITE `max_distance` reached the kernel and tripped its
-    // finiteness assert. One reduction by the largest absolute component answers all three.
+test "a DENORMAL displacement is served, not read as empty" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+    const id = try magnitudeScene(gpa, &world, &chars);
+
+    // **THE SLIDE ASKED `lengthSq() == 0` FOR EMPTINESS AND THE SQUARE UNDERFLOWS**, so a denormal
+    // remainder read as nothing and the displacement was dropped. One reduction by the largest
+    // absolute component answers emptiness, direction and distance together and has no such hole.
     const tiny = std.math.floatTrueMin(Real);
     try testing.expectEqual(@as(Real, 0), tiny * tiny); // the square really does underflow
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(tiny, 0, 0), 1.0 / 60.0);
+
+    // **BIT-EXACTLY the displacement, and an inequality here would admit the defect.** The old
+    // behaviour left the pose at exactly zero, which any `x >= 0` accepts; the character starts at
+    // `x = 0` and the whole denormal is served, so the pose IS the displacement, at both precisions.
+    try testing.expectEqual(tiny, r.position.toArray()[0]);
+}
+
+test "a HUGE displacement is bounded by the geometry, not by an infinity" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+    const id = try magnitudeScene(gpa, &world, &chars);
+
+    // `@sqrt(lengthSq())` for the distance OVERFLOWS, so an INFINITE `max_distance` reached the kernel
+    // and tripped its finiteness assert. Two sites produced it — the loop head and the step attempt —
+    // and the second is the one this case aborted on.
     const huge: Real = if (Real == f32) 1e30 else 1e200;
     try testing.expect(!std.math.isFinite(huge * huge)); // and really does overflow
 
-    for ([_]Real{ tiny, huge }) |magnitude| {
-        errdefer std.debug.print("magnitude {e}\n", .{magnitude});
-        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-        defer world.deinit(gpa);
-        var chars: CharacterStore = .{};
-        defer chars.deinit(gpa);
-        _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 960);
-        // A wall at x = 2, so a huge request is BOUNDED by geometry rather than by arithmetic.
-        _ = try addBox(gpa, &world, av(0.5, 2, 2), av(2.5, 0, 0), 961);
-        var desc = baseDescriptor();
-        desc.entity = ent(962);
-        desc.position = av(0, 0.02, 0);
-        const id = try addMover(gpa, &world, &chars, desc);
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(huge, 0, 0), 1.0 / 60.0);
+    const x = r.position.toArray()[0];
+    try testing.expect(std.math.isFinite(x));
+    // Served up to the wall and no further: the request is bounded by what is in the way.
+    try testing.expectApproxEqAbs(@as(Real, 1.68), x, 1e-2);
+}
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(magnitude, 0, 0), 1.0 / 60.0);
-        const x = r.position.toArray()[0];
-        try testing.expect(std.math.isFinite(x));
-        if (magnitude == huge) {
-            // Served up to the wall and no further: the request is bounded by the geometry.
-            try testing.expectApproxEqAbs(@as(Real, 1.68), x, 1e-2);
-        } else {
-            // A denormal is a real request. It cannot move the pose measurably, but it must not be
-            // read as EMPTY — which is what the underflowing test did, and what dropped it.
-            try testing.expect(x >= 0);
-        }
-    }
+test "a displacement whose NORM is not representable is served to the arithmetic's limit" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+    const id = try magnitudeScene(gpa, &world, &chars);
+
+    // **THE REDUCTION PROTECTS THE INTERMEDIATE SQUARE AND NOT THE FINAL PRODUCT.** Two components at
+    // `0.75 · floatMax` have a norm of about `1.06 · floatMax`, which no float here can hold, so
+    // `largest · ‖reduced‖` left the range and `unitAndLength` answered `inf` — which became the sweep
+    // bound and tripped the kernel one call later. It now answers "not representable" at the site that
+    // produces the value, and the caller serves the request to the largest distance the arithmetic can
+    // express rather than refusing it or re-deriving the guard.
+    const big = 0.75 * std.math.floatMax(Real);
+    try testing.expect(!std.math.isFinite(v(big, big, 0).length()));
+
+    // **THE SCENE IS CLOSED, and that is what isolates this defect from the next one.** An
+    // unrepresentable norm on an axis nothing blocks carries the pose to `0.75 · floatMax`, where the
+    // BROADPHASE's own arithmetic gives out — a node box that far from the origin has
+    // `(min + max) · 0.5` overflowing, so the ray origin it derives is infinite and a different assert
+    // fires. That limit is real, pre-existing and NOT this one; a wall on each horizontal axis keeps
+    // the pose where the question is about `unitAndLength` and nothing else.
+    _ = try addBox(gpa, &world, av(0.5, 4, 4), av(-3, 0, 0), 963);
+    _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, 3), 964);
+    _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, -3), 965);
+
+    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0);
+    for (r.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
+    // Blocked by the walls, exactly as a finite request of the same direction would be.
+    try testing.expect(r.position.toArray()[0] < 2);
+    try testing.expect(r.position.toArray()[2] < 3);
 }
 
 test "the two cast arms consume the SAME direction — the unit-band reproducer" {
