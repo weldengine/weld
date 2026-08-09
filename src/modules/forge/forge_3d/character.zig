@@ -85,27 +85,11 @@ pub const CharacterError = error{
     StaleCharacter,
     /// `displacement` is out of domain: a non-finite component, or a norm outside the `f32` range.
     ///
-    /// The domain itself and the prohibition on saturating instead of refusing are NORMATIVE in
-    /// `engine-physics-forge.md` §1.12.6, and mirrored on the frozen entry in
-    /// `engine-tier-interfaces.md`. Deliberately not restated: a second formulation of a normative
-    /// rule is a second source, and this module spends its length refusing those.
-    ///
-    /// **THE DOMAIN IS THE `f32` RANGE, AND IT IS EVALUATED IN AN ARITHMETIC THAT CAN DECIDE THAT
-    /// RANGE WITHOUT ROUNDING.** The width is the consequence, not the rule. Deciding it in `f32`
-    /// itself does NOT work and that is measured, not argued: for
-    /// `(floatMax(f32), 0.0002 · floatMax(f32), 0)` the reduced square `1 + 4e-8` falls below the
-    /// half-ULP of `1.0` in `f32`, rounds to exactly `1.0`, and the norm comes back as exactly
-    /// `floatMax(f32)` — so `f32` cannot see its own overflow and accepts a vector whose true norm
-    /// leaves the range. Widening the components is EXACT, so the verdict is a pure function of the
-    /// public input and identical under either `-Dphysics_f64` setting.
-    ///
-    /// This is the same phenomenon `engine-physics-forge.md` §1.11.4 bis measured on the ray normals:
-    /// the information is present in the `f32` inputs and only a wider arithmetic extracts it. Not a
-    /// precision picked at random.
-    ///
-    /// What belongs here is what the code does with the two ends the domain leaves open: EXACT zero
-    /// is legal and a no-op; and a DENORMAL displacement is served, the norm leaving the range only
-    /// by overflow and never by underflow since the direction is scale-free.
+    /// NORMATIVE in `engine-physics-forge.md` §1.12.6 and mirrored on the frozen entry in
+    /// `engine-tier-interfaces.md`: the domain, the fact that the rule fixes which domain applies and
+    /// NOT which arithmetic decides it, the measurement behind that distinction, and the two ends the
+    /// domain leaves served. Not restated here — a second formulation of a normative rule is a second
+    /// source, and this module spends its length refusing those.
     InvalidDisplacement,
 };
 
@@ -1514,15 +1498,15 @@ pub const CharacterStore = struct {
         dt: Real,
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
-        // The call parameter's domain (§1.12.6), at the entry and not mid-loop. The range is `f32`'s
-        // and the arithmetic is the one that can decide it without rounding — see
-        // `CharacterError.InvalidDisplacement` for why `f32` cannot decide its own range. Exact zero
-        // passes: a displacement of nothing is a legal no-op.
+        // The call parameter's domain (§1.12.6), at the entry and not mid-loop. `f64` is not a choice
+        // made here: it is the arithmetic §1.12.6 requires, the one that can decide the `f32` range
+        // without rounding.
         //
-        // No reduction by the largest component is needed HERE, unlike everywhere else this norm is
-        // taken: the widening makes the square safe for every `f32`-origin input, and a square that
-        // overflows `f64` can only come from a component already outside the `f32` range, which is
-        // the same verdict by a shorter route.
+        // What IS decided here, and is written because it is nowhere else: no reduction by the
+        // largest component is needed at this one site, unlike everywhere else this norm is taken.
+        // The widening makes the square safe for every `f32`-origin input, and a square that
+        // overflows `f64` can only come from a component already outside the `f32` range — the same
+        // verdict by a shorter route.
         const displacement_limit: f64 = std.math.floatMax(f32);
         var displacement_norm_sq: f64 = 0;
         for (displacement.toArray()) |component| {
