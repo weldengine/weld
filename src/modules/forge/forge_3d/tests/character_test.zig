@@ -3977,13 +3977,19 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // the range and `unitAndLength` answered `inf` — which became the sweep bound and tripped the
     // kernel one call later. An earlier form here saturated that bound instead of refusing, which was
     // the module's only exception to its own rule and lasted one round.
-    // **`floatMax(f32)` AND NOT `floatMax(Real)` — the same input at both precisions, which is the
-    // whole point.** The domain belongs to the PUBLIC `f32` surface the vector came through, so a
-    // `Real`-scaled literal would hand the two builds two different vectors and hide exactly the
-    // defect this asserts: with the bound taken in `Real`, this norm is an ordinary number under
-    // `-Dphysics_f64` and the same public call was accepted there and refused at `f32`.
+    // **THE SAME VECTOR AT BOTH PRECISIONS, which is the whole point.** The domain belongs to the
+    // `f32` range the vector came through, so a `Real`-scaled literal would hand the two builds two
+    // different inputs and hide the defect instead of asserting it.
     const big: Real = 0.75 * std.math.floatMax(f32);
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0));
+
+    // **AND THE EDGE THE BOUND ALONE COULD NOT CATCH.** With the norm computed at `Real`, this vector
+    // is refused at `f64` and accepted at `f32`, because the `f32` reduction rounds `1 + 4e-8` to
+    // exactly `1.0` and hands back exactly `floatMax(f32)` — `f32` cannot see its own overflow. The
+    // components are formed in `f32` and widened, so both builds receive the identical vector.
+    const edge_x: Real = std.math.floatMax(f32);
+    const edge_y: Real = @as(f32, 0.0002 * std.math.floatMax(f32));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, edge_y, 0), 1.0 / 60.0));
 
     // A NON-FINITE component is the same class and the same answer.
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
