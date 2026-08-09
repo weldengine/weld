@@ -3943,8 +3943,16 @@ test "a HUGE displacement is bounded by the geometry, not by an infinity" {
     // `@sqrt(lengthSq())` for the distance OVERFLOWS, so an INFINITE `max_distance` reached the kernel
     // and tripped its finiteness assert. Two sites produced it — the loop head and the step attempt —
     // and the second is the one this case aborted on.
-    const huge: Real = if (Real == f32) 1e30 else 1e200;
-    try testing.expect(!std.math.isFinite(huge * huge)); // and really does overflow
+    //
+    // **ONE input at both precisions, and an earlier form used two.** It read
+    // `if (Real == f32) 1e30 else 1e200`, which is the very class this milestone had just named at the
+    // domain: two builds handed two different vectors, so the test compared two things. `1e30` is
+    // inside the public `f32` domain at both precisions, and the mechanism it exercises is live at
+    // `f32` alone — `1e60` overflows there and is an ordinary number in `f64`, so the guard is
+    // load-bearing at one precision and inert at the other. Stated, rather than papered over with a
+    // second literal that would make the f64 leg look like it tested the same thing.
+    const huge: Real = 1e30;
+    if (Real == f32) try testing.expect(!std.math.isFinite(huge * huge));
 
     const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(huge, 0, 0), 1.0 / 60.0);
     const x = r.position.toArray()[0];
@@ -3971,8 +3979,12 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // leaves no diagnostic. An earlier form here saturated the sweep to `floatMax` — the module's only
     // exception, and it lasted one round. Serving it would also make this entry a multi-segment
     // integrator for a request no POSITION can represent.
-    const big = 0.75 * std.math.floatMax(Real);
-    try testing.expect(!std.math.isFinite(v(big, big, 0).length()));
+    // **`floatMax(f32)` AND NOT `floatMax(Real)` — the same input at both precisions, which is the
+    // whole point.** The domain belongs to the PUBLIC `f32` surface the vector came through, so a
+    // `Real`-scaled literal would hand the two builds two different vectors and hide exactly the
+    // defect this asserts: with the bound taken in `Real`, this norm is an ordinary number under
+    // `-Dphysics_f64` and the same public call was accepted there and refused at `f32`.
+    const big: Real = 0.75 * std.math.floatMax(f32);
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0));
 
     // A NON-FINITE component is the same class and the same answer.
@@ -3983,6 +3995,8 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     const before = chars.get(id).?.position.toArray()[0];
     const still = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
     try testing.expectApproxEqAbs(before, still.position.toArray()[0], api_tol);
+    // A single component of the same magnitude has a REPRESENTABLE norm and is served, at both
+    // precisions — the domain excludes the norm, not the magnitude.
     const served = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, 0), 1.0 / 60.0);
     try testing.expect(std.math.isFinite(served.position.toArray()[0]));
 }

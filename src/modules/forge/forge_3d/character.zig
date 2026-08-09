@@ -83,9 +83,16 @@ pub const CharacterError = error{
     InvalidCollisionLayer,
     /// The handle is stale: its slot was freed, or its generation does not match.
     StaleCharacter,
-    /// `displacement` is out of domain: a non-finite component, or a norm that is not
-    /// REPRESENTABLE — two components at `0.75 · floatMax` have a norm near `1.06 · floatMax`,
-    /// which no float here holds.
+    /// `displacement` is out of domain: a non-finite component, or a norm that is not representable
+    /// **in `f32`** — two components at `0.75 · floatMax(f32)` have a norm near `1.06 · floatMax(f32)`.
+    ///
+    /// **THE DOMAIN IS THE PUBLIC `f32` SURFACE'S, EVALUATED AT THE BOUNDARY, and not the solver
+    /// scalar's.** A first form tested representability in `Real`, which made the domain depend on a
+    /// BUILD FLAG: the same public vector was refused at `f32` and accepted under `-Dphysics_f64`,
+    /// where its norm is an ordinary number. The interface takes a `Vec3` in `f32` (§1.12.11), so the
+    /// discriminant is the quantity's ORIGIN and not the precision that handles it afterwards — the
+    /// tolerance class this milestone made normative in §1.11.2, applied to a DOMAIN instead of to a
+    /// comparison.
     ///
     /// **This is the domain the call parameter did not have.** Every other guard in this module
     /// belongs to the DESCRIPTOR, checked once at creation; `displacement` is checked per call and
@@ -93,8 +100,8 @@ pub const CharacterError = error{
     /// bound. Refused rather than saturated, for the reason stated at the head of this set: a clamp
     /// makes a caller's mistake look like a modelling choice. Serving it would also mean segmenting
     /// the move, which would make this entry a multi-segment integrator for a request no POSITION
-    /// can represent — `0.75 · floatMax` is outside any expressible world, and the broadphase's own
-    /// node arithmetic overflows there.
+    /// can represent — `0.75 · floatMax(f32)` is outside any expressible world, and the broadphase's
+    /// own node arithmetic overflows well before it.
     ///
     /// EXACT zero stays legal and is a no-op, and a DENORMAL displacement stays served: the norm is
     /// unrepresentable only by overflow, never by underflow, the direction being scale-free.
@@ -1506,13 +1513,20 @@ pub const CharacterStore = struct {
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
         // The call parameter's domain, at the entry and not mid-loop: finite components, and a norm
-        // this arithmetic can hold. Exact zero passes — `unitAndLength` answers `null` there and a
-        // displacement of nothing is a legal no-op.
+        // representable at the PUBLIC `f32` surface this vector came through — never at `Real`, which
+        // would make the domain a function of the build flag and give one public vector two answers.
+        // Exact zero passes: `unitAndLength` answers `null` there, and a displacement of nothing is a
+        // legal no-op.
+        const displacement_limit: Real = std.math.floatMax(f32);
         for (displacement.toArray()) |component| {
             if (!std.math.isFinite(component)) return error.InvalidDisplacement;
         }
         if (displacement.unitAndLength()) |whole| {
-            if (whole.length == null) return error.InvalidDisplacement;
+            // `null` is the overflow of `Real` itself, which only `f32` can reach here; the bound is
+            // what refuses the same vector under `-Dphysics_f64`, where that norm is an ordinary
+            // number and nothing else would have stopped it.
+            const norm = whole.length orelse return error.InvalidDisplacement;
+            if (!(norm <= displacement_limit)) return error.InvalidDisplacement;
         }
         const c = self.characters.items[idx];
         const record = store.get(c.shape) orelse unreachable;
