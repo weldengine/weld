@@ -88,11 +88,10 @@ pub const CharacterError = error{
     /// mathematical norm.
     ///
     /// NORMATIVE in `engine-physics-forge.md` §1.12.6 and mirrored on the frozen entry in
-    /// `engine-tier-interfaces.md`: why no fixed-width arithmetic decides the mathematical form
-    /// exactly, why the domain is therefore declared on what is DECIDABLE, what that costs and what
-    /// it protects, and the two ends the domain leaves served. Not restated here — a second
-    /// formulation of a normative rule is a second source, and this module spends its length refusing
-    /// those.
+    /// `engine-tier-interfaces.md`: why widening moves the rounding threshold without removing it,
+    /// why the domain is therefore declared on what is DECIDABLE, what that costs and what it
+    /// protects, and the two ends the domain leaves served. Not restated here — a second formulation
+    /// of a normative rule is a second source, and this module spends its length refusing those.
     InvalidDisplacement,
 };
 
@@ -1502,8 +1501,8 @@ pub const CharacterStore = struct {
     ) !MoveResult {
         const idx = self.alloc.validate(id) orelse return error.StaleCharacter;
         // The call parameter's domain (§1.12.6), at the entry and not mid-loop. `f64` is not a choice
-        // made here: it is the evaluation arithmetic §1.12.6 fixes, and the bound is on the norm as
-        // computed IN it — no fixed-width arithmetic decides the mathematical form exactly.
+        // made here: it is the evaluation arithmetic §1.12.6 FIXES, and the bound is on the norm as
+        // computed in it.
         //
         // What IS decided here, and is written because it is nowhere else: no reduction by the
         // largest component is needed at this one site, unlike everywhere else this norm is taken.
