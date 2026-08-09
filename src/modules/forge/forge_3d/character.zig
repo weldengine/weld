@@ -1549,7 +1549,13 @@ pub const CharacterStore = struct {
             // representable non-zero displacement is a real request to be served.
             if (len_sq == 0) break;
             const distance = @sqrt(len_sq);
-            const direction = remaining.scale(1 / distance);
+            // **`normalizeScaled` and not `scale(1 / distance)`, which is the SAME formula the query
+            // family conditions with.** The division form fails at both ends of the range where the
+            // reduce-then-normalise form does not — a denormal remainder squares to zero and a huge one
+            // overflows — and the cast adapter now ASSERTS its direction is unit rather than
+            // re-establishing it, so producing one correctly is this caller's job. `len_sq == 0` is
+            // already excluded above, at true zero, so the optional cannot be empty here.
+            const direction = remaining.normalizeScaled().?;
 
             const maybe_hit = sweepNearest(
                 bp,

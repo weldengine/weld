@@ -793,37 +793,31 @@ pub const BodyManager = struct {
             self.bodies.items(.position)[idx],
             self.bodies.items(.rotation)[idx],
         );
-        // **THE DIRECTION IS CONDITIONED ONCE, HERE, BEFORE THE DISPATCH — and that single line is a
-        // contract table collapsing.** Measured across the three shape classes, this entry had FOUR
-        // divergent behaviours for one parameter: `plane.zig` ASSERTS the direction is unit and
-        // conditions nothing, so a non-unit, a denormal or a zero direction was a domain violation on
-        // that arm and an ordinary answer on the other two; `shapecast.zig` conditions through
-        // `unitOf`; and the mesh arm additionally lost a denormal in its swept traversal. Every one of
-        // those is the same defect: the callee was left to decide what direction it had been handed.
+        // **THE DIRECTION IS A PRECONDITION OF THIS ADAPTER, ASSERTED AND NOT RE-ESTABLISHED.**
         //
-        // Conditioned at the entry, all three arms receive a unit direction and the assert becomes
-        // satisfied BY CONSTRUCTION rather than a precondition charged to the caller — which is what
-        // makes it an invariant instead of a trap. A zero direction is the one degenerate case and it
-        // answers `null` uniformly, since `unitOf` is null at EXACT zero and nowhere else.
+        // Measured across the three shape classes, this entry had FOUR divergent behaviours for one
+        // parameter: `plane.zig` asserts the vector is unit and conditions nothing, so a non-unit,
+        // denormal or zero direction was a domain violation on that arm and an ordinary answer on the
+        // other two, and the mesh arm additionally lost a denormal in its swept traversal. A first
+        // remedy conditioned here, which uniformised by the PERMISSIVE — and the map then showed that
+        // nobody needs the permission: `query/root.zig` conditions once for the whole query family
+        // (and guards zero there, where a zero direction is a legal query with an empty answer), the
+        // ground probe and the step sweeps pass the exact constants `up` and `up.neg()`, and the slide
+        // normalises its own remainder. Not one production caller passes a non-unit direction.
         //
-        // `max_distance` is therefore in units of the NORMALISED direction on every arm, which is what
-        // the two conditioning arms already did and what the asserting one had no way to say.
+        // So it uniformises by the STRICT instead. `castShapeBody` is an INTERNAL adapter of
+        // `BodyManager`, not a public entry: requiring a unit direction of it is legitimate where
+        // requiring it of `query.shapeCast` would not be, and the public contract is unchanged.
         //
-        // **AND IT CONDITIONS ONLY WHAT IS NOT ALREADY CONDITIONED, which is not an optimisation.** A
-        // first form normalised unconditionally and shifted every query answer by an ULP, caught by
-        // `mesh_test`'s bit-exact brute-force oracle: the query entry ALREADY normalises
-        // (`query/root.zig`), so an unconditional line here is a SECOND conditioning of the same vector
-        // — the very class this entry is collapsing, re-introduced by the collapse. The reduce-then-
-        // normalise round trip is not bit-idempotent, so applying it twice moves the result.
-        //
-        // The gate is the module's existing unit predicate, the same `16 · floatEps` slack
-        // `plane.zig` and `shapecast.zig` assert with, and no answer depends on which branch is taken:
-        // both produce a unit direction, one by passing it through untouched.
-        const dir = if (@abs(direction.lengthSq() - 1) <= 16 * std.math.floatEps(Real))
-            direction
-        else
-            direction.normalizeScaled() orelse return null;
-        const local_dir = cast_rotation.conjugate().rotateVec3(dir);
+        // Conditioning here was also not free of the very defect it was closing: the query entry
+        // already normalises, so an unconditional line was a SECOND conditioning of one vector, and
+        // skipping it inside a tolerance left the two arms disagreeing INSIDE that tolerance —
+        // `plane.zig` uses the raw norm in `t = sep / −closing` while `shapecast.zig` renormalises,
+        // so a direction 1 ULP off unit moved one arm's distance and not the other's. Measured: a
+        // conditioned direction lands 0 to 1 ULP from unit, so that branch was taken on every query.
+        // An assert has no inside.
+        std.debug.assert(@abs(direction.lengthSq() - 1) <= direction_unit_k * std.math.floatEps(Real));
+        const local_dir = cast_rotation.conjugate().rotateVec3(direction);
         // The CAST shape is always a bounded convex — the query entry refuses an
         // unbounded probe with a typed error (§1.11.7) — so only the HIT body's
         // category is dispatched on. Exhaustive, no `else`.
@@ -888,7 +882,7 @@ pub const BodyManager = struct {
                     inv_rot.rotateVec3(cast_origin.sub(self.bodies.items(.position)[idx])),
                     inv_rot.mul(cast_rotation),
                 );
-                const sweep_dir = inv_rot.rotateVec3(dir);
+                const sweep_dir = inv_rot.rotateVec3(direction);
                 var collector = MeshCastCollector{
                     .data = data,
                     .cast_shape = cast_shape,
@@ -928,7 +922,7 @@ pub const BodyManager = struct {
                 // hit of the cast/manifold disagreement. Nothing real to oppose the motion.
                 break :blk (probe_manifold.normal orelse return null).neg();
             };
-            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else dir)) return null;
+            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else direction)) return null;
             // Already WORLD on this arm: `collideShapeBody` is a world-space call, which is why the
             // predicate above dots it with `direction` and not with `local_dir`.
             if (hit.distance <= 0) contact_normal = opposing_normal;
@@ -1697,32 +1691,35 @@ const SingleManifoldCollector = struct {
 /// whether a path exists that does not DEGRADE an axis-aligned quad's face normal under a yaw, rather
 /// than tolerating the degradation after the fact.
 ///
-/// **`d` IS CONDITIONED BY THE KERNEL'S OWN `unitOf`, and that is the point rather than a detail.**
-/// Two earlier forms of this predicate were wrong about the direction and each in a different way: an
-/// ABSOLUTE threshold made the verdict depend on `‖d‖`, so the same geometry changed sides when the
-/// direction arrived twice as long; and a bare sign test on the raw `d` UNDERFLOWS, because for a
-/// denormal direction a product `n_i · d_i` with a small `n_i` flushes to exactly zero and the sign is
-/// destroyed — which would read a real wall as non-opposing and discard it, contradicting the contract
-/// `shapecast_test.zig` already pins, that every non-zero direction including a denormal is served.
+/// **`d` IS UNIT BY PRECONDITION, and that is the point rather than a detail.** Three forms of this
+/// predicate were wrong about the direction, each differently: an ABSOLUTE threshold made the verdict
+/// depend on `‖d‖`, so the same geometry changed sides when the direction arrived twice as long; a
+/// bare sign test on a raw `d` UNDERFLOWS, since for a denormal direction a product `n_i · d_i` with
+/// `|n_i| < 0.5` flushes to exactly zero and the sign is destroyed; and conditioning the vector HERE
+/// made this the second place that conditions it, which moved every query answer by an ULP.
 ///
-/// Both mistakes have one root: this predicate was conditioning the direction ITSELF instead of taking
-/// the conditioning the kernel already performs. `unitOf` reduces by the largest absolute component
-/// before normalising, so it neither squares a denormal into zero nor overflows a huge one, and it
-/// returns `null` at EXACT zero and nowhere else. Sharing it means there are no longer two answers to
-/// the question of what direction this cast is travelling in.
-///
-/// A null direction opposes nothing, which is the same answer the sign test gave and for a better
-/// stated reason: there is no direction to oppose.
+/// All three have one root — the predicate deciding for itself what direction it had been handed —
+/// and the fix is that nobody downstream decides. `query/root.zig` conditions once for the whole
+/// query family and guards zero there; the character's own sweeps pass the exact constants `up` and
+/// `up.neg()` or normalise their remainder with the same shared form. Every consumer then ASSERTS,
+/// here and at the adapter's head, with `plane.zig` and `shapecast.zig` asserting the identical claim
+/// one tier down. An assert has no inside for two arms to disagree in.
 fn opposes(n: Vec3r, d: Vec3r) bool {
-    // `d` is UNIT by the entry's conditioning, not by hope: `castShapeBodyOpposing` runs `unitOf`
-    // once before the dispatch, and every direction reaching here is that vector or a rotation of it,
-    // which preserves the norm to a few ULP. Asserted rather than re-established, with the same
-    // `16 · floatEps` slack `plane.zig` and `shapecast.zig` use for the identical claim — because
-    // re-normalising here would be a SECOND answer to what direction the cast travels in, which is
-    // the very class this entry has just finished collapsing.
-    std.debug.assert(@abs(d.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
+    // `d` is UNIT because the CALLER guarantees it — `castShapeBodyOpposing` asserts the same thing at
+    // its head, and every direction reaching here is that vector or a rotation of it, which preserves
+    // the norm to a few ULP. Asserted rather than re-established: a sign test on a non-unit `d` was
+    // wrong twice, once through a threshold that scaled with `‖d‖` and once through an underflow that
+    // destroyed the sign, and BOTH disappear when the vector is unit. Re-normalising here would be a
+    // second answer to what direction the cast travels in, which is the class this entry collapsed.
+    std.debug.assert(@abs(d.lengthSq() - 1) <= direction_unit_k * std.math.floatEps(Real));
     return n.dot(d) < 0;
 }
+
+/// Slack, in ULPs of 1, on the unit-norm precondition the cast adapter and its opposing predicate
+/// assert. The same constant and the same role as `plane.zig`'s `unit_k` and `shapecast.zig`'s
+/// `unit_dir_k`, which assert the identical claim one tier down — named here so the three cannot
+/// drift into three different ideas of what "unit" means.
+const direction_unit_k: comptime_int = 16;
 
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
 /// the tie band that decides which edges a contact could have come from. Both compare

@@ -3683,72 +3683,6 @@ test "a ROTATED mesh: the opposing filter must not mix frames" {
     try testing.expectApproxEqAbs(plain.?.distance, filtered.?.distance, api_tol);
 }
 
-test "the opposing filter serves a DENORMAL direction where the cast does" {
-    const gpa = testing.allocator;
-    var store: ShapeStore = .{};
-    defer store.deinit(gpa);
-    var bm: BodyManager = .{};
-    defer bm.deinit(gpa);
-
-    // **THE CONTRACT IS THE KERNEL'S AND THE FILTER OWED IT TOO.** `shapecast_test.zig` pins that every
-    // non-zero direction is served, a denormal included, because `unitOf` reduces by the largest
-    // absolute component instead of squaring. The opposing filter reproduced the direction handling
-    // instead of sharing it and got it wrong twice: an ABSOLUTE threshold made the verdict depend on
-    // `‖d‖`, so the same geometry changed sides when the direction arrived twice as long; then a bare
-    // sign test UNDERFLOWED — for a denormal `d` a product `n_i · d_i` with a small `n_i` flushes to
-    // exactly zero, the sign is destroyed, and a real wall reads non-opposing and is discarded.
-    //
-    // **The test lives at the BODY level and not at the kernel's, which is the gap that let both forms
-    // through.** The kernel's own denormal test passed the whole time: it never goes near this
-    // predicate. A contract tested one tier below the code that breaks it is not a test of that code.
-    //
-    // **Scope, and it is MEASURED rather than assumed.** The claim is the FILTER's: it must answer what
-    // the unfiltered cast answers. The convex arm is where that has content — the plain cast serves a
-    // denormal there. The other two arms were tried and excluded on evidence, not convenience:
-    //   * TRIANGLE SOUP — the plain cast returns `null` for a denormal too (`plainDen=false`,
-    //     `filtDen=false`), so the two AGREE and the filter is not implicated. The direction is lost
-    //     upstream of it, in the swept traversal rather than in the kernel. Recorded, not fixed here.
-    //   * HALF-SPACE — `plane.zig:297` ASSERTS `|‖d‖² − 1| <= unit_k · floatEps` and conditions
-    //     nothing, where `shapecast.zig:199` conditions through `unitOf`. Two kernels, one parameter,
-    //     two contracts; the entry normalises once (`query/root.zig:703`) and the half-space arm relies
-    //     on it. A denormal is out of its DOMAIN, and the assert fires as designed.
-    const tiny = std.math.floatTrueMin(Real);
-    // Non-vacuity: the square really does underflow, so this is the hard case and not merely a small one.
-    try testing.expectEqual(@as(Real, 0), tiny * tiny);
-
-    // **THE WALL IS TILTED, AND AN AXIS-ALIGNED ONE PROVES NOTHING — measured, and the first version of
-    // this test made exactly that mistake.** Against a wall whose normal is `(−1, 0, 0)` the product
-    // `n_x · d_x` is `−1 · tiny`, which is representable, so the sign survives and the broken predicate
-    // passes. The product underflows only when `|n_x| < 0.5`, since `0.5 · floatTrueMin` is the
-    // rounding boundary: computed, `cos 45°` survives and `cos 60°` and beyond flush to exactly zero.
-    // The tilt is chosen by MEASUREMENT and not by trigonometry on the box: what reaches the predicate
-    // is the CONTACT normal, which is not the face normal one draws on paper. Swept over ten yaws, the
-    // raw product is `−1e-45` and survives at 20°–50° and again at 70°–85°, and is exactly `0e0` at 60°
-    // and 65°, where the contact normal's X component reads `−0.4999997` and `−0.4226`. 65° is taken,
-    // and the axis-aligned version this replaces was caught by the mutation probe passing — twice.
-    const probe = SupportShapeR{ .core = .{ .segment = 0.6 }, .radius = 0.3 };
-    const body = try bm.addBody(gpa, &store, .{
-        .entity = ent(890),
-        .body_type = .static,
-        .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 2, 2) } }),
-        .position = av(2.5, 0, 0),
-        .rotation = math.Quatf.fromAxisAngle(av(0, 1, 0), 65.0 * std.math.pi / 180.0),
-    });
-
-    const plain = bm.castShapeBody(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(tiny, 0, 0), 10, .ignore);
-    const filtered = bm.castShapeBodyOpposing(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(tiny, 0, 0), 10, .ignore, true);
-    const unit = bm.castShapeBodyOpposing(&store, body, probe, v(-2, 0, 0), Quatr.identity, v(1, 0, 0), 10, .ignore, true);
-
-    // The premise: the unfiltered cast DOES serve it, so the filter has something to be wrong about.
-    try testing.expect(plain != null);
-    // The claim: the wall opposes the sweep either way, the direction's MAGNITUDE being no geometric
-    // fact — so the filter answers what the cast answers, and at the unit direction's distance.
-    try testing.expect(filtered != null);
-    try testing.expect(unit != null);
-    try testing.expectApproxEqAbs(plain.?.distance, filtered.?.distance, api_tol);
-    try testing.expectApproxEqAbs(unit.?.distance, filtered.?.distance, api_tol);
-}
-
 test "an ACTIVE EDGE at exact tangency blocks — the face normal is not enough" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
@@ -3809,7 +3743,6 @@ test "CONTRACT TABLE — castShapeBody answers the same for all three shape clas
     // The rule this pins is not any single value: it is that the THREE ROWS AGREE. A future arm, or a
     // future kernel that decides to condition differently, breaks this test rather than a character
     // scene three milestones later.
-    const tiny = std.math.floatTrueMin(Real);
     const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
 
     // Three geometrically EQUIVALENT scenes: a wall whose surface is the plane `x = 2`, facing `−X`.
@@ -3819,11 +3752,16 @@ test "CONTRACT TABLE — castShapeBody answers the same for all three shape clas
         .{ .data = .{ 2, -2, -2 } }, .{ .data = .{ 2, -2, 2 } }, .{ .data = .{ 2, 2, -2 } }, .{ .data = .{ 2, 2, 2 } },
     };
     const wall_tris = [_]u32{ 0, 1, 2, 2, 1, 3 };
-    const walls = [_]api.BodyId{
-        try bm.addBody(gpa, &store, .{ .entity = ent(700), .body_type = .static, .position = av(2.5, 0, 0), .shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 2, 2) } }) }),
-        try bm.addBody(gpa, &store, .{ .entity = ent(701), .body_type = .static, .shape = try store.createShape(gpa, .{ .plane = .{ .normal = av(-1, 0, 0), .distance = -2 } }) }),
-        try bm.addBody(gpa, &store, .{ .entity = ent(702), .body_type = .static, .shape = try store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &wall_verts, .indices = &wall_tris } }) }),
+    const wall_shapes = [_]api.ShapeDescriptor{
+        .{ .box = .{ .half_extents = av(0.5, 2, 2) } },
+        .{ .plane = .{ .normal = av(-1, 0, 0), .distance = -2 } },
+        .{ .triangle_mesh = .{ .vertices = &wall_verts, .indices = &wall_tris } },
     };
+    const wall_positions = [_]ApiVec3{ av(2.5, 0, 0), av(0, 0, 0), av(0, 0, 0) };
+    var walls: [3]api.BodyId = undefined;
+    for (wall_shapes, wall_positions, 0..) |desc, pos, k| {
+        walls[k] = try bm.addBody(gpa, &store, .{ .entity = ent(@intCast(700 + k)), .body_type = .static, .position = pos, .shape = try store.createShape(gpa, desc) });
+    }
     // Three equivalent FLOORS: surface `y = 0`, facing `+Y` — a surface that cannot oppose a `+X` sweep.
     const floor_verts = [_]V{
         .{ .data = .{ -3, 0, -3 } }, .{ .data = .{ 3, 0, -3 } }, .{ .data = .{ -3, 0, 3 } }, .{ .data = .{ 3, 0, 3 } },
@@ -3851,24 +3789,21 @@ test "CONTRACT TABLE — castShapeBody answers the same for all three shape clas
         try testing.expect(unit != null);
         try testing.expectApproxEqAbs(nominal, unit.?.distance, api_tol);
 
-        // C1 — a NON-UNIT direction is accepted, and answers what the unit one answers. This asserted
-        // nothing on the half-space arm before the entry conditioned: it tripped an assert.
-        const long = bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, v(2, 0, 0), 10, .ignore);
-        try testing.expect(long != null);
-        try testing.expectApproxEqAbs(nominal, long.?.distance, api_tol);
+        // **C1 AND C2 ARE A PRECONDITION HERE, NOT AN ANSWER — and that is the pass's conclusion, not
+        // a retreat from it.** A first remedy made this adapter condition its own direction, which
+        // uniformised the three arms by the PERMISSIVE; the map of every production caller then showed
+        // that nobody needs the permission, so it uniformises by the STRICT instead and the vector is
+        // required to be unit. `castShapeBody` is an INTERNAL adapter of `BodyManager`: requiring that
+        // of it is legitimate where requiring it of `query.shapeCast` would not be.
+        //
+        // So a non-unit, denormal or zero direction is a CALLER FAULT here and trips an assert, which
+        // no test can call without aborting the process — and the property is pinned where it is a
+        // contract instead, one tier up, below. That is a stronger pin and a cheaper one: it exercises
+        // what a user of the engine can actually reach.
 
-        // C1 — a DENORMAL direction likewise, which is `shapecast_test.zig`'s contract lifted to the
-        // body level. It asserted on the half-space arm and returned null on the mesh arm.
-        const den = bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, v(tiny, 0, 0), 10, .ignore);
-        try testing.expect(den != null);
-        try testing.expectApproxEqAbs(nominal, den.?.distance, api_tol);
-
-        // C2 — EXACT zero is the one degenerate direction, and it answers `null` rather than asserting.
-        try testing.expect(bm.castShapeBody(&store, wall, probe, origin, Quatr.identity, Vec3r.zero, 10, .ignore) == null);
-
-        // C5 — `max_distance` and the returned distance are in units of the NORMALISED direction: a
-        // direction twice as long does not halve the answer.
-        try testing.expectApproxEqAbs(unit.?.distance, long.?.distance, api_tol);
+        // C5 — the returned distance is in units of the direction, which the precondition makes unit,
+        // so `max_distance` and the distance share one scale on every arm. Pinned through the nominal
+        // cast above and the public tier below rather than by handing this entry a longer vector.
 
         // C3 — the returned normal is in WORLD: rotating the PROBE does not rotate it.
         const rot = bm.castShapeBody(&store, wall, probe, origin, yawed, v(1, 0, 0), 10, .ignore);
@@ -3890,8 +3825,11 @@ test "CONTRACT TABLE — castShapeBody answers the same for all three shape clas
         // the other two answer a separating direction. The guarantee the contract actually makes is
         // this one, and all three keep it.
         try testing.expect(deep_plain.?.normal.dot(oblique.normalizeScaled().?) <= 0);
-        // The manifold IS consulted under the filter, on all three arms, and it carries the SURFACE
-        // normal — which is the field the character path reads and the one that must agree.
+        // Under the filter, all three arms fill `contact_normal` with the SURFACE normal — the field
+        // the character path reads and the one that must agree. **They do not all reach it the same
+        // way, and saying they do would be false:** the convex and mesh arms consult a MANIFOLD, the
+        // half-space transports its STORED plane normal and consults nothing. What the table pins is
+        // the value, which is what the caller depends on, not the route.
         try testing.expect(deep_plain.?.contact_normal == null);
         try testing.expect(deep_filt != null);
         try testing.expect(deep_filt.?.contact_normal != null);
@@ -3901,5 +3839,62 @@ test "CONTRACT TABLE — castShapeBody answers the same for all three shape clas
 
         // C6 — the opposing verdict: a FLOOR cannot oppose a `+X` sweep, on any of the three.
         try testing.expect(bm.castShapeBodyOpposing(&store, floor, probe, v(0, 0.3, 0), Quatr.identity, v(1, 0, 0), 10, .ignore, true) == null);
+    }
+}
+
+test "CONTRACT TABLE — the public cast conditions the direction, for all three classes" {
+    const gpa = testing.allocator;
+    // **THE OTHER HALF OF THE TABLE, at the tier where the direction is a CONTRACT and not a
+    // precondition.** `query.shapeCast` normalises once at its entry and guards zero there, calling a
+    // zero direction a legal query with an empty answer — so what the internal adapter is entitled to
+    // require, the public entry is required to provide. These are the two cells that moved when the
+    // pass uniformised by the strict, and they are asserted on the same three shape classes so the
+    // agreement is the table's and not one arm's.
+    const tiny = std.math.floatTrueMin(Real);
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const wall_verts = [_]V{
+        .{ .data = .{ 2, -2, -2 } }, .{ .data = .{ 2, -2, 2 } }, .{ .data = .{ 2, 2, -2 } }, .{ .data = .{ 2, 2, 2 } },
+    };
+    const wall_tris = [_]u32{ 0, 1, 2, 2, 1, 3 };
+    const shapes = [_]api.ShapeDescriptor{
+        .{ .box = .{ .half_extents = av(0.5, 2, 2) } },
+        .{ .plane = .{ .normal = av(-1, 0, 0), .distance = -2 } },
+        .{ .triangle_mesh = .{ .vertices = &wall_verts, .indices = &wall_tris } },
+    };
+    const positions = [_]ApiVec3{ av(2.5, 0, 0), av(0, 0, 0), av(0, 0, 0) };
+
+    for (shapes, positions, 0..) |desc, pos, row| {
+        errdefer std.debug.print("shape class row {d}\n", .{row});
+        var scene = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer scene.deinit(gpa);
+        // The probe lives in the SCENE's store: a handle is an index into one store, and creating it
+        // in another resolved to whatever shape sat at that index here.
+        const probe_shape = try scene.store.createShape(gpa, .{ .sphere = .{ .radius = 0.3 } });
+        const shape = try scene.store.createShape(gpa, desc);
+        _ = try scene.addBody(gpa, .{ .entity = ent(@intCast(720 + row)), .body_type = .static, .position = pos, .shape = shape });
+
+        const base: query.CastQuery = .{ .shape = probe_shape, .origin = v(-2, 0, 0), .direction = v(1, 0, 0), .max_distance = 10 };
+        const unit = try query.shapeCast(&scene.bp, &scene.bm, &scene.store, base);
+        try testing.expect(unit != null);
+
+        // A NON-UNIT direction is conditioned, so it answers what the unit one answers rather than
+        // rescaling the distance — the property `max_distance` needs to mean a length.
+        var q = base;
+        q.direction = v(2, 0, 0);
+        const long = try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q);
+        try testing.expect(long != null);
+        try testing.expectApproxEqAbs(unit.?.distance, long.?.distance, api_tol);
+
+        // A DENORMAL direction likewise: the reduce-then-normalise form serves it where a division by
+        // the length would square it to zero. This is `shapecast_test.zig`'s kernel contract, held at
+        // the public entry and on all three classes.
+        q.direction = v(tiny, 0, 0);
+        const den = try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q);
+        try testing.expect(den != null);
+        try testing.expectApproxEqAbs(unit.?.distance, den.?.distance, api_tol);
+
+        // EXACT zero is the one degenerate direction and it is an EMPTY ANSWER, not a fault.
+        q.direction = Vec3r.zero;
+        try testing.expect(try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q) == null);
     }
 }
