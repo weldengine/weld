@@ -1643,56 +1643,38 @@ const SingleManifoldCollector = struct {
     }
 };
 
-/// Slack, in ULPs of 1, on the test that decides whether a surface OPPOSES a sweep.
+/// Whether a surface with outward normal `n` opposes travel along `d`.
 ///
-/// **`k · floatEps(Real)` and nothing else — no coordinate scale.** `n · d` is the product of two
-/// UNIT vectors and is therefore DIMENSIONLESS, so a length scale has no business in it. That is what
-/// separates this constant from `contactMargin`, whose operand is a distance and which is right to
-/// carry `coordScale`.
+/// **AN EXACT ZERO, AND A NOISE BAND HERE WAS WRITTEN, MEASURED AND REVOKED.** The band closed all
+/// twenty-eight cells of the insoluble-squeeze grid at BOTH precisions and it still had to go, because
+/// what it bought in that authoring-fault configuration it paid for on the DEFAULT path: discarding a
+/// grazing contact lets the capsule advance INTO the surface by `distance × |n · d|`, measured at
+/// `3.05e-5` over 32 m and growing without bound with the distance. A traversable geometry is worse
+/// than a partial serve.
 ///
-/// **It IS governed by §1.11.2's tolerance discipline**, unlike `max_slope`, `padding` and
-/// `predictive_contact_distance`, which are named PHYSICAL parameters of the character and
-/// deliberately escape it. This one absorbs transport rounding and expresses no modelling intent.
+/// **AND NO BAND ON THIS QUANTITY CAN WORK — the demonstration is algebraic, not empirical, and it is
+/// written here so nobody spends another round rediscovering it.** The two populations a band would
+/// have to separate are a TRANSPORT RESIDUE, which tracks `floatEps(Real)` because it is the rounding
+/// of a quaternion rotation, and a REAL GRAZING INCIDENCE, which is geometric and does not depend on
+/// the precision at all. They separate by nine orders at f64 and by a factor of 2.4 at f32, so the
+/// inseparability is structurally an f32 phenomenon and no threshold expressed in ULPs sits between
+/// them. The length-dimensioned form escapes nothing either: the penetration is
+/// `distance × |n · d|` and the tolerance would be `k · floatEps · coordScale` with `coordScale ≈
+/// distance`, so it is THIS test with both sides multiplied by the distance — it buys nothing, at any
+/// precision.
 ///
-/// **Why a band exists here at all, and it is measured rather than argued.** A horizontal triangle's
-/// normal does not survive a quaternion yaw exactly: transported through 90° it reads
-/// `(7.4e-16, 1, 1.1e-15)` at f64 and `(3.97e-7, 1, 3.97e-7)` at f32. Its dot with a horizontal sweep
-/// is then a small NEGATIVE residue where the geometry has an exact zero — so an exact `>= 0` admitted
-/// a FLOOR as an obstacle to horizontal travel. The advance is zero, the iteration is spent, a plane
-/// slot is spent; the slide against that near-vertical normal then injects a vertical residue into the
-/// motion, which admits the CEILING by the same route; and two near-anti-parallel planes form a crease
-/// whose axis is their cross product, i.e. pure noise. At f64 that noise axis re-found the floor and
-/// the character froze at exactly zero, every call; at f32 it happened to find a real contact and
-/// served. A coin toss arbitrated by rounding, which is what this closes.
+/// What the exact zero leaves open is upstream of this predicate and is recorded in `CLAUDE.md`:
+/// whether a path exists that does not DEGRADE an axis-aligned quad's face normal under a yaw, rather
+/// than tolerating the degradation after the fact.
 ///
-/// **The direction of the band is decided and not symmetric**: it reads NON-OPPOSING, so a contact
-/// within it is DISCARDED. Discarding one that opposed by a hair advances by a hair into a surface,
-/// and the depenetration at the head of the next call recovers that; reading it as opposing FREEZES,
-/// and a freeze recovers from nothing.
-///
-/// `k = 16` against measured residues of `3.3 · floatEps` at f32 and `5 · floatEps` at f64 — a 3×
-/// margin, and the same value `contact_margin_conv_k` carries for the same reason: the residue is
-/// ACCUMULATED across the transport, the direction's normalisation and the dot's own three products.
-/// What it costs in angle is `asin(16 · floatEps)` — `1.1e-4` degrees at f32, `2.0e-13` at f64. No
-/// modelling notices that. The 3.6° cone this milestone REFUSED is thirty thousand times wider and is
-/// closed by `internalEdgeNormal` instead, which is a different mechanism for a different cause.
-const opposing_noise_k: comptime_int = 16;
-
-/// Whether a surface with outward normal `n` opposes travel along `d`, by more than float noise.
-/// One predicate for all four arms, so they cannot drift apart.
-///
-/// **`d` NEED NOT BE UNIT, and the threshold is scaled by its length rather than assuming it.** The
-/// kernels normalise the direction themselves, so a caller is entitled to hand this path a direction
-/// of any length — and a FIRST version compared `n · d` against an absolute threshold, which made the
-/// verdict depend on `‖d‖`: the same geometry, with the direction handed over twice as long, changed
-/// sides. No geometry justifies that. Multiplying the threshold by `‖d‖` is exactly normalising `d`
-/// without paying a division, and it is guarded at TRUE zero by construction: at `‖d‖ = 0` the dot is
-/// zero too and `0 < 0` is false, so a null direction opposes nothing and no epsilon is invented.
-///
-/// `n` IS unit at all four call sites by the narrowphase's own contract — a cast normal, a manifold
-/// normal, a transported stored plane — so only `d` needs the scaling.
+/// **The verdict does not depend on `‖d‖`, and at an exact zero that is STRUCTURAL rather than
+/// arranged.** Scaling `d` by any positive factor scales the dot by the same factor and cannot change
+/// its sign. The `‖d‖` term the band needed — and needed rightly, since an absolute threshold made the
+/// same geometry change sides when the direction was handed over twice as long — would now multiply a
+/// zero, which is not merely inert: `0 · inf` is a NaN, and `x < NaN` is false, so writing it would
+/// introduce a path where an infinite direction opposes nothing. The sign test has no such path.
 fn opposes(n: Vec3r, d: Vec3r) bool {
-    return n.dot(d) < -@as(Real, opposing_noise_k) * std.math.floatEps(Real) * d.length();
+    return n.dot(d) < 0;
 }
 
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
