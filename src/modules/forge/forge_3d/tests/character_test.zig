@@ -3998,12 +3998,23 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     const edge_y: Real = @as(f32, 0.0002 * std.math.floatMax(f32));
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, edge_y, 0), 1.0 / 60.0));
 
-    // **AND THE ACCEPTED SIDE OF THE SAME FRONTIER, which is what keeps the predicate pinned rather
-    // than merely bounded.** §1.12.6 declares both sides normative because the expression itself is:
-    // a finer form — `hypot`, a wider arithmetic, a different summation order — would refuse this
-    // vector, and a suite that only tested the refused side would call that an improvement. Its true
-    // norm is `M · (1 + 5e-19)`, above `floatMax(f32)` and far below the real overflow threshold
-    // `2^128 − 2^103`, so it is a deliberate consequence of the computed form and not an oversight.
+    // **AND THE ACCEPTED SIDE OF THE SAME FRONTIER, which is what pins the predicate rather than
+    // merely bounding it.** §1.12.6 makes the EXPRESSION normative, so the suite has to lock the
+    // expression and not just the verdict. Three properties of it are locked, each by the one case
+    // that moves when that property changes, and each was MEASURED to move rather than assumed to:
+    //
+    //   * WIDTH — this vector. Its true norm is `M · (1 + 5e-19)`, above `floatMax(f32)` and far
+    //     below the real overflow threshold `2^128 − 2^103`; `f64` absorbs the excess and accepts,
+    //     an arithmetic wider than `f64` would resolve it and refuse.
+    //   * ORDER — `(M, 7e-9·M, 7e-9·M)` below. Each square alone falls under the half-ULP of `M²`
+    //     and is absorbed, but their SUM does not: `x, y, z` accepts and `y, z` first refuses. At
+    //     `1e-9` the two orders agree and at `9e-9` both refuse, so the case sits in the band where
+    //     the absorption flips and nowhere else.
+    //   * REDUCTION FORM — `(M, 9e-9·M, 0)` below. The ordered sum refuses it and `hypot` accepts:
+    //     the two have different thresholds, the sum losing the term at `a² < 2^-53` and `hypot`
+    //     only once the true norm exceeds `M` by half an ULP OF `M`. The band where they disagree
+    //     is `a ∈ [8e-9, 1.05e-8]`, measured; below and above it they agree, which is why the two
+    //     cases above cannot stand in for this one.
     // The second component points DOWN, into the floor, so both axes of the request are blocked and
     // the pose stays near the origin — the norm, hence the verdict, is unchanged by the sign. Without
     // that, the vertical component carries the character to `3.4e29` and the run aborts in the
@@ -4012,6 +4023,20 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     const near_y: Real = @as(f32, 1e-9 * std.math.floatMax(f32));
     const served_edge = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, -near_y, 0), 1.0 / 60.0);
     for (served_edge.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
+
+    // ORDER. The vertical component points DOWN into the floor for the same reason as above, and the
+    // scene gains a `−Z` wall for the third one — the norm, hence the verdict, does not depend on
+    // either sign, and every axis of the request has to be blocked or the pose leaves the region the
+    // broadphase can hold. Without the wall the run aborts at `z = −2.4e30`, on the far-field limit
+    // this file already records, which is a different limit from the one under test.
+    _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, -3), 966);
+    const ord: Real = @as(f32, 7e-9 * std.math.floatMax(f32));
+    const served_order = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, -ord, -ord), 1.0 / 60.0);
+    for (served_order.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
+
+    // REDUCTION FORM. Refused by the ordered sum, accepted by `hypot`.
+    const red: Real = @as(f32, 9e-9 * std.math.floatMax(f32));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, red, 0), 1.0 / 60.0));
 
     // A NON-FINITE component is the same class and the same answer.
     try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
