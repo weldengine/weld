@@ -790,15 +790,31 @@ const null_slot: u32 = std.math.maxInt(u32);
 /// Default layer-pair matrix — symmetric; `true` = the two layers produce
 /// candidate pairs. Indexed by `@intFromEnum(BroadphaseLayer)`
 /// (static=0, dynamic=1, debris=2, trigger=3). Allowed: dynamic×dynamic,
-/// dynamic×static, dynamic×debris, dynamic×trigger, debris×static (brief Notes).
+/// dynamic×static, dynamic×debris, debris×static.
 /// Overridable `CollisionConfig` wiring is a later milestone (out of scope);
 /// this `const` is the Phase-1 default.
+///
+/// **The `trigger` ROW AND COLUMN are `false` in full, and this REVISES a decision
+/// taken at M1.1.1**, which set `dynamic × trigger` to `true` and wrote a test
+/// asserting it positively. That choice was reasonable then — nothing consumed the
+/// class, so the permissive cell cost nothing — and it is wrong now that the class
+/// has a meaning: a trigger detects without responding
+/// (`engine-physics-solver.md` §1.13.3), so the pairs that cell produced would have
+/// to be discarded downstream, every tick, on a hot path. Killing them at the source
+/// is less work AND a stronger guarantee: a trigger never reaches step 4 of the
+/// cycle, so no downstream filter can forget it.
+///
+/// It follows that the SENSOR PASS CANNOT CONSULT THIS MATRIX — it reads `false`
+/// everywhere. Detection is filtered by the trigger's own unilateral object-layer
+/// mask (§1.13.5), and the two mechanisms never substitute for each other: this one
+/// governs the physical RESPONSE, absolutely and without exception, and the mask
+/// governs what is SEEN (§1.13.2).
 pub const default_layer_pairs: [layer_count][layer_count]bool = .{
     //         static  dynamic  debris  trigger
     .{ false, true, true, false }, // static
-    .{ true, true, true, true }, // dynamic
+    .{ true, true, true, false }, // dynamic
     .{ true, true, false, false }, // debris
-    .{ false, true, false, false }, // trigger
+    .{ false, false, false, false }, // trigger
 };
 
 /// Multi-layer broadphase: one `Bvh(T)` per `BroadphaseLayer`, per-layer

@@ -431,19 +431,61 @@ test "layer-pair matrix filters pairs" {
     try bph.computePairs(gpa, &pairs);
     try assertSortedDeduped(pairs.items);
 
-    // Allowed combinations present.
+    // Allowed combinations present. These are the POSITIVE CONTROL for the block below:
+    // the scene is eight overlapping boxes at one point, so an implementation emitting
+    // nothing at all would satisfy every negative assertion and fail these.
     try std.testing.expect(hasPair(pairs.items, 20, 21)); // dynamic × dynamic
     try std.testing.expect(hasPair(pairs.items, 10, 20)); // static × dynamic
     try std.testing.expect(hasPair(pairs.items, 10, 30)); // static × debris
     try std.testing.expect(hasPair(pairs.items, 20, 30)); // dynamic × debris
-    try std.testing.expect(hasPair(pairs.items, 20, 40)); // dynamic × trigger
 
-    // Forbidden combinations absent.
+    // Forbidden combinations absent — the WHOLE `trigger` row and column, M1.1.13.
     try std.testing.expect(!hasPair(pairs.items, 10, 11)); // static × static
     try std.testing.expect(!hasPair(pairs.items, 30, 31)); // debris × debris
     try std.testing.expect(!hasPair(pairs.items, 40, 41)); // trigger × trigger
     try std.testing.expect(!hasPair(pairs.items, 10, 40)); // static × trigger
     try std.testing.expect(!hasPair(pairs.items, 30, 40)); // debris × trigger
+    // `dynamic × trigger` — this cell was `true` at M1.1.1 and a positive assertion on
+    // exactly this pair stood here until M1.1.13. It is REVERSED, not relaxed, and the
+    // old assertion is DELETED rather than commented out: a trigger detects without
+    // responding, so it must never reach constraint construction, and killing the pair at
+    // the source is a stronger guarantee than filtering it downstream every tick
+    // (`engine-physics-solver.md` §1.13.3).
+    try std.testing.expect(!hasPair(pairs.items, 20, 40)); // dynamic × trigger
+}
+
+test "the trigger row and column of the layer matrix are false in full" {
+    // The matrix read DIRECTLY, in BOTH index orders, and not only through the pairs it
+    // produces: the emission test above shows the four combinations reachable in one
+    // scene, this one shows the constant itself is symmetric and complete. A cell true in
+    // one order and false in the other would make the answer depend on which proxy moved.
+    inline for (0..broadphase.layer_count) |i| {
+        const t = @intFromEnum(Layer.trigger);
+        try std.testing.expect(!broadphase.default_layer_pairs[t][i]); // trigger × *
+        try std.testing.expect(!broadphase.default_layer_pairs[i][t]); // * × trigger
+    }
+
+    // POSITIVE CONTROL, without which the loop above is satisfied by an all-false matrix:
+    // three cells outside the trigger row and column are still `true`, so the matrix has
+    // not simply been emptied. `dynamic × dynamic` is on the diagonal, where the loop
+    // never reaches.
+    const s = @intFromEnum(Layer.static);
+    const d = @intFromEnum(Layer.dynamic);
+    const b = @intFromEnum(Layer.debris);
+    try std.testing.expect(broadphase.default_layer_pairs[d][d]);
+    try std.testing.expect(broadphase.default_layer_pairs[s][d] and broadphase.default_layer_pairs[d][s]);
+    try std.testing.expect(broadphase.default_layer_pairs[s][b] and broadphase.default_layer_pairs[b][s]);
+
+    // The whole matrix is symmetric — a property the `trigger` edit must not break, and
+    // one no single-cell assertion states.
+    inline for (0..broadphase.layer_count) |i| {
+        inline for (0..broadphase.layer_count) |j| {
+            try std.testing.expectEqual(
+                broadphase.default_layer_pairs[i][j],
+                broadphase.default_layer_pairs[j][i],
+            );
+        }
+    }
 }
 
 test "computePairs matches brute force multi-layer" {

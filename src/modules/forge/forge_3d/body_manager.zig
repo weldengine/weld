@@ -68,6 +68,7 @@ const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
 const RayR = broadphase_mod.Ray(Real);
+const BroadphaseLayer = broadphase_mod.BroadphaseLayer;
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -330,6 +331,45 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Which broadphase class a body of this role and type belongs to
+    /// (`engine-physics-solver.md` §1.13.3). A pure function of the two, so it is also
+    /// available before a body exists — which is what the caller inserting a proxy needs.
+    ///
+    /// **The priority is FIXED and `is_trigger` comes first**: a trigger goes to `trigger`
+    /// WHATEVER its body type, because the class is what decides whether it can reach
+    /// constraint construction at all, and the answer for a sensor is no in every case.
+    /// Then body type — `static` to `static`, EVERYTHING ELSE to `dynamic`.
+    ///
+    /// **A KINEMATIC body therefore lands in `dynamic`, and that is deliberate rather than
+    /// an approximation.** The class names what MOVES, not what is SIMULATED: a kinematic
+    /// platform has to be paired against statics and dynamics exactly like a simulated
+    /// body, and putting it in `static` would lose every pair a moving platform needs. The
+    /// name lags its meaning; renaming it touches the broadphase and its suites and is not
+    /// this milestone's (`engine-physics-solver.md` §1.13.3).
+    ///
+    /// `debris` is NOT produced here: nothing consumes the class before destruction, and
+    /// deriving it from an object layer is a policy that touches no signature, so no
+    /// freeze puts a date on it. There is deliberately no `is_debris` field — debris is a
+    /// Forge optimisation class, where sensor is a semantic every backend shares.
+    pub fn broadLayerFor(is_trigger_role: bool, body_type_of: api.BodyType) BroadphaseLayer {
+        if (is_trigger_role) return .trigger;
+        return switch (body_type_of) {
+            .static => .static,
+            .kinematic, .dynamic => .dynamic,
+        };
+    }
+
+    /// Safe getter: the broadphase class of a live body, or null if `id` is stale/invalid.
+    /// `broadLayerFor` applied to the body's stored role and type — DERIVED and never
+    /// stored, so the class cannot drift from the two facts it is a function of.
+    pub fn broadLayer(self: *const BodyManager, id: BodyId) ?BroadphaseLayer {
+        const idx = self.alloc.validate(id) orelse return null;
+        return broadLayerFor(
+            self.bodies.items(.flags)[idx].is_trigger,
+            self.bodies.items(.body_type)[idx],
+        );
     }
 
     /// Safe getter: whether the body carries the SENSOR role, or null if `id` is
