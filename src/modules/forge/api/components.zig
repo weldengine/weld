@@ -104,7 +104,15 @@ comptime {
     // once, so the three offsets below are pinned rather than described.
     //
     // These three are what decide the 52: a different arrangement landing on the same
-    // size must fail here. Size alone would not catch it.
+    // size must fail here, and size alone would not catch it. COUNTER-FACTUAL MEASURED,
+    // by changing the LAYOUT and never the expected constant — an oracle that judges a
+    // layout has to be confronted with a different layout. `collision_layer` and
+    // `is_trigger` were SWAPPED in the declaration: both are one byte and adjacent, so
+    // the size stays 52 and the alignment 4 and only the two offsets exchange. With these
+    // three asserts removed the whole suite still passed 497/497 — so the size and align
+    // pins really do accept the permutation — and with them present the build failed
+    // here. Moving the expected value from 44 to 43 would have proven only that the line
+    // executes.
     std.debug.assert(@offsetOf(CollisionShape, "collision_layer") == 44);
     std.debug.assert(@offsetOf(CollisionShape, "is_trigger") == 45);
     std.debug.assert(@offsetOf(CollisionShape, "trigger_layer_mask") == 48);
@@ -183,5 +191,10 @@ test "CollisionShape mirrors the two authoring fields of the body descriptor" {
     // The count is what makes an ADDITION visible; the by-name references above cannot.
     // A component is `extern struct` POD read across the C ABI, so a field appended here
     // after the M1.1.15 freeze shifts every offset behind it.
+    //
+    // COUNTER-FACTUAL MEASURED, and with a field chosen so that this line is the ONLY one
+    // that moves: a `u8` inserted between `is_trigger` and `trigger_layer_mask` lands in
+    // padding byte 46, so the size stays 52, the alignment 4 and the three pinned offsets
+    // unchanged — every assert above passes and this one reports `expected 7, found 8`.
     try testing.expectEqual(@as(usize, 7), @typeInfo(CollisionShape).@"struct".fields.len);
 }

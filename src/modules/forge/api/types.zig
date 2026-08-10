@@ -885,6 +885,8 @@ test "BodyDescriptor defaults match the brief" {
     // shape as `CharacterDescriptor`'s below, and for the same reason: after the M1.1.15
     // freeze, `engine-c-api.md` carrying no `struct_size` and no minor version, appending
     // one defaulted field here is an ABI break and not a source-compatible addition.
+    // COUNTER-FACTUAL MEASURED: appending one defaulted field leaves every assert above
+    // passing and reports `expected 16, found 17` here.
     try testing.expectEqual(@as(usize, 16), @typeInfo(BodyDescriptor).@"struct".fields.len);
 
     // The role is a property of the INSTANCE and never of the geometry (§1.13.1): the
@@ -892,12 +894,31 @@ test "BodyDescriptor defaults match the brief" {
     // field on `ShapeDescriptor` would force two bodies sharing a sphere to share their
     // nature. Pinned as an ABSENCE, because that is the form the error would take — a
     // later milestone moving it there has to delete this line first.
+    //
+    // The VISITS are counted and the total asserted, because the loop's scope is not
+    // visible from its body: skipping the `void` variants is correct — a field cannot be
+    // added to `void` without first making it a struct, which this loop would then see —
+    // but nothing else would notice a struct variant being REMOVED, and the absence check
+    // would quietly cover less while still passing.
+    comptime var visited: usize = 0;
     inline for (@typeInfo(ShapeDescriptor).@"union".fields) |f| {
         if (@typeInfo(f.type) == .@"struct") {
+            visited += 1;
             try testing.expect(!@hasField(f.type, "is_trigger"));
             try testing.expect(!@hasField(f.type, "trigger_layer_mask"));
         }
     }
+    // Five of the twelve variants carry a payload today: sphere, box, capsule, plane and
+    // triangle_mesh. The other seven are `void` until their own sub-milestone, at which
+    // point this total rises with them.
+    //
+    // COUNTER-FACTUAL MEASURED, by changing the UNION and not the expected count: giving
+    // `cylinder` a payload reports `expected 5, found 6` here while the variant total
+    // below still passes — which is the division of labour between the two lines, the
+    // total seeing variants appear or vanish and the visit count seeing the loop's REACH
+    // change under a constant total.
+    try testing.expectEqual(@as(usize, 5), visited);
+    try testing.expectEqual(@as(usize, 12), @typeInfo(ShapeDescriptor).@"union".fields.len);
 }
 
 test "ShapeType and BodyType are u8-backed" {
