@@ -186,6 +186,23 @@ pub fn Bvh(comptime T: type) type {
             return index < self.nodes.items.len and self.nodes.items[index].height == 0;
         }
 
+        /// Hand the `user_data` of every LIVE leaf to `collector.add(user_data)`.
+        ///
+        /// The walk is over the node POOL, and `isLiveLeaf` is what makes it exact in both
+        /// directions: `freeNode` sets a retired node's height to `-1` and an internal node's
+        /// is `>= 1`, so the `height == 0` test admits live leaves and nothing else.
+        ///
+        /// Order is the pool index, which is a deterministic function of the operation
+        /// sequence and NOT insertion order — the same contract, for the same reason, as the
+        /// unbounded list's (§1.11.15). No result may depend on it.
+        pub fn forEachLeaf(self: *const Self, collector: anytype) void {
+            for (0..self.nodes.items.len) |i| {
+                const index: u32 = @intCast(i);
+                if (!self.isLiveLeaf(index)) continue;
+                collector.add(self.userData(index));
+            }
+        }
+
         /// Insert a proxy for `tight_aabb` carrying `user_data`. The stored box
         /// is `tight_aabb` fattened by `config.margin`. Returns the proxy id
         /// (a node index). Each insert adds at most two nodes (the leaf plus one
@@ -1128,6 +1145,40 @@ pub fn Broadphase(comptime T: type) type {
                     collector.add(slot.user_data);
                 }
             }
+        }
+
+        /// Hand the `user_data` of every live proxy of ONE layer to `collector.add(user_data)`
+        /// — the layer's tree leaves first, then its unbounded slots.
+        ///
+        /// The sensor pass (`engine-physics-solver.md` §1.13.5) is what needs it, and it needs
+        /// it in this DIRECTION: triggers are rare against bodies, so the set to rebuild is
+        /// indexed by them, and enumerating the whole body store to find the few triggers would
+        /// be the cost that direction exists to avoid — a cost sleep does not economise
+        /// (§1.13.9).
+        ///
+        /// Both halves are required: a trigger may carry a half-space, which lives OUTSIDE the
+        /// trees (§1.11.15), so a walk over the tree alone would silently miss it.
+        pub fn forEachInLayer(self: *const Self, layer: BroadphaseLayer, collector: anytype) void {
+            const li = @intFromEnum(layer);
+            self.trees[li].forEachLeaf(collector);
+            for (self.unbounded[li].items) |slot| {
+                if (!slot.live) continue;
+                collector.add(slot.user_data);
+            }
+        }
+
+        /// Offer every leaf of every layer TREE that meets the half-space to `collector`.
+        ///
+        /// **Named for exactly what it visits, because what it omits is the point.** It does
+        /// NOT visit the unbounded lists. Two half-spaces have no narrowphase kernel
+        /// (§1.11.15) and the sensor pass, its only caller, declares such a pair OUT OF DOMAIN
+        /// — both sides carry a static-only shape, so the overlap cannot vary under simulation
+        /// and could never produce a transition (§1.13.6). Putting the omission in the NAME
+        /// keeps a later caller from reading a silent miss as coverage.
+        pub fn queryHalfSpaceTrees(self: *const Self, normal: Vec3T, distance: T, collector: anytype) u32 {
+            var visited: u32 = 0;
+            for (&self.trees) |*t| visited += t.queryHalfSpace(normal, distance, collector);
+            return visited;
         }
 
         /// Ray type for this scalar.

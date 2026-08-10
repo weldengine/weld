@@ -37,6 +37,11 @@ const island_mod = @import("pipeline/island.zig");
 // over the `BodyManager` SoA store, at the same pipeline level as integration.
 // Re-exported as the `sleep` namespace below; the comptime pin analyses its tests.
 const sleep_mod = @import("pipeline/sleep.zig");
+// M1.1.13 — the sensor traversal: which bodies each trigger currently overlaps.
+// A pipeline-level sweep like `sleep.zig`, deliberately independent of the solver
+// and of `computePairs`. Re-exported as the `sensor` namespace below; the comptime
+// pin analyses its acceptance suite.
+const sensor_mod = @import("pipeline/sensor.zig");
 // M1.1.9 — `Real`-bound spatial queries (stateless orchestration over the
 // broadphase ray traversal + the exact kernels). Re-exported as the `query`
 // namespace below; the comptime pin analyses its acceptance tests.
@@ -271,6 +276,13 @@ pub const island = island_mod;
 /// lives in `rigid/`.
 pub const sleep = sleep_mod;
 
+/// Sensor detection at solver precision (`engine-physics-solver.md` §1.13): the
+/// trigger-proxy enumeration, the unilateral object-layer mask, and the exact
+/// narrowphase confirmation. Produces body-level overlaps; the entity mapping and
+/// the two deltas are the step above it. Independent of the solver by construction
+/// — it reads no sleep state and consults no pair matrix.
+pub const sensor = sensor_mod;
+
 // --- Integration (semi-implicit Euler) ---
 
 /// Advance every live body one fixed tick of `dt` under world-space `gravity`
@@ -302,6 +314,7 @@ comptime {
     _ = rigid_mod;
     _ = island_mod;
     _ = sleep_mod;
+    _ = sensor_mod;
     _ = query_mod;
     _ = character_mod;
     _ = @import("tests/body_manager_test.zig");
@@ -322,4 +335,5 @@ comptime {
     _ = @import("tests/plane_test.zig");
     _ = @import("tests/mesh_test.zig");
     _ = @import("tests/character_test.zig");
+    _ = @import("tests/sensor_test.zig");
 }
