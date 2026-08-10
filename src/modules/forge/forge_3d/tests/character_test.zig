@@ -2332,6 +2332,60 @@ test "growing under a low ceiling returns false and changes NOTHING" {
     try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 0.9));
 }
 
+test "growing under a TRIGGER ceiling returns true and really grows" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var chars: CharacterStore = .{};
+    defer chars.deinit(gpa);
+
+    // **THE FOURTH GATE-C CASE, and it is about a VERDICT rather than a position.**
+    // `WorstOverlap` serves TWO call sites — the depenetration and this occupancy test — so the
+    // single shared filter of `admitsCandidate` already covers both. What differs is the
+    // OBSERVABLE: the three cases above read a position back, and `resizeCharacter` answers a
+    // `bool` that none of them exercises.
+    //
+    // The consumer is named and real. `engine-movement.md` gates the stand-up on that return
+    // (`if physics_resize_character(entity, vc.radius, config.stand_height)`), so a trigger
+    // counted as an occupant is a crouched character inside a detection volume who can never
+    // stand up again — silent in unit tests, visible only in play. The same document explains
+    // that the occupancy test was moved INSIDE the operation precisely so it could not disagree
+    // with it; a trigger counting as an occupant brings that disagreement back in another form.
+    //
+    // Geometry IDENTICAL to `growing under a low ceiling returns false and changes NOTHING`
+    // above — same plane, same slab whose underside is at y = 1.2, same 1.0 m character, same
+    // target height — with `is_trigger` the ONLY difference. That test IS this one's positive
+    // control, reused as it stands rather than re-derived.
+    _ = try addPlane(gpa, &world, av(0, 1, 0), 0, 310);
+    const ceiling = try addTriggerBox(gpa, &world, av(2, 0.5, 2), av(0, 1.7, 0), 311);
+    try testing.expectEqual(true, world.bm.isTrigger(ceiling).?);
+
+    var desc = baseDescriptor();
+    desc.position = av(0, 0.02, 0);
+    desc.height = 1.0;
+    const id = try addMover(gpa, &world, &chars, desc);
+    const presence = (try chars.getCharacterInnerBody(id)).?;
+
+    // The volume the sensor occupies is NOT occupied for the purposes of standing up.
+    try testing.expectEqual(true, try chars.resizeCharacter(gpa, &world.bp, &world.bm, &world.store, id, 0.3, 1.8));
+
+    // And it really grew — asserted on the three quantities a successful resize moves, because
+    // `true` alone is satisfied by an entry that returns it and does nothing. The base does NOT
+    // move: the resize is anchored at the feet (§1.12.7), so the volume grows upward.
+    const after = chars.get(id).?;
+    try testing.expectApproxEqAbs(@as(Real, 1.8), after.height, api_tol);
+    try testing.expectApproxEqAbs(@as(Real, 0.02), after.position.toArray()[1], api_tol);
+    // The presence follows the new half-height: 0.02 + 0.9 = 0.92, against 0.52 before.
+    try testing.expectApproxEqAbs(@as(Real, 0.92), world.bm.position(presence).?.toArray()[1], api_tol);
+    // New capsule, new cylinder half-height 1.8/2 − 0.3 = 0.6, and the handle preserved.
+    try testing.expectApproxEqAbs(@as(Real, 0.6), world.store.get(after.shape).?.half_height, api_tol);
+    try testing.expectEqual(presence, (try chars.getCharacterInnerBody(id)).?);
+    try testing.expectEqual(after.shape, world.bm.shapeOf(presence).?);
+    // Three shapes live — the plane's, the ceiling's and the character's NEW capsule: the old one
+    // was destroyed on the success path too, not only on the refusal path.
+    try testing.expectEqual(@as(u32, 3), world.store.count());
+}
+
 test "resizeCharacter refuses the same domain as createCharacter, by typed error" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
