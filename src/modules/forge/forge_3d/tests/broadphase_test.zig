@@ -454,6 +454,62 @@ test "layer-pair matrix filters pairs" {
     try std.testing.expect(!hasPair(pairs.items, 20, 40)); // dynamic × trigger
 }
 
+test "forEachLeaf skips a retired slot and follows it through recycling" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    // **THE ENTRY POINT OF THE WHOLE SENSOR PASS** (M1.1.13): `forEachInLayer` enumerates the
+    // TRIGGERS THEMSELVES through this walk, so a missed leaf is a trigger that detects
+    // nothing, silently, and everything the pass reports rests on it.
+    //
+    // What is under test is the POOL ITERATION and not the predicate. `forEachLeaf` writes no
+    // predicate of its own: it delegates to `isLiveLeaf`, which pre-dates it and which
+    // production already consumes (`computePairs` skips a stale proxy id with it). The
+    // existing suites hole the node pool through `remove` in several places, but none of them
+    // walks it, and until M1.1.13 nothing did.
+    const a = try tree.insert(gpa, boxAt(0), 10);
+    const b = try tree.insert(gpa, boxAt(4), 20);
+    const c = try tree.insert(gpa, boxAt(8), 30);
+    try std.testing.expectEqual(@as(u32, 3), tree.leafCount());
+
+    // A HOLED POOL: the retired leaf is not reported, and the two survivors are — the
+    // non-vacuity lives in the same case, because "reports nothing" would satisfy the first
+    // half alone.
+    tree.remove(b);
+    {
+        var got = Collector{ .gpa = gpa };
+        defer got.deinit();
+        tree.forEachLeaf(&got);
+        try std.testing.expectEqualSlices(u32, &.{ 10, 30 }, got.sortedOwned());
+    }
+
+    // A RECYCLED SLOT, which is the configuration closest to the real danger: a slot that
+    // comes back to life under ANOTHER identity. The walk must report the leaf again, with the
+    // NEW `user_data` and never the old one — an iteration that read a stale payload, or that
+    // had cached the pool length, would show up exactly here.
+    const d = try tree.insert(gpa, boxAt(4), 40);
+    try std.testing.expectEqual(@as(u32, 3), tree.leafCount());
+    {
+        var got = Collector{ .gpa = gpa };
+        defer got.deinit();
+        tree.forEachLeaf(&got);
+        try std.testing.expectEqualSlices(u32, &.{ 10, 30, 40 }, got.sortedOwned());
+        try std.testing.expect(!got.contains(20)); // the retired identity, never resurrected
+    }
+
+    // The three live proxies really are live and answer a query, so the walk above is not
+    // agreeing with a tree that lost its contents.
+    for ([_]u32{ a, c, d }) |p| try std.testing.expect(tree.isLiveLeaf(p));
+
+    // INTERNAL nodes are not leaves, and with three proxies the pool holds some: the walk
+    // reports exactly the leaf count and never the pool's population.
+    var got = Collector{ .gpa = gpa };
+    defer got.deinit();
+    tree.forEachLeaf(&got);
+    try std.testing.expectEqual(@as(usize, tree.leafCount()), got.items.items.len);
+}
+
 test "the trigger row and column of the layer matrix are false in full" {
     // The matrix read DIRECTLY, in BOTH index orders, and not only through the pairs it
     // produces: the emission test above shows the four combinations reachable in one
