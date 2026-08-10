@@ -33,10 +33,16 @@
 //! Determinism by construction (M1.1.14). No hash container anywhere: the reverse
 //! `BodyId` → dense-index direction is a scratch array indexed by slot, members are
 //! sorted ascending by `BodyId`, ranks are assigned by walking members in that
-//! order, and constraints are ordered by the COMPOSITE key `(rank, pair_key)` — so
-//! the result never depends on the sort algorithm's stability. Rank, membership and
-//! constraint order are a pure function of two inputs: the awake dynamic set, and
-//! the pair-key-sorted constraint array.
+//! order, and constraints are ordered by the COMPOSITE key
+//! `(rank, pair_key, subshape_id)` — so the result never depends on the sort
+//! algorithm's stability. Rank, membership and constraint order are a pure function
+//! of two inputs: the awake dynamic set, and the pair-key-sorted constraint array.
+//!
+//! That key is a TRIPLET and not a pair, and the third term is what makes the
+//! sentence above true: since M1.1.11.1 a mesh pair contributes one constraint per
+//! contacting triangle, all sharing `rank` and `pair_key`, and on those two alone
+//! their relative order would be `std.sort.block`'s internal tie-handling — which is
+//! UNSTABLE. `lessByCompositeKey` is the authority.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -78,8 +84,8 @@ const Member = struct {
     slot: u32,
 };
 
-/// The composite sort key of one constraint — `(rank, pair_key)` — plus where the
-/// constraint currently sits, so the array can be permuted into key order.
+/// The composite sort key of one constraint — `(rank, pair_key, subshape_id)` — plus
+/// where the constraint currently sits, so the array can be permuted into key order.
 pub const ConstraintKey = struct {
     rank: u32,
     pair_key: u64,
@@ -157,9 +163,9 @@ pub const IslandManager = struct {
     /// wakes.
     ///
     /// `constraints` must be the array `contact_constraint.build` produced, sorted
-    /// ascending by pair key; it is permuted in place into `(rank, pair_key)` order.
-    /// Both accumulated impulses and every other field ride along untouched — only
-    /// the ORDER changes.
+    /// ascending by pair key; it is permuted in place into
+    /// `(rank, pair_key, subshape_id)` order. Both accumulated impulses and every
+    /// other field ride along untouched — only the ORDER changes.
     ///
     /// On the two wake causes this step owns: W3 is applied here as a real wake, so
     /// a group on a moving support restarts its window every tick and cannot
@@ -336,9 +342,9 @@ pub const IslandManager = struct {
         }
     }
 
-    /// Reorder `constraints` into `(rank, pair_key)` order and record each island's
-    /// index range. The composite key is explicit, so the ordering never leans on
-    /// the sort algorithm being stable.
+    /// Reorder `constraints` into `(rank, pair_key, subshape_id)` order and record
+    /// each island's index range. The composite key is explicit AND total, so the
+    /// ordering never leans on the sort algorithm being stable.
     fn orderConstraints(
         self: *IslandManager,
         gpa: std.mem.Allocator,

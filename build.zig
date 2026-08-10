@@ -1015,6 +1015,34 @@ pub fn build(b: *std.Build) void {
     );
     forge_mesh_bench_step.dependOn(&forge_mesh_bench_run.step);
 
+    // -------------------------------- M1.1.12 forge character controller bench --
+    //
+    // `moveCharacter` on a plane / stairs / a wall / a triangle mesh, plus
+    // `resizeCharacter`, INTERLEAVED across reps. Writes
+    // `bench/results/forge_3d_character.md`. REPORTED, not gated — no envelope is
+    // pre-registered (bench header).
+    const forge_char_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_3d_character.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_char_bench_module.addImport("forge_3d", forge_3d_module);
+    forge_char_bench_module.addImport("weld_forge", forge_api_module);
+    const forge_char_bench_exe = b.addExecutable(.{
+        .name = "forge-character-bench",
+        .root_module = forge_char_bench_module,
+    });
+    b.installArtifact(forge_char_bench_exe);
+    const forge_char_bench_run = b.addRunArtifact(forge_char_bench_exe);
+    forge_char_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_char_bench_run.addArgs(args);
+    const forge_char_bench_step = b.step(
+        "bench-forge-character",
+        "Run the M1.1.12 forge character controller bench (five paths interleaved, writes bench/results/forge_3d_character.md)",
+    );
+    forge_char_bench_step.dependOn(&forge_char_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the

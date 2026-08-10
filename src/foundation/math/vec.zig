@@ -125,10 +125,43 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         /// `surfaceArea`, `rayInterval`, `inflate` and `overlapsHalfSpace` — pure vector
         /// arithmetic, no threshold, no physical semantics.
         pub fn normalizeScaled(self: Self) ?Self {
+            const both = self.unitAndLength() orelse return null;
+            return both.unit;
+        }
+
+        /// The unit direction AND the length, from ONE reduction by the largest absolute component.
+        ///
+        /// **Three questions, one reduction, and that is the whole point.** A caller that asks
+        /// `lengthSq() == 0` to test emptiness, `@sqrt(lengthSq())` for the length and this for the
+        /// direction has asked three times and gets three different domains: the square UNDERFLOWS for
+        /// a denormal vector, so a real displacement reads as empty and is dropped, and it OVERFLOWS
+        /// for a large one, so the length comes back infinite and poisons whatever consumes it. The
+        /// reduction has neither failure, and returning both quantities from it is what stops a caller
+        /// from reconstructing one of them the unsafe way.
+        ///
+        /// `null` at EXACTLY zero — the largest absolute component is zero exactly when all three are —
+        /// which is the emptiness test the caller needs, exact and without a threshold.
+        ///
+        /// **`length` is itself optional, because a DIRECTION always exists where a LENGTH need not.**
+        /// The reduction protects the intermediate square, but the final product `largest · ‖reduced‖`
+        /// can still leave the range: two components at `0.75 · floatMax` have a norm of about
+        /// `1.06 · floatMax`, which is not representable at either precision. Answering `inf` there
+        /// would be answering a number that is not the length, and it propagated — measured, it became
+        /// an infinite sweep bound and tripped a kernel's finiteness assert one call later.
+        ///
+        /// So the unrepresentable case is an ANSWER this function gives, not an assumption each caller
+        /// re-derives. The direction is unaffected: it is scale-free by construction, which is exactly
+        /// why the two are returned separately rather than as one vector.
+        pub fn unitAndLength(self: Self) ?struct { unit: Self, length: ?T } {
             const largest = @reduce(.Max, @abs(self.data));
             if (largest == 0) return null;
             const reduced: Self = .{ .data = self.data / @as(Simd, @splat(largest)) };
-            return reduced.scale(1 / reduced.length());
+            const reduced_length = reduced.length();
+            const full = largest * reduced_length;
+            return .{
+                .unit = reduced.scale(1 / reduced_length),
+                .length = if (std.math.isFinite(full)) full else null,
+            };
         }
 
         /// Largest absolute component. Zero exactly when every component is zero.

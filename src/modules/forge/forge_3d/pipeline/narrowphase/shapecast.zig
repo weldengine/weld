@@ -182,6 +182,47 @@ pub fn castShapeBounded(
     ceiling: u32,
     diag: ?*CastDiagnostics,
 ) ?CastHit(T) {
+    return castShapeImpl(T, shape_a, relpose, shape_b, direction, max_distance, ceiling, diag, false);
+}
+
+/// `castShape` for a caller that GUARANTEES a unit direction — it skips the reconditioning below and
+/// asserts instead.
+///
+/// **It exists because reconditioning is not free when a sibling kernel does not do it.** `plane.zig`
+/// takes the direction as given and uses its raw norm in `t = sep / −closing`; this kernel normalised
+/// its own copy. So for a direction inside the unit band but not exactly unit — which is what
+/// `Vec.normalizeScaled` produces, measured 0 to 1 ULP off — the two arms of `castShapeBody` answered
+/// distances that differed by that ULP, and no amount of asserting at the entry closed it: an assert
+/// BOUNDS a direction, it does not canonicalise it. `(1 + 4ε, 0, 0)` passes every unit assert in the
+/// module and still split the two arms.
+///
+/// ADDITIVE on purpose: `castShape` and `castShapeBounded` keep conditioning, keep their zero-direction
+/// guard and keep their signatures, so no existing caller moves. Only `castShapeBody`, whose direction
+/// is a precondition it asserts, takes this entry — and the two arms then see one vector.
+pub fn castShapeUnit(
+    comptime T: type,
+    shape_a: SupportShape(T),
+    relpose: RelativePose(T),
+    shape_b: SupportShape(T),
+    direction: math.Vec(3, T),
+    max_distance: T,
+) ?CastHit(T) {
+    return castShapeImpl(T, shape_a, relpose, shape_b, direction, max_distance, max_shapecast_iterations, null, true);
+}
+
+fn castShapeImpl(
+    comptime T: type,
+    shape_a: SupportShape(T),
+    relpose: RelativePose(T),
+    shape_b: SupportShape(T),
+    direction: math.Vec(3, T),
+    max_distance: T,
+    ceiling: u32,
+    diag: ?*CastDiagnostics,
+    /// Whether the caller guarantees `direction` is unit. When true the reduce-then-normalise below
+    /// is SKIPPED — not merely made redundant — so this kernel and `plane.zig` consume the same bits.
+    comptime assume_unit: bool,
+) ?CastHit(T) {
     const Vec3T = math.Vec(3, T);
     const Simplex = gjk_mod.Simplex(T);
     const Vertex = support.Vertex(T);
@@ -194,9 +235,10 @@ pub fn castShapeBounded(
     std.debug.assert(@reduce(.And, @abs(direction.data) < @as(Simd, @splat(std.math.inf(T)))));
     std.debug.assert(ceiling > 0);
 
-    // The direction, normalised once. `unitOf` returns null at EXACTLY zero, which
-    // is the whole zero-direction guard.
-    const d = unitOf(T, direction) orelse return finish(T, diag, .degenerate_direction, 0, 0, 0, null);
+    // The direction, normalised once — or taken as given when the caller guarantees it. `unitOf`
+    // returns null at EXACTLY zero, which is the whole zero-direction guard on the conditioning path;
+    // on the other, a zero direction would fail the unit assert below, which is the caller's contract.
+    const d = if (assume_unit) direction else (unitOf(T, direction) orelse return finish(T, diag, .degenerate_direction, 0, 0, 0, null));
     std.debug.assert(@abs(d.lengthSq() - 1) <= unit_dir_k * std.math.floatEps(T));
 
     // The configuration-space ray direction. A swept along `+d` touching B is the ray

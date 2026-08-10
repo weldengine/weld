@@ -33,6 +33,17 @@ pub const CrossOutcome = vec.CrossOutcome;
 /// Whether a triangle is EXACTLY flat, decided in integer arithmetic. THE classifier: callers that
 /// must not admit a flat triangle ask this, never `triangleCross`.
 pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;
+/// A vector PARALLEL to the exact area vector of three points, or `null` when that vector is
+/// EXACTLY zero — the exact tier `triangleIsFlat` is written on, exposed for callers that need the
+/// DIRECTION together with that exact null.
+///
+/// Re-exported at M1.1.12 for its second consumer: the character controller's edge slide, whose
+/// direction is `n₁ × n₂` and whose `null` must mean "the two normals are exactly parallel" and
+/// nothing weaker. The tiered `triangleCross` cannot serve there — its `.direction` comes from the
+/// first float tier that forms a non-zero vector, so on exactly parallel normals it returns a
+/// rounding residue that reads as a valid crease. That is the very confusion §1.11.17 records as
+/// having nearly shipped.
+pub const triangleCrossDirection = @import("exact.zig").triangleCrossDirection;
 /// The power-of-two exponent that reduces three points below unit magnitude.
 pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 

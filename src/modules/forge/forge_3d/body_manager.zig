@@ -76,6 +76,16 @@ const ApiQuat = @import("foundation").math.Quatf;
 /// the kernel's `CastHit`, whose fields are in the cast shape's frame: the frames
 /// differ, so the types do too rather than one being quietly reinterpreted.
 pub const BodyCastHit = struct {
+    /// The CONTACT's own normal at an initial overlap, in WORLD, surface → probe — or null when the
+    /// sweep travelled, where `normal` already is it, and null when nobody asked.
+    ///
+    /// **It exists because the answer was computed and thrown away.** At distance zero every arm of
+    /// `castShapeBodyOpposing` derives a real surface normal to render its opposing verdict — the
+    /// manifold of the retained triangle, the manifold of the convex, the stored plane — and `normal`
+    /// carries none of them: §1.11.11 fixes it at `−direction` there, which is a contract this field
+    /// does NOT touch. Without this channel the caller had to ask a second time, over the whole body,
+    /// and could be answered about a different sub-shape than the one the cast retained.
+    contact_normal: ?Vec3r = null,
     /// Distance along the cast direction at first touch, in `[0, max_distance]`.
     distance: Real,
     /// Which SUB-SHAPE of the hit body was touched — a mesh's triangle index, and `0` for a
@@ -311,6 +321,70 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Safe getter: the body's simulation class, or null if `id` is stale/invalid.
+    ///
+    /// The column has existed since M1.1.0 and was never exposed. What needs it is
+    /// M1.1.12: §1.12.2 states normatively that a character's presence is a KINEMATIC body,
+    /// and `motionProperties` cannot answer that — a static and a kinematic body both carry
+    /// an inverse mass of exactly zero. A normative property nothing can assert is one that
+    /// regresses silently, which is the same argument that exposed `entity` at M1.1.10.
+    pub fn bodyType(self: *const BodyManager, id: BodyId) ?api.BodyType {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.body_type)[idx];
+    }
+
+    /// Safe getter: the handle of the shape this body carries, or null if `id` is
+    /// stale/invalid.
+    ///
+    /// Named `shapeOf` and not `shape` because it returns a `ShapeId` and not a `Shape`, and
+    /// the two live one `store.get` apart. Exposed for the same reason as `bodyType` above:
+    /// §1.12.2 states that a character's presence carries the CONTROLLER'S OWN capsule and
+    /// never a second shape, and handle equality is the direct form of that statement.
+    pub fn shapeOf(self: *const BodyManager, id: BodyId) ?api.ShapeId {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.shape)[idx];
+    }
+
+    /// Replace the shape a body carries, KEEPING its `BodyId`. Stale-safe no-op.
+    ///
+    /// **Restricted to a NON-DYNAMIC body, asserted.** `computeMotion` returns an inverse mass and
+    /// an inverse inertia of exactly zero for anything but `.dynamic`, INDEPENDENT of the shape, so
+    /// a swap leaves `motion` correct with nothing to recompute. On a dynamic body the same swap
+    /// would silently keep an inertia tensor belonging to the old geometry, so that case is refused
+    /// rather than half-handled.
+    ///
+    /// Added at M1.1.12 for `resizeCharacter`, which MUST keep the presence's handle (§1.12.2) — a
+    /// resize is not a re-creation, and an exclusion the caller memorised survives it.
+    /// Destroy-and-add is the only alternative and it changes the `BodyId`.
+    ///
+    /// **AND restricted to a CONVEX on BOTH sides, asserted.** The body-type assert alone was not
+    /// enough, and the two other categories break a different consequence each: a mesh carries a
+    /// CACHED `world_aabb` computed at `addBody`, which a swap between two meshes would leave holding
+    /// the old geometry's box; and a half-space lives OUTSIDE the broadphase trees (§1.11.15), so
+    /// swapping a convex for one leaves a leaf in a tree for a shape that has no box at all. Both
+    /// fall away by construction under the restriction — a convex's cached box is NaN and never read,
+    /// and two bounded shapes keep the proxy in the tree where it belongs.
+    ///
+    /// The restriction is not a gap: the only need is capsule → capsule on a kinematic presence, and
+    /// widening it later is purely additive. Saying what this does NOT do is the point — the previous
+    /// comment described a general shape swap and the code maintained two of its four consequences.
+    ///
+    /// NON-ACTIVATING, like the other write paths of §1.8.4: the wake the caller owes is composed by
+    /// the caller from what the new volume touches.
+    pub fn setShape(self: *BodyManager, store: *const ShapeStore, id: BodyId, shape_id: api.ShapeId) void {
+        const idx = self.alloc.validate(id) orelse return;
+        std.debug.assert(self.bodies.items(.body_type)[idx] != .dynamic);
+        const shape = store.get(shape_id) orelse return;
+        std.debug.assert(shape.class() == .convex);
+        if (store.get(self.bodies.items(.shape)[idx])) |old| {
+            std.debug.assert(old.class() == .convex);
+        }
+        self.bodies.items(.shape)[idx] = shape_id;
+        // The sleep radius is geometry-derived, so it is recomputed even though a non-dynamic body's
+        // is never read — a stale derived value is worse than a redundant assignment.
+        self.bodies.items(.sleep_radius)[idx] = body_mod.computeSleepRadius(shape);
     }
 
     /// Safe getter: the ECS entity owning this body, or null if `id` is
@@ -680,6 +754,37 @@ pub const BodyManager = struct {
         max_distance: Real,
         back_face_mode: api.BackFaceMode,
     ) ?BodyCastHit {
+        return self.castShapeBodyOpposing(store, id, cast_shape, cast_origin, cast_rotation, direction, max_distance, back_face_mode, false);
+    }
+
+    /// `castShapeBody` restricted to contacts whose surface OPPOSES the sweep.
+    ///
+    /// A surface the sweep runs along or away from obstructs nothing, and a caller that resolves motion
+    /// wants the nearest OBSTACLE rather than the nearest contact. Selecting on that predicate instead
+    /// of selecting and then discarding is what makes it gapless: this entry returns ONE hit, so any
+    /// filter applied to its RESULT throws away every other sub-shape the cast never returned — three
+    /// earlier forms did exactly that, by body, by pair and by a bounded set, and each left a hole.
+    ///
+    /// **A SIBLING RATHER THAN A PARAMETER, and the reason is measured rather than stylistic.** Adding
+    /// the argument to `castShapeBody` itself would touch fourteen call sites inside INHERITED test
+    /// files that are byte-identical to the tag. One caller needs the predicate; the others keep the
+    /// entry they had, and `castShapeBody` delegates here with `false`.
+    ///
+    /// Each shape class supplies the normal it actually has: the mesh classifies per triangle AFTER its
+    /// cast, on the contact's own normal; the half-space uses its STORED plane; the convex uses the
+    /// cast's normal, or the manifold's at distance zero where the cast's is `−direction`.
+    pub fn castShapeBodyOpposing(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        cast_shape: narrowphase.SupportShape(Real),
+        cast_origin: Vec3r,
+        cast_rotation: Quatr,
+        direction: Vec3r,
+        max_distance: Real,
+        back_face_mode: api.BackFaceMode,
+        skip_non_opposing: bool,
+    ) ?BodyCastHit {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const relpose = narrowphase.RelativePose(Real).init(
@@ -688,6 +793,30 @@ pub const BodyManager = struct {
             self.bodies.items(.position)[idx],
             self.bodies.items(.rotation)[idx],
         );
+        // **THE DIRECTION IS A PRECONDITION OF THIS ADAPTER, ASSERTED AND NOT RE-ESTABLISHED.**
+        //
+        // Measured across the three shape classes, this entry had FOUR divergent behaviours for one
+        // parameter: `plane.zig` asserts the vector is unit and conditions nothing, so a non-unit,
+        // denormal or zero direction was a domain violation on that arm and an ordinary answer on the
+        // other two, and the mesh arm additionally lost a denormal in its swept traversal. A first
+        // remedy conditioned here, which uniformised by the PERMISSIVE — and the map then showed that
+        // nobody needs the permission: `query/root.zig` conditions once for the whole query family
+        // (and guards zero there, where a zero direction is a legal query with an empty answer), the
+        // ground probe and the step sweeps pass the exact constants `up` and `up.neg()`, and the slide
+        // normalises its own remainder. Not one production caller passes a non-unit direction.
+        //
+        // So it uniformises by the STRICT instead. `castShapeBody` is an INTERNAL adapter of
+        // `BodyManager`, not a public entry: requiring a unit direction of it is legitimate where
+        // requiring it of `query.shapeCast` would not be, and the public contract is unchanged.
+        //
+        // Conditioning here was also not free of the very defect it was closing: the query entry
+        // already normalises, so an unconditional line was a SECOND conditioning of one vector, and
+        // skipping it inside a tolerance left the two arms disagreeing INSIDE that tolerance —
+        // `plane.zig` uses the raw norm in `t = sep / −closing` while `shapecast.zig` renormalises,
+        // so a direction 1 ULP off unit moved one arm's distance and not the other's. Measured: a
+        // conditioned direction lands 0 to 1 ULP from unit, so that branch was taken on every query.
+        // An assert has no inside.
+        std.debug.assert(@abs(direction.lengthSq() - 1) <= direction_unit_k * std.math.floatEps(Real));
         const local_dir = cast_rotation.conjugate().rotateVec3(direction);
         // The CAST shape is always a bounded convex — the query entry refuses an
         // unbounded probe with a typed error (§1.11.7) — so only the HIT body's
@@ -701,8 +830,29 @@ pub const BodyManager = struct {
         // The sub-shape the mesh arm resolves, and zero for the two arms whose shapes carry
         // no sub-shape at all (§1.11.16).
         var subshape_id: u32 = 0;
+        // **THE SURFACE NORMAL EACH ARM ALREADY DERIVES, KEPT INSTEAD OF DISCARDED.** World frame,
+        // surface → probe, filled only at distance zero and only when the verdict was asked for —
+        // `castShapeBody` delegates with `skip_non_opposing = false`, so the query family pays
+        // nothing and its §1.11.11 contract is untouched.
+        var contact_normal: ?Vec3r = null;
+        // Transported ONCE and read twice — by the predicate below and by the cast arm. Two calls
+        // computed the same plane from the same inputs, which is a drift risk for no gain.
+        const hs: ?@TypeOf(shape_mod.halfSpace(shape)) = if (shape.class() == .half_space)
+            shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel)
+        else
+            null;
+        // The two single-sub-shape classes: excluding sub-shape `0` excludes the body.
+        // The half-space's predicate uses the STORED plane normal, transported: at an initial overlap
+        // `plane.castShape` returns `direction.neg()`, which carries no surface information at all.
+        if (skip_non_opposing and shape.class() == .half_space) {
+            if (!opposes(hs.?.normal, local_dir)) return null;
+        }
         const hit = switch (shape.class()) {
-            .convex => narrowphase.castShape(
+            // `castShapeUnit` and not `castShape`: the direction is this entry's PRECONDITION, and a
+            // kernel that reconditioned it would consume different bits from `plane.castShape`, which
+            // takes it as given. That difference is what an assert cannot close — it bounds the
+            // vector, it does not canonicalise it.
+            .convex => narrowphase.castShapeUnit(
                 Real,
                 cast_shape,
                 relpose,
@@ -712,7 +862,7 @@ pub const BodyManager = struct {
             ),
             .half_space => narrowphase.plane.castShape(
                 Real,
-                shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel),
+                hs.?,
                 cast_shape,
                 local_dir,
                 max_distance,
@@ -744,14 +894,50 @@ pub const BodyManager = struct {
                     .direction_in_a = local_dir,
                     .sweep_direction_local = sweep_dir,
                     .back_face_mode = back_face_mode,
+                    .skip_non_opposing = skip_non_opposing,
                     .bound = max_distance,
                 };
                 _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
                 subshape_id = collector.best_triangle;
+                // A's frame, like everything the collector holds — carried to world with `normal`.
+                if (collector.best_contact_normal) |n| contact_normal = cast_rotation.rotateVec3(n);
                 break :blk collector.best;
             },
         } orelse return null;
+        // **THE CONVEX PREDICATE, AND ITS INPUT CHANGES AT DISTANCE ZERO.**
+        //
+        // At `d > 0` the cast's normal IS the surface normal and the test uses it directly. At `d == 0`
+        // it is not: `terminal` takes `outward = unitOf(v)` where `v` separates the CORES, so in a
+        // squeeze — the capsule's segment core deep inside the box's — it returns a minimal-translation
+        // direction of the polytope and not a face normal. MEASURED on a capsule squeezed under a box
+        // ceiling: the cast says `(−0.062267, 0.996115, −0.062267)`, tilted 3.6° and symmetric in X and
+        // Z, which is a simplex direction's signature; the manifold on the SAME contact says
+        // `(0, −1, 0)` exactly. An earlier measurement at 1 mm of overlap gave the face normal and did
+        // NOT transport to a squeeze.
+        //
+        // So at zero the input is the MANIFOLD's normal, which is the same source `slideNormal` has used
+        // since gate C and for the same stated reason. The other two arms need none of this: the mesh
+        // tests `faceNormal` and the half-space its stored plane, both valid at every distance.
+        if (skip_non_opposing and shape.class() == .convex) {
+            const opposing_normal = if (hit.distance > 0) hit.normal else blk: {
+                var probe_manifold = FirstManifoldNormal{};
+                self.collideShapeBody(store, id, cast_shape, cast_origin, cast_rotation, &probe_manifold);
+                // No manifold at all: the cast reports a contact the narrowphase denies — the spurious
+                // hit of the cast/manifold disagreement. Nothing real to oppose the motion.
+                break :blk (probe_manifold.normal orelse return null).neg();
+            };
+            if (!opposes(opposing_normal, if (hit.distance > 0) local_dir else direction)) return null;
+            // Already WORLD on this arm: `collideShapeBody` is a world-space call, which is why the
+            // predicate above dots it with `direction` and not with `local_dir`.
+            if (hit.distance <= 0) contact_normal = opposing_normal;
+        }
+        // The half-space's plane is the contact normal at every distance; at zero it is the only arm
+        // whose answer needs no second computation of any kind.
+        if (skip_non_opposing and shape.class() == .half_space and hit.distance <= 0) {
+            contact_normal = cast_rotation.rotateVec3(hs.?.normal);
+        }
         return .{
+            .contact_normal = contact_normal,
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
             // The mesh arm is the only one that fills this; the other two carry zero
@@ -1102,6 +1288,102 @@ pub const BodyManager = struct {
         return single.manifold;
     }
 
+    /// Full narrowphase between a caller-supplied convex `probe` posed at
+    /// (`probe_position`, `probe_rotation`) and body `id`, calling
+    /// `collector.add(subshape_id, manifold)` for EVERY manifold the pair produces. Nothing
+    /// is called when the two are separated, or when the handle — or its shape — is
+    /// stale/invalid.
+    ///
+    /// **The seventh body-level adapter, and the one a VIRTUAL controller needs.** A
+    /// controller owns no body, so `collidePairEach` — which resolves both sides from
+    /// handles — cannot serve it at all. This is `castShapeBody`'s shape without the
+    /// direction: shape plus pose against a body, dispatched on the BODY's category alone,
+    /// the probe being a bounded convex by its type.
+    ///
+    /// **Only the general "Each" form exists.** There is deliberately no convenience
+    /// sibling asserting the body carries no sub-shape, the way `collidePair` wraps
+    /// `collidePairEach`: the controller is this entry's only consumer and it needs the
+    /// general form, a mesh floor being exactly the case it cannot afford to lose. Such a
+    /// wrapper is purely additive — zero call sites to touch — so the deferral rule lets it
+    /// wait for a caller that wants it.
+    ///
+    /// **Normal orientation: probe → body.** The probe is A and the body is B, in all three
+    /// arms. The half-space arm computes body→probe, §1.11.15's formulas being stated with
+    /// the plane as A, and negates; the mesh arm passes `mesh_is_a = false` so the shared
+    /// helper hands `collideOrdered` its arguments in that same order and needs no mirroring.
+    ///
+    /// **No `back_face_mode` parameter, and that is a decision rather than an omission.**
+    /// Contact generation culls back faces unconditionally: the mode is a solver-internal
+    /// setting and not part of the frozen surface (§1.11.17), because a contact generated on
+    /// the back of a wall pushes the body through it. The mesh arm therefore inherits both
+    /// the cull and the internal-edge correction from `collideConvexMesh` — which is the
+    /// whole reason this entry reuses that helper instead of walking the mesh itself.
+    ///
+    /// Internal: no interface entry corresponds to it, and it knows nothing about
+    /// characters. Self-exclusion belongs to the controller — the broadphase will offer a
+    /// character its own presence among the candidates of its own sweeps, and filtering that
+    /// out is the controller's business, not this adapter's.
+    pub fn collideShapeBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        probe: narrowphase.SupportShape(Real),
+        probe_position: Vec3r,
+        probe_rotation: Quatr,
+        collector: anytype,
+    ) void {
+        const idx = self.alloc.validate(id) orelse return;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return;
+        const body_position = self.bodies.items(.position)[idx];
+        const body_rotation = self.bodies.items(.rotation)[idx];
+
+        // Exhaustive on the body's class, no `else` — a fourth category is a compile error
+        // here and owes its own decision (§1.11.15, §1.11.17).
+        switch (shape.class()) {
+            .convex => {
+                const m = narrowphase.collideOrdered(
+                    Real,
+                    probe,
+                    probe_position,
+                    probe_rotation,
+                    shape_mod.supportShape(shape),
+                    body_position,
+                    body_rotation,
+                ) orelse return;
+                collector.add(0, m);
+            },
+            .half_space => {
+                var m = narrowphase.collidePlane(
+                    Real,
+                    shape_mod.halfSpace(shape),
+                    body_position,
+                    body_rotation,
+                    narrowphase.RelativePose(Real).init(
+                        body_position,
+                        body_rotation,
+                        probe_position,
+                        probe_rotation,
+                    ),
+                    probe,
+                ) orelse return;
+                m.normal = m.normal.neg(); // computed body→probe; the caller asked probe→body
+                collector.add(0, m);
+            },
+            // SEVERAL manifolds, one per contacting triangle — the one shape change a mesh
+            // imposes, and the reason this entry has no single-manifold form.
+            .triangle_soup => self.collideConvexMesh(
+                probe,
+                probe_position,
+                probe_rotation,
+                shape.mesh.?,
+                body_position,
+                body_rotation,
+                false, // the mesh is B, so the normal comes out probe→body already
+                collector,
+            ),
+        }
+    }
+
     /// `collidePairEach` for a fixed (already-canonical body-id) order — validates both
     /// handles/shapes then runs the manifold pipeline in THIS order. Calls `collideOrdered`
     /// (not `collide`): `collide` would re-canonicalize by pose, so the `feature_id`
@@ -1389,6 +1671,60 @@ const SingleManifoldCollector = struct {
     }
 };
 
+/// Whether a surface with outward normal `n` opposes travel along `d`.
+///
+/// **AN EXACT ZERO, AND A NOISE BAND HERE WAS WRITTEN, MEASURED AND REVOKED.** The band closed all
+/// twenty-eight cells of the insoluble-squeeze grid at BOTH precisions and it still had to go, because
+/// what it bought in that authoring-fault configuration it paid for on the DEFAULT path: discarding a
+/// grazing contact lets the capsule advance INTO the surface by `distance × |n · d|`, measured at
+/// `3.05e-5` over 32 m and growing without bound with the distance. A traversable geometry is worse
+/// than a partial serve.
+///
+/// **AND NO BAND ON THIS QUANTITY CAN WORK — the demonstration is algebraic, not empirical, and it is
+/// written here so nobody spends another round rediscovering it.** The two populations a band would
+/// have to separate are a TRANSPORT RESIDUE, which tracks `floatEps(Real)` because it is the rounding
+/// of a quaternion rotation, and a REAL GRAZING INCIDENCE, which is geometric and does not depend on
+/// the precision at all. They separate by nine orders at f64 and by a factor of 2.4 at f32, so the
+/// inseparability is structurally an f32 phenomenon and no threshold expressed in ULPs sits between
+/// them. The length-dimensioned form escapes nothing either: the penetration is
+/// `distance × |n · d|` and the tolerance would be `k · floatEps · coordScale` with `coordScale ≈
+/// distance`, so it is THIS test with both sides multiplied by the distance — it buys nothing, at any
+/// precision.
+///
+/// What the exact zero leaves open is upstream of this predicate and is recorded in `CLAUDE.md`:
+/// whether a path exists that does not DEGRADE an axis-aligned quad's face normal under a yaw, rather
+/// than tolerating the degradation after the fact.
+///
+/// **`d` IS UNIT BY PRECONDITION, and that is the point rather than a detail.** Three forms of this
+/// predicate were wrong about the direction, each differently: an ABSOLUTE threshold made the verdict
+/// depend on `‖d‖`, so the same geometry changed sides when the direction arrived twice as long; a
+/// bare sign test on a raw `d` UNDERFLOWS, since for a denormal direction a product `n_i · d_i` with
+/// `|n_i| < 0.5` flushes to exactly zero and the sign is destroyed; and conditioning the vector HERE
+/// made this the second place that conditions it, which moved every query answer by an ULP.
+///
+/// All three have one root — the predicate deciding for itself what direction it had been handed —
+/// and the fix is that nobody downstream decides. `query/root.zig` conditions once for the whole
+/// query family and guards zero there; the character's own sweeps pass the exact constants `up` and
+/// `up.neg()` or normalise their remainder with the same shared form. Every consumer then ASSERTS,
+/// here and at the adapter's head, with `plane.zig` and `shapecast.zig` asserting the identical claim
+/// one tier down. An assert has no inside for two arms to disagree in.
+fn opposes(n: Vec3r, d: Vec3r) bool {
+    // `d` is UNIT because the CALLER guarantees it — `castShapeBodyOpposing` asserts the same thing at
+    // its head, and every direction reaching here is that vector or a rotation of it, which preserves
+    // the norm to a few ULP. Asserted rather than re-established: a sign test on a non-unit `d` was
+    // wrong twice, once through a threshold that scaled with `‖d‖` and once through an underflow that
+    // destroyed the sign, and BOTH disappear when the vector is unit. Re-normalising here would be a
+    // second answer to what direction the cast travels in, which is the class this entry collapsed.
+    std.debug.assert(@abs(d.lengthSq() - 1) <= direction_unit_k * std.math.floatEps(Real));
+    return n.dot(d) < 0;
+}
+
+/// Slack, in ULPs of 1, on the unit-norm precondition the cast adapter and its opposing predicate
+/// assert. The same constant and the same role as `plane.zig`'s `unit_k` and `shapecast.zig`'s
+/// `unit_dir_k`, which assert the identical claim one tier down — named here so the three cannot
+/// drift into three different ideas of what "unit" means.
+const direction_unit_k: comptime_int = 16;
+
 /// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
 /// the tie band that decides which edges a contact could have come from. Both compare
 /// quantities of order 1 (a dot product of two unit vectors) or a length against the triangle's
@@ -1580,6 +1916,17 @@ fn MeshContactCollector(comptime Sink: type) type {
 /// already guarantees `normal · direction <= 0` on every hit, so on this family the flip is
 /// STRUCTURAL rather than applied — a back-face hit's normal IS the negated triangle normal
 /// because that is the axis facing the probe. Asserted rather than assumed, in the suite.
+/// The first manifold normal a body offers, probe → body — the deepest-point selection the character
+/// makes is not needed here, the question being only which way the surface faces.
+const FirstManifoldNormal = struct {
+    normal: ?Vec3r = null,
+
+    pub fn add(self: *FirstManifoldNormal, subshape_id: u32, manifold: narrowphase.ContactManifold(Real)) void {
+        _ = subshape_id;
+        if (self.normal == null) self.normal = manifold.normal;
+    }
+};
+
 const MeshCastCollector = struct {
     data: *const MeshData,
     /// The probe, in its own frame — the caller owns it, it is not a body.
@@ -1591,20 +1938,23 @@ const MeshCastCollector = struct {
     /// Sweep direction in the BODY's local frame — what the facing test takes.
     sweep_direction_local: Vec3r,
     back_face_mode: api.BackFaceMode,
+    /// Skip any triangle whose CONTACT does not oppose the sweep. See `castShapeBodyOpposing`.
+    skip_non_opposing: bool,
     bound: Real,
     /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
     /// at the end of `castShapeBody` carries every class's answer to world in one place, so
     /// this arm must hand it the same frame the other two do.
     best: ?narrowphase.CastHit(Real) = null,
     best_triangle: u32 = 0,
+    /// The retained triangle's CONTACT normal in A's frame, surface → probe — set only at distance
+    /// zero, where it is the manifold this collector already computes for its verdict.
+    best_contact_normal: ?Vec3r = null,
 
     pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
-        if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(
-            Real,
-            self.data.faceNormal(triangle_index),
-            self.sweep_direction_local,
-        )) return;
-        const hit = narrowphase.castShape(
+        const face = self.data.faceNormal(triangle_index);
+        if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(Real, face, self.sweep_direction_local)) return;
+        // Unit by the adapter's precondition, like the convex arm and for the same reason.
+        const hit = narrowphase.castShapeUnit(
             Real,
             self.cast_shape,
             self.relpose,
@@ -1612,6 +1962,84 @@ const MeshCastCollector = struct {
             self.direction_in_a,
             self.bound,
         ) orelse return;
+
+        // **THE NON-OPPOSING TEST, ON THE CONTACT'S OWN NORMAL AND AFTER THE CAST.**
+        //
+        // An earlier form rejected the triangle BEFORE the cast, on its FACE normal, justified by "a
+        // translation cannot reach a plane it is parallel to". That is true of a PLANE and false of a
+        // TRIANGLE, which is finite and reachable by its EDGE. MEASURED on a quad platform with an open
+        // boundary edge, a capsule sweeping `+X` at four heights: the plain cast finds the edge at
+        // `d = 1.70` to `2.00` with real opposing normals — `(−0.55, 0.83, 0)`, `(−0.94, 0.33, 0)`,
+        // `(−1, 0, 0)` — and the face-normal filter answered `null` at every one. A character walked
+        // into the edge of a platform, and starting SEPARATED the depenetration could not recover it.
+        //
+        // **BOTH REGIMES CLASSIFY ON THE CONTACT, AND EACH IN ITS OWN FRAME.**
+        //
+        // At `d > 0` the cast's normal IS the contact's, and it lives in the PROBE's frame — so it is
+        // dotted with `direction_in_a` and never with `sweep_direction_local`, which is the BODY's. An
+        // earlier form mixed the two, and on a ROTATED mesh the product had no geometric meaning at all:
+        // a local `+Y` face turned into a world `−X` wall was hit by the plain cast and rejected by this
+        // one, at both precisions.
+        //
+        // At `d == 0` the cast's normal is `−direction` and carries nothing, so the contact is resolved
+        // by the MANIFOLD of that one triangle. The face normal was used here and it is NOT enough: a
+        // capsule exactly tangent to an ACTIVE EDGE, moving parallel to the triangle's plane, is rejected
+        // on the face normal and traverses — measured from `x = −0.3` to `x = 0.672` with the base still
+        // at `y = −0.3`, at both precisions. The hypothesis that "the depenetration owns that case" is
+        // refuted by that measurement, and the manifold is what carries an edge's real normal.
+        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** An earlier form
+        // computed the manifold below, used it, and dropped it; the caller then asked again over the
+        // WHOLE body and could be answered about the ceiling where this collector had retained the
+        // wall. Two answers to one geometric fact, with the body's yaw deciding which — the class this
+        // module refuses, and the reason the field exists rather than the recomputation.
+        var contact_normal: ?Vec3r = null;
+        if (self.skip_non_opposing) {
+            if (hit.distance > 0) {
+                if (!opposes(hit.normal, self.direction_in_a)) return;
+            } else {
+                // The triangle alone, in A's frame: A at the origin, B at the relative pose the kernel
+                // already holds. `null` means the narrowphase denies the contact the cast reported — the
+                // spurious hit — and nothing there opposes the motion either.
+                const m = narrowphase.collideOrdered(
+                    Real,
+                    self.cast_shape,
+                    Vec3r.zero,
+                    Quatr.identity,
+                    shape_mod.triangleSupportShape(self.data, triangle_index),
+                    self.relpose.pos_rel,
+                    self.relpose.rot_rel,
+                ) orelse return;
+                // **THE INTERNAL-EDGE CORRECTION, ON THIS PATH TOO.** The contact path has consumed
+                // the flags baked at creation since M1.1.11.1; this one called `collideOrdered`
+                // directly and bypassed the consumer, so a capsule DEEP under a flat quad received
+                // the normal of the quad's internal diagonal — horizontal, and OPPOSITE on the two
+                // triangles sharing it. The slide read the pair as a crease, then a third plane as a
+                // corner, and stopped: traced as the residual partial serve of ~0.459 where ~1.700 is
+                // the norm.
+                //
+                // The edge is recovered from the contact POINT's distance to the three segments, not
+                // from `feature_id` — which decodes here as a reference face on the SEGMENT (id 6) and
+                // incident winding VERTICES, never `class_edge`, and for a single-point manifold
+                // carries no edge information at all. So this is the existing function reused with the
+                // data this collector already holds, and not a second way of naming an edge.
+                //
+                // The mesh is B in this call — A is the probe at the origin — so `mesh_is_a` is false
+                // and the returned face normal is negated to stay A→B like `m.normal`.
+                var contact = m;
+                if (internalEdgeNormal(
+                    self.data,
+                    triangle_index,
+                    self.relpose.pos_rel,
+                    self.relpose.rot_rel,
+                    m,
+                    false,
+                )) |face_world| contact.normal = face_world.neg();
+                // `collideOrdered` returns probe → body; the opposing test wants surface → probe.
+                const n = contact.normal.neg();
+                if (!opposes(n, self.direction_in_a)) return;
+                contact_normal = n;
+            }
+        }
         if (self.best) |best| {
             if (hit.distance > best.distance) return;
             // Equal time of impact: the smaller triangle index wins, so the answer is a
@@ -1620,6 +2048,7 @@ const MeshCastCollector = struct {
         }
         self.best = hit;
         self.best_triangle = triangle_index;
+        self.best_contact_normal = contact_normal;
         self.bound = hit.distance;
     }
 
