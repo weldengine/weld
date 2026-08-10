@@ -264,6 +264,38 @@ pub const BodyDescriptor = struct {
     /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
     /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
     can_sleep: bool = true,
+    /// SENSOR role: the body detects without responding (`engine-physics-solver.md`
+    /// §1.13). It is inserted into the `trigger` broad class, whose matrix row and
+    /// column are `false` in full — so it never reaches constraint construction —
+    /// and it is ignored BY CONSTRUCTION by the character controller's three
+    /// collection paths (§1.13.7).
+    ///
+    /// The role is a property of the INSTANCE and not of the geometry: the shape
+    /// store is shared, so carrying this field on `ShapeDescriptor` would force two
+    /// bodies sharing a sphere to share their nature (§1.13.1). The ECS authoring
+    /// surface is `CollisionShape.is_trigger` (`engine-physics-forge.md` §2),
+    /// translated here.
+    ///
+    /// PRE-FREEZE EXTENSION, second-to-last window: after the M1.1.15 freeze of
+    /// `PhysicsModule` this field could no longer land, and nothing would let a
+    /// caller declare a trigger at all.
+    is_trigger: bool = false,
+    /// OBJECT layers this trigger detects: a candidate passes when
+    /// `(1 << candidate_layer) & trigger_layer_mask` is non-zero. Same mechanism
+    /// and same semantics as `PhysicsQueryFilter.layer_mask`, the only object-layer
+    /// filtering the engine owns (§1.11.5).
+    ///
+    /// UNILATERAL: the mask belongs to the trigger and describes what IT sees, so
+    /// two overlapping triggers are two relations evaluated separately and A may
+    /// see B without B seeing A (§1.13.5).
+    ///
+    /// INERT on a non-trigger body, and the field exists anyway: without it a
+    /// damage zone detects projectiles, debris and scenery, and the only substitute
+    /// would be reserving an object layer for triggers, which would make a
+    /// technical class carry a gameplay policy. Same arbitrage as `back_face_mode`
+    /// on `OverlapQuery` — an almost-inert field against a permanent dead end.
+    /// PRE-FREEZE EXTENSION, second-to-last window.
+    trigger_layer_mask: u32 = 0xFFFFFFFF,
 };
 
 // --- Body pose and velocity entries — semantics frozen here ---
@@ -830,6 +862,42 @@ test "BodyDescriptor defaults match the brief" {
     try testing.expectEqual(true, d.can_sleep);
     try testing.expect(d.position.eql(Vec3.zero));
     try testing.expect(d.rotation.approxEql(Quatf.identity, 0));
+
+    // The two SENSOR fields (M1.1.13), transcribed from `engine-tier-interfaces.md` §1
+    // at version 0.9 name for name and default for default. `is_trigger` defaults OFF —
+    // the role is opt-in, and a default of `true` would make every body that forgot the
+    // field stop responding physically. `trigger_layer_mask` defaults to ALL layers, the
+    // same value and the same reason as `PhysicsQueryFilter.layer_mask`: a mask that
+    // defaulted to zero would make a declared trigger detect nothing, which reads as
+    // "sensors do not work" rather than as "you forgot the mask" (§1.13.5).
+    try testing.expectEqual(false, d.is_trigger);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), d.trigger_layer_mask);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), (PhysicsQueryFilter{}).layer_mask);
+
+    // The mask is 32 bits WIDE, which is what makes it the same object-layer mechanism as
+    // the query filter's and what bounds `collision_layer` to `[0, collision_layer_count)`.
+    // A `u16` here would silently make every body above layer 15 undetectable.
+    try testing.expectEqual(u32, @TypeOf(d.trigger_layer_mask));
+    try testing.expectEqual(@as(usize, collision_layer_count), @bitSizeOf(@TypeOf(d.trigger_layer_mask)));
+
+    // Referencing every field by name makes a rename or a removal a COMPILE error; this
+    // count is what makes an ADDITION visible, which no by-name reference can catch. Same
+    // shape as `CharacterDescriptor`'s below, and for the same reason: after the M1.1.15
+    // freeze, `engine-c-api.md` carrying no `struct_size` and no minor version, appending
+    // one defaulted field here is an ABI break and not a source-compatible addition.
+    try testing.expectEqual(@as(usize, 16), @typeInfo(BodyDescriptor).@"struct".fields.len);
+
+    // The role is a property of the INSTANCE and never of the geometry (§1.13.1): the
+    // shape store is shared and one `ShapeId` is referenceable by several bodies, so the
+    // field on `ShapeDescriptor` would force two bodies sharing a sphere to share their
+    // nature. Pinned as an ABSENCE, because that is the form the error would take — a
+    // later milestone moving it there has to delete this line first.
+    inline for (@typeInfo(ShapeDescriptor).@"union".fields) |f| {
+        if (@typeInfo(f.type) == .@"struct") {
+            try testing.expect(!@hasField(f.type, "is_trigger"));
+            try testing.expect(!@hasField(f.type, "trigger_layer_mask"));
+        }
+    }
 }
 
 test "ShapeType and BodyType are u8-backed" {

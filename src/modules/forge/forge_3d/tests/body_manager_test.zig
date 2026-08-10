@@ -578,3 +578,60 @@ test "the class precondition of every reader discriminates both ways" {
     try testing.expect(std.math.isNan(plane.local_aabb.min.toArray()[0]));
     try testing.expect(std.math.isNan(plane.unit_inertia.toArray()[0]));
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.13 / gate A — the sensor role reaches the store, and the mask with it
+// ---------------------------------------------------------------------------
+
+test "the sensor role and its detection mask survive addBody" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // A body that says nothing is NOT a trigger, and it detects everything — which is
+    // inert on it. Both halves of the default are asserted, because a mask defaulting to
+    // zero would make every declared trigger silently blind (§1.13.5).
+    const plain = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    try testing.expectEqual(false, bm.isTrigger(plain).?);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), bm.triggerLayerMask(plain).?);
+
+    // POSITIVE CONTROL for the line above: a body that DOES declare the role reads back
+    // as one. Without it, `isTrigger` returning a constant `false` would satisfy the
+    // default assertion and nothing else.
+    var trigger_desc = descOf(1, .static, s);
+    trigger_desc.is_trigger = true;
+    // Layers 0 and 5 only — a value that is neither the default nor zero, so a dropped
+    // assignment and a zeroed column are two distinguishable failures.
+    trigger_desc.trigger_layer_mask = (1 << 0) | (1 << 5);
+    const trigger = try bm.addBody(gpa, &store, trigger_desc);
+    try testing.expectEqual(true, bm.isTrigger(trigger).?);
+    try testing.expectEqual(@as(u32, 0b100001), bm.triggerLayerMask(trigger).?);
+
+    // The mask is stored VERBATIM on a NON-trigger body — the column is not a second
+    // representation of the role. Asserted against a value that differs from both the
+    // default and the trigger's, so this cannot pass by coincidence.
+    var inert_desc = descOf(2, .dynamic, s);
+    inert_desc.trigger_layer_mask = 1 << 7;
+    const inert = try bm.addBody(gpa, &store, inert_desc);
+    try testing.expectEqual(false, bm.isTrigger(inert).?);
+    try testing.expectEqual(@as(u32, 0b10000000), bm.triggerLayerMask(inert).?);
+
+    // The role is per BODY and not per SHAPE, and this is what proves it rather than
+    // restates it: all three bodies above share ONE `ShapeId`, and they disagree.
+    try testing.expectEqual(s, bm.shapeOf(plain).?);
+    try testing.expectEqual(s, bm.shapeOf(trigger).?);
+    try testing.expectEqual(s, bm.shapeOf(inert).?);
+    try testing.expect(bm.isTrigger(plain).? != bm.isTrigger(trigger).?);
+
+    // The role does not disturb the flags that shared the byte with it.
+    try testing.expectEqual(true, bm.canSleep(trigger).?);
+    try testing.expectEqual(false, bm.isSleeping(trigger).?);
+
+    // Stale handle ⇒ null on both, parity with every other stale-safe getter.
+    bm.removeBody(trigger);
+    try testing.expectEqual(@as(?bool, null), bm.isTrigger(trigger));
+    try testing.expectEqual(@as(?u32, null), bm.triggerLayerMask(trigger));
+}

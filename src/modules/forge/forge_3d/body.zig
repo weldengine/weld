@@ -40,7 +40,16 @@ pub const BodyFlags = packed struct(u8) {
     /// pairs produce no narrowphase work, and its sleep window stops advancing
     /// (§1.8.6).
     sleeping: bool = false,
-    _reserved: u5 = 0,
+    /// Whether this body is a SENSOR: it detects without responding
+    /// (`engine-physics-solver.md` §1.13). It is inserted into the `trigger` broad
+    /// class, whose pair-matrix row and column are `false` in full, so no candidate
+    /// pair involving it ever reaches constraint construction — hence no manifold,
+    /// no impulse and no island membership (§1.13.7).
+    ///
+    /// A FLAG and not a column because it is one bit that costs nothing here; the
+    /// detection MASK is a separate column, being 32 bits wide.
+    is_trigger: bool = false,
+    _reserved: u4 = 0,
 };
 
 /// The inverse quantities the integrator/solver act on. Static and kinematic
@@ -102,10 +111,25 @@ pub const Body = struct {
     shape: ShapeId,
     /// Simulation class.
     body_type: BodyType,
-    /// Object collision-layer index (stored from the descriptor). Consumed by
-    /// the object-layer pair filtering / `CollisionConfig` matrix wiring in a
-    /// later M1.1 sub-milestone; nothing reads it yet.
+    /// Object collision-layer index (stored from the descriptor). Read by the query
+    /// family's object-layer mask (§1.11.5) and, since M1.1.13, by the sensor pass,
+    /// which tests it against the TRIGGER's `trigger_layer_mask` (§1.13.5). The
+    /// object-layer pair filtering / `CollisionConfig` matrix is still unwired.
     collision_layer: u8,
+    /// OBJECT layers this body detects WHEN IT IS A TRIGGER — inert otherwise. A
+    /// candidate passes when `(1 << candidate.collision_layer) & trigger_layer_mask`
+    /// is non-zero (§1.13.5).
+    ///
+    /// UNILATERAL: it belongs to the trigger and describes what IT sees, so two
+    /// overlapping triggers are two relations evaluated separately and A may see B
+    /// without B seeing A. It is therefore NOT a pair predicate and must never be
+    /// consulted symmetrically.
+    ///
+    /// A separate SoA COLUMN and not a flag: 32 bits do not fit in `BodyFlags`, and
+    /// storing it beside `collision_layer` keeps the two object-layer quantities —
+    /// what the body IS and what it SEES — adjacent, which is the pairing
+    /// §1.12.4 already draws for the character controller.
+    trigger_layer_mask: u32,
     /// Per-body flags.
     flags: BodyFlags,
     /// Seconds the body has stayed within `SleepConfig.maxDisplacement()` of its
@@ -247,6 +271,31 @@ pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
         .angular_damping = ad,
         .gravity_factor = gf,
     };
+}
+
+test "the sensor flag costs no byte and leaves the existing flags in place" {
+    // `is_trigger` takes one of the five bits `_reserved` carried, so the byte is
+    // unchanged — asserted, because the whole reason the role is a FLAG and the mask is
+    // a COLUMN is that the flag was free and 32 bits are not.
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(BodyFlags));
+    try std.testing.expectEqual(u8, @typeInfo(BodyFlags).@"struct".backing_integer.?);
+
+    // Default OFF, and the three pre-existing defaults unmoved: a body that says nothing
+    // about the role is a normal body.
+    const f = BodyFlags{};
+    try std.testing.expectEqual(false, f.is_trigger);
+    try std.testing.expectEqual(false, f.continuous);
+    try std.testing.expectEqual(true, f.can_sleep);
+    try std.testing.expectEqual(false, f.sleeping);
+
+    // The bit is DISJOINT from the three that already existed. Setting it alone must not
+    // move any other, which a positive control makes meaningful: `sleeping` alone gives a
+    // different byte, so the comparison below is between two reachable states and not
+    // between one state and itself.
+    const only_trigger: u8 = @bitCast(BodyFlags{ .can_sleep = false, .is_trigger = true });
+    const only_sleeping: u8 = @bitCast(BodyFlags{ .can_sleep = false, .sleeping = true });
+    try std.testing.expect(only_trigger != only_sleeping);
+    try std.testing.expectEqual(@as(u8, 0), only_trigger & only_sleeping);
 }
 
 test "static and kinematic bodies have zero inverse mass and inertia" {

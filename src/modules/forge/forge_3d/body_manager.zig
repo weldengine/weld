@@ -218,7 +218,16 @@ pub const BodyManager = struct {
             .shape = desc.shape,
             .body_type = desc.body_type,
             .collision_layer = desc.collision_layer,
-            .flags = .{ .continuous = desc.continuous, .can_sleep = desc.can_sleep },
+            // Stored VERBATIM, including on a non-trigger body where it is inert. Zeroing
+            // it there would make the column a second representation of the role, which
+            // already lives in the flag, and two representations of one fact are two
+            // things that can disagree.
+            .trigger_layer_mask = desc.trigger_layer_mask,
+            .flags = .{
+                .continuous = desc.continuous,
+                .can_sleep = desc.can_sleep,
+                .is_trigger = desc.is_trigger,
+            },
             // The sleep window opens at the creation pose, closed (`sleep_time`
             // zero) — a fresh body has not yet stood still for any length of time.
             .sleep_time = 0,
@@ -321,6 +330,31 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Safe getter: whether the body carries the SENSOR role, or null if `id` is
+    /// stale/invalid (`engine-physics-solver.md` §1.13).
+    ///
+    /// A trigger detects without responding: it is inserted into the `trigger` broad
+    /// class whose pair-matrix row and column are `false` in full, so it reaches no
+    /// constraint, no impulse and no island — and the character controller excludes it
+    /// from its three collection paths by construction (§1.13.7). The public queries, by
+    /// contrast, see it like any other body (§1.11.1 point 3).
+    pub fn isTrigger(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].is_trigger;
+    }
+
+    /// Safe getter: the OBJECT layers this body detects when it is a trigger, or null if
+    /// `id` is stale/invalid. Inert on a non-trigger body, where it is still stored
+    /// verbatim from the descriptor (§1.13.5).
+    ///
+    /// UNILATERAL: it says what THIS body sees, never what sees it. A caller testing it
+    /// symmetrically has misread the model — two overlapping triggers are two relations,
+    /// and A may see B without B seeing A.
+    pub fn triggerLayerMask(self: *const BodyManager, id: BodyId) ?u32 {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.trigger_layer_mask)[idx];
     }
 
     /// Safe getter: the body's simulation class, or null if `id` is stale/invalid.
