@@ -3508,40 +3508,34 @@ test "the mesh scene at six yaws: the wall blocks, and the squeeze residue is PI
                 // anything. A bound and not `!= 0` on purpose: a dribble of `1e-9` is a freeze in every
                 // sense that matters, and `!= 0` would accept it.
                 //
-                // f32 ONLY, and the gate is the measurement's: at f64 one cell of the twenty-eight
-                // still freezes (90°, base 0), so the same assertion there would be false. Claiming it
-                // at both precisions is exactly what this suite has been caught doing.
+                // **THE SCOPE IS A MEASURED FACT AND NOT A CONVENIENCE GUARD, and the difference is
+                // the whole point of the round that produced this line.** The property was unguarded
+                // and RUN: it holds at `f32` and is FALSE at `f64`, where `yaw 90 / base 0` returns
+                // `−0e0` — a character that never moves again. So the claim is made exactly where it
+                // has been observed, and the `f64` failure is recorded in `CLAUDE.md` rather than
+                // hidden behind the condition that used to carry it.
                 //
-                // **The internal-edge correction closed one of the three residual cells and not the
-                // other two.** The character's cast path called `collideOrdered` directly and bypassed
-                // the consumer of the active-edge flags that the CONTACT path has used since
-                // M1.1.11.1, so a capsule deep under a flat quad received the normal of the quad's
-                // internal diagonal — horizontal, and opposite on the two triangles sharing it. With
-                // the correction branched in, f32 reads 26 of 28 converged, the two left being 0.506016
-                // at 90°/0.05 and 0.459151 at 315°/0.05 — both at the LIFTED base, where the closed one
-                // was the tangent base. At f64 nothing moved at all, the correction's noise gate being
-                // 2^29 tighter there. So the residue has a further cause again, and no common value is
-                // pinned.
+                // What the two sides rest on is NOT symmetric, and that asymmetry is the reason to
+                // write the scope down: at `f32` the property is exercised by four platform-and-mode
+                // combinations — arm64 macOS, `ubuntu-24.04` in Debug and in ReleaseSafe, and
+                // `windows-2025` — while at `f64` it is exercised by ONE, because no CI corner runs
+                // `-Dphysics_f64=true`, verified absent from `.github/`. The `f64` freeze is therefore
+                // a measurement on a single target, which is precisely the standing this suite has
+                // twice mistaken for a property.
                 if (Real == f32) try testing.expect(along > 0.1);
 
-                // **AND THE RESIDUAL CELLS ARE PINNED TO THEIR VALUES RATHER THAN SUFFERED.** A noise
-                // band on the opposing test closed all twenty-eight cells at both precisions and was
-                // REVOKED — see `opposes`, which carries the algebra: it opened a tunnelling window on
-                // the DEFAULT path worth `distance × |n · d|`, measured `3.05e-5` over 32 m and
-                // unbounded in the distance, and no band on that quantity can separate a transport
-                // residue that tracks `floatEps(Real)` from a grazing incidence that is geometric.
+                // **NOTHING IS ASSERTED ABOUT THE RESIDUAL CELLS' VALUE OR STATE, and two assertions
+                // were removed to make that true.** One pinned `0.506016400` at 90°/0.05 and one pinned
+                // the `f64` cell frozen at exactly zero. Both were measurements of THIS machine dressed
+                // as properties, and a quantity the consignation itself describes as decided by
+                // rounding is portable across neither instruction selection nor codegen mode: the first
+                // was refuted by `ubuntu-24.04 / Debug` reading `1.6999805` where arm64 read `0.506`,
+                // and the second was never contradicted only because NO CI corner runs
+                // `-Dphysics_f64=true` — verified absent from `.github/`, so its silence was not a
+                // confirmation.
                 //
-                // So the residue is permanent until the cause is closed upstream, and pinning it is
-                // what keeps this test honest: `> 0.1` above accepts 0.506 as readily as 1.700, and
-                // NOTHING at all watches the f64 cell, which is an exact zero — a character that never
-                // moves again. These two assertions are also the pin of the REVOCATION itself: against
-                // `a2e7493`, where the band made all twenty-eight converge, they fail.
-                if (yaw == 90) {
-                    if (Real == f32 and y0 == 0.05) {
-                        try testing.expectApproxEqAbs(@as(Real, 0.506016400), along, api_tol);
-                    }
-                    if (Real == f64 and y0 == 0) try testing.expect(along == 0);
-                }
+                // What survives is the property above, which is what the consignation actually claims
+                // and what breaks if the freeze class returns.
 
                 // **AND THE INTERNAL-EDGE CELL IS PINNED TO ITS VALUE, because the magnitude bound
                 // above does NOT discriminate it.** That cell read 0.459 before the correction was
