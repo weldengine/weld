@@ -1512,6 +1512,213 @@ test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by
     try testing.expectEqual(api.GroundState.grounded, r.ground.state);
 }
 
+// ---------------------------------------------------------------------------
+// M1.1.13 / gate C — the controller's three exclusions
+//
+// One case per collection path, each PAIRED WITH ITS POSITIVE CONTROL on geometry
+// identical to the byte: same shape, same pose, same displacement, `is_trigger` the
+// only thing that differs. Without the control every one of these is satisfied by a
+// controller that collides with nothing at all, which is the dominant apparatus
+// defect of this milestone (`engine-physics-solver.md` §1.13.7).
+//
+// The three closed forms are NOT re-derived here: each control reproduces a value an
+// existing test in this file already establishes — the wall at
+// `1.7 − padding·3/√10`, the 30° depenetration at `(0.02, 0.0315470)`, the resting
+// plane at `.grounded` with normal `+Y`. Re-deriving them would be a second source
+// for one geometric fact, which §1.12.6 names as a defect class in its own right.
+// ---------------------------------------------------------------------------
+
+/// The same box as `addBox`, carrying the SENSOR role. The harness derives its broad class
+/// from the descriptor, so this body lands in `trigger` by `broadLayerFor` and not by a
+/// literal (M1.1.13 gate B).
+fn addTriggerBox(gpa: std.mem.Allocator, world: *harness.World, half: ApiVec3, centre: ApiVec3, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = half } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = centre,
+        .is_trigger = true,
+    });
+}
+
+/// The same half-space as `addPlane`, carrying the SENSOR role.
+fn addTriggerPlane(gpa: std.mem.Allocator, world: *harness.World, normal: ApiVec3, distance: f32, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = normal, .distance = distance } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(0, 0, 0),
+        .is_trigger = true,
+    });
+}
+
+test "a trigger wall does not stop a sweep, and the same wall as a solid does" {
+    const gpa = testing.allocator;
+
+    // NEGATIVE: the wall of `a move into a wall …` — half-extents (1, 5, 5) centred at x = 3,
+    // so its −X face is at x = 2 — carrying the sensor role. The displacement (3, 0, 1) drives
+    // the capsule straight through it, so the whole of it is served and the final base is the
+    // displacement itself. The character ends INSIDE the trigger volume, which is the point: a
+    // sensor occupies space and opposes nothing.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const wall = try addTriggerBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 100);
+        // The role really is on the body, and it really is in the `trigger` class — asserted
+        // here rather than assumed, because a descriptor field that failed to reach the store
+        // would make the whole test pass for the wrong reason.
+        try testing.expectEqual(true, world.bm.isTrigger(wall).?);
+        try testing.expectEqual(
+            @import("../pipeline/broadphase.zig").BroadphaseLayer.trigger,
+            world.bm.broadLayer(wall).?,
+        );
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+        try testing.expect(r.position.approxEql(v(3, 0, 1), api_tol));
+    }
+
+    // POSITIVE CONTROL, identical to the byte but for `is_trigger`: the wall stops the sweep at
+    // `1.7 − padding·3/√10` in x while the tangential metre along +Z is served in full. Without
+    // this branch the assertion above is satisfied by a controller that sees nothing whatever.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 100);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+        const root10: Real = @sqrt(@as(Real, 10));
+        try testing.expectApproxEqAbs(1.7 - 0.02 * (3.0 / root10), r.position.toArray()[0], api_tol);
+        try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[2], api_tol);
+        // And the two answers really do differ, on the axis the wall opposes — the discriminator
+        // without which "3" and "1.68" could both be read as "the test passed".
+        try testing.expect(@abs(r.position.toArray()[0] - 3) > 1);
+    }
+}
+
+test "a trigger volume does not depenetrate the character, and the same volume as a solid does" {
+    const gpa = testing.allocator;
+
+    // NEGATIVE: the 30° half-space of `a move that starts interpenetrated …`, placed so the
+    // capsule starts 2 cm inside the solid, carrying the sensor role. The displacement is ZERO,
+    // so depenetration is the only thing that could move the character — and it does not. The
+    // base is asserted EXACTLY unchanged and not merely close: nothing ran, so nothing rounded.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const n = slopeNormal(30);
+        _ = try addTriggerPlane(gpa, &world, n, -0.0202, 120);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+        try testing.expectEqual(@as(Real, 0), r.position.toArray()[0]);
+        try testing.expectEqual(@as(Real, 0), r.position.toArray()[1]);
+        try testing.expectEqual(@as(Real, 0), r.position.toArray()[2]);
+        // Still inside the volume and still airborne: a sensor is not ground either.
+        try testing.expectEqual(api.GroundState.in_air, r.ground.state);
+    }
+
+    // POSITIVE CONTROL: the same half-space as a solid pushes the capsule out along the SLOPE's
+    // normal and the floor-sticking down-sweep re-seats it — `(0.02, 0.0315470)`, the value the
+    // existing depenetration test establishes.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const n = slopeNormal(30);
+        _ = try addPlane(gpa, &world, n, -0.0202, 120);
+
+        var desc = baseDescriptor();
+        desc.position = av(0, 0, 0);
+        const id = try addMover(gpa, &world, &chars, desc);
+
+        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+        try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[0], api_tol);
+        try testing.expectApproxEqAbs(@as(Real, 0.0315470), r.position.toArray()[1], api_tol);
+        try testing.expectEqual(api.GroundState.grounded, r.ground.state);
+    }
+}
+
+test "a trigger floor is never selected as ground, and the same floor as a solid is" {
+    const gpa = testing.allocator;
+
+    // NEGATIVE: the resting configuration of `a capsule resting on a plane …` — base at
+    // y = padding = 0.02, so the capsule's lower core endpoint is 2 cm clear of `{y <= 0}` and
+    // well inside the 0.12 m sweep band — with the floor carrying the sensor role. The verdict
+    // is `.in_air` and the four ground quantities are the absence defaults, ALL of them: a
+    // controller that reported `.in_air` while still naming a support body would be reporting
+    // two contradictory things.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        _ = try addTriggerPlane(gpa, &world, av(0, 1, 0), 0, 11);
+
+        var desc = baseDescriptor();
+        desc.entity = ent(50);
+        desc.position = av(0, 0.02, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(api.GroundState.in_air, g.state);
+        // All five quantities at their absence values, and the two HANDLES are the ones that
+        // matter here: a verdict of `.in_air` that still named a support body would be reporting
+        // two contradictory things, and it is the handles a partial refusal would leave behind.
+        try testing.expect(g.normal.eql(Vec3r.unit_y)); // the `.in_air` default, not a surface
+        try testing.expectEqual(api.EntityId.dead, g.entity);
+        try testing.expectEqual(@as(api.BodyId, api.PackedId.dead), g.body);
+        try testing.expect(g.velocity.eql(Vec3r.zero));
+    }
+
+    // POSITIVE CONTROL: the identical plane as a solid IS selected, with its own normal and its
+    // own body and entity — which is what proves the sweep reaches that geometry at all, and
+    // therefore that the branch above refused it on the ROLE and not on distance.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var chars: CharacterStore = .{};
+        defer chars.deinit(gpa);
+
+        const floor = try addPlane(gpa, &world, av(0, 1, 0), 0, 11);
+
+        var desc = baseDescriptor();
+        desc.entity = ent(50);
+        desc.position = av(0, 0.02, 0);
+        const id = try addCharacter(gpa, &world, &chars, desc);
+
+        const g = try chars.groundOf(&world.bp, &world.bm, &world.store, id);
+        try testing.expectEqual(api.GroundState.grounded, g.state);
+        try testing.expect(g.normal.approxEql(v(0, 1, 0), tol));
+        try testing.expectEqual(floor, g.body);
+        try testing.expectEqual(ent(11), g.entity);
+    }
+}
+
 test "self-exclusion is what lets a character move at all" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);

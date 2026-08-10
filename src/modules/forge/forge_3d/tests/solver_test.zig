@@ -71,9 +71,13 @@ pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
 
-fn broadphaseLayer(bt: api.BodyType) broadphase.BroadphaseLayer {
-    return if (bt == .static) .static else .dynamic;
-}
+// The harness does NOT compute a broad layer of its own. It calls
+// `BodyManager.broadLayerFor`, the same derivation production will use, so a trigger lands in
+// the `trigger` class BY THE RULE and not by a literal that happens to agree with it. A local
+// `if (bt == .static) .static else .dynamic` stood here until M1.1.13; it was right for the two
+// classes it knew and had no opinion about the role, so a sensor scene built on it would have
+// tested the rule beside the pass instead of through it. What remains between this harness and
+// what `PhysicsWorld` will do is one question — does M1.1.15 call this same function.
 
 fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
     std.mem.sort(u64, list.items, {}, std.sort.asc(u64));
@@ -173,7 +177,7 @@ pub const World = struct {
     /// leaves the trees.
     pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
-        const layer = broadphaseLayer(desc.body_type);
+        const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
         const shape = self.store.get(desc.shape).?;
         const proxy = switch (shape.class()) {
             .convex, .triangle_soup => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
