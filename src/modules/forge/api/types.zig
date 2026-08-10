@@ -895,11 +895,14 @@ test "BodyDescriptor defaults match the brief" {
     // nature. Pinned as an ABSENCE, because that is the form the error would take — a
     // later milestone moving it there has to delete this line first.
     //
-    // The VISITS are counted and the total asserted, because the loop's scope is not
-    // visible from its body: skipping the `void` variants is correct — a field cannot be
-    // added to `void` without first making it a struct, which this loop would then see —
-    // but nothing else would notice a struct variant being REMOVED, and the absence check
-    // would quietly cover less while still passing.
+    // The VISITS are counted and the variant total asserted, and the two lines catch
+    // DIFFERENT things. The total sees variants appear or disappear. The visit count is
+    // the only one that sees a change of DISTRIBUTION at a CONSTANT total — a `void`
+    // variant gaining a payload, or a `struct` variant losing one — and that is precisely
+    // what moves this loop's reach. Skipping the `void` variants is correct, a field
+    // cannot be added to `void` without first making it a struct; but a payload dropped
+    // from a struct variant leaves the total at 12 while the absence check quietly covers
+    // one variant less, still passing.
     comptime var visited: usize = 0;
     inline for (@typeInfo(ShapeDescriptor).@"union".fields) |f| {
         if (@typeInfo(f.type) == .@"struct") {
@@ -914,9 +917,15 @@ test "BodyDescriptor defaults match the brief" {
     //
     // COUNTER-FACTUAL MEASURED, by changing the UNION and not the expected count: giving
     // `cylinder` a payload reports `expected 5, found 6` here while the variant total
-    // below still passes — which is the division of labour between the two lines, the
-    // total seeing variants appear or vanish and the visit count seeing the loop's REACH
-    // change under a constant total.
+    // below still passes — a redistribution at constant total, the one case this line
+    // alone carries.
+    //
+    // The OTHER sense — a struct variant losing its payload — is deliberately NOT
+    // measured, and the omission is not a gap. `expectEqual` is a single code path and an
+    // equality falls on both sides by construction; once the line is established as
+    // reached and sensitive to `visited`, which the measurement above does, both senses
+    // are covered. The two-directions rule bites on a THRESHOLD, where each side is a
+    // distinct path — not on an equality.
     try testing.expectEqual(@as(usize, 5), visited);
     try testing.expectEqual(@as(usize, 12), @typeInfo(ShapeDescriptor).@"union".fields.len);
 }
