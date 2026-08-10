@@ -96,11 +96,20 @@ comptime {
     // POD layout pins — any future field change must revisit these.
     std.debug.assert(@sizeOf(RigidBody) == 32);
     std.debug.assert(@alignOf(RigidBody) == 4);
-    // 48 -> 52 at M1.1.13: `trigger_layer_mask` lands after `is_trigger`, so the
-    // three trailing padding bytes the 48-byte layout carried are consumed and the
-    // `u32` occupies bytes 48..52. This assert and the test that doubles it are
-    // updated TOGETHER — a pin changed in one place only is the defect the pair
-    // exists to catch.
+    // 48 -> 52 at M1.1.13. MEASURED, not reasoned: `collision_layer` sits at 44 and
+    // `is_trigger` at 45, so the byte after them is 46; the `u32` needs 4-alignment
+    // and therefore starts at 48, leaving bytes 46 and 47 as padding in BOTH layouts.
+    // The struct gains four full bytes and REUSES NOTHING — an earlier version of this
+    // comment claimed the trailing padding was consumed, which is false in two ways at
+    // once, so the three offsets below are pinned rather than described.
+    //
+    // These three are what decide the 52: a different arrangement landing on the same
+    // size must fail here. Size alone would not catch it.
+    std.debug.assert(@offsetOf(CollisionShape, "collision_layer") == 44);
+    std.debug.assert(@offsetOf(CollisionShape, "is_trigger") == 45);
+    std.debug.assert(@offsetOf(CollisionShape, "trigger_layer_mask") == 48);
+    // This assert and the test that doubles it are updated TOGETHER — a pin changed in
+    // one place only is the defect the pair exists to catch.
     std.debug.assert(@sizeOf(CollisionShape) == 52);
     std.debug.assert(@alignOf(CollisionShape) == 4);
     std.debug.assert(@sizeOf(PhysicsForces) == 32);
@@ -114,6 +123,13 @@ test "component layouts are the pinned extern-POD sizes" {
     try testing.expectEqual(@as(usize, 4), @alignOf(RigidBody));
     try testing.expectEqual(@as(usize, 52), @sizeOf(CollisionShape));
     try testing.expectEqual(@as(usize, 4), @alignOf(CollisionShape));
+    // The three offsets that decide the 52 (see the comptime block): `collision_layer`
+    // at 44, `is_trigger` at 45, and the `u32` at 48 — bytes 46 and 47 are padding in
+    // the 48-byte layout and stay padding in this one. Doubled here so the pin cannot be
+    // moved in one place only.
+    try testing.expectEqual(@as(usize, 44), @offsetOf(CollisionShape, "collision_layer"));
+    try testing.expectEqual(@as(usize, 45), @offsetOf(CollisionShape, "is_trigger"));
+    try testing.expectEqual(@as(usize, 48), @offsetOf(CollisionShape, "trigger_layer_mask"));
     try testing.expectEqual(@as(usize, 32), @sizeOf(PhysicsForces));
     try testing.expectEqual(@as(usize, 16), @alignOf(PhysicsForces));
 }
