@@ -415,10 +415,12 @@ pub const BodyManager = struct {
     ///
     /// Clearing is SAFE because a body in the `trigger` class has NO retained pairs at all —
     /// the whole `trigger` row and column of `default_layer_pairs` are `false` (§1.13.3), so
-    /// it has never entered the candidate set. It has nothing to purge; the caller owes only
-    /// the proxy move, the broad class being DERIVED from the role (`broadLayerFor`), so a
-    /// cleared body belongs to `static` or `dynamic` and a proxy belongs to one layer's
-    /// structure. This entry holds no broadphase and could not move it.
+    /// it has never entered the candidate set. So there is nothing to PURGE — but the caller
+    /// still composes the proxy move AND the wakes: the broad class is DERIVED from the role
+    /// (`broadLayerFor`), so a cleared body belongs to `static` or `dynamic` and a proxy belongs
+    /// to one layer's structure, and the bodies around and including it may be asleep. The
+    /// complete composition is the three-branch operation detailed below. This entry holds no
+    /// broadphase and could not do any of it.
     ///
     /// **Setting the role would be unsound today, and the mechanism is exact.** The retained
     /// candidate set is a CORRECTNESS condition of sleep (§1.8.7) and is therefore never
