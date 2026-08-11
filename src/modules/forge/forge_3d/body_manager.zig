@@ -178,6 +178,28 @@ pub const BodyManager = struct {
         if (must_be_static and desc.body_type != .static) {
             return error.ShapeMustBeStatic;
         }
+        // THE SENSOR ROLE NEEDS AN INTERIOR, and a triangle soup has none. A `MeshShape` is a
+        // SURFACE and not a solid — a categorical rule, not a setting (§1.11.17) — from which
+        // it follows that membership is false everywhere on it and `pointQuery` never returns
+        // a body carrying one. A sensor answers "who is inside"; a surface has no inside, so
+        // asking for the role on a mesh is a category error and gets a DIAGNOSTIC rather than
+        // a silent answer.
+        //
+        // **The half-space KEEPS the role**, and the distinction is exactly the one §1.11.17
+        // draws: a half-space IS a volume with a well-defined interior. It is the kill plane
+        // under the level, and nothing here removes it.
+        //
+        // Named on the INVARIANT rather than on the shape, like `ShapeMustBeStatic` above, so
+        // the next surface-like category — `HeightField` joins `.triangle_soup` at its own
+        // sub-milestone — reuses it instead of minting a second error. The test is on the
+        // CLASS for the same reason.
+        //
+        // Ordered with the other creation refusals and BEFORE any derived computation. It is
+        // also what makes the sensor pass total: with mesh triggers refused at the source, the
+        // only pair that had no exact kernel — mesh against mesh — is no longer reachable.
+        if (desc.is_trigger and shape.class() == .triangle_soup) {
+            return error.TriggerShapeMustBeSolid;
+        }
         // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
         // beyond that domain would be invisible to every query with no diagnostic
         // at all — the silent-miss class the shape invariant forbids
@@ -411,8 +433,18 @@ pub const BodyManager = struct {
     /// lose their support by it. All three belong to the owner of the retained set, which is
     /// `PhysicsWorld` and is not this store.
     ///
-    /// NON-ACTIVATING, like the other write paths of §1.8.4: losing the sensor role is not a
-    /// solicitation, and any wake the caller owes is composed by the caller.
+    /// **NON-ACTIVATING, and the wake the caller owes is NAMED because it is not obvious.**
+    /// This store holds neither broadphase nor islands, so it cannot wake anything — the
+    /// contract is §1.8.4's, and it is unchanged. What is easy to miss is WHICH bodies are
+    /// owed: clearing the role turns a volume that opposed nothing into a SOLID, so the bodies
+    /// that must be woken are those already OVERLAPPING it at that instant. They are not
+    /// discoverable from this call — the store has no candidate set to consult — so the caller
+    /// finds them with an overlap query against the body's own shape and pose, and wakes them.
+    ///
+    /// Until it does, a sleeping body inside the new solid STAYS asleep and interpenetrated:
+    /// no pass will notice, because a sleeper emits nothing in broadphase and the retained set
+    /// never held a pair for a body that was in the `trigger` class. That is a precondition,
+    /// pinned by a case in the sensor suite rather than left to be believed done.
     ///
     /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
     /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
@@ -1139,6 +1171,62 @@ pub const BodyManager = struct {
                 };
                 _ = data.traverseAabb(probe_box, &collector);
                 return collector.found;
+            },
+        }
+    }
+
+    /// Whether the solid of a HALF-SPACE body meets the solid of a NON-CONVEX body — the two
+    /// kernels the sensor pass needs once no side can be a convex probe (M1.1.13, §1.13.6).
+    /// Null when either handle or its shape is stale.
+    ///
+    /// **PRECONDITION, asserted: `plane_body` carries a half-space and `other` is NOT convex.**
+    /// A convex `other` is served by `overlapShapeBody` with the convex as the probe, which is
+    /// the probe rule's second clause; routing it here instead would be a second path to one
+    /// answer. And `other` can never be a triangle soup carrying the sensor role, `addBody`
+    /// refusing that at creation — which is what makes this dispatch two arms and not four.
+    ///
+    /// Both arms are exact and neither iterates: two half-spaces meet unless their normals are
+    /// exactly opposite with disjoint boundaries, and a surface meets a half-space iff one of
+    /// its vertices does, a triangle being the convex hull of its three.
+    pub fn halfSpaceOverlapsBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        plane_body: BodyId,
+        other: BodyId,
+    ) ?bool {
+        const pi = self.alloc.validate(plane_body) orelse return null;
+        const oi = self.alloc.validate(other) orelse return null;
+        const plane_shape = store.get(self.bodies.items(.shape)[pi]) orelse return null;
+        const other_shape = store.get(self.bodies.items(.shape)[oi]) orelse return null;
+        std.debug.assert(plane_shape.class() == .half_space);
+        std.debug.assert(other_shape.class() != .convex);
+
+        const world_plane = shape_mod.halfSpace(plane_shape).transformed(
+            self.bodies.items(.rotation)[pi],
+            self.bodies.items(.position)[pi],
+        );
+        switch (other_shape.class()) {
+            .convex => unreachable, // excluded by the precondition above
+            .half_space => {
+                const world_other = shape_mod.halfSpace(other_shape).transformed(
+                    self.bodies.items(.rotation)[oi],
+                    self.bodies.items(.position)[oi],
+                );
+                return narrowphase.plane.halfSpacesOverlap(Real, world_plane, world_other);
+            },
+            // The PLANE is transported into the MESH's local frame, not the vertices into the
+            // world: one transport instead of V, and the residue stays inside `signedDistance`.
+            .triangle_soup => {
+                const inv_rot = self.bodies.items(.rotation)[oi].conjugate();
+                const local_plane = world_plane.transformed(
+                    inv_rot,
+                    inv_rot.rotateVec3(self.bodies.items(.position)[oi].neg()),
+                );
+                return narrowphase.plane.halfSpaceMeetsVertices(
+                    Real,
+                    local_plane,
+                    other_shape.mesh.?.vertices,
+                );
             },
         }
     }

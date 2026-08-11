@@ -1167,17 +1167,36 @@ pub fn Broadphase(comptime T: type) type {
             }
         }
 
-        /// Offer every leaf of every layer TREE that meets the half-space to `collector`.
+        /// Offer every proxy that meets the half-space to `collector` — every layer TREE, then
+        /// every layer's UNBOUNDED list. Symmetric with `queryAabb`, which visits both halves
+        /// for the same reason: nothing here has a second body, so no row of the pair matrix
+        /// applies and every structure is visited.
         ///
-        /// **Named for exactly what it visits, because what it omits is the point.** It does
-        /// NOT visit the unbounded lists. Two half-spaces have no narrowphase kernel
-        /// (§1.11.15) and the sensor pass, its only caller, declares such a pair OUT OF DOMAIN
-        /// — both sides carry a static-only shape, so the overlap cannot vary under simulation
-        /// and could never produce a transition (§1.13.6). Putting the omission in the NAME
-        /// keeps a later caller from reading a silent miss as coverage.
-        pub fn queryHalfSpaceTrees(self: *const Self, normal: Vec3T, distance: T, collector: anytype) u32 {
+        /// **It was `queryHalfSpaceTrees` and visited only the trees**, named for its omission
+        /// because the sensor pass declared half-space against half-space out of domain. That
+        /// bound is RETRACTED (§1.13.6): it rested on a partition grouping half-space and mesh
+        /// by BODY TYPE where the question is whether the shape has an INTERIOR. A half-space
+        /// has one, its kernel against another half-space is two lines, and the omission had
+        /// no motive left — so it is the omission that goes, not merely the name.
+        ///
+        /// The unbounded walk offers the caller's OWN proxy back when it is itself unbounded;
+        /// excluding it is the caller's business, exactly as it is for `queryAabb`.
+        pub fn queryHalfSpace(self: *const Self, normal: Vec3T, distance: T, collector: anytype) u32 {
             var visited: u32 = 0;
             for (&self.trees) |*t| visited += t.queryHalfSpace(normal, distance, collector);
+            for (&self.unbounded) |*list| {
+                for (list.items) |slot| {
+                    if (!slot.live) continue;
+                    // **OFFERED UNFILTERED, and that is the division of labour.** A first
+                    // version tested disjointness here — a copy of the narrowphase kernel's own
+                    // closed form — and the duplicate is what a counter-factual caught: forcing
+                    // the KERNEL to answer always-true changed no test, because this filter was
+                    // deciding instead of it. The broadphase BOUNDS candidates and the exact
+                    // kernel DECIDES membership (§1.13.6); for two unbounded shapes there is
+                    // nothing to bound, so there is nothing to do here.
+                    collector.add(slot.user_data);
+                }
+            }
             return visited;
         }
 

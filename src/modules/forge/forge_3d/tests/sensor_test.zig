@@ -1,8 +1,13 @@
 //! Acceptance suite for the sensor traversal (M1.1.13).
 //!
-//! Gate D covers the traversal alone: trigger-proxy enumeration, the unilateral mask, the
-//! exact narrowphase confirmation, the probe rule and the domain bound. It produces a set
-//! of BODY-level overlaps; the entity mapping and the two deltas are the gate above.
+//! Trigger-proxy enumeration, the unilateral mask, the exact narrowphase confirmation, the
+//! probe rule and the creation-time refusal of the role on a mesh; then the observable state
+//! and its two deltas.
+//!
+//! **No domain bound remains.** An earlier version carried one, excluding pairs whose two
+//! sides both carried a static-only shape; it grouped half-space and mesh by BODY TYPE where
+//! the question is whether the shape has an INTERIOR, and it is retracted (§1.13.6). A mesh
+//! cannot be a trigger, a half-space can, and every reachable pair has an exact kernel.
 //!
 //! Half of this milestone's claims are NEGATIVE, so every negative case ships with the
 //! positive control that proves the apparatus can observe the thing being denied.
@@ -15,6 +20,7 @@ const sensor = @import("../pipeline/sensor.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
 const harness = @import("solver_test.zig");
+const query = @import("../query/root.zig");
 const Layer = @import("../pipeline/broadphase.zig").BroadphaseLayer;
 
 const Real = config.Real;
@@ -309,56 +315,115 @@ test "the probe rule serves both configurations in which it decides the answer" 
     // be usable, so M1.1.14 can verify it instead of establishing it.
 }
 
-test "a pair of static-only shapes is out of the detection domain" {
+test "the sensor role is refused on a mesh, by typed error, and kept on a half-space" {
     const gpa = testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
+
+    // **A SENSOR NEEDS AN INTERIOR, and a triangle soup has none.** A `MeshShape` is a SURFACE
+    // and not a solid — categorical, not a setting (§1.11.17) — so membership is false
+    // everywhere on it and `pointQuery` never returns a body carrying one. A sensor answers
+    // "who is inside"; a surface has no inside. The refusal is a DIAGNOSTIC and not a silent
+    // answer, and it is named on the INVARIANT so the next surface-like class reuses it.
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const verts = [_]V{
+        .{ .data = .{ -5, 0, -5 } }, .{ .data = .{ 5, 0, -5 } },
+        .{ .data = .{ -5, 0, 5 } },  .{ .data = .{ 5, 0, 5 } },
+    };
+    const tris = [_]u32{ 0, 2, 1, 1, 2, 3 };
+    const mesh = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+
+    try testing.expectError(error.TriggerShapeMustBeSolid, world.bm.addBody(gpa, &world.store, .{
+        .entity = ent(1),
+        .body_type = .static,
+        .shape = mesh,
+        .position = av(0, 0, 0),
+        .is_trigger = true,
+    }));
+
+    // POSITIVE CONTROL 1: the SAME mesh without the role is accepted, so the refusal is about
+    // the role and not about the shape being unusable.
+    _ = try world.addBody(gpa, .{
+        .entity = ent(2),
+        .body_type = .static,
+        .shape = mesh,
+        .position = av(0, 0, 0),
+    });
+
+    // POSITIVE CONTROL 2: a HALF-SPACE keeps the role. It IS a volume with a well-defined
+    // interior — the kill plane under the level — and that is exactly the distinction, which a
+    // test refusing both would have hidden.
+    const plane = try addHalfSpaceTrigger(gpa, &world, 3);
+    try testing.expectEqual(true, world.bm.isTrigger(plane).?);
+}
+
+test "a half-space trigger detects a mesh, one vertex on the solid side being enough" {
+    const gpa = testing.allocator;
     var out: std.ArrayListUnmanaged(sensor.BodyOverlap) = .empty;
     defer out.deinit(gpa);
 
-    // **THIS PINS A DELIBERATE LIMITATION, NOT AN IMPOSSIBILITY** (§1.13.6). Neither a
-    // half-space nor a triangle soup can be a probe, so this pair has no exact predicate in
-    // either direction and produces no membership — a KNOWN FALSE NEGATIVE on a legal
-    // configuration.
-    //
-    // An earlier version of this comment justified it by invariance: both classes force a
-    // static body, so the overlap supposedly could not change. That premise is FALSE and is
-    // retracted. A static body is movable by pose write — `setBodyTransform` allows it, and
-    // this module treats the case explicitly — and streaming, removal and shape change
-    // produce transitions the same way. The pair really can enter and leave unobserved.
-    //
-    // The bound stands on cost: mesh × mesh has no kernel anywhere in the engine and is a
-    // piece of work in its own right, and writing the two cheap cells would reduce the bound
-    // to one without removing it, for configurations with no identified use. Its lifting
-    // belongs to the milestone that introduces that kernel, and `CLAUDE.md` carries it as an
-    // attributed open decision until then.
-    //
-    // GEOMETRY SAYS YES HERE, which is what makes the case discriminating: the quad sits at
-    // y = -0.5, entirely inside the solid {y <= 0}, so the two shapes really do intersect
-    // and it is the bound alone that refuses them.
-    const trigger = try addHalfSpaceTrigger(gpa, &world, 1);
-    const floor = try addMeshFloor(gpa, &world, -0.5, 2);
+    // The kernel is exact rather than approximate, and by CONVEXITY: a triangle is the convex
+    // hull of its vertices and a half-space is a convex set, so `n·x − d` attains its minimum
+    // over the triangle at a VERTEX. No edge or interior point can be inside while all three
+    // vertices are outside — which is why one vertex suffices and why stopping at the first is
+    // not a shortcut.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const trigger = try addHalfSpaceTrigger(gpa, &world, 1); // solid {y <= 0}
+        const floor = try addMeshFloor(gpa, &world, -0.5, 2); // entirely inside it
+        try collect(gpa, &world, &out);
+        try testing.expect(hasOverlap(out.items, trigger, floor));
+    }
 
-    try collect(gpa, &world, &out);
-    try testing.expect(!hasOverlap(out.items, trigger, floor));
-    try testing.expectEqual(@as(usize, 0), out.items.len);
+    // NEGATIVE, on the same trigger: a mesh entirely OUTSIDE the solid is not detected. Without
+    // it the case above is satisfied by a kernel that answers `true` unconditionally.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const trigger = try addHalfSpaceTrigger(gpa, &world, 1);
+        const above = try addMeshFloor(gpa, &world, 3, 2);
+        try collect(gpa, &world, &out);
+        try testing.expect(!hasOverlap(out.items, trigger, above));
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}
 
-    // POSITIVE CONTROL, on the SAME trigger rather than a fresh one: a convex body in the
-    // same solid IS detected. Without it the assertion above is satisfied by a traversal
-    // that reaches nothing at all — a half-space trigger visiting no tree would look
-    // identical.
-    const box = try addBox(gpa, &world, av(1, 1, 1), av(0, 0, 0), 3, false, 0);
-    try collect(gpa, &world, &out);
-    try testing.expect(hasOverlap(out.items, trigger, box));
-    try testing.expect(!hasOverlap(out.items, trigger, floor));
-    try testing.expectEqual(@as(usize, 1), out.items.len);
+test "two half-spaces meet unless their normals are opposite and their boundaries disjoint" {
+    const gpa = testing.allocator;
+    var out: std.ArrayListUnmanaged(sensor.BodyOverlap) = .empty;
+    defer out.deinit(gpa);
 
-    // And the mesh really was a CANDIDATE the traversal reached: the same mesh, against a
-    // CONVEX trigger, is detected. So the refusal above is the domain bound and not a
-    // traversal that never met the body.
-    const convex_trigger = try addBox(gpa, &world, av(1, 1, 1), av(0, -0.5, 0), 4, true, 0);
-    try collect(gpa, &world, &out);
-    try testing.expect(hasOverlap(out.items, convex_trigger, floor));
+    // The trigger's solid is `{y <= 0}`. A second half-space `{-y <= d}` is `{y >= -d}`, so the
+    // two are disjoint exactly when `0 + d < 0`. Analytic, no iteration, and the antiparallel
+    // test is at TRUE ZERO — two normals merely CLOSE to opposite still meet, in a wedge, so an
+    // epsilon there would answer "no overlap" for a pair that genuinely overlaps.
+    const cases = [_]struct { normal: [3]f32, distance: f32, expect: bool, why: []const u8 }{
+        .{ .normal = .{ 0, -1, 0 }, .distance = -1, .expect = false, .why = "opposite, d = -1 < 0: disjoint" },
+        .{ .normal = .{ 0, -1, 0 }, .distance = 1, .expect = true, .why = "opposite, d = 1 >= 0: they meet" },
+        .{ .normal = .{ 0, -1, 0 }, .distance = 0, .expect = true, .why = "opposite, d = 0: boundaries touch" },
+        .{ .normal = .{ 1, 0, 0 }, .distance = -50, .expect = true, .why = "not antiparallel: always meet" },
+    };
+    for (cases, 0..) |c, i| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const trigger = try addHalfSpaceTrigger(gpa, &world, 1);
+        const shape = try world.store.createShape(gpa, .{ .plane = .{
+            .normal = av(c.normal[0], c.normal[1], c.normal[2]),
+            .distance = c.distance,
+        } });
+        const other = try world.addBody(gpa, .{
+            .entity = ent(2 + @as(u32, @intCast(i))),
+            .body_type = .static,
+            .shape = shape,
+            .position = av(0, 0, 0),
+        });
+        try collect(gpa, &world, &out);
+        try testing.expectEqual(c.expect, hasOverlap(out.items, trigger, other));
+        // A trigger never detects itself, whatever the direction of the walk — and the
+        // unbounded list now offers it its own proxy back, so this is a live exclusion.
+        try testing.expect(!hasOverlap(out.items, trigger, trigger));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,4 +906,73 @@ test "a recycled BodyId slot cannot resurrect a membership" {
     try testing.expect(hasPair(state.exited.items, 1, 2));
     try testing.expectEqual(@as(usize, 0), state.current.items.len);
     try testing.expect(!hasPair(state.current.items, 1, 3));
+}
+
+test "clearing the role leaves an overlapping sleeper asleep until the caller composes" {
+    const gpa = testing.allocator;
+    // REAL sleep, not `initNoSleep`: the whole point is what happens to a body that is
+    // ACTUALLY asleep, and a world that never sleeps cannot show it.
+    var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    world.sensors_on = true;
+
+    // A trigger volume with a DYNAMIC body resting inside it. While the role is on, the pair
+    // is detected and the body sleeps: a trigger reaches no constraint, so the body is a
+    // singleton island and nothing keeps it awake.
+    const tshape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(2, 2, 2) } });
+    const trigger = try world.addBody(gpa, .{
+        .entity = ent(1),
+        .body_type = .static,
+        .shape = tshape,
+        .position = av(0, 0, 0),
+        .is_trigger = true,
+    });
+    const bshape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const sleeper = try world.addBody(gpa, .{
+        .entity = ent(2),
+        .body_type = .dynamic,
+        .shape = bshape,
+        .position = av(0, 0, 0),
+    });
+
+    for (0..60) |_| try world.step(gpa);
+    try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+    try testing.expect(hasPair(world.sensors.current.items, 1, 2));
+
+    // CLEAR THE ROLE. The volume becomes SOLID, and the sleeper is inside it.
+    try clearTriggerRole(gpa, &world, trigger);
+    try world.step(gpa);
+
+    // The pair exits, which is the fourth disappearance cause and is already covered above.
+    try testing.expect(hasPair(world.sensors.exited.items, 1, 2));
+
+    // **AND THE SLEEPER IS STILL ASLEEP, STILL INTERPENETRATED.** This is the PRECONDITION the
+    // entry documents, pinned rather than believed done: a sleeper emits nothing in
+    // broadphase, and the retained candidate set never held a pair for a body that was in the
+    // `trigger` class, so nothing in the cycle notices that a solid has appeared around it.
+    // Ten more ticks change nothing.
+    for (0..10) |_| {
+        try world.step(gpa);
+        try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+    }
+    try testing.expect(world.bm.position(sleeper).?.approxEql(Vec3r.zero, 1e-6));
+
+    // POSITIVE CONTROL — what the caller owes, performed: find the bodies overlapping the new
+    // solid with a query, and wake them. This is the composition the doc-comment names, and
+    // without it the assertion above is satisfied by a body that could never have woken.
+    var found: [8]api.BodyId = undefined;
+    const n = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = world.bm.shapeOf(trigger).?,
+        .position = world.bm.position(trigger).?,
+        .rotation = world.bm.rotation(trigger).?,
+    }, &found);
+    try testing.expect(n >= 1);
+    var woke = false;
+    for (found[0..n]) |id| {
+        if (id == trigger) continue;
+        world.bm.wakeBody(id);
+        if (id == sleeper) woke = true;
+    }
+    try testing.expect(woke); // the query really did find the sleeper
+    try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
 }

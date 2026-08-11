@@ -175,17 +175,16 @@ const TriggerVisitor = struct {
                 _ = self.bp.queryAabb(box, &sink);
             },
             // A HALF-SPACE has no box at all — `bodyAabb` asserts on it — so the candidate
-            // set is the corner predicate against the trees. The unbounded lists are not
-            // visited, and that is the domain bound below rather than an omission: the only
-            // pair it could yield is half-space against half-space, which is static on both
-            // sides.
+            // set is the corner predicate, over the trees AND the unbounded lists. Both
+            // halves: a half-space trigger against another half-space is a legal pair with a
+            // two-line kernel, and the bound that once excluded it is retracted (§1.13.6).
             .half_space => {
                 const shape = self.store.get(self.bm.shapeOf(trigger).?).?;
                 const world = shape_mod.halfSpace(shape).transformed(
                     self.bm.rotation(trigger).?,
                     self.bm.position(trigger).?,
                 );
-                _ = self.bp.queryHalfSpaceTrees(world.normal, world.distance, &sink);
+                _ = self.bp.queryHalfSpace(world.normal, world.distance, &sink);
             },
         }
         if (sink.err) |e| self.err = e;
@@ -218,65 +217,34 @@ const CandidateSink = struct {
         const layer = self.bm.collisionLayer(other) orelse return;
         if ((@as(u32, 1) << @intCast(layer)) & self.mask == 0) return;
 
-        const other_class = classOf(self.bm, self.store, other) orelse return;
-
-        // **THE DOMAIN BOUND (§1.13.6): a KNOWN FALSE NEGATIVE on a legal configuration, and
-        // not a property of the world.** Neither a half-space nor a triangle soup can be a
-        // probe, so a pair whose two sides carry a static-only shape has no exact predicate
-        // available in either direction. It produces NO membership.
-        //
-        // **The pair CAN change overlap, and an earlier version of this comment said it could
-        // not.** That premise was false and is retracted: a static body is movable by pose
-        // write — `setBodyTransform` allows it, and this module treats the case explicitly,
-        // the world-AABB cache invalidation being conditioned on body type PRECISELY because
-        // a non-dynamic body reaching it signals an external teleport. Streaming, removal and
-        // shape change produce transitions the same way. So a half-space × mesh pair can
-        // enter and leave without ever appearing in the state.
-        //
-        // **The bound stands on its real motive: the cost of covering it is out of proportion
-        // to its use.** The missing kernel that matters is mesh × mesh — two triangulated
-        // surfaces whose exact overlap has no kernel anywhere in the engine, and a piece of
-        // work in its own right. The other two cells, half-space × half-space and half-space
-        // × mesh, are cheap; writing them would reduce the bound to one cell without removing
-        // it, for configurations with no identified use — two infinite planes detecting each
-        // other, or a kill plane announcing the level geometry.
-        //
-        // What separates this from a defect is that it is WRITTEN, TESTED and ATTRIBUTED, not
-        // that it would be without consequence. Its lifting belongs to the milestone that
-        // introduces a mesh × mesh kernel, and the repository's open-decision register carries
-        // it until then.
-        //
-        // Refusing the sensor role to non-convex shapes remains the bad trade: a half-space
-        // trigger against a convex WORKS — that is the kill plane under the level — so
-        // forbidding it would remove a case that carries a signal to eliminate one that does
-        // not. The role stays a property of the instance (§1.13.1); it is the PAIR that is
-        // bounded, never the role.
-        if (self.trigger_class != .convex and other_class != .convex) return;
-
-        // **THE PROBE IS FIXED BY A RULE, never by availability.** Trigger when the trigger
-        // is convex, candidate otherwise — and when BOTH are convex it is ALWAYS the
+        // **THE PROBE IS FIXED BY A RULE, never by availability** (§1.13.6). Trigger when the
+        // trigger is convex, candidate otherwise — and when BOTH are convex it is ALWAYS the
         // trigger. The overlap boolean is symmetric in exact arithmetic, so no orientation
         // changes the answer there; but nothing guarantees bit equality of the two orders in
         // floating point, and a rule left to whichever side happened to be usable would make
         // the boundary depend on a choice the spec does not state. M1.1.14 must be able to
         // VERIFY this order, not establish it.
+        //
+        // **THE DISPATCH IS TOTAL, and no pair is out of domain.** A trigger is convex or a
+        // half-space and never a triangle soup — `addBody` refuses the role on one, a surface
+        // having no interior for a sensor to ask about (§1.11.17) — so the three arms below
+        // cover every reachable pair. An earlier version carried a DOMAIN BOUND here that
+        // refused {half-space, mesh} × {half-space, mesh}; it rested on a partition that
+        // grouped the two by BODY TYPE where the question is whether the shape has an
+        // INTERIOR, and the cell that made it look unavoidable — mesh against mesh — is
+        // unreachable once a mesh cannot be a trigger. The bound is gone, not narrowed.
         const overlaps = if (self.trigger_probe) |p|
+            // (1) convex trigger: it is the probe, against a body of any class.
             self.bm.overlapShapeBody(self.store, other, p.shape, p.position, p.rotation, .ignore)
-        else blk: {
-            // **UNWRAPPED, and that is what makes the bound above LOAD-BEARING rather than
-            // decorative.** The trigger is not convex here, so the domain bound has already
-            // guaranteed the candidate is; and `classOf` succeeded one branch above, so the
-            // handle and its shape are live and the only way `probeOf` could answer null —
-            // a non-convex class — is the one the bound excludes.
-            //
-            // Written as an unwrap and not as an `orelse return`: that fallback would return
-            // the same answer for the same pair, so the bound would change no behaviour and
-            // could be deleted without a single test noticing. Here its removal fires in
-            // Debug and ReleaseSafe, which is the difference between a rule the code STATES
-            // and a rule the code merely happens to agree with.
-            const p = probeOf(self.bm, self.store, other).?;
-            break :blk self.bm.overlapShapeBody(self.store, self.trigger, p.shape, p.position, p.rotation, .ignore);
-        };
+        else if (probeOf(self.bm, self.store, other)) |p|
+            // (2) half-space trigger, convex candidate: the candidate is the probe.
+            self.bm.overlapShapeBody(self.store, self.trigger, p.shape, p.position, p.rotation, .ignore)
+        else
+            // (3) half-space trigger, non-convex candidate — the two analytic kernels. Neither
+            // iterates: two half-spaces meet unless their normals are exactly opposite with
+            // disjoint boundaries, and a surface meets a half-space iff one of its vertices
+            // does, a triangle being the convex hull of its three.
+            self.bm.halfSpaceOverlapsBody(self.store, self.trigger, other);
 
         if (!(overlaps orelse return)) return;
         self.out.append(self.gpa, .{ .trigger = self.trigger, .other = other }) catch |e| {
