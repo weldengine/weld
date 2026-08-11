@@ -1164,3 +1164,56 @@ fn probeIsConvex(world: *const harness.World, id: api.BodyId) bool {
     const s = world.store.get(sid) orelse return false;
     return s.class() == .convex;
 }
+
+test "the composition must wake the body whose role changed, not only what it overlaps" {
+    const gpa = testing.allocator;
+    var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    world.sensors_on = true;
+
+    // **THE THIRD BRANCH, and it is the one the other two cases could not show.** There, the
+    // sleeper was what the trigger OVERLAPPED, so waking the overlapped bodies was enough.
+    // Here the sleeper IS the trigger: a DYNAMIC trigger — a configuration this suite already
+    // builds — overlapping a STATIC body.
+    //
+    // Waking the static changes nothing, and the mechanism is exact: `sleep.isAwake` returns
+    // `isMoving` for a non-dynamic body, so a static at rest is NOT awake, and `build` skips
+    // and DEFERS any pair with neither endpoint awake. The pair therefore never produces a
+    // manifold, nothing wakes the trigger, and the body that just became solid stays
+    // interpenetrated indefinitely.
+    const tshape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(1, 1, 1) } });
+    const trigger = try world.addBody(gpa, .{
+        .entity = ent(1),
+        .body_type = .dynamic,
+        .shape = tshape,
+        .position = av(0, 0, 0),
+        .is_trigger = true,
+    });
+    const solid = try addBox(gpa, &world, av(1, 1, 1), av(0.5, 0, 0), 2, false, 0);
+
+    for (0..60) |_| try world.step(gpa);
+    try testing.expectEqual(true, world.bm.isSleeping(trigger).?);
+    try testing.expect(hasPair(world.sensors.current.items, 1, 2));
+    // While the role is on, the pair reaches no constraint at all — the matrix sees to that.
+    try testing.expectEqual(@as(usize, 0), world.constraints.items.len);
+
+    try clearTriggerRole(gpa, &world, trigger);
+    try world.step(gpa);
+    try testing.expect(hasPair(world.sensors.exited.items, 1, 2));
+
+    // NEGATIVE, and it is the discriminator: waking ONLY what the volume overlaps — the recipe
+    // that sufficed in the two earlier cases — leaves the trigger asleep and the pair deferred.
+    world.bm.wakeBody(solid);
+    for (0..10) |_| {
+        try world.step(gpa);
+        try testing.expectEqual(true, world.bm.isSleeping(trigger).?);
+        try testing.expectEqual(@as(usize, 0), world.constraints.items.len);
+    }
+
+    // POSITIVE: wake the body whose ROLE CHANGED. The pair reaches `build`, and the fixpoint
+    // propagates from there to any neighbour that needs it.
+    world.bm.wakeBody(trigger);
+    try world.step(gpa);
+    try testing.expectEqual(false, world.bm.isSleeping(trigger).?);
+    try testing.expect(world.constraints.items.len > 0);
+}

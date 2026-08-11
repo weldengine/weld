@@ -440,26 +440,36 @@ pub const BodyManager = struct {
     /// that must be woken are those already OVERLAPPING it at that instant. They are not
     /// discoverable from this call — the store has no candidate set to consult.
     ///
-    /// **The recipe DISPATCHES on the shape, because one entry does not serve both shapes the
-    /// role admits.** A first version of this comment said "find them with an overlap query",
-    /// which is impossible for half of its own domain: `overlapShape` takes a BOUNDED CONVEX
-    /// probe and answers `error.UnsupportedShape` for anything else, and a half-space is
-    /// exactly the non-convex shape that keeps the sensor role. So:
+    /// **THIS IS NOT A RECIPE, IT IS THE CONTENT OF AN ATOMIC OPERATION M1.1.15 OWES**, and it
+    /// is written as such because it grew a third branch under review. What the caller must do
+    /// by hand — three branches for one role change — is the signal that the composition
+    /// belongs to the orchestrator, exactly like the purge and the proxy replacement this entry
+    /// already names for the direction it does not offer:
     ///
-    ///   - **convex body** — `query.overlapShape` with the body's own shape and pose;
-    ///   - **half-space body** — `Broadphase.queryHalfSpace` for the candidates, then
-    ///     `overlapShapeBody` per convex candidate and `halfSpaceOverlapsBody` per non-convex
-    ///     one. That is precisely what the sensor pass does for a half-space trigger, so the
-    ///     caller composes an existing path rather than needing a new entry.
+    ///   1. **Convex body** — `query.overlapShape` with the body's own shape and pose gives the
+    ///      overlapping bodies; wake them.
+    ///   2. **Half-space body** — that entry cannot serve it: `overlapShape` takes a BOUNDED
+    ///      CONVEX probe and answers `error.UnsupportedShape` otherwise, and a half-space is
+    ///      exactly the non-convex shape that keeps the sensor role. Use
+    ///      `Broadphase.queryHalfSpace` for the candidates, then `overlapShapeBody` per convex
+    ///      candidate and `halfSpaceOverlapsBody` per non-convex one — which is what the sensor
+    ///      pass itself does, so this composes an existing path rather than needing a new entry.
+    ///   3. **The body whose role changed**, when it is DYNAMIC — and this branch is invisible
+    ///      from the other two, because there the sleeper was what the volume OVERLAPPED. A
+    ///      sleeping dynamic trigger over a static body is the case: `sleep.isAwake` answers
+    ///      `isMoving` for a non-dynamic body, so a resting static is NOT awake, and `build`
+    ///      DEFERS any pair with neither endpoint awake. Waking only the overlapped bodies
+    ///      leaves that pair deferred forever and the newly solid body interpenetrated. Wake the
+    ///      modified body itself; the `build` fixpoint propagates to its neighbours from there.
     ///
-    /// No query entry is added for this: the family freezes at M1.1.15, two milestones away,
-    /// and the need already has a path.
+    /// No query entry is added for any of this: the family freezes at M1.1.15, two milestones
+    /// away, and every branch already has a path.
     ///
-    /// Until the caller composes, a sleeping body inside the new solid STAYS asleep and
-    /// interpenetrated: no pass will notice, because a sleeper emits nothing in broadphase and
-    /// the retained set never held a pair for a body that was in the `trigger` class. That is a
-    /// precondition, pinned for BOTH shapes by the sensor suite rather than left to be believed
-    /// done.
+    /// Until the caller composes all three, a sleeping body in or around the new solid STAYS
+    /// asleep and interpenetrated: no pass will notice, a sleeper emitting nothing in
+    /// broadphase and the retained set never having held a pair for a body in the `trigger`
+    /// class. That is a precondition, pinned by the sensor suite for both shapes AND for the
+    /// modified body, rather than left to be believed done.
     ///
     /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
     /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
