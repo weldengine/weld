@@ -385,25 +385,40 @@ pub const BodyManager = struct {
         return self.bodies.items(.flags)[idx].is_trigger;
     }
 
-    /// Set or clear the SENSOR role on a live body. No-op on a stale/invalid handle.
+    /// CLEAR the SENSOR role on a live body. No-op on a stale/invalid handle.
     ///
-    /// **THE CALLER OWES THE PROXY MOVE, and that is the whole reason this carries a comment
-    /// rather than being a one-line setter.** The broadphase class is DERIVED from the role
-    /// (`broadLayerFor`), so clearing the role moves the body from the `trigger` class to
-    /// `static` or `dynamic` — and a broadphase proxy belongs to ONE layer's structure. This
-    /// entry writes the flag and nothing else: it holds no broadphase and could not move the
-    /// proxy if it wanted to. A caller that flips the role without re-placing the proxy
-    /// leaves a body that the sensor pass still enumerates as a trigger, or one that no pass
-    /// enumerates at all.
+    /// **ONE DIRECTION ONLY, and the asymmetry is the reason.** Setting the role is NOT
+    /// offered, and that is a refusal rather than an omission: the dangerous direction ceases
+    /// to be available instead of being documented.
     ///
-    /// NON-ACTIVATING, like the other write paths of §1.8.4: losing or gaining the sensor role
-    /// is not a solicitation, and any wake the caller owes is composed by the caller.
+    /// Clearing is SAFE because a body in the `trigger` class has NO retained pairs at all —
+    /// the whole `trigger` row and column of `default_layer_pairs` are `false` (§1.13.3), so
+    /// it has never entered the candidate set. It has nothing to purge; the caller owes only
+    /// the proxy move, the broad class being DERIVED from the role (`broadLayerFor`), so a
+    /// cleared body belongs to `static` or `dynamic` and a proxy belongs to one layer's
+    /// structure. This entry holds no broadphase and could not move it.
+    ///
+    /// **Setting the role would be unsound today, and the mechanism is exact.** The retained
+    /// candidate set is a CORRECTNESS condition of sleep (§1.8.7) and is therefore never
+    /// pruned — a pair that enters it does not leave — and `build` carries no revalidation of
+    /// the role: it reads poses and shapes, never `isTrigger`. So a body flipped to `true`
+    /// would keep producing constraints and impulses for every pair it had already
+    /// accumulated, indefinitely, while the sensor pass reported it as a trigger. It would be
+    /// a body that both detects and responds, which §1.13.1 states does not exist.
+    ///
+    /// What M1.1.15 must orchestrate the day it opens that direction, ATOMICALLY: purge the
+    /// body's retained pairs, re-place its proxy in the new class, and wake the bodies that
+    /// lose their support by it. All three belong to the owner of the retained set, which is
+    /// `PhysicsWorld` and is not this store.
+    ///
+    /// NON-ACTIVATING, like the other write paths of §1.8.4: losing the sensor role is not a
+    /// solicitation, and any wake the caller owes is composed by the caller.
     ///
     /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
     /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
-    pub fn setTrigger(self: *BodyManager, id: BodyId, value: bool) void {
+    pub fn clearTrigger(self: *BodyManager, id: BodyId) void {
         const idx = self.alloc.validate(id) orelse return;
-        self.bodies.items(.flags)[idx].is_trigger = value;
+        self.bodies.items(.flags)[idx].is_trigger = false;
     }
 
     /// Safe getter: the OBJECT layers this body detects when it is a trigger, or null if

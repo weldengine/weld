@@ -316,11 +316,22 @@ test "a pair of static-only shapes is out of the detection domain" {
     var out: std.ArrayListUnmanaged(sensor.BodyOverlap) = .empty;
     defer out.deinit(gpa);
 
-    // A WRITTEN BOUND, not a tolerated gap (§1.13.6). Neither a half-space nor a triangle
-    // soup can be a probe, so this pair has no exact predicate in either direction. It
-    // produces no membership — and the motive is that the combination carries nothing:
-    // `addBody` forces `.static` on both classes, so the overlap cannot vary under
-    // simulation and would yield one entry on the first tick and never a transition again.
+    // **THIS PINS A DELIBERATE LIMITATION, NOT AN IMPOSSIBILITY** (§1.13.6). Neither a
+    // half-space nor a triangle soup can be a probe, so this pair has no exact predicate in
+    // either direction and produces no membership — a KNOWN FALSE NEGATIVE on a legal
+    // configuration.
+    //
+    // An earlier version of this comment justified it by invariance: both classes force a
+    // static body, so the overlap supposedly could not change. That premise is FALSE and is
+    // retracted. A static body is movable by pose write — `setBodyTransform` allows it, and
+    // this module treats the case explicitly — and streaming, removal and shape change
+    // produce transitions the same way. The pair really can enter and leave unobserved.
+    //
+    // The bound stands on cost: mesh × mesh has no kernel anywhere in the engine and is a
+    // piece of work in its own right, and writing the two cheap cells would reduce the bound
+    // to one without removing it, for configurations with no identified use. Its lifting
+    // belongs to the milestone that introduces that kernel, and `CLAUDE.md` carries it as an
+    // attributed open decision until then.
     //
     // GEOMETRY SAYS YES HERE, which is what makes the case discriminating: the quad sits at
     // y = -0.5, entirely inside the solid {y <= 0}, so the two shapes really do intersect
@@ -500,9 +511,9 @@ test "two mutually detecting triggers produce two pairs, one per direction" {
 }
 
 /// Clear the sensor role on a live body AND move its proxy to the class the role change
-/// implies — the two halves the caller owes together (`BodyManager.setTrigger`).
+/// implies — the two halves the caller owes together (`BodyManager.clearTrigger`).
 fn clearTriggerRole(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyId) !void {
-    world.bm.setTrigger(id, false);
+    world.bm.clearTrigger(id);
     const layer = BodyManager.broadLayerFor(false, world.bm.bodyType(id).?);
     for (world.bodies.items) |*b| {
         if (b.id != id) continue;
@@ -712,6 +723,23 @@ test "every cause of disappearance produces exactly one exit" {
         try clearTriggerRole(gpa, &world, trigger);
         try testing.expectEqual(false, world.bm.isTrigger(trigger).?);
         try testing.expectEqual(Layer.static, world.bm.broadLayer(trigger).?);
+
+        // **THE REVERSE DIRECTION IS NOT IN THE SURFACE, and that is a refusal rather than an
+        // omission.** Pinned as an ABSENCE, because that is the form the regression would
+        // take: `clearTrigger` takes no value, and no entry sets the role on a live body.
+        //
+        // Clearing is safe because a body in the `trigger` class has NO retained pairs — the
+        // whole row and column of the matrix are `false` — so it has nothing to purge.
+        // SETTING would be unsound today: the retained candidate set is a correctness
+        // condition of sleep and is never pruned, and `build` carries no revalidation of the
+        // role, so a body flipped to `true` would keep producing constraints for the pairs it
+        // had already accumulated while the sensor pass reported it as a trigger — a body
+        // that both detects and responds, which §1.13.1 states does not exist.
+        try testing.expect(!@hasDecl(BodyManager, "setTrigger"));
+        try testing.expectEqual(
+            @as(usize, 2),
+            @typeInfo(@TypeOf(BodyManager.clearTrigger)).@"fn".params.len,
+        );
 
         try state.update(gpa, &world.bp, &world.bm, &world.store);
         try testing.expectEqual(@as(usize, 1), state.exited.items.len);

@@ -220,26 +220,37 @@ const CandidateSink = struct {
 
         const other_class = classOf(self.bm, self.store, other) orelse return;
 
-        // **THE DOMAIN BOUND (§1.13.6), and it is a written bound rather than a tolerated
-        // gap.** Neither a half-space nor a triangle soup can be a probe, so a pair whose
-        // two sides carry a static-only shape has no exact predicate available in either
-        // direction. It produces NO membership.
+        // **THE DOMAIN BOUND (§1.13.6): a KNOWN FALSE NEGATIVE on a legal configuration, and
+        // not a property of the world.** Neither a half-space nor a triangle soup can be a
+        // probe, so a pair whose two sides carry a static-only shape has no exact predicate
+        // available in either direction. It produces NO membership.
         //
-        // The motive is that the combination carries nothing. `addBody` forces `.static` on
-        // both classes (`error.ShapeMustBeStatic`), so such a pair is static on both sides:
-        // its overlap does not vary under simulation, and it would yield one entry on the
-        // first tick and never a transition again. A sensor whose only possible signal is a
-        // permanent state has no information to carry — a kill plane announcing the level
-        // geometry is noise, not an event.
+        // **The pair CAN change overlap, and an earlier version of this comment said it could
+        // not.** That premise was false and is retracted: a static body is movable by pose
+        // write — `setBodyTransform` allows it, and this module treats the case explicitly,
+        // the world-AABB cache invalidation being conditioned on body type PRECISELY because
+        // a non-dynamic body reaching it signals an external teleport. Streaming, removal and
+        // shape change produce transitions the same way. So a half-space × mesh pair can
+        // enter and leave without ever appearing in the state.
         //
-        // Writing the missing kernels would not remove the bound: half-space against
-        // half-space and half-space against mesh are cheap, mesh against mesh is not, so the
-        // bound would still be needed and the two cheap kernels would be code avoiding no
-        // decision. And refusing the sensor role to non-convex shapes would cost more: a
-        // half-space trigger against a convex WORKS — that is the kill plane under the level
-        // — so forbidding it would remove a case that carries a signal to eliminate one that
-        // does not. The role stays a property of the instance (§1.13.1); it is the PAIR that
-        // is bounded.
+        // **The bound stands on its real motive: the cost of covering it is out of proportion
+        // to its use.** The missing kernel that matters is mesh × mesh — two triangulated
+        // surfaces whose exact overlap has no kernel anywhere in the engine, and a piece of
+        // work in its own right. The other two cells, half-space × half-space and half-space
+        // × mesh, are cheap; writing them would reduce the bound to one cell without removing
+        // it, for configurations with no identified use — two infinite planes detecting each
+        // other, or a kill plane announcing the level geometry.
+        //
+        // What separates this from a defect is that it is WRITTEN, TESTED and ATTRIBUTED, not
+        // that it would be without consequence. Its lifting belongs to the milestone that
+        // introduces a mesh × mesh kernel, and the repository's open-decision register carries
+        // it until then.
+        //
+        // Refusing the sensor role to non-convex shapes remains the bad trade: a half-space
+        // trigger against a convex WORKS — that is the kill plane under the level — so
+        // forbidding it would remove a case that carries a signal to eliminate one that does
+        // not. The role stays a property of the instance (§1.13.1); it is the PAIR that is
+        // bounded, never the role.
         if (self.trigger_class != .convex and other_class != .convex) return;
 
         // **THE PROBE IS FIXED BY A RULE, never by availability.** Trigger when the trigger
