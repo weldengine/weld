@@ -431,19 +431,153 @@ test "layer-pair matrix filters pairs" {
     try bph.computePairs(gpa, &pairs);
     try assertSortedDeduped(pairs.items);
 
-    // Allowed combinations present.
+    // Allowed combinations present. These are the POSITIVE CONTROL for the block below:
+    // the scene is eight overlapping boxes at one point, so an implementation emitting
+    // nothing at all would satisfy every negative assertion and fail these.
     try std.testing.expect(hasPair(pairs.items, 20, 21)); // dynamic × dynamic
     try std.testing.expect(hasPair(pairs.items, 10, 20)); // static × dynamic
     try std.testing.expect(hasPair(pairs.items, 10, 30)); // static × debris
     try std.testing.expect(hasPair(pairs.items, 20, 30)); // dynamic × debris
-    try std.testing.expect(hasPair(pairs.items, 20, 40)); // dynamic × trigger
 
-    // Forbidden combinations absent.
+    // Forbidden combinations absent — the WHOLE `trigger` row and column, M1.1.13.
     try std.testing.expect(!hasPair(pairs.items, 10, 11)); // static × static
     try std.testing.expect(!hasPair(pairs.items, 30, 31)); // debris × debris
     try std.testing.expect(!hasPair(pairs.items, 40, 41)); // trigger × trigger
     try std.testing.expect(!hasPair(pairs.items, 10, 40)); // static × trigger
     try std.testing.expect(!hasPair(pairs.items, 30, 40)); // debris × trigger
+    // `dynamic × trigger` — this cell was `true` at M1.1.1 and a positive assertion on
+    // exactly this pair stood here until M1.1.13. It is REVERSED, not relaxed, and the
+    // old assertion is DELETED rather than commented out: a trigger detects without
+    // responding, so it must never reach constraint construction, and killing the pair at
+    // the source is a stronger guarantee than filtering it downstream every tick
+    // (`engine-physics-solver.md` §1.13.3).
+    try std.testing.expect(!hasPair(pairs.items, 20, 40)); // dynamic × trigger
+}
+
+test "forEachLeaf skips a retired slot and follows it through recycling" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    // **THE ENTRY POINT OF THE WHOLE SENSOR PASS** (M1.1.13): `forEachInLayer` enumerates the
+    // TRIGGERS THEMSELVES through this walk, so a missed leaf is a trigger that detects
+    // nothing, silently, and everything the pass reports rests on it.
+    //
+    // What is under test is the POOL ITERATION and not the predicate. `forEachLeaf` writes no
+    // predicate of its own: it delegates to `isLiveLeaf`, which pre-dates it and which
+    // production already consumes (`computePairs` skips a stale proxy id with it). The
+    // existing suites hole the node pool through `remove` in several places, but none of them
+    // walks it, and until M1.1.13 nothing did.
+    const a = try tree.insert(gpa, boxAt(0), 10);
+    const b = try tree.insert(gpa, boxAt(4), 20);
+    const c = try tree.insert(gpa, boxAt(8), 30);
+    try std.testing.expectEqual(@as(u32, 3), tree.leafCount());
+
+    // A HOLED POOL: the retired leaf is not reported, and the two survivors are — the
+    // non-vacuity lives in the same case, because "reports nothing" would satisfy the first
+    // half alone.
+    tree.remove(b);
+    {
+        var got = Collector{ .gpa = gpa };
+        defer got.deinit();
+        tree.forEachLeaf(&got);
+        try std.testing.expectEqualSlices(u32, &.{ 10, 30 }, got.sortedOwned());
+    }
+
+    // A RECYCLED SLOT, which is the configuration closest to the real danger: a slot that
+    // comes back to life under ANOTHER identity. The walk must report the leaf again, with the
+    // NEW `user_data` and never the old one — an iteration that read a stale payload, or that
+    // had cached the pool length, would show up exactly here.
+    const d = try tree.insert(gpa, boxAt(4), 40);
+    try std.testing.expectEqual(@as(u32, 3), tree.leafCount());
+    {
+        var got = Collector{ .gpa = gpa };
+        defer got.deinit();
+        tree.forEachLeaf(&got);
+        try std.testing.expectEqualSlices(u32, &.{ 10, 30, 40 }, got.sortedOwned());
+        try std.testing.expect(!got.contains(20)); // the retired identity, never resurrected
+    }
+
+    // The three live proxies really are live and answer a query, so the walk above is not
+    // agreeing with a tree that lost its contents.
+    for ([_]u32{ a, c, d }) |p| try std.testing.expect(tree.isLiveLeaf(p));
+
+    // INTERNAL nodes are not leaves, and with three proxies the pool holds some: the walk
+    // reports exactly the leaf count and never the pool's population.
+    var got = Collector{ .gpa = gpa };
+    defer got.deinit();
+    tree.forEachLeaf(&got);
+    try std.testing.expectEqual(@as(usize, tree.leafCount()), got.items.items.len);
+}
+
+test "forEachInLayer reports BOTH halves of a layer, bounded and unbounded" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{ .margin = 0 });
+    defer bp.deinit(gpa);
+
+    // **THE UNBOUNDED HALF NAMED, rather than covered by consequence.** An unbounded shape
+    // lives OUTSIDE the trees (§1.11.15), so `forEachInLayer` walks the layer's tree AND its
+    // flat list, and the sensor pass depends on the second half to enumerate a half-space
+    // TRIGGER at all. That half is exercised today by two gate-D cases that build such a
+    // trigger — but by CONSEQUENCE: neither names it, and if either ever moved to a convex
+    // shape for an unrelated reason the coverage would vanish with no assertion changing.
+    // This case owns it.
+    //
+    // Both halves are asserted TOGETHER, in one layer, which is what makes each the other's
+    // control: a walk that lost the tree half, or one that lost the list half, fails here and
+    // an empty walk fails twice.
+    const floor = BphF.UnboundedShape{ .normal = Vec3.unit_y, .distance = 0 };
+    _ = try bp.insert(gpa, .trigger, boxCe(.{ 0, 5, 0 }, 1), 100); // bounded, in the tree
+    _ = try bp.insertUnbounded(gpa, .trigger, floor, 200); // unbounded, in the list
+    // A third proxy in ANOTHER layer, so "reports the layer" is a statement about the layer
+    // and not about the whole broadphase.
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 5, 0 }, 1), 300);
+
+    var got = Collector{ .gpa = gpa };
+    defer got.deinit();
+    bp.forEachInLayer(.trigger, &got);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 200 }, got.sortedOwned());
+
+    // And the other layer is reported by its own call, so the filtering above is selection
+    // and not loss.
+    var other = Collector{ .gpa = gpa };
+    defer other.deinit();
+    bp.forEachInLayer(.dynamic, &other);
+    try std.testing.expectEqualSlices(u32, &.{300}, other.sortedOwned());
+}
+
+test "the trigger row and column of the layer matrix are false in full" {
+    // The matrix read DIRECTLY, in BOTH index orders, and not only through the pairs it
+    // produces: the emission test above shows the four combinations reachable in one
+    // scene, this one shows the constant itself is symmetric and complete. A cell true in
+    // one order and false in the other would make the answer depend on which proxy moved.
+    inline for (0..broadphase.layer_count) |i| {
+        const t = @intFromEnum(Layer.trigger);
+        try std.testing.expect(!broadphase.default_layer_pairs[t][i]); // trigger × *
+        try std.testing.expect(!broadphase.default_layer_pairs[i][t]); // * × trigger
+    }
+
+    // POSITIVE CONTROL, without which the loop above is satisfied by an all-false matrix:
+    // three cells outside the trigger row and column are still `true`, so the matrix has
+    // not simply been emptied. `dynamic × dynamic` is on the diagonal, where the loop
+    // never reaches.
+    const s = @intFromEnum(Layer.static);
+    const d = @intFromEnum(Layer.dynamic);
+    const b = @intFromEnum(Layer.debris);
+    try std.testing.expect(broadphase.default_layer_pairs[d][d]);
+    try std.testing.expect(broadphase.default_layer_pairs[s][d] and broadphase.default_layer_pairs[d][s]);
+    try std.testing.expect(broadphase.default_layer_pairs[s][b] and broadphase.default_layer_pairs[b][s]);
+
+    // The whole matrix is symmetric — a property the `trigger` edit must not break, and
+    // one no single-cell assertion states.
+    inline for (0..broadphase.layer_count) |i| {
+        inline for (0..broadphase.layer_count) |j| {
+            try std.testing.expectEqual(
+                broadphase.default_layer_pairs[i][j],
+                broadphase.default_layer_pairs[j][i],
+            );
+        }
+    }
 }
 
 test "computePairs matches brute force multi-layer" {

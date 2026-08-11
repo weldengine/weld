@@ -1043,6 +1043,30 @@ pub fn build(b: *std.Build) void {
     );
     forge_char_bench_step.dependOn(&forge_char_bench_run.step);
 
+    // M1.1.13 — sensor pass bench: the cost sleep does NOT economise, plus a floor row
+    // and a many-triggers row (reported, not gated).
+    const forge_sensor_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_3d_sensor.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_sensor_bench_module.addImport("forge_3d", forge_3d_module);
+    forge_sensor_bench_module.addImport("weld_forge", forge_api_module);
+    const forge_sensor_bench_exe = b.addExecutable(.{
+        .name = "forge-sensor-bench",
+        .root_module = forge_sensor_bench_module,
+    });
+    b.installArtifact(forge_sensor_bench_exe);
+    const forge_sensor_bench_run = b.addRunArtifact(forge_sensor_bench_exe);
+    forge_sensor_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_sensor_bench_run.addArgs(args);
+    const forge_sensor_bench_step = b.step(
+        "bench-forge-sensor",
+        "Run the M1.1.13 forge sensor pass bench (three rows interleaved, writes bench/results/forge_3d_sensor.md)",
+    );
+    forge_sensor_bench_step.dependOn(&forge_sensor_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the

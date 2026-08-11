@@ -68,6 +68,7 @@ const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
 const RayR = broadphase_mod.Ray(Real);
+const BroadphaseLayer = broadphase_mod.BroadphaseLayer;
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -177,6 +178,28 @@ pub const BodyManager = struct {
         if (must_be_static and desc.body_type != .static) {
             return error.ShapeMustBeStatic;
         }
+        // THE SENSOR ROLE NEEDS AN INTERIOR, and a triangle soup has none. A `MeshShape` is a
+        // SURFACE and not a solid — a categorical rule, not a setting (§1.11.17) — from which
+        // it follows that membership is false everywhere on it and `pointQuery` never returns
+        // a body carrying one. A sensor answers "who is inside"; a surface has no inside, so
+        // asking for the role on a mesh is a category error and gets a DIAGNOSTIC rather than
+        // a silent answer.
+        //
+        // **The half-space KEEPS the role**, and the distinction is exactly the one §1.11.17
+        // draws: a half-space IS a volume with a well-defined interior. It is the kill plane
+        // under the level, and nothing here removes it.
+        //
+        // Named on the INVARIANT rather than on the shape, like `ShapeMustBeStatic` above, so
+        // the next surface-like category — `HeightField` joins `.triangle_soup` at its own
+        // sub-milestone — reuses it instead of minting a second error. The test is on the
+        // CLASS for the same reason.
+        //
+        // Ordered with the other creation refusals and BEFORE any derived computation. It is
+        // also what makes the sensor pass total: with mesh triggers refused at the source, the
+        // only pair that had no exact kernel — mesh against mesh — is no longer reachable.
+        if (desc.is_trigger and shape.class() == .triangle_soup) {
+            return error.TriggerShapeMustBeSolid;
+        }
         // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
         // beyond that domain would be invisible to every query with no diagnostic
         // at all — the silent-miss class the shape invariant forbids
@@ -218,7 +241,16 @@ pub const BodyManager = struct {
             .shape = desc.shape,
             .body_type = desc.body_type,
             .collision_layer = desc.collision_layer,
-            .flags = .{ .continuous = desc.continuous, .can_sleep = desc.can_sleep },
+            // Stored VERBATIM, including on a non-trigger body where it is inert. Zeroing
+            // it there would make the column a second representation of the role, which
+            // already lives in the flag, and two representations of one fact are two
+            // things that can disagree.
+            .trigger_layer_mask = desc.trigger_layer_mask,
+            .flags = .{
+                .continuous = desc.continuous,
+                .can_sleep = desc.can_sleep,
+                .is_trigger = desc.is_trigger,
+            },
             // The sleep window opens at the creation pose, closed (`sleep_time`
             // zero) — a fresh body has not yet stood still for any length of time.
             .sleep_time = 0,
@@ -321,6 +353,143 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Which broadphase class a body of this role and type belongs to
+    /// (`engine-physics-solver.md` §1.13.3). A pure function of the two, so it is also
+    /// available before a body exists — which is what the caller inserting a proxy needs.
+    ///
+    /// **The priority is FIXED and `is_trigger` comes first**: a trigger goes to `trigger`
+    /// WHATEVER its body type, because the class is what decides whether it can reach
+    /// constraint construction at all, and the answer for a sensor is no in every case.
+    /// Then body type — `static` to `static`, EVERYTHING ELSE to `dynamic`.
+    ///
+    /// **A KINEMATIC body therefore lands in `dynamic`, and that is deliberate rather than
+    /// an approximation.** The class names what MOVES, not what is SIMULATED: a kinematic
+    /// platform has to be paired against statics and dynamics exactly like a simulated
+    /// body, and putting it in `static` would lose every pair a moving platform needs. The
+    /// name lags its meaning; renaming it touches the broadphase and its suites and is not
+    /// this milestone's (`engine-physics-solver.md` §1.13.3).
+    ///
+    /// `debris` is NOT produced here: nothing consumes the class before destruction, and
+    /// deriving it from an object layer is a policy that touches no signature, so no
+    /// freeze puts a date on it. There is deliberately no `is_debris` field — debris is a
+    /// Forge optimisation class, where sensor is a semantic every backend shares.
+    pub fn broadLayerFor(is_trigger_role: bool, body_type_of: api.BodyType) BroadphaseLayer {
+        if (is_trigger_role) return .trigger;
+        return switch (body_type_of) {
+            .static => .static,
+            .kinematic, .dynamic => .dynamic,
+        };
+    }
+
+    /// Safe getter: the broadphase class of a live body, or null if `id` is stale/invalid.
+    /// `broadLayerFor` applied to the body's stored role and type — DERIVED and never
+    /// stored, so the class cannot drift from the two facts it is a function of.
+    pub fn broadLayer(self: *const BodyManager, id: BodyId) ?BroadphaseLayer {
+        const idx = self.alloc.validate(id) orelse return null;
+        return broadLayerFor(
+            self.bodies.items(.flags)[idx].is_trigger,
+            self.bodies.items(.body_type)[idx],
+        );
+    }
+
+    /// Safe getter: whether the body carries the SENSOR role, or null if `id` is
+    /// stale/invalid (`engine-physics-solver.md` §1.13).
+    ///
+    /// A trigger detects without responding: it is inserted into the `trigger` broad
+    /// class whose pair-matrix row and column are `false` in full, so it reaches no
+    /// constraint, no impulse and no island — and the character controller excludes it
+    /// from its three collection paths by construction (§1.13.7). The public queries, by
+    /// contrast, see it like any other body (§1.11.1 point 3).
+    pub fn isTrigger(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].is_trigger;
+    }
+
+    /// CLEAR the SENSOR role on a live body. No-op on a stale/invalid handle.
+    ///
+    /// **ONE DIRECTION ONLY, and the asymmetry is the reason.** Setting the role is NOT
+    /// offered, and that is a refusal rather than an omission: the dangerous direction ceases
+    /// to be available instead of being documented.
+    ///
+    /// Clearing is SAFE because a body in the `trigger` class has NO retained pairs at all —
+    /// the whole `trigger` row and column of `default_layer_pairs` are `false` (§1.13.3), so
+    /// it has never entered the candidate set. So there is nothing to PURGE — but the caller
+    /// still composes the proxy move AND the wakes: the broad class is DERIVED from the role
+    /// (`broadLayerFor`), so a cleared body belongs to `static` or `dynamic` and a proxy belongs
+    /// to one layer's structure, and the bodies around and including it may be asleep. The
+    /// complete composition is the three-branch operation detailed below. This entry holds no
+    /// broadphase and could not do any of it.
+    ///
+    /// **Setting the role would be unsound today, and the mechanism is exact.** The retained
+    /// candidate set is a CORRECTNESS condition of sleep (§1.8.7) and is therefore never
+    /// pruned — a pair that enters it does not leave — and `build` carries no revalidation of
+    /// the role: it reads poses and shapes, never `isTrigger`. So a body flipped to `true`
+    /// would keep producing constraints and impulses for every pair it had already
+    /// accumulated, indefinitely, while the sensor pass reported it as a trigger. It would be
+    /// a body that both detects and responds, which §1.13.1 states does not exist.
+    ///
+    /// What M1.1.15 must orchestrate the day it opens that direction, ATOMICALLY: purge the
+    /// body's retained pairs, re-place its proxy in the new class, and wake the bodies that
+    /// lose their support by it. All three belong to the owner of the retained set, which is
+    /// `PhysicsWorld` and is not this store.
+    ///
+    /// **NON-ACTIVATING, and the wake the caller owes is NAMED because it is not obvious.**
+    /// This store holds neither broadphase nor islands, so it cannot wake anything — the
+    /// contract is §1.8.4's, and it is unchanged. What is easy to miss is WHICH bodies are
+    /// owed: clearing the role turns a volume that opposed nothing into a SOLID, so the bodies
+    /// that must be woken are those already OVERLAPPING it at that instant. They are not
+    /// discoverable from this call — the store has no candidate set to consult.
+    ///
+    /// **THIS IS NOT A RECIPE, IT IS THE CONTENT OF AN ATOMIC OPERATION M1.1.15 OWES**, and it
+    /// is written as such because it grew a third branch under review. What the caller must do
+    /// by hand — three branches for one role change — is the signal that the composition
+    /// belongs to the orchestrator, exactly like the purge and the proxy replacement this entry
+    /// already names for the direction it does not offer:
+    ///
+    ///   1. **Convex body** — `query.overlapShape` with the body's own shape and pose gives the
+    ///      overlapping bodies; wake them.
+    ///   2. **Half-space body** — that entry cannot serve it: `overlapShape` takes a BOUNDED
+    ///      CONVEX probe and answers `error.UnsupportedShape` otherwise, and a half-space is
+    ///      exactly the non-convex shape that keeps the sensor role. Use
+    ///      `Broadphase.queryHalfSpace` for the candidates, then `overlapShapeBody` per convex
+    ///      candidate and `halfSpaceOverlapsBody` per non-convex one — which is what the sensor
+    ///      pass itself does, so this composes an existing path rather than needing a new entry.
+    ///   3. **The body whose role changed**, when it is DYNAMIC — and this branch is invisible
+    ///      from the other two, because there the sleeper was what the volume OVERLAPPED. A
+    ///      sleeping dynamic trigger over a static body is the case: `sleep.isAwake` answers
+    ///      `isMoving` for a non-dynamic body, so a resting static is NOT awake, and `build`
+    ///      DEFERS any pair with neither endpoint awake. Waking only the overlapped bodies
+    ///      leaves that pair deferred forever and the newly solid body interpenetrated. Wake the
+    ///      modified body itself; the `build` fixpoint propagates to its neighbours from there.
+    ///
+    /// No query entry is added for any of this: the family freezes at M1.1.15, two milestones
+    /// away, and every branch already has a path.
+    ///
+    /// Until the caller composes all three, a sleeping body in or around the new solid STAYS
+    /// asleep and interpenetrated: no pass will notice, a sleeper emitting nothing in
+    /// broadphase and the retained set never having held a pair for a body in the `trigger`
+    /// class. That is a precondition, pinned by the sensor suite for both shapes AND for the
+    /// modified body, rather than left to be believed done.
+    ///
+    /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
+    /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
+    pub fn clearTrigger(self: *BodyManager, id: BodyId) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.flags)[idx].is_trigger = false;
+    }
+
+    /// Safe getter: the OBJECT layers this body detects when it is a trigger, or null if
+    /// `id` is stale/invalid. Inert on a non-trigger body, where it is still stored
+    /// verbatim from the descriptor (§1.13.5).
+    ///
+    /// UNILATERAL: it says what THIS body sees, never what sees it. A caller testing it
+    /// symmetrically has misread the model — two overlapping triggers are two relations,
+    /// and A may see B without B seeing A.
+    pub fn triggerLayerMask(self: *const BodyManager, id: BodyId) ?u32 {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.trigger_layer_mask)[idx];
     }
 
     /// Safe getter: the body's simulation class, or null if `id` is stale/invalid.
@@ -1029,6 +1198,64 @@ pub const BodyManager = struct {
                 };
                 _ = data.traverseAabb(probe_box, &collector);
                 return collector.found;
+            },
+        }
+    }
+
+    /// Whether the solid of a HALF-SPACE body meets the solid of a NON-CONVEX body — the two
+    /// kernels the sensor pass needs once no side can be a convex probe (M1.1.13, §1.13.6).
+    /// Null when either handle or its shape is stale.
+    ///
+    /// **PRECONDITION, asserted: `plane_body` carries a half-space and `other` is NOT convex.**
+    /// A convex `other` is served by `overlapShapeBody` with the convex as the probe, which is
+    /// the probe rule's second clause; routing it here instead would be a second path to one
+    /// answer. And `other` can never be a triangle soup carrying the sensor role, `addBody`
+    /// refusing that at creation — which is what makes this dispatch two arms and not four.
+    ///
+    /// Both arms are exact and neither iterates: two half-spaces meet unless their normals are
+    /// exactly opposite with disjoint boundaries, and a surface meets a half-space iff one of
+    /// its vertices does, a triangle being the convex hull of its three.
+    pub fn halfSpaceOverlapsBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        plane_body: BodyId,
+        other: BodyId,
+    ) ?bool {
+        const pi = self.alloc.validate(plane_body) orelse return null;
+        const oi = self.alloc.validate(other) orelse return null;
+        const plane_shape = store.get(self.bodies.items(.shape)[pi]) orelse return null;
+        const other_shape = store.get(self.bodies.items(.shape)[oi]) orelse return null;
+        std.debug.assert(plane_shape.class() == .half_space);
+        std.debug.assert(other_shape.class() != .convex);
+
+        const world_plane = shape_mod.halfSpace(plane_shape).transformed(
+            self.bodies.items(.rotation)[pi],
+            self.bodies.items(.position)[pi],
+        );
+        switch (other_shape.class()) {
+            .convex => unreachable, // excluded by the precondition above
+            .half_space => {
+                const world_other = shape_mod.halfSpace(other_shape).transformed(
+                    self.bodies.items(.rotation)[oi],
+                    self.bodies.items(.position)[oi],
+                );
+                return narrowphase.plane.halfSpacesOverlap(Real, world_plane, world_other);
+            },
+            // The PLANE is transported into the MESH's local frame, not the vertices into the
+            // world: one transport instead of V, and the residue stays inside `signedDistance`.
+            .triangle_soup => {
+                const inv_rot = self.bodies.items(.rotation)[oi].conjugate();
+                const local_plane = world_plane.transformed(
+                    inv_rot,
+                    inv_rot.rotateVec3(self.bodies.items(.position)[oi].neg()),
+                );
+                const data = other_shape.mesh.?;
+                return narrowphase.plane.halfSpaceMeetsMesh(
+                    Real,
+                    local_plane,
+                    data.vertices,
+                    data.indices,
+                );
             },
         }
     }

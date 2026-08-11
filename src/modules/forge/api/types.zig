@@ -264,6 +264,38 @@ pub const BodyDescriptor = struct {
     /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
     /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
     can_sleep: bool = true,
+    /// SENSOR role: the body detects without responding (`engine-physics-solver.md`
+    /// §1.13). It is inserted into the `trigger` broad class, whose matrix row and
+    /// column are `false` in full — so it never reaches constraint construction —
+    /// and it is ignored BY CONSTRUCTION by the character controller's three
+    /// collection paths (§1.13.7).
+    ///
+    /// The role is a property of the INSTANCE and not of the geometry: the shape
+    /// store is shared, so carrying this field on `ShapeDescriptor` would force two
+    /// bodies sharing a sphere to share their nature (§1.13.1). The ECS authoring
+    /// surface is `CollisionShape.is_trigger` (`engine-physics-forge.md` §2),
+    /// translated here.
+    ///
+    /// PRE-FREEZE EXTENSION, second-to-last window: after the M1.1.15 freeze of
+    /// `PhysicsModule` this field could no longer land, and nothing would let a
+    /// caller declare a trigger at all.
+    is_trigger: bool = false,
+    /// OBJECT layers this trigger detects: a candidate passes when
+    /// `(1 << candidate_layer) & trigger_layer_mask` is non-zero. Same mechanism
+    /// and same semantics as `PhysicsQueryFilter.layer_mask`, the only object-layer
+    /// filtering the engine owns (§1.11.5).
+    ///
+    /// UNILATERAL: the mask belongs to the trigger and describes what IT sees, so
+    /// two overlapping triggers are two relations evaluated separately and A may
+    /// see B without B seeing A (§1.13.5).
+    ///
+    /// INERT on a non-trigger body, and the field exists anyway: without it a
+    /// damage zone detects projectiles, debris and scenery, and the only substitute
+    /// would be reserving an object layer for triggers, which would make a
+    /// technical class carry a gameplay policy. Same arbitrage as `back_face_mode`
+    /// on `OverlapQuery` — an almost-inert field against a permanent dead end.
+    /// PRE-FREEZE EXTENSION, second-to-last window.
+    trigger_layer_mask: u32 = 0xFFFFFFFF,
 };
 
 // --- Body pose and velocity entries — semantics frozen here ---
@@ -830,6 +862,72 @@ test "BodyDescriptor defaults match the brief" {
     try testing.expectEqual(true, d.can_sleep);
     try testing.expect(d.position.eql(Vec3.zero));
     try testing.expect(d.rotation.approxEql(Quatf.identity, 0));
+
+    // The two SENSOR fields (M1.1.13), transcribed from `engine-tier-interfaces.md` §1
+    // at version 0.9 name for name and default for default. `is_trigger` defaults OFF —
+    // the role is opt-in, and a default of `true` would make every body that forgot the
+    // field stop responding physically. `trigger_layer_mask` defaults to ALL layers, the
+    // same value and the same reason as `PhysicsQueryFilter.layer_mask`: a mask that
+    // defaulted to zero would make a declared trigger detect nothing, which reads as
+    // "sensors do not work" rather than as "you forgot the mask" (§1.13.5).
+    try testing.expectEqual(false, d.is_trigger);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), d.trigger_layer_mask);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), (PhysicsQueryFilter{}).layer_mask);
+
+    // The mask is 32 bits WIDE, which is what makes it the same object-layer mechanism as
+    // the query filter's and what bounds `collision_layer` to `[0, collision_layer_count)`.
+    // A `u16` here would silently make every body above layer 15 undetectable.
+    try testing.expectEqual(u32, @TypeOf(d.trigger_layer_mask));
+    try testing.expectEqual(@as(usize, collision_layer_count), @bitSizeOf(@TypeOf(d.trigger_layer_mask)));
+
+    // Referencing every field by name makes a rename or a removal a COMPILE error; this
+    // count is what makes an ADDITION visible, which no by-name reference can catch. Same
+    // shape as `CharacterDescriptor`'s below, and for the same reason: after the M1.1.15
+    // freeze, `engine-c-api.md` carrying no `struct_size` and no minor version, appending
+    // one defaulted field here is an ABI break and not a source-compatible addition.
+    // COUNTER-FACTUAL MEASURED: appending one defaulted field leaves every assert above
+    // passing and reports `expected 16, found 17` here.
+    try testing.expectEqual(@as(usize, 16), @typeInfo(BodyDescriptor).@"struct".fields.len);
+
+    // The role is a property of the INSTANCE and never of the geometry (§1.13.1): the
+    // shape store is shared and one `ShapeId` is referenceable by several bodies, so the
+    // field on `ShapeDescriptor` would force two bodies sharing a sphere to share their
+    // nature. Pinned as an ABSENCE, because that is the form the error would take — a
+    // later milestone moving it there has to delete this line first.
+    //
+    // The VISITS are counted and the variant total asserted, and the two lines catch
+    // DIFFERENT things. The total sees variants appear or disappear. The visit count is
+    // the only one that sees a change of DISTRIBUTION at a CONSTANT total — a `void`
+    // variant gaining a payload, or a `struct` variant losing one — and that is precisely
+    // what moves this loop's reach. Skipping the `void` variants is correct, a field
+    // cannot be added to `void` without first making it a struct; but a payload dropped
+    // from a struct variant leaves the total at 12 while the absence check quietly covers
+    // one variant less, still passing.
+    comptime var visited: usize = 0;
+    inline for (@typeInfo(ShapeDescriptor).@"union".fields) |f| {
+        if (@typeInfo(f.type) == .@"struct") {
+            visited += 1;
+            try testing.expect(!@hasField(f.type, "is_trigger"));
+            try testing.expect(!@hasField(f.type, "trigger_layer_mask"));
+        }
+    }
+    // Five of the twelve variants carry a payload today: sphere, box, capsule, plane and
+    // triangle_mesh. The other seven are `void` until their own sub-milestone, at which
+    // point this total rises with them.
+    //
+    // COUNTER-FACTUAL MEASURED, by changing the UNION and not the expected count: giving
+    // `cylinder` a payload reports `expected 5, found 6` here while the variant total
+    // below still passes — a redistribution at constant total, the one case this line
+    // alone carries.
+    //
+    // The OTHER sense — a struct variant losing its payload — is deliberately NOT
+    // measured, and the omission is not a gap. `expectEqual` is a single code path and an
+    // equality falls on both sides by construction; once the line is established as
+    // reached and sensitive to `visited`, which the measurement above does, both senses
+    // are covered. The two-directions rule bites on a THRESHOLD, where each side is a
+    // distinct path — not on an equality.
+    try testing.expectEqual(@as(usize, 5), visited);
+    try testing.expectEqual(@as(usize, 12), @typeInfo(ShapeDescriptor).@"union".fields.len);
 }
 
 test "ShapeType and BodyType are u8-backed" {

@@ -363,3 +363,63 @@ pub fn aabbOverlaps(comptime T: type, plane: HalfSpace(T), box: math.Aabb(T)) bo
     plane.assertDomain();
     return box.overlapsHalfSpace(plane.normal, plane.distance);
 }
+
+/// Do two half-space SOLIDS meet? Analytic, no iteration, no threshold (M1.1.13).
+///
+/// Two half-spaces intersect ALWAYS, with one exception: their normals exactly opposite AND
+/// their boundaries disjoint. The derivation is one line — with `A = {n·x <= d_a}` and
+/// `B = {−n·x <= d_b} = {n·x >= −d_b}`, the intersection is non-empty iff `−d_b <= d_a`, i.e.
+/// iff `d_a + d_b >= 0`.
+///
+/// **The antiparallel test is at TRUE ZERO and needs no epsilon**, which is a property of the
+/// geometry rather than a discipline imposed on it: two half-spaces whose normals are merely
+/// CLOSE to opposite still intersect, in a wedge that narrows as they approach. Only the
+/// exactly-opposite case can be empty, so an epsilon here would answer "no overlap" for a pair
+/// that genuinely overlaps.
+///
+/// Both normals are unit by the shape's creation invariant, so `b.normal == a.normal.neg()` is
+/// the exact test.
+pub fn halfSpacesOverlap(comptime T: type, a: HalfSpace(T), b: HalfSpace(T)) bool {
+    a.assertDomain();
+    b.assertDomain();
+    if (!b.normal.eql(a.normal.neg())) return true;
+    return a.distance + b.distance >= 0;
+}
+
+/// Does any point of a triangulated SURFACE lie in a half-space solid? (M1.1.13.)
+///
+/// **A vertex test is EXACT here, and that is a property of convexity rather than a
+/// simplification.** A triangle is the convex hull of its three vertices and a half-space is a
+/// convex set defined by a linear inequality, so `n·x − d` attains its minimum over the
+/// triangle at a VERTEX. The surface therefore meets the solid if and only if some vertex of
+/// some TRIANGLE does, and no edge or interior point can be inside while all three vertices
+/// are outside.
+///
+/// **IT WALKS THE REFERENCED VERTICES, NOT THE STORED ARRAY, and the distinction is the whole
+/// correctness of the entry.** `MeshData` validates that every index is within the vertex
+/// array and never the converse, so an UNREFERENCED vertex is legal — an imported mesh may
+/// carry them. The convexity argument above is about the vertices of a TRIANGLE, and the
+/// stored array is not that set: walking it would answer "overlap" for a surface lying wholly
+/// outside the solid that merely stores an orphan inside it.
+///
+/// That is a FALSE POSITIVE, and in a sensor a false positive is a phantom `TriggerEnter` —
+/// not a conservative answer, a wrong one, and more visible in play than a miss. An earlier
+/// version of this comment called the stored-array walk "conservative in the direction that
+/// cannot produce a false negative", and that formulation is what let the defect through.
+///
+/// The walk stops at the first vertex on the solid side. `plane` must already be expressed in
+/// the MESH's local frame: transporting one plane once is cheaper than transporting every
+/// vertex, and it keeps the subtraction that carries the far-field residue inside
+/// `signedDistance`, where §1.11.15 puts it.
+pub fn halfSpaceMeetsMesh(
+    comptime T: type,
+    plane: HalfSpace(T),
+    vertices: []const math.Vec(3, T),
+    indices: []const u32,
+) bool {
+    plane.assertDomain();
+    for (indices) |i| {
+        if (plane.signedDistance(vertices[i]) <= 0) return true;
+    }
+    return false;
+}

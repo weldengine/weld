@@ -826,3 +826,90 @@ test "overlapShape separates a stale handle, an inadmissible probe and an empty 
         &out,
     ));
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.13 — the public queries KEEP SEEING triggers, and the asymmetry with the
+// character controller is deliberate (`engine-physics-solver.md` §1.13.7).
+// ---------------------------------------------------------------------------
+
+test "a trigger body answers the overlap entries like any other, and its layer still masks it" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // **BOTH DIRECTIONS, and the pairing is the point.** The controller excludes triggers BY
+    // CONSTRUCTION (§1.13.7) and the eight query entries do NOT: they traverse every broad
+    // class, editor selection and debug overlays depend on it, and a caller that wants none
+    // has its own mask. Restoring the symmetry by reflex is the error this case exists to
+    // catch, so the two halves are asserted together.
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const trigger = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(0, 0, 0),
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+        .is_trigger = true,
+        .collision_layer = 3,
+    });
+    // A solid body on ANOTHER object layer, so the mask below selects rather than empties.
+    const solid = try world.addBody(gpa, .{
+        .shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } }),
+        .position = harness.av3(0.5, 0, 0),
+        .body_type = .static,
+        .entity = .{ .index = 1, .generation = 0 },
+        .collision_layer = 4,
+    });
+    // The role really reached the store and the body really is in the `trigger` class — a
+    // descriptor field that failed to arrive would make this case pass for the wrong reason.
+    try testing.expectEqual(true, world.bm.isTrigger(trigger).?);
+
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    var out: [8]api.BodyId = undefined;
+
+    // SEEN: no mask, and the trigger comes back beside the solid body.
+    const all = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .position = Vec3r.zero,
+    }, &out);
+    try testing.expectEqual(@as(u32, 2), all);
+    try testing.expectEqual(trigger, out[0]);
+    try testing.expectEqual(solid, out[1]);
+
+    // MASKED OUT: a caller that does not want it masks its OBJECT layer, which is the
+    // mechanism §1.13.7 points such a caller at — and the solid body still answers, so this
+    // is selection and not an emptied query.
+    const masked = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .position = Vec3r.zero,
+        .filter = .{ .layer_mask = ~(@as(u32, 1) << 3) },
+    }, &out);
+    try testing.expectEqual(@as(u32, 1), masked);
+    try testing.expectEqual(solid, out[0]);
+
+    // The AABB and point entries see it too — the visibility is a property of the family and
+    // not of one entry.
+    //
+    // Both probes are placed where ONLY the trigger can answer, so "1" is a statement about
+    // the trigger and not a count that happens to include it. The trigger's tight world box
+    // is `[-1, 1]³`; the solid's is `[-0.5, 1.5]` on x, so a box around `x = -0.8` meets the
+    // first and not the second. A first version of this case probed the ORIGIN and expected
+    // 1: the origin is inside BOTH spheres — the solid's centre is 0.5 away and its radius is
+    // 1 — so the expectation was wrong and the engine was right.
+    const boxed = query.overlapAabb(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        v(-0.9, -0.1, -0.1),
+        v(-0.7, 0.1, 0.1),
+        .{},
+        &out,
+    );
+    try testing.expectEqual(@as(u32, 1), boxed);
+    try testing.expectEqual(trigger, out[0]);
+
+    // `(-0.8, 0, 0)` is 0.8 from the trigger's centre, so inside it, and 1.3 from the solid's,
+    // so outside that one.
+    const points = query.pointQuery(&world.bp, &world.bm, &world.store, v(-0.8, 0, 0), .{}, &out);
+    try testing.expectEqual(@as(u32, 1), points);
+    try testing.expectEqual(trigger, out[0]);
+}

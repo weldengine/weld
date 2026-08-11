@@ -69,6 +69,16 @@ pub const CollisionShape = extern struct {
     collision_layer: u8 = 0,
     /// Trigger (overlap events only, no physical response).
     is_trigger: bool = false,
+    /// OBJECT layers this trigger detects — the ECS authoring source of
+    /// `BodyDescriptor.trigger_layer_mask` (`engine-physics-forge.md` §2). A
+    /// candidate passes when `(1 << candidate_layer) & trigger_layer_mask` is
+    /// non-zero, the same mechanism as `PhysicsQueryFilter.layer_mask`
+    /// (`engine-physics-solver.md` §1.13.5).
+    ///
+    /// `is_trigger` removes the physical RESPONSE; this field governs the
+    /// DETECTION. The two axes are independent and never substitute for each other
+    /// (§1.13.2). INERT when `is_trigger` is false.
+    trigger_layer_mask: u32 = 0xFFFFFFFF,
 };
 
 /// Forces + torques accumulated during a frame, applied and reset each fixed
@@ -86,7 +96,29 @@ comptime {
     // POD layout pins — any future field change must revisit these.
     std.debug.assert(@sizeOf(RigidBody) == 32);
     std.debug.assert(@alignOf(RigidBody) == 4);
-    std.debug.assert(@sizeOf(CollisionShape) == 48);
+    // 48 -> 52 at M1.1.13. MEASURED, not reasoned: `collision_layer` sits at 44 and
+    // `is_trigger` at 45, so the byte after them is 46; the `u32` needs 4-alignment
+    // and therefore starts at 48, leaving bytes 46 and 47 as padding in BOTH layouts.
+    // The struct gains four full bytes and REUSES NOTHING — an earlier version of this
+    // comment claimed the trailing padding was consumed, which is false in two ways at
+    // once, so the three offsets below are pinned rather than described.
+    //
+    // These three are what decide the 52: a different arrangement landing on the same
+    // size must fail here, and size alone would not catch it. COUNTER-FACTUAL MEASURED,
+    // by changing the LAYOUT and never the expected constant — an oracle that judges a
+    // layout has to be confronted with a different layout. `collision_layer` and
+    // `is_trigger` were SWAPPED in the declaration: both are one byte and adjacent, so
+    // the size stays 52 and the alignment 4 and only the two offsets exchange. With these
+    // three asserts removed the whole suite still passed 497/497 — so the size and align
+    // pins really do accept the permutation — and with them present the build failed
+    // here. Moving the expected value from 44 to 43 would have proven only that the line
+    // executes.
+    std.debug.assert(@offsetOf(CollisionShape, "collision_layer") == 44);
+    std.debug.assert(@offsetOf(CollisionShape, "is_trigger") == 45);
+    std.debug.assert(@offsetOf(CollisionShape, "trigger_layer_mask") == 48);
+    // This assert and the test that doubles it are updated TOGETHER — a pin changed in
+    // one place only is the defect the pair exists to catch.
+    std.debug.assert(@sizeOf(CollisionShape) == 52);
     std.debug.assert(@alignOf(CollisionShape) == 4);
     std.debug.assert(@sizeOf(PhysicsForces) == 32);
     std.debug.assert(@alignOf(PhysicsForces) == 16);
@@ -97,8 +129,15 @@ const testing = std.testing;
 test "component layouts are the pinned extern-POD sizes" {
     try testing.expectEqual(@as(usize, 32), @sizeOf(RigidBody));
     try testing.expectEqual(@as(usize, 4), @alignOf(RigidBody));
-    try testing.expectEqual(@as(usize, 48), @sizeOf(CollisionShape));
+    try testing.expectEqual(@as(usize, 52), @sizeOf(CollisionShape));
     try testing.expectEqual(@as(usize, 4), @alignOf(CollisionShape));
+    // The three offsets that decide the 52 (see the comptime block): `collision_layer`
+    // at 44, `is_trigger` at 45, and the `u32` at 48 — bytes 46 and 47 are padding in
+    // the 48-byte layout and stay padding in this one. Doubled here so the pin cannot be
+    // moved in one place only.
+    try testing.expectEqual(@as(usize, 44), @offsetOf(CollisionShape, "collision_layer"));
+    try testing.expectEqual(@as(usize, 45), @offsetOf(CollisionShape, "is_trigger"));
+    try testing.expectEqual(@as(usize, 48), @offsetOf(CollisionShape, "trigger_layer_mask"));
     try testing.expectEqual(@as(usize, 32), @sizeOf(PhysicsForces));
     try testing.expectEqual(@as(usize, 16), @alignOf(PhysicsForces));
 }
@@ -126,4 +165,36 @@ test "CollisionShape default is a unit-ish sphere trigger-off" {
     try testing.expectEqual(@as(f32, 0.5), cs.params.sphere.radius);
     try testing.expectEqual(@as(f32, 1), cs.rotation_offset[3]);
     try testing.expectEqual(false, cs.is_trigger);
+    // Detection defaults to ALL object layers, the same value and the same reason as
+    // `PhysicsQueryFilter.layer_mask`: a zero default would make a declared trigger
+    // detect nothing, which reads as a broken engine rather than a forgotten field.
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), cs.trigger_layer_mask);
+    try testing.expectEqual(u32, @TypeOf(cs.trigger_layer_mask));
+}
+
+test "CollisionShape mirrors the two authoring fields of the body descriptor" {
+    // The ECS component is the AUTHORING source and the descriptor is the interface
+    // form; the pair is what `engine-physics-forge.md` §2 calls the translation
+    // `CollisionShape.is_trigger` -> `BodyDescriptor.is_trigger` -> body flag. Pinning
+    // the two names and the two defaults together is what makes a rename on one side a
+    // failing test rather than a silently half-wired role.
+    const cs = CollisionShape{};
+    const bd = types.BodyDescriptor{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body_type = .static,
+        .shape = 0,
+    };
+    try testing.expectEqual(bd.is_trigger, cs.is_trigger);
+    try testing.expectEqual(bd.trigger_layer_mask, cs.trigger_layer_mask);
+    try testing.expectEqual(@TypeOf(bd.trigger_layer_mask), @TypeOf(cs.trigger_layer_mask));
+
+    // The count is what makes an ADDITION visible; the by-name references above cannot.
+    // A component is `extern struct` POD read across the C ABI, so a field appended here
+    // after the M1.1.15 freeze shifts every offset behind it.
+    //
+    // COUNTER-FACTUAL MEASURED, and with a field chosen so that this line is the ONLY one
+    // that moves: a `u8` inserted between `is_trigger` and `trigger_layer_mask` lands in
+    // padding byte 46, so the size stays 52, the alignment 4 and the three pinned offsets
+    // unchanged — every assert above passes and this one reports `expected 7, found 8`.
+    try testing.expectEqual(@as(usize, 7), @typeInfo(CollisionShape).@"struct".fields.len);
 }

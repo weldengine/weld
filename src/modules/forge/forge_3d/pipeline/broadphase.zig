@@ -186,6 +186,23 @@ pub fn Bvh(comptime T: type) type {
             return index < self.nodes.items.len and self.nodes.items[index].height == 0;
         }
 
+        /// Hand the `user_data` of every LIVE leaf to `collector.add(user_data)`.
+        ///
+        /// The walk is over the node POOL, and `isLiveLeaf` is what makes it exact in both
+        /// directions: `freeNode` sets a retired node's height to `-1` and an internal node's
+        /// is `>= 1`, so the `height == 0` test admits live leaves and nothing else.
+        ///
+        /// Order is the pool index, which is a deterministic function of the operation
+        /// sequence and NOT insertion order — the same contract, for the same reason, as the
+        /// unbounded list's (§1.11.15). No result may depend on it.
+        pub fn forEachLeaf(self: *const Self, collector: anytype) void {
+            for (0..self.nodes.items.len) |i| {
+                const index: u32 = @intCast(i);
+                if (!self.isLiveLeaf(index)) continue;
+                collector.add(self.userData(index));
+            }
+        }
+
         /// Insert a proxy for `tight_aabb` carrying `user_data`. The stored box
         /// is `tight_aabb` fattened by `config.margin`. Returns the proxy id
         /// (a node index). Each insert adds at most two nodes (the leaf plus one
@@ -790,15 +807,31 @@ const null_slot: u32 = std.math.maxInt(u32);
 /// Default layer-pair matrix — symmetric; `true` = the two layers produce
 /// candidate pairs. Indexed by `@intFromEnum(BroadphaseLayer)`
 /// (static=0, dynamic=1, debris=2, trigger=3). Allowed: dynamic×dynamic,
-/// dynamic×static, dynamic×debris, dynamic×trigger, debris×static (brief Notes).
+/// dynamic×static, dynamic×debris, debris×static.
 /// Overridable `CollisionConfig` wiring is a later milestone (out of scope);
 /// this `const` is the Phase-1 default.
+///
+/// **The `trigger` ROW AND COLUMN are `false` in full, and this REVISES a decision
+/// taken at M1.1.1**, which set `dynamic × trigger` to `true` and wrote a test
+/// asserting it positively. That choice was reasonable then — nothing consumed the
+/// class, so the permissive cell cost nothing — and it is wrong now that the class
+/// has a meaning: a trigger detects without responding
+/// (`engine-physics-solver.md` §1.13.3), so the pairs that cell produced would have
+/// to be discarded downstream, every tick, on a hot path. Killing them at the source
+/// is less work AND a stronger guarantee: a trigger never reaches step 4 of the
+/// cycle, so no downstream filter can forget it.
+///
+/// It follows that the SENSOR PASS CANNOT CONSULT THIS MATRIX — it reads `false`
+/// everywhere. Detection is filtered by the trigger's own unilateral object-layer
+/// mask (§1.13.5), and the two mechanisms never substitute for each other: this one
+/// governs the physical RESPONSE, absolutely and without exception, and the mask
+/// governs what is SEEN (§1.13.2).
 pub const default_layer_pairs: [layer_count][layer_count]bool = .{
     //         static  dynamic  debris  trigger
     .{ false, true, true, false }, // static
-    .{ true, true, true, true }, // dynamic
+    .{ true, true, true, false }, // dynamic
     .{ true, true, false, false }, // debris
-    .{ false, true, false, false }, // trigger
+    .{ false, false, false, false }, // trigger
 };
 
 /// Multi-layer broadphase: one `Bvh(T)` per `BroadphaseLayer`, per-layer
@@ -1112,6 +1145,59 @@ pub fn Broadphase(comptime T: type) type {
                     collector.add(slot.user_data);
                 }
             }
+        }
+
+        /// Hand the `user_data` of every live proxy of ONE layer to `collector.add(user_data)`
+        /// — the layer's tree leaves first, then its unbounded slots.
+        ///
+        /// The sensor pass (`engine-physics-solver.md` §1.13.5) is what needs it, and it needs
+        /// it in this DIRECTION: triggers are rare against bodies, so the set to rebuild is
+        /// indexed by them, and enumerating the whole body store to find the few triggers would
+        /// be the cost that direction exists to avoid — a cost sleep does not economise
+        /// (§1.13.9).
+        ///
+        /// Both halves are required: a trigger may carry a half-space, which lives OUTSIDE the
+        /// trees (§1.11.15), so a walk over the tree alone would silently miss it.
+        pub fn forEachInLayer(self: *const Self, layer: BroadphaseLayer, collector: anytype) void {
+            const li = @intFromEnum(layer);
+            self.trees[li].forEachLeaf(collector);
+            for (self.unbounded[li].items) |slot| {
+                if (!slot.live) continue;
+                collector.add(slot.user_data);
+            }
+        }
+
+        /// Offer every proxy that meets the half-space to `collector` — every layer TREE, then
+        /// every layer's UNBOUNDED list. Symmetric with `queryAabb`, which visits both halves
+        /// for the same reason: nothing here has a second body, so no row of the pair matrix
+        /// applies and every structure is visited.
+        ///
+        /// **It was `queryHalfSpaceTrees` and visited only the trees**, named for its omission
+        /// because the sensor pass declared half-space against half-space out of domain. That
+        /// bound is RETRACTED (§1.13.6): it rested on a partition grouping half-space and mesh
+        /// by BODY TYPE where the question is whether the shape has an INTERIOR. A half-space
+        /// has one, its kernel against another half-space is two lines, and the omission had
+        /// no motive left — so it is the omission that goes, not merely the name.
+        ///
+        /// The unbounded walk offers the caller's OWN proxy back when it is itself unbounded;
+        /// excluding it is the caller's business, exactly as it is for `queryAabb`.
+        pub fn queryHalfSpace(self: *const Self, normal: Vec3T, distance: T, collector: anytype) u32 {
+            var visited: u32 = 0;
+            for (&self.trees) |*t| visited += t.queryHalfSpace(normal, distance, collector);
+            for (&self.unbounded) |*list| {
+                for (list.items) |slot| {
+                    if (!slot.live) continue;
+                    // **OFFERED UNFILTERED, and that is the division of labour.** A first
+                    // version tested disjointness here — a copy of the narrowphase kernel's own
+                    // closed form — and the duplicate is what a counter-factual caught: forcing
+                    // the KERNEL to answer always-true changed no test, because this filter was
+                    // deciding instead of it. The broadphase BOUNDS candidates and the exact
+                    // kernel DECIDES membership (§1.13.6); for two unbounded shapes there is
+                    // nothing to bound, so there is nothing to do here.
+                    collector.add(slot.user_data);
+                }
+            }
+            return visited;
         }
 
         /// Ray type for this scalar.

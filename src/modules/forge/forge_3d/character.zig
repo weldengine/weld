@@ -307,6 +307,42 @@ const Candidate = struct {
 
 /// Gathers the ground candidates of one downward sweep and keeps the winner.
 ///
+/// The candidate filter shared by the controller's THREE collection paths — the sweeps, the
+/// depenetration and the ground probe. Written once because a rule posted in two places out of
+/// three is how the third comes to disagree, and the trigger refusal below is exactly that shape.
+///
+/// Three refusals, in this order:
+///
+///  1. **A STALE handle.** The getters answer it by returning null; a freed body has no layer and
+///     no role.
+///  2. **A TRIGGER body, BY CONSTRUCTION and never by mask** (`engine-physics-solver.md` §1.13.7).
+///  3. **A body outside what the character SEES** — its own `layer_mask` over OBJECT layers
+///     (§1.12.4), which is the caller's choice and therefore comes last.
+///
+/// **Why the trigger refusal is by construction, and the distinction is load-bearing.** All three
+/// collectors filter on the OBJECT layer and none consults the broad class. Left alone, a trigger
+/// would stop blocking rigid bodies — the pair matrix sees to that (§1.13.3) — while still blocking
+/// the character: an invisible wall for the player alone, and the costliest defect class there is
+/// to diagnose. Making it the caller's business instead would mean asking the game to reserve an
+/// object layer for triggers, which rebuilds in mirror the confusion §1.13.2 forbids: `is_trigger`
+/// removes the RESPONSE, the mask governs what is SEEN, and the two axes never substitute. And "no
+/// physical response" IS the definition of the role, while a controller sweep IS a physical
+/// response — so the exclusion is the contract, not an option.
+///
+/// **The public queries do the OPPOSITE and that asymmetry is deliberate** (§1.11.1 point 3): they
+/// traverse every broad class and keep seeing triggers, because editor selection and debug overlays
+/// depend on it and a caller that wants none has its own mask. A query is not a physical response.
+/// Symmetry here would be an error, and it is tested in both directions so nobody restores it by
+/// reflex.
+fn admitsCandidate(bm: *const BodyManager, body: BodyId, layer_mask: u32) bool {
+    // The role is tested BEFORE the mask: the refusal is absolute and belongs to the engine, the
+    // mask is the caller's and belongs after it.
+    if (bm.isTrigger(body) orelse return false) return false;
+    // The layer getter answers staleness too: a freed handle has no layer.
+    const layer = bm.collisionLayer(body) orelse return false;
+    return (@as(u32, 1) << @intCast(layer)) & layer_mask != 0;
+}
+
 /// **The bound NEVER tightens**, unlike the query family's `closest` collector: the winner is
 /// the FLATTEST surface within the band and not the nearest one, so a nearer steeper contact
 /// must not prune a flatter one behind it. That is what lets a character straddling an edge
@@ -336,9 +372,7 @@ const GroundCollector = struct {
         if (self.exclude) |own| {
             if (own == body) return;
         }
-        // The layer getter answers staleness too: a freed handle has no layer.
-        const layer = self.bm.collisionLayer(body) orelse return;
-        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+        if (!admitsCandidate(self.bm, body, self.layer_mask)) return;
 
         const hit = self.bm.castShapeBody(
             self.store,
@@ -645,8 +679,7 @@ const SweepCollector = struct {
         if (self.exclude) |own| {
             if (own == body) return;
         }
-        const layer = self.bm.collisionLayer(body) orelse return;
-        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+        if (!admitsCandidate(self.bm, body, self.layer_mask)) return;
 
         // **THE EXCLUSION GOES INTO THE CAST, not around it.** `castShapeBody` returns ONE hit — the
         // nearest sub-shape — so filtering its RESULT discards that sub-shape and, with it, every other
@@ -736,8 +769,7 @@ const WorstOverlap = struct {
         if (self.exclude) |own| {
             if (own == body) return;
         }
-        const layer = self.bm.collisionLayer(body) orelse return;
-        if ((@as(u32, 1) << @intCast(layer)) & self.layer_mask == 0) return;
+        if (!admitsCandidate(self.bm, body, self.layer_mask)) return;
 
         var one = DeepestManifold{ .body = body };
         self.bm.collideShapeBody(self.store, body, self.probe, self.centre, Quatr.identity, &one);

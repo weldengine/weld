@@ -578,3 +578,138 @@ test "the class precondition of every reader discriminates both ways" {
     try testing.expect(std.math.isNan(plane.local_aabb.min.toArray()[0]));
     try testing.expect(std.math.isNan(plane.unit_inertia.toArray()[0]));
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.13 / gate A — the sensor role reaches the store, and the mask with it
+// ---------------------------------------------------------------------------
+
+test "the sensor role and its detection mask survive addBody" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // A body that says nothing is NOT a trigger, and it detects everything — which is
+    // inert on it. Both halves of the default are asserted, because a mask defaulting to
+    // zero would make every declared trigger silently blind (§1.13.5).
+    const plain = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    try testing.expectEqual(false, bm.isTrigger(plain).?);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), bm.triggerLayerMask(plain).?);
+
+    // POSITIVE CONTROL for the line above: a body that DOES declare the role reads back
+    // as one. Without it, `isTrigger` returning a constant `false` would satisfy the
+    // default assertion and nothing else.
+    var trigger_desc = descOf(1, .static, s);
+    trigger_desc.is_trigger = true;
+    // Layers 0 and 5 only — a value that is neither the default nor zero, so a dropped
+    // assignment and a zeroed column are two distinguishable failures.
+    trigger_desc.trigger_layer_mask = (1 << 0) | (1 << 5);
+    const trigger = try bm.addBody(gpa, &store, trigger_desc);
+    try testing.expectEqual(true, bm.isTrigger(trigger).?);
+    try testing.expectEqual(@as(u32, 0b100001), bm.triggerLayerMask(trigger).?);
+
+    // The mask is stored VERBATIM on a NON-trigger body — the column is not a second
+    // representation of the role. Asserted against a value that differs from both the
+    // default and the trigger's, so this cannot pass by coincidence.
+    var inert_desc = descOf(2, .dynamic, s);
+    inert_desc.trigger_layer_mask = 1 << 7;
+    const inert = try bm.addBody(gpa, &store, inert_desc);
+    try testing.expectEqual(false, bm.isTrigger(inert).?);
+    try testing.expectEqual(@as(u32, 0b10000000), bm.triggerLayerMask(inert).?);
+
+    // The role is per BODY and not per SHAPE, and this is what proves it rather than
+    // restates it: all three bodies above share ONE `ShapeId`, and they disagree.
+    try testing.expectEqual(s, bm.shapeOf(plain).?);
+    try testing.expectEqual(s, bm.shapeOf(trigger).?);
+    try testing.expectEqual(s, bm.shapeOf(inert).?);
+    try testing.expect(bm.isTrigger(plain).? != bm.isTrigger(trigger).?);
+
+    // The role does not disturb the flags that shared the byte with it.
+    try testing.expectEqual(true, bm.canSleep(trigger).?);
+    try testing.expectEqual(false, bm.isSleeping(trigger).?);
+
+    // Stale handle ⇒ null on both, parity with every other stale-safe getter.
+    bm.removeBody(trigger);
+    try testing.expectEqual(@as(?bool, null), bm.isTrigger(trigger));
+    try testing.expectEqual(@as(?u32, null), bm.triggerLayerMask(trigger));
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.13 / gate B — broad-class assignment, `is_trigger` first then body type
+// ---------------------------------------------------------------------------
+
+test "broad class is the trigger role first, then the body type" {
+    const Layer = @import("../pipeline/broadphase.zig").BroadphaseLayer;
+
+    // The full 2 x 3 domain, every cell asserted — the rule has exactly six inputs, so
+    // enumerating them is cheaper than arguing about them. The role WINS over the type in
+    // all three trigger rows, which is what "priority" means and what a spot check on one
+    // body type would not show.
+    try testing.expectEqual(Layer.static, BodyManager.broadLayerFor(false, .static));
+    try testing.expectEqual(Layer.dynamic, BodyManager.broadLayerFor(false, .kinematic));
+    try testing.expectEqual(Layer.dynamic, BodyManager.broadLayerFor(false, .dynamic));
+    try testing.expectEqual(Layer.trigger, BodyManager.broadLayerFor(true, .static));
+    try testing.expectEqual(Layer.trigger, BodyManager.broadLayerFor(true, .kinematic));
+    try testing.expectEqual(Layer.trigger, BodyManager.broadLayerFor(true, .dynamic));
+
+    // A KINEMATIC body lands in `dynamic` and NOT in `static`, asserted as a difference
+    // and not only as a value: the class names what MOVES, not what is SIMULATED, so a
+    // moving platform must be paired against statics exactly like a simulated body. A
+    // reader who takes `dynamic` to mean "solver-simulated" will read this as a bug; it is
+    // the name that lags (`engine-physics-solver.md` §1.13.3).
+    try testing.expect(BodyManager.broadLayerFor(false, .kinematic) != BodyManager.broadLayerFor(false, .static));
+    try testing.expectEqual(
+        BodyManager.broadLayerFor(false, .kinematic),
+        BodyManager.broadLayerFor(false, .dynamic),
+    );
+
+    // `debris` is produced by NO input. Not an omission: nothing consumes the class before
+    // destruction, and deriving it from an object layer touches no signature, so no freeze
+    // dates it. Pinned so a later milestone adding it has to delete this line.
+    inline for (.{ false, true }) |role| {
+        inline for (.{ api.BodyType.static, .kinematic, .dynamic }) |bt| {
+            try testing.expect(BodyManager.broadLayerFor(role, bt) != Layer.debris);
+        }
+    }
+}
+
+test "a live body reports the broad class its role and type derive" {
+    const Layer = @import("../pipeline/broadphase.zig").BroadphaseLayer;
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // One body per class the rule can produce, all on the SAME shape — the class is a
+    // property of the instance, exactly as the role is.
+    const st = try bm.addBody(gpa, &store, descOf(0, .static, s));
+    const kin = try bm.addBody(gpa, &store, descOf(1, .kinematic, s));
+    var trig_desc = descOf(2, .static, s);
+    trig_desc.is_trigger = true;
+    const trig = try bm.addBody(gpa, &store, trig_desc);
+
+    try testing.expectEqual(Layer.static, bm.broadLayer(st).?);
+    try testing.expectEqual(Layer.dynamic, bm.broadLayer(kin).?);
+    try testing.expectEqual(Layer.trigger, bm.broadLayer(trig).?);
+
+    // `trig` and `st` are BOTH `.static` bodies and land in different classes, which is
+    // the priority rule observed on real bodies rather than on the pure function.
+    try testing.expectEqual(bm.bodyType(st).?, bm.bodyType(trig).?);
+    try testing.expect(bm.broadLayer(st).? != bm.broadLayer(trig).?);
+
+    // DERIVED, never stored: the per-body form and the pure function agree by
+    // construction, and this is what keeps a fourth column from drifting from the two
+    // facts it would duplicate.
+    try testing.expectEqual(
+        BodyManager.broadLayerFor(bm.isTrigger(trig).?, bm.bodyType(trig).?),
+        bm.broadLayer(trig).?,
+    );
+
+    // Stale handle ⇒ null, parity with every other stale-safe getter.
+    bm.removeBody(trig);
+    try testing.expectEqual(@as(?Layer, null), bm.broadLayer(trig));
+}

@@ -46,6 +46,7 @@ const bm_mod = @import("../body_manager.zig");
 const broadphase = @import("../pipeline/broadphase.zig");
 const integration = @import("../pipeline/integration.zig");
 const sleep = @import("../pipeline/sleep.zig");
+const sensor = @import("../pipeline/sensor.zig");
 const rigid = @import("../rigid/root.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -71,9 +72,13 @@ pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
 
-fn broadphaseLayer(bt: api.BodyType) broadphase.BroadphaseLayer {
-    return if (bt == .static) .static else .dynamic;
-}
+// The harness does NOT compute a broad layer of its own. It calls
+// `BodyManager.broadLayerFor`, the same derivation production will use, so a trigger lands in
+// the `trigger` class BY THE RULE and not by a literal that happens to agree with it. A local
+// `if (bt == .static) .static else .dynamic` stood here until M1.1.13; it was right for the two
+// classes it knew and had no opinion about the role, so a sensor scene built on it would have
+// tested the rule beside the pass instead of through it. What remains between this harness and
+// what `PhysicsWorld` will do is one question — does M1.1.15 call this same function.
 
 fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
     std.mem.sort(u64, list.items, {}, std.sort.asc(u64));
@@ -121,6 +126,14 @@ pub const World = struct {
     velocity_result: rigid.VelocitySolveResult = .{},
     /// Islands put to sleep at step 11 of the last tick.
     slept_last_tick: u32 = 0,
+    /// The sensor state, updated at STEP 10 BIS when `sensors_on` (M1.1.13).
+    ///
+    /// Off by default so every inherited test keeps its exact cycle: a scene with no
+    /// trigger would pay a traversal that can only answer empty, and a suite that never
+    /// reads the state has no reason to run it.
+    sensors: sensor.SensorState = .{},
+    /// Whether step 10 bis runs. Set by the sensor suite before its first step.
+    sensors_on: bool = false,
 
     /// A world with the given gravity and fixed timestep. Default `SolverConfig`,
     /// sleeping ENABLED.
@@ -148,6 +161,7 @@ pub const World = struct {
 
     /// Release every owned buffer.
     pub fn deinit(self: *World, gpa: std.mem.Allocator) void {
+        self.sensors.deinit(gpa);
         self.store.deinit(gpa);
         self.bm.deinit(gpa);
         self.bp.deinit(gpa);
@@ -173,7 +187,7 @@ pub const World = struct {
     /// leaves the trees.
     pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
-        const layer = broadphaseLayer(desc.body_type);
+        const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
         const shape = self.store.get(desc.shape).?;
         const proxy = switch (shape.class()) {
             .convex, .triangle_soup => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
@@ -294,6 +308,24 @@ pub const World = struct {
             if (b.proxy.kind == .unbounded) continue;
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
+
+        // (10 BIS) the sensor pass (`engine-physics-solver.md` §1.13.4). Its placement rests
+        // on two claims, and THEY ARE NOT OF THE SAME RANK — the distinction is marked here
+        // rather than left for a reader to assume both were established:
+        //
+        //   - BEFORE step 11, and this half is MEASURED. The suite's sleep case asserts that
+        //     falling asleep inside a trigger never produces an exit, and the counter-factual
+        //     that adds a sleep filter to the traversal makes it fail. That is the phantom
+        //     exit, caught.
+        //   - AFTER step 10, and this half is a DESIGN REASONING, NOT MEASURED. Poses are
+        //     final there, corrections included, so an `enter` cannot announce a crossing the
+        //     NGS pass then undoes. No test moves the pass earlier to observe that: it would
+        //     need a scene calibrated so the position correction crosses a trigger boundary
+        //     within the tick, which costs more than it would establish — the placement is
+        //     correct by the DEFINITION of the poses the tick publishes, not by that probe.
+        //     The argument lives in the spec, which is its place; this comment only records
+        //     that it is an argument and not a measurement.
+        if (self.sensors_on) try self.sensors.update(gpa, &self.bp, &self.bm, &self.store);
 
         // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep
         // every island all of whose members are eligible. The only place in the
