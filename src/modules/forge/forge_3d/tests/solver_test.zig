@@ -46,6 +46,7 @@ const bm_mod = @import("../body_manager.zig");
 const broadphase = @import("../pipeline/broadphase.zig");
 const integration = @import("../pipeline/integration.zig");
 const sleep = @import("../pipeline/sleep.zig");
+const sensor = @import("../pipeline/sensor.zig");
 const rigid = @import("../rigid/root.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -125,6 +126,14 @@ pub const World = struct {
     velocity_result: rigid.VelocitySolveResult = .{},
     /// Islands put to sleep at step 11 of the last tick.
     slept_last_tick: u32 = 0,
+    /// The sensor state, updated at STEP 10 BIS when `sensors_on` (M1.1.13).
+    ///
+    /// Off by default so every inherited test keeps its exact cycle: a scene with no
+    /// trigger would pay a traversal that can only answer empty, and a suite that never
+    /// reads the state has no reason to run it.
+    sensors: sensor.SensorState = .{},
+    /// Whether step 10 bis runs. Set by the sensor suite before its first step.
+    sensors_on: bool = false,
 
     /// A world with the given gravity and fixed timestep. Default `SolverConfig`,
     /// sleeping ENABLED.
@@ -152,6 +161,7 @@ pub const World = struct {
 
     /// Release every owned buffer.
     pub fn deinit(self: *World, gpa: std.mem.Allocator) void {
+        self.sensors.deinit(gpa);
         self.store.deinit(gpa);
         self.bm.deinit(gpa);
         self.bp.deinit(gpa);
@@ -298,6 +308,15 @@ pub const World = struct {
             if (b.proxy.kind == .unbounded) continue;
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
+
+        // (10 BIS) the sensor pass (`engine-physics-solver.md` §1.13.4). AFTER the proxy
+        // update, so poses are final and every proxy is valid — sleepers' included, their
+        // AABB being unchanged by construction — and BEFORE step 11, which is what makes a
+        // body's membership established for the tick in which it falls asleep. Move it after
+        // the sleep transition and a body that falls asleep inside a trigger still stays in
+        // the set, the pass reading no sleep state at all; move it BEFORE step 10 and an
+        // `enter` could announce a crossing the NGS pass then undoes.
+        if (self.sensors_on) try self.sensors.update(gpa, &self.bp, &self.bm, &self.store);
 
         // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep
         // every island all of whose members are eligible. The only place in the

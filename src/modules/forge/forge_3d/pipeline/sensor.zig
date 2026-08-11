@@ -60,6 +60,7 @@ const Real = config.Real;
 const Vec3r = config.Vec3r;
 const Quatr = config.Quatr;
 const BodyId = api.BodyId;
+const EntityId = api.EntityId;
 const BodyManager = body_manager.BodyManager;
 const ShapeStore = shape_mod.ShapeStore;
 const Broadphase = broadphase.Broadphase(Real);
@@ -270,5 +271,181 @@ const CandidateSink = struct {
         self.out.append(self.gpa, .{ .trigger = self.trigger, .other = other }) catch |e| {
             self.err = e;
         };
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The observable state, and the two deltas
+// ---------------------------------------------------------------------------
+
+/// One ORIENTED pair of the observable state, in ENTITY identities and never in body
+/// handles (§1.13.8). The public payload of `engine-physics-forge.md` §5 carries entities:
+/// a state expressed in bodies would produce two `enter` where one entity carries two
+/// colliders, for a single observable crossing.
+pub const EntityPair = struct {
+    /// The entity owning the trigger body.
+    trigger: EntityId,
+    /// The entity it detects. Never equal to `trigger` (§1.13.8 rule 2).
+    other: EntityId,
+};
+
+/// Strict order on an entity identity: index first, then generation.
+///
+/// **Written out rather than bitcast to the packed `u64`.** `EntityId` is a
+/// `packed struct(u64)`, so a bitcast comparison would order by whichever field the layout
+/// happens to place high — a property of the layout and not a decision — and a later field
+/// reorder would silently reorder this. Both fields are compared, which is what §1.13.11
+/// requires: never the index alone, two successive occupants of one index having to be
+/// distinct AND ordered.
+fn entityLess(a: EntityId, b: EntityId) bool {
+    if (a.index != b.index) return a.index < b.index;
+    return a.generation < b.generation;
+}
+
+fn entityEql(a: EntityId, b: EntityId) bool {
+    return a.index == b.index and a.generation == b.generation;
+}
+
+/// The lexicographic order of §1.13.11: `(trigger_entity, other_entity)`, each compared on
+/// its complete identity value.
+fn pairLess(_: void, a: EntityPair, b: EntityPair) bool {
+    if (!entityEql(a.trigger, b.trigger)) return entityLess(a.trigger, b.trigger);
+    return entityLess(a.other, b.other);
+}
+
+fn pairEql(a: EntityPair, b: EntityPair) bool {
+    return entityEql(a.trigger, b.trigger) and entityEql(a.other, b.other);
+}
+
+/// The overlap state and its two deltas, rebuilt in full every tick.
+///
+/// **No hashed container appears on this path**, here as in the broadphase and the
+/// warm-start cache (§1.13.11): the set is a sorted flat array, deduplication is an
+/// adjacent pass, and the two differences are linear merges. The output order is therefore a
+/// pure function of the SET — independent of tree visit order, of worker count and of body
+/// insertion order — which is the condition for M1.1.14 to VERIFY it rather than establish
+/// it.
+pub const SensorState = struct {
+    /// The current set, sorted and deduplicated by the §1.13.11 key.
+    current: std.ArrayListUnmanaged(EntityPair) = .empty,
+    /// The previous tick's set, kept for the comparison and for nothing else.
+    previous: std.ArrayListUnmanaged(EntityPair) = .empty,
+    /// `current` minus `previous`, in the same order.
+    entered: std.ArrayListUnmanaged(EntityPair) = .empty,
+    /// `previous` minus `current`, in the same order. There is no third list: the
+    /// maintained state is readable in `current` at any instant, and an event per tick per
+    /// maintained pair would be the bus's largest producer for information already
+    /// available without it (§1.13.12).
+    exited: std.ArrayListUnmanaged(EntityPair) = .empty,
+    /// Body-level scratch, retained across ticks for its capacity alone.
+    overlaps: std.ArrayListUnmanaged(BodyOverlap) = .empty,
+
+    pub fn deinit(self: *SensorState, gpa: std.mem.Allocator) void {
+        self.current.deinit(gpa);
+        self.previous.deinit(gpa);
+        self.entered.deinit(gpa);
+        self.exited.deinit(gpa);
+        self.overlaps.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// Rebuild the current set from the live proxies and recompute the two deltas.
+    ///
+    /// **RESERVE-THEN-MUTATE.** Every fallible step — the body-level collection and the
+    /// three reservations — precedes the first observable mutation of the state, so an
+    /// allocation failure leaves `current`, `previous` and the two deltas exactly as they
+    /// were and the call is retryable. The same invariant the ECS slot allocator holds.
+    ///
+    /// **The state is rebuilt IN FULL and nothing is carried forward but the comparison
+    /// copy.** That is what makes body-handle recycling harmless: no handle appears in the
+    /// state and no membership is carried, so a reissued `BodyId` inherits nothing. The
+    /// immunity is a property of the reconstruction and not of the type — a state held by
+    /// increments would lose it, which is why it is stated here and not left implicit
+    /// (§1.13.8).
+    ///
+    /// **Filtered by NO sleep state, on either side.** A body that falls asleep inside a
+    /// trigger stays in the set, so falling asleep never produces an exit (§1.13.9). The
+    /// price is that a fully resting scene pays this every tick.
+    pub fn update(
+        self: *SensorState,
+        gpa: std.mem.Allocator,
+        bp: *const Broadphase,
+        bm: *const BodyManager,
+        store: *const ShapeStore,
+    ) !void {
+        try collectOverlaps(gpa, bp, bm, store, &self.overlaps);
+
+        // All three reservations before any swap, and the FIRST one is on `previous` and not
+        // on `current`: the swap below makes the previous buffer the new `current`, so
+        // reserving on `current` here would grow the buffer that is about to become the
+        // comparison copy and leave the rebuilt one short. A first version did exactly that
+        // and papered over it with a post-swap `catch unreachable` on a path that really can
+        // fail — the reservation is simply moved to the right buffer instead.
+        // Each delta holds at most the sum of the two sets.
+        try self.previous.ensureTotalCapacity(gpa, self.overlaps.items.len);
+        const delta_bound = self.overlaps.items.len + self.current.items.len;
+        try self.entered.ensureTotalCapacity(gpa, delta_bound);
+        try self.exited.ensureTotalCapacity(gpa, delta_bound);
+
+        // From here on nothing can fail.
+        std.mem.swap(std.ArrayListUnmanaged(EntityPair), &self.current, &self.previous);
+        self.current.clearRetainingCapacity();
+
+        for (self.overlaps.items) |o| {
+            const t = bm.entity(o.trigger) orelse continue;
+            const e = bm.entity(o.other) orelse continue;
+            // REFLEXIVE SUPPRESSION (§1.13.8 rule 2): one entity carrying a trigger body and
+            // a solid body would otherwise detect itself. Distinct from the body-level
+            // self-match, which the traversal already excludes — this one is about two
+            // DIFFERENT bodies of one entity.
+            if (entityEql(t, e)) continue;
+            self.current.appendAssumeCapacity(.{ .trigger = t, .other = e });
+        }
+
+        // AGGREGATION (§1.13.8 rule 1) IS this dedup: several body overlaps between the same
+        // two entities collapse to one pair, so the exit fires only when the last of them
+        // disappears — which falls out of the set difference below without a special case.
+        std.mem.sort(EntityPair, self.current.items, {}, pairLess);
+        dedupAdjacent(&self.current);
+
+        difference(self.current.items, self.previous.items, &self.entered);
+        difference(self.previous.items, self.current.items, &self.exited);
+    }
+
+    /// `a \ b` over two SORTED, deduplicated lists, written into `out` in the same order.
+    /// A linear merge — no hashed container, and no allocation, the capacity having been
+    /// reserved by the caller.
+    fn difference(
+        a: []const EntityPair,
+        b: []const EntityPair,
+        out: *std.ArrayListUnmanaged(EntityPair),
+    ) void {
+        out.clearRetainingCapacity();
+        var i: usize = 0;
+        var j: usize = 0;
+        while (i < a.len) {
+            if (j == b.len or pairLess({}, a[i], b[j])) {
+                out.appendAssumeCapacity(a[i]);
+                i += 1;
+            } else if (pairEql(a[i], b[j])) {
+                i += 1;
+                j += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+
+    fn dedupAdjacent(list: *std.ArrayListUnmanaged(EntityPair)) void {
+        if (list.items.len == 0) return;
+        var w: usize = 1;
+        var i: usize = 1;
+        while (i < list.items.len) : (i += 1) {
+            if (!pairEql(list.items[i], list.items[w - 1])) {
+                list.items[w] = list.items[i];
+                w += 1;
+            }
+        }
+        list.shrinkRetainingCapacity(w);
     }
 };

@@ -385,6 +385,27 @@ pub const BodyManager = struct {
         return self.bodies.items(.flags)[idx].is_trigger;
     }
 
+    /// Set or clear the SENSOR role on a live body. No-op on a stale/invalid handle.
+    ///
+    /// **THE CALLER OWES THE PROXY MOVE, and that is the whole reason this carries a comment
+    /// rather than being a one-line setter.** The broadphase class is DERIVED from the role
+    /// (`broadLayerFor`), so clearing the role moves the body from the `trigger` class to
+    /// `static` or `dynamic` — and a broadphase proxy belongs to ONE layer's structure. This
+    /// entry writes the flag and nothing else: it holds no broadphase and could not move the
+    /// proxy if it wanted to. A caller that flips the role without re-placing the proxy
+    /// leaves a body that the sensor pass still enumerates as a trigger, or one that no pass
+    /// enumerates at all.
+    ///
+    /// NON-ACTIVATING, like the other write paths of §1.8.4: losing or gaining the sensor role
+    /// is not a solicitation, and any wake the caller owes is composed by the caller.
+    ///
+    /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
+    /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
+    pub fn setTrigger(self: *BodyManager, id: BodyId, value: bool) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.flags)[idx].is_trigger = value;
+    }
+
     /// Safe getter: the OBJECT layers this body detects when it is a trigger, or null if
     /// `id` is stale/invalid. Inert on a non-trigger body, where it is still stored
     /// verbatim from the descriptor (§1.13.5).
