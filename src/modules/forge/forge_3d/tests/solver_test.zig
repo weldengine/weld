@@ -309,13 +309,22 @@ pub const World = struct {
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
 
-        // (10 BIS) the sensor pass (`engine-physics-solver.md` §1.13.4). AFTER the proxy
-        // update, so poses are final and every proxy is valid — sleepers' included, their
-        // AABB being unchanged by construction — and BEFORE step 11, which is what makes a
-        // body's membership established for the tick in which it falls asleep. Move it after
-        // the sleep transition and a body that falls asleep inside a trigger still stays in
-        // the set, the pass reading no sleep state at all; move it BEFORE step 10 and an
-        // `enter` could announce a crossing the NGS pass then undoes.
+        // (10 BIS) the sensor pass (`engine-physics-solver.md` §1.13.4). Its placement rests
+        // on two claims, and THEY ARE NOT OF THE SAME RANK — the distinction is marked here
+        // rather than left for a reader to assume both were established:
+        //
+        //   - BEFORE step 11, and this half is MEASURED. The suite's sleep case asserts that
+        //     falling asleep inside a trigger never produces an exit, and the counter-factual
+        //     that adds a sleep filter to the traversal makes it fail. That is the phantom
+        //     exit, caught.
+        //   - AFTER step 10, and this half is a DESIGN REASONING, NOT MEASURED. Poses are
+        //     final there, corrections included, so an `enter` cannot announce a crossing the
+        //     NGS pass then undoes. No test moves the pass earlier to observe that: it would
+        //     need a scene calibrated so the position correction crosses a trigger boundary
+        //     within the tick, which costs more than it would establish — the placement is
+        //     correct by the DEFINITION of the poses the tick publishes, not by that probe.
+        //     The argument lives in the spec, which is its place; this comment only records
+        //     that it is an argument and not a measurement.
         if (self.sensors_on) try self.sensors.update(gpa, &self.bp, &self.bm, &self.store);
 
         // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep

@@ -1851,3 +1851,61 @@ test "two bodies on the same entity fall back on BodyId" {
     try testing.expect(winner_y[0] != winner_y[1]);
     try testing.expectEqual(-winner_y[0], winner_y[1]);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.13 — the public queries KEEP SEEING triggers, and the asymmetry with the
+// character controller is deliberate (`engine-physics-solver.md` §1.13.7).
+// ---------------------------------------------------------------------------
+
+test "a trigger body answers the ray entries like any other, and its layer still masks it" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // **BOTH DIRECTIONS in one case.** The controller excludes triggers BY CONSTRUCTION
+    // (§1.13.7); the eight query entries do NOT — editor selection, debug overlays and an
+    // inspection raycast depend on seeing them, and a caller that wants none has its own
+    // mask. Restoring the symmetry by reflex is what this case is here to catch.
+    //
+    // The trigger is NEARER than the solid body, so an entry that skipped it would return
+    // the far one rather than nothing: the two outcomes are distinguishable, which a scene
+    // with a single body could not make them.
+    const trig_shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const trigger = try world.addBody(gpa, .{
+        .shape = trig_shape,
+        .position = harness.av3(10, 0, 0),
+        .body_type = .static,
+        .collision_layer = 3,
+        .entity = .{ .index = 0, .generation = 0 },
+        .is_trigger = true,
+    });
+    const solid = try addSphere(gpa, &world, v(20, 0, 0), 4);
+    try testing.expectEqual(true, world.bm.isTrigger(trigger).?);
+
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
+
+    // SEEN: the closest hit is the trigger, at its closed-form surface distance — centre 10,
+    // radius 1, so t = 9.
+    const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    try testing.expectEqual(trigger, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
+
+    // And `all` returns BOTH, so the trigger is a hit of the family and not an artefact of
+    // the closest collector.
+    var out: [8]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 2), query.raycastAll(&world.bp, &world.bm, &world.store, q, &out));
+
+    // MASKED OUT: masking the trigger's OBJECT layer hides it, and the ray then finds the
+    // SOLID body behind it at t = 19 — selection, not an emptied query.
+    const masked = query.RayQuery{
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+        .filter = .{ .layer_mask = ~(@as(u32, 1) << 3) },
+    };
+    const behind = (query.raycast(&world.bp, &world.bm, &world.store, masked)).?;
+    try testing.expectEqual(solid, behind.body);
+    try testing.expectApproxEqAbs(@as(Real, 19), behind.distance, tol);
+    try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, masked, &out));
+}
