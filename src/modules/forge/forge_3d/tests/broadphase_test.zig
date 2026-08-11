@@ -510,6 +510,42 @@ test "forEachLeaf skips a retired slot and follows it through recycling" {
     try std.testing.expectEqual(@as(usize, tree.leafCount()), got.items.items.len);
 }
 
+test "forEachInLayer reports BOTH halves of a layer, bounded and unbounded" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{ .margin = 0 });
+    defer bp.deinit(gpa);
+
+    // **THE UNBOUNDED HALF NAMED, rather than covered by consequence.** An unbounded shape
+    // lives OUTSIDE the trees (§1.11.15), so `forEachInLayer` walks the layer's tree AND its
+    // flat list, and the sensor pass depends on the second half to enumerate a half-space
+    // TRIGGER at all. That half is exercised today by two gate-D cases that build such a
+    // trigger — but by CONSEQUENCE: neither names it, and if either ever moved to a convex
+    // shape for an unrelated reason the coverage would vanish with no assertion changing.
+    // This case owns it.
+    //
+    // Both halves are asserted TOGETHER, in one layer, which is what makes each the other's
+    // control: a walk that lost the tree half, or one that lost the list half, fails here and
+    // an empty walk fails twice.
+    const floor = BphF.UnboundedShape{ .normal = Vec3.unit_y, .distance = 0 };
+    _ = try bp.insert(gpa, .trigger, boxCe(.{ 0, 5, 0 }, 1), 100); // bounded, in the tree
+    _ = try bp.insertUnbounded(gpa, .trigger, floor, 200); // unbounded, in the list
+    // A third proxy in ANOTHER layer, so "reports the layer" is a statement about the layer
+    // and not about the whole broadphase.
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 5, 0 }, 1), 300);
+
+    var got = Collector{ .gpa = gpa };
+    defer got.deinit();
+    bp.forEachInLayer(.trigger, &got);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 200 }, got.sortedOwned());
+
+    // And the other layer is reported by its own call, so the filtering above is selection
+    // and not loss.
+    var other = Collector{ .gpa = gpa };
+    defer other.deinit();
+    bp.forEachInLayer(.dynamic, &other);
+    try std.testing.expectEqualSlices(u32, &.{300}, other.sortedOwned());
+}
+
 test "the trigger row and column of the layer matrix are false in full" {
     // The matrix read DIRECTLY, in BOTH index orders, and not only through the pairs it
     // produces: the emission test above shows the four combinations reachable in one
