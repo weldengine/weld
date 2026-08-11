@@ -391,20 +391,35 @@ pub fn halfSpacesOverlap(comptime T: type, a: HalfSpace(T), b: HalfSpace(T)) boo
 /// **A vertex test is EXACT here, and that is a property of convexity rather than a
 /// simplification.** A triangle is the convex hull of its three vertices and a half-space is a
 /// convex set defined by a linear inequality, so `n·x − d` attains its minimum over the
-/// triangle at a VERTEX. The surface therefore meets the solid if and only if some vertex
-/// does, and no edge or interior point can be inside while all three vertices are outside.
+/// triangle at a VERTEX. The surface therefore meets the solid if and only if some vertex of
+/// some TRIANGLE does, and no edge or interior point can be inside while all three vertices
+/// are outside.
 ///
-/// The walk stops at the first vertex on the solid side; `vertices` is the mesh's own stored
-/// set, so unreferenced vertices are visited too — conservative in the direction that cannot
-/// produce a false negative, and the same set `MeshData` bounds elsewhere.
+/// **IT WALKS THE REFERENCED VERTICES, NOT THE STORED ARRAY, and the distinction is the whole
+/// correctness of the entry.** `MeshData` validates that every index is within the vertex
+/// array and never the converse, so an UNREFERENCED vertex is legal — an imported mesh may
+/// carry them. The convexity argument above is about the vertices of a TRIANGLE, and the
+/// stored array is not that set: walking it would answer "overlap" for a surface lying wholly
+/// outside the solid that merely stores an orphan inside it.
 ///
-/// `plane` must already be expressed in the MESH's local frame: transporting one plane once is
-/// cheaper than transporting every vertex, and it keeps the subtraction that carries the
-/// far-field residue inside `signedDistance`, where §1.11.15 puts it.
-pub fn halfSpaceMeetsVertices(comptime T: type, plane: HalfSpace(T), vertices: []const math.Vec(3, T)) bool {
+/// That is a FALSE POSITIVE, and in a sensor a false positive is a phantom `TriggerEnter` —
+/// not a conservative answer, a wrong one, and more visible in play than a miss. An earlier
+/// version of this comment called the stored-array walk "conservative in the direction that
+/// cannot produce a false negative", and that formulation is what let the defect through.
+///
+/// The walk stops at the first vertex on the solid side. `plane` must already be expressed in
+/// the MESH's local frame: transporting one plane once is cheaper than transporting every
+/// vertex, and it keeps the subtraction that carries the far-field residue inside
+/// `signedDistance`, where §1.11.15 puts it.
+pub fn halfSpaceMeetsMesh(
+    comptime T: type,
+    plane: HalfSpace(T),
+    vertices: []const math.Vec(3, T),
+    indices: []const u32,
+) bool {
     plane.assertDomain();
-    for (vertices) |v| {
-        if (plane.signedDistance(v) <= 0) return true;
+    for (indices) |i| {
+        if (plane.signedDistance(vertices[i]) <= 0) return true;
     }
     return false;
 }

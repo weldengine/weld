@@ -438,13 +438,28 @@ pub const BodyManager = struct {
     /// contract is §1.8.4's, and it is unchanged. What is easy to miss is WHICH bodies are
     /// owed: clearing the role turns a volume that opposed nothing into a SOLID, so the bodies
     /// that must be woken are those already OVERLAPPING it at that instant. They are not
-    /// discoverable from this call — the store has no candidate set to consult — so the caller
-    /// finds them with an overlap query against the body's own shape and pose, and wakes them.
+    /// discoverable from this call — the store has no candidate set to consult.
     ///
-    /// Until it does, a sleeping body inside the new solid STAYS asleep and interpenetrated:
-    /// no pass will notice, because a sleeper emits nothing in broadphase and the retained set
-    /// never held a pair for a body that was in the `trigger` class. That is a precondition,
-    /// pinned by a case in the sensor suite rather than left to be believed done.
+    /// **The recipe DISPATCHES on the shape, because one entry does not serve both shapes the
+    /// role admits.** A first version of this comment said "find them with an overlap query",
+    /// which is impossible for half of its own domain: `overlapShape` takes a BOUNDED CONVEX
+    /// probe and answers `error.UnsupportedShape` for anything else, and a half-space is
+    /// exactly the non-convex shape that keeps the sensor role. So:
+    ///
+    ///   - **convex body** — `query.overlapShape` with the body's own shape and pose;
+    ///   - **half-space body** — `Broadphase.queryHalfSpace` for the candidates, then
+    ///     `overlapShapeBody` per convex candidate and `halfSpaceOverlapsBody` per non-convex
+    ///     one. That is precisely what the sensor pass does for a half-space trigger, so the
+    ///     caller composes an existing path rather than needing a new entry.
+    ///
+    /// No query entry is added for this: the family freezes at M1.1.15, two milestones away,
+    /// and the need already has a path.
+    ///
+    /// Until the caller composes, a sleeping body inside the new solid STAYS asleep and
+    /// interpenetrated: no pass will notice, because a sleeper emits nothing in broadphase and
+    /// the retained set never held a pair for a body that was in the `trigger` class. That is a
+    /// precondition, pinned for BOTH shapes by the sensor suite rather than left to be believed
+    /// done.
     ///
     /// Its consumer is the fourth disappearance cause of §1.13.10 — a body that loses the
     /// sensor role stops being a trigger and its pairs exit; it does not become an inert one.
@@ -1222,10 +1237,12 @@ pub const BodyManager = struct {
                     inv_rot,
                     inv_rot.rotateVec3(self.bodies.items(.position)[oi].neg()),
                 );
-                return narrowphase.plane.halfSpaceMeetsVertices(
+                const data = other_shape.mesh.?;
+                return narrowphase.plane.halfSpaceMeetsMesh(
                     Real,
                     local_plane,
-                    other_shape.mesh.?.vertices,
+                    data.vertices,
+                    data.indices,
                 );
             },
         }

@@ -577,13 +577,37 @@ test "two mutually detecting triggers produce two pairs, one per direction" {
 
 /// Clear the sensor role on a live body AND move its proxy to the class the role change
 /// implies — the two halves the caller owes together (`BodyManager.clearTrigger`).
+///
+/// **THE PROXY MOVE DISPATCHES ON THE SHAPE TOO**, and a first version did not: it called
+/// `bodyAabb` unconditionally, which ASSERTS on a half-space, so the helper worked for a box
+/// trigger and crashed on the other shape the role admits. The same lesson as the owed wake
+/// one line below — one recipe does not serve both shapes — met once in the wake and once in
+/// the proxy move.
 fn clearTriggerRole(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyId) !void {
     world.bm.clearTrigger(id);
     const layer = BodyManager.broadLayerFor(false, world.bm.bodyType(id).?);
+    const record = world.store.get(world.bm.shapeOf(id).?).?;
     for (world.bodies.items) |*b| {
         if (b.id != id) continue;
         world.bp.remove(b.proxy);
-        b.proxy = try world.bp.insert(gpa, layer, world.bm.bodyAabb(&world.store, id).?, id);
+        b.proxy = switch (record.class()) {
+            .convex, .triangle_soup => try world.bp.insert(
+                gpa,
+                layer,
+                world.bm.bodyAabb(&world.store, id).?,
+                id,
+            ),
+            .half_space => blk: {
+                const w = shape_mod.halfSpace(record).transformed(
+                    world.bm.rotation(id).?,
+                    world.bm.position(id).?,
+                );
+                break :blk try world.bp.insertUnbounded(gpa, layer, .{
+                    .normal = w.normal,
+                    .distance = w.distance,
+                }, id);
+            },
+        };
     }
 }
 
@@ -975,4 +999,168 @@ test "clearing the role leaves an overlapping sleeper asleep until the caller co
     }
     try testing.expect(woke); // the query really did find the sleeper
     try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
+}
+
+/// A mesh whose single triangle sits at height `tri_y`, plus an UNREFERENCED vertex at
+/// `orphan_y`. `MeshData` validates that every index is inside the vertex array and never the
+/// converse, so an orphan is legal and an imported mesh may carry one.
+fn addMeshWithOrphan(
+    gpa: std.mem.Allocator,
+    world: *harness.World,
+    tri_y: f32,
+    orphan_y: f32,
+    entity_index: u32,
+) !api.BodyId {
+    const V = @typeInfo(@FieldType(@FieldType(api.ShapeDescriptor, "triangle_mesh"), "vertices")).pointer.child;
+    const verts = [_]V{
+        .{ .data = .{ -1, tri_y, -1 } }, .{ .data = .{ 1, tri_y, -1 } }, .{ .data = .{ 0, tri_y, 1 } },
+        .{ .data = .{ 0, orphan_y, 0 } }, // index 3, referenced by NO triangle
+    };
+    const tris = [_]u32{ 0, 2, 1 };
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{ .vertices = &verts, .indices = &tris } });
+    return world.addBody(gpa, .{
+        .entity = ent(entity_index),
+        .body_type = .static,
+        .shape = shape,
+        .position = av(0, 0, 0),
+    });
+}
+
+test "an unreferenced vertex inside the solid does not make the surface overlap it" {
+    const gpa = testing.allocator;
+    var out: std.ArrayListUnmanaged(sensor.BodyOverlap) = .empty;
+    defer out.deinit(gpa);
+
+    // **THE CONVEXITY ARGUMENT IS ABOUT THE VERTICES OF A TRIANGLE, and the stored array is
+    // not that set.** A predicate walking the stored array answers "overlap" for a surface
+    // lying wholly outside the solid that merely stores an orphan inside it — a FALSE
+    // POSITIVE, which in a sensor is a phantom `TriggerEnter`: not a conservative answer, a
+    // wrong one, and more visible in play than a miss.
+    //
+    // The orphan is NOT rejected at creation, deliberately: an imported mesh may legitimately
+    // carry unreferenced vertices, and refusing them would break valid assets for a defect
+    // that lives in the predicate.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const trigger = try addHalfSpaceTrigger(gpa, &world, 1); // solid {y <= 0}
+        // Triangle entirely at y = +2, outside the solid; orphan at y = −5, inside it.
+        const mesh = try addMeshWithOrphan(gpa, &world, 2, -5, 2);
+
+        // The traversal REALLY REACHES the body: its world AABB is tight over the stored
+        // vertices, orphan included, so it spans y ∈ [−5, 2] and meets the half-space. The
+        // refusal below is therefore the kernel's and not a candidate that was never offered.
+        try testing.expect(world.bm.bodyAabb(&world.store, mesh).?.min.toArray()[1] < 0);
+
+        try collect(gpa, &world, &out);
+        try testing.expect(!hasOverlap(out.items, trigger, mesh));
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+
+    // POSITIVE CONTROL, same shape of scene: move the TRIANGLE inside the solid and the same
+    // predicate answers overlap. Without it the assertion above is satisfied by a kernel that
+    // answers `false` unconditionally.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const trigger = try addHalfSpaceTrigger(gpa, &world, 1);
+        const mesh = try addMeshWithOrphan(gpa, &world, -1, -5, 2);
+        try collect(gpa, &world, &out);
+        try testing.expect(hasOverlap(out.items, trigger, mesh));
+    }
+}
+
+test "the owed wake dispatches on the shape, and a half-space trigger needs the other path" {
+    const gpa = testing.allocator;
+    var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    world.sensors_on = true;
+
+    // **THE SECOND SHAPE THE ROLE ADMITS, and the one a single recipe cannot serve.** A
+    // half-space keeps the sensor role — it is a volume with an interior — and it is exactly
+    // the shape `overlapShape` refuses as a probe. A caller told only to "run an overlap query"
+    // would get `error.UnsupportedShape` on half of the role's own domain.
+    const trigger = try addHalfSpaceTrigger(gpa, &world, 1); // solid {y <= 0}
+    const bshape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.5, 0.5, 0.5) } });
+    const sleeper = try world.addBody(gpa, .{
+        .entity = ent(2),
+        .body_type = .dynamic,
+        .shape = bshape,
+        .position = av(0, -2, 0), // well inside the solid
+    });
+
+    for (0..60) |_| try world.step(gpa);
+    try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+    try testing.expect(hasPair(world.sensors.current.items, 1, 2));
+
+    // THE RECIPE THAT DOES NOT WORK, asserted rather than described: the query entry refuses a
+    // half-space probe outright. Without this line the dispatch below reads as a preference.
+    var found: [8]api.BodyId = undefined;
+    try testing.expectError(error.UnsupportedShape, query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = world.bm.shapeOf(trigger).?,
+        .position = world.bm.position(trigger).?,
+    }, &found));
+
+    try clearTriggerRole(gpa, &world, trigger);
+    try world.step(gpa);
+    try testing.expect(hasPair(world.sensors.exited.items, 1, 2));
+
+    // The sleeper is still asleep inside what is now a solid half-space: the precondition, on
+    // the second shape.
+    for (0..10) |_| {
+        try world.step(gpa);
+        try testing.expectEqual(true, world.bm.isSleeping(sleeper).?);
+    }
+
+    // THE RECIPE THAT WORKS, performed — `queryHalfSpace` for the candidates, then the exact
+    // kernel per candidate. It is what the sensor pass itself does for a half-space trigger,
+    // so the caller composes an existing path instead of needing a new query entry.
+    const shape = world.store.get(world.bm.shapeOf(trigger).?).?;
+    const world_plane = shape_mod.halfSpace(shape).transformed(
+        world.bm.rotation(trigger).?,
+        world.bm.position(trigger).?,
+    );
+    var candidates = Candidates{ .gpa = gpa };
+    defer candidates.deinit();
+    _ = world.bp.queryHalfSpace(world_plane.normal, world_plane.distance, &candidates);
+
+    var woke = false;
+    for (candidates.items.items) |id| {
+        if (id == trigger) continue;
+        const overlaps = if (probeIsConvex(&world, id))
+            world.bm.overlapShapeBody(
+                &world.store,
+                trigger,
+                shape_mod.supportShape(world.store.get(world.bm.shapeOf(id).?).?),
+                world.bm.position(id).?,
+                world.bm.rotation(id).?,
+                .ignore,
+            ) orelse false
+        else
+            world.bm.halfSpaceOverlapsBody(&world.store, trigger, id) orelse false;
+        if (!overlaps) continue;
+        world.bm.wakeBody(id);
+        if (id == sleeper) woke = true;
+    }
+    try testing.expect(woke); // the composition really found the sleeper
+    try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
+}
+
+/// Records every `user_data` a broadphase traversal offers.
+const Candidates = struct {
+    items: std.ArrayListUnmanaged(api.BodyId) = .empty,
+    gpa: std.mem.Allocator,
+
+    pub fn add(self: *Candidates, user_data: u32) void {
+        self.items.append(self.gpa, user_data) catch @panic("collector OOM");
+    }
+    fn deinit(self: *Candidates) void {
+        self.items.deinit(self.gpa);
+    }
+};
+
+fn probeIsConvex(world: *const harness.World, id: api.BodyId) bool {
+    const sid = world.bm.shapeOf(id) orelse return false;
+    const s = world.store.get(sid) orelse return false;
+    return s.class() == .convex;
 }
