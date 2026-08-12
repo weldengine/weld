@@ -5,7 +5,7 @@
 //! meaning for the rigid branch: it projects the awake dynamic bodies onto
 //! `0..count`, links the pairs its contact constraints couple, ranks the resulting
 //! groups, reorders the constraint array into one contiguous range per island —
-//! the range shape `solveRange` and `solvePositionRange` have taken since M1.1.6 —
+//! the range shape the solver's stage entries have taken since M1.1.6 —
 //! and arbitrates the two decisions the model makes per island: activation at step
 //! 5 of the normative cycle (§1.7) and the sleep transition at step 11.
 //!

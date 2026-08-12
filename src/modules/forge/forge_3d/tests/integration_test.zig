@@ -6,7 +6,12 @@
 //!
 //! M1.1.6 adds the velocity/position split: `integrate` is now the composition
 //! of `integrateVelocities` + `integratePositions`, and the composition is pinned
-//! bit-for-bit here so the Sequential Impulses solve can sit between the two.
+//! bit-for-bit here so the contact solve can sit between the two.
+//!
+//! M1.1.13.1 adds the substep decomposition: `integrateVelocities` is itself the
+//! composition of `integrateVelocitiesNoReset` and `resetForceAccumulators`, because
+//! a solver that calls the velocity half once per substep must not have the force
+//! accumulators consumed on the first one.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -379,7 +384,7 @@ test "static and kinematic bodies are not integrated" {
     // `addBody` stores — and `addBody` now normalises the widened descriptor
     // rotation (`Body.rotation`'s invariant, M1.1.9), so that comparison was
     // asserting creation semantics under the name of integration semantics. Form
-    // taken from `position_solver_test.zig:402`, which already captures the pose
+    // taken from the M1.1.7 NGS suite (since deleted), which already captured the pose
     // before its pass and asserts it bit-unchanged after.
     const before_rot_stat = bm.rotation(id_stat).?;
     const before_rot_kin = bm.rotation(id_kin).?;
@@ -668,7 +673,7 @@ test "orientation update uses the left (world-space) quaternion product" {
 // --- M1.1.6 integration split ------------------------------------------------
 
 test "split integration composes to the monolithic pass" {
-    // The Sequential Impulses solve (M1.1.6) sits BETWEEN the velocity and
+    // The contact solve sits BETWEEN the velocity and
     // position updates, so `integrate` is split into `integrateVelocities` +
     // `integratePositions`. Running the two halves back-to-back (no solve
     // between) must reproduce the fused `integrate` BIT-FOR-BIT — the composition

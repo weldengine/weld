@@ -1,6 +1,6 @@
-//! `forge_3d/rigid/contact_constraint.zig` — the velocity-level contact
-//! constraint of the rigid-body Sequential Impulses solver (Catto lineage,
-//! Box2D/Jolt tradition), plus its build/precompute front end.
+//! `forge_3d/rigid/contact_constraint.zig` — the contact constraint of the rigid
+//! branch's substepped solver (TGS Soft, Catto lineage), plus its build/precompute
+//! front end.
 //!
 //! The rigid branch lives in `rigid/` (distinct from the branch-shared
 //! `pipeline/`; `engine-physics-forge.md` §1.2). This file owns:
@@ -11,16 +11,16 @@
 //!   - the SOFT-CONSTRAINT coefficient forms (`makeSoft`, `effectiveContactHertz`,
 //!     `usesStaticSoftness`) — same family as the combine rules above: per-tick
 //!     derivation of a constraint's coefficients from authored parameters. They are
-//!     the first half of the TGS Soft port (`engine-physics-solver.md` §1.7.1); the
-//!     substepped solver that consumes them is the second;
+//!     the coefficient half of the model (`engine-physics-solver.md` §1.7.1);
+//!     `solver.zig` is the half that consumes them;
 //!   - `ContactConstraint` (one per manifold, ≤ 4 inline points) with its
 //!     per-point solver data;
 //!   - `build`, which turns canonical broadphase candidate pairs into a
 //!     deterministically-ordered constraint array, running the narrowphase and
 //!     the per-point `prepare` precompute (lever arms, world inverse inertias,
 //!     normal + two tangent effective masses, pre-solve normal velocity `v_n⁻`,
-//!     and — for the NGS position pass — the two body-local surface anchors plus
-//!     the pose-invariant local inverse inertias).
+//!     the two body-local surface anchors, the pose-invariant local inverse inertias,
+//!     the softness selection, and the warm-start SEEDING).
 //!
 //! Import discipline (brief): `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
@@ -29,12 +29,12 @@
 //! the same file. NEVER `broadphase.zig`: candidate pairs are consumed as data
 //! (packed `u64` keys), never re-derived.
 //!
-//! The velocity solver carries NO positional bias (no Baumgarte, no split
-//! impulse) — position error is entirely the NGS position pass's business
-//! (`engine-physics-forge.md` §1.7). `ContactPoint.penetration` is consumed HERE
-//! and only here, at `prepare`, to derive the two surface anchors; the position
-//! iterations then re-derive the separation from the current poses instead of
-//! re-reading the frozen manifold (§1.7.2).
+//! `ContactPoint.penetration` is consumed HERE and only here, at `prepare`, to derive
+//! the two surface anchors. There is NO position pass: each substep re-derives the
+//! separation from the CURRENT poses against those anchors and feeds it to the solve
+//! as a bounded velocity bias (`engine-physics-solver.md` §1.7.1). The anchors and the
+//! local inverse inertias survive the M1.1.13.1 port unchanged in shape and changed in
+//! consumer — the NGS pass that used to read them is gone.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -259,14 +259,13 @@ pub const ConstraintPoint = struct {
     rel_normal_velocity: Real,
     /// Surface penetration along the normal (≥ 0). Consumed ONCE, here at
     /// `prepare`, to derive the two surface anchors below; it is never re-read from
-    /// the frozen manifold during the position iterations — the NGS pass re-derives
-    /// the separation from the CURRENT poses, which is what makes it non-linear
-    /// (`engine-physics-forge.md` §1.7.2). The velocity pass carries no positional
-    /// bias and never reads it.
+    /// the frozen manifold during the substep loop — each substep re-derives the
+    /// separation from the CURRENT poses, which is what makes the scheme non-linear
+    /// (`engine-physics-solver.md` §1.7.1).
     penetration: Real,
     /// Contact anchor in body A's LOCAL frame: A's surface point at prepare time,
-    /// `conj(q_a)·(surface_a − x_a)` — rigidly attached, so the NGS position pass
-    /// re-derives its world position from A's current pose.
+    /// `conj(q_a)·(surface_a − x_a)` — rigidly attached, so every substep re-derives
+    /// its world position from A's current pose.
     local_anchor_a: Vec3r,
     /// Contact anchor in body B's LOCAL frame (mirror of `local_anchor_a`, on B's
     /// surface). The two anchors are `penetration` apart along the normal at
@@ -346,10 +345,11 @@ pub const ContactConstraint = struct {
     inv_inertia_a: Mat3r,
     inv_inertia_b: Mat3r,
     /// Pose-invariant LOCAL inverse inertia per body, copied from
-    /// `MotionProperties`. The NGS position pass rebuilds the world tensor
-    /// `R_current · I_local⁻¹ · R_currentᵀ` from the CURRENT rotation on every
-    /// point/iteration (it moves the poses it reads), so it never calls
-    /// `motionProperties` in its inner loop.
+    /// `MotionProperties`, and kept through the M1.1.13.1 port for the consumers that
+    /// need a world tensor at a pose the substep loop has just moved. The frozen
+    /// per-tick `inv_inertia_a`/`inv_inertia_b` above are what the solve itself uses
+    /// (§1.7.1: the Jacobian arms and the effective masses are frozen together, so
+    /// re-rotating one without the others would make them inconsistent).
     local_inv_inertia_a: Mat3r,
     local_inv_inertia_b: Mat3r,
     /// Per-point solver data.
@@ -449,7 +449,7 @@ fn prepare(
         const v_pa = vel_a.add(ang_a.cross(r_a));
         const v_pb = vel_b.add(ang_b.cross(r_b));
 
-        // Surface anchors for the NGS position pass. The manifold point IS the
+        // Surface anchors for the substep loop. The manifold point IS the
         // midpoint of the two surface points (`pipeline/narrowphase/manifold.zig`
         // `ContactPoint`), so they reconstruct exactly from the penetration:
         // A's surface sits half a penetration toward B, B's half a penetration
@@ -694,7 +694,7 @@ const ConstraintCollector = struct {
 /// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh
 /// pair produces one per contacting triangle, and on `pair_key` alone their relative order becomes
 /// neither the traversal's nor a contract of any kind: it is the sort algorithm's internal
-/// behaviour. Sequential Impulses is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
+/// behaviour. The contact solve is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
 /// determinism path, not a cosmetic one.
 ///
 /// M1.1.8 stated the invariant this restores, in these words: the constraints are ordered by an

@@ -1,9 +1,12 @@
-//! `forge_3d/rigid/contact_cache.zig` — the Sequential Impulses warm-start cache.
+//! `forge_3d/rigid/contact_cache.zig` — the contact solver's warm-start cache.
 //!
 //! A per-tick, double-buffered flat cache of accumulated contact impulses keyed
 //! by contact feature. The solver seeds each new tick's constraints from the
-//! previous tick's solved impulses (warm start; `velocity_solver.warmStart`),
-//! which is what makes the iterative solver converge in a handful of iterations.
+//! previous tick's solved impulses (SEEDED once per tick at
+//! `contact_constraint.seedWarmStart`, then APPLIED once per substep by
+//! `solver.applyWarmStartRange` — two operations, deliberately two functions),
+//! which is what lets the substepped solver start each tick where the last one left
+//! off instead of from zero.
 //!
 //! Determinism by construction (M1.1.14): sorted flat arrays only, NO hash
 //! containers. The `prev` buffer is sorted ascending by the full key; matching is
