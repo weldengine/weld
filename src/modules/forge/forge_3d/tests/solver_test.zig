@@ -1,43 +1,54 @@
-//! M1.1.6 acceptance suite for the Sequential Impulses contact solver, extended at
-//! M1.1.7 with the NGS position pass.
+//! M1.1.13.1 acceptance suite for the SUBSTEPPED rigid contact solver (TGS Soft),
+//! replacing the M1.1.6 Sequential Impulses suite and absorbing the M1.1.7 NGS
+//! suite, whose model no longer exists.
 //!
 //! `World` composes the full per-tick pipeline IN TESTS ONLY (the production
-//! `step()` orchestration is M1.1.15). The eleven normative steps
-//! (`engine-physics-forge.md` §1.7), in order:
+//! `step()` orchestration is M1.1.15). The normative cycle
+//! (`engine-physics-solver.md` §1.7), in order — step numbers are STABLE anchors and
+//! step 8 is retired at a frozen number:
 //!   (1)  `Broadphase.computePairs` on the current poses (moved-driven deltas)
 //!   (2)  candidate-pair retention: merge the deltas into a PERSISTENT set
-//!   (3)  `integrateVelocities(dt, gravity)` — skips sleeping bodies
-//!   (4)  `cache.beginTick` → `build` (narrowphase `collidePair` per candidate +
-//!        `prepare`, and the wake fixpoint of §1.8.5)
+//!   (3)  external forces — READ-ONLY, and it owns no code. The force/torque
+//!        accumulators are constant for the whole of `step()` (nothing writes them
+//!        between ticks), so they ARE the tick's accelerations and every substep
+//!        reads them directly. The uniform §2 reset is not here: it runs once at the
+//!        END of step 6, because clearing an accumulator before anything consumes it
+//!        delivers `F/m·0` (blocker B1).
+//!   (4)  `cache.beginTick` → `build` (narrowphase `collidePair` per candidate,
+//!        `prepare` capturing `v_n⁻` PRE-GRAVITY, the local anchors, the softness
+//!        selection and the warm-start SEEDING, plus the wake fixpoint of §1.8.5)
 //!   (5)  island partition + activation (W2, W3) — never puts anything to sleep
-//!   (6)  velocity pass — `warmStart`, then the iterations ONCE PER ISLAND RANGE
-//!   (7)  `integratePositions(dt)` — skips sleeping bodies
-//!   (8)  NGS position pass, once per island range (§1.7.2)
+//!   (6)  the SUBSTEP LOOP and (7) the restitution pass, both inside
+//!        `rigid.solveTick`: per substep `integrateVelocitiesNoReset(h)` → warm-start
+//!        APPLICATION → biased solve (normal points only) → `integratePositions(h)` →
+//!        relax (normal points unbiased, then friction); after the loop the uniform
+//!        accumulator reset, then restitution per island.
+//!   (8)  retired — there is no position pass. Position error is corrected by the
+//!        bias inside step 6, and penetration recovery is PACED by
+//!        `contact_push_max_speed` rather than resorbed in one frame.
 //!   (9)  `storeContacts` (harvest) → `cache.endTick` (sort + swap)
-//!   (10) broadphase proxy updates on the corrected poses — skips sleeping bodies
+//!   (10) broadphase proxy updates on the final poses — skips sleeping bodies
+//!   (10 bis) the sensor pass (§1.13.4), when `sensors_on`
 //!   (11) sleep window sweep on the POST-SOLVE state, then the sleep transition:
 //!        the only point in the cycle where a body falls asleep.
 //!
-//! Sleeping is ENABLED by default here. Every inherited convergence measurement
-//! — resting box, five-box stack, mass ratio, drift — sets
-//! `sleep_cfg.allow_sleeping = false`, which is normative and not a convenience
-//! (§1.8.3): a displacement-bounded criterion lets a slowly creeping body sleep,
-//! so a converging-or-not question must be asked with sleeping off.
+//! Sleeping is ENABLED by default here. Every convergence measurement — resting box,
+//! five-box stack, mass ratio, drift — sets `sleep_cfg.allow_sleeping = false`, which
+//! is normative and not a convenience (§1.8.3): a displacement-bounded criterion lets
+//! a slowly creeping body sleep, so a converging-or-not question must be asked with
+//! sleeping off.
 //!
 //! `computePairs` is moved-driven with fat-AABB hysteresis (it reports a pair only
 //! when a proxy moves enough to exit its fat AABB), so the consumer keeps a
 //! PERSISTENT candidate set (`active`, a sorted-deduped key list) and merges each
 //! tick's deltas into it. NORMATIVE retention rule for the M1.1.15
-//! `step()`/`PhysicsWorld` (b2ContactManager semantics): a pair is retained while
-//! the two FAT broadphase AABBs overlap, dropped only when they separate — which
-//! is safe, since any later re-contact first requires a proxy to exit its fat
-//! AABB, which re-marks it moved and re-emits the pair. This test harness keeps
-//! EVERY emitted pair (never drops) — a conservative superset of that rule, valid
-//! in test: the narrowphase filters non-touching pairs (a pair with no manifold
-//! produces no constraint), so a retained separated pair only costs a redundant
-//! `collidePair`, never a wrong contact. Dropping a contacting pair on transient
-//! separation (e.g. a small hop within the fat margin), by contrast, would lose
-//! the contact until the body sank past the margin.
+//! `step()`/`PhysicsWorld` (b2ContactManager semantics): a pair is retained while the
+//! two FAT broadphase AABBs overlap, dropped only when they separate. This harness
+//! keeps EVERY emitted pair (never drops) — a conservative superset of that rule,
+//! valid in test: the narrowphase filters non-touching pairs, so a retained separated
+//! pair costs a redundant `collidePair` and never a wrong contact. Dropping a
+//! contacting pair on transient separation would lose it until the body sank past the
+//! margin.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -62,6 +73,9 @@ const ContactCache = rigid.ContactCache;
 const SolverConfig = rigid.SolverConfig;
 const testing = std.testing;
 
+const gravity_y: Real = -9.81;
+const fixed_dt: Real = 1.0 / 60.0;
+
 /// A `Vec3r` literal at solver precision.
 pub fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
@@ -73,12 +87,9 @@ pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
 }
 
 // The harness does NOT compute a broad layer of its own. It calls
-// `BodyManager.broadLayerFor`, the same derivation production will use, so a trigger lands in
-// the `trigger` class BY THE RULE and not by a literal that happens to agree with it. A local
-// `if (bt == .static) .static else .dynamic` stood here until M1.1.13; it was right for the two
-// classes it knew and had no opinion about the role, so a sensor scene built on it would have
-// tested the rule beside the pass instead of through it. What remains between this harness and
-// what `PhysicsWorld` will do is one question — does M1.1.15 call this same function.
+// `BodyManager.broadLayerFor`, the same derivation production will use, so a trigger
+// lands in the `trigger` class BY THE RULE and not by a literal that happens to agree
+// with it.
 
 fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
     std.mem.sort(u64, list.items, {}, std.sort.asc(u64));
@@ -97,9 +108,7 @@ fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
 const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy };
 
 /// A minimal physics world composing the full contact-solver pipeline for tests.
-/// The single definition of the normative per-tick cycle (see the file header):
-/// `tests/position_solver_test.zig` drives this same harness rather than copying
-/// it, so the cycle cannot drift between the two suites.
+/// The single definition of the normative per-tick cycle (see the file header).
 pub const World = struct {
     store: ShapeStore = .{},
     bm: BodyManager = .{},
@@ -116,21 +125,12 @@ pub const World = struct {
     scratch: std.ArrayListUnmanaged(Bp.Pair) = .empty,
     /// The island partition of the last tick (step 5).
     islands: rigid.IslandManager = .{},
-    /// Last tick's NGS telemetry, AGGREGATED over the islands solved at step 8:
-    /// the largest iteration count and the smallest separation any island saw.
-    /// Identical to the single island's own result in a one-island scene, which is
-    /// what the inherited tests read.
-    position_result: rigid.PositionSolveResult = .{},
-    /// Last tick's velocity-pass telemetry, aggregated the same way (step 6) — the
-    /// largest number of iterations any island actually ran before its early-out.
-    velocity_result: rigid.VelocitySolveResult = .{},
+    /// Last tick's solver telemetry (steps 6 and 7) — substeps executed, solve and
+    /// relax sweeps, and the minimum separation any biased sweep observed.
+    solver_stats: rigid.SolverStats = .{},
     /// Islands put to sleep at step 11 of the last tick.
     slept_last_tick: u32 = 0,
     /// The sensor state, updated at STEP 10 BIS when `sensors_on` (M1.1.13).
-    ///
-    /// Off by default so every inherited test keeps its exact cycle: a scene with no
-    /// trigger would pay a traversal that can only answer empty, and a suite that never
-    /// reads the state has no reason to run it.
     sensors: sensor.SensorState = .{},
     /// Whether step 10 bis runs. Set by the sensor suite before its first step.
     sensors_on: bool = false,
@@ -141,18 +141,14 @@ pub const World = struct {
         return .{ .bp = Bp.init(.{}), .gravity = gravity, .dt = dt };
     }
 
-    /// `init` with sleeping switched off — the world every MEASUREMENT of the
-    /// solver uses: settling, penetration recovery, drift, friction decay,
-    /// determinism of the solve.
+    /// `init` with sleeping switched off — the world every MEASUREMENT of the solver
+    /// uses: settling, penetration recovery, drift, friction decay, determinism.
     ///
-    /// Normative, not a convenience (`engine-physics-forge.md` §1.8.3). The sleep
-    /// criterion is a displacement bound over a window, so a body creeping at
-    /// 5 mm/s moves 2.5 mm per 0.5 s window against a 15 mm bound and falls asleep
-    /// while still creeping. Ask "does this settle?" with sleeping on and the answer
-    /// you measure is "it fell asleep", which is not the same question. Several of
-    /// these tests would also stop testing anything: a resting body that sleeps has
-    /// its pose frozen, so a no-sinking or no-drift assertion becomes vacuous, and a
-    /// non-activating `setLinearVelocity` would no longer restart it.
+    /// Normative, not a convenience (§1.8.3). The sleep criterion is a displacement
+    /// bound over a window, so a body creeping at 5 mm/s moves 2.5 mm per 0.5 s window
+    /// against a 15 mm bound and falls asleep while still creeping. Ask "does this
+    /// settle?" with sleeping on and the answer you measure is "it fell asleep", which
+    /// is not the same question.
     pub fn initNoSleep(gravity: Vec3r, dt: Real) World {
         var world = init(gravity, dt);
         world.sleep_cfg.allow_sleeping = false;
@@ -175,16 +171,9 @@ pub const World = struct {
     }
 
     /// Create a body and insert its broadphase proxy on the matching layer.
-    ///
-    /// **Dispatches on the shape CLASS since M1.1.11.** A half-space has no world AABB,
-    /// so `bodyAabb` asserts on one and there is no box to hand `insert`: an unbounded
-    /// shape goes into the layer's flat list instead, carrying the half-space transported
-    /// into WORLD space, which is the frame the broadphase's corner predicate works in
-    /// (`engine-physics-forge.md` §1.11.15). Exhaustive on the class, no `else`.
-    ///
-    /// A MESH takes the BOUNDED arm (M1.1.11.1): it is a surface, but a finite one, so it
-    /// has a world AABB and is an ordinary leaf of the tree. Only the unbounded category
-    /// leaves the trees.
+    /// Dispatches on the shape CLASS: an unbounded half-space has no world AABB and
+    /// goes into the layer's flat list (§1.11.15); a MESH is a finite surface, so it
+    /// takes the bounded arm. Exhaustive on the class, no `else`.
     pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
         const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
@@ -206,14 +195,9 @@ pub const World = struct {
         return id;
     }
 
-    /// Remove a body, applying wake cause W4 (`engine-physics-forge.md` §1.8.5)
-    /// first: every sleeper retained in a candidate pair with it is woken, because
-    /// removing it changes what supports them and a sleeper emits nothing in
-    /// broadphase that could notice.
-    ///
-    /// W4 lives with whoever OWNS the retained candidate set — here the harness, in
-    /// production the `step()` orchestrator at M1.1.15. That is the whole reason it
-    /// is proven at this level: there is no other owner yet.
+    /// Remove a body, applying wake cause W4 (§1.8.5) first: every sleeper retained
+    /// in a candidate pair with it is woken, because removing it changes what
+    /// supports them and a sleeper emits nothing in broadphase that could notice.
     pub fn removeBody(self: *World, id: BodyId) void {
         for (self.active.items) |key| {
             const a: BodyId = @intCast(key >> 32);
@@ -230,112 +214,115 @@ pub const World = struct {
         self.bm.removeBody(id);
     }
 
-    /// Advance one fixed tick through the normative cycle (file header, steps 1-11).
+    /// Advance one fixed tick through the normative cycle (file header).
     pub fn step(self: *World, gpa: std.mem.Allocator) !void {
         // (1) broadphase candidate deltas → (2) persistent active set. Never pruned:
         // every emitted pair is retained, which is a CORRECTNESS condition of sleep
-        // (§1.8.7) and not just warm-start persistence — a sleeping island emits
-        // nothing in broadphase, so its retained pairs are the graph the wake
-        // fixpoint re-scans to rebuild its internal contacts.
+        // (§1.8.7) and not just warm-start persistence.
         try self.bp.computePairs(gpa, &self.scratch);
         for (self.scratch.items) |p| try self.active.append(gpa, (@as(u64, p.a) << 32) | p.b);
         sortDedup(&self.active);
 
-        // (3) integrate velocities (gravity + accumulators + clamped damping).
-        integration.integrateVelocities(&self.bm, self.dt, self.gravity);
+        // (3) external forces — read-only, no code. See the file header.
 
-        // (4) build: narrowphase per candidate, `prepare` captures v_n⁻
-        // (post-gravity), and the wake fixpoint runs.
+        // (4) build: narrowphase per candidate; `prepare` captures `v_n⁻` PRE-GRAVITY
+        // (the velocity integration has moved into the substep loop), selects the
+        // softness, SEEDS the warm start from the cache, and the wake fixpoint runs.
         self.cache.beginTick();
-        try rigid.build(gpa, &self.constraints, &self.bm, &self.store, self.active.items);
+        try rigid.build(
+            gpa,
+            &self.constraints,
+            &self.bm,
+            &self.store,
+            self.active.items,
+            rigid.prepareContext(self.cfg, self.dt, &self.cache),
+        );
 
         // (5) partition into islands and arbitrate activation. Reorders the
         // constraint array into one contiguous range per island. Wakes only.
         try self.islands.partition(gpa, &self.bm, self.constraints.items);
 
-        // (6) velocity pass: warm start over the whole array, then the Gauss-Seidel
-        // iterations ONCE PER ISLAND RANGE.
-        rigid.warmStart(&self.bm, &self.cache, self.constraints.items);
-        self.velocity_result = .{};
-        for (self.islands.islandsSlice()) |isl| {
-            const result = rigid.solveRangeReport(
-                &self.bm,
-                self.constraints.items,
-                isl.constraint_from,
-                isl.constraint_to,
-                self.cfg,
-            );
-            self.velocity_result.iterations_run = @max(self.velocity_result.iterations_run, result.iterations_run);
-        }
-
-        // (7) integrate positions from the solved velocities.
-        integration.integratePositions(&self.bm, self.dt);
-
-        // (8) NGS position pass per island — resorb the residual penetration by
-        // correcting poses only (no velocity is touched, no accumulated impulse is
-        // modified). Termination is per range, never global: each island converges
-        // independently.
-        self.position_result = .{};
-        for (self.islands.islandsSlice()) |isl| {
-            const result = rigid.solvePositionRange(
-                &self.bm,
-                self.constraints.items,
-                isl.constraint_from,
-                isl.constraint_to,
-                self.cfg,
-            );
-            self.position_result.iterations_run = @max(self.position_result.iterations_run, result.iterations_run);
-            if (result.min_separation) |separation| {
-                self.position_result.min_separation = if (self.position_result.min_separation) |current|
-                    @min(current, separation)
-                else
-                    separation;
-            }
-        }
+        // (6) the substep loop and (7) the restitution pass. Islands advance in
+        // LOCKSTEP inside: every stage sweeps all intervals before the next begins.
+        self.solver_stats = rigid.solveTick(
+            &self.bm,
+            self.constraints.items,
+            self.islands.islandsSlice(),
+            self.cfg,
+            self.dt,
+            self.gravity,
+        );
 
         // (9) harvest solved impulses into the cache, then finalize (sort + swap).
         try rigid.storeContacts(gpa, &self.cache, self.constraints.items);
         self.cache.endTick();
 
-        // (10) broadphase proxy updates to the poses corrected by step (8).
+        // (10) broadphase proxy updates to the final poses.
         for (self.bodies.items) |b| {
             const sleeping = self.bm.isSleeping(b.id) orelse continue; // stale handle
             if (sleeping) continue; // a sleeper's AABB is unchanged by construction
             // An UNBOUNDED proxy has no box to update and cannot move: a half-space
-            // forces a STATIC body, so its pairs are established once at insertion and
-            // then carried by the retention rule of step 2 (§1.11.15). `bp.update`
-            // asserts this rather than absorbing it, so the skip is explicit here.
+            // forces a STATIC body, so its pairs are established once at insertion
+            // and then carried by the retention rule of step 2 (§1.11.15).
             if (b.proxy.kind == .unbounded) continue;
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
 
-        // (10 BIS) the sensor pass (`engine-physics-solver.md` §1.13.4). Its placement rests
-        // on two claims, and THEY ARE NOT OF THE SAME RANK — the distinction is marked here
-        // rather than left for a reader to assume both were established:
-        //
-        //   - BEFORE step 11, and this half is MEASURED. The suite's sleep case asserts that
-        //     falling asleep inside a trigger never produces an exit, and the counter-factual
-        //     that adds a sleep filter to the traversal makes it fail. That is the phantom
-        //     exit, caught.
-        //   - AFTER step 10, and this half is a DESIGN REASONING, NOT MEASURED. Poses are
-        //     final there, corrections included, so an `enter` cannot announce a crossing the
-        //     NGS pass then undoes. No test moves the pass earlier to observe that: it would
-        //     need a scene calibrated so the position correction crosses a trigger boundary
-        //     within the tick, which costs more than it would establish — the placement is
-        //     correct by the DEFINITION of the poses the tick publishes, not by that probe.
-        //     The argument lives in the spec, which is its place; this comment only records
-        //     that it is an argument and not a measurement.
+        // (10 BIS) the sensor pass (§1.13.4). Placement rests on two claims of
+        // UNEQUAL rank: BEFORE step 11 is MEASURED (the sleep case asserts that
+        // falling asleep inside a trigger never produces an exit, and a sleep filter
+        // on the traversal makes it fail); AFTER step 10 is a DESIGN REASONING — the
+        // poses there are the ones the tick publishes, so an `enter` cannot announce
+        // a crossing the solver then undoes.
         if (self.sensors_on) try self.sensors.update(gpa, &self.bp, &self.bm, &self.store);
 
         // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep
-        // every island all of whose members are eligible. The only place in the
-        // cycle where a body falls asleep and its velocities are zeroed.
+        // every island all of whose members are eligible.
         sleep.updateWindows(&self.bm, self.dt, self.sleep_cfg);
         self.slept_last_tick = self.islands.sleepEligibleIslands(&self.bm, self.sleep_cfg);
     }
+
+    /// Deepest penetration across the manifolds this world currently holds.
+    pub fn deepestPenetration(self: *const World) Real {
+        var deepest: Real = 0;
+        for (self.constraints.items) |c| {
+            for (0..c.count) |i| deepest = @max(deepest, c.points[i].penetration);
+        }
+        return deepest;
+    }
 };
 
-/// Ground (static box, top at y = 0.5) + a dynamic unit box dropped from y = `drop_y`.
+// --- named envelopes ----------------------------------------------------------
+//
+// Every margin below is a measured value with headroom, never a tuning knob.
+
+/// How far under `n · penetration_slop` a body in an n-deep contact chain may sit.
+/// Under soft constraints the resting overlap is the slop dead zone PLUS the spring
+/// sag the contact hertz leaves, so a chain adds a little to each contact.
+const rest_margin: Real = 5e-3;
+/// A body may not sit ABOVE its analytic rest height by more than float noise.
+const rest_overshoot: Real = 1e-4;
+/// The anti-BOUNCE ceiling: the speed a free-falling body picks up in one tick
+/// (`g·dt`). Below it no body is in sustained free fall. PHYSICAL, not fitted.
+const settle_speed: Real = 9.81 * fixed_dt;
+/// The IMMOBILITY criterion, two orders below `settle_speed`: 1 mm/s is stopped, not
+/// merely slow.
+const rest_speed: Real = 1e-3;
+/// Sideways offset a body may end up with after the settling transient.
+const lateral_bound: Real = 4e-2;
+/// How much that offset may still GROW over the second half of a run — what rejects
+/// a WALKING stack independently of how large the settling transient was.
+const lateral_creep_bound: Real = 1e-3;
+
+/// Float noise of a separation reconstructed from two world coordinates, in the
+/// M1.1.4 `k·floatEps·coordScale` form.
+fn noiseMargin(coord_scale: Real) Real {
+    return 16 * std.math.floatEps(Real) * coord_scale;
+}
+
+// --- scene helpers ------------------------------------------------------------
+
+/// Ground (static box, top at y = 0.5) + a dynamic unit box dropped from `drop_y`.
 /// Returns the dynamic box's BodyId. Restitution `e` on both.
 pub fn groundAndBox(gpa: std.mem.Allocator, world: *World, drop_y: Real, e: f32) !BodyId {
     const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
@@ -352,79 +339,233 @@ pub fn groundAndBox(gpa: std.mem.Allocator, world: *World, drop_y: Real, e: f32)
     return world.addBody(gpa, box);
 }
 
+/// A static ground box (half-extents 5 × 0.5 × 5) whose top face sits at
+/// `base_y + 0.5`.
+fn addGround(gpa: std.mem.Allocator, world: *World, base_y: f32) !BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
+    var desc = api.BodyDescriptor{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body_type = .static,
+        .shape = shape,
+    };
+    desc.position = av3(0, base_y, 0);
+    desc.restitution = 0;
+    return world.addBody(gpa, desc);
+}
+
+/// Fill `out` with `out.len` unit boxes stacked flush above a ground whose top face
+/// is at `base_y + 0.5`: box `i` starts at its analytic rest height
+/// `base_y + 1.0 + i`, so the stack begins with zero penetration everywhere.
+fn addStack(gpa: std.mem.Allocator, world: *World, out: []BodyId, base_y: f32, mass: f32) !void {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    for (out, 0..) |*id, i| {
+        var desc = api.BodyDescriptor{
+            .entity = .{ .index = @intCast(i + 1), .generation = 0 },
+            .body_type = .dynamic,
+            .shape = shape,
+        };
+        desc.mass = mass;
+        desc.restitution = 0;
+        desc.position = av3(0, base_y + 1.0 + @as(f32, @floatFromInt(i)), 0);
+        id.* = try world.addBody(gpa, desc);
+    }
+}
+
+/// Horizontal (XZ) distance of `id` from the world's Y axis at `base_x`/`base_z`.
+fn lateralOffset(world: *const World, id: BodyId, base_x: Real, base_z: Real) Real {
+    const p = world.bm.position(id).?.toArray();
+    const dx = p[0] - base_x;
+    const dz = p[2] - base_z;
+    return @sqrt(dx * dx + dz * dz);
+}
+
+fn descOf(idx: u32, bt: api.BodyType, shape: api.ShapeId) api.BodyDescriptor {
+    return .{ .entity = .{ .index = idx, .generation = 0 }, .body_type = bt, .shape = shape };
+}
+
+fn pairKey(a: BodyId, b: BodyId) u64 {
+    return (@as(u64, @min(a, b)) << 32) | @max(a, b);
+}
+
+/// A `PrepareContext` at the default config and tick, with no warm-start source —
+/// every point cold-starts. The shape most constraint-level scenarios want.
+fn coldContext() rigid.PrepareContext {
+    return rigid.prepareContext(.{}, fixed_dt, null);
+}
+
+// --- resting, recovery and the substep budget ---------------------------------
+
 test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     const gpa = testing.allocator;
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 2.0, 0);
 
-    // Run 5 s. Capture the height at the FIRST tick that produces a contact
-    // constraint (impact), then require the box never sinks below it afterwards.
-    var y_impact: ?Real = null;
-    var min_after_impact: Real = 1e30;
     var t: u32 = 0;
-    while (t < 300) : (t += 1) {
-        try world.step(gpa);
-        const y = world.bm.position(box).?.toArray()[1];
-        if (y_impact == null and world.constraints.items.len > 0) y_impact = y;
-        if (y_impact != null and y < min_after_impact) min_after_impact = y;
-    }
+    while (t < 300) : (t += 1) try world.step(gpa);
+
     const y_final = world.bm.position(box).?.toArray()[1];
     const v_final = world.bm.linearVelocity(box).?.toArray()[1];
 
-    // The box made contact and never sank below the at-impact height thereafter.
-    // NOTE: since M1.1.7 the box RISES from its at-impact height (the position pass
-    // resorbs the penetration), so this floor is vacuous by construction — it is
-    // kept as the M1.1.6 no-sinking statement, not as an active assertion.
-    try testing.expect(y_impact != null);
-    try testing.expect(min_after_impact >= y_impact.? - 1e-3);
+    // Analytic rest y = ground_top(0.5) + box_half(0.5) = 1.0. The box settles just
+    // under it: the soft constraint holds a small steady overlap rather than driving
+    // it to zero, which is the slop's whole role — keeping the contact, and its
+    // warm-start entry, alive instead of oscillating between contact and no contact.
+    try testing.expect(y_final > 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_final < 1.0 + rest_overshoot);
+    try testing.expect(@abs(v_final) < rest_speed);
+}
 
-    // RECOVERY (M1.1.7). The M1.1.6 statement — "penetration bounded at its
-    // at-impact value, absolute non-recovery accepted" — is obsolete: the NGS
-    // position pass resorbs the impact penetration down to the slop, which is
-    // precisely where it stops so the contact (and its warm-start entry) stays
-    // alive instead of oscillating between contact and no contact.
-    try testing.expectEqual(@as(usize, 1), world.constraints.items.len);
-    var resting_penetration: Real = 0;
-    for (0..world.constraints.items[0].count) |i| {
-        resting_penetration = @max(resting_penetration, world.constraints.items[0].points[i].penetration);
+test "rest overlap at equilibrium is measured and bounded" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try groundAndBox(gpa, &world, 1.0, 0); // starts flush, settles in place
+
+    var t: u32 = 0;
+    while (t < 600) : (t += 1) try world.step(gpa);
+
+    // The equilibrium overlap under soft constraints is NOT the NGS fixed point the
+    // M1.1.7 model converged to (`slop` exactly, approached from below, measured
+    // `5.9e-7` above it at f32 — SUPERSEDED). It is the slop dead zone plus the sag
+    // the spring leaves under the load: inside the dead zone the bias term is zero,
+    // so the contact holds by impulse alone and sits slightly deeper.
+    const overlap = world.deepestPenetration();
+    try testing.expect(overlap > 0); // the contact is alive, not oscillating
+    try testing.expect(overlap <= world.cfg.penetration_slop + rest_margin);
+
+    // Steady, not still drifting: the overlap 60 ticks later is the same to within
+    // float noise, which is what "equilibrium" claims.
+    const settled = overlap;
+    t = 0;
+    while (t < 60) : (t += 1) try world.step(gpa);
+    try testing.expectApproxEqAbs(settled, world.deepestPenetration(), 1e-4);
+}
+
+test "five-box stack comes to rest at substep_count=4" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, 0);
+    var boxes: [5]BodyId = undefined;
+    try addStack(gpa, &world, &boxes, 0, 1);
+
+    // THE DISCRIMINATING ORACLE of the port. This is the scene that measured the
+    // 16-iteration floor at M1.1.7 — a five-deep chain of four-point face manifolds,
+    // forty contact points — and it must now come to rest on the substep budget
+    // alone, with no iteration count anywhere in the config.
+    try testing.expectEqual(@as(u32, 4), world.cfg.substep_count);
+
+    var lateral_mid: [5]Real = undefined;
+    var max_speed_late: Real = 0;
+    var t: u32 = 0;
+    while (t < 1200) : (t += 1) {
+        try world.step(gpa);
+        if (t == 599) {
+            for (boxes, 0..) |b, i| lateral_mid[i] = lateralOffset(&world, b, 0, 0);
+        }
+        if (t >= 1140) { // the last second
+            for (boxes) |b| max_speed_late = @max(max_speed_late, world.bm.linearVelocity(b).?.length());
+        }
     }
-    // The rest sits exactly at the NGS fixed point `separation = −penetration_slop`
-    // (a contraction never crosses its fixed point), so the resting penetration
-    // equals the slop up to the float noise of reconstructing it — a difference of
-    // two world coordinates of magnitude ≈ 1 m. Measured: 0 at f64, 5.9e-7 at f32
-    // (≈ 5 ULP of 1.0). `noise_margin` is that noise floor in the M1.1.4 form
-    // `k·floatEps(Real)·coordScale`, NOT a geometric threshold: the physical
-    // statement is the recovery from the ≈ 7 cm at-impact penetration down to the
-    // 5 mm slop, a factor of ~14.
-    const coord_scale: Real = 1.0; // the contact sits at y ≈ 1 m
-    const noise_margin: Real = 16 * std.math.floatEps(Real) * coord_scale;
-    try testing.expect(resting_penetration <= world.cfg.penetration_slop + noise_margin);
 
-    // Envelope: analytic rest y = ground_top(0.5) + box_half(0.5) = 1.0, and NGS
-    // converges to `1.0 − penetration_slop` from below. Never fell through, rests
-    // one slop under the analytic height, at rest.
-    try testing.expect(y_final > 1.0 - 2 * world.cfg.penetration_slop);
-    try testing.expect(y_final < 1.0 + 1e-4);
-    try testing.expect(@abs(v_final) < 0.05);
+    for (boxes, 0..) |b, i| {
+        // Box `i` rests on `i + 1` contacts, each holding at most one slop of overlap
+        // plus its share of the spring sag.
+        const analytic = 1.0 + @as(Real, @floatFromInt(i));
+        const allowed_sink = @as(Real, @floatFromInt(i + 1)) * world.cfg.penetration_slop + rest_margin;
+        const y = world.bm.position(b).?.toArray()[1];
+        try testing.expect(y >= analytic - allowed_sink);
+        try testing.expect(y <= analytic + rest_overshoot);
+
+        // Bounded sideways offset, and — the statement that actually rejects a
+        // walking stack — that offset must not still be GROWING in the second half.
+        const lateral_end = lateralOffset(&world, b, 0, 0);
+        try testing.expect(lateral_end <= lateral_bound);
+        try testing.expect(lateral_end - lateral_mid[i] <= lateral_creep_bound);
+    }
+    // STOPPED, not merely slow.
+    try testing.expect(max_speed_late <= rest_speed);
+    try testing.expect(max_speed_late <= settle_speed);
+
+    // Determinism: an identical second run reproduces every pose bit-for-bit.
+    var replay = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer replay.deinit(gpa);
+    _ = try addGround(gpa, &replay, 0);
+    var replay_boxes: [5]BodyId = undefined;
+    try addStack(gpa, &replay, &replay_boxes, 0, 1);
+    t = 0;
+    while (t < 1200) : (t += 1) try replay.step(gpa);
+    for (boxes, replay_boxes) |a, b| {
+        const pa = world.bm.position(a).?.toArray();
+        const pb = replay.bm.position(b).?.toArray();
+        const qa = world.bm.rotation(a).?.toArray();
+        const qb = replay.bm.rotation(b).?.toArray();
+        inline for (0..3) |k| try testing.expectEqual(pa[k], pb[k]);
+        inline for (0..4) |k| try testing.expectEqual(qa[k], qb[k]);
+    }
+}
+
+test "substep_count=1 degenerate big-step runs" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    world.cfg.substep_count = 1; // the A/B lever
+    const box = try groundAndBox(gpa, &world, 1.0, 0);
+
+    var t: u32 = 0;
+    while (t < 300) : (t += 1) try world.step(gpa);
+
+    // The lever RUNS and the telemetry follows it — that is the whole claim. Stack
+    // depth is deliberately NOT asserted: at one substep the effective hertz clamps
+    // to `0.125/dt` = 7.5 Hz, a quarter of the authored stiffness, so visibly softer
+    // contacts are the expected behaviour of the lever and not a defect of it.
+    try testing.expectEqual(@as(u32, 1), world.solver_stats.substeps_executed);
+    try testing.expectEqual(@as(u32, 1), world.solver_stats.solve_sweeps);
+    try testing.expectEqual(@as(u32, 1), world.solver_stats.relax_sweeps);
+
+    // It still holds the box up — softer, not broken.
+    const y = world.bm.position(box).?.toArray()[1];
+    try testing.expect(y > 0.5); // never fell through the ground
+    try testing.expect(y < 1.0 + rest_overshoot);
+}
+
+test "telemetry reports substeps and sweeps" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try groundAndBox(gpa, &world, 1.0, 0);
+
+    var t: u32 = 0;
+    while (t < 30) : (t += 1) try world.step(gpa);
+
+    // Fixed cost by construction: one solve sweep and one relax sweep per substep,
+    // no early-out and no iteration predicate anywhere. The full per-tick constraint
+    // budget is `3·substep_count + 1` (n warm-start applications + n solves + n
+    // relaxes + 1 restitution) = 13 at the defaults.
+    try testing.expectEqual(@as(u32, 4), world.solver_stats.substeps_executed);
+    try testing.expectEqual(@as(u32, 4), world.solver_stats.solve_sweeps);
+    try testing.expectEqual(@as(u32, 4), world.solver_stats.relax_sweeps);
+    // A resting contact is overlapping, so the minimum separation observed is
+    // negative and REAL — the field is not merely defaulting.
+    try testing.expect(world.solver_stats.min_separation != null);
+    try testing.expect(world.solver_stats.min_separation.? < 0);
 }
 
 test "small hop within the fat margin keeps the contact pair alive" {
     const gpa = testing.allocator;
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 1.0, 0); // starts flush, e = 0
 
-    // Settle, then record the resting height.
     var t: u32 = 0;
     while (t < 120) : (t += 1) try world.step(gpa);
     const y_rest = world.bm.position(box).?.toArray()[1];
 
-    // A small upward hop: apex ≈ v²/2g = 0.25/19.62 ≈ 1.3 cm, well within the
-    // broadphase fat-AABB margin (0.1 m). The box never moves far enough to be
-    // re-emitted by the moved-driven `computePairs`, so retaining the pair is what
-    // keeps the contact live and catches the box on its way down. Dropping the pair
-    // on separation would lose it until the box sank past the fat margin (~0.1 m).
+    // A small upward hop: apex ≈ v²/2g ≈ 1.3 cm, well within the broadphase fat-AABB
+    // margin (0.1 m). The box never moves far enough to be re-emitted by the
+    // moved-driven `computePairs`, so retaining the pair is what keeps the contact
+    // live and catches the box on its way down.
     world.bm.addImpulse(box, vr(0, 0.5, 0));
     var min_y: Real = y_rest;
     t = 0;
@@ -439,10 +580,10 @@ test "small hop within the fat margin keeps the contact pair alive" {
 test "solve is deterministic across identical runs" {
     const gpa = testing.allocator;
 
-    var w1 = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var w1 = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer w1.deinit(gpa);
     const b1 = try groundAndBox(gpa, &w1, 2.0, 0.5);
-    var w2 = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var w2 = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer w2.deinit(gpa);
     const b2 = try groundAndBox(gpa, &w2, 2.0, 0.5);
 
@@ -465,10 +606,11 @@ test "solve is deterministic across identical runs" {
     inline for (0..4) |k| try testing.expectEqual(q1[k], q2[k]);
 }
 
-/// Max upward (+Y) velocity the dropped box reaches over `ticks` — the rebound
-/// speed after impact (≈ 0 when it does not bounce).
+// --- restitution --------------------------------------------------------------
+
+/// Max upward (+Y) velocity the dropped box reaches over `ticks`.
 fn maxReboundVy(gpa: std.mem.Allocator, drop_y: Real, e: f32, ticks: u32) !Real {
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, drop_y, e);
     var max_vy: Real = -1e30;
@@ -487,42 +629,137 @@ test "restitution bounces above the threshold and not below it" {
     const high = try maxReboundVy(gpa, 2.0, 0.8, 120);
     try testing.expect(high > 2.0);
     // A box resting flush only ever approaches at the per-tick gravity speed
-    // (≈ 0.16 m/s ≪ the 1.0 threshold), so it settles without a bounce. (The
-    // genuine sub-threshold IMPACT case is pinned exactly by the E4 unit test.)
+    // (≈ 0.16 m/s ≪ the 1.0 threshold), so it settles without a bounce.
     const low = try maxReboundVy(gpa, 1.0, 0.8, 120);
     try testing.expect(low < 0.5);
 }
 
-test "restitution is captured before warm start" {
+test "resting body arms no restitution from one tick of gravity" {
     const gpa = testing.allocator;
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
-    const box = try groundAndBox(gpa, &world, 1.0, 0.8); // starts flush, e = 0.8
+    const box = try groundAndBox(gpa, &world, 1.0, 1.0); // maximal restitution
 
-    // Rest for 1 s: the per-tick gravity approach (≈ 0.16 m/s) is below the
-    // restitution threshold, so the box settles and the cache warms up.
+    // `v_n⁻` is captured at `prepare`, which is now PRE-GRAVITY: the velocity
+    // integration moved into the substep loop, so the capture precedes the first
+    // slice. A resting body therefore reads `v_n⁻ ≈ 0` and never arms — where a
+    // post-gravity capture would read `−g·dt` every tick and, at `e = 1`, hand a
+    // motionless box a phantom rebound forever.
     var t: u32 = 0;
-    while (t < 60) : (t += 1) try world.step(gpa);
-    try testing.expect(world.cache.hits > 0); // warm start is matching the resting contact
-    try testing.expect(@abs(world.bm.linearVelocity(box).?.toArray()[1]) < 0.05); // resting
+    while (t < 240) : (t += 1) try world.step(gpa);
 
-    // A real downward impact after resting: v_n⁻ is captured (in `prepare`) BEFORE
-    // `warmStart`, so the warm-started resting impulse does NOT suppress the bounce.
-    world.bm.setLinearVelocity(box, vr(0, -3, 0));
-    var max_vy: Real = -1e30;
-    t = 0;
-    while (t < 60) : (t += 1) {
-        try world.step(gpa);
-        const vy = world.bm.linearVelocity(box).?.toArray()[1];
-        if (vy > max_vy) max_vy = vy;
-    }
-    try testing.expect(max_vy > 1.5); // bounced (≈ e·3 = 2.4)
+    const v = world.bm.linearVelocity(box).?.toArray()[1];
+    try testing.expect(@abs(v) < rest_speed);
+    const y = world.bm.position(box).?.toArray()[1];
+    try testing.expect(y > 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y < 1.0 + rest_overshoot);
 }
 
-/// Along-surface displacement of a box placed flush on a static incline (rotated
-/// θ about Z) with combined friction from `mu`, after `ticks`.
+test "restitution predicate: <= threshold boundary arms; zero total impulse skips" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    // A dynamic sphere overlapping a static one, e = 1 so a bounce is unmissable.
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    da.restitution = 1;
+    var db = descOf(1, .static, s);
+    db.position = av3(0.9, 0, 0);
+    db.restitution = 1;
+    const a = try bm.addBody(gpa, &store, da);
+    const b = try bm.addBody(gpa, &store, db);
+
+    const cfg = SolverConfig{};
+    // EXACTLY at the threshold, approaching. The predicate is `<=`, so this arms —
+    // the closed-interval convention of the family, and it supersedes §1.7.2's
+    // strict `<` wording.
+    bm.setLinearVelocity(a, vr(cfg.restitution_threshold, 0, 0));
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
+    try testing.expectEqual(@as(usize, 1), constraints.items.len);
+    try testing.expectApproxEqAbs(-cfg.restitution_threshold, constraints.items[0].points[0].rel_normal_velocity, 1e-5);
+
+    // Drive one substep's worth of solve so the point actually pushes, then restitute.
+    const h = fixed_dt / 4.0;
+    rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
+    rigid.relaxRange(&bm, constraints.items, 0, 1, cfg, h);
+    try testing.expect(constraints.items[0].points[0].total_normal_impulse > 0);
+    rigid.applyRestitutionRange(&bm, constraints.items, 0, 1, cfg);
+    try testing.expect(bm.linearVelocity(a).?.toArray()[0] < -0.5); // it bounced back
+
+    // The SECOND clause: a point that never pushed must not bounce, however fast it
+    // approached at capture. Forced directly — `total_normal_impulse` at zero is the
+    // state of a speculative point the tick never had to resolve.
+    const before = constraints.items[0].points[0].normal_impulse;
+    constraints.items[0].points[0].total_normal_impulse = 0;
+    const v_before = bm.linearVelocity(a).?.toArray()[0];
+    rigid.applyRestitutionRange(&bm, constraints.items, 0, 1, cfg);
+    try testing.expectEqual(v_before, bm.linearVelocity(a).?.toArray()[0]);
+    try testing.expectEqual(before, constraints.items[0].points[0].normal_impulse);
+}
+
+test "speculative branch limits approach without attraction" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    // Two spheres in contact at build time, so a constraint exists with its anchors
+    // set; then A is MOVED APART so the separation re-derived from the current poses
+    // is strictly positive. That is the intra-tick case the `s > 0` branch owns.
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    var db = descOf(1, .static, s);
+    db.position = av3(0.99, 0, 0);
+    const a = try bm.addBody(gpa, &store, da);
+    const b = try bm.addBody(gpa, &store, db);
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
+    try testing.expectEqual(@as(usize, 1), constraints.items.len);
+
+    const gap: Real = 0.02;
+    bm.setPosition(a, bm.position(a).?.sub(vr(gap, 0, 0)));
+    const cfg = SolverConfig{};
+    const h = fixed_dt / 4.0;
+
+    // NO ATTRACTION: a body sitting still at a positive separation is left alone.
+    // The accumulated clamp `λₙ ≥ 0` is what forbids the pull, and a speculative
+    // point must not manufacture one.
+    bm.setLinearVelocity(a, vr(0, 0, 0));
+    rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
+    try testing.expectEqual(@as(Real, 0), constraints.items[0].points[0].normal_impulse);
+    try testing.expect(bm.linearVelocity(a).?.approxEql(Vec3r.zero, 0));
+
+    // APPROACH LIMITED: closing faster than the gap can absorb in one substep is cut
+    // back to exactly `gap/h` — the speed that just closes the gap and no more.
+    const closing = gap / h;
+    bm.setLinearVelocity(a, vr(4 * closing, 0, 0));
+    rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
+    try testing.expectApproxEqAbs(closing, bm.linearVelocity(a).?.toArray()[0], 1e-3);
+
+    // And RELAX takes the same branch, not the unbiased one: the speculative bias is
+    // active in both passes (§1.7.1), so a second cut leaves the same speed rather
+    // than driving it to zero.
+    rigid.relaxRange(&bm, constraints.items, 0, 1, cfg, h);
+    try testing.expectApproxEqAbs(closing, bm.linearVelocity(a).?.toArray()[0], 1e-3);
+}
+
+// --- friction (relax-only scheduling revalidation) ----------------------------
+
+/// Along-surface displacement of a box placed flush on a static incline (rotated θ
+/// about Z) with combined friction from `mu`, after `ticks`.
 fn inclineDrift(gpa: std.mem.Allocator, theta: Real, mu: f32, ticks: u32) !Real {
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
     const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
     const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
@@ -533,7 +770,6 @@ fn inclineDrift(gpa: std.mem.Allocator, theta: Real, mu: f32, ticks: u32) !Real 
     ground.friction = mu;
     _ = try world.addBody(gpa, ground);
 
-    // Box flush on the incline: centre at R·(0,1,0) (ground half + box half), same rotation.
     var box = api.BodyDescriptor{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .dynamic, .shape = box_shape };
     box.mass = 1;
     box.friction = mu;
@@ -549,6 +785,9 @@ fn inclineDrift(gpa: std.mem.Allocator, theta: Real, mu: f32, ticks: u32) !Real 
 
 test "inclined static box holds below the friction angle and slides above it" {
     const gpa = testing.allocator;
+    // Friction now runs in the RELAX sweep only, after every normal point of the
+    // constraint — a measurable scheduling change, so the hold/slide threshold is
+    // re-established rather than assumed to have survived.
     const theta = std.math.pi / 6.0; // 30° ⇒ tan θ ≈ 0.577
     const holds = try inclineDrift(gpa, theta, 0.8, 180); // μ = 0.8 > tan θ ⇒ holds
     const slides = try inclineDrift(gpa, theta, 0.3, 180); // μ = 0.3 < tan θ ⇒ slides
@@ -556,10 +795,9 @@ test "inclined static box holds below the friction angle and slides above it" {
     try testing.expect(slides > 0.5);
 }
 
-/// Horizontal speed of a box sliding on flat ground after `ticks`, given the
-/// initial horizontal velocity `v0` (default friction 0.5 on both).
+/// Horizontal speed of a box sliding on flat ground after `ticks`.
 fn slideSpeedAfter(gpa: std.mem.Allocator, v0: Vec3r, ticks: u32) !Real {
-    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 1.0, 0); // starts flush on the ground
     world.bm.setLinearVelocity(box, v0);
@@ -572,93 +810,299 @@ fn slideSpeedAfter(gpa: std.mem.Allocator, v0: Vec3r, ticks: u32) !Real {
 test "friction deceleration is isotropic on flat ground" {
     const gpa = testing.allocator;
     // Same initial speed (3 m/s) along +X vs the XZ diagonal must decay equally —
-    // the circular clamp is basis-independent.
+    // the circular clamp is basis-independent, and moving friction into relax does
+    // not change that.
     const along = try slideSpeedAfter(gpa, vr(3, 0, 0), 20);
     const diagonal = try slideSpeedAfter(gpa, vr(2.1213203, 0, 2.1213203), 20);
     try testing.expectApproxEqAbs(along, diagonal, 1e-2);
 }
 
-// --- constraint/cache-level scenarios (direct build, no broadphase) -----------
+test "a sheared stack does not walk" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, 0);
+    var boxes: [3]BodyId = undefined;
+    try addStack(gpa, &world, &boxes, 0, 1);
 
-fn descOf(idx: u32, bt: api.BodyType, shape: api.ShapeId) api.BodyDescriptor {
-    return .{ .entity = .{ .index = idx, .generation = 0 }, .body_type = bt, .shape = shape };
+    // Shear the stack once, then let friction absorb it. What is asserted is not
+    // that the transient is small but that it STOPS: the offset must not still be
+    // growing in the second half of the run.
+    world.bm.setLinearVelocity(boxes[2], vr(1.5, 0, 0));
+
+    var mid: [3]Real = undefined;
+    var t: u32 = 0;
+    while (t < 900) : (t += 1) {
+        try world.step(gpa);
+        if (t == 449) for (boxes, 0..) |b, i| {
+            mid[i] = lateralOffset(&world, b, 0, 0);
+        };
+    }
+    for (boxes, 0..) |b, i| {
+        const end = lateralOffset(&world, b, 0, 0);
+        try testing.expect(end - mid[i] <= lateral_creep_bound);
+        try testing.expect(world.bm.linearVelocity(b).?.length() <= rest_speed);
+    }
 }
 
-fn pairKey(a: BodyId, b: BodyId) u64 {
-    return (@as(u64, @min(a, b)) << 32) | @max(a, b);
+// --- chains, mass ratio, far field, reference-face ownership -------------------
+
+test "a heavy box resting on a light box does not sink through" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, 0);
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+    var light = api.BodyDescriptor{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .dynamic, .shape = shape };
+    light.mass = 1;
+    light.restitution = 0;
+    light.position = av3(0, 1, 0);
+    const light_id = try world.addBody(gpa, light);
+    var heavy = light;
+    heavy.entity = .{ .index = 2, .generation = 0 };
+    heavy.mass = 10; // 10:1 mass ratio — the regime §1.6 claims for substepping
+    heavy.position = av3(0, 2, 0);
+    const heavy_id = try world.addBody(gpa, heavy);
+
+    var t: u32 = 0;
+    while (t < 600) : (t += 1) try world.step(gpa);
+
+    const y_light = world.bm.position(light_id).?.toArray()[1];
+    const y_heavy = world.bm.position(heavy_id).?.toArray()[1];
+    try testing.expect(y_light >= 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_light <= 1.0 + rest_overshoot);
+    try testing.expect(y_heavy >= 2.0 - (2 * world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_heavy <= 2.0 + rest_overshoot);
 }
 
-/// Warm-start a single sphere contact whose normal is `normalize(n_dir)` with a
-/// cached WORLD tangent `t_world`, and return the reconstructed applied tangent
-/// (λ_t1·t1 + λ_t2·t2) — the world tangent seeded into the new basis.
-fn reconstructWarmTangent(gpa: std.mem.Allocator, n_dir: foundation.math.Vec3, t_world: Vec3r) !Vec3r {
+test "a stack far from the origin along the contact normal still settles" {
+    const gpa = testing.allocator;
+    // The offset is ALONG the contact normal: the configuration exercising the
+    // `(p_b − p_a)·n` cancellation, where both terms are ≈ 5000 and their difference
+    // is a few millimetres. At f32 the noise there is `floatEps · 5000 ≈ 0.6 mm`
+    // against a 5 mm slop — the worldspace precision characteristic §1.7.1 documents.
+    const base: f32 = 5000;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, base);
+    var boxes: [3]BodyId = undefined;
+    try addStack(gpa, &world, &boxes, base, 1);
+
+    var max_speed_late: Real = 0;
+    var t: u32 = 0;
+    while (t < 600) : (t += 1) {
+        try world.step(gpa);
+        if (t >= 540) {
+            for (boxes) |b| max_speed_late = @max(max_speed_late, world.bm.linearVelocity(b).?.length());
+        }
+    }
+
+    for (boxes, 0..) |b, i| {
+        const analytic = @as(Real, base) + 1.0 + @as(Real, @floatFromInt(i));
+        const allowed_sink = @as(Real, @floatFromInt(i + 1)) * world.cfg.penetration_slop +
+            rest_margin + noiseMargin(base);
+        const y = world.bm.position(b).?.toArray()[1];
+        try testing.expect(y >= analytic - allowed_sink);
+        try testing.expect(y <= analytic + rest_overshoot + noiseMargin(base));
+    }
+    try testing.expect(max_speed_late <= settle_speed);
+}
+
+test "a tilted anisotropic box resorbs penetration without lateral drift" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, 0);
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 0.1, 0.5) } });
+    var desc = api.BodyDescriptor{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .dynamic, .shape = shape };
+    desc.mass = 1;
+    desc.restitution = 0;
+    desc.rotation = foundation.math.Quatf.fromAxisAngle(av3(0, 0, 1), 0.15);
+    desc.position = av3(0, 0.85, 0); // tilted and already overlapping the ground
+    const id = try world.addBody(gpa, desc);
+
+    var mid_x: Real = 0;
+    var mid_z: Real = 0;
+    var t: u32 = 0;
+    while (t < 600) : (t += 1) {
+        try world.step(gpa);
+        if (t == 299) {
+            mid_x = world.bm.position(id).?.toArray()[0];
+            mid_z = world.bm.position(id).?.toArray()[2];
+        }
+    }
+
+    // Normal direction: the box flattened onto the ground and rests just under the
+    // flush height (ground top 0.5 + half-thickness 0.1). The recovery is PACED by
+    // `contact_push_max_speed` rather than resorbed in one frame, so what is asserted
+    // is where it ends up, not how fast it got there.
+    const p = world.bm.position(id).?.toArray();
+    try testing.expect(p[1] >= 0.6 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(p[1] <= 0.6 + rest_overshoot);
+    try testing.expect(world.deepestPenetration() <= world.cfg.penetration_slop + rest_margin);
+
+    // Tangential: the tip-over displaces the centre once, but the settled box must
+    // not creep afterwards — the bias is along the normal, so it may not walk the box
+    // sideways.
+    const creep = @sqrt((p[0] - mid_x) * (p[0] - mid_x) + (p[2] - mid_z) * (p[2] - mid_z));
+    try testing.expect(creep <= lateral_creep_bound);
+    try testing.expect(lateralOffset(&world, id, 0, 0) <= lateral_bound);
+}
+
+test "reference face carried by B still resorbs penetration" {
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+
+    // A LYING capsule against a static box, capsule added FIRST so it holds the lower
+    // BodyId and is the canonical A. This is the scene that reaches `manifold.zig`'s
+    // reference/incident selection with `a_is_ref == false`: a lying capsule's
+    // supporting face is its two-endpoint segment (`count == 2`, so not the point-core
+    // short-circuit), `face_b.count == 4`, and `align_a` is 0 against `align_b ≈ 1`.
+    // The box therefore owns the reference face — the case §1.7.1 cites for why the
+    // normal may not follow A.
+    const capsule_shape = try world.store.createShape(gpa, .{ .capsule = .{ .radius = 0.2, .half_height = 0.5 } });
+    var capsule = api.BodyDescriptor{ .entity = .{ .index = 0, .generation = 0 }, .body_type = .dynamic, .shape = capsule_shape };
+    capsule.mass = 1;
+    capsule.restitution = 0;
+    capsule.rotation = foundation.math.Quatf.fromAxisAngle(av3(0, 0, 1), std.math.pi / 2.0);
+    capsule.position = av3(0, 0.64, 0); // flush would be 0.5 + 0.2 ⇒ 6 cm of penetration
+    const capsule_id = try world.addBody(gpa, capsule);
+
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(3, 0.5, 3) } });
+    var box = api.BodyDescriptor{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .static, .shape = box_shape };
+    box.restitution = 0;
+    _ = try world.addBody(gpa, box);
+
+    try world.step(gpa);
+    try testing.expectEqual(@as(usize, 1), world.constraints.items.len);
+    // COVERAGE assertion, not a presumption: a 2-point manifold here can only come
+    // from clipping the incident SEGMENT against a reference FACE, which is only
+    // reachable through the reference/incident selection.
+    try testing.expectEqual(@as(u8, 2), world.constraints.items[0].count);
+    try testing.expect(world.constraints.items[0].normal.approxEql(vr(0, -1, 0), 1e-4));
+    try testing.expect(world.constraints.items[0].points[0].penetration > 0.05);
+
+    var t: u32 = 0;
+    while (t < 300) : (t += 1) try world.step(gpa);
+
+    try testing.expect(world.deepestPenetration() <= world.cfg.penetration_slop + rest_margin);
+    const y = world.bm.position(capsule_id).?.toArray()[1];
+    try testing.expect(y >= 0.7 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y <= 0.7 + rest_overshoot);
+}
+
+test "BodyId order permutation converges to the same poses" {
+    const gpa = testing.allocator;
+    // The same physical scene with the two bodies added in swapped order: the
+    // canonical pair flips (A/B roles, normal sign, reference face), so the two runs
+    // are NOT bit-identical — they must nonetheless converge to the same rest.
+    var ground_first = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer ground_first.deinit(gpa);
+    _ = try addGround(gpa, &ground_first, 0);
+    var boxes_a: [1]BodyId = undefined;
+    try addStack(gpa, &ground_first, &boxes_a, 0, 1);
+
+    var box_first = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer box_first.deinit(gpa);
+    const shape = try box_first.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var box = api.BodyDescriptor{ .entity = .{ .index = 0, .generation = 0 }, .body_type = .dynamic, .shape = shape };
+    box.mass = 1;
+    box.restitution = 0;
+    box.position = av3(0, 1, 0);
+    const box_id = try box_first.addBody(gpa, box);
+    _ = try addGround(gpa, &box_first, 0);
+
+    var t: u32 = 0;
+    while (t < 300) : (t += 1) {
+        try ground_first.step(gpa);
+        try box_first.step(gpa);
+    }
+
+    const order_tolerance: Real = 1e-4;
+    try testing.expectApproxEqAbs(
+        ground_first.bm.position(boxes_a[0]).?.toArray()[1],
+        box_first.bm.position(box_id).?.toArray()[1],
+        order_tolerance,
+    );
+}
+
+// --- island lockstep ----------------------------------------------------------
+
+test "island lockstep equivalence per stage per substep" {
+    const gpa = testing.allocator;
     var store = ShapeStore{};
     defer store.deinit(gpa);
     var bm = BodyManager{};
     defer bm.deinit(gpa);
     const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-    var da = descOf(0, .dynamic, s);
-    da.friction = 1;
-    var db = descOf(1, .dynamic, s);
-    db.friction = 1;
-    db.position = n_dir.normalize().scale(0.9); // overlap along n_dir ⇒ normal ≈ n̂
-    const a = try bm.addBody(gpa, &store, da);
-    const b = try bm.addBody(gpa, &store, db);
+
+    // Two DISJOINT contacting pairs, ten metres apart — two islands by construction.
+    var ids: [4]BodyId = undefined;
+    var pairs: [2]u64 = undefined;
+    for (0..2) |k| {
+        const x = @as(f32, @floatFromInt(k)) * 10.0;
+        var da = descOf(@intCast(2 * k), .dynamic, s);
+        da.mass = 1;
+        da.position = av3(x, 0, 0);
+        var db = descOf(@intCast(2 * k + 1), .dynamic, s);
+        db.mass = 1;
+        db.position = av3(x + 0.9, 0, 0);
+        ids[2 * k] = try bm.addBody(gpa, &store, da);
+        ids[2 * k + 1] = try bm.addBody(gpa, &store, db);
+        bm.setLinearVelocity(ids[2 * k], vr(2, 0, 0));
+        pairs[k] = pairKey(ids[2 * k], ids[2 * k + 1]);
+    }
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
-    const c = &constraints.items[0];
+    try rigid.build(gpa, &constraints, &bm, &store, &pairs, coldContext());
+    try testing.expectEqual(@as(usize, 2), constraints.items.len);
 
-    var cache = ContactCache{};
-    defer cache.deinit(gpa);
-    try cache.store(gpa, .{ .pair_key = c.pair_key, .feature_id = c.points[0].feature_id }, .{ .lambda_n = 10, .tangent_impulse = t_world });
-    cache.endTick();
-    cache.beginTick();
-    rigid.warmStart(&bm, &cache, constraints.items);
-    return c.tangent1.scale(c.points[0].tangent1_impulse).add(c.tangent2.scale(c.points[0].tangent2_impulse));
+    const cfg = SolverConfig{};
+    const h = fixed_dt / @as(Real, @floatFromInt(cfg.substep_count));
+
+    // Snapshot, solve the two ranges SEPARATELY at every stage, and record.
+    const snapshot = [_]Vec3r{
+        bm.linearVelocity(ids[0]).?, bm.linearVelocity(ids[1]).?,
+        bm.linearVelocity(ids[2]).?, bm.linearVelocity(ids[3]).?,
+    };
+    rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
+    rigid.solveRange(&bm, constraints.items, 1, 2, cfg, h);
+    rigid.relaxRange(&bm, constraints.items, 0, 1, cfg, h);
+    rigid.relaxRange(&bm, constraints.items, 1, 2, cfg, h);
+    var per_island: [4]Vec3r = undefined;
+    for (ids, 0..) |id, i| per_island[i] = bm.linearVelocity(id).?;
+
+    // Reset and solve the WHOLE array in one range per stage.
+    for (ids, snapshot) |id, v| bm.setLinearVelocity(id, v);
+    for (constraints.items) |*c| for (0..c.count) |i| {
+        c.points[i].normal_impulse = 0;
+        c.points[i].tangent1_impulse = 0;
+        c.points[i].tangent2_impulse = 0;
+        c.points[i].total_normal_impulse = 0;
+    };
+    rigid.solveRange(&bm, constraints.items, 0, 2, cfg, h);
+    rigid.relaxRange(&bm, constraints.items, 0, 2, cfg, h);
+
+    // BIT-EXACT: constraints of two islands touch disjoint bodies, so no update of
+    // one can change an input of the other, and the composite sort key preserves
+    // relative order inside each range. Structural, not empirical.
+    for (ids, per_island) |id, expected| {
+        const got = bm.linearVelocity(id).?.toArray();
+        inline for (0..3) |k| try testing.expectEqual(expected.toArray()[k], got[k]);
+    }
 }
 
-test "warm-started tangent is continuous across a tangent-basis flip" {
-    const gpa = testing.allocator;
-    // Two normals straddling the x = y dominant-axis boundary (so the tangent
-    // basis flips discontinuously). The cached WORLD tangent must reconstruct to
-    // the SAME world direction for both — a per-basis-scalar cache would rotate it.
-    const t_world = vr(0.3, -0.3, 0.5);
-    const r1 = try reconstructWarmTangent(gpa, av3(1.0, 1.02, 0.0), t_world); // y-dominant
-    const r2 = try reconstructWarmTangent(gpa, av3(1.02, 1.0, 0.0), t_world); // x-dominant
-    try testing.expect(r1.approxEql(r2, 1e-2));
-}
-
-test "kinematic-static contact produces no constraint and no NaN" {
-    const gpa = testing.allocator;
-    var store = ShapeStore{};
-    defer store.deinit(gpa);
-    var bm = BodyManager{};
-    defer bm.deinit(gpa);
-    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-    const a = try bm.addBody(gpa, &store, descOf(0, .static, s));
-    var db = descOf(1, .kinematic, s);
-    db.position = av3(0.9, 0, 0);
-    const b = try bm.addBody(gpa, &store, db);
-
-    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
-    defer constraints.deinit(gpa);
-    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
-    rigid.solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
-
-    try testing.expectEqual(@as(usize, 0), constraints.items.len);
-    for (bm.position(a).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
-    for (bm.position(b).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
-    for (bm.linearVelocity(b).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
-}
+// --- warm start: seeding at prepare, application per substep -------------------
 
 test "warm start hits a resting contact and misses on generation reuse" {
     const gpa = testing.allocator;
 
     // Part A: a resting box in the full pipeline warm-starts (cache hits > 0).
     {
-        var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+        var world = World.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
         defer world.deinit(gpa);
         _ = try groundAndBox(gpa, &world, 1.0, 0);
         var t: u32 = 0;
@@ -683,9 +1127,10 @@ test "warm start hits a resting contact and misses on generation reuse" {
         defer constraints.deinit(gpa);
         var cache = ContactCache{};
         defer cache.deinit(gpa);
+        const ctx = rigid.prepareContext(.{}, fixed_dt, &cache);
 
         cache.beginTick();
-        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, ctx);
         constraints.items[0].points[0].normal_impulse = 5;
         try rigid.storeContacts(gpa, &cache, constraints.items);
         cache.endTick();
@@ -695,8 +1140,7 @@ test "warm start hits a resting contact and misses on generation reuse" {
         try testing.expect(b2 != b);
 
         cache.beginTick();
-        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b2)});
-        rigid.warmStart(&bm, &cache, constraints.items);
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b2)}, ctx);
         try testing.expectEqual(@as(u32, 0), cache.hits);
         try testing.expect(cache.misses > 0);
     }
@@ -716,9 +1160,8 @@ test "per-feature warm start: surviving points keep impulses, a vanished one col
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
-    const c = &constraints.items[0];
-    const n: usize = c.count;
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
+    const n: usize = constraints.items[0].count;
     try testing.expect(n >= 2);
 
     // Seed the cache for every point EXCEPT the last (simulate that feature vanishing).
@@ -726,14 +1169,17 @@ test "per-feature warm start: surviving points keep impulses, a vanished one col
     defer cache.deinit(gpa);
     var i: usize = 0;
     while (i + 1 < n) : (i += 1) {
-        try cache.store(gpa, .{ .pair_key = c.pair_key, .feature_id = c.points[i].feature_id }, .{ .lambda_n = 3, .tangent_impulse = Vec3r.zero });
+        try cache.store(gpa, .{
+            .pair_key = constraints.items[0].pair_key,
+            .feature_id = constraints.items[0].points[i].feature_id,
+        }, .{ .lambda_n = 3, .tangent_impulse = Vec3r.zero });
     }
     cache.endTick();
 
     cache.beginTick();
-    rigid.warmStart(&bm, &cache, constraints.items);
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, rigid.prepareContext(.{}, fixed_dt, &cache));
 
-    // Surviving points seeded from the cache; the last point cold-starts at 0.
+    const c = &constraints.items[0];
     i = 0;
     while (i + 1 < n) : (i += 1) {
         try testing.expectApproxEqAbs(@as(Real, 3), c.points[i].normal_impulse, 1e-5);
@@ -741,4 +1187,89 @@ test "per-feature warm start: surviving points keep impulses, a vanished one col
     try testing.expectEqual(@as(Real, 0), c.points[n - 1].normal_impulse);
     try testing.expectEqual(@as(u32, @intCast(n - 1)), cache.hits);
     try testing.expectEqual(@as(u32, 1), cache.misses);
+
+    // SEEDING DOES NOT APPLY. The seeded impulse sits on the constraint and no body
+    // has moved: that separation is N4's hazard made observable — re-calling the
+    // seeding per substep would re-read the cache and reset the accumulators, while
+    // the APPLICATION is a distinct function called once per substep.
+    try testing.expect(bm.linearVelocity(a).?.approxEql(Vec3r.zero, 0));
+    try testing.expect(bm.linearVelocity(b).?.approxEql(Vec3r.zero, 0));
+
+    // Applying it moves both bodies, and it credits `total_normal_impulse` with the
+    // CURRENT accumulator — the first of the three contributions the restitution
+    // predicate reads.
+    rigid.applyWarmStartRange(&bm, constraints.items, 0, 1);
+    try testing.expect(!bm.linearVelocity(a).?.approxEql(Vec3r.zero, 0));
+    try testing.expectApproxEqAbs(@as(Real, 3), c.points[0].total_normal_impulse, 1e-5);
+}
+
+/// Warm-start a single sphere contact whose normal is `normalize(n_dir)` with a
+/// cached WORLD tangent `t_world`, and return the reconstructed seeded tangent
+/// (λ_t1·t1 + λ_t2·t2) — the world tangent projected into the new basis.
+fn reconstructWarmTangent(gpa: std.mem.Allocator, n_dir: foundation.math.Vec3, t_world: Vec3r) !Vec3r {
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    var da = descOf(0, .dynamic, s);
+    da.friction = 1;
+    var db = descOf(1, .dynamic, s);
+    db.friction = 1;
+    db.position = n_dir.normalize().scale(0.9); // overlap along n_dir ⇒ normal ≈ n̂
+    const a = try bm.addBody(gpa, &store, da);
+    const b = try bm.addBody(gpa, &store, db);
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    var cache = ContactCache{};
+    defer cache.deinit(gpa);
+
+    // First build cold, only to learn the feature id this contact will carry.
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
+    const feature = constraints.items[0].points[0].feature_id;
+
+    try cache.store(gpa, .{
+        .pair_key = constraints.items[0].pair_key,
+        .feature_id = feature,
+    }, .{ .lambda_n = 10, .tangent_impulse = t_world });
+    cache.endTick();
+    cache.beginTick();
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, rigid.prepareContext(.{}, fixed_dt, &cache));
+    const c = constraints.items[0];
+    return c.tangent1.scale(c.points[0].tangent1_impulse).add(c.tangent2.scale(c.points[0].tangent2_impulse));
+}
+
+test "warm-started tangent is continuous across a tangent-basis flip" {
+    const gpa = testing.allocator;
+    // Two normals straddling the x = y dominant-axis boundary (so the tangent basis
+    // flips discontinuously). The cached WORLD tangent must reconstruct to the SAME
+    // world direction for both — a per-basis-scalar cache would rotate it.
+    const t_world = vr(0.3, -0.3, 0.5);
+    const r1 = try reconstructWarmTangent(gpa, av3(1.0, 1.02, 0.0), t_world); // y-dominant
+    const r2 = try reconstructWarmTangent(gpa, av3(1.02, 1.0, 0.0), t_world); // x-dominant
+    try testing.expect(r1.approxEql(r2, 1e-2));
+}
+
+test "kinematic-static contact produces no constraint and no NaN" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    const a = try bm.addBody(gpa, &store, descOf(0, .static, s));
+    var db = descOf(1, .kinematic, s);
+    db.position = av3(0.9, 0, 0);
+    const b = try bm.addBody(gpa, &store, db);
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
+    rigid.solveRange(&bm, constraints.items, 0, constraints.items.len, .{}, fixed_dt / 4.0);
+
+    try testing.expectEqual(@as(usize, 0), constraints.items.len);
+    for (bm.position(a).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
+    for (bm.position(b).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
+    for (bm.linearVelocity(b).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
 }

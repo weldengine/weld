@@ -326,7 +326,6 @@ comptime {
     _ = @import("tests/fast_paths_test.zig");
     _ = @import("tests/epa_robustness_test.zig");
     _ = @import("tests/solver_test.zig");
-    _ = @import("tests/position_solver_test.zig");
     _ = @import("tests/island_test.zig");
     _ = @import("tests/sleep_test.zig");
     _ = @import("tests/raycast_test.zig");
