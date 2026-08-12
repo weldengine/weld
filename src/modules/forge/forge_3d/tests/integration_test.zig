@@ -204,6 +204,110 @@ test "forces are consumed once per tick" {
     try testing.expectEqual(v_after_1, v_after_2);
 }
 
+// --- M1.1.13.1: the substep decomposition of the velocity half ----------------
+
+test "integrateVelocitiesNoReset leaves the accumulators standing" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    var d = dynDesc(0, s);
+    d.mass = 2;
+    const id = try bm.addBody(gpa, &store, d);
+    const idx = api.PackedId.unpack(id).index;
+
+    const force = vr(10, 0, 4);
+    const torque = vr(0, 3, 0);
+    bm.addForce(id, force);
+    bm.addTorque(id, torque);
+    integration.integrateVelocitiesNoReset(&bm, 1.0 / 240.0, vr(0, 0, 0));
+
+    // It APPLIED them — the velocity moved — and it did not consume them: both
+    // columns are bit-unchanged, which is what lets the next substep read the same
+    // force again.
+    try testing.expect(bm.linearVelocity(id).?.toArray()[0] > 0);
+    try testing.expectEqual(force.toArray(), bm.bodies.items(.force)[idx].toArray());
+    try testing.expectEqual(torque.toArray(), bm.bodies.items(.torque)[idx].toArray());
+}
+
+test "resetForceAccumulators clears every live slot and no dead one" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // One of each live kind — the §2 clear is uniform over body types, not just
+    // dynamics — plus a slot freed while carrying a stale accumulator.
+    const dyn = try bm.addBody(gpa, &store, dynDesc(0, s));
+    const stat = try bm.addBody(gpa, &store, .{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .static, .shape = s });
+    const kin = try bm.addBody(gpa, &store, .{ .entity = .{ .index = 2, .generation = 0 }, .body_type = .kinematic, .shape = s });
+    const doomed = try bm.addBody(gpa, &store, dynDesc(3, s));
+
+    for ([_]api.BodyId{ dyn, stat, kin, doomed }) |id| {
+        bm.addForce(id, vr(5, 6, 7));
+        bm.addTorque(id, vr(1, 2, 3));
+    }
+    const i_dead = api.PackedId.unpack(doomed).index;
+    bm.removeBody(doomed);
+    const force_dead = bm.bodies.items(.force)[i_dead].toArray();
+
+    integration.resetForceAccumulators(&bm);
+
+    for ([_]api.BodyId{ dyn, stat, kin }) |id| {
+        const i = api.PackedId.unpack(id).index;
+        try testing.expect(bm.bodies.items(.force)[i].approxEql(Vec3r.zero, 0));
+        try testing.expect(bm.bodies.items(.torque)[i].approxEql(Vec3r.zero, 0));
+    }
+    // The dead slot keeps its stale accumulator: the store does not compact, and a
+    // freed slot's columns are nobody's business until it is reused. Same statement
+    // the M1.1.5 freed-slot test makes about `integrate`, now about the clear alone.
+    try testing.expectEqual(force_dead, bm.bodies.items(.force)[i_dead].toArray());
+}
+
+test "n substeps of NoReset deliver a constant force's whole impulse" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    var d = dynDesc(0, s); // damping 0, so `n` slices of `h` are the tick exactly
+    d.mass = 2;
+    const id = try bm.addBody(gpa, &store, d);
+
+    const dt: Real = 1.0 / 60.0;
+    const substeps: u32 = 4;
+    const h = dt / @as(Real, @floatFromInt(substeps));
+    const accel: Real = 5; // F/m = 10/2
+
+    bm.addForce(id, vr(10, 0, 0));
+    var k: u32 = 0;
+    while (k < substeps) : (k += 1) integration.integrateVelocitiesNoReset(&bm, h, vr(0, 0, 0));
+    integration.resetForceAccumulators(&bm);
+    const v = bm.linearVelocity(id).?.toArray()[0];
+
+    // THE GUARD THIS FILE EXISTS FOR (blocker B1). The tick must deliver `F/m·dt`,
+    // and the two defects it replaced are both excluded by name rather than by a
+    // tolerance that happens to be tight enough:
+    //   - clearing INSIDE the substep (the fused form called `n` times) gives
+    //     `F/m·h`, a quarter of it;
+    //   - clearing BEFORE the loop gives exactly zero, because an accumulator
+    //     cleared before anything consumes it is consumed by nothing.
+    try testing.expectApproxEqAbs(accel * dt, v, 1e-6);
+    try testing.expect(@abs(v - accel * h) > 1e-3); // not the 1/n defect
+    try testing.expect(@abs(v) > 1e-3); // not the zero defect
+
+    // And the accumulator is gone once the tick ends, so a force applied once is
+    // applied once — the property `forces are consumed once per tick` states for
+    // the fused entry, restated for the substepped path.
+    integration.integrateVelocitiesNoReset(&bm, h, vr(0, 0, 0));
+    try testing.expectEqual(v, bm.linearVelocity(id).?.toArray()[0]);
+}
+
 test "impulse is an immediate velocity change" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
