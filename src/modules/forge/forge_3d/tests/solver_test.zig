@@ -302,13 +302,33 @@ pub const World = struct {
 /// Inside the dead zone the bias term is exactly zero, so the contact is held by
 /// impulse alone and settles a little deeper than the slop; how much deeper is set by
 /// `(contact_hertz, contact_damping_ratio)` and the load, not by a closed form.
-/// MEASURED on the five-box stack at f32, 1200 ticks: total sink 5.345643, 12.551069,
-/// 19.206524, 25.311708 and 30.867100 mm from the bottom up, i.e. a worst per-contact
-/// 6.402 mm against the 5 mm slop — about 1.4 mm of sag. The 3 mm below leaves ~1.25×
-/// headroom on that worst contact.
+///
+/// MEASURED DIRECTLY, and the distinction matters because a first version of this
+/// comment derived it instead. The worst per-contact overlap is what
+/// `deepestPenetration()` reports — the penetration carried by a constraint point —
+/// and on the five-box stack after 1200 ticks that is **7.216632 mm at f32 and
+/// 7.208680 mm at f64**, against the 5 mm slop: about **2.2 mm of sag**.
+///
+/// It is NOT the per-box sink divided by the number of contacts under it. Those sinks
+/// are 5.345643, 12.551069, 19.206524, 25.311708 and 30.867100 mm from the bottom up
+/// (f32; 5.345057, 12.551584, 19.206999, 25.310440, 30.862218 at f64), and dividing
+/// the third by three gives 6.402 mm — a number with no physical referent, since a
+/// sink is a CENTRE displacement that also carries whatever tilt the settling
+/// transient left. The two quantities happen to land within a millimetre of each
+/// other here, which is exactly why the derivation went unnoticed.
+///
+/// 3 mm against a measured 2.2 mm of sag leaves ~1.35× headroom on the quantity this
+/// constant names.
 const soft_sag: Real = 3e-3;
 /// Rest budget for ONE contact: the dead zone the solver stops pushing inside, plus
 /// the sag it leaves under load. A chain of `n` contacts is allowed `n` times this.
+///
+/// Two different physical quantities are compared against it, deliberately and with
+/// the same allowance: a constraint point's PENETRATION (a surface overlap) and a
+/// body's SINK below its analytic rest height (a centre displacement down a chain of
+/// `n` contacts). They are not the same measurement — see `soft_sag` — but a contact
+/// that overlaps by at most `slop + sag` cannot lower the body above it by more than
+/// that either, so one allowance bounds both.
 fn restBudget(cfg: SolverConfig, contacts: usize) Real {
     return @as(Real, @floatFromInt(contacts)) * (cfg.penetration_slop + soft_sag);
 }
@@ -442,6 +462,13 @@ test "rest overlap at equilibrium is measured and bounded" {
     // `5.9e-7` above it at f32 — SUPERSEDED). It is the slop dead zone plus the sag
     // the spring leaves under the load: inside the dead zone the bias term is zero,
     // so the contact holds by impulse alone and sits slightly deeper.
+    //
+    // MEASURED here, one box on the ground after 600 ticks: **5.068719 mm at f32,
+    // 5.069011 mm at f64** — 69 µm of sag over the 5 mm slop. The same quantity on the
+    // most loaded contact of the five-box stack is 7.216632 mm (f32), i.e. 2.2 mm of
+    // sag. That the sag GROWS WITH THE LOAD is the whole difference from the model it
+    // replaces: the NGS fixed point was the slop whatever the load, because a position
+    // pass drives error to a target, where a spring deflects under force.
     const overlap = world.deepestPenetration();
     try testing.expect(overlap > 0); // the contact is alive, not oscillating
     try testing.expect(overlap <= restBudget(world.cfg, 1));

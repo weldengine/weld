@@ -2967,6 +2967,7 @@ test "warm starting is per triangle and survives a reordered re-traversal" {
     // test measures is the one the real cycle performs.
     try rigid.build(gpa, &reordered, &scene.world.bm, &scene.world.store, &.{key}, rigid.prepareContext(.{}, 1.0 / 60.0, &cache));
     const hits_after_seeding = cache.hits;
+    const misses_after_seeding = cache.misses;
     try testing.expectEqual(constraints.items.len, reordered.items.len);
     std.mem.reverse(rigid.ContactConstraint, reordered.items);
 
@@ -2999,10 +3000,18 @@ test "warm starting is per triangle and survives a reordered re-traversal" {
         }
     }
     try testing.expect(matched >= 4);
-    // The cache reports HITS, not cold starts: every point of the second pass found its
-    // own triangle's history, and not one cold-started.
-    try testing.expect(hits_after_seeding > 0);
-    try testing.expectEqual(@as(u32, 0), cache.misses);
+    // The cache reports HITS, not cold starts — and the claim is EXACT rather than
+    // "some": the seeding pass looked up every point of every constraint and found ALL of
+    // them. `hits > 0` would have left the sentence unearned, which is the defect class
+    // where a comment claims more than its assertion.
+    //
+    // Both counters are read AT THE SEEDING, not at the end of the test: the verification
+    // loop above calls `lookup` itself, so a count taken here would conflate the reheating
+    // under test with the reads that checked it.
+    var total_points: u32 = 0;
+    for (reordered.items) |c| total_points += c.count;
+    try testing.expectEqual(total_points, hits_after_seeding);
+    try testing.expectEqual(@as(u32, 0), misses_after_seeding);
 }
 
 test "mesh versus mesh and mesh versus half-space are unreachable" {
