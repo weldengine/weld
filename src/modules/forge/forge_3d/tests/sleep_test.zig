@@ -251,15 +251,18 @@ test "solver writes never rearm the sleep window" {
     // If any of those four writes were treated as an external mutation, the window
     // would be restarted every tick and the box would never become eligible. That
     // is exactly what this test refuses.
+    // The substep loop writes pose AND velocity every tick, so it exercises all four
+    // write kinds the sleep contract must treat as internal. Driven through a real
+    // island partition rather than a hand-made range, so the writes arrive by the
+    // same path production will use.
+    var islands = rigid.IslandManager{};
+    defer islands.deinit(gpa);
     var t: u32 = 0;
     while (t < 300) : (t += 1) {
-        integration.integrateVelocities(&bm, dt, gravity);
         cache.beginTick();
-        try rigid.build(gpa, &constraints, &bm, &store, &pairs);
-        rigid.warmStart(&bm, &cache, constraints.items);
-        rigid.solveRange(&bm, constraints.items, 0, constraints.items.len, solver_cfg);
-        integration.integratePositions(&bm, dt);
-        _ = rigid.solvePositionRange(&bm, constraints.items, 0, constraints.items.len, solver_cfg);
+        try rigid.build(gpa, &constraints, &bm, &store, &pairs, rigid.prepareContext(solver_cfg, dt, &cache));
+        try islands.partition(gpa, &bm, constraints.items);
+        _ = rigid.solveTick(&bm, constraints.items, islands.islandsSlice(), solver_cfg, dt, gravity);
         try rigid.storeContacts(gpa, &cache, constraints.items);
         cache.endTick();
         sleep.updateWindows(&bm, dt, cfg);
@@ -387,7 +390,7 @@ test "a moving non-member wakes the island resting on it (W3)" {
         while (t < 40) : (t += 1) sleep.updateWindows(&bm, dt, cfg);
         try testing.expect(sleep.isEligible(&bm, box, cfg));
 
-        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)});
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
         try testing.expectEqual(@as(usize, 1), constraints.items.len);
         try manager.partition(gpa, &bm, constraints.items);
         try testing.expectEqual(@as(usize, 1), manager.islandsSlice().len);
@@ -436,7 +439,7 @@ test "an island sleeps only when every member is eligible (W2)" {
 
     var t: u32 = 0;
     while (t < 40) : (t += 1) sleep.updateWindows(&bm, dt, cfg);
-    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
     try manager.partition(gpa, &bm, constraints.items);
     try testing.expectEqual(@as(usize, 1), manager.islandsSlice().len);
     try testing.expectEqual(@as(u32, 2), manager.islandsSlice()[0].member_to);
@@ -673,7 +676,7 @@ test "build skips a pair whose endpoints are both non-awake" {
     const pairs = [_]u64{pairKey(ground, box)};
 
     // Awake: the contact is built as usual.
-    try rigid.build(gpa, &constraints, &bm, &store, &pairs);
+    try rigid.build(gpa, &constraints, &bm, &store, &pairs, rigid.prepareContext(.{}, 1.0 / 60.0, null));
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
 
     // Asleep against a STATIC ground: both endpoints are non-awake, so the pair is
@@ -681,7 +684,7 @@ test "build skips a pair whose endpoints are both non-awake" {
     // ground has no `sleeping` flag of its own (the window sweep never touches it),
     // which is exactly why the predicate cannot be "both flags set".
     sleep.putToSleep(&bm, box);
-    try rigid.build(gpa, &constraints, &bm, &store, &pairs);
+    try rigid.build(gpa, &constraints, &bm, &store, &pairs, rigid.prepareContext(.{}, 1.0 / 60.0, null));
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
     try testing.expect(bm.isSleeping(box).?); // and nothing woke it
 }
@@ -700,7 +703,7 @@ test "build wakes a sleeping endpoint as soon as a manifold appears" {
     try testing.expect(bm.isSleeping(ids[0]).?);
     try testing.expect(!bm.isSleeping(ids[1]).?); // the other stays awake
 
-    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
 
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
     try testing.expect(!bm.isSleeping(ids[0]).?);
@@ -734,7 +737,7 @@ test "the wake fixpoint reaches a whole sleeping chain in one build" {
 
     const all = [_]BodyId{ stack[0], stack[1], stack[2], impactor };
     try allPairs(gpa, &pairs, &all);
-    try rigid.build(gpa, &constraints, &bm, &store, pairs.items);
+    try rigid.build(gpa, &constraints, &bm, &store, pairs.items, rigid.prepareContext(.{}, 1.0 / 60.0, null));
 
     // ONE build call: every member of the chain is awake and its internal contacts
     // are back — the impactor's plus the stack's two.
@@ -772,7 +775,7 @@ test "a moving kinematic support wakes the sleeper resting on it" {
 
         sleep.putToSleep(&bm, box);
         if (platform_moves) bm.setLinearVelocity(platform, vr(1, 0, 0));
-        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)});
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
 
         if (platform_moves) {
             try testing.expect(!bm.isSleeping(box).?);

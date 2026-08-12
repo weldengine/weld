@@ -246,7 +246,7 @@ const Rig = struct {
             for (self.ids.items[i + 1 ..]) |b| try self.pairs.append(gpa, pairKey(a, b));
         }
         std.mem.sort(u64, self.pairs.items, {}, std.sort.asc(u64));
-        try rigid.build(gpa, &self.constraints, &self.bm, &self.store, self.pairs.items);
+        try rigid.build(gpa, &self.constraints, &self.bm, &self.store, self.pairs.items, rigid.prepareContext(.{}, 1.0 / 60.0, null));
         try self.manager.partition(gpa, &self.bm, self.constraints.items);
     }
 
@@ -563,44 +563,38 @@ test "per-island solve equals global solve bit-exactly on disjoint islands" {
     try testing.expectEqual(@as(usize, 2), per_island.manager.islandsSlice().len);
     try testing.expectEqual(global.constraints.items.len, per_island.constraints.items.len);
 
-    var slowest_island: u32 = 0;
-    var fastest_island: u32 = std.math.maxInt(u32);
+    const h = (1.0 / 60.0) / @as(Real, @floatFromInt(cfg.substep_count));
+
+    // Per-island: every stage sweeps all intervals before the next begins — LOCKSTEP,
+    // which is the order `solveTick` runs and the only one compatible with the
+    // integrations being global.
     for (per_island.manager.islandsSlice()) |isl| {
-        const result = rigid.solveRangeReport(
-            &per_island.bm,
-            per_island.constraints.items,
-            isl.constraint_from,
-            isl.constraint_to,
-            cfg,
-        );
-        slowest_island = @max(slowest_island, result.iterations_run);
-        fastest_island = @min(fastest_island, result.iterations_run);
+        rigid.solveRange(&per_island.bm, per_island.constraints.items, isl.constraint_from, isl.constraint_to, cfg, h);
     }
     for (per_island.manager.islandsSlice()) |isl| {
-        _ = rigid.solvePositionRange(
-            &per_island.bm,
-            per_island.constraints.items,
-            isl.constraint_from,
-            isl.constraint_to,
-            cfg,
-        );
+        rigid.relaxRange(&per_island.bm, per_island.constraints.items, isl.constraint_from, isl.constraint_to, cfg, h);
     }
 
-    const global_velocity = rigid.solveRangeReport(
-        &global.bm,
-        global.constraints.items,
-        0,
-        global.constraints.items.len,
-        cfg,
-    );
-    _ = rigid.solvePositionRange(&global.bm, global.constraints.items, 0, global.constraints.items.len, cfg);
+    // Global: the same two stages over one range covering the whole array.
+    rigid.solveRange(&global.bm, global.constraints.items, 0, global.constraints.items.len, cfg, h);
+    rigid.relaxRange(&global.bm, global.constraints.items, 0, global.constraints.items.len, cfg, h);
 
-    // Discrimination guard: the two strategies really did run different iteration
-    // counts. The sphere pair stops early on its own range, while the global range
-    // keeps iterating over it until the stack has converged too — so the equality
-    // below is the early-out being exact, not the two runs being one computation.
-    try testing.expect(fastest_island < global_velocity.iterations_run);
-    try testing.expectEqual(slowest_island, global_velocity.iterations_run);
+    // THE PRECONDITION, asserted rather than assumed — and it is what carries the
+    // equivalence now that there is no early-out to discriminate on. The M1.1.7 guard
+    // compared iteration counts between the two strategies; a fixed per-substep cost
+    // leaves no count to differ, so what has to be pinned instead is the property that
+    // makes the two orders identical in the first place: the island ranges are
+    // CONTIGUOUS, ASCENDING and cover the array exactly. Let a gap or an overlap in,
+    // and per-island solving would visit a different multiset of constraints from the
+    // global range — silently, and the bit-equality below would be the thing that
+    // failed, with no indication why.
+    var cursor: u32 = 0;
+    for (per_island.manager.islandsSlice()) |isl| {
+        try testing.expectEqual(cursor, isl.constraint_from);
+        try testing.expect(isl.constraint_to >= isl.constraint_from);
+        cursor = isl.constraint_to;
+    }
+    try testing.expectEqual(@as(u32, @intCast(per_island.constraints.items.len)), cursor);
 
     try expectSameStates(&global, &per_island);
 }

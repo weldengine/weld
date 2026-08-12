@@ -296,10 +296,22 @@ pub const World = struct {
 //
 // Every margin below is a measured value with headroom, never a tuning knob.
 
-/// How far under `n · penetration_slop` a body in an n-deep contact chain may sit.
-/// Under soft constraints the resting overlap is the slop dead zone PLUS the spring
-/// sag the contact hertz leaves, so a chain adds a little to each contact.
-const rest_margin: Real = 5e-3;
+/// Per-contact spring sag at rest, ON TOP of the slop dead zone — the quantity that
+/// replaces the M1.1.7 NGS fixed point.
+///
+/// Inside the dead zone the bias term is exactly zero, so the contact is held by
+/// impulse alone and settles a little deeper than the slop; how much deeper is set by
+/// `(contact_hertz, contact_damping_ratio)` and the load, not by a closed form.
+/// MEASURED on the five-box stack at f32, 1200 ticks: total sink 5.345643, 12.551069,
+/// 19.206524, 25.311708 and 30.867100 mm from the bottom up, i.e. a worst per-contact
+/// 6.402 mm against the 5 mm slop — about 1.4 mm of sag. The 3 mm below leaves ~1.25×
+/// headroom on that worst contact.
+const soft_sag: Real = 3e-3;
+/// Rest budget for ONE contact: the dead zone the solver stops pushing inside, plus
+/// the sag it leaves under load. A chain of `n` contacts is allowed `n` times this.
+fn restBudget(cfg: SolverConfig, contacts: usize) Real {
+    return @as(Real, @floatFromInt(contacts)) * (cfg.penetration_slop + soft_sag);
+}
 /// A body may not sit ABOVE its analytic rest height by more than float noise.
 const rest_overshoot: Real = 1e-4;
 /// The anti-BOUNCE ceiling: the speed a free-falling body picks up in one tick
@@ -411,7 +423,7 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     // under it: the soft constraint holds a small steady overlap rather than driving
     // it to zero, which is the slop's whole role — keeping the contact, and its
     // warm-start entry, alive instead of oscillating between contact and no contact.
-    try testing.expect(y_final > 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_final > 1.0 - restBudget(world.cfg, 1));
     try testing.expect(y_final < 1.0 + rest_overshoot);
     try testing.expect(@abs(v_final) < rest_speed);
 }
@@ -432,7 +444,7 @@ test "rest overlap at equilibrium is measured and bounded" {
     // so the contact holds by impulse alone and sits slightly deeper.
     const overlap = world.deepestPenetration();
     try testing.expect(overlap > 0); // the contact is alive, not oscillating
-    try testing.expect(overlap <= world.cfg.penetration_slop + rest_margin);
+    try testing.expect(overlap <= restBudget(world.cfg, 1));
 
     // Steady, not still drifting: the overlap 60 ticks later is the same to within
     // float noise, which is what "equilibrium" claims.
@@ -473,7 +485,7 @@ test "five-box stack comes to rest at substep_count=4" {
         // Box `i` rests on `i + 1` contacts, each holding at most one slop of overlap
         // plus its share of the spring sag.
         const analytic = 1.0 + @as(Real, @floatFromInt(i));
-        const allowed_sink = @as(Real, @floatFromInt(i + 1)) * world.cfg.penetration_slop + rest_margin;
+        const allowed_sink = restBudget(world.cfg, i + 1);
         const y = world.bm.position(b).?.toArray()[1];
         try testing.expect(y >= analytic - allowed_sink);
         try testing.expect(y <= analytic + rest_overshoot);
@@ -651,7 +663,7 @@ test "resting body arms no restitution from one tick of gravity" {
     const v = world.bm.linearVelocity(box).?.toArray()[1];
     try testing.expect(@abs(v) < rest_speed);
     const y = world.bm.position(box).?.toArray()[1];
-    try testing.expect(y > 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y > 1.0 - restBudget(world.cfg, 1));
     try testing.expect(y < 1.0 + rest_overshoot);
 }
 
@@ -674,34 +686,52 @@ test "restitution predicate: <= threshold boundary arms; zero total impulse skip
     const b = try bm.addBody(gpa, &store, db);
 
     const cfg = SolverConfig{};
-    // EXACTLY at the threshold, approaching. The predicate is `<=`, so this arms —
-    // the closed-interval convention of the family, and it supersedes §1.7.2's
-    // strict `<` wording.
-    bm.setLinearVelocity(a, vr(cfg.restitution_threshold, 0, 0));
+    bm.setLinearVelocity(a, vr(3, 0, 0)); // approaching, well past the threshold
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
     try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
-    try testing.expectApproxEqAbs(-cfg.restitution_threshold, constraints.items[0].points[0].rel_normal_velocity, 1e-5);
 
-    // Drive one substep's worth of solve so the point actually pushes, then restitute.
+    // Drive one substep's worth of solve so the point actually pushes.
     const h = fixed_dt / 4.0;
     rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
     rigid.relaxRange(&bm, constraints.items, 0, 1, cfg, h);
-    try testing.expect(constraints.items[0].points[0].total_normal_impulse > 0);
+    const pt = &constraints.items[0].points[0];
+    try testing.expect(pt.total_normal_impulse > 0);
+    const pushed = pt.total_normal_impulse;
+
+    // THE BOUNDARY IS SET, NOT AIMED AT. `v_n⁻` is written directly onto the point
+    // rather than manufactured by a launch velocity: the captured value goes through a
+    // quaternion transport and a dot product, so no choice of scene puts it exactly on
+    // the threshold at every precision — a first version of this test aimed at the
+    // boundary geometrically, passed at f32 by luck and missed it at f64. What the
+    // predicate claims is a CLOSED interval, and that is a statement about the
+    // comparison, so the comparison is what gets tested.
+    const settled = bm.linearVelocity(a).?.toArray()[0];
+    pt.rel_normal_velocity = -cfg.restitution_threshold; // exactly on it ⇒ arms
     rigid.applyRestitutionRange(&bm, constraints.items, 0, 1, cfg);
-    try testing.expect(bm.linearVelocity(a).?.toArray()[0] < -0.5); // it bounced back
+    try testing.expect(bm.linearVelocity(a).?.toArray()[0] < settled - 0.5); // bounced
+
+    // One ULP on the INSIDE of the threshold — a hair slower than the cutoff — must not
+    // arm. Paired with the case above this pins the boundary itself, not merely that
+    // fast contacts bounce and slow ones do not.
+    bm.setLinearVelocity(a, vr(settled, 0, 0));
+    pt.normal_impulse = 0;
+    pt.total_normal_impulse = pushed;
+    pt.rel_normal_velocity = std.math.nextAfter(Real, -cfg.restitution_threshold, 0);
+    rigid.applyRestitutionRange(&bm, constraints.items, 0, 1, cfg);
+    try testing.expectEqual(settled, bm.linearVelocity(a).?.toArray()[0]);
 
     // The SECOND clause: a point that never pushed must not bounce, however fast it
-    // approached at capture. Forced directly — `total_normal_impulse` at zero is the
-    // state of a speculative point the tick never had to resolve.
-    const before = constraints.items[0].points[0].normal_impulse;
-    constraints.items[0].points[0].total_normal_impulse = 0;
-    const v_before = bm.linearVelocity(a).?.toArray()[0];
+    // approached at capture. `total_normal_impulse` at zero is the state of a
+    // speculative point the tick never had to resolve.
+    pt.rel_normal_velocity = -10; // far past the threshold
+    pt.total_normal_impulse = 0;
+    const before = pt.normal_impulse;
     rigid.applyRestitutionRange(&bm, constraints.items, 0, 1, cfg);
-    try testing.expectEqual(v_before, bm.linearVelocity(a).?.toArray()[0]);
-    try testing.expectEqual(before, constraints.items[0].points[0].normal_impulse);
+    try testing.expectEqual(settled, bm.linearVelocity(a).?.toArray()[0]);
+    try testing.expectEqual(before, pt.normal_impulse);
 }
 
 test "speculative branch limits approach without attraction" {
@@ -727,7 +757,13 @@ test "speculative branch limits approach without attraction" {
     try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)}, coldContext());
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
 
+    // The pair is built OVERLAPPING (centres 0.99 apart, radii summing to 1.0), so
+    // pulling A back by `gap` leaves `gap − penetration` of clearance, not `gap`. The
+    // expectation is derived from the manifold the build actually produced rather than
+    // from the displacement — a literal here would encode the initial overlap silently.
     const gap: Real = 0.02;
+    const separation = gap - constraints.items[0].points[0].penetration;
+    try testing.expect(separation > 0);
     bm.setPosition(a, bm.position(a).?.sub(vr(gap, 0, 0)));
     const cfg = SolverConfig{};
     const h = fixed_dt / 4.0;
@@ -742,7 +778,7 @@ test "speculative branch limits approach without attraction" {
 
     // APPROACH LIMITED: closing faster than the gap can absorb in one substep is cut
     // back to exactly `gap/h` — the speed that just closes the gap and no more.
-    const closing = gap / h;
+    const closing = separation / h;
     bm.setLinearVelocity(a, vr(4 * closing, 0, 0));
     rigid.solveRange(&bm, constraints.items, 0, 1, cfg, h);
     try testing.expectApproxEqAbs(closing, bm.linearVelocity(a).?.toArray()[0], 1e-3);
@@ -870,9 +906,9 @@ test "a heavy box resting on a light box does not sink through" {
 
     const y_light = world.bm.position(light_id).?.toArray()[1];
     const y_heavy = world.bm.position(heavy_id).?.toArray()[1];
-    try testing.expect(y_light >= 1.0 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_light >= 1.0 - restBudget(world.cfg, 1));
     try testing.expect(y_light <= 1.0 + rest_overshoot);
-    try testing.expect(y_heavy >= 2.0 - (2 * world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y_heavy >= 2.0 - restBudget(world.cfg, 2));
     try testing.expect(y_heavy <= 2.0 + rest_overshoot);
 }
 
@@ -900,8 +936,7 @@ test "a stack far from the origin along the contact normal still settles" {
 
     for (boxes, 0..) |b, i| {
         const analytic = @as(Real, base) + 1.0 + @as(Real, @floatFromInt(i));
-        const allowed_sink = @as(Real, @floatFromInt(i + 1)) * world.cfg.penetration_slop +
-            rest_margin + noiseMargin(base);
+        const allowed_sink = restBudget(world.cfg, i + 1) + noiseMargin(base);
         const y = world.bm.position(b).?.toArray()[1];
         try testing.expect(y >= analytic - allowed_sink);
         try testing.expect(y <= analytic + rest_overshoot + noiseMargin(base));
@@ -938,9 +973,9 @@ test "a tilted anisotropic box resorbs penetration without lateral drift" {
     // `contact_push_max_speed` rather than resorbed in one frame, so what is asserted
     // is where it ends up, not how fast it got there.
     const p = world.bm.position(id).?.toArray();
-    try testing.expect(p[1] >= 0.6 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(p[1] >= 0.6 - restBudget(world.cfg, 1));
     try testing.expect(p[1] <= 0.6 + rest_overshoot);
-    try testing.expect(world.deepestPenetration() <= world.cfg.penetration_slop + rest_margin);
+    try testing.expect(world.deepestPenetration() <= restBudget(world.cfg, 1));
 
     // Tangential: the tip-over displaces the centre once, but the settled box must
     // not creep afterwards — the bias is along the normal, so it may not walk the box
@@ -987,9 +1022,9 @@ test "reference face carried by B still resorbs penetration" {
     var t: u32 = 0;
     while (t < 300) : (t += 1) try world.step(gpa);
 
-    try testing.expect(world.deepestPenetration() <= world.cfg.penetration_slop + rest_margin);
+    try testing.expect(world.deepestPenetration() <= restBudget(world.cfg, 1));
     const y = world.bm.position(capsule_id).?.toArray()[1];
-    try testing.expect(y >= 0.7 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y >= 0.7 - restBudget(world.cfg, 1));
     try testing.expect(y <= 0.7 + rest_overshoot);
 }
 

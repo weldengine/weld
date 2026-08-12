@@ -40,6 +40,7 @@ const std = @import("std");
 const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
+const cache_mod = @import("contact_cache.zig");
 const sleep = @import("../pipeline/sleep.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -52,6 +53,7 @@ const BodyManager = bm_mod.BodyManager;
 const ShapeStore = bm_mod.ShapeStore;
 const BodyId = api.BodyId;
 const ContactManifold = narrowphase.ContactManifold(Real);
+const ContactCache = cache_mod.ContactCache;
 
 // --- Material combine rules (Box2D/Jolt convention) --------------------------
 
@@ -212,6 +214,32 @@ pub fn usesStaticSoftness(bm: *const BodyManager, a: BodyId, b: BodyId) bool {
     return type_a == .static or type_b == .static;
 }
 
+/// The two coefficient triples a tick needs: the ordinary one and the stiffened one
+/// for pairs touching a static body. Both are CONSTRAINT-INDEPENDENT — they depend
+/// only on `(contact_hertz, contact_damping_ratio, h)` — so the orchestration derives
+/// them once per tick and `prepare` merely SELECTS, storing the chosen triple on the
+/// constraint. That is the reference's shape (`constraint->softness`), and it keeps
+/// the hot sweeps free of a per-point branch on body type.
+pub const SoftnessPair = struct {
+    /// Coefficients for a pair of two solver bodies.
+    contact: Softness,
+    /// Coefficients for a pair with a static endpoint — `static_hertz_factor` times
+    /// the effective hertz.
+    static: Softness,
+};
+
+/// Everything `prepare` needs beyond the geometry, bundled so the tick derives it
+/// once and `build` forwards it without deriving anything of its own — `build` reads
+/// no `dt` and no `SolverConfig`, and that is deliberate: constraint construction is
+/// narrowphase work, not solver tuning.
+pub const PrepareContext = struct {
+    /// The tick's two coefficient triples; `prepare` selects per constraint.
+    softness: SoftnessPair,
+    /// Warm-start source. `null` cold-starts every point — no lookup, no hit/miss
+    /// telemetry — which is what a scenario that never solves wants.
+    cache: ?*ContactCache = null,
+};
+
 // --- Contact constraint ------------------------------------------------------
 
 /// One contact point's precomputed solver data.
@@ -307,6 +335,10 @@ pub const ContactConstraint = struct {
     /// Combined friction / restitution for the pair.
     friction: Real,
     restitution: Real,
+    /// The soft coefficients this constraint solves with, SELECTED at `prepare` from
+    /// the tick's `SoftnessPair` — stiffened when either endpoint is static. Read by
+    /// the biased sweep only: relax runs the same update with the soft terms off.
+    softness: Softness,
     /// Cached inverse mass and world-space inverse inertia per body — precomputed
     /// once in `prepare`, reused by warm start (E3) and the iterations (E4/E5).
     inv_mass_a: Real,
@@ -350,7 +382,15 @@ fn effectiveMass(
 /// Build and precompute one contact constraint for the canonical pair `(a, b)`
 /// from `manifold`: tangent basis, combined material, cached inverse mass/inertia,
 /// and per-point lever arms, effective masses, and pre-solve normal velocity.
-fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape_id: u32, manifold: ContactManifold) ?ContactConstraint {
+fn prepare(
+    bm: *const BodyManager,
+    a: BodyId,
+    b: BodyId,
+    pair_key: u64,
+    subshape_id: u32,
+    manifold: ContactManifold,
+    ctx: PrepareContext,
+) ?ContactConstraint {
     const mp_a = bm.motionProperties(a).?;
     const mp_b = bm.motionProperties(b).?;
 
@@ -388,6 +428,7 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
         .tangent2 = tb.t2,
         .friction = combineFriction(bm.friction(a).?, bm.friction(b).?),
         .restitution = combineRestitution(bm.restitution(a).?, bm.restitution(b).?),
+        .softness = if (usesStaticSoftness(bm, a, b)) ctx.softness.static else ctx.softness.contact,
         .inv_mass_a = mp_a.inv_mass,
         .inv_mass_b = mp_b.inv_mass,
         .inv_inertia_a = inv_inertia_a,
@@ -431,7 +472,50 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
             .feature_id = p.feature_id,
         };
     }
+    if (ctx.cache) |cache| seedWarmStart(&c, cache);
     return c;
+}
+
+/// SEED the constraint's accumulators from the previous tick's solved impulses —
+/// once per tick, here at `prepare`, absorbing the deleted `velocity_solver.warmStart`.
+///
+/// **Seeding and APPLYING are two operations and must stay two functions**
+/// (`engine-physics-solver.md` §1.7, step 6). Seeding reads the cache, counts a hit or
+/// a miss, and writes the accumulators; applying injects the CURRENT accumulators into
+/// the body velocities and runs once per substep. Calling a seeding-shaped function
+/// per substep would re-read the cache, reset `λ` to last frame's values — discarding
+/// everything the earlier substeps of this tick solved — and multiply the hit/miss
+/// counters by `substep_count`. Nothing here is idempotent; nothing here may run twice.
+///
+/// Matching is per individual feature key: contact topology legitimately changes
+/// between frames, so a point without a match cold-starts and the manifold count is
+/// never assumed stable. The cached tangent is world-space and is REPROJECTED onto the
+/// new tangent plane BEFORE being clamped to `μ·λₙ`, never the reverse — the basis may
+/// have flipped since it was cached, and clamping a raw magnitude that still carries a
+/// normal component would shrink the in-plane part it was meant to preserve.
+///
+/// `total_normal_impulse` needs no reset here: `ConstraintPoint` defaults it to zero,
+/// so a freshly prepared point starts the tick at zero by construction.
+fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
+    for (0..c.count) |i| {
+        const pt = &c.points[i];
+        const cached = cache.lookup(.{
+            .pair_key = c.pair_key,
+            .subshape_id = c.subshape_id,
+            .feature_id = pt.feature_id,
+        }) orelse continue;
+
+        var j_t = cached.tangent_impulse.sub(c.normal.scale(cached.tangent_impulse.dot(c.normal)));
+        const max_t = c.friction * cached.lambda_n;
+        const len_sq = j_t.lengthSq();
+        if (len_sq > max_t * max_t) {
+            j_t = j_t.scale(max_t / @sqrt(len_sq));
+        }
+
+        pt.normal_impulse = cached.lambda_n;
+        pt.tangent1_impulse = j_t.dot(c.tangent1);
+        pt.tangent2_impulse = j_t.dot(c.tangent2);
+    }
 }
 
 /// Build the contact constraints for `pairs` (canonical packed keys
@@ -474,6 +558,7 @@ pub fn build(
     bm: *BodyManager,
     store: *const ShapeStore,
     pairs: []const u64,
+    ctx: PrepareContext,
 ) !void {
     out.clearRetainingCapacity();
 
@@ -492,7 +577,7 @@ pub fn build(
             try deferred.append(gpa, @intCast(index));
             continue;
         }
-        if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
+        if (try emitPair(gpa, out, bm, store, key, ctx)) woke_someone = true;
     }
 
     while (woke_someone and deferred.items.len > 0) {
@@ -505,7 +590,7 @@ pub fn build(
                 kept += 1;
                 continue;
             }
-            if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
+            if (try emitPair(gpa, out, bm, store, key, ctx)) woke_someone = true;
         }
         deferred.shrinkRetainingCapacity(kept);
     }
@@ -534,6 +619,7 @@ fn emitPair(
     bm: *BodyManager,
     store: *const ShapeStore,
     key: u64,
+    ctx: PrepareContext,
 ) !bool {
     const a: BodyId = @intCast(key >> 32);
     const b: BodyId = @intCast(key & 0xFFFF_FFFF);
@@ -551,6 +637,7 @@ fn emitPair(
         .a = a,
         .b = b,
         .key = key,
+        .ctx = ctx,
     };
     bm.collidePairEach(store, a, b, &collector);
     if (collector.err) |e| return e;
@@ -583,6 +670,7 @@ const ConstraintCollector = struct {
     a: BodyId,
     b: BodyId,
     key: u64,
+    ctx: PrepareContext,
     /// How many manifolds arrived, whether or not each produced a constraint — the wake signal
     /// is "the pair touches", not "the pair produced solver work": a pair of infinite masses
     /// touches and `prepare` skips it at true zero.
@@ -592,7 +680,7 @@ const ConstraintCollector = struct {
     pub fn add(self: *ConstraintCollector, subshape_id: u32, manifold: ContactManifold) void {
         self.emitted += 1;
         if (self.err != null) return;
-        const constraint = prepare(self.bm, self.a, self.b, self.key, subshape_id, manifold) orelse return;
+        const constraint = prepare(self.bm, self.a, self.b, self.key, subshape_id, manifold, self.ctx) orelse return;
         self.out.append(self.gpa, constraint) catch |e| {
             self.err = e;
         };
@@ -640,6 +728,14 @@ fn pairKey(a: BodyId, b: BodyId) u64 {
     return (@as(u64, @min(a, b)) << 32) | @max(a, b);
 }
 
+/// A `PrepareContext` with no warm-start source and coefficients for the default
+/// tick — these tests exercise construction, never the solve.
+fn coldCtx() PrepareContext {
+    const h: Real = 1.0 / 240.0;
+    const soft = makeSoft(30, 10, h);
+    return .{ .softness = .{ .contact = soft, .static = makeSoft(60, 10, h) } };
+}
+
 fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
@@ -675,7 +771,7 @@ fn twoSpheresPosed(
     const id_a = try bm.addBody(gpa, store, da);
     const id_b = try bm.addBody(gpa, store, db);
 
-    try build(gpa, constraints, bm, store, &.{pairKey(id_a, id_b)});
+    try build(gpa, constraints, bm, store, &.{pairKey(id_a, id_b)}, coldCtx());
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
     return constraints.items[0];
 }
@@ -737,7 +833,7 @@ test "prepare caches the pose-invariant local inverse inertias" {
 
         var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
         defer constraints.deinit(gpa);
-        try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+        try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
         try testing.expectEqual(@as(usize, 1), constraints.items.len);
         const c = constraints.items[0];
 
@@ -949,7 +1045,7 @@ test "prepare captures normal effective mass and pre-solve normal velocity" {
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
     const c = constraints.items[0];
@@ -975,7 +1071,7 @@ test "kinematic vs static pair yields no constraint (true-zero inverse mass skip
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     // Both inv_mass == 0 ⇒ total inverse mass exactly zero ⇒ skipped at build.
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
@@ -996,7 +1092,7 @@ test "separated pair yields no constraint" {
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
 }
@@ -1025,7 +1121,7 @@ test "constraints come back sorted ascending by pair key" {
     // Feed the keys OUT of ascending order — build must sort them.
     try build(gpa, &constraints, &bm, &store, &.{
         pairKey(b1, b2), pairKey(b0, b1), pairKey(b0, b2),
-    });
+    }, coldCtx());
 
     try testing.expectEqual(@as(usize, 3), constraints.items.len);
     try testing.expect(constraints.items[0].pair_key < constraints.items[1].pair_key);
