@@ -8,6 +8,11 @@
 //!     = max(a, b) — the Box2D/Jolt convention);
 //!   - `tangentBasis`, a trig-free deterministic orthonormal basis for a contact
 //!     normal;
+//!   - the SOFT-CONSTRAINT coefficient forms (`makeSoft`, `effectiveContactHertz`,
+//!     `usesStaticSoftness`) — same family as the combine rules above: per-tick
+//!     derivation of a constraint's coefficients from authored parameters. They are
+//!     the first half of the TGS Soft port (`engine-physics-solver.md` §1.7.1); the
+//!     substepped solver that consumes them is the second;
 //!   - `ContactConstraint` (one per manifold, ≤ 4 inline points) with its
 //!     per-point solver data;
 //!   - `build`, which turns canonical broadphase candidate pairs into a
@@ -100,6 +105,113 @@ pub fn tangentBasis(n: Vec3r) TangentBasis {
     return .{ .t1 = t1, .t2 = t2 };
 }
 
+// --- Soft contact constraints (TGS Soft) -------------------------------------
+
+/// The three mass-independent coefficients of a soft contact constraint
+/// (`engine-physics-solver.md` §1.7.1; Nordby/Catto, the reference's `b2MakeSoft`).
+/// Derived once per tick from `(f, ζ, h)` — never per substep — and consumed by
+/// the biased solve, which reads `bias_rate` to turn the current separation into a
+/// velocity bias and `mass_scale`/`impulse_scale` to relax the impulse toward that
+/// bias instead of enforcing it outright.
+///
+/// The relax sweep does NOT read a `Softness`: it runs the same update with bias 0
+/// and the NEUTRAL coefficients `mass_scale = 1`, `impulse_scale = 0`, which are
+/// written at the call site rather than manufactured here — a "neutral softness"
+/// value would invite the reader to believe relax is a softness with different
+/// numbers, when it is the same update with the soft terms switched off.
+pub const Softness = struct {
+    /// Rate (1/s) converting a position error into a velocity bias.
+    bias_rate: Real,
+    /// Fraction of the velocity error the biased solve enforces this substep.
+    mass_scale: Real,
+    /// Fraction of the accumulated impulse the biased solve gives back — the term
+    /// that makes the constraint soft rather than hard.
+    impulse_scale: Real,
+};
+
+/// The three soft coefficients for stiffness `hertz` (Hz), damping ratio
+/// `damping_ratio` (dimensionless) and substep length `h` (s):
+///
+/// ```
+/// ω  = 2π·f ; a1 = 2ζ + h·ω ; a2 = h·ω·a1 ; a3 = 1/(1 + a2)
+/// bias_rate = ω/a1 ; mass_scale = a2·a3 ; impulse_scale = a3
+/// ```
+///
+/// MASS-INDEPENDENT by construction: nothing here reads an inverse mass or an
+/// effective mass, which is what lets one `(f, ζ)` pair describe the same visible
+/// stiffness across every mass ratio in the scene — the property that makes hertz
+/// an authorable parameter (`engine-physics-forge.md` §1.6, motive 4) where an
+/// iteration count is not.
+///
+/// `a1 > 0` whenever `hertz > 0` and `h > 0`, so the two divisions are finite; the
+/// domain assert states exactly that precondition rather than guarding it at some
+/// epsilon. The reference's `hertz == 0` early return is deliberately NOT ported:
+/// `contact_hertz > 0` is validated at the config entry, so that branch has no
+/// reachable cause here, and an unreachable branch is an assertion written as
+/// control flow.
+pub fn makeSoft(hertz: Real, damping_ratio: Real, h: Real) Softness {
+    std.debug.assert(std.math.isFinite(hertz) and hertz > 0);
+    std.debug.assert(std.math.isFinite(damping_ratio) and damping_ratio >= 0);
+    std.debug.assert(std.math.isFinite(h) and h > 0);
+
+    const omega = 2 * std.math.pi * hertz;
+    const a1 = 2 * damping_ratio + h * omega;
+    const a2 = h * omega * a1;
+    const a3 = 1 / (1 + a2);
+    return .{ .bias_rate = omega / a1, .mass_scale = a2 * a3, .impulse_scale = a3 };
+}
+
+/// Stiffening factor applied to the contact hertz when either body of the pair is
+/// STATIC (`usesStaticSoftness`). A static body returns no mass-ratio feedback —
+/// the whole correction lands on the dynamic side — so the same authored stiffness
+/// produces a visibly softer contact there than between two comparable dynamics;
+/// doubling the hertz compensates.
+pub const static_hertz_factor: Real = 2;
+
+/// The contact stiffness actually used this tick: the authored `contact_hertz`
+/// clamped to `0.125 · substep_count / dt`.
+///
+/// A constraint cannot be stiffer than the discretisation can resolve — past
+/// roughly a fixed fraction of the substep rate the spring is integrated too
+/// coarsely and the softness stops describing the behaviour it names. The clamp is
+/// therefore a property of the SCHEME, not a tuning knob, and it is not of the
+/// `k · floatEps(T) · coordScale` family: it classifies nothing and guards no
+/// degeneracy (§1.7.1).
+///
+/// At the defaults (30 Hz, 4 substeps, 60 Hz tick) the bound is `0.125 · 240 = 30`
+/// Hz exactly, so the clamp binds at equality and changes nothing. At
+/// `substep_count = 1` — the degenerate big-step A/B lever — it binds hard at
+/// 7.5 Hz, and the visibly soft contacts that follow are the lever's expected
+/// behaviour rather than a defect of it.
+pub fn effectiveContactHertz(contact_hertz: Real, substep_count: u32, dt: Real) Real {
+    std.debug.assert(std.math.isFinite(contact_hertz) and contact_hertz > 0);
+    std.debug.assert(substep_count >= 1);
+    std.debug.assert(std.math.isFinite(dt) and dt > 0);
+
+    const substep_rate = @as(Real, @floatFromInt(substep_count)) / dt;
+    return @min(contact_hertz, 0.125 * substep_rate);
+}
+
+/// Whether the pair `(a, b)` takes the stiffened static coefficients — true iff at
+/// least one endpoint is a STATIC body.
+///
+/// KINEMATIC BODIES RECEIVE ORDINARY SOFTNESS, and that is source parity rather
+/// than an oversight about infinite mass. The reference keys this choice on the
+/// absence of a solver body, and a kinematic body has one: it is carried through
+/// the solve like any other, it simply never receives an impulse. Keying on
+/// infinite mass instead would silently extend the stiffening to every kinematic
+/// contact — a platform, a lift, a moving door — none of which the measurement
+/// behind the factor covers. Extending it is a named open item, not a default.
+///
+/// A stale handle answers `false`: `prepare` has already dereferenced both bodies
+/// by the time this is consulted, so a stale id cannot reach it, and the ordinary
+/// coefficients are the answer that changes least if one ever did.
+pub fn usesStaticSoftness(bm: *const BodyManager, a: BodyId, b: BodyId) bool {
+    const type_a = bm.bodyType(a) orelse return false;
+    const type_b = bm.bodyType(b) orelse return false;
+    return type_a == .static or type_b == .static;
+}
+
 // --- Contact constraint ------------------------------------------------------
 
 /// One contact point's precomputed solver data.
@@ -141,6 +253,25 @@ pub const ConstraintPoint = struct {
     /// Accumulated tangent impulses on the `(t1, t2)` basis (E5).
     tangent1_impulse: Real = 0,
     tangent2_impulse: Real = 0,
+    /// Normal impulse this point has RECEIVED over the whole tick, and the second
+    /// half of the restitution predicate (`engine-physics-solver.md` §1.7.2): a
+    /// bounce is applied only to a point that both approached fast enough AND
+    /// actually pushed. Exactly:
+    ///
+    ///   - `0` here, at `prepare` — by this default, so the reset is structural;
+    ///   - `+= λₙ` (the CURRENT accumulator) at each per-substep warm application;
+    ///   - `+= applied` — algebraic and POST-clamp, so a retracted impulse subtracts
+    ///     — at each solve, relax and restitution update.
+    ///
+    /// It is therefore NEITHER the final `λₙ` (which the substeps rewrite) NOR a
+    /// boolean, and the distinction is what the predicate needs: a speculative point
+    /// that never pushed ends the tick at exactly zero and must not bounce, while a
+    /// point that pushed and was then relaxed back to zero did participate.
+    ///
+    /// NOT stored to the warm-start cache: that format is frozen at
+    /// `(λₙ, world tangent)` and this quantity is per-tick bookkeeping, meaningless
+    /// to the next tick's seeding.
+    total_normal_impulse: Real = 0,
 };
 
 /// One manifold's worth of contact constraints between a canonical body pair.
@@ -654,6 +785,144 @@ test "tangent basis is orthonormal, right-handed, and deterministic" {
         const tb2 = tangentBasis(n);
         try testing.expect(tb.t1.approxEql(tb2.t1, 0)); // deterministic
         try testing.expect(tb.t2.approxEql(tb2.t2, 0));
+    }
+}
+
+test "soft coefficients match the closed form" {
+    // The oracle is derived INDEPENDENTLY rather than transcribed: substituting
+    // `a2 = h·ω·a1` into `mass_scale = a2·a3` with `a3 = 1/(1+a2)` gives
+    // `mass_scale = 1 − impulse_scale`, and `bias_rate = 2πf / (2ζ + 2πfh)`. A copy
+    // of the production expression would agree with any typo it contains; these
+    // forms disagree with all but the intended algebra.
+    const cases = [_]struct { f: Real, zeta: Real, h: Real }{
+        .{ .f = 30, .zeta = 10, .h = 1.0 / 240.0 }, // the defaults, 4 substeps at 60 Hz
+        .{ .f = 30, .zeta = 10, .h = 1.0 / 60.0 }, // substep_count = 1
+        .{ .f = 60, .zeta = 10, .h = 1.0 / 240.0 }, // the static stiffening
+        .{ .f = 5, .zeta = 0, .h = 1.0 / 120.0 }, // undamped, soft
+        .{ .f = 240, .zeta = 1, .h = 1.0 / 480.0 }, // stiff, lightly damped
+    };
+    for (cases) |c| {
+        const s = makeSoft(c.f, c.zeta, c.h);
+        const omega_h = 2 * std.math.pi * c.f * c.h;
+        const a1 = 2 * c.zeta + omega_h;
+        const expected_bias = (2 * std.math.pi * c.f) / a1;
+        const expected_impulse: Real = 1 / (1 + omega_h * a1);
+        const expected_mass = 1 - expected_impulse;
+
+        try testing.expectApproxEqRel(expected_bias, s.bias_rate, 1e-5);
+        try testing.expectApproxEqRel(expected_impulse, s.impulse_scale, 1e-5);
+        try testing.expectApproxEqAbs(expected_mass, s.mass_scale, 1e-5);
+
+        // Structural, and true for every admissible input rather than for these
+        // five: the two scales partition unity (`a2·a3 + a3 = a3·(1+a2) = 1`), so
+        // the biased update relaxes exactly what it does not enforce. Both stay
+        // inside `[0, 1]`, so neither can amplify.
+        try testing.expectApproxEqAbs(@as(Real, 1), s.mass_scale + s.impulse_scale, 1e-5);
+        try testing.expect(s.mass_scale >= 0 and s.mass_scale <= 1);
+        try testing.expect(s.impulse_scale >= 0 and s.impulse_scale <= 1);
+        try testing.expect(s.bias_rate > 0);
+    }
+}
+
+test "the static factor genuinely stiffens the coefficients" {
+    // Non-vacuity guard for the selection test below: if doubling the hertz left the
+    // coefficients unchanged, "static softness is selected" would assert nothing.
+    const zeta: Real = 10;
+    const h: Real = 1.0 / 240.0;
+    const ordinary = makeSoft(30, zeta, h);
+    const stiffened = makeSoft(static_hertz_factor * 30, zeta, h);
+
+    try testing.expect(stiffened.bias_rate > ordinary.bias_rate);
+    try testing.expect(stiffened.mass_scale > ordinary.mass_scale);
+    try testing.expect(stiffened.impulse_scale < ordinary.impulse_scale);
+}
+
+test "effective contact hertz clamps to an eighth of the substep rate" {
+    const dt: Real = 1.0 / 60.0;
+
+    // At the defaults the bound is `0.125 · 4/dt = 30` Hz — exactly the authored
+    // value, so the clamp binds AT EQUALITY and is invisible. Asserted with a
+    // tolerance and not by equality on purpose: `4/dt` is not exact at `f32`
+    // (`dt` is not a binary fraction), so the bound lands a few ULP under 30 there
+    // and a few over at `f64` — the two precisions take different sides of the
+    // `@min`, and neither is a defect.
+    try testing.expectApproxEqAbs(@as(Real, 30), effectiveContactHertz(30, 4, dt), 1e-4);
+
+    // The degenerate big-step lever: one substep at 60 Hz bounds the stiffness at
+    // 7.5 Hz, a quarter of the authored value. Visibly soft contacts follow, and
+    // that is the lever behaving as specified.
+    try testing.expectApproxEqAbs(@as(Real, 7.5), effectiveContactHertz(30, 1, dt), 1e-4);
+
+    // Far above the bound the clamp does not bind, and there the result is EXACT:
+    // `@min` returns its first operand untouched, so no arithmetic touches the
+    // authored value at all.
+    try testing.expectEqual(@as(Real, 30), effectiveContactHertz(30, 64, dt));
+
+    // Monotone in the substep count, and bounded by the authored stiffness however
+    // fine the substepping gets. NON-STRICTLY monotone, and the distinction is the
+    // clamp's whole point: past `n = 4` at 60 Hz the bound has SATURATED at the
+    // authored 30 Hz and finer substepping buys no extra stiffness. A first version
+    // of this ladder asserted strict growth and failed at `n = 16` — the estimate
+    // was wrong, the code was not.
+    var previous: Real = 0;
+    for ([_]u32{ 1, 2, 4, 8, 16 }) |n| {
+        const f = effectiveContactHertz(30, n, dt);
+        try testing.expect(f >= previous);
+        try testing.expect(f <= 30);
+        previous = f;
+    }
+    // Strict growth is asserted only where the bound genuinely binds, so the ladder
+    // above is not passing merely by being flat.
+    try testing.expect(effectiveContactHertz(30, 2, dt) > effectiveContactHertz(30, 1, dt));
+    try testing.expect(effectiveContactHertz(30, 4, dt) > effectiveContactHertz(30, 2, dt));
+}
+
+test "static softness is selected iff either body is static" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    const dyn_a = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    const dyn_b = try bm.addBody(gpa, &store, descOf(1, .dynamic, s));
+    const stat = try bm.addBody(gpa, &store, descOf(2, .static, s));
+    const kine = try bm.addBody(gpa, &store, descOf(3, .kinematic, s));
+
+    try testing.expect(usesStaticSoftness(&bm, dyn_a, stat));
+    try testing.expect(usesStaticSoftness(&bm, stat, dyn_a)); // symmetric in the pair
+    try testing.expect(usesStaticSoftness(&bm, stat, stat));
+
+    // THE discriminating case. A kinematic body has infinite mass too, so a
+    // predicate written on the mass would answer true here; the reference keys on
+    // the absence of a solver body, which only a static lacks.
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, kine));
+    try testing.expect(!usesStaticSoftness(&bm, kine, kine));
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, dyn_b));
+
+    // A stale handle answers with the ordinary coefficients rather than trapping:
+    // `prepare` dereferences both bodies before consulting this, so no stale id
+    // reaches it, and this is the answer that changes least if one ever did.
+    bm.removeBody(kine);
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, kine));
+    try testing.expect(!usesStaticSoftness(&bm, kine, stat));
+}
+
+test "prepare zeroes the per-tick total normal impulse" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+
+    const c = try twoSpheresPosed(gpa, &store, &bm, &constraints, .identity, av3(0, 0, 0));
+    // Structural rather than assigned: the field's default initializer is the reset,
+    // so a future `prepare` cannot forget it without removing the default.
+    for (0..c.count) |i| {
+        try testing.expectEqual(@as(Real, 0), c.points[i].total_normal_impulse);
     }
 }
 
