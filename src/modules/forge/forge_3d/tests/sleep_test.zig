@@ -744,7 +744,12 @@ test "the wake fixpoint reaches a whole sleeping chain in one build" {
     for (stack) |id| try testing.expect(!bm.isSleeping(id).?);
     try testing.expectEqual(@as(usize, 3), constraints.items.len);
 
-    // Output order is unaffected by the deferred re-scan: still ascending pair key.
+    // Output order is unaffected by the deferred re-scan. The STRICT inequality below
+    // is scene-dependent and that is worth naming: `build` sorts on the composite key
+    // `(pair_key, subshape_id)`, and here every body is a box, so each pair yields one
+    // constraint and the pair keys are distinct. Put a mesh in this scene and two
+    // constraints would share a `pair_key` — the assertion would fail on a sort that is
+    // working exactly as specified.
     for (constraints.items, 0..) |c, i| {
         if (i > 0) try testing.expect(constraints.items[i - 1].pair_key < c.pair_key);
     }

@@ -163,8 +163,8 @@ pub const IslandManager = struct {
     /// wakes.
     ///
     /// `constraints` must be the array `contact_constraint.build` produced, sorted
-    /// ascending by pair key; it is permuted in place into
-    /// `(rank, pair_key, subshape_id)` order. Both accumulated impulses and every
+    /// ascending by the composite key `(pair_key, subshape_id)`; it is permuted in
+    /// place into `(rank, pair_key, subshape_id)` order. Both accumulated impulses and every
     /// other field ride along untouched — only the ORDER changes.
     ///
     /// On the two wake causes this step owns: W3 is applied here as a real wake, so

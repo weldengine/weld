@@ -553,7 +553,7 @@ fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
 /// continues has strictly reduced it. The narrowphase work is exactly that of the
 /// contacts which end up in the array — nothing is spent twice. Determinism is
 /// preserved — the scan follows the sorted pair order and the output is re-sorted by
-/// pair key.
+/// the composite key `(pair_key, subshape_id)`.
 ///
 /// At rest nothing wakes, so the fixpoint loop does not run at all — the
 /// deferred list is built and never re-scanned. What a resting tick still
@@ -1084,7 +1084,7 @@ test "separated pair yields no constraint" {
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
 }
 
-test "constraints come back sorted ascending by pair key" {
+test "constraints come back sorted ascending by the composite key" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
     defer store.deinit(gpa);
