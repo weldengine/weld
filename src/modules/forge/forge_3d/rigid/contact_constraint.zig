@@ -524,11 +524,17 @@ fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
 }
 
 /// Build the contact constraints for `pairs` (canonical packed keys
-/// `min(BodyId)<<32 | max`, the M1.1.1 `computePairs` contract: sorted, deduped)
-/// into `out`. `out` is cleared first. For each pair the narrowphase runs via
-/// `bm.collidePair` (canonical BodyId order → frame-stable feature ids); a
-/// non-null manifold becomes one `ContactConstraint` with per-point data
-/// precomputed by `prepare`.
+/// `min(BodyId)<<32 | max`, the M1.1.1 `computePairs` contract: sorted, and deduped so
+/// that each unordered PAIR appears once) into `out`. `out` is cleared first. For each
+/// pair the narrowphase runs via `bm.collidePairEach` (canonical BodyId order →
+/// frame-stable feature ids), and EVERY manifold it offers becomes one
+/// `ContactConstraint` with per-point data precomputed by `prepare`.
+///
+/// One manifold is one constraint, but one PAIR is not: a pair of sub-shape-free
+/// convexes yields at most one, while a mesh pair yields one PER CONTACTING TRIANGLE
+/// (M1.1.11.1). That is why the array's order needs a composite key and why
+/// `pair_key` alone stopped being unique across constraints — see
+/// `lessByConstraintKey`.
 ///
 /// **This is also the wake fixpoint** (`engine-physics-forge.md` §1.8.5), which is
 /// why `bm` is mutable here. A sleeping island's internal contacts are not built,
@@ -600,10 +606,16 @@ pub fn build(
         deferred.shrinkRetainingCapacity(kept);
     }
 
-    // Deterministic iteration order: sort ascending by the packed pair key (a
-    // total order; the pairs are deduped so keys are unique). No hash containers
+    // Deterministic iteration order: sort ascending by the COMPOSITE key
+    // `(pair_key, subshape_id)`, whose totality is argued at `lessByConstraintKey`.
+    //
+    // What `computePairs` dedups is the CANDIDATE PAIRS, so `pair_key` is unique per
+    // pair — never per constraint. A mesh pair contributes one constraint per
+    // contacting triangle, and the sub-shape index is the term that separates them;
+    // an earlier version of this comment inferred per-constraint uniqueness from the
+    // pair-level dedup, which has been false since M1.1.11. No hash containers
     // anywhere on the path (M1.1.14).
-    std.mem.sort(ContactConstraint, out.items, {}, lessByPairKey);
+    std.mem.sort(ContactConstraint, out.items, {}, lessByConstraintKey);
 }
 
 /// Whether neither endpoint of `key` is a motion source — the pair the fixpoint
@@ -695,6 +707,12 @@ const ConstraintCollector = struct {
 /// Total order over constraints — `(pair_key, subshape_id)`, and the second term is load-bearing
 /// (M1.1.11.1 closure, finding F4).
 ///
+/// NAMED for what it orders, not for its first term. It was `lessByPairKey` until the M1.1.13.1
+/// closing review, which is a name that survives only while a pair means a constraint — the very
+/// equivalence M1.1.11.1 broke. `lessByCompositeKey` would have been the symmetric name, but
+/// `rigid/root.zig` already re-exports the ISLAND permutation's comparator under it, and two
+/// comparators of different argument types cannot share one name in the facade.
+///
 /// `std.mem.sort` is `std.sort.block`, which is UNSTABLE. While a pair produced at most one
 /// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh
 /// pair produces one per contacting triangle, and on `pair_key` alone their relative order becomes
@@ -708,7 +726,7 @@ const ConstraintCollector = struct {
 ///
 /// TOTAL because two constraints of one pair cannot share a `subshape_id`: the sub-shape is the
 /// triangle index, and `collidePairEach` offers each triangle at most once.
-pub fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
+pub fn lessByConstraintKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
     if (x.pair_key != y.pair_key) return x.pair_key < y.pair_key;
     return x.subshape_id < y.subshape_id;
 }

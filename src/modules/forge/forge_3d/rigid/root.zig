@@ -39,7 +39,7 @@ pub const ContactCache = contact_cache.ContactCache;
 /// with several constraints per pair, totality is the property that keeps the ordering from
 /// resting on `std.sort.block`'s tie-handling, and totality is a claim about the COMPARATOR that
 /// only a caller of it can check (closure finding F4).
-pub const lessByPairKey = contact_constraint.lessByPairKey;
+pub const lessByConstraintKey = contact_constraint.lessByConstraintKey;
 /// The island permutation's total order, `(rank, pair_key, subshape_id)`.
 pub const lessByCompositeKey = island_manager.lessByCompositeKey;
 /// One constraint's island sort key plus where it currently sits.

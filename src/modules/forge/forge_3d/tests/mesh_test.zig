@@ -4525,8 +4525,8 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
     // one pair, and this fails at the first such couple.
     for (constraints.items, 0..) |x, i| {
         for (constraints.items[i + 1 ..]) |y| {
-            const x_first = rigid.lessByPairKey({}, x, y);
-            const y_first = rigid.lessByPairKey({}, y, x);
+            const x_first = rigid.lessByConstraintKey({}, x, y);
+            const y_first = rigid.lessByConstraintKey({}, y, x);
             try testing.expect(x_first != y_first);
         }
     }
