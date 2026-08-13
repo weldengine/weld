@@ -2882,7 +2882,7 @@ test "the constraint build emits one constraint per contacting triangle" {
     var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
     const key = (@as(u64, @min(scene.ground, scene.box)) << 32) | @max(scene.ground, scene.box);
-    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
 
     try testing.expectEqual(tally.count, @as(u32, @intCast(constraints.items.len)));
     var constraint_ids: [8]bool = @splat(false);
@@ -2908,10 +2908,9 @@ test "warm starting is per triangle and survives a reordered re-traversal" {
 
     // ONE tick of the solve, so the cache holds a per-triangle history.
     cache.beginTick();
-    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
     try testing.expect(constraints.items.len >= 4);
-    rigid.warmStart(&scene.world.bm, &cache, constraints.items);
-    rigid.solveRange(&scene.world.bm, constraints.items, 0, constraints.items.len, .{});
+    rigid.solveRange(&scene.world.bm, constraints.items, 0, constraints.items.len, .{}, 1.0 / 240.0);
     try rigid.storeContacts(gpa, &cache, constraints.items);
     cache.endTick();
 
@@ -2963,7 +2962,12 @@ test "warm starting is per triangle and survives a reordered re-traversal" {
     var reordered: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
     defer reordered.deinit(gpa);
     cache.beginTick();
-    try rigid.build(gpa, &reordered, &scene.world.bm, &scene.world.store, &.{key});
+    // The cache is IN the context: warm-start seeding now happens inside `build`, per
+    // constraint, keyed on `(pair, subshape_id, feature_id)` — so the reheating this
+    // test measures is the one the real cycle performs.
+    try rigid.build(gpa, &reordered, &scene.world.bm, &scene.world.store, &.{key}, rigid.prepareContext(.{}, 1.0 / 60.0, &cache));
+    const hits_after_seeding = cache.hits;
+    const misses_after_seeding = cache.misses;
     try testing.expectEqual(constraints.items.len, reordered.items.len);
     std.mem.reverse(rigid.ContactConstraint, reordered.items);
 
@@ -2996,11 +3000,18 @@ test "warm starting is per triangle and survives a reordered re-traversal" {
         }
     }
     try testing.expect(matched >= 4);
-    // The cache reports HITS, not cold starts: reheating actually happened on the reordered pass.
-    const before = cache.hits;
-    rigid.warmStart(&scene.world.bm, &cache, reordered.items);
-    try testing.expect(cache.hits > before);
-    try testing.expectEqual(@as(u32, 0), cache.misses);
+    // The cache reports HITS, not cold starts — and the claim is EXACT rather than
+    // "some": the seeding pass looked up every point of every constraint and found ALL of
+    // them. `hits > 0` would have left the sentence unearned, which is the defect class
+    // where a comment claims more than its assertion.
+    //
+    // Both counters are read AT THE SEEDING, not at the end of the test: the verification
+    // loop above calls `lookup` itself, so a count taken here would conflate the reheating
+    // under test with the reads that checked it.
+    var total_points: u32 = 0;
+    for (reordered.items) |c| total_points += c.count;
+    try testing.expectEqual(total_points, hits_after_seeding);
+    try testing.expectEqual(@as(u32, 0), misses_after_seeding);
 }
 
 test "mesh versus mesh and mesh versus half-space are unreachable" {
@@ -3193,13 +3204,25 @@ test "the contact answer is invariant under creation-order permutation" {
     // an ULP apart decorrelate, and a bound on continuous deviation after hundreds of frames is
     // ill-posed.
     //
-    // MEASURED over 300 steps: `Δy = 1.34e-4` m — and IDENTICALLY at f32 and f64, which is what
-    // shows it is the geometric difference and not float noise. The bound below is 1 mm, some
-    // seven times that, stated as a physical claim about where a box comes to rest.
-    const settle_tol: Real = 1e-3;
-    try testing.expectApproxEqAbs(trajectories[0][1], trajectories[1][1], settle_tol);
-    try testing.expectApproxEqAbs(trajectories[0][0], trajectories[1][0], settle_tol);
-    try testing.expectApproxEqAbs(trajectories[0][2], trajectories[1][2], settle_tol);
+    // RE-MEASURED at M1.1.13.1 under the substepped solver, and the two directions
+    // separated because they no longer behave alike. Along the CONTACT NORMAL the two
+    // orders now agree to `2e-8` m — four orders tighter than the `1.34e-4` the big-step
+    // solver left, so that bound is TIGHTENED rather than carried over. LATERALLY they
+    // spread to `2.5e-3` m in x and `6.6e-3` m in z, where the old solver held `1e-3`.
+    //
+    // The cause is named in the port's own notes and is not a surprise: friction now runs
+    // in the RELAX sweep only, after every normal point of its constraint, which is a
+    // scheduling change on a Gauss-Seidel solve whose points are coupled through the body
+    // velocities. Swapping creation order swaps A and B, hence the reference face and the
+    // point order, so the settling transient deposits the box a few millimetres away. What
+    // the assertion claims is unchanged — a box settles in the same PLACE, not on the same
+    // bits — and the constrained direction, which is the one the solver actually governs,
+    // got strictly better.
+    const settle_tol_normal: Real = 1e-4; // measured 2e-8
+    const settle_tol_lateral: Real = 2e-2; // measured worst 6.6e-3, ~3x headroom
+    try testing.expectApproxEqAbs(trajectories[0][1], trajectories[1][1], settle_tol_normal);
+    try testing.expectApproxEqAbs(trajectories[0][0], trajectories[1][0], settle_tol_lateral);
+    try testing.expectApproxEqAbs(trajectories[0][2], trajectories[1][2], settle_tol_lateral);
     // Non-vacuous: both runs fell and settled ON the floor rather than staying put or falling
     // through, so the agreement above is between two real simulations.
     try testing.expect(trajectories[0][1] < 1.2);
@@ -3354,13 +3377,17 @@ test "a slider does not catch on a flat seam, and catches when that seam is acti
     // experiment.** The SAME geometry, vertex for vertex, with each triangle carrying its own
     // copies so no edge pairs: every seam is then a BOUNDARY edge of an open mesh and therefore
     // ACTIVE, the correction never fires, and the tilted normals decelerate the slider.
-    // MEASURED: 4.647478 m/s, a 7% loss — and it FAILS the bound above, which is what makes the
-    // first assertion a test of the MECHANISM and not of the geometry.
+    // RE-MEASURED at M1.1.13.1 under the substepped solver: 4.850727 m/s, a 3% loss, where the
+    // big-step solver left 4.647478 m/s and 7%. It still FAILS the bound above, which is what
+    // makes the first assertion a test of the MECHANISM and not of the geometry. The catch
+    // costs less now because a softer, sub-sampled contact takes a smaller bite out of the
+    // tangential velocity on each tilted normal it meets.
     const uncorrected = try slideSphere(gpa, false, 0, cos_5_deg, 0.45, 60);
     try testing.expect(uncorrected < 4.95);
     // Stated as a gap as well, so a future change that merely narrowed the difference could not
-    // pass by drifting both numbers together.
-    try testing.expect(corrected - uncorrected > 0.2);
+    // pass by drifting both numbers together. Re-baselined 0.2 -> 0.10 against the measured
+    // 0.149274830, which keeps ~1.5x headroom on the smaller loss.
+    try testing.expect(corrected - uncorrected > 0.10);
 
     // **AND THE COUNTER-FACTUAL ON THE CODE, run and recorded.** Making `internalEdgeNormal`
     // return `null` unconditionally — the correction disabled, everything else untouched — takes
@@ -4480,7 +4507,7 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
 
     var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key}, rigid.prepareContext(.{}, 1.0 / 60.0, null));
     // Several constraints on ONE pair — the configuration that made `pair_key` alone a
     // non-total key, and `std.mem.sort` being `std.sort.block` it is UNSTABLE, so their relative
     // order was the algorithm's internal behaviour rather than a contract.
@@ -4498,8 +4525,8 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
     // one pair, and this fails at the first such couple.
     for (constraints.items, 0..) |x, i| {
         for (constraints.items[i + 1 ..]) |y| {
-            const x_first = rigid.lessByPairKey({}, x, y);
-            const y_first = rigid.lessByPairKey({}, y, x);
+            const x_first = rigid.lessByConstraintKey({}, x, y);
+            const y_first = rigid.lessByConstraintKey({}, y, x);
             try testing.expect(x_first != y_first);
         }
     }

@@ -5,7 +5,15 @@
 //! `integrateVelocities` applies gravity + the force/torque accumulators + the
 //! clamped damping (and clears the accumulators); `integratePositions` advances
 //! position and orientation from the CURRENT velocity. `integrate` is their exact
-//! composition. The split exists because the Sequential Impulses contact solver
+//! composition.
+//!
+//! `integrateVelocities` is ITSELF a composition since M1.1.13.1 —
+//! `integrateVelocitiesNoReset` then `resetForceAccumulators` — because a substepped
+//! solver calls the velocity half once per substep and must not have the
+//! accumulators consumed out from under it on the first one. The decomposition is
+//! exact and the fused entries keep their behaviour bit-for-bit, so every M1.1.5 pin
+//! reads the same values it did (the same move M1.1.5 made when it split `integrate`
+//! itself; see `integrateVelocitiesNoReset` for the arithmetic that forces it). The split exists because the Sequential Impulses contact solver
 //! (M1.1.6) must run BETWEEN the two — it corrects velocities after gravity but
 //! before positions advance. Solving around the fused pass would leave the
 //! per-tick `g·dt` residual advancing positions (a resting body would sink
@@ -64,6 +72,33 @@ const BodyManager = body_manager.BodyManager;
 /// velocity. Positions and orientations are NOT touched — `integratePositions`
 /// advances them (in the full pipeline, after the contact solver has run).
 pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
+    integrateVelocitiesNoReset(bm, dt, gravity);
+    resetForceAccumulators(bm);
+}
+
+/// `integrateVelocities` WITHOUT the accumulator reset — the form the substepped
+/// solver calls once per substep (`engine-physics-solver.md` §1.7, step 6).
+///
+/// **The split is a correctness requirement of substepping, not a refactor.** The
+/// fused form CONSUMES the accumulators: it reads `force`/`torque`, applies them,
+/// and clears them. Called `n` times with `h = dt/n` it would therefore apply an
+/// accumulated force on the FIRST substep only and deliver `F/m·h` over the tick —
+/// a quarter of `F/m·dt` at the default four substeps. That is not a reading in
+/// need of a probe: `tests/integration_test.zig` already pins the consumption in so
+/// many words, "second tick with no re-apply: no force contribution".
+///
+/// Gravity and damping, by contrast, want the per-substep call and get it: gravity
+/// accumulates to `g·dt` over the `n` slices, exactly as §1.7 step 3 requires of any
+/// constant force, and damping becomes `(1 − d·h)^n` — substep-count-sensitive,
+/// which M1.1.5 recorded as the orchestrator's decision and §1.7 step 6 now takes.
+///
+/// The reset therefore runs ONCE, after the LAST substep (`resetForceAccumulators`),
+/// never before the first: clearing an accumulator before anything consumes it
+/// delivers `F/m·0`, which is a worse defect than the `1/n` it would be trying to
+/// fix. Step 3 of the cycle owns no code at all — the accumulators are constant for
+/// the whole of `step()`, so they ARE the tick's accelerations, and reading them per
+/// substep needs neither a capture nor a scratch column.
+pub fn integrateVelocitiesNoReset(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     const rotations = bm.bodies.items(.rotation);
     const linear_velocities = bm.bodies.items(.linear_velocity);
     const angular_velocities = bm.bodies.items(.angular_velocity);
@@ -80,32 +115,46 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
         // them (their stale data must not be integrated).
         if (!bm.alloc.isAliveIndex(i)) continue;
 
-        // A sleeper is not simulated (§1.8.6). Note the skip is on the INTEGRATION
-        // only: the accumulator reset below stays uniform over every live body.
-        if (body_types[i] == .dynamic and !flags[i].sleeping) {
-            const mp = motions[i];
+        // A sleeper is not simulated (§1.8.6).
+        if (body_types[i] != .dynamic or flags[i].sleeping) continue;
+        const mp = motions[i];
 
-            // --- Linear ---
-            // Gravity as an acceleration (mass-independent), plus the accumulated
-            // force divided by mass. Read `force` before the clear below.
-            const accel = gravity.scale(mp.gravity_factor).add(forces[i].scale(mp.inv_mass));
-            const v = linear_velocities[i].add(accel.scale(dt));
-            const damp = @max(@as(Real, 0), 1 - mp.linear_damping * dt);
-            linear_velocities[i] = v.scale(damp);
+        // --- Linear ---
+        // Gravity as an acceleration (mass-independent), plus the accumulated
+        // force divided by mass.
+        const accel = gravity.scale(mp.gravity_factor).add(forces[i].scale(mp.inv_mass));
+        const v = linear_velocities[i].add(accel.scale(dt));
+        const damp = @max(@as(Real, 0), 1 - mp.linear_damping * dt);
+        linear_velocities[i] = v.scale(damp);
 
-            // --- Angular ---
-            // World-space inverse inertia I_world_inv = R · I_local_inv · Rᵀ
-            // (Rᵀ == R⁻¹ for an orthonormal rotation), then α = I_world_inv·τ.
-            const r = Mat3r.fromQuat(rotations[i]);
-            const i_world_inv = r.mul(mp.local_inv_inertia).mul(r.transpose());
-            const alpha = i_world_inv.mulVec(torques[i]);
-            const w = angular_velocities[i].add(alpha.scale(dt));
-            const ang_damp = @max(@as(Real, 0), 1 - mp.angular_damping * dt);
-            angular_velocities[i] = w.scale(ang_damp);
-        }
+        // --- Angular ---
+        // World-space inverse inertia I_world_inv = R · I_local_inv · Rᵀ
+        // (Rᵀ == R⁻¹ for an orthonormal rotation), then α = I_world_inv·τ.
+        const r = Mat3r.fromQuat(rotations[i]);
+        const i_world_inv = r.mul(mp.local_inv_inertia).mul(r.transpose());
+        const alpha = i_world_inv.mulVec(torques[i]);
+        const w = angular_velocities[i].add(alpha.scale(dt));
+        const ang_damp = @max(@as(Real, 0), 1 - mp.angular_damping * dt);
+        angular_velocities[i] = w.scale(ang_damp);
+    }
+}
 
-        // Reset the per-tick accumulators for every live body (§2), including
-        // static/kinematic — the clear is uniform.
+/// Clear the per-tick force and torque accumulators, UNIFORMLY over every live body
+/// (`engine-physics-forge.md` §2) — static and kinematic included, sleepers
+/// included. Dead slots are left exactly as they are: the store does not compact,
+/// and a freed slot's stale columns are nobody's business until it is reused.
+///
+/// Runs ONCE per tick, at the END of step 6 (after the last substep, before the
+/// restitution pass), which is the only placement that both consumes the
+/// accumulators `substep_count` times and leaves nothing behind for the next tick.
+pub fn resetForceAccumulators(bm: *BodyManager) void {
+    const forces = bm.bodies.items(.force);
+    const torques = bm.bodies.items(.torque);
+
+    const n: u32 = @intCast(bm.bodies.len);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (!bm.alloc.isAliveIndex(i)) continue;
         forces[i] = Vec3r.zero;
         torques[i] = Vec3r.zero;
     }

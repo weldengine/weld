@@ -1,6 +1,6 @@
-//! `forge_3d/rigid/contact_constraint.zig` — the velocity-level contact
-//! constraint of the rigid-body Sequential Impulses solver (Catto lineage,
-//! Box2D/Jolt tradition), plus its build/precompute front end.
+//! `forge_3d/rigid/contact_constraint.zig` — the contact constraint of the rigid
+//! branch's substepped solver (TGS Soft, Catto lineage), plus its build/precompute
+//! front end.
 //!
 //! The rigid branch lives in `rigid/` (distinct from the branch-shared
 //! `pipeline/`; `engine-physics-forge.md` §1.2). This file owns:
@@ -8,14 +8,19 @@
 //!     = max(a, b) — the Box2D/Jolt convention);
 //!   - `tangentBasis`, a trig-free deterministic orthonormal basis for a contact
 //!     normal;
+//!   - the SOFT-CONSTRAINT coefficient forms (`makeSoft`, `effectiveContactHertz`,
+//!     `usesStaticSoftness`) — same family as the combine rules above: per-tick
+//!     derivation of a constraint's coefficients from authored parameters. They are
+//!     the coefficient half of the model (`engine-physics-solver.md` §1.7.1);
+//!     `solver.zig` is the half that consumes them;
 //!   - `ContactConstraint` (one per manifold, ≤ 4 inline points) with its
 //!     per-point solver data;
 //!   - `build`, which turns canonical broadphase candidate pairs into a
 //!     deterministically-ordered constraint array, running the narrowphase and
 //!     the per-point `prepare` precompute (lever arms, world inverse inertias,
 //!     normal + two tangent effective masses, pre-solve normal velocity `v_n⁻`,
-//!     and — for the NGS position pass — the two body-local surface anchors plus
-//!     the pose-invariant local inverse inertias).
+//!     the two body-local surface anchors, the softness selection, and the warm-start
+//!     SEEDING).
 //!
 //! Import discipline (brief): `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
@@ -24,17 +29,19 @@
 //! the same file. NEVER `broadphase.zig`: candidate pairs are consumed as data
 //! (packed `u64` keys), never re-derived.
 //!
-//! The velocity solver carries NO positional bias (no Baumgarte, no split
-//! impulse) — position error is entirely the NGS position pass's business
-//! (`engine-physics-forge.md` §1.7). `ContactPoint.penetration` is consumed HERE
-//! and only here, at `prepare`, to derive the two surface anchors; the position
-//! iterations then re-derive the separation from the current poses instead of
-//! re-reading the frozen manifold (§1.7.2).
+//! `ContactPoint.penetration` is consumed HERE and only here, at `prepare`, to derive
+//! the two surface anchors. There is NO position pass: each substep re-derives the
+//! separation from the CURRENT poses against those anchors and feeds it to the solve
+//! as a bounded velocity bias (`engine-physics-solver.md` §1.7.1). The ANCHORS survive
+//! the port unchanged in shape and changed in consumer; the two cached copies of the
+//! bodies' LOCAL inverse inertia did not — their only consumer was the NGS pass, and
+//! they were removed at the closing review with it.
 
 const std = @import("std");
 const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
+const cache_mod = @import("contact_cache.zig");
 const sleep = @import("../pipeline/sleep.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -47,6 +54,7 @@ const BodyManager = bm_mod.BodyManager;
 const ShapeStore = bm_mod.ShapeStore;
 const BodyId = api.BodyId;
 const ContactManifold = narrowphase.ContactManifold(Real);
+const ContactCache = cache_mod.ContactCache;
 
 // --- Material combine rules (Box2D/Jolt convention) --------------------------
 
@@ -100,6 +108,139 @@ pub fn tangentBasis(n: Vec3r) TangentBasis {
     return .{ .t1 = t1, .t2 = t2 };
 }
 
+// --- Soft contact constraints (TGS Soft) -------------------------------------
+
+/// The three mass-independent coefficients of a soft contact constraint
+/// (`engine-physics-solver.md` §1.7.1; Nordby/Catto, the reference's `b2MakeSoft`).
+/// Derived once per tick from `(f, ζ, h)` — never per substep — and consumed by
+/// the biased solve, which reads `bias_rate` to turn the current separation into a
+/// velocity bias and `mass_scale`/`impulse_scale` to relax the impulse toward that
+/// bias instead of enforcing it outright.
+///
+/// The relax sweep does NOT read a `Softness`: it runs the same update with bias 0
+/// and the NEUTRAL coefficients `mass_scale = 1`, `impulse_scale = 0`, which are
+/// written at the call site rather than manufactured here — a "neutral softness"
+/// value would invite the reader to believe relax is a softness with different
+/// numbers, when it is the same update with the soft terms switched off.
+pub const Softness = struct {
+    /// Rate (1/s) converting a position error into a velocity bias.
+    bias_rate: Real,
+    /// Fraction of the velocity error the biased solve enforces this substep.
+    mass_scale: Real,
+    /// Fraction of the accumulated impulse the biased solve gives back — the term
+    /// that makes the constraint soft rather than hard.
+    impulse_scale: Real,
+};
+
+/// The three soft coefficients for stiffness `hertz` (Hz), damping ratio
+/// `damping_ratio` (dimensionless) and substep length `h` (s):
+///
+/// ```
+/// ω  = 2π·f ; a1 = 2ζ + h·ω ; a2 = h·ω·a1 ; a3 = 1/(1 + a2)
+/// bias_rate = ω/a1 ; mass_scale = a2·a3 ; impulse_scale = a3
+/// ```
+///
+/// MASS-INDEPENDENT by construction: nothing here reads an inverse mass or an
+/// effective mass, which is what lets one `(f, ζ)` pair describe the same visible
+/// stiffness across every mass ratio in the scene — the property that makes hertz
+/// an authorable parameter (`engine-physics-forge.md` §1.6, motive 4) where an
+/// iteration count is not.
+///
+/// `a1 > 0` whenever `hertz > 0` and `h > 0`, so the two divisions are finite; the
+/// domain assert states exactly that precondition rather than guarding it at some
+/// epsilon. The reference's `hertz == 0` early return is deliberately NOT ported:
+/// `contact_hertz > 0` is validated at the config entry, so that branch has no
+/// reachable cause here, and an unreachable branch is an assertion written as
+/// control flow.
+pub fn makeSoft(hertz: Real, damping_ratio: Real, h: Real) Softness {
+    std.debug.assert(std.math.isFinite(hertz) and hertz > 0);
+    std.debug.assert(std.math.isFinite(damping_ratio) and damping_ratio >= 0);
+    std.debug.assert(std.math.isFinite(h) and h > 0);
+
+    const omega = 2 * std.math.pi * hertz;
+    const a1 = 2 * damping_ratio + h * omega;
+    const a2 = h * omega * a1;
+    const a3 = 1 / (1 + a2);
+    return .{ .bias_rate = omega / a1, .mass_scale = a2 * a3, .impulse_scale = a3 };
+}
+
+/// Stiffening factor applied to the contact hertz when either body of the pair is
+/// STATIC (`usesStaticSoftness`). A static body returns no mass-ratio feedback —
+/// the whole correction lands on the dynamic side — so the same authored stiffness
+/// produces a visibly softer contact there than between two comparable dynamics;
+/// doubling the hertz compensates.
+pub const static_hertz_factor: Real = 2;
+
+/// The contact stiffness actually used this tick: the authored `contact_hertz`
+/// clamped to `0.125 · substep_count / dt`.
+///
+/// A constraint cannot be stiffer than the discretisation can resolve — past
+/// roughly a fixed fraction of the substep rate the spring is integrated too
+/// coarsely and the softness stops describing the behaviour it names. The clamp is
+/// therefore a property of the SCHEME, not a tuning knob, and it is not of the
+/// `k · floatEps(T) · coordScale` family: it classifies nothing and guards no
+/// degeneracy (§1.7.1).
+///
+/// At the defaults (30 Hz, 4 substeps, 60 Hz tick) the bound is `0.125 · 240 = 30`
+/// Hz exactly, so the clamp binds at equality and changes nothing. At
+/// `substep_count = 1` — the degenerate big-step A/B lever — it binds hard at
+/// 7.5 Hz, and the visibly soft contacts that follow are the lever's expected
+/// behaviour rather than a defect of it.
+pub fn effectiveContactHertz(contact_hertz: Real, substep_count: u32, dt: Real) Real {
+    std.debug.assert(std.math.isFinite(contact_hertz) and contact_hertz > 0);
+    std.debug.assert(substep_count >= 1);
+    std.debug.assert(std.math.isFinite(dt) and dt > 0);
+
+    const substep_rate = @as(Real, @floatFromInt(substep_count)) / dt;
+    return @min(contact_hertz, 0.125 * substep_rate);
+}
+
+/// Whether the pair `(a, b)` takes the stiffened static coefficients — true iff at
+/// least one endpoint is a STATIC body.
+///
+/// KINEMATIC BODIES RECEIVE ORDINARY SOFTNESS, and that is source parity rather
+/// than an oversight about infinite mass. The reference keys this choice on the
+/// absence of a solver body, and a kinematic body has one: it is carried through
+/// the solve like any other, it simply never receives an impulse. Keying on
+/// infinite mass instead would silently extend the stiffening to every kinematic
+/// contact — a platform, a lift, a moving door — none of which the measurement
+/// behind the factor covers. Extending it is a named open item, not a default.
+///
+/// A stale handle answers `false`: `prepare` has already dereferenced both bodies
+/// by the time this is consulted, so a stale id cannot reach it, and the ordinary
+/// coefficients are the answer that changes least if one ever did.
+pub fn usesStaticSoftness(bm: *const BodyManager, a: BodyId, b: BodyId) bool {
+    const type_a = bm.bodyType(a) orelse return false;
+    const type_b = bm.bodyType(b) orelse return false;
+    return type_a == .static or type_b == .static;
+}
+
+/// The two coefficient triples a tick needs: the ordinary one and the stiffened one
+/// for pairs touching a static body. Both are CONSTRAINT-INDEPENDENT — they depend
+/// only on `(contact_hertz, contact_damping_ratio, h)` — so the orchestration derives
+/// them once per tick and `prepare` merely SELECTS, storing the chosen triple on the
+/// constraint. That is the reference's shape (`constraint->softness`), and it keeps
+/// the hot sweeps free of a per-point branch on body type.
+pub const SoftnessPair = struct {
+    /// Coefficients for a pair of two solver bodies.
+    contact: Softness,
+    /// Coefficients for a pair with a static endpoint — `static_hertz_factor` times
+    /// the effective hertz.
+    static: Softness,
+};
+
+/// Everything `prepare` needs beyond the geometry, bundled so the tick derives it
+/// once and `build` forwards it without deriving anything of its own — `build` reads
+/// no `dt` and no `SolverConfig`, and that is deliberate: constraint construction is
+/// narrowphase work, not solver tuning.
+pub const PrepareContext = struct {
+    /// The tick's two coefficient triples; `prepare` selects per constraint.
+    softness: SoftnessPair,
+    /// Warm-start source. `null` cold-starts every point — no lookup, no hit/miss
+    /// telemetry — which is what a scenario that never solves wants.
+    cache: ?*ContactCache = null,
+};
+
 // --- Contact constraint ------------------------------------------------------
 
 /// One contact point's precomputed solver data.
@@ -119,14 +260,13 @@ pub const ConstraintPoint = struct {
     rel_normal_velocity: Real,
     /// Surface penetration along the normal (≥ 0). Consumed ONCE, here at
     /// `prepare`, to derive the two surface anchors below; it is never re-read from
-    /// the frozen manifold during the position iterations — the NGS pass re-derives
-    /// the separation from the CURRENT poses, which is what makes it non-linear
-    /// (`engine-physics-forge.md` §1.7.2). The velocity pass carries no positional
-    /// bias and never reads it.
+    /// the frozen manifold during the substep loop — each substep re-derives the
+    /// separation from the CURRENT poses, which is what makes the scheme non-linear
+    /// (`engine-physics-solver.md` §1.7.1).
     penetration: Real,
     /// Contact anchor in body A's LOCAL frame: A's surface point at prepare time,
-    /// `conj(q_a)·(surface_a − x_a)` — rigidly attached, so the NGS position pass
-    /// re-derives its world position from A's current pose.
+    /// `conj(q_a)·(surface_a − x_a)` — rigidly attached, so every substep re-derives
+    /// its world position from A's current pose.
     local_anchor_a: Vec3r,
     /// Contact anchor in body B's LOCAL frame (mirror of `local_anchor_a`, on B's
     /// surface). The two anchors are `penetration` apart along the normal at
@@ -141,6 +281,29 @@ pub const ConstraintPoint = struct {
     /// Accumulated tangent impulses on the `(t1, t2)` basis (E5).
     tangent1_impulse: Real = 0,
     tangent2_impulse: Real = 0,
+    /// The per-tick normal-impulse sum the restitution predicate's second clause reads
+    /// (`engine-physics-solver.md` §1.7.2). It is defined by its THREE CONTRIBUTIONS and
+    /// by nothing else:
+    ///
+    ///   - `0` here, at `prepare` — by this default, so the reset is structural;
+    ///   - `+= λₙ` (the CURRENT accumulator) at each per-substep warm application;
+    ///   - `+= applied` — the ALGEBRAIC, POST-clamp delta — at each solve, relax and
+    ///     restitution update.
+    ///
+    /// The third contribution is signed, so consecutive updates TELESCOPE: between two
+    /// warm-start applications the sum moves by the net change in `λₙ` over that run,
+    /// and a point pushed then relaxed fully back to zero contributes zero.
+    ///
+    /// It is therefore NEITHER the final `λₙ` (which the substeps rewrite) NOR a
+    /// boolean NOR a record of whether the point ever pushed — an earlier version of
+    /// this comment claimed the last of those, which the telescoping refutes. The
+    /// predicate is `total_normal_impulse != 0` on the value this sum ends the tick
+    /// with, taken literally; reference parity is on the arithmetic above.
+    ///
+    /// NOT stored to the warm-start cache: that format is frozen at
+    /// `(λₙ, world tangent)` and this quantity is per-tick bookkeeping, meaningless
+    /// to the next tick's seeding.
+    total_normal_impulse: Real = 0,
 };
 
 /// One manifold's worth of contact constraints between a canonical body pair.
@@ -176,19 +339,26 @@ pub const ContactConstraint = struct {
     /// Combined friction / restitution for the pair.
     friction: Real,
     restitution: Real,
-    /// Cached inverse mass and world-space inverse inertia per body — precomputed
-    /// once in `prepare`, reused by warm start (E3) and the iterations (E4/E5).
+    /// The soft coefficients this constraint solves with, SELECTED at `prepare` from
+    /// the tick's `SoftnessPair` — stiffened when either endpoint is static. Read by
+    /// the biased sweep only: relax runs the same update with the soft terms off.
+    softness: Softness,
+    /// Cached inverse mass and WORLD-space inverse inertia per body — precomputed once
+    /// in `prepare` and frozen for the tick, alongside the Jacobian arms and the
+    /// effective masses built from them (§1.7.1). Re-deriving one without the others
+    /// per substep would leave them inconsistent, which is why nothing here is
+    /// refreshed inside the loop.
+    ///
+    /// The constraint caches NO copy of the bodies' LOCAL inverse inertia. Two such
+    /// copies existed from M1.1.7 to M1.1.13.1, for the NGS position pass, which
+    /// rebuilt a world tensor at the poses it had just moved; that pass is gone and the
+    /// copies went with it at the closing review — 96 bytes of dead state per
+    /// constraint, on memory-bound sweeps. `prepare` reads `MotionProperties` directly
+    /// (§1.7.1).
     inv_mass_a: Real,
     inv_mass_b: Real,
     inv_inertia_a: Mat3r,
     inv_inertia_b: Mat3r,
-    /// Pose-invariant LOCAL inverse inertia per body, copied from
-    /// `MotionProperties`. The NGS position pass rebuilds the world tensor
-    /// `R_current · I_local⁻¹ · R_currentᵀ` from the CURRENT rotation on every
-    /// point/iteration (it moves the poses it reads), so it never calls
-    /// `motionProperties` in its inner loop.
-    local_inv_inertia_a: Mat3r,
-    local_inv_inertia_b: Mat3r,
     /// Per-point solver data.
     points: [4]ConstraintPoint,
     /// Valid entries in `points`, 1..4.
@@ -219,7 +389,15 @@ fn effectiveMass(
 /// Build and precompute one contact constraint for the canonical pair `(a, b)`
 /// from `manifold`: tangent basis, combined material, cached inverse mass/inertia,
 /// and per-point lever arms, effective masses, and pre-solve normal velocity.
-fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape_id: u32, manifold: ContactManifold) ?ContactConstraint {
+fn prepare(
+    bm: *const BodyManager,
+    a: BodyId,
+    b: BodyId,
+    pair_key: u64,
+    subshape_id: u32,
+    manifold: ContactManifold,
+    ctx: PrepareContext,
+) ?ContactConstraint {
     const mp_a = bm.motionProperties(a).?;
     const mp_b = bm.motionProperties(b).?;
 
@@ -257,12 +435,11 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
         .tangent2 = tb.t2,
         .friction = combineFriction(bm.friction(a).?, bm.friction(b).?),
         .restitution = combineRestitution(bm.restitution(a).?, bm.restitution(b).?),
+        .softness = if (usesStaticSoftness(bm, a, b)) ctx.softness.static else ctx.softness.contact,
         .inv_mass_a = mp_a.inv_mass,
         .inv_mass_b = mp_b.inv_mass,
         .inv_inertia_a = inv_inertia_a,
         .inv_inertia_b = inv_inertia_b,
-        .local_inv_inertia_a = mp_a.local_inv_inertia,
-        .local_inv_inertia_b = mp_b.local_inv_inertia,
         .points = undefined,
         .count = manifold.count,
     };
@@ -277,7 +454,7 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
         const v_pa = vel_a.add(ang_a.cross(r_a));
         const v_pb = vel_b.add(ang_b.cross(r_b));
 
-        // Surface anchors for the NGS position pass. The manifold point IS the
+        // Surface anchors for the substep loop. The manifold point IS the
         // midpoint of the two surface points (`pipeline/narrowphase/manifold.zig`
         // `ContactPoint`), so they reconstruct exactly from the penetration:
         // A's surface sits half a penetration toward B, B's half a penetration
@@ -300,15 +477,64 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
             .feature_id = p.feature_id,
         };
     }
+    if (ctx.cache) |cache| seedWarmStart(&c, cache);
     return c;
 }
 
+/// SEED the constraint's accumulators from the previous tick's solved impulses —
+/// once per tick, here at `prepare`, absorbing the deleted `velocity_solver.warmStart`.
+///
+/// **Seeding and APPLYING are two operations and must stay two functions**
+/// (`engine-physics-solver.md` §1.7, step 6). Seeding reads the cache, counts a hit or
+/// a miss, and writes the accumulators; applying injects the CURRENT accumulators into
+/// the body velocities and runs once per substep. Calling a seeding-shaped function
+/// per substep would re-read the cache, reset `λ` to last frame's values — discarding
+/// everything the earlier substeps of this tick solved — and multiply the hit/miss
+/// counters by `substep_count`. Nothing here is idempotent; nothing here may run twice.
+///
+/// Matching is per individual feature key: contact topology legitimately changes
+/// between frames, so a point without a match cold-starts and the manifold count is
+/// never assumed stable. The cached tangent is world-space and is REPROJECTED onto the
+/// new tangent plane BEFORE being clamped to `μ·λₙ`, never the reverse — the basis may
+/// have flipped since it was cached, and clamping a raw magnitude that still carries a
+/// normal component would shrink the in-plane part it was meant to preserve.
+///
+/// `total_normal_impulse` needs no reset here: `ConstraintPoint` defaults it to zero,
+/// so a freshly prepared point starts the tick at zero by construction.
+fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
+    for (0..c.count) |i| {
+        const pt = &c.points[i];
+        const cached = cache.lookup(.{
+            .pair_key = c.pair_key,
+            .subshape_id = c.subshape_id,
+            .feature_id = pt.feature_id,
+        }) orelse continue;
+
+        var j_t = cached.tangent_impulse.sub(c.normal.scale(cached.tangent_impulse.dot(c.normal)));
+        const max_t = c.friction * cached.lambda_n;
+        const len_sq = j_t.lengthSq();
+        if (len_sq > max_t * max_t) {
+            j_t = j_t.scale(max_t / @sqrt(len_sq));
+        }
+
+        pt.normal_impulse = cached.lambda_n;
+        pt.tangent1_impulse = j_t.dot(c.tangent1);
+        pt.tangent2_impulse = j_t.dot(c.tangent2);
+    }
+}
+
 /// Build the contact constraints for `pairs` (canonical packed keys
-/// `min(BodyId)<<32 | max`, the M1.1.1 `computePairs` contract: sorted, deduped)
-/// into `out`. `out` is cleared first. For each pair the narrowphase runs via
-/// `bm.collidePair` (canonical BodyId order → frame-stable feature ids); a
-/// non-null manifold becomes one `ContactConstraint` with per-point data
-/// precomputed by `prepare`.
+/// `min(BodyId)<<32 | max`, the M1.1.1 `computePairs` contract: sorted, and deduped so
+/// that each unordered PAIR appears once) into `out`. `out` is cleared first. For each
+/// pair the narrowphase runs via `bm.collidePairEach` (canonical BodyId order →
+/// frame-stable feature ids), and EVERY manifold it offers becomes one
+/// `ContactConstraint` with per-point data precomputed by `prepare`.
+///
+/// One manifold is one constraint, but one PAIR is not: a pair of sub-shape-free
+/// convexes yields at most one, while a mesh pair yields one PER CONTACTING TRIANGLE
+/// (M1.1.11.1). That is why the array's order needs a composite key and why
+/// `pair_key` alone stopped being unique across constraints — see
+/// `lessByConstraintKey`.
 ///
 /// **This is also the wake fixpoint** (`engine-physics-forge.md` §1.8.5), which is
 /// why `bm` is mutable here. A sleeping island's internal contacts are not built,
@@ -327,7 +553,7 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape
 /// continues has strictly reduced it. The narrowphase work is exactly that of the
 /// contacts which end up in the array — nothing is spent twice. Determinism is
 /// preserved — the scan follows the sorted pair order and the output is re-sorted by
-/// pair key.
+/// the composite key `(pair_key, subshape_id)`.
 ///
 /// At rest nothing wakes, so the fixpoint loop does not run at all — the
 /// deferred list is built and never re-scanned. What a resting tick still
@@ -343,6 +569,7 @@ pub fn build(
     bm: *BodyManager,
     store: *const ShapeStore,
     pairs: []const u64,
+    ctx: PrepareContext,
 ) !void {
     out.clearRetainingCapacity();
 
@@ -361,7 +588,7 @@ pub fn build(
             try deferred.append(gpa, @intCast(index));
             continue;
         }
-        if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
+        if (try emitPair(gpa, out, bm, store, key, ctx)) woke_someone = true;
     }
 
     while (woke_someone and deferred.items.len > 0) {
@@ -374,15 +601,21 @@ pub fn build(
                 kept += 1;
                 continue;
             }
-            if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
+            if (try emitPair(gpa, out, bm, store, key, ctx)) woke_someone = true;
         }
         deferred.shrinkRetainingCapacity(kept);
     }
 
-    // Deterministic iteration order: sort ascending by the packed pair key (a
-    // total order; the pairs are deduped so keys are unique). No hash containers
+    // Deterministic iteration order: sort ascending by the COMPOSITE key
+    // `(pair_key, subshape_id)`, whose totality is argued at `lessByConstraintKey`.
+    //
+    // What `computePairs` dedups is the CANDIDATE PAIRS, so `pair_key` is unique per
+    // pair — never per constraint. A mesh pair contributes one constraint per
+    // contacting triangle, and the sub-shape index is the term that separates them;
+    // an earlier version of this comment inferred per-constraint uniqueness from the
+    // pair-level dedup, which has been false since M1.1.11. No hash containers
     // anywhere on the path (M1.1.14).
-    std.mem.sort(ContactConstraint, out.items, {}, lessByPairKey);
+    std.mem.sort(ContactConstraint, out.items, {}, lessByConstraintKey);
 }
 
 /// Whether neither endpoint of `key` is a motion source — the pair the fixpoint
@@ -403,6 +636,7 @@ fn emitPair(
     bm: *BodyManager,
     store: *const ShapeStore,
     key: u64,
+    ctx: PrepareContext,
 ) !bool {
     const a: BodyId = @intCast(key >> 32);
     const b: BodyId = @intCast(key & 0xFFFF_FFFF);
@@ -420,6 +654,7 @@ fn emitPair(
         .a = a,
         .b = b,
         .key = key,
+        .ctx = ctx,
     };
     bm.collidePairEach(store, a, b, &collector);
     if (collector.err) |e| return e;
@@ -452,6 +687,7 @@ const ConstraintCollector = struct {
     a: BodyId,
     b: BodyId,
     key: u64,
+    ctx: PrepareContext,
     /// How many manifolds arrived, whether or not each produced a constraint — the wake signal
     /// is "the pair touches", not "the pair produced solver work": a pair of infinite masses
     /// touches and `prepare` skips it at true zero.
@@ -461,7 +697,7 @@ const ConstraintCollector = struct {
     pub fn add(self: *ConstraintCollector, subshape_id: u32, manifold: ContactManifold) void {
         self.emitted += 1;
         if (self.err != null) return;
-        const constraint = prepare(self.bm, self.a, self.b, self.key, subshape_id, manifold) orelse return;
+        const constraint = prepare(self.bm, self.a, self.b, self.key, subshape_id, manifold, self.ctx) orelse return;
         self.out.append(self.gpa, constraint) catch |e| {
             self.err = e;
         };
@@ -471,11 +707,17 @@ const ConstraintCollector = struct {
 /// Total order over constraints — `(pair_key, subshape_id)`, and the second term is load-bearing
 /// (M1.1.11.1 closure, finding F4).
 ///
+/// NAMED for what it orders, not for its first term. It was `lessByPairKey` until the M1.1.13.1
+/// closing review, which is a name that survives only while a pair means a constraint — the very
+/// equivalence M1.1.11.1 broke. `lessByCompositeKey` would have been the symmetric name, but
+/// `rigid/root.zig` already re-exports the ISLAND permutation's comparator under it, and two
+/// comparators of different argument types cannot share one name in the facade.
+///
 /// `std.mem.sort` is `std.sort.block`, which is UNSTABLE. While a pair produced at most one
 /// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh
 /// pair produces one per contacting triangle, and on `pair_key` alone their relative order becomes
 /// neither the traversal's nor a contract of any kind: it is the sort algorithm's internal
-/// behaviour. Sequential Impulses is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
+/// behaviour. The contact solve is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
 /// determinism path, not a cosmetic one.
 ///
 /// M1.1.8 stated the invariant this restores, in these words: the constraints are ordered by an
@@ -484,7 +726,7 @@ const ConstraintCollector = struct {
 ///
 /// TOTAL because two constraints of one pair cannot share a `subshape_id`: the sub-shape is the
 /// triangle index, and `collidePairEach` offers each triangle at most once.
-pub fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
+pub fn lessByConstraintKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
     if (x.pair_key != y.pair_key) return x.pair_key < y.pair_key;
     return x.subshape_id < y.subshape_id;
 }
@@ -507,6 +749,14 @@ fn descOf(entity_index: u32, body_type: api.BodyType, shape: api.ShapeId) api.Bo
 
 fn pairKey(a: BodyId, b: BodyId) u64 {
     return (@as(u64, @min(a, b)) << 32) | @max(a, b);
+}
+
+/// A `PrepareContext` with no warm-start source and coefficients for the default
+/// tick — these tests exercise construction, never the solve.
+fn coldCtx() PrepareContext {
+    const h: Real = 1.0 / 240.0;
+    const soft = makeSoft(30, 10, h);
+    return .{ .softness = .{ .contact = soft, .static = makeSoft(60, 10, h) } };
 }
 
 fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
@@ -544,7 +794,7 @@ fn twoSpheresPosed(
     const id_a = try bm.addBody(gpa, store, da);
     const id_b = try bm.addBody(gpa, store, db);
 
-    try build(gpa, constraints, bm, store, &.{pairKey(id_a, id_b)});
+    try build(gpa, constraints, bm, store, &.{pairKey(id_a, id_b)}, coldCtx());
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
     return constraints.items[0];
 }
@@ -586,42 +836,6 @@ test "prepare stores body-local surface anchors that reproduce the penetration" 
     try testing.expect(c2.points[0].local_anchor_b.approxEql(pt.local_anchor_b, anchor_tol));
 }
 
-test "prepare caches the pose-invariant local inverse inertias" {
-    const gpa = testing.allocator;
-    // One dynamic body against an infinite-mass one: the pair survives the
-    // true-zero skip, and the infinite-mass side must carry a zero local inverse
-    // inertia (both static and kinematic).
-    inline for (.{ api.BodyType.static, api.BodyType.kinematic }) |bt| {
-        var store = ShapeStore{};
-        defer store.deinit(gpa);
-        var bm = BodyManager{};
-        defer bm.deinit(gpa);
-        const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-        var da = descOf(0, .dynamic, s);
-        da.mass = 2;
-        var db = descOf(1, bt, s);
-        db.position = av3(0.9, 0, 0);
-        const id_a = try bm.addBody(gpa, &store, da);
-        const id_b = try bm.addBody(gpa, &store, db);
-
-        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
-        defer constraints.deinit(gpa);
-        try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
-        try testing.expectEqual(@as(usize, 1), constraints.items.len);
-        const c = constraints.items[0];
-
-        // An exact copy of `MotionProperties.local_inv_inertia` (pose-invariant, so
-        // the position pass rebuilds the world tensor from the current rotation
-        // without touching `motionProperties`).
-        const local_a = bm.motionProperties(id_a).?.local_inv_inertia;
-        inline for (0..3) |k| {
-            try testing.expect(c.local_inv_inertia_a.cols[k].approxEql(local_a.cols[k], 0));
-            try testing.expect(c.local_inv_inertia_b.cols[k].approxEql(Vec3r.zero, 0));
-        }
-        try testing.expect(local_a.cols[0].toArray()[0] > 0); // the dynamic side is non-zero
-    }
-}
-
 test "combine rules: friction is the geometric mean, restitution is the max" {
     try testing.expectApproxEqAbs(@as(Real, 0.5), combineFriction(0.25, 1.0), 1e-6); // √0.25
     try testing.expectEqual(@as(Real, 0), combineFriction(0, 0.9));
@@ -657,6 +871,144 @@ test "tangent basis is orthonormal, right-handed, and deterministic" {
     }
 }
 
+test "soft coefficients match the closed form" {
+    // The oracle is derived INDEPENDENTLY rather than transcribed: substituting
+    // `a2 = h·ω·a1` into `mass_scale = a2·a3` with `a3 = 1/(1+a2)` gives
+    // `mass_scale = 1 − impulse_scale`, and `bias_rate = 2πf / (2ζ + 2πfh)`. A copy
+    // of the production expression would agree with any typo it contains; these
+    // forms disagree with all but the intended algebra.
+    const cases = [_]struct { f: Real, zeta: Real, h: Real }{
+        .{ .f = 30, .zeta = 10, .h = 1.0 / 240.0 }, // the defaults, 4 substeps at 60 Hz
+        .{ .f = 30, .zeta = 10, .h = 1.0 / 60.0 }, // substep_count = 1
+        .{ .f = 60, .zeta = 10, .h = 1.0 / 240.0 }, // the static stiffening
+        .{ .f = 5, .zeta = 0, .h = 1.0 / 120.0 }, // undamped, soft
+        .{ .f = 240, .zeta = 1, .h = 1.0 / 480.0 }, // stiff, lightly damped
+    };
+    for (cases) |c| {
+        const s = makeSoft(c.f, c.zeta, c.h);
+        const omega_h = 2 * std.math.pi * c.f * c.h;
+        const a1 = 2 * c.zeta + omega_h;
+        const expected_bias = (2 * std.math.pi * c.f) / a1;
+        const expected_impulse: Real = 1 / (1 + omega_h * a1);
+        const expected_mass = 1 - expected_impulse;
+
+        try testing.expectApproxEqRel(expected_bias, s.bias_rate, 1e-5);
+        try testing.expectApproxEqRel(expected_impulse, s.impulse_scale, 1e-5);
+        try testing.expectApproxEqAbs(expected_mass, s.mass_scale, 1e-5);
+
+        // Structural, and true for every admissible input rather than for these
+        // five: the two scales partition unity (`a2·a3 + a3 = a3·(1+a2) = 1`), so
+        // the biased update relaxes exactly what it does not enforce. Both stay
+        // inside `[0, 1]`, so neither can amplify.
+        try testing.expectApproxEqAbs(@as(Real, 1), s.mass_scale + s.impulse_scale, 1e-5);
+        try testing.expect(s.mass_scale >= 0 and s.mass_scale <= 1);
+        try testing.expect(s.impulse_scale >= 0 and s.impulse_scale <= 1);
+        try testing.expect(s.bias_rate > 0);
+    }
+}
+
+test "the static factor genuinely stiffens the coefficients" {
+    // Non-vacuity guard for the selection test below: if doubling the hertz left the
+    // coefficients unchanged, "static softness is selected" would assert nothing.
+    const zeta: Real = 10;
+    const h: Real = 1.0 / 240.0;
+    const ordinary = makeSoft(30, zeta, h);
+    const stiffened = makeSoft(static_hertz_factor * 30, zeta, h);
+
+    try testing.expect(stiffened.bias_rate > ordinary.bias_rate);
+    try testing.expect(stiffened.mass_scale > ordinary.mass_scale);
+    try testing.expect(stiffened.impulse_scale < ordinary.impulse_scale);
+}
+
+test "effective contact hertz clamps to an eighth of the substep rate" {
+    const dt: Real = 1.0 / 60.0;
+
+    // At the defaults the bound is `0.125 · 4/dt = 30` Hz — exactly the authored
+    // value, so the clamp binds AT EQUALITY and is invisible. Asserted with a
+    // tolerance and not by equality on purpose: `4/dt` is not exact at `f32`
+    // (`dt` is not a binary fraction), so the bound lands a few ULP under 30 there
+    // and a few over at `f64` — the two precisions take different sides of the
+    // `@min`, and neither is a defect.
+    try testing.expectApproxEqAbs(@as(Real, 30), effectiveContactHertz(30, 4, dt), 1e-4);
+
+    // The degenerate big-step lever: one substep at 60 Hz bounds the stiffness at
+    // 7.5 Hz, a quarter of the authored value. Visibly soft contacts follow, and
+    // that is the lever behaving as specified.
+    try testing.expectApproxEqAbs(@as(Real, 7.5), effectiveContactHertz(30, 1, dt), 1e-4);
+
+    // Far above the bound the clamp does not bind, and there the result is EXACT:
+    // `@min` returns its first operand untouched, so no arithmetic touches the
+    // authored value at all.
+    try testing.expectEqual(@as(Real, 30), effectiveContactHertz(30, 64, dt));
+
+    // Monotone in the substep count, and bounded by the authored stiffness however
+    // fine the substepping gets. NON-STRICTLY monotone, and the distinction is the
+    // clamp's whole point: past `n = 4` at 60 Hz the bound has SATURATED at the
+    // authored 30 Hz and finer substepping buys no extra stiffness. A first version
+    // of this ladder asserted strict growth and failed at `n = 16` — the estimate
+    // was wrong, the code was not.
+    var previous: Real = 0;
+    for ([_]u32{ 1, 2, 4, 8, 16 }) |n| {
+        const f = effectiveContactHertz(30, n, dt);
+        try testing.expect(f >= previous);
+        try testing.expect(f <= 30);
+        previous = f;
+    }
+    // Strict growth is asserted only where the bound genuinely binds, so the ladder
+    // above is not passing merely by being flat.
+    try testing.expect(effectiveContactHertz(30, 2, dt) > effectiveContactHertz(30, 1, dt));
+    try testing.expect(effectiveContactHertz(30, 4, dt) > effectiveContactHertz(30, 2, dt));
+}
+
+test "static softness is selected iff either body is static" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    const dyn_a = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    const dyn_b = try bm.addBody(gpa, &store, descOf(1, .dynamic, s));
+    const stat = try bm.addBody(gpa, &store, descOf(2, .static, s));
+    const kine = try bm.addBody(gpa, &store, descOf(3, .kinematic, s));
+
+    try testing.expect(usesStaticSoftness(&bm, dyn_a, stat));
+    try testing.expect(usesStaticSoftness(&bm, stat, dyn_a)); // symmetric in the pair
+    try testing.expect(usesStaticSoftness(&bm, stat, stat));
+
+    // THE discriminating case. A kinematic body has infinite mass too, so a
+    // predicate written on the mass would answer true here; the reference keys on
+    // the absence of a solver body, which only a static lacks.
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, kine));
+    try testing.expect(!usesStaticSoftness(&bm, kine, kine));
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, dyn_b));
+
+    // A stale handle answers with the ordinary coefficients rather than trapping:
+    // `prepare` dereferences both bodies before consulting this, so no stale id
+    // reaches it, and this is the answer that changes least if one ever did.
+    bm.removeBody(kine);
+    try testing.expect(!usesStaticSoftness(&bm, dyn_a, kine));
+    try testing.expect(!usesStaticSoftness(&bm, kine, stat));
+}
+
+test "prepare zeroes the per-tick total normal impulse" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+
+    const c = try twoSpheresPosed(gpa, &store, &bm, &constraints, .identity, av3(0, 0, 0));
+    // Structural rather than assigned: the field's default initializer is the reset,
+    // so a future `prepare` cannot forget it without removing the default.
+    for (0..c.count) |i| {
+        try testing.expectEqual(@as(Real, 0), c.points[i].total_normal_impulse);
+    }
+}
+
 test "prepare captures normal effective mass and pre-solve normal velocity" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
@@ -680,7 +1032,7 @@ test "prepare captures normal effective mass and pre-solve normal velocity" {
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     try testing.expectEqual(@as(usize, 1), constraints.items.len);
     const c = constraints.items[0];
@@ -706,7 +1058,7 @@ test "kinematic vs static pair yields no constraint (true-zero inverse mass skip
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     // Both inv_mass == 0 ⇒ total inverse mass exactly zero ⇒ skipped at build.
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
@@ -727,12 +1079,12 @@ test "separated pair yields no constraint" {
 
     var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
     defer constraints.deinit(gpa);
-    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
 
     try testing.expectEqual(@as(usize, 0), constraints.items.len);
 }
 
-test "constraints come back sorted ascending by pair key" {
+test "constraints come back sorted ascending by the composite key" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
     defer store.deinit(gpa);
@@ -756,7 +1108,7 @@ test "constraints come back sorted ascending by pair key" {
     // Feed the keys OUT of ascending order — build must sort them.
     try build(gpa, &constraints, &bm, &store, &.{
         pairKey(b1, b2), pairKey(b0, b1), pairKey(b0, b2),
-    });
+    }, coldCtx());
 
     try testing.expectEqual(@as(usize, 3), constraints.items.len);
     try testing.expect(constraints.items[0].pair_key < constraints.items[1].pair_key);

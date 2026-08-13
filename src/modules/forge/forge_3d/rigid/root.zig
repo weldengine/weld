@@ -1,9 +1,10 @@
-//! `forge_3d/rigid/root.zig` — facade for the rigid-body branch (Sequential
-//! Impulses + NGS position solver; `engine-physics-forge.md` §1.2). M1.1.6 landed
-//! the velocity half: contact constraint setup (combine rules, tangent basis,
-//! `ContactConstraint`, build/prepare), the warm-start cache, and the velocity
-//! solver. M1.1.7 adds the shared `solver_config.zig` and the NGS position pass;
-//! joints follow the same additive-sibling way.
+//! `forge_3d/rigid/root.zig` — facade for the rigid-body branch (TGS Soft
+//! substepping; `engine-physics-forge.md` §1.2). It carries the contact constraint
+//! setup (combine rules, tangent basis, soft coefficients, `ContactConstraint`,
+//! build/prepare), the warm-start cache, the shared `solver_config.zig`, the
+//! substepped solver and the island manager. The M1.1.6 velocity pass and the M1.1.7
+//! NGS position pass were merged into `solver.zig` at M1.1.13.1 and their files are
+//! gone; joints follow the same additive-sibling way.
 //!
 //! Re-exported at `Real` by `forge_3d/root.zig`. The comptime pin analyses the
 //! package's inline tests when built as a test target (engine-zig-conventions.md
@@ -12,8 +13,7 @@
 const contact_constraint = @import("contact_constraint.zig");
 const contact_cache = @import("contact_cache.zig");
 const solver_config = @import("solver_config.zig");
-const velocity_solver = @import("velocity_solver.zig");
-const position_solver = @import("position_solver.zig");
+const solver = @import("solver.zig");
 const island_manager = @import("island_manager.zig");
 
 /// One manifold's velocity-solver contact constraint (≤ 4 inline points).
@@ -39,7 +39,7 @@ pub const ContactCache = contact_cache.ContactCache;
 /// with several constraints per pair, totality is the property that keeps the ordering from
 /// resting on `std.sort.block`'s tie-handling, and totality is a claim about the COMPARATOR that
 /// only a caller of it can check (closure finding F4).
-pub const lessByPairKey = contact_constraint.lessByPairKey;
+pub const lessByConstraintKey = contact_constraint.lessByConstraintKey;
 /// The island permutation's total order, `(rank, pair_key, subshape_id)`.
 pub const lessByCompositeKey = island_manager.lessByCompositeKey;
 /// One constraint's island sort key plus where it currently sits.
@@ -49,25 +49,47 @@ pub const CacheKey = contact_cache.CacheKey;
 /// A warm-start cache value (accumulated normal + world tangent impulse).
 pub const CacheValue = contact_cache.CacheValue;
 
-/// Rigid contact-solver tuning, shared by the velocity and position passes
-/// (iteration counts, restitution threshold, NGS slop/factor/clamp).
+/// Rigid contact-solver tuning (substep count, contact stiffness and damping,
+/// recovery cap, restitution threshold, slop).
 pub const SolverConfig = solver_config.SolverConfig;
+/// Debug-assert the solver config's domain.
+pub const assertSolverDomain = solver_config.assertDomain;
 
-/// Warm-start constraints from the previous tick's cache (tangent reprojection).
-pub const warmStart = velocity_solver.warmStart;
+/// The three mass-independent soft-constraint coefficients.
+pub const Softness = contact_constraint.Softness;
+/// The tick's two coefficient triples (ordinary and static-stiffened).
+pub const SoftnessPair = contact_constraint.SoftnessPair;
+/// What `build` needs beyond the geometry: the softness pair and the warm-start source.
+pub const PrepareContext = contact_constraint.PrepareContext;
+/// The `b2MakeSoft` closed form for `(hertz, damping ratio, substep length)`.
+pub const makeSoft = contact_constraint.makeSoft;
+/// The authored stiffness clamped to an eighth of the substep rate.
+pub const effectiveContactHertz = contact_constraint.effectiveContactHertz;
+/// Whether a pair takes the stiffened static coefficients (either endpoint static).
+pub const usesStaticSoftness = contact_constraint.usesStaticSoftness;
+
+/// Derive the tick's two coefficient triples from the config and the timestep.
+pub const makeSoftnessPair = solver.makeSoftnessPair;
+/// Build a `PrepareContext` for one tick.
+pub const prepareContext = solver.prepareContext;
+/// Inject the CURRENT accumulated impulses — once per substep, after integration.
+pub const applyWarmStartRange = solver.applyWarmStartRange;
+/// The biased sweep over an index range — one call per island range per substep.
+pub const solveRange = solver.solveRange;
+/// `solveRange` returning its telemetry (the §1.8.2 sibling entry).
+pub const solveRangeReport = solver.solveRangeReport;
+/// The relax sweep over an index range: normal points unbiased, then friction.
+pub const relaxRange = solver.relaxRange;
+/// The restitution pass over an index range — step 7, once after the substep loop.
+pub const applyRestitutionRange = solver.applyRestitutionRange;
+/// Steps 6 and 7: the substep loop, the accumulator reset, and restitution.
+pub const solveTick = solver.solveTick;
 /// Harvest solved constraint impulses into the cache's current buffer.
-pub const storeContacts = velocity_solver.storeContacts;
-/// Solve the velocity constraints over an index range — one call per island range.
-pub const solveRange = velocity_solver.solveRange;
-/// `solveRange` returning its iteration telemetry (the §1.8.2 sibling entry).
-pub const solveRangeReport = velocity_solver.solveRangeReport;
-/// Telemetry of one velocity pass (iterations actually run before the early-out).
-pub const VelocitySolveResult = velocity_solver.VelocitySolveResult;
-
-/// Telemetry of one NGS position pass (iterations run, minimum separation seen).
-pub const PositionSolveResult = position_solver.PositionSolveResult;
-/// Resorb penetration over an index range by correcting poses (NGS, §1.7.2).
-pub const solvePositionRange = position_solver.solvePositionRange;
+pub const storeContacts = solver.storeContacts;
+/// Telemetry of one solver tick (substeps, sweeps, minimum separation).
+pub const SolverStats = solver.SolverStats;
+/// Telemetry of one biased sweep over one island range.
+pub const RangeStats = solver.RangeStats;
 
 /// Partitions the awake dynamic bodies into islands, gives each a contiguous
 /// constraint range for the two range-shaped solver passes, and arbitrates
@@ -80,7 +102,6 @@ comptime {
     _ = contact_constraint;
     _ = contact_cache;
     _ = solver_config;
-    _ = velocity_solver;
-    _ = position_solver;
+    _ = solver;
     _ = island_manager;
 }

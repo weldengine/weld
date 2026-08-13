@@ -1,132 +1,124 @@
-//! `forge_3d/rigid/solver_config.zig` — the rigid contact solver's tuning, shared
-//! by the two passes of the normative per-tick cycle (`engine-physics-forge.md`
-//! §1.7): the Sequential Impulses VELOCITY pass (§1.7.1, `velocity_solver.zig`)
-//! and the NGS POSITION pass (§1.7.2, `position_solver.zig`).
+//! `forge_3d/rigid/solver_config.zig` — the rigid contact solver's tuning, read by
+//! the substepped solver of the normative per-tick cycle
+//! (`engine-physics-solver.md` §1.7): the substep loop of step 6 (§1.7.1) and the
+//! restitution pass of step 7 (§1.7.2).
 //!
-//! One struct read by two solvers belongs in neither, so it lives here. It was
-//! born in `velocity_solver.zig` at M1.1.6 — with `velocity_iterations` named
-//! explicitly for the `position_iterations` sibling this file adds — and moved at
-//! M1.1.7 when the position pass landed. Both solvers import it and
-//! `rigid/root.zig` re-exports it from this owner, so call sites keep naming
-//! `rigid.SolverConfig`; the velocity half is unchanged by the move.
+//! It was born in `velocity_solver.zig` at M1.1.6, moved here at M1.1.7 when a
+//! second pass began reading it, and outlived both of those passes at M1.1.13.1.
+//! The doc header cited `engine-physics-forge.md` §1.7 until then — stale since the
+//! M1.1.12 file split moved §1.7 into `engine-physics-solver.md`.
 //!
-//! `penetration_slop` and `max_penetration_correction` are absolute lengths in
-//! metres, and that is assumed: they are PHYSICAL tolerances of the internal unit
-//! scale (`engine-units.md`), the same class as `restitution_threshold`. They
-//! classify nothing and guard no numerical degeneracy — every other guard in the
-//! rigid solver fires at true zero. They are deliberately not derived from a scale
-//! (§1.7.2): a body-size-derived slop would make the resting overlap pair-dependent
-//! (a small body resting on a big one would sink by the big one's slop — a
-//! non-uniform rest offset in a stack), and a contact-coordinate-derived one would
-//! make it depend on where in the world the contact is.
+//! **What the port removed, and why none of it is deferred.** `velocity_iterations`
+//! and `position_iterations` were budgets of a big-step model that no longer exists:
+//! each substep runs exactly one biased sweep and one relax sweep, a cost fixed BY
+//! CONSTRUCTION rather than by a predicate, so there is no budget left to spend.
+//! `position_correction_factor` and `max_penetration_correction` were the NGS pass's
+//! under-relaxation and its per-pass error clamp; position error is now corrected by
+//! the velocity bias inside the loop, and its rate is bounded by
+//! `contact_push_max_speed` instead. The 16-iteration floor M1.1.7 MEASURED goes with
+//! them — the five-box stack that established it is the acceptance oracle of the port
+//! and now comes to rest on `substep_count = 4`.
 //!
-//! **A THIRD member of that family lives elsewhere, and deliberately.**
-//! `mesh.default_active_edge_cos_threshold` (M1.1.11.1, default `cos(5°)`) is a physical
-//! parameter of exactly this class — it selects a modelling behaviour, not a numerical
-//! tolerance, and the `k · floatEps(T) · coordScale` discipline does not apply to it. It
-//! is NOT declared here because the mesh's active-edge flags are BAKED AT CREATION: a
-//! field on this struct would be read long after the decision it governs had been taken,
-//! and changing it at runtime would silently rebuild nothing. This cross-reference is
-//! what keeps the family readable from one place; see that declaration for the rest.
+//! **Threshold class.** `penetration_slop`, `restitution_threshold` and
+//! `contact_push_max_speed` are PHYSICAL tolerances in the internal unit scale
+//! (`engine-units.md`) — metres, m/s, m/s. They classify nothing and guard no
+//! numerical degeneracy; every other guard in the rigid solver fires at true zero.
+//! `contact_hertz` and `contact_damping_ratio` are authored parameters of the same
+//! family: a stiffness and a damping ratio are meaningful to a designer, where an
+//! iteration count encodes the solver's schema into the configuration
+//! (`engine-physics-forge.md` §1.6, motive 4).
+//!
+//! `penetration_slop` is deliberately NOT derived from a scale (§1.7.1): a
+//! body-size-derived slop would make the resting overlap pair-dependent (a small body
+//! resting on a big one would sink by the big one's slop — a non-uniform rest offset
+//! in a stack), and a contact-coordinate-derived one would make it depend on where in
+//! the world the contact is.
+//!
+//! **A member of that family lives elsewhere, and deliberately.**
+//! `mesh.default_active_edge_cos_threshold` (M1.1.11.1, default `cos(5°)`) selects a
+//! modelling behaviour, not a numerical tolerance, so the `k · floatEps(T) ·
+//! coordScale` discipline does not apply to it either. It is NOT declared here
+//! because a mesh's active-edge flags are BAKED AT CREATION: a field on this struct
+//! would be read long after the decision it governs had been taken.
 
 const std = @import("std");
 const config = @import("../config.zig");
 
 const Real = config.Real;
 
-/// Rigid contact-solver tuning: the velocity pass (§1.7.1) then the position pass
-/// (§1.7.2). Defaults are the spec's §1.7.2 table plus the M1.1.6 velocity half.
+/// Rigid contact-solver tuning for the substepped model (§1.7.1). Defaults are the
+/// spec's §1.7.1 configuration table.
 pub const SolverConfig = struct {
-    // --- Velocity pass (Sequential Impulses, §1.7.1) ---
-
-    /// Gauss-Seidel velocity iteration passes per tick. 0 is allowed — warm start
-    /// only, no solve.
+    /// Substeps per tick — the whole budget of the solver, and the only knob that
+    /// buys convergence. `1` is legal and is the degenerate big-step A/B lever;
+    /// `0` is illegal and asserts (`assertDomain`), a `u32` giving no other floor.
     ///
-    /// 16, not the 8 of the Box2D tuning family: that number is 2D, where a contact
-    /// patch is two points and a rotation is one scalar. A 3D face patch carries
-    /// four points and a five-deep stack forty, and 8 is under-provisioned at that
-    /// depth — measured at M1.1.7, a five-box stack never comes to rest at 8 and
-    /// stops dead at 16. 16 is a measured FLOOR, not a first-principles result:
-    /// there is no derivation of the required budget from chain depth, patch size or
-    /// mass ratio, only the measurement that 16 puts this configuration inside the
-    /// convergence basin.
-    ///
-    /// A claim written here at M1.1.7 — that Jolt uses no global constant and
-    /// derives the budget per island, so a deep stack automatically gets more
-    /// iterations — was READ ON THE SOURCE at M1.1.8 and is false in both halves
-    /// (`engine-physics-forge.md` §1.8.2). Jolt does carry global defaults
-    /// (`PhysicsSettings.h`: `mNumVelocitySteps = 10`, `mNumPositionSteps = 2`), and
-    /// its per-island aggregation (`CalculateSolverSteps.h`) is a MAXIMUM over
-    /// overrides supplied by the author on bodies and constraints, falling back on
-    /// the global default when none is set. No heuristic of any kind reads the
-    /// topology: under Jolt a deep stack receives exactly the global default.
-    ///
-    /// So this stays a global default and a floor. The velocity pass's EARLY-OUT
-    /// (§1.8.2) is EXACT and free, but its yield is scene- AND precision-dependent,
-    /// because the predicate is a true-zero test: it fires only once `Δλ` underflows
-    /// to exactly zero, which happens sooner in coarser precision. Measured on a
-    /// resting five-box stack (40 contact points), ceiling 16: 11 iterations at f32,
-    /// all 16 at f64. The unambiguous saving is the position pass — 1 of 3 at rest at
-    /// both precisions. So this field is NOT a ceiling that is generally left
-    /// unreached; it remains a MEASURED floor, and raising it locally is what the
-    /// additive per-body override channel is for (no Phase-1 consumer).
-    velocity_iterations: u32 = 16,
-    /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
-    /// relative normal speed exceeds this — a PHYSICAL velocity constant (config
-    /// field), not a geometric epsilon. Below it, low-speed contacts settle
-    /// without jitter.
+    /// 4 is the reference tuning. It is not a measured floor the way
+    /// `velocity_iterations = 16` was: sub-sampling attacks the DISCRETISATION error
+    /// (~h² per substep), which iterating cannot reduce at all, so the five-box stack
+    /// that never came to rest at 8 iterations comes to rest here on four substeps
+    /// (`engine-physics-forge.md` §1.6, motive 1).
+    substep_count: u32 = 4,
+    /// Contact-constraint stiffness (Hz). Clamped per tick to an eighth of the
+    /// substep rate before use (`contact_constraint.effectiveContactHertz`): a
+    /// constraint cannot be stiffer than the discretisation can resolve. At the
+    /// defaults the clamp binds at equality and changes nothing.
+    contact_hertz: Real = 30.0,
+    /// Contact-constraint damping ratio (dimensionless). Well above critical: contact
+    /// is a unilateral constraint, and an underdamped one visibly rings.
+    contact_damping_ratio: Real = 10.0,
+    /// Ceiling on the speed at which penetration is resorbed (m/s). Recovery is
+    /// PACED — a deep overlap comes out over several ticks — rather than teleported
+    /// the way the removed NGS pass resorbed it in one frame, which left pose and
+    /// velocity inconsistent on the following tick (§1.7.2).
+    contact_push_max_speed: Real = 3.0,
+    /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve relative
+    /// normal speed reaches or exceeds this, approaching. Below it, low-speed contacts
+    /// settle without jitter. Unchanged since M1.1.6.
     restitution_threshold: Real = 1.0,
-
-    // --- Position pass (NGS, §1.7.2) ---
-
-    /// NGS position passes per tick. 0 is legal: no position correction at all
-    /// (velocity-only behaviour, the M1.1.6 contract).
-    position_iterations: u32 = 3,
-    /// Stationary overlap allowed at rest (m). Its role is contact PERSISTENCE:
-    /// a small steady overlap keeps the contact — and therefore its warm-start
-    /// cache entry — alive instead of oscillating between contact and no contact.
-    /// The 5 mm is the Box2D tuning family, not Jolt's 2 cm, which is coupled to
-    /// its speculative-contact distance (a number without its reason until
-    /// speculative contacts ship). It is independent of the iteration budget: the
-    /// slop sets WHERE the position pass stops, not how fast either pass converges.
+    /// Stationary overlap allowed at rest (m). Its role is contact PERSISTENCE: a
+    /// small steady overlap keeps the contact — and therefore its warm-start cache
+    /// entry — alive instead of oscillating between contact and no contact. Consumed
+    /// as the dead-zone offset of the biased solve's error term, `min(s + slop, 0)`.
+    ///
+    /// The 5 mm is the Box2D tuning family, not Jolt's 2 cm, which is coupled to its
+    /// speculative-contact distance — a number without its reason until speculative
+    /// contacts ship, at which point this offset goes to zero and the reference's own
+    /// form is restored exactly.
     penetration_slop: Real = 0.005,
-    /// NGS under-relaxation: the fraction of the measured error a pass resorbs.
-    /// NOT a Baumgarte velocity bias — the velocity pass carries none. Above 1 it
-    /// over-relaxes and can diverge, hence the `[0, 1]` domain.
-    position_correction_factor: Real = 0.2,
-    /// Clamp on the penetration ERROR a single pass takes into account (m) — "never
-    /// try to resorb more than this at once". It bounds the error going in, not the
-    /// correction coming out (Jolt `mMaxPenetrationDistance` semantics).
-    max_penetration_correction: Real = 0.2,
 };
 
-/// Debug-assert the position pass's config domain at its entry, mirroring the
-/// velocity pass's `restitution_threshold` guard (M1.1.6): all three `Real` fields
-/// finite, `penetration_slop >= 0`, `max_penetration_correction >= 0`, and
-/// `position_correction_factor` in `[0, 1]` (a factor above 1 over-relaxes and can
-/// diverge). `position_iterations` is a `u32`, so its domain holds by type — and
-/// 0 is legal.
-pub fn assertPositionDomain(cfg: SolverConfig) void {
+/// Debug-assert the solver config's domain at the entries that consume it. All five
+/// `Real` fields finite; `contact_hertz` strictly positive (which is what makes the
+/// reference's zero-hertz branch unreachable, so it is not ported); the other three
+/// non-negative; `substep_count >= 1`, since zero substeps would advance no time at
+/// all while reporting a completed tick.
+pub fn assertDomain(cfg: SolverConfig) void {
+    std.debug.assert(cfg.substep_count >= 1);
+    std.debug.assert(std.math.isFinite(cfg.contact_hertz) and cfg.contact_hertz > 0);
+    std.debug.assert(std.math.isFinite(cfg.contact_damping_ratio) and cfg.contact_damping_ratio >= 0);
+    std.debug.assert(std.math.isFinite(cfg.contact_push_max_speed) and cfg.contact_push_max_speed >= 0);
+    std.debug.assert(std.math.isFinite(cfg.restitution_threshold) and cfg.restitution_threshold >= 0);
     std.debug.assert(std.math.isFinite(cfg.penetration_slop) and cfg.penetration_slop >= 0);
-    std.debug.assert(std.math.isFinite(cfg.max_penetration_correction) and cfg.max_penetration_correction >= 0);
-    std.debug.assert(std.math.isFinite(cfg.position_correction_factor) and
-        cfg.position_correction_factor >= 0 and cfg.position_correction_factor <= 1);
 }
 
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
 
-test "solver config position defaults" {
+test "solver config defaults" {
     const cfg = SolverConfig{};
-    try testing.expectEqual(@as(u32, 3), cfg.position_iterations);
-    try testing.expectEqual(@as(Real, 0.005), cfg.penetration_slop);
-    try testing.expectEqual(@as(Real, 0.2), cfg.position_correction_factor);
-    try testing.expectEqual(@as(Real, 0.2), cfg.max_penetration_correction);
-    // The velocity half: `restitution_threshold` carried over unchanged by the
-    // relocation, `velocity_iterations` raised 8 → 16 at M1.1.7 (see its doc).
-    try testing.expectEqual(@as(u32, 16), cfg.velocity_iterations);
+    try testing.expectEqual(@as(u32, 4), cfg.substep_count);
+    try testing.expectEqual(@as(Real, 30.0), cfg.contact_hertz);
+    try testing.expectEqual(@as(Real, 10.0), cfg.contact_damping_ratio);
+    try testing.expectEqual(@as(Real, 3.0), cfg.contact_push_max_speed);
     try testing.expectEqual(@as(Real, 1.0), cfg.restitution_threshold);
-    // The defaults are inside the domain the position entry asserts.
-    assertPositionDomain(cfg);
+    try testing.expectEqual(@as(Real, 0.005), cfg.penetration_slop);
+    // The defaults are inside the domain the solver entries assert.
+    assertDomain(cfg);
+}
+
+test "the degenerate big-step config is legal" {
+    // `substep_count = 1` must pass the domain: it is the A/B lever, not an error.
+    assertDomain(.{ .substep_count = 1 });
 }
