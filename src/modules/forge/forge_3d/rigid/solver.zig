@@ -345,11 +345,15 @@ pub fn relaxRange(
 
 /// The restitution pass over `[from, to)` — step 7, once after the whole substep loop.
 ///
-/// A point bounces iff BOTH clauses hold: it was approaching at capture at least as
-/// fast as the threshold (`v_n⁻ <= −restitution_threshold`, closed interval, which
-/// supersedes §1.7.2's strict `<` wording), and it actually pushed at some point in
-/// the tick (`total_normal_impulse != 0`). The second clause is what keeps a
-/// speculative point that never had to resolve from bouncing.
+/// A point bounces iff BOTH clauses hold, taken literally:
+/// `v_n⁻ <= −restitution_threshold` (a closed interval, which supersedes §1.7.2's
+/// strict `<` wording) AND `total_normal_impulse != 0`.
+///
+/// The second clause guarantees ONE direction and only that one: a point that NEVER
+/// pushed reads exactly zero, which is what keeps a speculative point the tick never
+/// had to resolve from bouncing. The converse is NOT claimed — a push fully retracted
+/// by relax telescopes to zero as well, and reads the same. That is reference-conforming
+/// behaviour, not a case the predicate distinguishes.
 ///
 /// Placed after the loop rather than inside it because under soft constraints an
 /// in-loop restitution would be re-damped substep after substep, making the rebound a
