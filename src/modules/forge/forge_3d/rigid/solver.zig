@@ -293,6 +293,7 @@ pub fn solveRange(
     cfg: SolverConfig,
     h: Real,
 ) void {
+    solver_config.assertDomain(cfg);
     _ = solveRangeReport(bm, constraints, from, to, cfg, h);
 }
 
@@ -307,6 +308,7 @@ pub fn solveRangeReport(
     cfg: SolverConfig,
     h: Real,
 ) RangeStats {
+    solver_config.assertDomain(cfg);
     std.debug.assert(std.math.isFinite(h) and h > 0);
     var stats: RangeStats = .{};
     for (constraints[from..to]) |*c| {
@@ -326,6 +328,7 @@ pub fn relaxRange(
     cfg: SolverConfig,
     h: Real,
 ) void {
+    solver_config.assertDomain(cfg);
     std.debug.assert(std.math.isFinite(h) and h > 0);
     for (constraints[from..to]) |*c| {
         for (0..c.count) |i| solveNormalPoint(bm, c, &c.points[i], cfg, h, .relax, null);
@@ -357,6 +360,7 @@ pub fn applyRestitutionRange(
     to: usize,
     cfg: SolverConfig,
 ) void {
+    solver_config.assertDomain(cfg);
     for (constraints[from..to]) |*c| {
         for (0..c.count) |i| {
             const pt = &c.points[i];
