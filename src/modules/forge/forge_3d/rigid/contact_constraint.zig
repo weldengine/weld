@@ -281,20 +281,24 @@ pub const ConstraintPoint = struct {
     /// Accumulated tangent impulses on the `(t1, t2)` basis (E5).
     tangent1_impulse: Real = 0,
     tangent2_impulse: Real = 0,
-    /// Normal impulse this point has RECEIVED over the whole tick, and the second
-    /// half of the restitution predicate (`engine-physics-solver.md` §1.7.2): a
-    /// bounce is applied only to a point that both approached fast enough AND
-    /// actually pushed. Exactly:
+    /// The per-tick normal-impulse sum the restitution predicate's second clause reads
+    /// (`engine-physics-solver.md` §1.7.2). It is defined by its THREE CONTRIBUTIONS and
+    /// by nothing else:
     ///
     ///   - `0` here, at `prepare` — by this default, so the reset is structural;
     ///   - `+= λₙ` (the CURRENT accumulator) at each per-substep warm application;
-    ///   - `+= applied` — algebraic and POST-clamp, so a retracted impulse subtracts
-    ///     — at each solve, relax and restitution update.
+    ///   - `+= applied` — the ALGEBRAIC, POST-clamp delta — at each solve, relax and
+    ///     restitution update.
+    ///
+    /// The third contribution is signed, so consecutive updates TELESCOPE: between two
+    /// warm-start applications the sum moves by the net change in `λₙ` over that run,
+    /// and a point pushed then relaxed fully back to zero contributes zero.
     ///
     /// It is therefore NEITHER the final `λₙ` (which the substeps rewrite) NOR a
-    /// boolean, and the distinction is what the predicate needs: a speculative point
-    /// that never pushed ends the tick at exactly zero and must not bounce, while a
-    /// point that pushed and was then relaxed back to zero did participate.
+    /// boolean NOR a record of whether the point ever pushed — an earlier version of
+    /// this comment claimed the last of those, which the telescoping refutes. The
+    /// predicate is `total_normal_impulse != 0` on the value this sum ends the tick
+    /// with, taken literally; reference parity is on the arithmetic above.
     ///
     /// NOT stored to the warm-start cache: that format is frozen at
     /// `(λₙ, world tangent)` and this quantity is per-tick bookkeeping, meaningless

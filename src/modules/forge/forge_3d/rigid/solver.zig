@@ -221,9 +221,16 @@ fn solveNormalPoint(
     const new_lambda = @max(@as(Real, 0), pt.normal_impulse + delta);
     const applied = new_lambda - pt.normal_impulse;
     pt.normal_impulse = new_lambda;
-    // ALGEBRAIC and POST-clamp: a retracted impulse subtracts, so a point that pushed
-    // and was then relaxed back to zero still reads as having participated, while a
-    // point that never pushed stays at exactly zero (§1.7.2, the restitution predicate).
+    // The bookkeeping §1.7.2 freezes, and NOTHING MORE than it: the ALGEBRAIC,
+    // POST-clamp delta. A retraction subtracts exactly what the push added, so a run of
+    // updates between two warm-start applications TELESCOPES to the net change in `λₙ`
+    // over that run — a point pushed and then relaxed fully back to zero returns to zero
+    // here too.
+    //
+    // So this is NOT a participation flag, and an earlier comment here said it was. What
+    // the restitution predicate reads is the frozen two-clause test on this sum's final
+    // value, and the parity claimed against the reference is on the ARITHMETIC — the
+    // three contributions and their signs — never on a meaning attached to the result.
     pt.total_normal_impulse += applied;
     applyImpulse(bm, c, pt.r_a, pt.r_b, c.normal.scale(applied));
 }
