@@ -19,8 +19,8 @@
 //!     deterministically-ordered constraint array, running the narrowphase and
 //!     the per-point `prepare` precompute (lever arms, world inverse inertias,
 //!     normal + two tangent effective masses, pre-solve normal velocity `v_n⁻`,
-//!     the two body-local surface anchors, the pose-invariant local inverse inertias,
-//!     the softness selection, and the warm-start SEEDING).
+//!     the two body-local surface anchors, the softness selection, and the warm-start
+//!     SEEDING).
 //!
 //! Import discipline (brief): `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
@@ -32,9 +32,10 @@
 //! `ContactPoint.penetration` is consumed HERE and only here, at `prepare`, to derive
 //! the two surface anchors. There is NO position pass: each substep re-derives the
 //! separation from the CURRENT poses against those anchors and feeds it to the solve
-//! as a bounded velocity bias (`engine-physics-solver.md` §1.7.1). The anchors and the
-//! local inverse inertias survive the M1.1.13.1 port unchanged in shape and changed in
-//! consumer — the NGS pass that used to read them is gone.
+//! as a bounded velocity bias (`engine-physics-solver.md` §1.7.1). The ANCHORS survive
+//! the port unchanged in shape and changed in consumer; the two cached copies of the
+//! bodies' LOCAL inverse inertia did not — their only consumer was the NGS pass, and
+//! they were removed at the closing review with it.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -338,20 +339,22 @@ pub const ContactConstraint = struct {
     /// the tick's `SoftnessPair` — stiffened when either endpoint is static. Read by
     /// the biased sweep only: relax runs the same update with the soft terms off.
     softness: Softness,
-    /// Cached inverse mass and world-space inverse inertia per body — precomputed
-    /// once in `prepare`, reused by warm start (E3) and the iterations (E4/E5).
+    /// Cached inverse mass and WORLD-space inverse inertia per body — precomputed once
+    /// in `prepare` and frozen for the tick, alongside the Jacobian arms and the
+    /// effective masses built from them (§1.7.1). Re-deriving one without the others
+    /// per substep would leave them inconsistent, which is why nothing here is
+    /// refreshed inside the loop.
+    ///
+    /// The constraint caches NO copy of the bodies' LOCAL inverse inertia. Two such
+    /// copies existed from M1.1.7 to M1.1.13.1, for the NGS position pass, which
+    /// rebuilt a world tensor at the poses it had just moved; that pass is gone and the
+    /// copies went with it at the closing review — 96 bytes of dead state per
+    /// constraint, on memory-bound sweeps. `prepare` reads `MotionProperties` directly
+    /// (§1.7.1).
     inv_mass_a: Real,
     inv_mass_b: Real,
     inv_inertia_a: Mat3r,
     inv_inertia_b: Mat3r,
-    /// Pose-invariant LOCAL inverse inertia per body, copied from
-    /// `MotionProperties`, and kept through the M1.1.13.1 port for the consumers that
-    /// need a world tensor at a pose the substep loop has just moved. The frozen
-    /// per-tick `inv_inertia_a`/`inv_inertia_b` above are what the solve itself uses
-    /// (§1.7.1: the Jacobian arms and the effective masses are frozen together, so
-    /// re-rotating one without the others would make them inconsistent).
-    local_inv_inertia_a: Mat3r,
-    local_inv_inertia_b: Mat3r,
     /// Per-point solver data.
     points: [4]ConstraintPoint,
     /// Valid entries in `points`, 1..4.
@@ -433,8 +436,6 @@ fn prepare(
         .inv_mass_b = mp_b.inv_mass,
         .inv_inertia_a = inv_inertia_a,
         .inv_inertia_b = inv_inertia_b,
-        .local_inv_inertia_a = mp_a.local_inv_inertia,
-        .local_inv_inertia_b = mp_b.local_inv_inertia,
         .points = undefined,
         .count = manifold.count,
     };
@@ -811,42 +812,6 @@ test "prepare stores body-local surface anchors that reproduce the penetration" 
 
     try testing.expect(c2.points[0].local_anchor_a.approxEql(pt.local_anchor_a, anchor_tol));
     try testing.expect(c2.points[0].local_anchor_b.approxEql(pt.local_anchor_b, anchor_tol));
-}
-
-test "prepare caches the pose-invariant local inverse inertias" {
-    const gpa = testing.allocator;
-    // One dynamic body against an infinite-mass one: the pair survives the
-    // true-zero skip, and the infinite-mass side must carry a zero local inverse
-    // inertia (both static and kinematic).
-    inline for (.{ api.BodyType.static, api.BodyType.kinematic }) |bt| {
-        var store = ShapeStore{};
-        defer store.deinit(gpa);
-        var bm = BodyManager{};
-        defer bm.deinit(gpa);
-        const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-        var da = descOf(0, .dynamic, s);
-        da.mass = 2;
-        var db = descOf(1, bt, s);
-        db.position = av3(0.9, 0, 0);
-        const id_a = try bm.addBody(gpa, &store, da);
-        const id_b = try bm.addBody(gpa, &store, db);
-
-        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
-        defer constraints.deinit(gpa);
-        try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)}, coldCtx());
-        try testing.expectEqual(@as(usize, 1), constraints.items.len);
-        const c = constraints.items[0];
-
-        // An exact copy of `MotionProperties.local_inv_inertia` (pose-invariant, so
-        // the position pass rebuilds the world tensor from the current rotation
-        // without touching `motionProperties`).
-        const local_a = bm.motionProperties(id_a).?.local_inv_inertia;
-        inline for (0..3) |k| {
-            try testing.expect(c.local_inv_inertia_a.cols[k].approxEql(local_a.cols[k], 0));
-            try testing.expect(c.local_inv_inertia_b.cols[k].approxEql(Vec3r.zero, 0));
-        }
-        try testing.expect(local_a.cols[0].toArray()[0] > 0); // the dynamic side is non-zero
-    }
 }
 
 test "combine rules: friction is the geometric mean, restitution is the max" {
