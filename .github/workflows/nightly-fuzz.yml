@@ -4,8 +4,16 @@ name: Nightly IPC fuzz
 # promoted to nightly CI at M0.7 / E4. Runs on Linux + Windows and
 # archives the stdout digest as an artifact (G3 gate). Scheduled runs
 # only fire from the default branch (GitHub rule), so this activates once
-# the M0.7 branch is squash-merged to `main`; `workflow_dispatch` lets it
-# be triggered manually from the Actions tab in the meantime.
+# the M0.7 branch is squash-merged to `main`.
+#
+# M1.1.14 correction, MEASURED: the sentence that stood here — that
+# `workflow_dispatch` lets it be triggered manually from the Actions tab in the
+# meantime — is FALSE, and had been dormant since M0.7 because nobody tried it
+# from a branch. `gh workflow run <file> --ref <feature-branch>` returns
+# `HTTP 404: workflow not found on the default branch`: a `workflow_dispatch`
+# workflow must ALSO exist on the default branch before it can be dispatched at
+# all, whatever `--ref` says. Dispatch is available for this file today only
+# because it is already on `main`.
 on:
   schedule:
     # 04:00 UTC daily — off-peak for the shared runner pool.

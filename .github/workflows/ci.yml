@@ -586,6 +586,156 @@ jobs:
             vkblit.log
           retention-days: 30
 
+  witness-generation:
+    # M1.1.14 — generation of the committed determinism witnesses, GATED ON A
+    # COMMIT TRAILER.
+    #
+    # WHY A JOB HERE AND NOT A `workflow_dispatch` WORKFLOW OF ITS OWN. Measured,
+    # not assumed: `gh workflow run <new>.yml --ref <feature-branch>` returns
+    # `HTTP 404: workflow not found on the default branch`. GitHub requires a
+    # `workflow_dispatch` workflow to exist on the DEFAULT branch before it can be
+    # dispatched at all, whatever `--ref` says — so a new workflow file cannot be
+    # triggered until after the milestone merges, which is too late to produce the
+    # witnesses the milestone must commit. `ci.yml` is already on the default
+    # branch, so a job added here runs on the PR head today.
+    #
+    # WHY A COMMIT TRAILER RATHER THAN A DISPATCH INPUT. A witness pins a result in
+    # time, so producing one must be a DECLARED ACT and never a side effect. The
+    # declaration is `Witness-regen: <motive>` in the head commit message, which is
+    # STRONGER than a form field: it is reviewed in the diff, greppable, and
+    # permanent, where a dispatch input leaves no trace in the repository at all.
+    # Absent the trailer the job skips and costs nothing.
+    #
+    # PERMANENT, not scaffolding. M1.1.25 replays the harness at N workers, M1.A on
+    # a rebuilt scheduler DAG, and every shape added later moves the scenario —
+    # each needs a regeneration with provenance.
+    #
+    # NOT IN `ci-gate`'s `needs`. A conditional job in a required dependency makes
+    # the gate skip or fail depending on configuration; this job is a producer, not
+    # a verifier. What VERIFIES the witnesses is the ordinary matrix, comparing
+    # against the committed tree.
+    #
+    # LINUX BY CONSTRUCTION, and the consequence is intended: Linux is the
+    # reference, Windows the verifier. A Windows divergence is then THE measurement
+    # of the milestone. Regenerating on Windows to make such a divergence pass is
+    # forbidden by name — that is the silently re-baselined witness.
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read the Witness-regen trailer
+        id: trailer
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(git log -1 --pretty=%B)"
+          echo "--- head commit message ---"; echo "$body"
+          if reason="$(printf '%s\n' "$body" | sed -n 's/^Witness-regen:[[:space:]]*//p' | head -1)" && [ -n "$reason" ]; then
+            echo "requested=true" >> "$GITHUB_OUTPUT"
+            echo "reason=$reason" >> "$GITHUB_OUTPUT"
+            echo "--- witness generation REQUESTED: $reason ---"
+          else
+            echo "requested=false" >> "$GITHUB_OUTPUT"
+            echo "--- no Witness-regen trailer; skipping generation ---"
+          fi
+
+      - uses: weldengine/setup-zig@v0.1.0
+        if: steps.trailer.outputs.requested == 'true'
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Generate one witness set per (precision, mode)
+        if: steps.trailer.outputs.requested == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for prec in false true; do
+            for mode in Debug ReleaseSafe; do
+              tag=$([ "$prec" = "true" ] && echo f64 || echo f32)
+              dir="out/$tag-$mode"
+              mkdir -p "$dir"
+              echo "=== $tag / $mode ==="
+              zig build forge-determinism \
+                -Doptimize=$mode -Dphysics_f64=$prec -Dcpu=${{ env.ZIG_CPU }} \
+                -- --write-witness "$dir"
+            done
+          done
+
+      # The two mode-independent witness kinds are keyed by PRECISION ALONE, which
+      # asserts that Debug and ReleaseSafe agree on them. That is a hypothesis, so
+      # it is MEASURED here rather than assumed by the file name.
+      #
+      # It is MEASURED AND REPORTED, and it does NOT fail the job. C1.1 level 1
+      # requires bit-exactness "à ISA, BUILD, configuration et nombre de workers
+      # identiques" — Debug and ReleaseSafe are two builds, so a disagreement
+      # between them does not breach level 1 and must not be dressed up as a
+      # level-1 failure. What a disagreement DOES breach is the two frozen keys,
+      # which is a design question and a STOP, not something this job may decide.
+      #
+      # This cell is also where such a disagreement is most likely, and that is
+      # measured rather than feared: `x86_64-linux` is the ONLY one of the eight
+      # (target, mode) corners the engine builds whose Debug uses Zig's SELF-HOSTED
+      # backend while its ReleaseSafe uses LLVM. Windows x86_64 and both aarch64
+      # targets are LLVM in both modes. So this comparison is the only one in the
+      # matrix that puts two independent instruction selections against each other.
+      - name: Measure the cross-mode agreement and assemble the set
+        if: steps.trailer.outputs.requested == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p witnesses
+          agree=true
+          for tag in f32 f64; do
+            for kind in discrete reference-window; do
+              a="out/$tag-Debug/$kind-$tag.bin"
+              b="out/$tag-ReleaseSafe/$kind-$tag.bin"
+              if cmp -s "$a" "$b"; then
+                echo "$kind-$tag.bin: Debug == ReleaseSafe"
+              else
+                agree=false
+                echo "::warning::$kind-$tag.bin DIFFERS between Debug and ReleaseSafe."
+                echo "::warning::Its witness key carries precision only, so the two keys are wrong."
+                echo "::warning::This is a STOP and a design question, not a level-1 failure:"
+                echo "::warning::C1.1 level 1 holds at identical BUILD, and these are two builds."
+              fi
+              # The REFERENCE WINDOW is taken from ReleaseSafe, NAMED and not
+              # implicit: without naming it a later regeneration could switch mode
+              # in silence, and if the two modes ever disagree the ARM64 cell would
+              # then fold an ISA difference and a BACKEND difference into one number.
+              cp "out/$tag-ReleaseSafe/$kind-$tag.bin" "witnesses/$kind-$tag.bin"
+            done
+            for mode in Debug ReleaseSafe; do
+              cp "out/$tag-$mode/continuous-chain-$tag-$mode.bin" "witnesses/"
+            done
+          done
+          echo "cross_mode_agreement=$agree"
+          echo "--- witness set (reference window and discrete taken from ReleaseSafe) ---"
+          ls -l witnesses/
+          sha256sum witnesses/* | tee witnesses/SHA256SUMS.txt
+          {
+            echo "reason=${{ steps.trailer.outputs.reason }}"
+            echo "cell=ubuntu-24.04"
+            echo "cpu=${{ env.ZIG_CPU }}"
+            echo "zig=${{ env.ZIG_VERSION }}"
+            echo "reference_window_mode=ReleaseSafe"
+            echo "discrete_mode=ReleaseSafe"
+            echo "cross_mode_agreement=$agree"
+            echo "sha=${{ github.sha }}"
+            echo "run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > witnesses/PROVENANCE.txt
+          cat witnesses/PROVENANCE.txt
+
+      - name: Upload the witness set
+        if: steps.trailer.outputs.requested == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: determinism-witnesses
+          path: witnesses/
+          retention-days: 90
+
   # M1.0.3-followup — l'UNIQUE check required. La branch protection ne requiert
   # que ce job (Guy applique les réglages repo). Il agrège les jobs lourds :
   # vert si tous success OU skipped (PR doc-only), rouge si l'un est failure /
