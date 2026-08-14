@@ -61,20 +61,51 @@ const Hit = struct {
     symbol: []const u8,
 };
 
+/// Whether `c` can appear inside an assembler symbol name.
+fn isSymbolChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '$';
+}
+
 /// Strip the decorations a linker or an ABI puts around a symbol name, leaving
 /// the bare C identifier.
 ///
-/// Four decorations, each observed on a target the engine ships: a leading `_`
-/// (Mach-O), a leading `__imp_` (Windows import thunks), a leading `*` (an
-/// indirect operand), and a trailing `@PLT` / `@GOTPCREL` / `@plt` relocation
-/// suffix (ELF). Order matters — `*` sits outside `_`.
-fn bareSymbol(operand: []const u8) []const u8 {
-    var s = operand;
-    if (s.len > 0 and s[0] == '*') s = s[1..];
+/// Three, each observed on a target the engine ships: a leading `__imp_`
+/// (Windows import thunks), leading underscores (Mach-O prefixes exactly one,
+/// a C library's internal alias may carry two), and a trailing `@PLT` /
+/// `@GOTPCREL` / `@plt` relocation suffix (ELF). `__imp_` is removed FIRST,
+/// because stripping underscores first would eat its own prefix and leave
+/// `imp_cos`, which matches nothing.
+fn bareSymbol(token: []const u8) []const u8 {
+    var s = token;
     if (std.mem.startsWith(u8, s, "__imp_")) s = s["__imp_".len..];
-    if (s.len > 0 and s[0] == '_') s = s[1..];
+    while (s.len > 0 and s[0] == '_') s = s[1..];
     if (std.mem.indexOfScalar(u8, s, '@')) |at| s = s[0..at];
     return s;
+}
+
+/// Whether an operand names a forbidden function, in any addressing form.
+///
+/// The operand is TOKENISED and every token tested, rather than the operand
+/// being treated as one symbol. A direct call is `call cosf@PLT`, but the same
+/// call under `-fno-plt` is `call qword ptr [rip + cosf@GOTPCREL]` and on
+/// AArch64 a far call goes through `adrp`/`ldr` into `blr xN`. Reading the
+/// operand as a single name serves the first shape and silently misses the
+/// second — a false negative on exactly the build flags a distribution is most
+/// likely to add. Tokenising costs nothing in false positives, since matching
+/// is exact against thirteen names and no register, size keyword or address
+/// arithmetic spells one of them.
+fn operandNamesForbidden(operand: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < operand.len) {
+        if (!isSymbolChar(operand[i])) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        while (i < operand.len and (isSymbolChar(operand[i]) or operand[i] == '@')) i += 1;
+        if (matchesForbidden(bareSymbol(operand[start..i]))) |name| return name;
+    }
+    return null;
 }
 
 /// Whether `symbol` is one of the forbidden functions, in any of the spellings
@@ -132,16 +163,18 @@ fn scan(
         if (!is_call) continue;
         examined += 1;
 
-        // Operand: the rest of the line up to a comment or a comma.
+        // Operand: the rest of the line up to a comment. The comma is NOT a
+        // terminator — `call qword ptr [rip + sym]` has none and an AArch64
+        // `blr` operand may be a register list — so the whole operand is
+        // tokenised instead (see `operandNamesForbidden`).
         var operand = std.mem.trim(u8, line[mnemonic_end..], " \t");
-        if (std.mem.indexOfScalar(u8, operand, ',')) |c| operand = operand[0..c];
         for ([_][]const u8{ "//", "#", ";" }) |marker| {
             if (std.mem.indexOf(u8, operand, marker)) |c| operand = operand[0..c];
         }
         operand = std.mem.trim(u8, operand, " \t");
         if (operand.len == 0) continue;
 
-        if (matchesForbidden(bareSymbol(operand))) |name| {
+        if (operandNamesForbidden(operand)) |name| {
             try out.append(gpa, .{
                 .file = file,
                 .line_no = line_no,
@@ -243,6 +276,13 @@ test "asm_inventory: flags a transcendental call in every spelling that ships" {
         "\tjmp\tpowf@PLT",
         "\tb\texp",
         "\tcall\t*hypot@GOTPCREL(%rip)",
+        // Indirect forms. `-fno-plt` turns a direct call into a load through
+        // the GOT, and reading the operand as ONE symbol misses every one of
+        // these — a false negative on the build flags a distribution is most
+        // likely to add.
+        "\tcall\tqword ptr [rip + cosf@GOTPCREL]",
+        "\tcallq\t*sin@GOTPCREL(%rip)",
+        "\tbl\t__sinf", // a C library's internal alias carries two underscores
         "\tcallq\tfmodl",
         "\tbl\tcbrt",
         "\tcall\tlogf",
@@ -271,6 +311,11 @@ test "asm_inventory: does not flag a name that merely contains a forbidden one" 
         "\tcall\t__zig_probe_stack",
         "\tbl\tmemcpy",
         "\tcall\tsqrt", // ARCH-031 rule 4 exempts @sqrt explicitly
+        // Tokenising the operand must not turn address arithmetic into a
+        // symbol: registers, size keywords and offsets are all tokens too.
+        "\tcall\tqword ptr [rip + memcpy@GOTPCREL]",
+        "\tblr\tx16",
+        "\tcall\tqword ptr [rbx + 8]",
     };
     for (cases) |c| {
         const r = try scanText(c);
