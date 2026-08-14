@@ -327,6 +327,37 @@ pub fn build(b: *std.Build) void {
     const forge_3d_test_step = b.step("test-forge-3d", "Run only the forge_3d solver tests");
     forge_3d_test_step.dependOn(&forge_3d_tests_run.step);
 
+    // M1.1.14 — `zig build forge-determinism`: the determinism instrument, run
+    // at ONE worker over the canonical scenario. The step is deliberately an
+    // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a test:
+    // M1.1.25 replays it at N workers and M1.A on a rebuilt scheduler DAG, and a
+    // harness whose logic lived in its `main` would have to be re-entered through
+    // a process to be replayed. Its self-reproducibility and its artifact
+    // liveness are ALSO asserted inside `zig build test`, where the same library
+    // is exercised by `forge_3d`'s own suite.
+    //
+    // Its module carries the same imports as `forge_3d` itself because its root
+    // reaches the solver by relative path, exactly as the acceptance suite does.
+    const forge_determinism_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/forge_3d/determinism_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_determinism_module.addImport("foundation", foundation_module);
+    forge_determinism_module.addImport("weld_forge", forge_api_module);
+    forge_determinism_module.addOptions("build_options", forge_build_options);
+    const forge_determinism_exe = b.addExecutable(.{
+        .name = "forge-determinism",
+        .root_module = forge_determinism_module,
+    });
+    const forge_determinism_run = b.addRunArtifact(forge_determinism_exe);
+    if (b.args) |args| forge_determinism_run.addArgs(args);
+    const forge_determinism_step = b.step(
+        "forge-determinism",
+        "Run the canonical determinism scenario at one worker (M1.1.14)",
+    );
+    forge_determinism_step.dependOn(&forge_determinism_run.step);
+
     // M1.1.14 — `zig build forge-asm-inventory`: the conformance test of
     // `ARCH-031` rule 4, read in the EMITTED ASSEMBLY rather than in the source.
     // `forge_3d` is compiled to assembly for the three targets the engine ships

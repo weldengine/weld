@@ -352,4 +352,6 @@ comptime {
     _ = @import("tests/sensor_test.zig");
     // M1.1.14 — the determinism instrument: canonical scenario + artifacts.
     _ = @import("tests/determinism/scenario.zig");
+    _ = @import("tests/determinism/trace.zig");
+    _ = @import("tests/determinism/run.zig");
 }
