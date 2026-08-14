@@ -225,8 +225,74 @@ pub fn deviationExceeded(s: *const Scenario, reference: []const u8) bool {
         const dq_quat = q.mul(q_ref.conjugate());
         const dq = @sqrt(dq_quat.x * dq_quat.x + dq_quat.y * dq_quat.y + dq_quat.z * dq_quat.z);
 
-        const deviation = @sqrt(dx) + 2 * r * dq;
-        if (@as(f64, deviation) > divergence_factor * @as(f64, r)) return true;
+        if (bodyExceeds(@sqrt(dx), dq, r)) return true;
     }
     return false;
+}
+
+/// Whether ONE body's deviation exceeds its own threshold.
+///
+/// Extracted so the SHAPE OF THE THRESHOLD is testable in isolation, and that is
+/// not tidiness. C1.1 says `1e-4 × body scale`, so the comparison is PER BODY
+/// against that body's own `r`. An absolute threshold would pass on the
+/// canonical scenario — its twelve mobile bodies are all of comparable size —
+/// and would break silently the day a body of another scale entered the scene.
+/// That is the "assertion valid only through a tacit property of its fixture"
+/// class the brief names, and it becomes undetectable once a witness is
+/// committed over the scene that hides it. Hence the two-scale test below, which
+/// an absolute form cannot pass.
+///
+/// `translation` is `‖Δx‖`, `rotation_chord` is `‖vec(Δq)‖`, `r` the body's
+/// `sleep_radius`.
+pub fn bodyExceeds(translation: Real, rotation_chord: Real, r: Real) bool {
+    const deviation = translation + 2 * r * rotation_chord;
+    return @as(f64, deviation) > divergence_factor * @as(f64, r);
+}
+
+// --- Tests -------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "the divergence threshold scales WITH the body, not against a constant" {
+    // THE DISCRIMINATING TEST, and the one an absolute threshold cannot pass.
+    //
+    // Two bodies three orders of magnitude apart in scale, each given a
+    // translation of exactly half its own threshold and then of twice it. A
+    // per-body form answers `false` then `true` for BOTH. Any absolute
+    // threshold — whatever constant it picks — necessarily answers the same for
+    // the two rows of one of the two columns, because the same displacement is
+    // above the constant for one body and below it for the other.
+    const small: Real = 0.01; // a 1 cm body
+    const large: Real = 10.0; // a 10 m body
+
+    for ([_]Real{ small, large }) |r| {
+        const threshold: Real = @floatCast(divergence_factor * @as(f64, r));
+        try testing.expect(!bodyExceeds(threshold * 0.5, 0, r));
+        try testing.expect(bodyExceeds(threshold * 2.0, 0, r));
+    }
+
+    // And the cross-check that names the failure mode explicitly: the LARGE
+    // body's half-threshold displacement is far ABOVE the small body's whole
+    // threshold. A shared constant sized for either one misclassifies the other,
+    // and this line is what makes that arithmetic visible rather than implied.
+    const large_half: Real = @floatCast(divergence_factor * @as(f64, large) * 0.5);
+    try testing.expect(@as(f64, large_half) > divergence_factor * @as(f64, small));
+    try testing.expect(!bodyExceeds(large_half, 0, large));
+    try testing.expect(bodyExceeds(large_half, 0, small));
+}
+
+test "the rotation term is weighted by the body radius" {
+    // The second half of "weighting translation and rotation by the body radius".
+    // With zero translation, the same angular chord must clear the threshold for
+    // a body of any radius — the `2·r` numerator and the `1e-4·r` denominator
+    // cancel — so the predicate is a pure comparison of the chord against
+    // `1e-4/2`. Pinned because dropping the `r` from EITHER side would leave the
+    // translation tests above green while silently changing the rotation
+    // criterion by three orders of magnitude between the two bodies.
+    const chord_below: Real = @floatCast(divergence_factor / 2 * 0.5);
+    const chord_above: Real = @floatCast(divergence_factor / 2 * 2);
+    for ([_]Real{ 0.01, 1.0, 10.0 }) |r| {
+        try testing.expect(!bodyExceeds(0, chord_below, r));
+        try testing.expect(bodyExceeds(0, chord_above, r));
+    }
 }
