@@ -7,8 +7,8 @@
 //! its entry point would repair its own thread and leave every other consumer
 //! of that thread — the renderer, the animation sampler, a plugin — running on
 //! the state it just silently fixed, with no diagnostic anywhere. Installing is
-//! the platform layer's job and happens once per thread, at creation
-//! (`core/platform/float_env.zig`).
+//! Tier 0's job and happens once per thread, at creation
+//! (`foundation/math/float_env.zig`, which names its three call sites).
 //!
 //! **Where the entry point is, today and tomorrow.** There is no
 //! `PhysicsWorld.step()` yet — the orchestration lands at M1.1.15. What exists
@@ -24,7 +24,7 @@
 //! tool, a future plugin host — is exactly the case this reports.
 
 const std = @import("std");
-const float_env = @import("foundation").float_env;
+const float_env = @import("foundation").math.float_env;
 
 /// The float-environment state of the calling thread, when it is NOT the state
 /// the engine requires; `null` when the caller may proceed.
@@ -34,7 +34,7 @@ const float_env = @import("foundation").float_env;
 /// is not the engine's" is not an actionable message. On a target with no
 /// readable control register the answer is `null` — the question is not
 /// answerable there and a module entry point must not refuse to run because a
-/// port has no `MXCSR` (`foundation/float_env.zig`, `controllable`).
+/// port has no `MXCSR` (`foundation/math/float_env.zig`, `controllable`).
 pub fn checkFloatEnvironment() ?float_env.State {
     const state = float_env.read() orelse return null;
     if (state.eql(float_env.engine_default)) return null;
@@ -62,17 +62,13 @@ test "determinism: the entry-point check passes on an engine thread" {
     assertFloatEnvironment();
 }
 
-test "determinism: a perturbed float state is DETECTED and NOT repaired" {
-    // The two halves of the contract, in one test, because they are one
-    // decision: the check must SEE the perturbation, and must LEAVE it in
-    // place. A check that quietly re-installed would satisfy the first half and
-    // destroy the reason the second exists.
+test "determinism: a perturbed float state is DETECTED" {
     if (!float_env.controllable) return error.SkipZigTest;
 
     // Perturbed through the OWNER's own writer, never by reaching for the
     // control register here: this test is about `forge_3d`'s reaction, and a
     // second copy of the register layout in a third file is exactly the drift
-    // `foundation/float_env.zig` is written to prevent.
+    // `foundation/math/float_env.zig` is written to prevent.
     const saved = float_env.save();
     defer float_env.restore(saved);
     float_env.installState(.{
@@ -84,15 +80,31 @@ test "determinism: a perturbed float state is DETECTED and NOT repaired" {
     const observed = checkFloatEnvironment();
     try testing.expect(observed != null);
     try testing.expectEqual(float_env.Rounding.toward_zero, observed.?.rounding);
+}
 
-    // NOT repaired: a second read still finds the perturbation. This is the
-    // assertion that would fail the day someone "helpfully" makes the entry
-    // point self-healing.
+test "determinism: a perturbed float state is NOT repaired by the check" {
+    // Separate block, and the separation is the point: detection and
+    // non-repair are two claims, and a check that quietly re-installed would
+    // satisfy the first while destroying the reason the second exists. Folded
+    // together, the verdict would not say which half broke.
+    if (!float_env.controllable) return error.SkipZigTest;
+
+    const saved = float_env.save();
+    defer float_env.restore(saved);
+    float_env.installState(.{
+        .rounding = .toward_zero,
+        .flush_to_zero = false,
+        .denormals_are_zero = false,
+    });
+
+    // Read it three times. A self-healing check would repair on the first and
+    // report clean on the second.
+    try testing.expect(checkFloatEnvironment() != null);
     try testing.expect(checkFloatEnvironment() != null);
     try testing.expectEqual(float_env.Rounding.toward_zero, checkFloatEnvironment().?.rounding);
 
-    // And the platform layer's installer is what puts it back — the division of
-    // labour stated in the file header, exercised rather than described.
+    // And Tier 0's installer is what puts it back — the division of labour
+    // stated in the file header, exercised rather than described.
     float_env.install();
     try testing.expectEqual(@as(?float_env.State, null), checkFloatEnvironment());
 }

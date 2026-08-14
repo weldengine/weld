@@ -63,6 +63,18 @@ pub const Aabb = aabb.Aabb;
 /// f32 axis-aligned bounding box.
 pub const Aabbf = aabb.Aabbf;
 
+/// The floating-point EXECUTION state (`ARCH-031` rule 5) — rounding mode and
+/// denormal handling of the calling thread. Installed by Tier 0 at thread
+/// creation and at process entry, ASSERTED by every module whose output is
+/// compared.
+///
+/// It lives under `math/` rather than beside it because `engine-phase-1-criteria.md`
+/// C1.1 binds `forge_3d` to a whitelist of two dependencies — `foundation/math/`
+/// and `forge/api/` — and `forge_3d` is the module that has to assert. There is
+/// no facade in `core/platform/`: the tier rule is documented at the definition,
+/// not re-exported across the boundary. Added M1.1.14.
+pub const float_env = @import("float_env.zig");
+
 /// DETERMINISTIC cosine — no libm call, fixed operation order (`ARCH-031`
 /// rule 4). NOT a wrapper around `@cos`: `@cos` lowers to an external `cosf` /
 /// `cos` on every target the engine ships, and two C libraries disagree by an
@@ -80,4 +92,5 @@ comptime {
     _ = mat3;
     _ = aabb;
     _ = trig;
+    _ = float_env;
 }

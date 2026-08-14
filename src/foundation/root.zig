@@ -11,19 +11,7 @@ pub const math = @import("math/math.zig");
 /// Batched-SIMD kernels (adler32 in M0.6; audio mix, skinning, … later).
 pub const simd = @import("simd/simd.zig");
 
-/// The floating-point EXECUTION state (`ARCH-031` rule 5) — rounding mode and
-/// denormal handling of the calling thread. Installed by the platform layer at
-/// thread creation, ASSERTED by every module whose output is compared.
-///
-/// It sits in `foundation` rather than under `core/platform/` because the two
-/// halves have different owners and only one mechanism: the module that has to
-/// assert is `forge_3d`, which may not import `weld_core` (a C1.1 exit metric).
-/// `core/platform/float_env.zig` is the platform layer's facade over this file
-/// and holds no second copy of the register layout. Added M1.1.14.
-pub const float_env = @import("float_env.zig");
-
 comptime {
     _ = math;
     _ = simd;
-    _ = float_env;
 }

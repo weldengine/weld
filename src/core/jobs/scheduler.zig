@@ -39,8 +39,9 @@ const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
 // M1.1.14 — the engine float environment, installed at the head of every worker
-// thread (`ARCH-031` rule 5). See `../platform/float_env.zig` for the tier rule.
-const float_env = @import("../platform/float_env.zig");
+// thread (`ARCH-031` rule 5). Imported from its single definition rather than
+// through a Tier 0 facade; the tier rule lives at that definition.
+const float_env = @import("foundation").math.float_env;
 
 const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;

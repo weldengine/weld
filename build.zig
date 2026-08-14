@@ -816,6 +816,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_module.addImport("weld_core", core_module);
+    // M1.1.14 — the main thread installs the engine float environment
+    // (`ARCH-031` rule 5) from its single definition under `foundation/math/`.
+    runtime_module.addImport("foundation", foundation_module);
     const runtime_exe = b.addExecutable(.{
         .name = "weld-runtime",
         .root_module = runtime_module,
@@ -837,6 +840,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     editor_module.addImport("weld_core", core_module);
+    // M1.1.14 — same as the runtime: the main thread is not born of a spawn.
+    editor_module.addImport("foundation", foundation_module);
     // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
     // shared `shaders` facade — the same module the S2 spike uses.
     editor_module.addImport("shaders", shaders_module);

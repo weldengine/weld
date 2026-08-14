@@ -1,4 +1,4 @@
-//! `foundation/float_env.zig` — the engine's floating-point EXECUTION state.
+//! `foundation/math/float_env.zig` — the engine's floating-point EXECUTION state.
 //!
 //! `ARCH-031` rule 5: round-to-nearest-even, denormals PRESERVED — so FTZ and
 //! DAZ off — on **every engine thread**. Not a performance preference. A thread
@@ -9,27 +9,38 @@
 //! the linked C runtime, and on what a graphics driver may have changed inside
 //! the process — so it is **installed**, never assumed.
 //!
-//! **Why this file is in `foundation/` and not in `core/platform/`, which owns
-//! the installation.** The two halves of the contract have different owners and
-//! only one shared mechanism:
+//! **Two verbs, two owners, one definition — and that is what fixes the file's
+//! address.** The contract of `ARCH-031` rule 5 has halves that must not be
+//! confused:
 //!
-//! - **Installing** belongs to the platform layer (`engine-platform.md` §4 —
-//!   *Threading*): a module that installed it would leave divergent every
-//!   thread it did not create, and the main thread is one of those.
+//! - **Installing** belongs to Tier 0 (`engine-platform.md` §4 — *Threading*):
+//!   at thread creation for the threads the job system spawns, and at process
+//!   entry for the main thread, which is not born of a spawn. A module that
+//!   installed it would leave divergent every thread it did not create.
 //! - **Asserting** belongs to every module whose output is compared, at its own
 //!   entry point. A local re-install would MASK the defect instead of reporting
 //!   it, and leave the divergence standing for every other consumer.
 //!
-//! `forge_3d` is such a module and it must not import `weld_core` — depending
-//! only on `foundation/math/` and `forge/api/` is a C1.1 exit metric
-//! (`engine-phase-1-criteria.md`). So the reader has to be reachable from
-//! `foundation`. Putting only the reader here and the writer in `core/platform/`
-//! would split one register layout across two files, which is the drift shape
-//! this repository has already paid for once (`contactMargin`, duplicated in
-//! `fast_paths.zig` while both copies were private). One owner, two callers.
+//! `forge_3d` is such a module, and `engine-phase-1-criteria.md` C1.1 binds its
+//! dependencies to a WHITELIST OF TWO, verbatim: "Dépend uniquement de
+//! `src/foundation/math/` et des composants ECS publics de
+//! `src/modules/forge/api/`". Not "anything but `weld_core`" — two entries. So
+//! the definition lives under `foundation/math/`, which is one of the two, and
+//! `forge_3d` gains no third dependency by asserting.
 //!
-//! `core/platform/float_env.zig` is the platform layer's facade over this file
-//! and carries the tier rule; it holds no second copy of the layout.
+//! There is deliberately NO facade in `core/platform/`. Tier 0 imports this file
+//! directly — the downward direction, acyclic, `foundation` importing nothing
+//! but `std`. A file whose only content is a re-export across a tier boundary
+//! adds a name without adding a definition, and splitting the reader from the
+//! writer would put ONE register layout in two places: the drift shape this
+//! repository has already paid for once (`contactMargin`, duplicated in
+//! `fast_paths.zig` while both copies were private). One definition, three
+//! callers.
+//!
+//! `ARCH-031`'s own *Sources de vérité* line splits the same way, which is the
+//! corroboration rather than the argument: `engine-coordinate-system.md` §2 —
+//! the owner of `foundation/math/` — for execution semantics, and
+//! `engine-platform.md` for the FPU state and the CI pinning.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -298,10 +309,19 @@ pub fn installState(state: State) void {
 
 /// Install `engine_default` on the CALLING thread.
 ///
-/// **Called by the platform layer only** — at process init for the main thread
-/// and at every engine thread spawn (`ARCH-031` rule 5). A module that calls it
-/// is masking a defect rather than reporting one; `core/platform/float_env.zig`
-/// carries that rule where the callers can see it.
+/// **Called by Tier 0 only** (`ARCH-031` rule 5), at exactly three sites, and a
+/// fourth one inside a module is a defect rather than an extension:
+///
+/// 1. `core/jobs/scheduler.zig`, at the head of `workerMain` — thread creation
+///    by the job system, the site the invariant names by role;
+/// 2. `runtime/main.zig`, first statement — the runtime's main thread;
+/// 3. `editor/main.zig`, first statement — the editor's main thread.
+///
+/// The main thread needs its own two sites because it is not born of a spawn,
+/// and `core/platform/threading.zig` — FROZEN at C0.5 — propagates `std.Thread`
+/// as-is rather than wrapping it, so the engine has no single `spawn_thread` of
+/// its own to hook. When a platform-layer `init()` lands, sites 2 and 3 move
+/// into it and nothing else changes.
 ///
 /// Idempotent.
 pub fn install() void {
@@ -378,68 +398,74 @@ test "float_env: installState round-trips every state read can report" {
     try testing.expect(read().?.eql(engine_default));
 }
 
-test "float_env: read observes a perturbed state, and install restores it" {
-    // The DISCRIMINATION guard for every other test in this file and for the
-    // physics entry-point assertion: without a probe that actually moves the
-    // register, `isEngineDefault` returning true would be satisfied by a reader
-    // that always returns `engine_default` (workflow §5.5 — an oracle is
-    // confronted with a change of the OBJECT). Each perturbation is asserted to
-    // be OBSERVED, not merely applied.
+test "float_env: read observes a perturbed ROUNDING MODE" {
+    // The discrimination guard the two tests above depend on: without a probe
+    // that actually moves the register, `isEngineDefault` returning true would
+    // be satisfied by a reader that always answers `engine_default`
+    // (`engine-development-workflow.md` §5.5 — an oracle is confronted with a
+    // change of the OBJECT). One field per block: this one owns the rounding
+    // decode, and it is the field whose ENCODING differs between the two
+    // architectures, so a decode table copied from one to the other fails here.
     if (!controllable) return error.SkipZigTest;
 
-    switch (builtin.cpu.arch) {
-        .x86_64 => {
-            const saved = readMxcsr();
-            defer writeMxcsr(saved);
+    const saved = save();
+    defer restore(saved);
 
-            // Round toward zero.
-            writeMxcsr((saved & ~mxcsr_rc_mask) | (0b11 << mxcsr_rc_shift));
-            try testing.expectEqual(Rounding.toward_zero, read().?.rounding);
-            try testing.expect(!isEngineDefault());
+    installState(.{ .rounding = .toward_zero, .flush_to_zero = false, .denormals_are_zero = false });
+    try testing.expectEqual(Rounding.toward_zero, read().?.rounding);
+    try testing.expect(!isEngineDefault());
 
-            // Flush-to-zero on, rounding back to nearest.
-            writeMxcsr((saved & ~mxcsr_rc_mask) | mxcsr_ftz_bit);
-            try testing.expectEqual(Rounding.nearest_even, read().?.rounding);
-            try testing.expect(read().?.flush_to_zero);
-            try testing.expect(!isEngineDefault());
+    installState(.{ .rounding = .toward_positive, .flush_to_zero = false, .denormals_are_zero = false });
+    try testing.expectEqual(Rounding.toward_positive, read().?.rounding);
+    try testing.expect(!isEngineDefault());
+}
 
-            // Denormals-are-zero alone — the x86-only state the two-field
-            // `State` exists to keep representable.
-            writeMxcsr((saved & ~(mxcsr_rc_mask | mxcsr_ftz_bit)) | mxcsr_daz_bit);
-            try testing.expect(read().?.denormals_are_zero);
-            try testing.expect(!read().?.flush_to_zero);
-            try testing.expect(!isEngineDefault());
+test "float_env: read observes a perturbed FLUSH-TO-ZERO" {
+    // Second field, second block. Folded into the rounding test, an
+    // implementation that compared only the rounding mode would still pass on
+    // its other rows and the verdict would name the wrong field.
+    if (!controllable) return error.SkipZigTest;
 
-            install();
-            try testing.expect(isEngineDefault());
-        },
-        .aarch64, .aarch64_be => {
-            const saved = readFpcr();
-            defer writeFpcr(saved);
+    const saved = save();
+    defer restore(saved);
 
-            // Round toward zero.
-            writeFpcr((saved & ~fpcr_rmode_mask) | (0b11 << fpcr_rmode_shift));
-            try testing.expectEqual(Rounding.toward_zero, read().?.rounding);
-            try testing.expect(!isEngineDefault());
+    installState(.{ .rounding = .nearest_even, .flush_to_zero = true, .denormals_are_zero = true });
+    try testing.expectEqual(Rounding.nearest_even, read().?.rounding);
+    try testing.expect(read().?.flush_to_zero);
+    try testing.expect(!isEngineDefault());
+}
 
-            // Round toward +∞ — the encoding that x86 spells `toward_negative`.
-            // Pinned on both architectures so a copy-pasted decode table is a
-            // failing test rather than a silent misreport.
-            writeFpcr((saved & ~fpcr_rmode_mask) | (0b01 << fpcr_rmode_shift));
-            try testing.expectEqual(Rounding.toward_positive, read().?.rounding);
+test "float_env: x86_64 keeps DAZ and FTZ representable apart" {
+    // The x86-only state that is the whole reason `State` carries two fields
+    // where AArch64 has one bit. A third-party driver really does leave this
+    // behind, and collapsing the two would make it unrepresentable — so the
+    // claim is asserted on the architecture that has it rather than described
+    // in a comment on the architecture that does not.
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
 
-            // Flush-to-zero, reported under both names on this ISA.
-            writeFpcr((saved & ~fpcr_rmode_mask) | fpcr_fz_bit);
-            try testing.expectEqual(Rounding.nearest_even, read().?.rounding);
-            try testing.expect(read().?.flush_to_zero);
-            try testing.expect(read().?.denormals_are_zero);
-            try testing.expect(!isEngineDefault());
+    const saved = save();
+    defer restore(saved);
 
-            install();
-            try testing.expect(isEngineDefault());
-        },
-        else => unreachable,
-    }
+    installState(.{ .rounding = .nearest_even, .flush_to_zero = false, .denormals_are_zero = true });
+    try testing.expect(read().?.denormals_are_zero);
+    try testing.expect(!read().?.flush_to_zero);
+    try testing.expect(!isEngineDefault());
+}
+
+test "float_env: install repairs any perturbation it is handed" {
+    // The restore half, separated because it is a claim about the WRITER while
+    // the three blocks above are claims about the READER. A `save`/`restore`
+    // pair that worked while `install` did not would leave every one of them
+    // green.
+    if (!controllable) return error.SkipZigTest;
+
+    const saved = save();
+    defer restore(saved);
+
+    installState(.{ .rounding = .toward_zero, .flush_to_zero = true, .denormals_are_zero = true });
+    try testing.expect(!isEngineDefault());
+    install();
+    try testing.expect(isEngineDefault());
 }
 
 /// The smallest normal `f64` halved — a DENORMAL — computed so that no

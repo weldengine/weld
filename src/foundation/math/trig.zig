@@ -35,7 +35,7 @@
 //!    which computes round-to-nearest-even only BECAUSE the FPU is in that
 //!    mode. Under round-toward-zero the same expression returns the truncation
 //!    and this function silently returns a different number. That is not a
-//!    weakness of the trick — it is the reason `foundation/float_env.zig`
+//!    weakness of the trick — it is the reason `foundation/math/float_env.zig`
 //!    installs the mode at thread creation and every deterministic module
 //!    asserts it at its entry point (`ARCH-031` rule 5). The two deliverables
 //!    of this milestone hold each other up.
@@ -114,9 +114,8 @@ const c6: f64 = -1.13596475577881948265e-11;
 ///
 /// The leading `r` is kept OUT of the polynomial rather than folded into it:
 /// for a small `r` — a denormal included — `z` underflows to zero, the whole
-/// correction vanishes exactly, and the function returns `r` itself, which is
-/// the correctly rounded answer. A fit that produced `r` from the polynomial
-/// would round it.
+/// correction vanishes exactly, and the function returns `r` itself. A fit that
+/// produced `r` from the polynomial would round it instead.
 fn kernelSin(r: f64) f64 {
     const z = r * r;
     const p = s1 + z * (s2 + z * (s3 + z * (s4 + z * (s5 + z * s6))));
@@ -187,18 +186,24 @@ pub fn cos(comptime T: type, x: T) T {
 
 const testing = std.testing;
 
-test "cos: exact at the values that must be exact" {
-    // `cos(0) = 1` exactly, at both precisions, and by the shortest path
-    // through the code: `nf = 0`, so the three reduction terms are exact zeros
-    // and `r` is `0`.
+test "cos: cos(0) is exactly one, at both scalars" {
+    // The shortest path through the code: `nf = 0`, so the three reduction
+    // terms are exact zeros and `r` is `0`. Its own block because it is a
+    // different claim from evenness below — a reduction that broke at zero and
+    // a sign fold that broke are two defects, and one verdict for both would
+    // name neither.
     try testing.expectEqual(@as(f64, 1.0), cos(f64, 0.0));
     try testing.expectEqual(@as(f32, 1.0), cos(f32, 0.0));
+}
 
-    // Evenness is EXACT, not approximate: the sign is folded by `@abs` before
-    // any arithmetic runs, so the two calls execute bit-identical instructions.
-    // A fit that carried the sign through the polynomial would not give this.
+test "cos: evenness is EXACT, not approximate" {
+    // The sign is folded by `@abs` before any arithmetic runs, so the two calls
+    // execute bit-identical instructions. A fit that carried the sign through
+    // the polynomial would not give this, and the assertion is equality rather
+    // than a tolerance for exactly that reason.
     const probes = [_]f64{ 0.3, 1.0, 2.0, 3.5, 100.25 };
     for (probes) |p| {
+        errdefer std.debug.print("cos: evenness failed at x = {d}\n", .{p});
         try testing.expectEqual(cos(f64, p), cos(f64, -p));
         try testing.expectEqual(cos(f32, @floatCast(p)), cos(f32, @floatCast(-p)));
     }
@@ -206,10 +211,11 @@ test "cos: exact at the values that must be exact" {
 
 test "cos: a denormal argument returns exactly one" {
     // The smallest positive `f64`. `z = r²` underflows to zero, the correction
-    // vanishes EXACTLY, and `1 − (0 − 0)` is `1`. This is the correctly rounded
-    // answer — `cos(5e-324)` differs from 1 by ~1e-647 — and it is the case
-    // that would break first if the denormal were flushed to zero somewhere
-    // upstream, which is why the float environment is a sibling deliverable.
+    // vanishes EXACTLY, and `1 − (0 − 0)` is `1`. The true cosine of `5e-324`
+    // differs from 1 by ~1e-647, far below the spacing of `f64` at 1, so `1` is
+    // the nearest representable value. This is also the case that would break
+    // first if the denormal were flushed to zero somewhere upstream, which is
+    // why the float environment is a sibling deliverable.
     try testing.expectEqual(@as(f64, 1.0), cos(f64, std.math.floatTrueMin(f64)));
     try testing.expectEqual(@as(f32, 1.0), cos(f32, std.math.floatTrueMin(f32)));
 }
@@ -237,13 +243,23 @@ test "cos: accuracy against the builtin, inside the declared domain" {
         if (err > worst) worst = err;
     }
     // Absolute error, which for a function bounded by 1 is the meaningful
-    // grain. MEASURED on this sweep: `1.110e-16`, i.e. exactly half an ULP of
-    // unity — the function is correctly rounded here. The bound is set at 4 ULP
-    // rather than at the measurement: `@cos` is the oracle, and its OWN answer
-    // moves by about an ULP between C libraries, so a bound at the measured
-    // value would fail on a platform where the oracle drifted and the function
-    // did not. Four ULP absorbs the oracle and still catches any real
-    // degradation, which starts an order of magnitude higher.
+    // grain. MEASURED on this sweep: `1.110e-16`, half the spacing of `f64` at
+    // unity.
+    //
+    // That is a measured maximum and NOT a claim of correct rounding, which it
+    // could not establish: the image of `cos` crosses zero, and near a zero the
+    // correctly rounded result demands an absolute error orders of magnitude
+    // below this one. The far-domain test below measures ~9.6 ULP on the same
+    // function, which would contradict such a claim outright. And accuracy is
+    // not the contract here — BINARY IDENTITY BETWEEN PLATFORMS is, and its
+    // oracle is the committed value table, compared bit for bit. At 1e-15 on a
+    // slope threshold this function is a dozen orders past what its one caller
+    // needs.
+    //
+    // The bound is set at 4 ULP rather than at the measurement because `@cos`
+    // is the oracle and its OWN answer moves by about an ULP between C
+    // libraries: a bound at the measured value would fail on a platform where
+    // the oracle drifted and the function did not.
     try testing.expect(worst < 8.9e-16);
 }
 
@@ -298,6 +314,7 @@ test "cos: quadrant selection is right at and around every boundary" {
         .{ .x = 3.5 * half_pi, .want = 0.7071067811865474 },
     };
     for (cases) |c| {
+        errdefer std.debug.print("cos: quadrant case failed at x = {d}\n", .{c.x});
         try testing.expectApproxEqAbs(c.want, cos(f64, c.x), 1.0e-15);
     }
 }

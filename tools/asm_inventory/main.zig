@@ -17,6 +17,26 @@
 //! shell quoting, and identical behaviour on every host. The substitution is
 //! named, as the brief requires.
 //!
+//! **What this inventory does NOT establish, and it has to be said here because
+//! the next reader will assume otherwise.** `ARCH-031` rule 2 — no implicit
+//! multiply-add contraction — is exercised on ONE of the three targets, not
+//! three, and the reason is the `-Dcpu=baseline` pinning the same invariant's
+//! rule 6 requires. Measured, at baseline, on a two-line probe:
+//!
+//! - **aarch64**: `@mulAdd` emits `fmadd d0, d0, d1, d2`. `FMADD` is in the
+//!   ARMv8-A base ISA, so the backend COULD contract and does not — rule 2 is
+//!   genuinely observed there, and the zero-fused-instruction count over
+//!   `forge_3d`'s listing is a real measurement rather than a vacuous one.
+//! - **x86_64**: `@mulAdd` emits `jmp fma@PLT`. FMA3 is Haswell and later, so
+//!   baseline (SSE2) has no fusion instruction at all and rule 2 holds there by
+//!   ABSENCE OF HARDWARE rather than by respect of a contract. Structurally in
+//!   the engine's favour, and worth nothing as evidence.
+//!
+//! Note also that `fma` is not among the thirteen names below — `ARCH-031`
+//! rule 2 admits an explicit `@mulAdd` as a declared exception at its site — so
+//! this inventory would NOT flag that external call. It is not meant to: rule 2
+//! is about what the backend does silently, rule 4 about what the source calls.
+//!
 //! **What it looks for, and why that shape.** A transcendental reaches the
 //! object as a CALL to a named symbol. So the scanner reads each line, takes
 //! the first token as a mnemonic, keeps only branch-with-link and tail-call
@@ -259,49 +279,96 @@ fn scanText(text: []const u8) !struct { hits: usize, examined: usize } {
     return .{ .hits = out.items.len, .examined = examined };
 }
 
-test "asm_inventory: flags a transcendental call in every spelling that ships" {
-    // THE counter-factual. A scanner that never fires is indistinguishable from
-    // a clean tree, and this is the test that separates the two. Each line is a
-    // spelling actually emitted by one of the three targets: ELF PLT, Mach-O
-    // underscore, Windows import thunk, AArch64 branch-with-link, and a TAIL
-    // call — the shape an optimised leaf takes and the one a `call`-only
-    // inventory would miss.
-    const cases = [_][]const u8{
+/// Assert that every line in `cases` is flagged exactly once, NAMING the case
+/// that failed. A loop under a bare `expectEqual` reports "expected 1, found 0"
+/// and leaves the reader to find which of a dozen strings stopped matching.
+fn expectAllFlagged(cases: []const []const u8) !void {
+    for (cases) |c| {
+        const r = try scanText(c);
+        if (r.hits != 1) {
+            std.debug.print("asm_inventory: case should have been flagged: {s}\n", .{c});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// The mirror: assert that no line in `cases` is flagged, naming the offender.
+fn expectNoneFlagged(cases: []const []const u8) !void {
+    for (cases) |c| {
+        const r = try scanText(c);
+        if (r.hits != 0) {
+            std.debug.print("asm_inventory: case should NOT have been flagged: {s}\n", .{c});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "asm_inventory: flags a direct call, in each platform's symbol spelling" {
+    // THE counter-factual, first half. A scanner that never fires is
+    // indistinguishable from a clean tree. Each line is a spelling actually
+    // emitted by one of the three targets — the ELF PLT form, the Mach-O
+    // leading underscore, the Windows import thunk, the AArch64
+    // branch-with-link — so this block owns exactly one mechanism: resolving a
+    // direct operand to a bare C identifier.
+    try expectAllFlagged(&.{
         "\tcallq\tcosf@PLT",
         "  call  cos",
         "\tcall\t_cosf",
         "\tcall\t__imp_cos",
         "\tbl\t_sinf",
         "\tbl\tatan2",
-        "\tjmp\tpowf@PLT",
-        "\tb\texp",
-        "\tcall\t*hypot@GOTPCREL(%rip)",
-        // Indirect forms. `-fno-plt` turns a direct call into a load through
-        // the GOT, and reading the operand as ONE symbol misses every one of
-        // these — a false negative on the build flags a distribution is most
-        // likely to add.
-        "\tcall\tqword ptr [rip + cosf@GOTPCREL]",
-        "\tcallq\t*sin@GOTPCREL(%rip)",
-        "\tbl\t__sinf", // a C library's internal alias carries two underscores
         "\tcallq\tfmodl",
         "\tbl\tcbrt",
         "\tcall\tlogf",
         "\tbl\tacos",
         "\tcall\ttanf",
         "\tbl\tasin",
-    };
-    for (cases) |c| {
-        const r = try scanText(c);
-        try testing.expectEqual(@as(usize, 1), r.hits);
-    }
+    });
+}
+
+test "asm_inventory: flags a TAIL call, which an optimised leaf emits" {
+    // Its own block because it owns a DIFFERENT mechanism: the mnemonic table,
+    // not the operand parse. A leaf ending in `jmp cosf` has called `cosf` just
+    // as surely as one ending in `call cosf; ret`, and an inventory that knew
+    // only `call` would be blind to precisely the optimised shape the shipped
+    // build uses. Folded into the block above, a mnemonic table that lost `jmp`
+    // would still leave that block green on its other eleven rows.
+    try expectAllFlagged(&.{
+        "\tjmp\tpowf@PLT",
+        "\tb\texp",
+        "\tjmpq\tsin",
+        "\tbr\tcosf",
+    });
+}
+
+test "asm_inventory: flags an INDIRECT call through the GOT" {
+    // Third mechanism: tokenising the operand rather than reading it as one
+    // symbol. `-fno-plt` turns every direct call into a load through the GOT,
+    // and a scanner that reads the operand whole misses all of these — a false
+    // negative on exactly the build flag a distribution is most likely to add.
+    try expectAllFlagged(&.{
+        "\tcall\t*hypot@GOTPCREL(%rip)",
+        "\tcall\tqword ptr [rip + cosf@GOTPCREL]",
+        "\tcallq\t*sin@GOTPCREL(%rip)",
+    });
+}
+
+test "asm_inventory: flags a symbol behind more than one leading underscore" {
+    // Fourth mechanism: decoration stripping. A C library's internal alias
+    // carries two underscores where Mach-O prefixes one, so stripping exactly
+    // one would let `__sinf` through.
+    try expectAllFlagged(&.{
+        "\tbl\t__sinf",
+        "\tcall\t__cos",
+    });
 }
 
 test "asm_inventory: does not flag a name that merely contains a forbidden one" {
-    // The other half, and the reason matching is EXACT rather than by prefix.
-    // Every operand below is a real shape from a Zig listing; a prefix test
-    // flags all nine and the inventory acquires a suppression list within a
-    // week, at which point it has stopped meaning anything.
-    const cases = [_][]const u8{
+    // The reason matching is EXACT rather than by prefix. Every operand below is
+    // a real shape from a Zig listing; a prefix test flags all of them and the
+    // inventory acquires a suppression list within a week, at which point it has
+    // stopped meaning anything.
+    try expectNoneFlagged(&.{
         "\tcall\tcosine_table",
         "\tcall\texpand_buffer",
         "\tbl\tlogger_write",
@@ -311,23 +378,28 @@ test "asm_inventory: does not flag a name that merely contains a forbidden one" 
         "\tcall\t__zig_probe_stack",
         "\tbl\tmemcpy",
         "\tcall\tsqrt", // ARCH-031 rule 4 exempts @sqrt explicitly
-        // Tokenising the operand must not turn address arithmetic into a
-        // symbol: registers, size keywords and offsets are all tokens too.
+    });
+}
+
+test "asm_inventory: tokenising an operand does not invent a symbol from it" {
+    // The cost side of the indirect-call mechanism above, and its own claim:
+    // registers, size keywords and address arithmetic are tokens too, and none
+    // of them may be read as a function name. Folded into the block above, a
+    // tokeniser regression would be reported as a prefix-matching regression.
+    try expectNoneFlagged(&.{
         "\tcall\tqword ptr [rip + memcpy@GOTPCREL]",
         "\tblr\tx16",
         "\tcall\tqword ptr [rbx + 8]",
-    };
-    for (cases) |c| {
-        const r = try scanText(c);
-        try testing.expectEqual(@as(usize, 0), r.hits);
-    }
+        "\tbl\tx0",
+    });
 }
 
 test "asm_inventory: the mnemonic anchor rejects text that is not an instruction" {
-    // Lines that CONTAIN a forbidden name but do not call it. Without the
-    // anchor every one of these fires, which is what makes a whole-line
-    // substring search unusable on real listings.
-    const cases = [_][]const u8{
+    // ONE mechanism — the anchor — sampled across the line kinds a listing
+    // actually contains. Kept as a single block for that reason, with the case
+    // named on failure: these are not independent claims, they are one claim
+    // under the shapes that would break it.
+    try expectNoneFlagged(&.{
         "\t.section\t.text.cos,\"ax\",@progbits",
         "\t# call cosf here once, in 2023",
         "cosf:",
@@ -335,11 +407,7 @@ test "asm_inventory: the mnemonic anchor rejects text that is not an instruction
         "\t.type\tcos,@function",
         "\tmovsd\tcos_table(%rip), %xmm0",
         "// bl atan2 — an old comment",
-    };
-    for (cases) |c| {
-        const r = try scanText(c);
-        try testing.expectEqual(@as(usize, 0), r.hits);
-    }
+    });
 }
 
 test "asm_inventory: call sites are counted, so a silent empty listing is visible" {
