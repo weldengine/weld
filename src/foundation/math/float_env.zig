@@ -142,20 +142,58 @@ const mxcsr_ftz_bit: u32 = 1 << 15;
 const mxcsr_rc_shift: u5 = 13;
 const mxcsr_rc_mask: u32 = 0b11 << mxcsr_rc_shift;
 
+// **The two constraint spellings below are the ONLY pair that is both accepted
+// and CORRECT on the two backends Zig 0.16 uses for x86_64**, and establishing
+// that cost a red CI cell. `zig build` in Debug goes through the SELF-HOSTED
+// x86 backend; ReleaseSafe and ReleaseFast go through LLVM. They do not accept
+// the same inline-assembly surface, and — the dangerous part — they do not give
+// the same MEANING to everything they both accept. Measured, by disassembling
+// the emitted object rather than by reading exit codes:
+//
+//   - `"*m"` (the original spelling here): LLVM accepts it and emits correct
+//     code; the self-hosted backend rejects it outright. A green ReleaseSafe
+//     leg and a red Debug leg, which is exactly what CI reported.
+//   - `(%[p])` with an `"r"` pointer, and `0(%[p])`: same split — correct under
+//     LLVM, `invalid memory operand` under the self-hosted backend. So is any
+//     other explicit memory reference in the template, including `(%rsp)`.
+//   - `"m"` as an INPUT: accepted by BOTH and correct on only one. The
+//     self-hosted backend loads the VALUE (`ldmxcsr 0x8(%rsp)` after storing it
+//     there); LLVM materialises a POINTER into a slot and hands the instruction
+//     that slot, so `ldmxcsr` would configure the FPU from the low half of a
+//     stack ADDRESS. A form that compiles everywhere and is silently garbage in
+//     the shipped optimisation mode is worse than a compile error, and it is
+//     the reason these notes are here rather than in a commit message.
+//   - `"+m"`: crashes the LLVM backend (`Elementtype attribute can only be
+//     applied for indirect constraints`).
+//
+// What survives is `"=m"` as an OUTPUT, on both instructions. For `stmxcsr`
+// that is its true direction. For `ldmxcsr` it is a deliberate lie — the
+// instruction READS that memory — and the lie has exactly one consequence: the
+// optimiser is entitled to treat the slot as undefined on entry and drop the
+// store that put the value there. That is why the value is written through a
+// `*volatile u32` first: a volatile store is a language-level guarantee, not a
+// hope about an optimiser, and the disassembly confirms it survives at
+// ReleaseFast. Nothing reads `local` afterwards, so the lie costs nothing else.
+
 fn readMxcsr() u32 {
     var word: u32 = 0;
+    // Only the assembly writes `word`, which the compiler cannot see, so the
+    // `var` needs this to avoid `local variable is never mutated`.
+    _ = &word;
     asm volatile ("stmxcsr %[out]"
+        : [out] "=m" (word),
         :
-        : [out] "*m" (&word),
         : .{ .memory = true });
     return word;
 }
 
 fn writeMxcsr(word: u32) void {
-    var local = word;
+    var local: u32 = 0;
+    const slot: *volatile u32 = &local;
+    slot.* = word;
     asm volatile ("ldmxcsr %[in]"
+        : [in] "=m" (local),
         :
-        : [in] "*m" (&local),
         : .{ .memory = true });
 }
 
