@@ -1419,7 +1419,15 @@ pub const CharacterStore = struct {
             // The SINGLE trigonometric call of this module's whole life. Taken at `Real` on
             // the widened angle rather than in `f32` and widened after, so its accuracy is
             // bounded only by the angle the caller authored.
-            .cos_max_slope = @cos(@as(Real, desc.max_slope)),
+            //
+            // M1.1.14 — `math.cos`, NOT `@cos`. This is not a style change: `@cos` lowers
+            // to an external `cosf` on Linux, Windows and AArch64 alike, two C libraries
+            // disagree by an ULP, and the result here is STORED ENGINE STATE — it sits in
+            // the compared bits from frame 0 and never leaves them. It is, measured at
+            // recon, the only libm transcendental on the whole deterministic path, which is
+            // why removing it is a prerequisite of the bit-exactness contract rather than
+            // an improvement (`ARCH-031` rule 4, `engine-physics-queries.md` §1.12.5).
+            .cos_max_slope = math.cos(Real, @as(Real, desc.max_slope)),
             .padding = desc.padding,
             .predictive_contact_distance = desc.predictive_contact_distance,
             .collision_layer = desc.collision_layer,
