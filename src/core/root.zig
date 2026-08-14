@@ -55,6 +55,12 @@ pub const platform = struct {
     pub const time = @import("platform/time.zig");
     // M0.3 — setAffinity / setPriority OS-specific helpers.
     pub const threading = @import("platform/threading.zig");
+    // M1.1.14 — the platform layer's installation of the engine float
+    // environment (`ARCH-031` rule 5). Facade over `foundation.float_env`; the
+    // tier rule and the three call sites are documented there. Additive to the
+    // frozen C0.5 surface — no existing declaration changes, so
+    // `WELD_PLATFORM_PROTOCOL_VERSION` does not move.
+    pub const float_env = @import("platform/float_env.zig");
     // M0.3 — DynamicLib { open, lookup, close } over LoadLibraryW / dlopen.
     pub const dynamic_lib = @import("platform/dynamic_lib.zig");
     // M0.3 — VFS resolver (assets:// / cache:// / user://) + mmapFile.
@@ -208,6 +214,8 @@ comptime {
     _ = platform.once;
     _ = platform.time;
     _ = platform.threading;
+    // M1.1.14 — pin the float-environment facade.
+    _ = platform.float_env;
     _ = platform.dynamic_lib;
     _ = platform.fs;
     _ = platform.input.keycode;

@@ -97,6 +97,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // M1.1.14 — Tier 0 gains a `foundation` dep. `foundation` imports nothing
+    // but std, so the graph stays acyclic (`ARCH-016`) and this is the shared
+    // bottom layer depending downward, not sideways. The one consumer is
+    // `platform/float_env.zig`, the platform layer's facade over
+    // `foundation/float_env.zig`: the float environment is INSTALLED by the
+    // platform layer and ASSERTED by `forge_3d`, and `forge_3d` may not import
+    // `weld_core` (a C1.1 exit metric), so the single owner of the register
+    // layout has to be reachable from `foundation`.
+    core_module.addImport("foundation", foundation_module);
+
     const asset_pipeline_module = b.createModule(.{
         .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
         .target = target,
@@ -316,6 +326,115 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&forge_3d_tests_run.step);
     const forge_3d_test_step = b.step("test-forge-3d", "Run only the forge_3d solver tests");
     forge_3d_test_step.dependOn(&forge_3d_tests_run.step);
+
+    // M1.1.14 — `zig build forge-asm-inventory`: the conformance test of
+    // `ARCH-031` rule 4, read in the EMITTED ASSEMBLY rather than in the source.
+    // `forge_3d` is compiled to assembly for the three targets the engine ships
+    // and every call site is inspected for a libm transcendental.
+    //
+    // The scanner is `tools/asm_inventory/` — a Zig program, not `grep`. Named
+    // substitution: the check has to anchor on the instruction mnemonic at line
+    // start, and the natural `\b` for that is a GNU extension that silently
+    // matches NOTHING on BSD grep. A scanner removes the class instead of
+    // dodging one instance of it, and it carries its own counter-factuals.
+    //
+    // A DEDICATED step and NOT part of `zig build test`: three cross-compiles
+    // of the whole physics module are minutes of work, `test` runs twice on
+    // every `git push` through the pre-push hook, and the answer is a property
+    // of the three TARGETS — it does not vary with the host that asks. So CI
+    // invokes it on one cell, exactly as it already does for
+    // `verify-synth-100`. The scanner's own tests are in `zig build test`.
+    const asm_inventory_module = b.createModule(.{
+        .root_source_file = b.path("tools/asm_inventory/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const asm_inventory_exe = b.addExecutable(.{
+        .name = "asm_inventory",
+        .root_module = asm_inventory_module,
+    });
+    const asm_inventory_run = b.addRunArtifact(asm_inventory_exe);
+
+    // The three targets of the determinism contract: the two OSes of level 1
+    // and the ISA of level 2 (`engine-phase-1-criteria.md` C1.1). Each is
+    // pinned to `baseline` for the same reason every CI cell is — a runner
+    // image that changes processor generation must not change what is emitted
+    // (`ARCH-031` rule 6).
+    const inventory_targets = [_][]const u8{
+        "x86_64-linux-gnu",
+        "x86_64-windows-gnu",
+        "aarch64-linux-gnu",
+    };
+    for (inventory_targets) |triple| {
+        const query = std.Target.Query.parse(.{
+            .arch_os_abi = triple,
+            .cpu_features = "baseline",
+        }) catch @panic("bad inventory target triple");
+        const resolved = b.resolveTargetQuery(query);
+
+        // The module chain has to be rebuilt per target: a `Module` is bound to
+        // its target at creation, so the host-bound handles above cannot serve.
+        // It mirrors the graph declared earlier in this file and nothing more —
+        // if that graph gains an edge, this loop is where it has to be repeated,
+        // and a missing edge is a compile error here rather than a silent gap.
+        const t_foundation = b.createModule(.{
+            .root_source_file = b.path("src/foundation/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        const t_core = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        });
+        t_core.addImport("foundation", t_foundation);
+        const t_forge_api = b.createModule(.{
+            .root_source_file = b.path("src/modules/forge/api/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_forge_api.addImport("foundation", t_foundation);
+        t_forge_api.addImport("weld_core", t_core);
+        const t_forge_3d = b.createModule(.{
+            .root_source_file = b.path("src/modules/forge/forge_3d/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_forge_3d.addImport("foundation", t_foundation);
+        t_forge_3d.addImport("weld_forge", t_forge_api);
+        t_forge_3d.addOptions("build_options", forge_build_options);
+
+        // Compiling `forge_3d/root.zig` DIRECTLY emits nothing — it is a
+        // re-export file and Zig is lazy. Measured before this indirection
+        // existed: `0 call sites examined` on all three targets, which the
+        // scanner refuses rather than reports as clean. The surface root forces
+        // the module's public functions into codegen; see its header.
+        const t_surface = b.createModule(.{
+            .root_source_file = b.path("tools/asm_inventory/forge_3d_surface.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_surface.addImport("forge_3d", t_forge_3d);
+
+        const obj = b.addObject(.{
+            .name = b.fmt("forge_3d_asm_{s}", .{triple}),
+            .root_module = t_surface,
+        });
+        asm_inventory_run.addFileArg(obj.getEmittedAsm());
+    }
+
+    const asm_inventory_step = b.step(
+        "forge-asm-inventory",
+        "Assert zero libm transcendental call in forge_3d assembly (ARCH-031 rule 4)",
+    );
+    asm_inventory_step.dependOn(&asm_inventory_run.step);
+
+    // The scanner's own counter-factuals ride in `zig build test`: a scanner
+    // that cannot fire reports a clean tree for the wrong reason, and that is
+    // the failure this suite exists to make impossible.
+    const asm_inventory_tests = b.addTest(.{ .root_module = asm_inventory_module });
+    test_step.dependOn(&b.addRunArtifact(asm_inventory_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.

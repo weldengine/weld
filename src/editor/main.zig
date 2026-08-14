@@ -86,6 +86,12 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // M1.1.14 — the main thread is not born of a spawn, so it does not pass
+    // through the job system's worker entry and receives the engine float
+    // environment here instead (`ARCH-031` rule 5, `engine-platform.md` §4).
+    // First statement, before anything can compute.
+    weld_core.platform.float_env.install();
+
     // Full Juicy Main (engine-zig-conventions §2 — `Init` for dev tools):
     // `init.arena` is process-lifetime + auto-cleaned; `init.io` drives
     // the executable-directory lookup used to resolve the runtime path.

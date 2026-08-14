@@ -101,6 +101,12 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    // M1.1.14 — the main thread is not born of a spawn, so it does not pass
+    // through the job system's worker entry and receives the engine float
+    // environment here instead (`ARCH-031` rule 5, `engine-platform.md` §4).
+    // First statement, before anything can compute.
+    weld_core.platform.float_env.install();
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
