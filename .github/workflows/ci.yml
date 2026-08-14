@@ -624,15 +624,44 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      # CHECK OUT THE PR HEAD COMMIT ITSELF, not the synthetic merge commit.
+      # MEASURED, and it took a live run to see it: on a `pull_request` event
+      # `actions/checkout` defaults to `refs/pull/N/merge`, whose message is
+      # `Merge <head> into <base>` — so `git log -1 --pretty=%B` read GitHub's
+      # generated text and never the commit the author wrote. The trailer gate
+      # could not fire, and it failed the way that costs the most: SILENTLY, by
+      # skipping, on a green job.
+      #
+      # The second consequence is worse and would have SHIPPED: `github.sha` is
+      # that same merge commit, an ephemeral object outside the branch history
+      # that nobody can resolve later — so `PROVENANCE.txt`, whose entire purpose
+      # is provenance, would have named a sha no reader could check out. Pinning
+      # the head sha fixes both, and it is the right tree to generate from
+      # anyway: a witness pins the reviewed commit, not a merge preview of it.
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Read the Witness-regen trailer
         id: trailer
         shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # LOUD, not silent, if the checkout ever drifts back. The failure above
+          # was invisible precisely because "no trailer" and "wrong commit" are
+          # the same observable, so the two are separated here: a checkout that
+          # is not the head commit FAILS, and only then may an absent trailer
+          # legitimately skip.
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$HEAD_SHA" ]; then
+            echo "::error::checked out $actual, expected PR head $HEAD_SHA"
+            echo "::error::the trailer would be read from the wrong commit message"
+            exit 1
+          fi
           body="$(git log -1 --pretty=%B)"
-          echo "--- head commit message ---"; echo "$body"
+          echo "--- head commit $actual ---"; echo "$body"
           if reason="$(printf '%s\n' "$body" | sed -n 's/^Witness-regen:[[:space:]]*//p' | head -1)" && [ -n "$reason" ]; then
             echo "requested=true" >> "$GITHUB_OUTPUT"
             echo "reason=$reason" >> "$GITHUB_OUTPUT"
@@ -723,7 +752,10 @@ jobs:
             echo "reference_window_mode=ReleaseSafe"
             echo "discrete_mode=ReleaseSafe"
             echo "cross_mode_agreement=$agree"
-            echo "sha=${{ github.sha }}"
+            # The PR HEAD sha, never `github.sha` — on a `pull_request` event the
+            # latter is the ephemeral merge commit, which is outside the branch
+            # history and unresolvable by any later reader.
+            echo "sha=${{ github.event.pull_request.head.sha }}"
             echo "run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > witnesses/PROVENANCE.txt
           cat witnesses/PROVENANCE.txt
