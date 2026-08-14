@@ -768,6 +768,21 @@ jobs:
           path: witnesses/
           retention-days: 90
 
+      # THE PER-MODE OUTPUTS, kept whole. The assembled set above collapses the
+      # two mode-independent kinds onto their ReleaseSafe copy, so when the
+      # cross-mode measurement reports a DISAGREEMENT the artifact no longer
+      # contains the disagreeing pair — the one thing needed to characterise it.
+      # Measured the hard way: the first run reported reference-window-f32
+      # differing and left nothing to diff. A measurement that reports a
+      # difference must retain both sides of it.
+      - name: Upload the raw per-mode outputs
+        if: steps.trailer.outputs.requested == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: determinism-raw-per-mode
+          path: out/
+          retention-days: 90
+
   # M1.0.3-followup — l'UNIQUE check required. La branch protection ne requiert
   # que ce job (Guy applique les réglages repo). Il agrège les jobs lourds :
   # vert si tous success OU skipped (PR doc-only), rouge si l'un est failure /
