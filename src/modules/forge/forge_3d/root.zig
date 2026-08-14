@@ -49,6 +49,9 @@ const query_mod = @import("query/root.zig");
 // M1.1.12 — the kinematic character controller's store. Re-exported below; the
 // comptime pin analyses its acceptance suite.
 const character_mod = @import("character.zig");
+// M1.1.14 — the module's entry-point check on the floating-point execution
+// state (`ARCH-031` rule 5). Scalar-free; re-exported as two functions below.
+const determinism_mod = @import("determinism.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -300,10 +303,22 @@ pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
 /// siblings. Bound to `Real` through the package's `../config.zig` import.
 pub const rigid = rigid_mod;
 
+// --- Determinism (M1.1.14) ---
+
+/// Read the float-environment state of the calling thread when it is NOT the
+/// engine's, `null` otherwise — the module's entry-point check of `ARCH-031`
+/// rule 5. `forge_3d` ASSERTS this state and never installs it; the reason the
+/// two are different verbs is in `determinism.zig`.
+pub const checkFloatEnvironment = determinism_mod.checkFloatEnvironment;
+/// Assert that the calling thread carries the engine float environment. Called
+/// by whatever drives a tick; `PhysicsWorld.step()` inherits the call at M1.1.15.
+pub const assertFloatEnvironment = determinism_mod.assertFloatEnvironment;
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
     _ = config;
+    _ = determinism_mod;
     _ = shape;
     _ = mesh_mod;
     _ = body;

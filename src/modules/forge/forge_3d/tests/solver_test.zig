@@ -59,6 +59,8 @@ const integration = @import("../pipeline/integration.zig");
 const sleep = @import("../pipeline/sleep.zig");
 const sensor = @import("../pipeline/sensor.zig");
 const rigid = @import("../rigid/root.zig");
+// M1.1.14 — the module's float-environment check, asserted where a world opens.
+const determinism = @import("../determinism.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
 
@@ -138,6 +140,14 @@ pub const World = struct {
     /// A world with the given gravity and fixed timestep. Default `SolverConfig`,
     /// sleeping ENABLED.
     pub fn init(gravity: Vec3r, dt: Real) World {
+        // M1.1.14 — THE physics entry point, until `PhysicsWorld` exists at
+        // M1.1.15 and inherits this call. Opening a world on a thread whose
+        // float environment is not the engine's makes every number this world
+        // produces incomparable with the same world opened elsewhere, so the
+        // state is checked once, here, where a world begins — and ASSERTED, not
+        // installed (`ARCH-031` rule 5; the reason the two verbs differ is in
+        // `../determinism.zig`).
+        determinism.assertFloatEnvironment();
         return .{ .bp = Bp.init(.{}), .gravity = gravity, .dt = dt };
     }
 
