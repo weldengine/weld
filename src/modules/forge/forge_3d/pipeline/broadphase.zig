@@ -1118,6 +1118,47 @@ pub fn Broadphase(comptime T: type) type {
             }
         }
 
+        /// The stored FAT AABB of a bounded proxy; `null` when `proxy` is unbounded.
+        ///
+        /// M1.1.14, and READ-ONLY BY DESIGN. Its consumer is the retention rule of
+        /// §1.7 step 2 — "removal on fat-AABB separation only" — which lives in
+        /// whoever owns the retained candidate set: the acceptance harness today,
+        /// `PhysicsWorld` at M1.1.15. The broadphase deliberately does NOT own that
+        /// rule: pair retention IS the wake graph (§1.8.7), so putting the policy
+        /// here would move an islands-and-sleep behaviour into the acceleration
+        /// structure. What is added is the DATUM the policy needs, which `Bvh`
+        /// already exposed and the multi-layer aggregate did not forward — the same
+        /// class as `BodyManager.entity()` at M1.1.10, a column that existed from the
+        /// first day and had simply never been reachable.
+        ///
+        /// The `null` is not a failure: an unbounded proxy has no box at all, and a
+        /// caller must reach for `unboundedShape` instead. Answering with a fabricated
+        /// infinite box is exactly what §1.11.15 refuses.
+        pub fn proxyAabb(self: *const Self, proxy: Proxy) ?AabbT {
+            const li = @intFromEnum(proxy.layer);
+            return switch (proxy.kind) {
+                .tree => self.trees[li].proxyAabb(proxy.id),
+                .unbounded => null,
+            };
+        }
+
+        /// The half-space an unbounded proxy carries; `null` when `proxy` is bounded.
+        ///
+        /// The other half of what the retention rule needs: a pair with a half-space on
+        /// one side has no second fat AABB to separate from, so its overlap test is
+        /// `Aabb.overlapsHalfSpace` — the same exact predicate the traversal uses, from
+        /// `foundation/math`, never a second copy (§1.11.15).
+        pub fn unboundedShape(self: *const Self, proxy: Proxy) ?UnboundedShape {
+            const li = @intFromEnum(proxy.layer);
+            return switch (proxy.kind) {
+                .tree => null,
+                .unbounded => blk: {
+                    const slot = self.unbounded[li].items[proxy.id];
+                    break :blk if (slot.live) slot.shape else null;
+                },
+            };
+        }
+
         /// Overlap query across every layer: `collector.add(user_data)` for each
         /// proxy whose fat AABB overlaps `query`. Returns the total nodes
         /// visited. `collector` is a pointer with `fn add(self, u32) void`.

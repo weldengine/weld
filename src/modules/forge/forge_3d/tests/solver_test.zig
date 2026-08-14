@@ -224,14 +224,78 @@ pub const World = struct {
         self.bm.removeBody(id);
     }
 
+    /// The proxy of `id`, or `null` once the body has been removed.
+    fn proxyOf(self: *const World, id: BodyId) ?Bp.Proxy {
+        for (self.bodies.items) |b| {
+            if (b.id == id) return b.proxy;
+        }
+        return null;
+    }
+
+    /// Whether a retained pair still satisfies §1.7 step 2 — "removal on FAT-AABB
+    /// separation only".
+    ///
+    /// Three cases, exhaustive on what a proxy can be, and the middle one is why
+    /// this is not a two-box test. A half-space has no box at all (§1.11.15), so a
+    /// pair with one on either side is tested by the SAME exact predicate the
+    /// traversal uses, `Aabb.overlapsHalfSpace` from `foundation/math` — never a
+    /// second copy of that formula. Two half-spaces both force static bodies and
+    /// can never separate, so such a pair is retained unconditionally.
+    ///
+    /// The FAT boxes are the ones compared, deliberately. Comparing the tight boxes
+    /// would purge on a transient sub-margin separation and lose the contact until
+    /// the body sank back past the margin — the defect `test "small hop within the
+    /// fat margin keeps the contact pair alive"` was written for at M1.1.6. The
+    /// margin exists precisely so that this test has hysteresis.
+    fn pairStillOverlaps(self: *const World, a: BodyId, b: BodyId) bool {
+        // A removed body's pair serves nothing: W4 has already woken whoever was
+        // retained with it, at `removeBody`, and there is no proxy left to test.
+        const pa = self.proxyOf(a) orelse return false;
+        const pb = self.proxyOf(b) orelse return false;
+
+        const box_a = self.bp.proxyAabb(pa);
+        const box_b = self.bp.proxyAabb(pb);
+        if (box_a) |ba| {
+            if (box_b) |bb| return ba.overlaps(bb);
+            const hs = self.bp.unboundedShape(pb) orelse return false;
+            return ba.overlapsHalfSpace(hs.normal, hs.distance);
+        }
+        if (box_b) |bb| {
+            const hs = self.bp.unboundedShape(pa) orelse return false;
+            return bb.overlapsHalfSpace(hs.normal, hs.distance);
+        }
+        return true; // two half-spaces: both static, no separation is possible
+    }
+
     /// Advance one fixed tick through the normative cycle (file header).
     pub fn step(self: *World, gpa: std.mem.Allocator) !void {
-        // (1) broadphase candidate deltas → (2) persistent active set. Never pruned:
-        // every emitted pair is retained, which is a CORRECTNESS condition of sleep
-        // (§1.8.7) and not just warm-start persistence.
+        // (1) broadphase candidate deltas → (2) persistent active set.
+        //
+        // The set is PERSISTENT and its retention is a CORRECTNESS condition of
+        // sleep (§1.8.7), not merely warm-start persistence — a sleeper emits
+        // nothing in broadphase, so these retained pairs ARE the wake graph.
+        //
+        // M1.1.14 — it is also PRUNED, on the one condition §1.7 step 2 allows:
+        // the two FAT AABBs have separated. Until this milestone the harness kept
+        // every pair it had ever seen, a conservative superset of the normative
+        // rule; that is sound for the wake graph but makes the retained set a
+        // monotonically growing sequence, and a determinism trace over a set that
+        // can only grow passes by ACCUMULATION and proves nothing. The
+        // non-vacuity probe on this set is what turns it back into an oracle.
         try self.bp.computePairs(gpa, &self.scratch);
         for (self.scratch.items) |p| try self.active.append(gpa, (@as(u64, p.a) << 32) | p.b);
         sortDedup(&self.active);
+        {
+            var w: usize = 0;
+            for (self.active.items) |key| {
+                const a: BodyId = @intCast(key >> 32);
+                const b: BodyId = @intCast(key & 0xFFFF_FFFF);
+                if (!self.pairStillOverlaps(a, b)) continue;
+                self.active.items[w] = key;
+                w += 1;
+            }
+            self.active.shrinkRetainingCapacity(w);
+        }
 
         // (3) external forces — read-only, no code. See the file header.
 
@@ -624,6 +688,41 @@ test "small hop within the fat margin keeps the contact pair alive" {
         if (y < min_y) min_y = y;
     }
     try testing.expect(min_y >= y_rest - 0.02);
+}
+
+test "separation beyond the fat margin prunes the retained pair" {
+    // THE COMPLEMENT of the small-hop test above, and the pair is the point: one
+    // asserts the set RETAINS inside the margin, this one asserts it PRUNES outside
+    // it. Either alone is satisfiable by a degenerate rule — never prune, or always
+    // prune — and only the two together pin §1.7 step 2, "removal on fat-AABB
+    // separation only".
+    //
+    // It is also the NON-VACUITY probe M1.1.14 owes its fourth discrete trace. A
+    // retained set that can only grow is a monotone sequence, and a trace over a
+    // monotone sequence agrees with itself by accumulation whatever the engine did.
+    // Until this milestone the harness never pruned, so that trace was about to be
+    // an oracle that could not fail.
+    const gpa = testing.allocator;
+    var world = World.initNoSleep(Vec3r.zero, fixed_dt); // no gravity: a clean departure
+    defer world.deinit(gpa);
+    const box = try groundAndBox(gpa, &world, 1.0, 0); // rests flush on the ground
+
+    var t: u32 = 0;
+    while (t < 4) : (t += 1) try world.step(gpa);
+    const retained_in_contact = world.active.items.len;
+    // POSITIVE WITNESS: the pair exists before it can be shown to disappear.
+    // Without this, "the set shrank" is satisfied by a set that was empty all along.
+    try testing.expect(retained_in_contact >= 1);
+
+    // Leave, decisively. The fat margin is 0.1 m, so a departure of several metres
+    // is far outside any hysteresis and separates the two fat boxes.
+    world.bm.addImpulse(box, vr(0, 40, 0));
+    t = 0;
+    while (t < 60) : (t += 1) try world.step(gpa);
+
+    try testing.expect(world.bm.position(box).?.toArray()[1] > 5);
+    try testing.expect(world.active.items.len < retained_in_contact);
+    try testing.expectEqual(@as(usize, 0), world.active.items.len);
 }
 
 test "solve is deterministic across identical runs" {
