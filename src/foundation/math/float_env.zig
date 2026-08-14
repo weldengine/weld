@@ -21,10 +21,11 @@
 //!   entry point. A local re-install would MASK the defect instead of reporting
 //!   it, and leave the divergence standing for every other consumer.
 //!
-//! `forge_3d` is such a module, and `engine-phase-1-criteria.md` C1.1 binds its
-//! dependencies to a WHITELIST OF TWO, verbatim: "Dépend uniquement de
-//! `src/foundation/math/` et des composants ECS publics de
-//! `src/modules/forge/api/`". Not "anything but `weld_core`" — two entries. So
+//! `forge_3d` is such a module, and `engine-phase-1-criteria.md` C1.1, block
+//! *Métriques*, binds its dependencies to a WHITELIST OF EXACTLY TWO:
+//! `src/foundation/math/`, and the public ECS components of
+//! `src/modules/forge/api/`. Not "anything but `weld_core`" — two entries, and
+//! the paraphrase is what put this file at the wrong address once already. So
 //! the definition lives under `foundation/math/`, which is one of the two, and
 //! `forge_3d` gains no third dependency by asserting.
 //!
