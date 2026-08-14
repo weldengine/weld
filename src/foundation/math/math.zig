@@ -13,6 +13,7 @@ const vec = @import("vec.zig");
 const quat = @import("quat.zig");
 const mat3 = @import("mat3.zig");
 const aabb = @import("aabb.zig");
+const trig = @import("trig.zig");
 
 /// Generic vector constructor `Vec(N, T)`.
 pub const Vec = vec.Vec;
@@ -62,6 +63,15 @@ pub const Aabb = aabb.Aabb;
 /// f32 axis-aligned bounding box.
 pub const Aabbf = aabb.Aabbf;
 
+/// DETERMINISTIC cosine — no libm call, fixed operation order (`ARCH-031`
+/// rule 4). NOT a wrapper around `@cos`: `@cos` lowers to an external `cosf` /
+/// `cos` on every target the engine ships, and two C libraries disagree by an
+/// ULP. Domain-bounded by `max_argument`; see `trig.zig` for what that bound is
+/// and why serving past it would mean writing a replacement libm.
+pub const cos = trig.cos;
+/// The largest argument magnitude `cos` accepts, in radians.
+pub const max_trig_argument = trig.max_argument;
+
 // Pins so the inline tests in every sub-file are analysed when this module is
 // built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -69,4 +79,5 @@ comptime {
     _ = quat;
     _ = mat3;
     _ = aabb;
+    _ = trig;
 }
