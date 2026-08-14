@@ -19,6 +19,21 @@ env:
   # cache automatically. The build.zig minor-version guard still enforces the
   # 0.16.x invariant on the local toolchain.
   ZIG_VERSION: "0.16.0"
+  # M1.1.14 — the third pinning axis of `ARCH-031` rule 6, alongside the
+  # compiler version above and the per-cell optimize mode. NO CELL COMPILES FOR
+  # ITS NATIVE CPU, and the motive is not parity between two OSes — two
+  # IEEE-strict builds agree anyway — it is stability IN TIME: a runner image
+  # that moves to a new processor generation would otherwise invalidate a
+  # committed determinism witness without a line of code having changed, and the
+  # diagnosis would go looking inside the engine.
+  #
+  # `baseline` rather than a named model or `x86_64_v2`: it is defined per
+  # architecture by the compiler, so the single value below is correct on
+  # x86_64 and on aarch64 alike, and it is the one choice that cannot drift with
+  # a runner refresh. The cost is SSE2-only codegen on x86_64; the CI legs are
+  # dominated by compilation rather than by test arithmetic, and determinism is
+  # not negotiable per cell (`ARCH-031`, Conséquences).
+  ZIG_CPU: "baseline"
 
 jobs:
   # M1.0.3-followup — doc-only fast path. `ci-gate` (en fin de fichier) devient
@@ -206,7 +221,7 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build -Doptimize=${{ matrix.mode }}
+          zig build -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
           echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # CI cache refresh chore — mid-job save right after `zig build`: a run
@@ -230,13 +245,13 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test -Doptimize=${{ matrix.mode }}
+          zig build test -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
       # `.etch` fixtures + the `etch_test` shim run over the green fixtures.
       - name: zig build test-etch
-        run: zig build test-etch -Doptimize=${{ matrix.mode }}
+        run: zig build test-etch -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
@@ -244,7 +259,7 @@ jobs:
       # between the committed bindings and what the regen produces
       # blocks the merge.
       - name: zig build bindgen-verify
-        run: zig build bindgen-verify
+        run: zig build bindgen-verify -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.8 / E3-D — D-S5-synth100-proper proof: the standalone
       # bench/fixtures/synth_100/ sub-project resolves the parent as a
@@ -253,7 +268,20 @@ jobs:
       # A nested cold build (~30 s) — one matrix leg is enough.
       - name: zig build verify-synth-100
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build verify-synth-100
+        run: zig build verify-synth-100 -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.14 — the conformance test of `ARCH-031` rule 4, read in the emitted
+      # assembly and not in the source: `forge_3d` is compiled for the three
+      # targets the engine ships and every call site is inspected for a libm
+      # transcendental. It answers a property of those three TARGETS, so one
+      # cell covers the matrix — same arbitration as `verify-synth-100` above,
+      # and the reason it is a dedicated step rather than part of `zig build
+      # test` (which the pre-push hook runs twice on every push) is written in
+      # `build.zig`. Not gated on the matrix mode of the cell: the step pins
+      # ReleaseSafe internally, since that is the mode a witness is produced in.
+      - name: zig build forge-asm-inventory
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build forge-asm-inventory -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.9 / E1 — CI wall-time + cache measurement, archived as an
       # artifact (measurement deliverable, not a gate). `always()` so a
@@ -369,7 +397,7 @@ jobs:
       - name: zig build (ReleaseSafe)
         run: |
           set -euo pipefail
-          zig build -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
       - name: Launch weston headless backend
         run: |
@@ -392,7 +420,7 @@ jobs:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           set -euo pipefail
-          zig build run-example-triangle -- \
+          zig build run-example-triangle -Dcpu=${{ env.ZIG_CPU }} -- \
             --smoke-test --vulkan-driver=software --capture-frame=10
 
       - name: Verify PSNR vs golden
@@ -413,7 +441,7 @@ jobs:
           # `test-render-capture` invocation (~3-5 min/run). The test raises a
           # typed error when PSNR < 40 dB, so a non-zero exit propagates
           # through pipefail.
-          zig build test-ppm-psnr -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+          zig build test-ppm-psnr -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} --summary all 2>&1 | tee test-output.txt
 
       - name: Upload capture artifact
         if: always()
@@ -479,7 +507,7 @@ jobs:
           mkdir -p out
           # Default `zig build` = Debug → render.zig enable_validation = true →
           # the validation layers load. Offscreen render → no surface/weston.
-          zig build run-vertical-slice -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
           echo "--- a frame was composed + captured ---"
           test -s out/vertical_slice.ppm
           echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
@@ -498,7 +526,7 @@ jobs:
           # E5 / C0.8 end-to-end: an editor-stub thread sends a real
           # ModifyComponent over the M0.7 transport; the slice applies it to the
           # live World; the render reflects it. Offscreen capture, validation on.
-          zig build run-vertical-slice -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
           echo "--- the post-edit frame composed + captured ---"
           test -s out/vertical_slice_ipc.ppm
           if grep -E "VUID-|Validation Error" slice-c08.log; then
@@ -522,7 +550,7 @@ jobs:
           # The editor blits the runtime mire via the E6-consolidated
           # src/editor/vk_blit.zig (now on the GAL); Debug build → GAL
           # validation layer + syncval feature.
-          zig build run-ipc-demo -- --frames=120 > vkblit.log 2>&1 || true
+          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || true
           echo "=== vk_blit GAL blit on lavapipe (E6) ==="
           echo "--- distinct VUIDs ---"
           grep -oE "VUID-[A-Za-z0-9-]+" vkblit.log | sort -u || echo "  (none)"
