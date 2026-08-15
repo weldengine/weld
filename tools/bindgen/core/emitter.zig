@@ -53,16 +53,18 @@ pub fn emit(
 
 test "emit writes a placeholder for a minimal description" {
     const gpa = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(gpa);
-    var aw = buf.writer(gpa).adaptToNewApi(&.{});
+    // M1.1.14 — `ArrayList.writer` was removed in Zig 0.16; `Io.Writer.Allocating`
+    // is the in-tree idiom (`src/modules/asset_pipeline/format/intermediate.zig`).
+    // This test had never compiled since the 0.16 pin: nothing collected it.
+    var aw = std.Io.Writer.Allocating.init(gpa);
+    defer aw.deinit();
     const desc = api.ApiDescription{
         .name = "vulkan",
         .version = .{ .major = 1, .minor = 3, .patch = 0 },
         .source = .{ .xml_khronos = "bindings/upstream/vulkan/vk.xml" },
         .link = .{ .name = .{ .runtime = .{ .linux = "", .windows = "", .macos = "" } } },
     };
-    try emit(desc, &aw.new_interface);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "vulkan") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "skeleton") != null);
+    try emit(desc, &aw.writer);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "vulkan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "skeleton") != null);
 }

@@ -141,6 +141,9 @@ comptime {
     _ = ipc.framing;
     _ = ipc.transport;
     _ = ipc.shm;
+    // M1.1.14 — the POSIX backend is selected inside `shm.zig` at comptime, so
+    // referencing `ipc.shm` never analyses it. Its one test had never run.
+    _ = @import("ipc/shm_posix.zig");
     _ = ipc.viewport;
     _ = ipc.connection;
     _ = ipc.server;

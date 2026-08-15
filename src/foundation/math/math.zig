@@ -100,4 +100,9 @@ comptime {
     _ = aabb;
     _ = trig;
     _ = float_env;
+    // M1.1.14 — `exact.zig` is reached elsewhere only through `triangleIsFlat` and
+    // `triangleCrossDirection`, and referencing a DECL analyses that decl, never the
+    // file's `test` blocks. Measured: its two tests had never run — the exact integer
+    // arithmetic M1.1.11.1 spent eleven rounds establishing was unguarded.
+    _ = @import("exact.zig");
 }

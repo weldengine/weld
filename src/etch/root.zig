@@ -55,13 +55,36 @@ comptime {
     _ = @import("test_runner.zig");
     // M1.0.17 — explicit wire-in of `types.zig`'s inline tests (E0101,
     // scene/prefab/const validation, the M1.0.17 resource-collection acceptance
-    // tests, …), consistent with the sibling entries above. NOTE: unlike those,
-    // this one is *belt-and-suspenders* — a deliberate-failure probe confirmed
-    // `zig build test` already collects `types.zig`'s `test` blocks via the
-    // `pub const types` re-export (a public re-export of the root module is
-    // force-analyzed, tests included), WITH and WITHOUT this line (etch_tests
-    // count identical). Kept for explicitness; not load-bearing (§13 residual).
+    // tests, …), consistent with the sibling entries above.
+    //
+    // M1.1.14 — THIS LINE IS LOAD-BEARING, and the note that said otherwise was
+    // wrong on its MECHANISM while right on its observation. It claimed "a public
+    // re-export of the root module is force-analyzed, tests included", which
+    // directly contradicts the paragraph above this block, in this same file. A
+    // four-case experiment settles it: with `pub const leaf = @import("leaf.zig")`
+    // alone the root collects ZERO of leaf's tests, with or without a test of its
+    // own; only a `comptime { _ = leaf; }` reference collects them. The original
+    // probe's observation was sound — removing this line left the count unchanged
+    // — because `types.zig` is ALSO reached through `interp.zig`, which is pinned
+    // above and uses its declarations. Attributing that to the re-export turned a
+    // true measurement into a false general rule, and the rule is what a later
+    // reader would have acted on.
     _ = @import("types.zig");
+    // M1.1.14 — `zig_codegen/root.zig` carries the correct reference guard for its
+    // own three test files, and nothing ever ran it: the only path to it was
+    // `pub const codegen_zig`, the form that does not analyse. Thirty-seven test
+    // blocks — including `lower_test.zig`'s twenty-six — had never executed.
+    //
+    // THE WIRE-IN IS HELD, NOT FORGOTTEN, and the reason is a bigger finding than
+    // the dead tests: `zig_codegen/cache.zig` does not COMPILE under the pinned
+    // Zig 0.16. `std.fs.cwd()` was removed and `Io.Dir` carries no `realpath`, so
+    // `writeHash`, `readCachedHash` and `root.writeFileAndCache` have been dead
+    // code since the 0.16 pin — and `root.zig` already documents `cookTree` as
+    // having "no current in-tree consumer". Repairing it is not a rename: the
+    // 0.16 filesystem API takes an `io` parameter these functions do not have, so
+    // it changes the codegen cache's public signatures. That is an Etch decision
+    // and not a determinism one. Enable this line with that repair.
+    //   _ = @import("zig_codegen/root.zig");
 }
 
 /// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model

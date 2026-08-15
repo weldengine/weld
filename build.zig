@@ -1988,4 +1988,33 @@ pub fn build(b: *std.Build) void {
     });
     const weld_lint_unit_test = b.addTest(.{ .root_module = weld_lint_test_module });
     test_step.dependOn(&b.addRunArtifact(weld_lint_unit_test).step);
+
+    // M1.1.14 — three modules held `test` blocks that NO test target collected,
+    // so they had never run: `src/modules/render/` (49 blocks), `tools/bindgen/`
+    // (8) and `src/modules/audio/` (1). Found by counting source `test` blocks
+    // against the suite's own per-target totals, then confirming each by
+    // appending a deliberately failing test and watching the suite stay green.
+    // RENDER IS HELD, and the reason is what the sweep was for. Wiring its 49
+    // never-run tests turns two of them red, and a probe settled why: the
+    // render-graph passes return a `Pass` whose `reads`/`writes` slices point at
+    // an anonymous literal in `buildPass`'s OWN STACK FRAME. Measured on
+    // `depth_prepass`: `writes.ptr` is a stack address, `depth_attachment` reads
+    // `false` immediately after the call, and a fresh call at the SAME address
+    // reads `true` — a use-after-return, live since M0.4 and invisible because
+    // nothing ever compiled the tests that assert it. `forward.zig` fails
+    // identically. The fix is an ownership decision in the render graph, not a
+    // determinism change, so it is reported rather than taken here.
+    //   const render_tests = b.addTest(.{ .root_module = render_module });
+    //   test_step.dependOn(&b.addRunArtifact(render_tests).step);
+
+    const audio_tests = b.addTest(.{ .root_module = audio_module });
+    test_step.dependOn(&b.addRunArtifact(audio_tests).step);
+
+    const bindgen_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const bindgen_tests = b.addTest(.{ .root_module = bindgen_test_module });
+    test_step.dependOn(&b.addRunArtifact(bindgen_tests).step);
 }
