@@ -1965,4 +1965,27 @@ pub fn build(b: *std.Build) void {
     const lint_runner_run = b.addRunArtifact(lint_runner_test);
     lint_runner_run.step.dependOn(&b.addInstallArtifact(weld_lint_exe, .{}).step);
     test_step.dependOn(&lint_runner_run.step);
+
+    // M1.1.14 — the linter's OWN inline tests. The fixture corpus above proves
+    // each rule is WIRED into `runLint`, by running the real binary; it cannot
+    // prove a rule's logic, since the runner only reads an exit code and a
+    // fixture can say no more than "something fired". The two layers are
+    // complementary and neither substitutes for the other: a rule tested only
+    // inline can be left out of `main.zig` and still pass, and a rule covered
+    // only by fixtures can miscount, mis-scope its escape hatch, or flag its own
+    // prose without a single test noticing.
+    //
+    // Until this step existed, every `test` block under `tools/weld_lint/` was
+    // dead text — compiled by nothing, run by nothing. The root is `tests.zig`
+    // and NOT `main.zig`: a test build does not analyse a plain `const` import,
+    // so rooting here at `main.zig` ran zero tests while reporting success —
+    // measured, by appending a deliberately failing test and watching this step
+    // stay green.
+    const weld_lint_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/weld_lint/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const weld_lint_unit_test = b.addTest(.{ .root_module = weld_lint_test_module });
+    test_step.dependOn(&b.addRunArtifact(weld_lint_unit_test).step);
 }

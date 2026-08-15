@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const vec = @import("vec.zig");
+const reduce = @import("reduce.zig");
 
 /// Axis-aligned bounding box over 3-vectors of scalar `T`, stored as its
 /// minimum and maximum corners.
@@ -106,7 +107,7 @@ pub fn Aabb(comptime T: type) type {
         pub fn overlapsHalfSpace(self: Self, normal: Vec3T, distance: T) bool {
             const zeros: @Vector(3, T) = @splat(0);
             const lowest = @select(T, normal.data >= zeros, self.min.data, self.max.data);
-            return @reduce(.Add, normal.data * lowest) <= distance;
+            return reduce.foldAdd(normal.data * lowest) <= distance;
         }
 
         /// Geometric center.
@@ -221,8 +222,8 @@ pub fn Aabb(comptime T: type) type {
             const near = @select(T, dir_is_zero, unbounded_lo, @min(a, b));
             const far = @select(T, dir_is_zero, unbounded_hi, @max(a, b));
 
-            const enter = @reduce(.Max, near);
-            const exit = @reduce(.Min, far);
+            const enter = reduce.foldMax(near);
+            const exit = reduce.foldMin(far);
             // Strict `>`: `enter == exit` is a single-parameter graze, a hit
             // under the same inclusive convention as `overlaps`/`contains`.
             if (enter > exit) return null;

@@ -60,8 +60,14 @@ pub fn vectorized(data: []const u8) u32 {
         while (i + vlen <= block_len) : (i += vlen) {
             const bytes: @Vector(vlen, u8) = block[i..][0..vlen].*;
             const widened: Vu32 = bytes; // element-wise u8 → u32 widening
-            const chunk_sum: u32 = @reduce(.Add, widened);
-            const lane_weighted: u32 = @reduce(.Add, widened * lanes);
+            // `widened` and `lanes` hold `u32`. Integer addition is associative and
+            // exact, so the backend's reduction order cannot change the result — the
+            // property `ARCH-031` rule 3 buys for floats is already had here, and a
+            // scalar fold would only cost a horizontal add in a checksum hot loop.
+            // The marker sits on each site rather than on this block: the `no_float_reduce`
+            // window is one line, deliberately, so the claim stays attached to the statement.
+            const chunk_sum: u32 = @reduce(.Add, widened); // WELD_INTEGER_LANES
+            const lane_weighted: u32 = @reduce(.Add, widened * lanes); // WELD_INTEGER_LANES
             // Global index j = i + lane, so Σ j·D = i·ΣD_chunk + Σ lane·D_chunk.
             sum_d += chunk_sum;
             sum_jd += @as(u64, i) * chunk_sum + lane_weighted;

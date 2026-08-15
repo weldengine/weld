@@ -820,7 +820,7 @@ test "traversal agrees with brute force" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            const offset = if (@reduce(.Max, @abs(away.data)) == 0) Vec3r.unit_x else away.scale(1 / away.length());
+            const offset = if (away.maxAbsComponent() == 0) Vec3r.unit_x else away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             const direction = offset.neg();
             const max_distance: Real = 60;
@@ -1270,7 +1270,7 @@ test "the ray bound prunes and still finds the nearest triangle" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            const offset = if (@reduce(.Max, @abs(away.data)) == 0) Vec3r.unit_x else away.scale(1 / away.length());
+            const offset = if (away.maxAbsComponent() == 0) Vec3r.unit_x else away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             const ray = broadphase_mod.Ray(Real).init(origin, offset.neg());
             const max_distance: Real = 60;
@@ -1596,7 +1596,7 @@ test "a back-face hit returns a flipped normal" {
             rand.float(Real) * 2 - 1,
             rand.float(Real) * 2 - 1,
         );
-        if (@reduce(.Max, @abs(raw.data)) == 0) continue;
+        if (raw.maxAbsComponent() == 0) continue;
         const direction = raw.scale(1 / raw.length());
         const origin = vr(4, 0, 0).sub(direction.scale(20));
         inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
@@ -1770,7 +1770,7 @@ test "the ray family agrees exactly with brute force over the mesh" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            if (away.maxAbsComponent() == 0) continue;
             const offset = away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             // The direction the ENTRY will use, and the query is given the RAW one so the
@@ -2353,7 +2353,7 @@ test "the five remaining entries agree exactly with brute force over the mesh" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            if (away.maxAbsComponent() == 0) continue;
             const offset = away.scale(1 / away.length());
             const origin = target.add(offset.scale(25));
             const raw_direction = offset.neg();

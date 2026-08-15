@@ -927,7 +927,7 @@ pub fn aabbDistanceSq(box: Aabbr, point: Vec3r) Real {
     const below = @max(box.min.data - point.data, zeros);
     const above = @max(point.data - box.max.data, zeros);
     const d = below + above; // at most one term is non-zero per axis
-    return @reduce(.Add, d * d);
+    return math.reduce.foldAdd(d * d);
 }
 
 /// One (triangle, edge) endpoint of the adjacency sort.

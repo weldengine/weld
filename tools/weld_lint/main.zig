@@ -3,7 +3,7 @@
 //! Two subcommands wire into `build.zig`:
 //!   - `lint [path]...`         — walk the given paths (default
 //!     `src/ bench/ tests/ tools/`, including the linter's own
-//!     sources so it stays exemplary) and apply rules 1–4. Exits
+//!     sources so it stays exemplary) and apply rules 1–6. Exits
 //!     non-zero if any rule fires.
 //!   - `commit-msg <file>`      — validate the title of the commit
 //!     message at `file` against the Conventional Commits subset
@@ -21,6 +21,7 @@ const doc_comments = @import("rules/doc_comments.zig");
 const c_module_isolation = @import("rules/c_module_isolation.zig");
 const conventional_commit = @import("rules/conventional_commit.zig");
 const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
+const no_float_reduce = @import("rules/no_float_reduce.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
 
@@ -75,6 +76,7 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try doc_comments.check(arena, file, source, &diags);
         try c_module_isolation.check(arena, file, source, &diags);
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
+        try no_float_reduce.check(arena, file, source, &diags);
     }
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
@@ -107,7 +109,8 @@ const usage_text =
     \\  weld_lint lint [path]...
     \\      Walk the given paths (default `src bench tests tools`) and
     \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
-    \\      c_module_isolation, no_device_dispatch_outside_gal. Exits 0
+    \\      c_module_isolation, no_device_dispatch_outside_gal,
+    \\      no_float_reduce. Exits 0
     \\      if clean, 1 if any rule fires.
     \\
     \\  weld_lint commit-msg <file>

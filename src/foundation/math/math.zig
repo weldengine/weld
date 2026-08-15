@@ -14,6 +14,7 @@ const quat = @import("quat.zig");
 const mat3 = @import("mat3.zig");
 const aabb = @import("aabb.zig");
 const trig = @import("trig.zig");
+const reduce_mod = @import("reduce.zig");
 
 /// Generic vector constructor `Vec(N, T)`.
 pub const Vec = vec.Vec;
@@ -47,6 +48,12 @@ pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;
 pub const triangleCrossDirection = @import("exact.zig").triangleCrossDirection;
 /// The power-of-two exponent that reduces three points below unit magnitude.
 pub const pow2ReductionExponent = vec.pow2ReductionExponent;
+
+/// Ordered lane reductions — the sanctioned form for FLOAT vectors, and the reason `@reduce` may
+/// not be used on them. `@reduce` delegates the reduction order to the backend by construction, and
+/// two Zig 0.16 backends were measured at M1.1.14 to disagree on the same `x86_64` target. See
+/// `reduce.zig` for the two disassemblies and `ARCH-031` rule 3 for the contract.
+pub const reduce = reduce_mod;
 
 /// Generic quaternion constructor `Quat(T)`.
 pub const Quat = quat.Quat;

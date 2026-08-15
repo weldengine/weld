@@ -2435,7 +2435,7 @@ pub fn closestPointOnCore(
         return .{ .distance = surface_distance, .position = core.b };
     }
     const away = point.sub(core.b);
-    const scale = @reduce(.Max, @abs(away.data));
+    const scale = away.maxAbsComponent();
     if (scale == 0) {
         // The queried point coincides with the core witness. Reachable only in the
         // deep band, where the two are within float noise of each other; the
