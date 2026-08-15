@@ -2004,8 +2004,8 @@ pub fn build(b: *std.Build) void {
     // nothing ever compiled the tests that assert it. `forward.zig` fails
     // identically. The fix is an ownership decision in the render graph, not a
     // determinism change, so it is reported rather than taken here.
-    //   const render_tests = b.addTest(.{ .root_module = render_module });
-    //   test_step.dependOn(&b.addRunArtifact(render_tests).step);
+    const render_tests = b.addTest(.{ .root_module = render_module });
+    test_step.dependOn(&b.addRunArtifact(render_tests).step);
 
     const audio_tests = b.addTest(.{ .root_module = audio_module });
     test_step.dependOn(&b.addRunArtifact(audio_tests).step);

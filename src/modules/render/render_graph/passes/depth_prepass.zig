@@ -18,20 +18,33 @@ pub const Config = struct {
     depth_target: gal.types.TextureHandle,
     /// Depth clear value (1.0 by default — reverse-Z = 0.0 Phase 1+).
     depth_clear: f32 = 1.0,
+    /// Storage the returned `Pass.reads`/`Pass.writes` point at.
+    ///
+    /// M1.1.14 — before this field, `buildPass` returned slices of an ANONYMOUS
+    /// LITERAL built in its own stack frame, so the `Pass` carried a dangling
+    /// pointer the moment it returned. Measured: `writes.ptr` was a stack address,
+    /// the access mask read `false` immediately after the call, and a fresh call at
+    /// the SAME address read `true`. Live since M0.4 and invisible because nothing
+    /// compiled this file's tests until the M1.1.14 dead-test sweep.
+    ///
+    /// The config owns it and introduces NO new lifetime constraint: the config is
+    /// already the pass's `ctx`, so it had to outlive the pass by construction.
+    write_storage: [1]pass_mod.ResourceUsage = undefined,
 };
 
 /// Builds a depth-prepass Pass ready to be added to a Graph.
-pub fn buildPass(config: *const Config) pass_mod.Pass {
+pub fn buildPass(config: *Config) pass_mod.Pass {
+    config.write_storage[0] = .{
+        .resource = .{ .texture = config.depth_target },
+        .stage = .{ .vertex = true, .fragment = true },
+        .access = .{ .write = true, .depth_attachment = true },
+        .layout = .depth_stencil_attachment,
+    };
     return .{
         .name = "depth_prepass",
         .barrier_mode = .auto,
         .reads = &.{},
-        .writes = &.{.{
-            .resource = .{ .texture = config.depth_target },
-            .stage = .{ .vertex = true, .fragment = true },
-            .access = .{ .write = true, .depth_attachment = true },
-            .layout = .depth_stencil_attachment,
-        }},
+        .writes = config.write_storage[0..],
         .body = body,
         .ctx = @as(*anyopaque, @ptrCast(@constCast(config))),
     };
@@ -51,10 +64,12 @@ fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
 test "depth_prepass: buildPass populates writes" {
     const t = std.testing;
     const tex = gal.types.TextureHandle{ .inner = 1 };
-    const cfg: Config = .{ .depth_target = tex };
+    var cfg: Config = .{ .depth_target = tex };
     const p = buildPass(&cfg);
     try t.expectEqual(@as(usize, 0), p.reads.len);
     try t.expectEqual(@as(usize, 1), p.writes.len);
     try t.expectEqualStrings("depth_prepass", p.name);
     try t.expect(p.writes[0].access.depth_attachment);
+    // The slice must point INTO the config, never at a returned frame.
+    try t.expectEqual(@as([*]const pass_mod.ResourceUsage, &cfg.write_storage), p.writes.ptr);
 }
