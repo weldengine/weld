@@ -36,6 +36,15 @@
 //! invented edge yields a false ALIVE, which is the failure that says green and
 //! is what the hostile fixtures exist to refuse.
 //!
+//! **AT RESUMPTION, READ THIS BEFORE TOUCHING THE CLOSURE.** The second incoming
+//! edge into `src/etch/zig_codegen/` crosses a MODULE boundary — the two live
+//! test targets reach `codegen_zig` through `weld_etch` — and this analysis
+//! follows RELATIVE imports only. So the closure measures one level and the
+//! verdict is about another: the same scale mismatch as every other defect this
+//! milestone found. **Do not hunt the edge by hand.** The per-step measurement
+//! names it mechanically, and that is cheaper and does not depend on being right
+//! about where to look.
+//!
 //! **STATUS: NOT WIRED. THE FIXPOINT IS NOW TOO PERMISSIVE, AND THE BILATERAL
 //! CONTROL CAUGHT IT ON THE FIRST RUN.** Scoping the reference search to the
 //! closure closed the three false deads — the run reports `clean` — but it opened
