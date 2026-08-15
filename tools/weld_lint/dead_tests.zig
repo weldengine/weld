@@ -46,8 +46,28 @@
 //! reached 1829 against a suite total of 1829 before the last root form landed,
 //! which is a strong corroboration of the closure itself.
 //!
+//! **THE REMAINING DEFECT IS NAMED, and it is one mechanism for all three: the
+//! reference search is scoped to the BINDING FILE and must be scoped to the
+//! CLOSURE.** `gal/root.zig` binds `pub const barriers` and never touches it —
+//! but `render_graph/pass.zig` writes `gal.barriers.Access`, and that reference
+//! is what makes the file live. Same for `comptime_query`, bound in
+//! `ecs/root.zig` and referenced from `core/root.zig`. `transport_posix.zig` is
+//! the third shape: `@import` inside a `switch` assigned to a referenced `const`,
+//! which the head parser does not recognise as a binding at all.
+//!
+//! So the criterion stands — THE REFERENCE IS THE DISCRIMINANT — and the fix is
+//! a FIXPOINT: a binding is live once its name is referenced anywhere already in
+//! the closure, which can add files, which can add references. Two hypotheses
+//! were eliminated on the way and are recorded so they are not retried: it is
+//! not "the root file is special" (a `pub const` unreferenced ONE LEVEL DOWN
+//! collects nothing either — measured), and it is not the syntax of the import.
+//!
 //! The three, for whoever closes them: `src/core/ecs/comptime_query.zig`,
 //! `src/core/ipc/transport_posix.zig`, `src/modules/render/gal/barriers.zig`.
+//! The closure control that AUTHORISES activation is not the fixture count: it is
+//! `live_tests` equalling the suite's own collected total, two unrelated
+//! computations landing on one number. It read 1829 against 1829 at an
+//! intermediate state and must be redone on the final one.
 //! Activation is a Gate F exit condition, and it is COUPLED to the doctrine:
 //! writing "a dead test switches off compilation coverage" as normative while
 //! nothing checks it is the milestone's own named prohibition.

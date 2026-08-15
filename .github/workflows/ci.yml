@@ -258,8 +258,41 @@ jobs:
       # distinct from the full post-test save at the end of the job; the
       # zon-level prefix fallback of the restore step matches both, newest
       # first.
-      - name: Save Zig cache (post-build)
+      # M1.1.14 — THE SAVE IS ALL-OR-NOTHING. `actions/cache` purges contents when
+      # the archive exceeds its cap and saves what is left, which produces a
+      # `.zig-cache` whose manifests reference objects that are no longer there:
+      # the next restore hands `zig build` an entry it cannot stat, and the build
+      # fails with `file_hash FileNotFound` on something it believes it has.
+      # A cache that LIES costs more than no cache — this milestone spent six runs
+      # and two wrong hypotheses learning it.
+      #
+      # So the size is measured first and the save is SKIPPED, loudly, when it
+      # would be partial. A skipped save means the next run is cold: slower, and
+      # correct. Pinning `ZIG_CPU` in the key removed the cause that was inflating
+      # the archive here, but the cap will be met again for other reasons — the f64
+      # axis and the ARM cell both add targets — and the purge would corrupt just
+      # the same. The trigger was fixed; this fixes the mechanism.
+      - name: Measure the Zig cache before saving
         if: matrix.mode == 'ReleaseSafe'
+        id: cache-size
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit=2147483648
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache: $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
+            echo "::warning::A partial save leaves manifests referencing purged objects, which"
+            echo "::warning::the next restore turns into `file_hash FileNotFound`. Cold is correct."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Zig cache (post-build)
+        if: matrix.mode == 'ReleaseSafe' && steps.cache-size.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
