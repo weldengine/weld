@@ -34,6 +34,7 @@ comptime {
     _ = @import("rules/no_float_reduce.zig");
     _ = @import("rules/conventional_commit.zig");
     // Shared machinery.
+    _ = @import("dead_tests.zig");
     _ = @import("scan.zig");
     _ = @import("diagnostic.zig");
 }

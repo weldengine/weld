@@ -245,7 +245,7 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
+          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
