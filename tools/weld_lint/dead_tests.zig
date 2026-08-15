@@ -36,7 +36,29 @@
 //! invented edge yields a false ALIVE, which is the failure that says green and
 //! is what the hostile fixtures exist to refuse.
 //!
-//! **STATUS: NOT YET WIRED INTO `zig build lint`. THREE FALSE DEADS REMAIN.**
+//! **STATUS: NOT WIRED. THE FIXPOINT IS NOW TOO PERMISSIVE, AND THE BILATERAL
+//! CONTROL CAUGHT IT ON THE FIRST RUN.** Scoping the reference search to the
+//! closure closed the three false deads — the run reports `clean` — but it opened
+//! the direction that says green: `live_tests` reads **1884** against a suite
+//! total of **1829**, and a count ABOVE the total is precisely the signature of a
+//! guard that admits too much. `src/etch/zig_codegen/` is admitted although it
+//! does not compile, so its 37 blocks are counted live and its declared exclusion
+//! never fires. Sixteen — now twenty-one — passing fixtures did not see this;
+//! ONE NUMBER DID.
+//!
+//! That is the control's whole point and it earned it immediately: too permissive
+//! overshoots the total, too strict undershoots it, and only equality excludes
+//! both. It is the gate for activation, not the fixture count.
+//!
+//! The remaining work, named: the cross-closure reference must not admit a file
+//! through a binding whose name is referenced only in a file that is itself
+//! reachable ONLY through that same binding — the mutual-reference shape
+//! `zig_codegen` has. And the expected equality is PLATFORM-DEPENDENT: the guard
+//! is static and blind to comptime dispatch, so on macOS expect
+//! `live_tests = total + 4` for `gal/vulkan/conv.zig`, whose four blocks the Null
+//! backend never collects, and expect exact equality on Linux.
+//!
+//! HISTORY — THREE FALSE DEADS, since closed and worth keeping:
 //! First run: 116 files / 405 blocks reported dead. After the two defects named
 //! below were fixed — loop-built and bare-array roots discovered, and the
 //! inline-field-access rule folded INTO the reference test — the run reports
@@ -223,6 +245,85 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
     }
 }
 
+/// Edges of `source` where a bound name counts as referenced if it appears in
+/// `source` itself OR in any file of `live` — and in nothing else.
+fn edgesOfLive(
+    gpa: std.mem.Allocator,
+    source: []const u8,
+    live: []const []const u8,
+    read: *const fn (path: []const u8) ?[]const u8,
+    out: *std.ArrayList(Edge),
+) !void {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, source, i, "@import(\"")) |at| {
+        const start = at + "@import(\"".len;
+        const end = std.mem.indexOfScalarPos(u8, source, start, '"') orelse break;
+        const rel = source[start..end];
+        i = end + 1;
+        if (!std.mem.endsWith(u8, rel, ".zig")) continue;
+
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..at], '\n')) |p| p + 1 else 0;
+        const head = std.mem.trim(u8, source[line_start..at], " \t");
+        if (std.mem.endsWith(u8, head, "_ =")) {
+            try out.append(gpa, .{ .rel = rel });
+            continue;
+        }
+        const name = bindingName(head) orelse {
+            // A binding the head parser does not recognise — an `@import` inside a
+            // `switch` assigned to a referenced `const`, as `ipc/transport.zig`
+            // does. Refusing it outright reported a live file dead; admitting it
+            // whenever the enclosing statement binds SOMETHING keeps the criterion
+            // (a reference exists) without teaching the parser every expression form.
+            if (enclosingBindingReferenced(source, line_start, live, read)) {
+                try out.append(gpa, .{ .rel = rel });
+            }
+            continue;
+        };
+        if (isReferenced(source, name, line_start)) {
+            try out.append(gpa, .{ .rel = rel });
+            continue;
+        }
+        for (live) |other| {
+            const osrc = read(other) orelse continue;
+            if (osrc.ptr == source.ptr) continue;
+            if (isReferenced(osrc, name, osrc.len)) {
+                try out.append(gpa, .{ .rel = rel });
+                break;
+            }
+        }
+    }
+}
+
+/// Whether the `const NAME = ` statement enclosing `line_start` binds a name that
+/// is referenced in `source` or in the live set. Walks back to the nearest
+/// `const … = ` line, which is where a multi-line `switch` binding starts.
+fn enclosingBindingReferenced(
+    source: []const u8,
+    line_start: usize,
+    live: []const []const u8,
+    read: *const fn (path: []const u8) ?[]const u8,
+) bool {
+    var pos = line_start;
+    var back: usize = 0;
+    while (pos > 0 and back < 8) : (back += 1) {
+        const prev_end = pos - 1;
+        const prev_start = if (std.mem.lastIndexOfScalar(u8, source[0..prev_end], '\n')) |p| p + 1 else 0;
+        const line = std.mem.trim(u8, source[prev_start..prev_end], " \t");
+        if (bindingName(line)) |name| {
+            if (isReferenced(source, name, prev_start)) return true;
+            for (live) |other| {
+                const osrc = read(other) orelse continue;
+                if (osrc.ptr == source.ptr) continue;
+                if (isReferenced(osrc, name, osrc.len)) return true;
+            }
+            return false;
+        }
+        pos = prev_start;
+        if (prev_start == 0) break;
+    }
+    return false;
+}
+
 /// The bound name of `const NAME = ` / `pub const NAME = `, or null.
 fn bindingName(head: []const u8) ?[]const u8 {
     var h = head;
@@ -312,25 +413,54 @@ pub fn analyze(
         try queue.append(gpa, n);
     }
 
+    // FIXPOINT, and it extends ONLY through files that are ALREADY LIVE.
+    //
+    // The reference that makes a binding live is often in ANOTHER file:
+    // `gal/root.zig` binds `pub const barriers` and never touches it, while
+    // `render_graph/pass.zig` writes `gal.barriers.Access`. Scoping the search to
+    // the binding file reported three live files dead.
+    //
+    // WIDENING THE SCOPE OPENS THE FALSE ALIVE — the first time in this analysis
+    // that the error could point that way, and the direction that says green. The
+    // restriction is what closes it: a reference only counts when it comes from a
+    // file already in the closure. `src/etch/zig_codegen/` is exactly the shape
+    // that would break a naive version — 37 dead blocks across files that
+    // reference each other — and none of them is ever scanned, because none of
+    // them is ever live.
     var head: usize = 0;
-    while (head < queue.items.len) : (head += 1) {
-        const path = queue.items[head];
-        const src = read(path) orelse continue;
-        report.in_closure += 1;
-        report.live_tests += countTests(src);
-
-        var edges: std.ArrayList(Edge) = .empty;
-        defer edges.deinit(gpa);
-        try edgesOf(gpa, src, &edges);
-        for (edges.items) |e| {
-            const resolved = try resolveRel(gpa, path, e.rel);
-            if (seen.contains(resolved)) {
-                gpa.free(resolved);
-                continue;
-            }
-            try seen.put(gpa, try gpa.dupe(u8, resolved), {});
-            try queue.append(gpa, resolved);
+    while (true) {
+        const before = queue.items.len;
+        while (head < queue.items.len) : (head += 1) {
+            const path = queue.items[head];
+            const src = read(path) orelse continue;
+            report.in_closure += 1;
+            report.live_tests += countTests(src);
         }
+        // Re-scan every live file: a file admitted in this round can carry the
+        // reference that makes an earlier file's binding live.
+        //
+        // Admissions are STAGED and appended after the scan. Appending inside the
+        // loop reallocates `queue.items` and leaves `path` dangling into freed
+        // memory — which segfaulted on Zig's `0xaa` poison at the first real run.
+        var pending: std.ArrayList([]const u8) = .empty;
+        defer pending.deinit(gpa);
+        for (queue.items) |path| {
+            const src = read(path) orelse continue;
+            var edges: std.ArrayList(Edge) = .empty;
+            defer edges.deinit(gpa);
+            try edgesOfLive(gpa, src, queue.items, read, &edges);
+            for (edges.items) |e| {
+                const resolved = try resolveRel(gpa, path, e.rel);
+                if (seen.contains(resolved)) {
+                    gpa.free(resolved);
+                    continue;
+                }
+                try seen.put(gpa, try gpa.dupe(u8, resolved), {});
+                try pending.append(gpa, resolved);
+            }
+        }
+        for (pending.items) |r| try queue.append(gpa, r);
+        if (pending.items.len == 0 and queue.items.len == before) break;
     }
 
     for (all_files) |f| {
@@ -643,4 +773,45 @@ test "a bare string-array table of roots is discovered, and only its elements" {
     try std.testing.expectEqual(@as(usize, 2), roots.items.len);
     try std.testing.expectEqualStrings("tests/ipc/framing.zig", roots.items[0]);
     try std.testing.expectEqualStrings("tests/ipc/shm.zig", roots.items[1]);
+}
+
+test "a file referenced ONLY from outside the closure is DEAD" {
+    // FIXTURE 7 — it guards the direction the fixpoint opened, and it is the only
+    // one that can say green when it should say red. `outside.zig` binds AND
+    // references `victim.zig`, but nothing ever admits `outside.zig`, so that
+    // reference must not count. This is `src/etch/zig_codegen/` exactly: 37 dead
+    // blocks across files that reference each other.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "pub const nothing = u8;\n" },
+        .{ "m/outside.zig", "const victim = @import(\"victim.zig\");\npub const V = victim.V;\n" },
+        .{ "m/victim.zig", "pub const V = u8;\ntest \"victim\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.files.deinit(gpa);
+
+    // One dead FILE, not two: only files holding `test` blocks are counted, and
+    // `outside.zig` holds none. Expecting two was my own error — the report
+    // counts dead TESTS' homes, never every unreached file.
+    try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
+    try std.testing.expectEqualStrings("m/victim.zig", r.dead.items[0].path);
+    try std.testing.expectEqual(@as(usize, 0), r.live_tests);
+}
+
+test "the same file referenced from INSIDE the closure is ALIVE" {
+    // The twin, by the pairing rule: same shape, discriminant inverted, verdict
+    // inverted. `helper.zig` is admitted, so ITS reference to `victim` counts —
+    // which is `render_graph/pass.zig` writing `gal.barriers.Access` for a name
+    // `gal/root.zig` binds and never touches.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "const helper = @import(\"helper.zig\");\ncomptime { _ = helper; }\npub const victim = @import(\"victim.zig\");\n" },
+        .{ "m/helper.zig", "pub const use = victim.V;\n" },
+        .{ "m/victim.zig", "pub const V = u8;\ntest \"victim\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.files.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
+    try std.testing.expectEqual(@as(usize, 1), r.live_tests);
 }
