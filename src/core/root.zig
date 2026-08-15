@@ -5,6 +5,8 @@
 //! `platform`, and `testing`. Each namespace is documented at its
 //! declaration below.
 
+const builtin = @import("builtin");
+
 /// ECS namespace — single canonical entry point at
 /// `src/core/ecs/root.zig` (M0.1 / E7). The root provides both:
 ///   * Flat public types : `ecs.World`, `ecs.EntityId`, `ecs.Query`,
@@ -143,7 +145,16 @@ comptime {
     _ = ipc.shm;
     // M1.1.14 — the POSIX backend is selected inside `shm.zig` at comptime, so
     // referencing `ipc.shm` never analyses it. Its one test had never run.
-    _ = @import("ipc/shm_posix.zig");
+    //
+    // The guard MIRRORS `shm.zig`'s own dispatch and is not decoration: the file
+    // opens with a `@compileError` for any other OS, so an unconditional wire-in
+    // breaks every Windows build. It did, and `zig build test` on a POSIX host
+    // could not show it — `forge-asm-inventory` cross-compiles to
+    // `x86_64-windows-gnu` from ANY host, and that step is not part of
+    // `zig build test`. A green local suite is a smaller claim than a green cell.
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        _ = @import("ipc/shm_posix.zig");
+    }
     _ = ipc.viewport;
     _ = ipc.connection;
     _ = ipc.server;
