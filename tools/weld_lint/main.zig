@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !u8 {
         return runCommitMsg(arena, init.io, argv[2..], stdout);
     }
     if (std.mem.eql(u8, sub, "dead-tests")) {
-        return runDeadTests(arena, init.io, stdout);
+        return runDeadTests(arena, init.io, stdout, argv[2..]);
     }
 
     try stdout.print("unknown subcommand: {s}\n\n", .{sub});
@@ -114,7 +114,7 @@ fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8
 /// The roots are DERIVED from `build.zig` rather than kept beside it: a
 /// hand-maintained list drifts the first time a target is added, and drift here
 /// reads as "no dead tests", which is the failure mode that says green.
-fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !u8 {
+fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_extra: []const [:0]const u8) !u8 {
     const build_src = scan.readSourceZ(arena, io, "build.zig") catch {
         try out.writeAll("dead-tests: cannot read build.zig\n");
         return 2;
@@ -133,6 +133,19 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !u8 {
     reader_io = io;
     var report = try dead_tests.analyze(arena, roots.items, files.items, &readForAnalysis);
     defer report.deinit(arena);
+
+    // `--list` prints the closure file by file with its test count. A delta is
+    // not a verdict until it is DECOMPOSED: a single number invites attribution
+    // by guesswork, which is how five unaccounted blocks became thirteen.
+    var want_list = false;
+    for (argv_extra) |a| {
+        if (std.mem.eql(u8, a, "--list")) want_list = true;
+    }
+    if (want_list) {
+        for (report.closure.items) |c| {
+            if (c.tests > 0) try out.print("LIVE {d}\t{s}\n", .{ c.tests, c.path });
+        }
+    }
 
     // The report states the SIZE of what it judged. A tool built because probes
     // rendered verdicts over unmeasured objects does not get to skip that.

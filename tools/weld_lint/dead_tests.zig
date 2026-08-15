@@ -150,10 +150,14 @@ pub const Report = struct {
     excluded: usize = 0,
     /// Test blocks inside declared exclusions.
     excluded_tests: usize = 0,
+    /// Every closure file with its test count, so a delta can be DECOMPOSED.
+    closure: std.ArrayList(Dead) = .empty,
 
     pub fn deinit(self: *Report, gpa: std.mem.Allocator) void {
         for (self.dead.items) |d| gpa.free(d.path);
         self.dead.deinit(gpa);
+        for (self.closure.items) |c| gpa.free(c.path);
+        self.closure.deinit(gpa);
     }
 };
 
@@ -172,9 +176,11 @@ pub const Exclusion = struct {
 pub const exclusions = [_]Exclusion{
     .{
         .prefix = "src/etch/zig_codegen/",
-        .reason = "cache.zig does not compile under the pinned Zig 0.16 — `std.fs.cwd()` was " ++
-            "removed and the replacement takes an `io` parameter these functions do not have, " ++
-            "so the repair changes the codegen cache's public signatures",
+        .reason = "the subtree IS elaborated — two live test targets reach `codegen_zig` through " ++
+            "the `weld_etch` module boundary — but the subset the wire-in ADDS does not compile: " ++
+            "`zig_codegen/tests/` and `cache.zig`, where `std.fs.cwd()` was removed at Zig 0.16 " ++
+            "and the replacement takes an `io` parameter these functions do not have, so the " ++
+            "repair changes the codegen cache's public signatures",
         .owner = "M1.D.5",
     },
 };
@@ -337,7 +343,25 @@ fn bindingName(head: []const u8) ?[]const u8 {
     return name;
 }
 
-/// Whether `name` appears as an identifier anywhere outside its own binding line.
+/// Whether a byte offset falls inside a `//` comment.
+///
+/// MEASURED, and by the worst possible route: the guard admitted all of
+/// `src/etch/zig_codegen/` because `src/etch/root.zig` carries a COMMENT naming
+/// `codegen_zig` — the very paragraph explaining why that subtree is dead. The
+/// documentation of a corpse reported it alive. A reference search that reads
+/// prose is not a reference search.
+fn inComment(source: []const u8, at: usize) bool {
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..at], '\n')) |p| p + 1 else 0;
+    var i = line_start;
+    while (i + 1 < at) : (i += 1) {
+        if (source[i] == '/' and source[i + 1] == '/') return true;
+        if (source[i] == '"') return false; // a `//` inside a string is not a comment
+    }
+    return false;
+}
+
+/// Whether `name` appears as an identifier anywhere outside its own binding line,
+/// ignoring occurrences inside comments.
 fn isReferenced(source: []const u8, name: []const u8, binding_line_start: usize) bool {
     const binding_line_end = std.mem.indexOfScalarPos(u8, source, binding_line_start, '\n') orelse source.len;
     var i: usize = 0;
@@ -347,7 +371,7 @@ fn isReferenced(source: []const u8, name: []const u8, binding_line_start: usize)
         const before_ok = at == 0 or !isIdentChar(source[at - 1]);
         const after = at + name.len;
         const after_ok = after >= source.len or !isIdentChar(source[after]);
-        if (before_ok and after_ok) return true;
+        if (before_ok and after_ok and !inComment(source, at)) return true;
     }
     return false;
 }
@@ -434,7 +458,9 @@ pub fn analyze(
             const path = queue.items[head];
             const src = read(path) orelse continue;
             report.in_closure += 1;
-            report.live_tests += countTests(src);
+            const n = countTests(src);
+            report.live_tests += n;
+            try report.closure.append(gpa, .{ .path = try gpa.dupe(u8, path), .tests = n });
         }
         // Re-scan every live file: a file admitted in this round can carry the
         // reference that makes an earlier file's binding live.
@@ -812,6 +838,32 @@ test "the same file referenced from INSIDE the closure is ALIVE" {
     defer r.deinit(gpa);
     defer Fixture.files.deinit(gpa);
 
+    try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
+    try std.testing.expectEqual(@as(usize, 1), r.live_tests);
+}
+
+test "a name occurring only in a COMMENT is not a reference" {
+    // The defect that admitted all of `zig_codegen`: `src/etch/root.zig` names
+    // `codegen_zig` in the paragraph explaining why that subtree is DEAD, and the
+    // reference search read it as a use. Its twin below is the same name in code.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "pub const orphan = @import(\"orphan.zig\");\n// orphan is held, see M1.D.5\n" },
+        .{ "m/orphan.zig", "test \"dead\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.files.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
+}
+
+test "the same name in CODE is a reference" {
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "pub const orphan = @import(\"orphan.zig\");\npub const O = orphan.V;\n" },
+        .{ "m/orphan.zig", "pub const V = u8;\ntest \"live\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.files.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
 }
