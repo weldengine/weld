@@ -196,16 +196,41 @@ jobs:
       # save cost exceeded the build it protected and pushed the job past its
       # ceiling. The Debug legs now run fully cold by design, so their build and
       # test wall-times are the honest cold numbers rather than a cache lottery.
+      # M1.1.14 — `ZIG_CPU` JOINS EVERY CACHE KEY, and this is a READING of the
+      # config rather than an experiment. The keys carried os, mode and Zig
+      # version but NOT the CPU axis this milestone introduced, so a
+      # `-Dcpu=baseline` build could restore a cache saved from a NATIVE-CPU
+      # build through either restore-key. Zig's manifests are cpu-aware, so that
+      # never returns a wrong object — it returns a MISS and rebuilds, leaving
+      # BOTH variants of everything in one `.zig-cache`.
+      #
+      # That bloat is what meets the 2 GB save cap recorded above
+      # (`was 6214569092; purged contents before save`), and the purge is the
+      # corruption mechanism: it deletes objects while the manifests referencing
+      # them survive into the saved archive, so the next restore hands
+      # `zig build` a manifest whose entry cannot be stat'd — `file_hash
+      # FileNotFound` on an executable the build believes it has.
+      #
+      # Every measured property of that failure follows: `ReleaseSafe` ONLY,
+      # because these cache steps are gated on that mode and Debug has none;
+      # `windows-2025` only, where the purge was observed; content varying at
+      # CONSTANT COMMIT, because which entries were purged depends on the save;
+      # and one commit green then red a day apart, because it depends on which
+      # generation was restored.
+      #
+      # Adding the axis fixes the `ARCH-031` rule 6 pinning AND makes every
+      # pre-M1.1.14 cache unrestorable — which is the point: those are the
+      # mixed-CPU archives that feed the purge.
       - name: Restore Zig cache
         if: matrix.mode == 'ReleaseSafe'
         id: zig-cache
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
@@ -238,7 +263,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
 
       - name: zig build test
         shell: bash
@@ -304,7 +329,7 @@ jobs:
             echo "os=${{ matrix.os }}"
             echo "mode=${{ matrix.mode }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
-            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
             echo "cache_enabled=${{ matrix.mode == 'ReleaseSafe' }}"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
             echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
@@ -333,7 +358,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
@@ -362,9 +387,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-
+            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -477,9 +502,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-
+            zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |

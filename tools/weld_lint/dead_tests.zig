@@ -36,7 +36,23 @@
 //! invented edge yields a false ALIVE, which is the failure that says green and
 //! is what the hostile fixtures exist to refuse.
 //!
-//! **STATUS AT M1.1.14: NOT WIRED INTO `zig build lint`, and here is why.** The
+//! **STATUS: NOT YET WIRED INTO `zig build lint`. THREE FALSE DEADS REMAIN.**
+//! First run: 116 files / 405 blocks reported dead. After the two defects named
+//! below were fixed — loop-built and bare-array roots discovered, and the
+//! inline-field-access rule folded INTO the reference test — the run reports
+//! **3 files / 9 blocks**, and all three were probed empirically and are
+//! COLLECTED. So the residue is three missed edges, and it is the SAFE
+//! direction: no false ALIVE has been observed at any point. `live_tests`
+//! reached 1829 against a suite total of 1829 before the last root form landed,
+//! which is a strong corroboration of the closure itself.
+//!
+//! The three, for whoever closes them: `src/core/ecs/comptime_query.zig`,
+//! `src/core/ipc/transport_posix.zig`, `src/modules/render/gal/barriers.zig`.
+//! Activation is a Gate F exit condition, and it is COUPLED to the doctrine:
+//! writing "a dead test switches off compilation coverage" as normative while
+//! nothing checks it is the milestone's own named prohibition.
+//!
+//! HISTORY OF THE TWO DEFECTS THE FIRST RUN FOUND. The
 //! criterion above is CONFIRMED — the first run against the real tree tested it
 //! and it survived. `src/modules/render/root.zig` binds everything with bare
 //! `pub const` and its 45 tests ARE collected, which looked like a refutation
@@ -164,11 +180,6 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
         i = end + 1;
         if (!std.mem.endsWith(u8, rel, ".zig")) continue;
 
-        // Inline field access — `@import("f.zig").decl` — analyses one decl, not
-        // the file, so it is NOT an edge.
-        const after = std.mem.trimStart(u8, source[end + 1 ..], " \t\n");
-        if (after.len >= 2 and after[0] == ')' and after[1] == '.') continue;
-
         // Find the statement head to classify the binding.
         const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..at], '\n')) |p| p + 1 else 0;
         const head = std.mem.trim(u8, source[line_start..at], " \t");
@@ -180,6 +191,13 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
             try out.append(gpa, .{ .rel = rel }); // explicit reference guard
             continue;
         }
+        // The DISCRIMINANT IS THE REFERENCE, never the syntax of the import.
+        // An earlier version refused `@import("f.zig").decl` outright, which is
+        // wrong: `pub const Graph = @import("graph.zig").Graph;` DOES pull that
+        // file's tests once `Graph` is referenced, while `triangleIsFlat` pulled
+        // nothing because nothing referenced it. Same syntax, opposite outcomes,
+        // one rule. So the syntax test folds INTO the reference test rather than
+        // preceding it, and an unbound inline access simply has no name to check.
         const name = bindingName(head) orelse continue;
         if (isReferenced(source, name, line_start)) try out.append(gpa, .{ .rel = rel });
     }
@@ -372,12 +390,18 @@ test "a file bound but never referenced is DEAD" {
     try std.testing.expectEqual(@as(usize, 2), r.dead.items[0].tests);
 }
 
-test "an inline field access on an import is not an edge" {
-    // `foundation/math/exact.zig` exactly: reached only as
-    // `@import("exact.zig").triangleIsFlat`, which analyses one decl.
+test "an inline field access whose name is NEVER referenced is DEAD" {
+    // `foundation/math/exact.zig` exactly: bound as
+    // `pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;` and
+    // referenced by nothing, so its two tests never ran.
+    //
+    // This fixture ORIGINALLY bound `f` and then wrote `pub const g = f;`, which
+    // references it — it therefore encoded the refuted rule (syntax decides) and
+    // passed only because the implementation shared the mistake. Corrected here
+    // with its sibling below, which is the same syntax with the reference present.
     const gpa = std.testing.allocator;
     var r = try runFixture(gpa, &.{
-        .{ "m/root.zig", "pub const f = @import(\"leaf.zig\").f;\npub const g = f;\n" },
+        .{ "m/root.zig", "pub const f = @import(\"leaf.zig\").f;\n" },
         .{ "m/leaf.zig", "pub fn f() void {}\ntest \"leaf\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
@@ -461,7 +485,41 @@ pub fn rootsFromBuildZig(gpa: std.mem.Allocator, build_zig: []const u8) !std.Arr
         const mod = build_zig[name_start..name_end];
         if (try modulePath(gpa, build_zig, mod)) |p| try roots.append(gpa, p);
     }
+    try loopRoots(gpa, build_zig, &roots);
     return roots;
+}
+
+/// Extracts the literal paths of a `test_specs`-style table.
+///
+/// A target whose `root_source_file` is a LOOP VARIABLE has no literal to find
+/// at its `createModule`, so the first version of this file missed every one of
+/// them and reported all of `tests/` dead. The paths are still literals — in the
+/// table the loop walks — so they are read from there.
+pub fn loopRoots(gpa: std.mem.Allocator, build_zig: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, build_zig, i, ".path = \"")) |at| {
+        const s2 = at + ".path = \"".len;
+        const e = std.mem.indexOfScalarPos(u8, build_zig, s2, '"') orelse break;
+        i = e + 1;
+        const path = build_zig[s2..e];
+        if (!std.mem.endsWith(u8, path, ".zig")) continue;
+        try out.append(gpa, try gpa.dupe(u8, path));
+    }
+
+    // A second table shape: a bare `[_][]const u8{ "a.zig", "b.zig" }` array,
+    // which the IPC targets use. Matched on the ELEMENT form — a line whose whole
+    // content is a quoted `.zig` path followed by a comma — rather than on any
+    // `.zig` string anywhere in `build.zig`, because a loose match would invent
+    // roots, and an invented root yields a false ALIVE.
+    var it = std.mem.splitScalar(u8, build_zig, '\n');
+    while (it.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (t.len < 8 or t[0] != '"') continue;
+        if (!std.mem.endsWith(u8, t, "\".zig\",") and !std.mem.endsWith(u8, t, ".zig\",")) continue;
+        const e = std.mem.lastIndexOfScalar(u8, t, '"') orelse continue;
+        if (e == 0) continue;
+        try out.append(gpa, try gpa.dupe(u8, t[1..e]));
+    }
 }
 
 /// The `root_source_file` path of the module bound to `name`, if it is a literal.
@@ -497,4 +555,72 @@ test "rootsFromBuildZig picks addTest roots and skips other modules" {
     }
     try std.testing.expectEqual(@as(usize, 1), roots.items.len);
     try std.testing.expectEqualStrings("src/a/root.zig", roots.items[0]);
+}
+
+test "a root whose path is a loop variable is still discovered" {
+    // DEFECT 1, pinned. The first version read only literal `root_source_file`
+    // arguments, so every target built by the `test_specs` loop was invisible and
+    // all of `tests/` reported dead. The paths ARE literals — in the table the
+    // loop walks — and that is where they are read from.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const test_specs = [_]Spec{
+        \\    .{ .path = "tests/a/one.zig" },
+        \\    .{ .path = "tests/a/two.zig" },
+        \\};
+        \\for (test_specs) |spec| {
+        \\    const t_mod = b.createModule(.{ .root_source_file = b.path(spec.path) });
+        \\    const t = b.addTest(.{ .root_module = t_mod });
+        \\}
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 2), roots.items.len);
+    try std.testing.expectEqualStrings("tests/a/one.zig", roots.items[0]);
+    try std.testing.expectEqualStrings("tests/a/two.zig", roots.items[1]);
+}
+
+test "an inline field access whose name IS referenced is ALIVE" {
+    // DEFECT 2, pinned, and it is the counterpart of the third fixture above:
+    // same syntax, opposite outcome, decided by the reference alone. This is
+    // `render_graph.Graph` — `pub const Graph = @import("graph.zig").Graph;` with
+    // a `comptime { _ = render_graph.Graph; }` guard — whose six tests ARE
+    // collected, against `exact.zig`, which nothing referenced.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "pub const Graph = @import(\"graph.zig\").Graph;\ncomptime { _ = Graph; }\n" },
+        .{ "m/graph.zig", "pub const Graph = struct {};\ntest \"graph\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.files.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
+    try std.testing.expectEqual(@as(usize, 1), r.live_tests);
+}
+
+test "a bare string-array table of roots is discovered, and only its elements" {
+    // The IPC targets, built from a `[_][]const u8` list. Matched on the ELEMENT
+    // form: a loose "any .zig string in build.zig" would pick up `b.path` calls
+    // for executables and invent roots, and an invented root says ALIVE.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const ipc_specs = [_][]const u8{
+        \\    "tests/ipc/framing.zig",
+        \\    "tests/ipc/shm.zig",
+        \\};
+        \\const exe_mod = b.createModule(.{ .root_source_file = b.path("src/runtime/main.zig") });
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 2), roots.items.len);
+    try std.testing.expectEqualStrings("tests/ipc/framing.zig", roots.items[0]);
+    try std.testing.expectEqualStrings("tests/ipc/shm.zig", roots.items[1]);
 }
