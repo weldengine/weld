@@ -272,20 +272,57 @@ jobs:
       # the archive here, but the cap will be met again for other reasons — the f64
       # axis and the ARM cell both add targets — and the purge would corrupt just
       # the same. The trigger was fixed; this fixes the mechanism.
+      # M1.1.14 — THE 2 GB CONSTANT HAD NO SOURCE ON THIS CACHE, and both ReleaseSafe
+      # cells have been permanently cold because of it. Measured, not argued:
+      #
+      #   * the line `Zig cache exceeded 2147483648 bytes (was …); purged contents
+      #     before save` is emitted by `Post Run weldengine/setup-zig@v0.1.0` — OUR
+      #     OWN action, in its post step, about the cache IT manages. It is not
+      #     `actions/cache`, and it is not this `.zig-cache`.
+      #   * `2147483648` occurs exactly TWICE in all of `.github/`: in the comment
+      #     quoting that message, and as the `limit=` below. It was transcribed
+      #     from one cache's cap onto a different cache.
+      #   * the volumes that action reports on the GLOBAL cache are far larger than
+      #     anything here — 14 700 387 106 bytes on ubuntu and 7 707 924 893 on
+      #     windows in bench run 31933791179 — so the two are not even the same
+      #     order of quantity.
+      #
+      # THIS RUN IS AN EXPERIMENT AND ITS LOG IS THE RESULT. The pre-check is
+      # raised to GitHub's documented repository-wide 10 GB so it stops pre-empting,
+      # and `actions/cache/save` is allowed to answer for itself. Two outcomes, both
+      # readable in the log and neither assumed here:
+      #
+      #   * it SAVES — then the cells stop being cold, and the next run yields the
+      #     warm `windows-2025 / ReleaseSafe` figure that decides the f64 matrix
+      #     axis. That number does not exist today.
+      #   * it REFUSES, with its own "over the … limit, not saving cache" — then
+      #     refusing is safe, the cells are cold for a reason that is finally the
+      #     platform's rather than ours, and the decision moves to what is cached.
+      #
+      # The outcome that would be a defect is a PURGE — a partial archive whose
+      # manifests outlive their objects, which the next restore turns into
+      # `file_hash FileNotFound`. Its signature is known and recorded: ReleaseSafe
+      # only, windows-2025 only, content varying at a CONSTANT commit. If it
+      # appears, this raise is reverted; a cache that lies costs more than no cache.
       - name: Measure the Zig cache before saving
         if: matrix.mode == 'ReleaseSafe'
         id: cache-size
         shell: bash
         run: |
           set -euo pipefail
-          limit=2147483648
+          limit=10737418240
           bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
           bytes=$((bytes * 1024))
           echo "zig cache: $bytes bytes (cap $limit)"
+          # The decomposition, so the "reduce what is cached" route is instructed by
+          # a measurement rather than by a guess. Measured locally, `o` is ~99 % of
+          # the tree — and it cannot be dropped, since a manifest without its object
+          # is the corruption above.
+          du -sk .zig-cache/* 2>/dev/null | sort -rn | head -5 || true
           if [ "$bytes" -gt "$limit" ]; then
             echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
             echo "::warning::A partial save leaves manifests referencing purged objects, which"
-            echo "::warning::the next restore turns into `file_hash FileNotFound`. Cold is correct."
+            echo "::warning::the next restore turns into 'file_hash FileNotFound'. Cold is correct."
             echo "save=false" >> "$GITHUB_OUTPUT"
           else
             echo "save=true" >> "$GITHUB_OUTPUT"
