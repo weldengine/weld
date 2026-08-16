@@ -100,7 +100,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        # M1.1.14 / Gate D — `ubuntu-24.04-arm` carries the half of C1.1 that no
+        # machine in rotation can measure: two physical machines, three GPU
+        # configurations, no ARM64 among them. Level 2 point 1 — the four discrete
+        # traces identical to the x86_64 witness over 60 frames, at both precisions
+        # — is the PASS/FAIL, and it is verified by the `forge-determinism` step
+        # below like any other cell.
+        #
+        # A CONTINUOUS DIVERGENCE HERE IS NOT A FAILURE, and the point is worth
+        # writing where the cell is declared rather than only in the brief: level 2
+        # PREDICTS it. `engine-phase-1-criteria.md` C1.1 puts inter-ISA
+        # bit-exactness at level 3 and explicitly out of Phase 1, so the chain
+        # comparison skips on this ISA by design and prints that it did. What the
+        # cell must produce is the discrete parity and a divergence frame that is
+        # reproducible run to run; the frame's REGRESSION is the signal, never its
+        # value.
+        #
+        # This is the first time the repository compiles for AArch64 in CI. What
+        # falls here and is NOT the discrete parity is a finding to measure and
+        # record, not to fix under cover of this milestone.
+        os: [ubuntu-24.04, windows-2025, ubuntu-24.04-arm]
         mode: [Debug, ReleaseSafe]
     runs-on: ${{ matrix.os }}
     # M0.1 hotfix — bumped from 10 to 20 min: Windows ReleaseSafe on the
