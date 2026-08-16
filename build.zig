@@ -1943,6 +1943,31 @@ pub fn build(b: *std.Build) void {
     );
     lint_step.dependOn(&lint_run.step);
 
+    // M1.1.14 — the dead-test guard, ACTIVE. Every file holding a `test` block
+    // must belong to some test target's analysis closure or to a declared
+    // exclusion. It builds nothing and runs nothing: it reads `build.zig` for its
+    // roots and walks relative imports, so it costs a tree scan and rides on the
+    // existing lint gate rather than earning a cell of its own.
+    //
+    // WHY IT IS ACTIVE AND NOT ADVISORY. An uncollected `test` block is never
+    // ANALYSED, so the code it instantiates loses type-checking, not just
+    // assertions — which is how `zig_codegen/cache.zig` stopped compiling at the
+    // Zig 0.16 pin unnoticed and how a use-after-return in the render graph
+    // survived ten milestones. Writing that as doctrine while nothing enforced it
+    // is the prohibition this milestone named against itself.
+    //
+    // It takes no paths, so `b.args` is deliberately NOT forwarded: the args of
+    // `zig build lint -- src` belong to the rule pass beside it.
+    const dead_tests_run = b.addRunArtifact(weld_lint_exe);
+    dead_tests_run.addArg("dead-tests");
+    lint_step.dependOn(&dead_tests_run.step);
+
+    const dead_tests_step = b.step(
+        "dead-tests",
+        "Report every file with `test` blocks outside all test-target closures",
+    );
+    dead_tests_step.dependOn(&dead_tests_run.step);
+
     const lint_commit_run = b.addRunArtifact(weld_lint_exe);
     lint_commit_run.addArg("commit-msg");
     if (b.args) |args| lint_commit_run.addArgs(args);

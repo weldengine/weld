@@ -138,13 +138,55 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
     // not a verdict until it is DECOMPOSED: a single number invites attribution
     // by guesswork, which is how five unaccounted blocks became thirteen.
     var want_list = false;
+    var want_per_root = false;
     for (argv_extra) |a| {
         if (std.mem.eql(u8, a, "--list")) want_list = true;
+        if (std.mem.eql(u8, a, "--per-root")) want_per_root = true;
     }
     if (want_list) {
         for (report.closure.items) |c| {
             if (c.tests > 0) try out.print("LIVE {d}\t{s}\n", .{ c.tests, c.path });
         }
+    }
+    if (want_per_root) try perRootControl(arena, out, roots.items, want_list);
+
+    // The bilateral control. Two independent computations must land on one
+    // number: this closure, and the suite's own collected total. Too permissive
+    // overshoots it, too strict undershoots it, and only equality excludes both —
+    // which is why the control, and not the fixture count, is what authorises
+    // this guard. Twenty-odd passing fixtures once missed a defect that ONE
+    // NUMBER caught on its first application.
+    const os = @import("builtin").os.tag;
+    const gap = dead_tests.uncollectedOn(os);
+    const expected = report.live_tests - gap;
+    try out.print(
+        "dead-tests: control — closure {d} - {d} declared uncollected on {t} = {d} expected collected\n",
+        .{ report.live_tests, gap, os, expected },
+    );
+    for (dead_tests.uncollected) |u| {
+        if (u.only_on != null and u.only_on.? != os) continue;
+        try out.print("  uncollected: {s} ({d} block(s)): {s}\n", .{ u.path, u.blocks, u.reason });
+    }
+    for (argv_extra) |a| {
+        const prefix = "--expect-collected=";
+        if (!std.mem.startsWith(u8, a, prefix)) continue;
+        const got = std.fmt.parseInt(usize, a[prefix.len..], 10) catch {
+            try out.print("dead-tests: --expect-collected needs a number, got '{s}'\n", .{a[prefix.len..]});
+            return 2;
+        };
+        if (got != expected) {
+            try out.print(
+                "dead-tests: CONTROL FAILED — expected {d} collected, `zig build test` reported {d}.\n",
+                .{ expected, got },
+            );
+            try out.writeAll("A gap in either direction is a finding. ABOVE the collected total means\n" ++
+                "the closure admits what no binary runs; BELOW means it misses an edge and a\n" ++
+                "dead file could hide behind it. Decompose with `--per-root --list` before\n" ++
+                "touching either side, and declare a new term in `uncollected` only with the\n" ++
+                "mechanism that explains it.\n");
+            return 1;
+        }
+        try out.print("dead-tests: control OK — closure and suite agree at {d}.\n", .{expected});
     }
 
     // The report states the SIZE of what it judged. A tool built because probes
@@ -178,6 +220,56 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
     return 1;
 }
 
+/// Per-root closure control — the quantity the suite's own total is comparable to.
+///
+/// WHY PER ROOT AND NOT GLOBALLY, because this is the defect the control itself
+/// exposed. `analyze` carries ONE `seen` set across every root, so a file reached
+/// by two test targets is counted ONCE. The suite counts it once PER BINARY: two
+/// targets that both reach it compile it twice and run its tests twice. Comparing
+/// the global closure against the suite total is therefore comparing a set
+/// cardinality to a multiset cardinality — the same collected-versus-source unit
+/// error this milestone has now made three times, in its own instrument.
+///
+/// The per-root sum counts with the SAME multiplicity the suite does, so the two
+/// numbers are finally the same kind of thing and their difference is a finding
+/// rather than an artefact of how each was computed.
+///
+/// A module import (`weld_core`, `weld_etch`) is deliberately not followed, here
+/// as everywhere: Zig collects tests from the root module's own files and not
+/// from the modules it imports, so following one would inflate this side against
+/// a suite that never ran those tests in that binary.
+fn perRootControl(
+    arena: std.mem.Allocator,
+    out: *std.Io.Writer,
+    roots: []const []const u8,
+    want_list: bool,
+) !void {
+    var sum: usize = 0;
+    for (roots) |root| {
+        var one = try dead_tests.analyze(arena, &.{root}, &.{}, &readForAnalysis);
+        defer one.deinit(arena);
+        sum += one.live_tests;
+        try out.print("ROOT {d}\t{s}\n", .{ one.live_tests, root });
+        if (want_list) {
+            for (one.closure.items) |c| {
+                if (c.tests > 0) try out.print("  in {s}: {d}\t{s}\n", .{ root, c.tests, c.path });
+            }
+        }
+    }
+    try out.print(
+        "dead-tests: per-root closure sum = {d} test block(s) over {d} roots\n",
+        .{ sum, roots.len },
+    );
+    try out.writeAll(
+        "Compare against the suite's own collected total from `zig build test --summary all`.\n" ++
+            "Expect a PLATFORM-DEPENDENT gap, announced before it is measured so a predicted\n" ++
+            "difference is not read as a broken guard: on macOS the closure exceeds the\n" ++
+            "collected total by the blocks of `src/modules/render/gal/vulkan/conv.zig`, which\n" ++
+            "the Null backend never analyses; on Linux the two are equal once the declared\n" ++
+            "exclusions are subtracted. This analysis is static and blind to comptime dispatch.\n",
+    );
+}
+
 var reader_arena: std.mem.Allocator = undefined;
 var reader_io: std.Io = undefined;
 
@@ -195,10 +287,14 @@ const usage_text =
     \\      no_float_reduce. Exits 0
     \\      if clean, 1 if any rule fires.
     \\
-    \\  weld_lint dead-tests
+    \\  weld_lint dead-tests [--list] [--per-root]
     \\      Check that every file holding a `test` block belongs to the
     \\      analysis closure of some test target, or to a declared
     \\      exclusion. Exits 0 if clean, 1 if any file is outside.
+    \\      --list      print the closure file by file with its count.
+    \\      --per-root  print each root's own closure and their SUM —
+    \\                  the quantity comparable to the suite's collected
+    \\                  total, which counts a shared file once per binary.
     \\
     \\  weld_lint commit-msg <file>
     \\      Validate the title of the commit message at <file> against
