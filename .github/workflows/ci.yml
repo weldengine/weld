@@ -447,6 +447,12 @@ jobs:
             echo "zig_version=${{ env.ZIG_VERSION }}"
             echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
             echo "cache_enabled=true"
+            # M1.1.14 — the archive size travels with the timings, because the
+            # decision it feeds is about matrix SHAPE and a reader weighing another
+            # axis needs both. Measured here: a Debug archive is far smaller than a
+            # ReleaseSafe one (0.59 GB against 2.86 on windows-2025), which is the
+            # other half of why the ReleaseSafe-only restriction was mis-founded.
+            echo "cache_bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 | awk '{print $1*1024}')"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
             echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
             echo "build_seconds=${BUILD_SECONDS:-NA}"
