@@ -414,6 +414,38 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
 
+      # TEMPORARY — CELL-LEVEL COUNTER-FACTUAL FOR THE STEP ABOVE. REMOVE IN THE
+      # NEXT COMMIT once the cell has been observed red.
+      #
+      # The claim under test is not that the linter fires — that has a local
+      # counter-factual already, and a local counter-factual is exactly what was
+      # mistaken for proof when the step did not exist in any workflow. The claim
+      # is that a violation reddens THE CELL, which is a property of the workflow
+      # wiring and can only be observed on a run.
+      #
+      # The violating file is created HERE, on the runner, and never exists in
+      # git: the `pre-commit` hook runs `zig build lint` over the whole tree, so a
+      # committed violation cannot be pushed at all, and `--no-verify` is a
+      # standing prohibition. The fixture corpus under `tests/lint/bad` is no route
+      # either — measured, `scan.collectZigFiles` skips that prefix even when it is
+      # passed explicitly, so linting it returns 0.
+      #
+      # Verified locally in both directions before this step was written: with the
+      # file present, `weld_lint lint` exits 1 naming
+      # `doc_comments: missing '///' doc comment on public declaration`; with it
+      # removed, 0.
+      - name: COUNTER-FACTUAL (temporary) — a lint violation must redden this cell
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '// not a doc comment\npub const probe_violation: u8 = 1;\n' \
+            > src/foundation/lint_counterfactual_probe.zig
+          echo "--- probe planted; the next command MUST fail ---"
+          zig build lint -Dcpu=${{ env.ZIG_CPU }}
+          echo "::error::the lint step did NOT fail on a planted violation"
+          exit 1
+
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
       # FLAG. Every cell replays the canonical scenario and compares its own
       # output against the committed witnesses; this is where C1.1 level 1 is
