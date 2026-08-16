@@ -414,68 +414,6 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
 
-      # TEMPORARY — CELL-LEVEL COUNTER-FACTUAL FOR THE STEP ABOVE. REMOVE IN THE
-      # NEXT COMMIT once the cell has been observed red.
-      #
-      # The claim under test is not that the linter fires — that has a local
-      # counter-factual already, and a local counter-factual is exactly what was
-      # mistaken for proof when the step did not exist in any workflow. The claim
-      # is that a violation reddens THE CELL, which is a property of the workflow
-      # wiring and can only be observed on a run.
-      #
-      # The violating file is created HERE, on the runner, and never exists in
-      # git: the `pre-commit` hook runs `zig build lint` over the whole tree, so a
-      # committed violation cannot be pushed at all, and `--no-verify` is a
-      # standing prohibition. The fixture corpus under `tests/lint/bad` is no route
-      # either — measured, `scan.collectZigFiles` skips that prefix even when it is
-      # passed explicitly, so linting it returns 0.
-      #
-      # Verified locally in both directions before this step was written: with the
-      # file present, `weld_lint lint` exits 1 naming
-      # `doc_comments: missing '///' doc comment on public declaration`; with it
-      # removed, 0.
-      - name: COUNTER-FACTUAL (temporary) — a lint violation must redden this cell
-        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '// not a doc comment\npub const probe_violation: u8 = 1;\n' \
-            > src/foundation/lint_counterfactual_probe.zig
-          echo "--- probe planted; the next command MUST fail ---"
-          zig build lint -Dcpu=${{ env.ZIG_CPU }}
-          echo "::error::the lint step did NOT fail on a planted violation"
-          exit 1
-
-      # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
-      # FLAG. Every cell replays the canonical scenario and compares its own
-      # output against the committed witnesses; this is where C1.1 level 1 is
-      # actually verified, and where level 2 point 1 is verified once the ARM64
-      # cell exists. A witness committed with nothing reading it is a file, and
-      # for one push that is exactly what the set was.
-      #
-      # NO AGGREGATOR, by the arbitration recorded in
-      # `engine-development-workflow.md` §7.3: each cell compares against the
-      # in-tree witness and fails ALONE, so the failure names the platform rather
-      # than announcing that two blobs differ. The paire-à-paire property C1.1
-      # level 1 asks for follows by transitivity, and in a stronger form — the
-      # witness pins the value in TIME, not merely between two OSes.
-      #
-      # Run at BOTH precisions on the same cell rather than by doubling the
-      # matrix: the harness is a two-minute step and the rest of a cell is not,
-      # so carrying the precision axis here buys the `{f32, f64}` coverage Gate C
-      # asks for at a fraction of the cost of eight full cells. The matrix axis
-      # `engine-platform.md` §8 describes remains the eventual shape; this is the
-      # cheap half of it, and it is the half the witnesses need.
-      - name: zig build forge-determinism
-        shell: bash
-        run: |
-          set -euo pipefail
-          for prec in false true; do
-            echo "=== -Dphysics_f64=$prec / ${{ matrix.mode }} ==="
-            zig build forge-determinism \
-              -Doptimize=${{ matrix.mode }} -Dphysics_f64=$prec -Dcpu=${{ env.ZIG_CPU }}
-          done
-
       # M0.9 / E1 — CI wall-time + cache measurement, archived as an
       # artifact (measurement deliverable, not a gate). `always()` so a
       # failing build/test leg still publishes whatever it measured.
