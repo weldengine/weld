@@ -84,9 +84,15 @@
 //! fixtures did not have, and which caught a real defect on its first
 //! application. Every term of the difference is declared IN ADVANCE in
 //! `uncollected`: a predicted gap is a result, the same gap unannounced reads as
-//! a broken guard. Measured at the state that activated it, macOS/aarch64:
-//! closure 1857 − 5 declared = 1852, against a suite reporting 1852 collected.
-//! On Linux the declared gap is 1, `conv.zig` being collected there.
+//! a broken guard. Measured on all three platforms of the matrix at the state
+//! that activated it, closure 1857 in every case:
+//!
+//!   macOS   1857 − 5 = 1852, suite reports 1852
+//!   Linux   1857 − 5 = 1852, suite reports 1852
+//!   Windows 1857 − 7 = 1850, suite reports 1850
+//!
+//! The three reconcile exactly, and getting there refuted the hypothesis the gap
+//! was first written on: `conv.zig` is collected on NO platform, not just macOS.
 //!
 //! Only relative `.zig` imports are followed. A module-name import (`std`,
 //! `weld_core`) crosses into a module that owns its own test target and its own
@@ -180,11 +186,30 @@ pub const uncollected = [_]Uncollected{
     .{
         .path = "src/modules/render/gal/vulkan/conv.zig",
         .blocks = 4,
-        .only_on = .macos,
-        .reason = "the GAL selects the Null backend on macOS, so the Vulkan bodies are " ++
-            "never analysed and their blocks are never collected. This analysis is static " ++
-            "and blind to comptime dispatch, so it counts them. On Linux and Windows the " ++
-            "same file IS collected and this entry does not apply",
+        .reason = "reached by this analysis through `gal/root.zig`'s `pub const " ++
+            "vulkan_backend`, and elaborated by Zig on NO platform of the matrix: the " ++
+            "render step reports 45 collected against a closure of 49 on macOS, on " ++
+            "ubuntu-24.04 and on windows-2025 alike. MEASURED, and it REFUTES the standing " ++
+            "hypothesis that the macOS Null backend was the cause and that Linux and " ++
+            "Windows would collect these four — they do not. What is established is the " ++
+            "absence, on all three; the mechanism inside Zig's lazy analysis is not, and " ++
+            "is deliberately not guessed at here",
+    },
+    .{
+        .path = "src/core/ipc/shm_posix.zig",
+        .blocks = 1,
+        .only_on = .windows,
+        .reason = "selected by comptime dispatch inside `shm.zig` and not analysed on " ++
+            "Windows. This analysis is static and follows the import regardless",
+    },
+    .{
+        .path = "src/core/ipc/transport_posix.zig",
+        .blocks = 1,
+        .only_on = .windows,
+        .reason = "same comptime dispatch as `shm_posix.zig`. The pair is exactly the " ++
+            "Linux-minus-Windows gap: the `core` step reports 167 collected on " ++
+            "ubuntu-24.04 and 165 on windows-2025, and that ONE step is the only " ++
+            "difference between the two cells across all 129",
     },
     .{
         .path = "tests/ecs/no_alloc_steady_state_stress.zig",
