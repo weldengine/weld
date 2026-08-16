@@ -121,6 +121,23 @@ jobs:
         # record, not to fix under cover of this milestone.
         os: [ubuntu-24.04, windows-2025, ubuntu-24.04-arm]
         mode: [Debug, ReleaseSafe]
+        # M1.1.14 / Gate E — THE PRECISION AXIS, `engine-platform.md` §8's third
+        # dimension, built rather than amended away. `-Dphysics_f64` is a supported
+        # build flag, and a supported flag no cell exercises is an untested
+        # configuration — the milestone's own named prohibition.
+        #
+        # AFFORDABLE, ON THE NUMBER AND NOT ON THE INTENTION. The cache returned to
+        # `windows-2025 / Debug` took it from 14 minutes to 4 of a 20-minute budget;
+        # every other cell sits between 1 and 9 minutes of its own. The one cell
+        # without margin was `ubuntu-24.04-arm / ReleaseSafe` at 25 of 55, and its
+        # cost was LOCATED before this axis was allowed to double it: 129 of 132
+        # `compile test` steps ran where a good run reuses 131, so the cost is
+        # COMPILATION and not test execution. Compilation does not depend on the
+        # precision — `-Dphysics_f64` moves a comptime constant, not a volume of
+        # code — so the f64 twin costs the same, and 25 minutes is a cache-miss
+        # figure rather than a steady state: the same cell ran in 1 minute when the
+        # cache served it.
+        precision: [false, true]
     runs-on: ${{ matrix.os }}
     # M0.1 hotfix — bumped from 10 to 20 min: Windows ReleaseSafe on the
     # 2-vCPU runner spends ~3 min on `zig build` then ~7 min on
@@ -257,10 +274,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
@@ -276,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
+          zig build -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
           echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # CI cache refresh chore — mid-job save right after `zig build`: a run
@@ -362,20 +379,20 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
 
       - name: zig build test
         shell: bash
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
+          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
       # `.etch` fixtures + the `etch_test` shim run over the green fixtures.
       - name: zig build test-etch
-        run: zig build test-etch -Doptimize=${{ matrix.mode }} -Dcpu=${{ env.ZIG_CPU }}
+        run: zig build test-etch -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
@@ -424,6 +441,27 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
 
+      # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
+      # FLAG. Every cell replays the canonical scenario and compares its own output
+      # against the committed witnesses. This is where C1.1 level 1 is verified on
+      # x86_64 and level 2 point 1 on the ARM64 cell; a witness with nothing reading
+      # it is a file.
+      #
+      # NO AGGREGATOR, by the arbitration in `engine-development-workflow.md` §7.3:
+      # each cell compares against the in-tree witness and fails ALONE, so a failure
+      # names the platform instead of announcing that two blobs differ.
+      #
+      # RESTORED AFTER BEING DELETED BY ACCIDENT, and the accident is worth its
+      # line. The commit that removed the temporary `lint` counter-factual cut a
+      # span running from that step's comment to the timing report's, and THIS step
+      # sat between them. Three runs then went green with no determinism check at
+      # all — a step that does not run cannot fail — which is the very property the
+      # deleted counter-factual existed to prove about `lint`. Measured, not
+      # inferred: `git show <sha>:.github/workflows/ci.yml | grep -c` returns 1 at
+      # `9a31746` and `a18b408`, and 0 from `c3d6073` onward.
+      - name: zig build forge-determinism
+        run: zig build forge-determinism -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
+
       # M0.9 / E1 — CI wall-time + cache measurement, archived as an
       # artifact (measurement deliverable, not a gate). `always()` so a
       # failing build/test leg still publishes whatever it measured.
@@ -439,13 +477,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt"
+          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}.txt"
           {
-            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }})"
+            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }}, ${{ matrix.precision }})"
             echo "os=${{ matrix.os }}"
             echo "mode=${{ matrix.mode }}"
+            echo "physics_f64=${{ matrix.precision }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
-            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
             echo "cache_enabled=true"
             # M1.1.14 — the archive size travels with the timings, because the
             # decision it feeds is about matrix SHAPE and a reader weighing another
@@ -467,8 +506,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}
-          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt
+          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}
+          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}.txt
           retention-days: 30
 
       # CI cache refresh chore — full post-test cache save. `if: always()`
@@ -509,7 +548,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
