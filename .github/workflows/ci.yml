@@ -397,6 +397,23 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build forge-asm-inventory -Dcpu=${{ env.ZIG_CPU }}
 
+      # M1.1.14 — `zig build lint` ON CI, and its absence was the ninth instance of
+      # this milestone's own failure mode. A grep over the whole of
+      # `.github/workflows/` returned NOTHING: the only caller was the `pre-commit`
+      # hook in `lefthook.yml`. So the brief lists "`zig build lint` green" as a CI
+      # criterion that no cell could produce, and — worse — BOTH guards this
+      # milestone built hang off this step: the dead-test closure and
+      # `no_float_reduce`. Neither ran in CI. A doctrine written on the strength of
+      # a guard nobody runs is the prohibition this milestone named against itself,
+      # and the local counter-factual that authorised it proved only that the
+      # LOCAL invocation reddens.
+      #
+      # One cell, because it answers a property of the SOURCE and not of the host —
+      # the same arbitration as `verify-synth-100` and `forge-asm-inventory` above.
+      - name: zig build lint
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
+
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
       # FLAG. Every cell replays the canonical scenario and compares its own
       # output against the committed witnesses; this is where C1.1 level 1 is
