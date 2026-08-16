@@ -4584,28 +4584,45 @@ test "the frictionless-slider residual is rounding, not energy injection" {
     // which was this milestone's own subject.
     //
     // Measured after the libm removal, the explicit folds, the installed FPU and
-    // `-Dcpu=baseline`:
+    // `-Dcpu=baseline`, counted in ULP AT THE VALUE 5.0:
     //
-    //   f32  retained 5.000002              bits 0x40A00004          4 ULP
-    //   f64  retained 5.000000000           bits 0x4014000000000003  3 ULP
+    //   f32  retained 5.000002     bits 0x40A00004          4 ULP
+    //   f64  retained 5.0          bits 0x4014000000000003  3 ULP
     //
-    // AND THE f64 FIGURE REFUTES THE ARGUMENT THAT USED TO SETTLE THIS. M1.1.12
-    // recorded exactly 5.0 at f64 and reasoned "a solver adding energy would add
-    // it at both precisions", concluding the effect was arithmetic because f64
-    // showed none. It shows 3 ULP now, so that argument is gone — and the
-    // conclusion survives on a stronger one.
+    // THE DISCRIMINANT, IN EXACT FORM RATHER THAN IN DECIMALS. Energy injected at a
+    // PHYSICAL rate is precision-independent in relative terms, so reproducing the
+    // f32 excess at f64 means reproducing the same ABSOLUTE excess at the same
+    // value. 5.0 lies in [4, 8), so its exponent is 2 and
     //
-    // THE DISCRIMINANT IS THE RELATIVE GAIN, and it separates the two hypotheses by
-    // nine orders. Energy injected at a PHYSICAL rate is precision-independent in
-    // relative terms: the f32 excess is 3.8147e-7 relative, and reproducing that
-    // relative gain at f64 would take **1 717 988 150 ULP**. Three are measured.
-    // What the numbers show instead is an excess of 3.20 x eps at f32 and 2.40 x
-    // eps at f64 — comparable in units of the working precision's own granularity,
-    // which is the signature of ROUNDING and not of energy.
+    //   ULP_f32(5.0) = 2^(2-23) = 2^-21
+    //   ULP_f64(5.0) = 2^(2-52) = 2^-50
     //
-    // So the bound below is stated in ULP rather than in metres, deliberately: a
-    // metre bound would pass at f64 for an energy injection nine orders too large,
-    // and would therefore be an assertion that cannot fail where it matters most.
+    // whose ratio is 2^29. The f32 excess is therefore
+    //
+    //   4 ULP_f32 = 4 x 2^29 ULP_f64 = 2^31 ULP_f64
+    //
+    // against THREE measured — nine orders of margin. The form is stated as powers
+    // of two on purpose: it is checkable by exponent arithmetic, by any reader,
+    // without a machine. A ten-digit decimal in a permanent pin is unverifiable,
+    // and that is exactly how the first version of this number survived review.
+    //
+    // THAT FIRST VERSION READ 1 717 988 150 AND WAS WRONG BY 5/4, because it was
+    // `relative excess / eps`, which counts ULP AT 1.0 while the question is about
+    // ULP AT 5.0. A quantity computed on one base and reported on another — the
+    // same shape as collected-versus-source, local-versus-cell, and
+    // `live_tests`-versus-collected-total earlier in this milestone.
+    //
+    // THE f64 RESIDUAL'S CAUSE IS NOT ATTRIBUTED, and deliberately so. M1.1.12
+    // measured exactly 5.0 there; three ULP appear today. Two changes sit between
+    // those measurements — the TGS Soft port at M1.1.13.1, and this milestone's
+    // explicit left folds, which alter the summation order of `dot` and `lengthSq`
+    // and are of exactly this magnitude. Neither has been measured against this
+    // scene, so neither is named as the cause. The conclusion does not depend on
+    // it.
+    //
+    // The bound below is in ULP rather than in metres for the same reason the
+    // discriminant is: a metre bound would pass at f64 for an energy injection nine
+    // orders too large, and would be an assertion that cannot fail where it matters.
     const gpa = testing.allocator;
     const retained = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
 
@@ -4619,6 +4636,6 @@ test "the frictionless-slider residual is rounding, not energy injection" {
     try testing.expect(retained > five);
 
     // And it is a handful of ULP. `8` is loose against the 4 and 3 measured and
-    // tight against the 1.7e9 an energy injection needs at f64.
+    // tight against the 2^31 an energy injection needs at f64.
     try testing.expect(got - want <= 8);
 }
