@@ -354,4 +354,5 @@ comptime {
     _ = @import("tests/determinism/scenario.zig");
     _ = @import("tests/determinism/trace.zig");
     _ = @import("tests/determinism/run.zig");
+    _ = @import("tests/determinism/witness.zig");
 }
