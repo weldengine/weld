@@ -240,8 +240,19 @@ jobs:
       # Adding the axis fixes the `ARCH-031` rule 6 pinning AND makes every
       # pre-M1.1.14 cache unrestorable — which is the point: those are the
       # mixed-CPU archives that feed the purge.
+      # M1.1.14 / Gate E — THE RELEASESAFE-ONLY RESTRICTION IS LIFTED, because the
+      # measurement it rested on has been refuted. It was adopted when
+      # `Save Zig cache` went 39s -> 5m23 -> 7m39 and ate the Debug budget; BOTH
+      # causes of that inflation are now fixed — the key carried no CPU axis, so
+      # every run mixed two CPU variants into one archive, and the oversized result
+      # met a cap that purged it. A decision resting on a refuted measurement is
+      # not inherited, it is re-measured.
+      #
+      # `windows-2025 / Debug` is the cell that matters: 14 minutes of a 20-minute
+      # budget with no cache, against 5 of 55 for its ReleaseSafe sibling, which now
+      # builds in 2 seconds. It is also the cell a `{f32, f64}` axis would double,
+      # so this is the number that decides that axis.
       - name: Restore Zig cache
-        if: matrix.mode == 'ReleaseSafe'
         id: zig-cache
         uses: actions/cache/restore@v5
         with:
@@ -324,7 +335,6 @@ jobs:
       # only, windows-2025 only, content varying at a CONSTANT commit. If it
       # appears, this raise is reverted; a cache that lies costs more than no cache.
       - name: Measure the Zig cache before saving
-        if: matrix.mode == 'ReleaseSafe'
         id: cache-size
         shell: bash
         run: |
@@ -348,7 +358,7 @@ jobs:
           fi
 
       - name: Save Zig cache (post-build)
-        if: matrix.mode == 'ReleaseSafe' && steps.cache-size.outputs.save == 'true'
+        if: steps.cache-size.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
@@ -436,7 +446,7 @@ jobs:
             echo "mode=${{ matrix.mode }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
             echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
-            echo "cache_enabled=${{ matrix.mode == 'ReleaseSafe' }}"
+            echo "cache_enabled=true"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
             echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
             echo "build_seconds=${BUILD_SECONDS:-NA}"
@@ -459,8 +469,37 @@ jobs:
       # so a red test leg still saves whatever it compiled. This entry is
       # newer than the post-build save of the same run, so the zon-level
       # prefix fallback serves it first to the next run.
+      # M1.1.14 — THE ALL-OR-NOTHING GUARD WAS HALF-APPLIED, and this is where.
+      # `Save Zig cache (final)` carried `always() && matrix.mode == 'ReleaseSafe'`
+      # and never consulted `steps.cache-size.outputs.save`, so every run that
+      # printed `SKIPPING the save` saved anyway one step later — measured on run
+      # 31932309771, where the pre-check warned at 3 094 724 608 bytes, the
+      # post-build save was correctly skipped, and this one reported
+      # `Cache saved with key: …`. One of two save steps honoured the guard.
+      #
+      # It gets its OWN measurement rather than reusing the earlier output, because
+      # `always()` is deliberate here — the cache is worth saving even when the
+      # tests failed — and the earlier step is skipped when the build fails, which
+      # would silently turn `always()` into `never` on exactly those runs.
+      - name: Measure the Zig cache before the final save
+        if: always()
+        id: cache-size-final
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit=10737418240
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache (final): $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the final save."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Save Zig cache (final)
-        if: always() && matrix.mode == 'ReleaseSafe'
+        if: always() && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache

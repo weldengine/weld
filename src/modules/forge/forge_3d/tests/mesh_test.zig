@@ -4575,3 +4575,50 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
         try testing.expect(prev.subshape_id < c.subshape_id);
     }
 }
+
+test "the frictionless-slider residual is rounding, not energy injection" {
+    // M1.1.14 — the qualification the brief owes on the M1.1.13.1 residual, and it
+    // is the FIRST branch of the alternative it imposed: the residual PERSISTS.
+    // Pinning the float environment did not move it — `5.000002` at f32, the same
+    // figure M1.1.13.1 recorded — so its cause was NOT the unpinned environment,
+    // which was this milestone's own subject.
+    //
+    // Measured after the libm removal, the explicit folds, the installed FPU and
+    // `-Dcpu=baseline`:
+    //
+    //   f32  retained 5.000002              bits 0x40A00004          4 ULP
+    //   f64  retained 5.000000000           bits 0x4014000000000003  3 ULP
+    //
+    // AND THE f64 FIGURE REFUTES THE ARGUMENT THAT USED TO SETTLE THIS. M1.1.12
+    // recorded exactly 5.0 at f64 and reasoned "a solver adding energy would add
+    // it at both precisions", concluding the effect was arithmetic because f64
+    // showed none. It shows 3 ULP now, so that argument is gone — and the
+    // conclusion survives on a stronger one.
+    //
+    // THE DISCRIMINANT IS THE RELATIVE GAIN, and it separates the two hypotheses by
+    // nine orders. Energy injected at a PHYSICAL rate is precision-independent in
+    // relative terms: the f32 excess is 3.8147e-7 relative, and reproducing that
+    // relative gain at f64 would take **1 717 988 150 ULP**. Three are measured.
+    // What the numbers show instead is an excess of 3.20 x eps at f32 and 2.40 x
+    // eps at f64 — comparable in units of the working precision's own granularity,
+    // which is the signature of ROUNDING and not of energy.
+    //
+    // So the bound below is stated in ULP rather than in metres, deliberately: a
+    // metre bound would pass at f64 for an energy injection nine orders too large,
+    // and would therefore be an assertion that cannot fail where it matters most.
+    const gpa = testing.allocator;
+    const retained = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
+
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(Real));
+    const five: Real = 5.0;
+    const got: Bits = @bitCast(retained);
+    const want: Bits = @bitCast(five);
+
+    // POSITIVE WITNESS FIRST: there IS an excess. Without it the bound below is
+    // satisfied by a slider that lost speed, and the test would pin nothing.
+    try testing.expect(retained > five);
+
+    // And it is a handful of ULP. `8` is loose against the 4 and 3 measured and
+    // tight against the 1.7e9 an energy injection needs at f64.
+    try testing.expect(got - want <= 8);
+}
