@@ -18,119 +18,79 @@
 //! derived from measurements that discriminate all four observed cases:
 //!
 //!   - `_ = @import("f.zig");` inside a `comptime` block → EDGE.
-//!     The explicit reference guard.
+//!     The explicit reference guard. In CODE: a commented-out one is not an edge,
+//!     and that mattered (see below).
 //!   - `const n = @import("f.zig");` (or `pub const`) where `n` is referenced
-//!     anywhere else in the file → EDGE. This is why `src/etch/lexer.zig`'s 17
-//!     tests are collected although nothing pins the file: `parser.zig` binds it
-//!     and uses it.
+//!     elsewhere in this root's closure → EDGE. This is why `src/etch/lexer.zig`'s
+//!     17 tests are collected although nothing pins the file: `parser.zig` binds
+//!     it and uses it.
 //!   - `const n = @import("f.zig");` never referenced → NO EDGE. This is why
-//!     `zig_codegen/root.zig` was dead: `src/etch/root.zig` bound it as
-//!     `pub const codegen_zig` and never touched the name.
-//!   - `@import("f.zig").decl` used inline → NO EDGE. Analysing a single
-//!     declaration does not analyse the file's tests. This is why
-//!     `foundation/math/exact.zig` was dead behind
-//!     `pub const triangleIsFlat = @import("exact.zig").triangleIsFlat`.
+//!     `zig_codegen/root.zig` was dead: `src/etch/root.zig` binds it as
+//!     `pub const codegen_zig` and never touches the name.
+//!   - `@import("f.zig").decl` used inline → decided by the REFERENCE like every
+//!     other form, never by the syntax. `pub const Graph = @import("graph.zig").Graph`
+//!     pulls that file's tests once `Graph` is referenced; `triangleIsFlat` pulled
+//!     nothing because nothing referenced it. Same syntax, opposite outcomes.
 //!
-//! It is an approximation of Zig's lazy analysis, and the direction of its error
-//! matters: a missed edge yields a false DEAD, which is noisy but visible; an
-//! invented edge yields a false ALIVE, which is the failure that says green and
-//! is what the hostile fixtures exist to refuse.
+//! It approximates Zig's lazy analysis, and the direction of its error matters: a
+//! missed edge yields a false DEAD, noisy and visible; an invented edge yields a
+//! false ALIVE, which says green. The hostile fixtures exist to refuse the second.
 //!
-//! **AT RESUMPTION, READ THIS BEFORE TOUCHING THE CLOSURE.** The second incoming
-//! edge into `src/etch/zig_codegen/` crosses a MODULE boundary — the two live
-//! test targets reach `codegen_zig` through `weld_etch` — and this analysis
-//! follows RELATIVE imports only. So the closure measures one level and the
-//! verdict is about another: the same scale mismatch as every other defect this
-//! milestone found. **Do not hunt the edge by hand.** The per-step measurement
-//! names it mechanically, and that is cheaper and does not depend on being right
-//! about where to look.
+//! THE CLOSURE IS PER ROOT, AND THAT IS THE CORRECTION THAT MADE IT BELIEVABLE.
+//! A single closure over all roots at once let a reference made from ANOTHER
+//! module license an edge inside this one: `tests/etch/keyword_ident_test.zig`
+//! names `codegen_zig`, but it reaches it through the `weld_etch` MODULE, and
+//! Zig collects no tests across a module boundary. Thirty-seven blocks that no
+//! binary runs were counted live. Per root, growth is monotone — files only
+//! enter, a reference counts only from a file already admitted HERE, and no two
+//! files vouch for each other into the closure.
 //!
-//! **STATUS: NOT WIRED. THE FIXPOINT IS NOW TOO PERMISSIVE, AND THE BILATERAL
-//! CONTROL CAUGHT IT ON THE FIRST RUN.** Scoping the reference search to the
-//! closure closed the three false deads — the run reports `clean` — but it opened
-//! the direction that says green: `live_tests` reads **1884** against a suite
-//! total of **1829**, and a count ABOVE the total is precisely the signature of a
-//! guard that admits too much. `src/etch/zig_codegen/` is admitted although it
-//! does not compile, so its 37 blocks are counted live and its declared exclusion
-//! never fires. Sixteen — now twenty-one — passing fixtures did not see this;
-//! ONE NUMBER DID.
+//! `live_tests` is therefore the sum over roots, a MULTISET count: a file two
+//! targets reach is counted twice, because the suite compiles and runs it twice.
+//! That is what makes it comparable to the suite's own collected total. The dead
+//! verdict is taken against the UNION — a file is dead only if NO root reaches it.
 //!
-//! That is the control's whole point and it earned it immediately: too permissive
-//! overshoots the total, too strict undershoots it, and only equality excludes
-//! both. It is the gate for activation, not the fixture count.
+//! TWO FALSE-ALIVE DEFECTS, both found by measurement and neither by the
+//! fixtures, recorded because each is a class rather than an instance:
 //!
-//! The remaining work, named: the cross-closure reference must not admit a file
-//! through a binding whose name is referenced only in a file that is itself
-//! reachable ONLY through that same binding — the mutual-reference shape
-//! `zig_codegen` has. And the expected equality is PLATFORM-DEPENDENT: the guard
-//! is static and blind to comptime dispatch, so on macOS expect
-//! `live_tests = total + 4` for `gal/vulkan/conv.zig`, whose four blocks the Null
-//! backend never collects, and expect exact equality on Linux.
+//!   1. A BINDING COUNTED AS A REFERENCE TO ITSELF. The cross-file search
+//!      re-reads every live file including the one under analysis, passing
+//!      `osrc.len` as the binding-line start — a sentinel meaning "nothing to
+//!      skip". With the binding file as its own candidate the exclusion window
+//!      was empty, so `pub const codegen_zig = @import(…)` was its own
+//!      justification. The same-file test was POINTER IDENTITY, which never
+//!      fired: the production reader allocates a fresh buffer per call. It is now
+//!      by PATH. The fixture harness returned the map's own stable pointer, so
+//!      the bug was unreachable there — a harness differing from production in
+//!      the exact property under test agrees with the code instead of judging it.
+//!      It now allocates per call too.
+//!   2. A COMMENTED-OUT IMPORT READ AS AN IMPORT. `src/etch/root.zig` shows the
+//!      guard that WOULD wire the subtree, `//   _ = @import("zig_codegen/root.zig");`,
+//!      and the head of that line ends in `_ =`. The reference search had been
+//!      taught to skip comments earlier in this milestone, for the same file and
+//!      nearly the same sentence; the IMPORT site had not. A correction applied
+//!      at one site and not at its twin is the motif this repository sweeps.
 //!
-//! HISTORY — THREE FALSE DEADS, since closed and worth keeping:
-//! First run: 116 files / 405 blocks reported dead. After the two defects named
-//! below were fixed — loop-built and bare-array roots discovered, and the
-//! inline-field-access rule folded INTO the reference test — the run reports
-//! **3 files / 9 blocks**, and all three were probed empirically and are
-//! COLLECTED. So the residue is three missed edges, and it is the SAFE
-//! direction: no false ALIVE has been observed at any point. `live_tests`
-//! reached 1829 against a suite total of 1829 before the last root form landed,
-//! which is a strong corroboration of the closure itself.
+//! ROOT DISCOVERY IS ANCHORED ON THE WIRING, not on path syntax: a table is read
+//! only when a `for` loop over it calls `addTest`, and a module's
+//! `root_source_file` is read only inside that declaration's own initializer.
+//! The previous forms invented roots out of `zig fmt` arguments and out of the
+//! next declaration's literal. See `loopRoots` and `modulePath`.
 //!
-//! **THE REMAINING DEFECT IS NAMED, and it is one mechanism for all three: the
-//! reference search is scoped to the BINDING FILE and must be scoped to the
-//! CLOSURE.** `gal/root.zig` binds `pub const barriers` and never touches it —
-//! but `render_graph/pass.zig` writes `gal.barriers.Access`, and that reference
-//! is what makes the file live. Same for `comptime_query`, bound in
-//! `ecs/root.zig` and referenced from `core/root.zig`. `transport_posix.zig` is
-//! the third shape: `@import` inside a `switch` assigned to a referenced `const`,
-//! which the head parser does not recognise as a binding at all.
-//!
-//! So the criterion stands — THE REFERENCE IS THE DISCRIMINANT — and the fix is
-//! a FIXPOINT: a binding is live once its name is referenced anywhere already in
-//! the closure, which can add files, which can add references. Two hypotheses
-//! were eliminated on the way and are recorded so they are not retried: it is
-//! not "the root file is special" (a `pub const` unreferenced ONE LEVEL DOWN
-//! collects nothing either — measured), and it is not the syntax of the import.
-//!
-//! The three, for whoever closes them: `src/core/ecs/comptime_query.zig`,
-//! `src/core/ipc/transport_posix.zig`, `src/modules/render/gal/barriers.zig`.
-//! The closure control that AUTHORISES activation is not the fixture count: it is
-//! `live_tests` equalling the suite's own collected total, two unrelated
-//! computations landing on one number. It read 1829 against 1829 at an
-//! intermediate state and must be redone on the final one.
-//! Activation is a Gate F exit condition, and it is COUPLED to the doctrine:
-//! writing "a dead test switches off compilation coverage" as normative while
-//! nothing checks it is the milestone's own named prohibition.
-//!
-//! HISTORY OF THE TWO DEFECTS THE FIRST RUN FOUND. The
-//! criterion above is CONFIRMED — the first run against the real tree tested it
-//! and it survived. `src/modules/render/root.zig` binds everything with bare
-//! `pub const` and its 45 tests ARE collected, which looked like a refutation
-//! until the file was read: it carries a `comptime { _ = gal; … }` guard, so the
-//! names ARE referenced. Bare `pub const` still collects nothing.
-//!
-//! What the run refuted is this IMPLEMENTATION, in two named places:
-//!
-//!   1. It discovers 18 roots and misses every target built by the `test_specs`
-//!      LOOP, whose `root_source_file` is a loop variable and not a literal. All
-//!      of `tests/` is therefore reported dead — false, and loud.
-//!   2. The inline-field-access rule is too strong. `pub const Graph =
-//!      @import("graph.zig").Graph;` DOES pull `graph.zig`'s tests when `Graph`
-//!      is later referenced (render's comptime guard does exactly that), while
-//!      `pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;` pulled
-//!      nothing because nothing referenced the name. The discriminator is the
-//!      REFERENCE, as everywhere else in this criterion — not the syntax of the
-//!      import. The rule must fold into the reference test rather than sit before it.
-//!
-//! Both defects push the same way, toward false DEAD, which is the direction
-//! chosen on purpose: the run is noisy and visible instead of quiet and green.
-//! Wiring it before those are fixed would make `zig build lint` report 116 files
-//! it cannot justify, and a guard nobody can believe is worse than none.
+//! THE BILATERAL CONTROL IS WHAT AUTHORISES THIS GUARD, and it is not the fixture
+//! count. Two independent computations must land on one number: this closure, and
+//! `zig build test --summary all`. Too permissive overshoots, too strict
+//! undershoots, and only equality excludes both — a property twenty-odd passing
+//! fixtures did not have, and which caught a real defect on its first
+//! application. Every term of the difference is declared IN ADVANCE in
+//! `uncollected`: a predicted gap is a result, the same gap unannounced reads as
+//! a broken guard. Measured at the state that activated it, macOS/aarch64:
+//! closure 1857 − 5 declared = 1852, against a suite reporting 1852 collected.
+//! On Linux the declared gap is 1, `conv.zig` being collected there.
 //!
 //! Only relative `.zig` imports are followed. A module-name import (`std`,
 //! `weld_core`) crosses into a module that owns its own test target and its own
-//! closure.
+//! closure — and, as the per-root correction above shows, its own references.
 
 const std = @import("std");
 
@@ -194,6 +154,58 @@ pub const exclusions = [_]Exclusion{
     },
 };
 
+/// A file INSIDE the closure whose blocks `zig build test` does not collect.
+///
+/// The closure count and the suite's collected total are two independent
+/// computations, and their agreement is what authorises this guard. They are not
+/// equal, and every term of the difference is declared HERE, in advance: a
+/// predicted gap is a result, while the same gap unannounced reads as a broken
+/// guard and nobody activates it. An undeclared gap is exactly what the control
+/// exists to surface.
+///
+/// This is a different list from `exclusions`. An exclusion is a subtree no
+/// closure reaches at all; an entry here is reached, counted, and then not
+/// collected — for a reason that lives in the compiler or in `build.zig`, never
+/// in this analysis.
+pub const Uncollected = struct {
+    path: []const u8,
+    blocks: usize,
+    /// `null` means every platform.
+    only_on: ?std.Target.Os.Tag = null,
+    reason: []const u8,
+};
+
+/// The declared terms of the closure-versus-suite gap, one entry per mechanism.
+pub const uncollected = [_]Uncollected{
+    .{
+        .path = "src/modules/render/gal/vulkan/conv.zig",
+        .blocks = 4,
+        .only_on = .macos,
+        .reason = "the GAL selects the Null backend on macOS, so the Vulkan bodies are " ++
+            "never analysed and their blocks are never collected. This analysis is static " ++
+            "and blind to comptime dispatch, so it counts them. On Linux and Windows the " ++
+            "same file IS collected and this entry does not apply",
+    },
+    .{
+        .path = "tests/ecs/no_alloc_steady_state_stress.zig",
+        .blocks = 1,
+        .reason = "the M0.2.1/E2 scheduler-livelock stress test hangs off `zig build " ++
+            "test-stress` and is deliberately kept OUT of `zig build test` — its own " ++
+            "`build.zig` comment says so. THE FIFTH BLOCK of the M1.1.14 sweep, which two " ++
+            "attempts failed to localise: it was never dead and never missing, it was in a " ++
+            "step the suite does not run",
+    },
+};
+
+/// Blocks the closure counts that `zig build test` does not collect, on `os`.
+pub fn uncollectedOn(os: std.Target.Os.Tag) usize {
+    var n: usize = 0;
+    for (uncollected) |u| {
+        if (u.only_on == null or u.only_on.? == os) n += u.blocks;
+    }
+    return n;
+}
+
 /// Whether `path` falls under a declared exclusion.
 pub fn excludedBy(path: []const u8) ?Exclusion {
     for (exclusions) |e| {
@@ -236,6 +248,8 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
         const rel = source[start..end];
         i = end + 1;
         if (!std.mem.endsWith(u8, rel, ".zig")) continue;
+        // A COMMENTED-OUT import is not an import. See `edgesOfLive`.
+        if (inComment(source, at)) continue;
 
         // Find the statement head to classify the binding.
         const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..at], '\n')) |p| p + 1 else 0;
@@ -261,9 +275,27 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
 }
 
 /// Edges of `source` where a bound name counts as referenced if it appears in
-/// `source` itself OR in any file of `live` — and in nothing else.
+/// `source` itself OR in any OTHER file of `live` — and in nothing else.
+///
+/// `path` is the file `source` was read from, and it is what identifies it.
+/// THE SAME-FILE TEST USED TO BE POINTER IDENTITY, `osrc.ptr == source.ptr`,
+/// AND IT NEVER FIRED IN PRODUCTION: the real reader allocates a fresh buffer on
+/// every call, so re-reading the very file under analysis yielded a different
+/// pointer. The cross-file loop then scanned the binding file as though it were
+/// another file, with `binding_line_start = osrc.len` — a sentinel meaning "no
+/// binding line to skip" — so the empty exclusion window let the binding line
+/// count as a reference to itself. `pub const codegen_zig = @import(…)` was
+/// therefore its own justification, and all of `src/etch/zig_codegen/` entered
+/// the closure: a SELF-REFERENTIAL rule, and the false-ALIVE direction.
+///
+/// The fixtures could not see it. `Fixture.read` returns a stable pointer out of
+/// a hash map, so pointer identity worked there and only there — a harness that
+/// differed from production in the exact property under test. It now returns a
+/// fresh copy per call, like the real reader, and the comparison is by PATH,
+/// which is correct whatever the reader does with memory.
 fn edgesOfLive(
     gpa: std.mem.Allocator,
+    path: []const u8,
     source: []const u8,
     live: []const []const u8,
     read: *const fn (path: []const u8) ?[]const u8,
@@ -276,6 +308,19 @@ fn edgesOfLive(
         const rel = source[start..end];
         i = end + 1;
         if (!std.mem.endsWith(u8, rel, ".zig")) continue;
+        // A COMMENTED-OUT import is not an import, and this is the edge that
+        // admitted all of `src/etch/zig_codegen/`. `src/etch/root.zig` carries
+        // `//   _ = @import("zig_codegen/root.zig");` — a commented-out EXAMPLE
+        // of the reference guard, in the paragraph explaining why the subtree is
+        // held — and the head of that line ends in `_ =`, so it was read as the
+        // guard itself. Thirty-seven blocks entered the closure on the strength
+        // of a comment, which is the false-ALIVE direction: it says green.
+        //
+        // The reference search was taught to skip comments earlier in this
+        // milestone, for the same file and very nearly the same sentence. The
+        // IMPORT site was not, and a correction applied at one site and not at
+        // its twin is the motif this repository sweeps rather than patches.
+        if (inComment(source, at)) continue;
 
         const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..at], '\n')) |p| p + 1 else 0;
         const head = std.mem.trim(u8, source[line_start..at], " \t");
@@ -289,7 +334,7 @@ fn edgesOfLive(
             // does. Refusing it outright reported a live file dead; admitting it
             // whenever the enclosing statement binds SOMETHING keeps the criterion
             // (a reference exists) without teaching the parser every expression form.
-            if (enclosingBindingReferenced(source, line_start, live, read)) {
+            if (enclosingBindingReferenced(path, source, line_start, live, read)) {
                 try out.append(gpa, .{ .rel = rel });
             }
             continue;
@@ -299,8 +344,8 @@ fn edgesOfLive(
             continue;
         }
         for (live) |other| {
+            if (std.mem.eql(u8, other, path)) continue;
             const osrc = read(other) orelse continue;
-            if (osrc.ptr == source.ptr) continue;
             if (isReferenced(osrc, name, osrc.len)) {
                 try out.append(gpa, .{ .rel = rel });
                 break;
@@ -313,6 +358,7 @@ fn edgesOfLive(
 /// is referenced in `source` or in the live set. Walks back to the nearest
 /// `const … = ` line, which is where a multi-line `switch` binding starts.
 fn enclosingBindingReferenced(
+    path: []const u8,
     source: []const u8,
     line_start: usize,
     live: []const []const u8,
@@ -327,8 +373,8 @@ fn enclosingBindingReferenced(
         if (bindingName(line)) |name| {
             if (isReferenced(source, name, prev_start)) return true;
             for (live) |other| {
+                if (std.mem.eql(u8, other, path)) continue;
                 const osrc = read(other) orelse continue;
-                if (osrc.ptr == source.ptr) continue;
                 if (isReferenced(osrc, name, osrc.len)) return true;
             }
             return false;
@@ -413,10 +459,90 @@ fn normalise(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.mem.join(gpa, "/", parts.items);
 }
 
-/// Walks the closure from `roots` and reports every file with tests outside it.
+/// One root's closure: the files reached, and their `test` block count.
+const RootClosure = struct {
+    files: std.ArrayList([]const u8) = .empty,
+    tests: usize = 0,
+
+    fn deinit(self: *RootClosure, gpa: std.mem.Allocator) void {
+        for (self.files.items) |f| gpa.free(f);
+        self.files.deinit(gpa);
+    }
+};
+
+/// The closure of ONE root, by monotone growth.
+///
+/// SCOPED TO THIS ROOT, and that scope is the whole correction. The cross-file
+/// reference that makes a binding live — `gal/root.zig` binds `pub const
+/// barriers`, `render_graph/pass.zig` writes `gal.barriers.Access` — is real, but
+/// it is only meaningful WITHIN one module. Run over every root at once, the
+/// same rule let `tests/etch/keyword_ident_test.zig` license an edge inside
+/// `src/etch/`: that file names `codegen_zig`, but it reaches it through the
+/// `weld_etch` MODULE, and Zig collects no tests across a module boundary. So a
+/// reference from another root's closure is not evidence about this one, and
+/// counting it admitted 37 blocks that no binary ever runs.
+///
+/// Per root, the growth is monotone: files only ever enter, a reference only
+/// counts when it comes from a file already admitted HERE, and there is no rule
+/// by which two files vouch for each other into the closure.
+fn closureOf(
+    gpa: std.mem.Allocator,
+    root: []const u8,
+    read: *const fn (path: []const u8) ?[]const u8,
+) !RootClosure {
+    var out: RootClosure = .{};
+    errdefer out.deinit(gpa);
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(gpa);
+
+    const first = try normalise(gpa, root);
+    try seen.put(gpa, first, {});
+    try out.files.append(gpa, first);
+
+    while (true) {
+        // Admissions are STAGED and appended after the scan. Appending inside the
+        // loop reallocates `files.items` and leaves the loop variable dangling
+        // into freed memory — which segfaulted on Zig's `0xaa` poison at the
+        // first real run.
+        var pending: std.ArrayList([]const u8) = .empty;
+        defer pending.deinit(gpa);
+        for (out.files.items) |path| {
+            const src = read(path) orelse continue;
+            var edges: std.ArrayList(Edge) = .empty;
+            defer edges.deinit(gpa);
+            try edgesOfLive(gpa, path, src, out.files.items, read, &edges);
+            for (edges.items) |e| {
+                const resolved = try resolveRel(gpa, path, e.rel);
+                if (seen.contains(resolved)) {
+                    gpa.free(resolved);
+                    continue;
+                }
+                try seen.put(gpa, resolved, {});
+                try pending.append(gpa, resolved);
+            }
+        }
+        if (pending.items.len == 0) break;
+        for (pending.items) |r| try out.files.append(gpa, r);
+    }
+
+    for (out.files.items) |path| {
+        const src = read(path) orelse continue;
+        out.tests += countTests(src);
+    }
+    return out;
+}
+
+/// Walks each root's closure and reports every file with tests outside all of them.
 ///
 /// `read` supplies file contents so the analysis is testable against fixtures
 /// without touching the filesystem layout the tool normally walks.
+///
+/// `live_tests` is the sum over roots and therefore a MULTISET count: a file two
+/// targets both reach is counted twice, because the suite compiles it twice and
+/// runs its tests twice. That is what makes it comparable to the suite's own
+/// collected total. `in_closure` and `closure` are the UNION, which is the right
+/// basis for the dead verdict — a file is dead only if no root reaches it.
 pub fn analyze(
     gpa: std.mem.Allocator,
     roots: []const []const u8,
@@ -424,78 +550,27 @@ pub fn analyze(
     read: *const fn (path: []const u8) ?[]const u8,
 ) !Report {
     var report: Report = .{};
+    errdefer report.deinit(gpa);
+
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.keyIterator();
         while (it.next()) |k| gpa.free(k.*);
         seen.deinit(gpa);
     }
-    var queue: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (queue.items) |q| gpa.free(q);
-        queue.deinit(gpa);
-    }
 
     for (roots) |r| {
-        const n = try normalise(gpa, r);
-        if (seen.contains(n)) {
-            gpa.free(n);
-            continue;
-        }
-        try seen.put(gpa, try gpa.dupe(u8, n), {});
-        try queue.append(gpa, n);
-    }
-
-    // FIXPOINT, and it extends ONLY through files that are ALREADY LIVE.
-    //
-    // The reference that makes a binding live is often in ANOTHER file:
-    // `gal/root.zig` binds `pub const barriers` and never touches it, while
-    // `render_graph/pass.zig` writes `gal.barriers.Access`. Scoping the search to
-    // the binding file reported three live files dead.
-    //
-    // WIDENING THE SCOPE OPENS THE FALSE ALIVE — the first time in this analysis
-    // that the error could point that way, and the direction that says green. The
-    // restriction is what closes it: a reference only counts when it comes from a
-    // file already in the closure. `src/etch/zig_codegen/` is exactly the shape
-    // that would break a naive version — 37 dead blocks across files that
-    // reference each other — and none of them is ever scanned, because none of
-    // them is ever live.
-    var head: usize = 0;
-    while (true) {
-        const before = queue.items.len;
-        while (head < queue.items.len) : (head += 1) {
-            const path = queue.items[head];
-            const src = read(path) orelse continue;
+        var one = try closureOf(gpa, r, read);
+        defer one.deinit(gpa);
+        report.live_tests += one.tests;
+        for (one.files.items) |f| {
+            if (seen.contains(f)) continue;
+            const owned = try gpa.dupe(u8, f);
+            try seen.put(gpa, owned, {});
             report.in_closure += 1;
-            const n = countTests(src);
-            report.live_tests += n;
-            try report.closure.append(gpa, .{ .path = try gpa.dupe(u8, path), .tests = n });
+            const src = read(f) orelse continue;
+            try report.closure.append(gpa, .{ .path = try gpa.dupe(u8, f), .tests = countTests(src) });
         }
-        // Re-scan every live file: a file admitted in this round can carry the
-        // reference that makes an earlier file's binding live.
-        //
-        // Admissions are STAGED and appended after the scan. Appending inside the
-        // loop reallocates `queue.items` and leaves `path` dangling into freed
-        // memory — which segfaulted on Zig's `0xaa` poison at the first real run.
-        var pending: std.ArrayList([]const u8) = .empty;
-        defer pending.deinit(gpa);
-        for (queue.items) |path| {
-            const src = read(path) orelse continue;
-            var edges: std.ArrayList(Edge) = .empty;
-            defer edges.deinit(gpa);
-            try edgesOfLive(gpa, src, queue.items, read, &edges);
-            for (edges.items) |e| {
-                const resolved = try resolveRel(gpa, path, e.rel);
-                if (seen.contains(resolved)) {
-                    gpa.free(resolved);
-                    continue;
-                }
-                try seen.put(gpa, try gpa.dupe(u8, resolved), {});
-                try pending.append(gpa, resolved);
-            }
-        }
-        for (pending.items) |r| try queue.append(gpa, r);
-        if (pending.items.len == 0 and queue.items.len == before) break;
     }
 
     for (all_files) |f| {
@@ -522,8 +597,31 @@ pub fn analyze(
 
 const Fixture = struct {
     var files: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var copies: std.ArrayList([]u8) = .empty;
+    var gpa: std.mem.Allocator = undefined;
+
+    /// Returns a FRESH buffer on every call, exactly as the production reader
+    /// does. It used to hand back the map's own stable pointer, and that single
+    /// difference is why no fixture could see the self-reference defect: a
+    /// same-file test written as pointer identity passed here and never fired in
+    /// the tree. A harness that differs from production in the property under
+    /// test agrees with the code instead of judging it.
     fn read(path: []const u8) ?[]const u8 {
-        return files.get(path);
+        const src = files.get(path) orelse return null;
+        const copy = gpa.dupe(u8, src) catch return null;
+        copies.append(gpa, copy) catch {
+            gpa.free(copy);
+            return null;
+        };
+        return copy;
+    }
+
+    fn deinit(a: std.mem.Allocator) void {
+        for (copies.items) |c| a.free(c);
+        copies.deinit(a);
+        copies = .empty;
+        files.deinit(a);
+        files = .empty;
     }
 };
 
@@ -533,6 +631,8 @@ fn runFixture(
     roots: []const []const u8,
 ) !Report {
     Fixture.files = .empty;
+    Fixture.copies = .empty;
+    Fixture.gpa = gpa;
     for (entries) |e| try Fixture.files.put(gpa, e[0], e[1]);
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(gpa);
@@ -552,7 +652,7 @@ test "a test three imports deep is ALIVE" {
         .{ "m/c.zig", "pub const V = u8;\ntest \"deep\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 4), r.in_closure);
@@ -568,7 +668,7 @@ test "a file bound but never referenced is DEAD" {
         .{ "m/orphan.zig", "test \"never analysed\" {}\ntest \"nor this\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
     try std.testing.expectEqualStrings("m/orphan.zig", r.dead.items[0].path);
@@ -590,7 +690,7 @@ test "an inline field access whose name is NEVER referenced is DEAD" {
         .{ "m/leaf.zig", "pub fn f() void {}\ntest \"leaf\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
     try std.testing.expectEqualStrings("m/leaf.zig", r.dead.items[0].path);
@@ -603,7 +703,7 @@ test "an explicit comptime reference guard is an edge" {
         .{ "m/pinned.zig", "test \"pinned\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
@@ -616,7 +716,7 @@ test "a declared exclusion is reported, not failed on" {
         .{ "src/etch/zig_codegen/cache.zig", "test \"excluded\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.excluded);
@@ -630,7 +730,7 @@ test "relative parent segments resolve" {
         .{ "m/up.zig", "pub const U = u8;\ntest \"up\" {}\n" },
     }, &.{"m/sub/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
@@ -674,50 +774,124 @@ pub fn rootsFromBuildZig(gpa: std.mem.Allocator, build_zig: []const u8) !std.Arr
     return roots;
 }
 
-/// Extracts the literal paths of a `test_specs`-style table.
+/// Extracts the literal paths of every table a loop turns into test targets.
 ///
 /// A target whose `root_source_file` is a LOOP VARIABLE has no literal to find
 /// at its `createModule`, so the first version of this file missed every one of
 /// them and reported all of `tests/` dead. The paths are still literals — in the
 /// table the loop walks — so they are read from there.
+///
+/// ANCHORED ON THE WIRING, NOT ON THE PATH SYNTAX, and that is a correction.
+/// Two shapes used to be matched independently — `.path = "…"` entries anywhere,
+/// and any line that was a quoted `.zig` path followed by a comma — neither of
+/// them scoped to a table that feeds `addTest`. The second INVENTED THREE ROOTS:
+/// the arguments of a `zig fmt` `addSystemCommand`, which are exactly that shape
+/// and are not test roots at all. An invented root is the false-ALIVE direction
+/// — it silently admits whatever it reaches and can mask a genuinely dead file —
+/// and the fixture that was supposed to catch it only checked that a
+/// `b.path("…")` call was NOT matched, a different syntax, so it agreed with the
+/// implementation's blind spot instead of testing it.
+///
+/// The rule is now one rule and it asks the question that actually decides:
+/// does a `for` loop over this table build test targets? A table is read only
+/// when its name is the subject of a loop whose body calls `addTest`, and then
+/// EVERY quoted `.zig` literal inside the table is taken — which covers both
+/// shapes without naming either.
 pub fn loopRoots(gpa: std.mem.Allocator, build_zig: []const u8, out: *std.ArrayList([]const u8)) !void {
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, build_zig, i, ".path = \"")) |at| {
-        const s2 = at + ".path = \"".len;
-        const e = std.mem.indexOfScalarPos(u8, build_zig, s2, '"') orelse break;
-        i = e + 1;
-        const path = build_zig[s2..e];
-        if (!std.mem.endsWith(u8, path, ".zig")) continue;
-        try out.append(gpa, try gpa.dupe(u8, path));
+    while (std.mem.indexOfPos(u8, build_zig, i, "for (")) |at| {
+        const s = at + "for (".len;
+        var e = s;
+        while (e < build_zig.len and isIdentChar(build_zig[e])) e += 1;
+        i = if (e > s) e else s + 1;
+        if (e == s or e >= build_zig.len or build_zig[e] != ')') continue;
+        const name = build_zig[s..e];
+        const body = loopBody(build_zig, e) orelse continue;
+        if (std.mem.indexOf(u8, body, "addTest") == null) continue;
+        try tableLiterals(gpa, build_zig, name, out);
     }
+}
 
-    // A second table shape: a bare `[_][]const u8{ "a.zig", "b.zig" }` array,
-    // which the IPC targets use. Matched on the ELEMENT form — a line whose whole
-    // content is a quoted `.zig` path followed by a comma — rather than on any
-    // `.zig` string anywhere in `build.zig`, because a loose match would invent
-    // roots, and an invented root yields a false ALIVE.
-    var it = std.mem.splitScalar(u8, build_zig, '\n');
-    while (it.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
-        if (t.len < 8 or t[0] != '"') continue;
-        if (!std.mem.endsWith(u8, t, "\".zig\",") and !std.mem.endsWith(u8, t, ".zig\",")) continue;
-        const e = std.mem.lastIndexOfScalar(u8, t, '"') orelse continue;
-        if (e == 0) continue;
-        try out.append(gpa, try gpa.dupe(u8, t[1..e]));
+/// The text of the block opened by the first `{` after `at`, brace-matched.
+///
+/// Strings and line comments are skipped, so a `"{s}"` in a format call or a
+/// brace inside a comment cannot close the body early and truncate the
+/// `addTest` search into a false negative.
+fn loopBody(src: []const u8, at: usize) ?[]const u8 {
+    const open = std.mem.indexOfScalarPos(u8, src, at, '{') orelse return null;
+    var depth: usize = 0;
+    var i = open;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '"' => {
+                i += 1;
+                while (i < src.len and src[i] != '"') : (i += 1) {
+                    if (src[i] == '\\') i += 1;
+                }
+            },
+            '/' => {
+                if (i + 1 < src.len and src[i + 1] == '/') {
+                    i = std.mem.indexOfScalarPos(u8, src, i, '\n') orelse return null;
+                }
+            },
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return src[open .. i + 1];
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Appends every quoted `.zig` literal of the array bound to `name`.
+fn tableLiterals(
+    gpa: std.mem.Allocator,
+    build_zig: []const u8,
+    name: []const u8,
+    out: *std.ArrayList([]const u8),
+) !void {
+    var buf: [128]u8 = undefined;
+    const decl = std.fmt.bufPrint(&buf, "const {s} = ", .{name}) catch return;
+    const at = std.mem.indexOf(u8, build_zig, decl) orelse return;
+    const body = loopBody(build_zig, at + decl.len) orelse return;
+
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, body, i, '"')) |q| {
+        const end = std.mem.indexOfScalarPos(u8, body, q + 1, '"') orelse return;
+        i = end + 1;
+        const lit = body[q + 1 .. end];
+        if (!std.mem.endsWith(u8, lit, ".zig")) continue;
+        for (out.items) |existing| {
+            if (std.mem.eql(u8, existing, lit)) break;
+        } else try out.append(gpa, try gpa.dupe(u8, lit));
     }
 }
 
 /// The `root_source_file` path of the module bound to `name`, if it is a literal.
+///
+/// SCOPED TO THE DECLARATION'S OWN INITIALIZER, by brace matching. It used to
+/// search forward from the declaration under a 400-character window, which is a
+/// window and not a boundary: when a module's `root_source_file` is NOT a literal
+/// — `b.path(spec.path)` in the `test_specs` loop, the ordinary shape — the
+/// search ran on and took the literal of the NEXT declaration, inventing a root
+/// out of whatever came after. That is the direction that says ALIVE, since an
+/// invented root admits its whole closure.
+///
+/// It did not fire on the current `build.zig`, measured: the loop's module is
+/// followed by enough `addImport` lines to push the next literal past 400 bytes.
+/// One reordering away from firing, and found by a fixture written for a
+/// different defect — which is the argument for a boundary rather than a window.
 fn modulePath(gpa: std.mem.Allocator, build_zig: []const u8, name: []const u8) !?[]u8 {
     var buf: [128]u8 = undefined;
     const decl = std.fmt.bufPrint(&buf, "const {s} = b.", .{name}) catch return null;
     const at = std.mem.indexOf(u8, build_zig, decl) orelse return null;
-    const key = std.mem.indexOfPos(u8, build_zig, at, "root_source_file = b.path(\"") orelse return null;
-    // Guard against running past the declaration into the next one.
-    if (key - at > 400) return null;
+    const init_block = loopBody(build_zig, at + decl.len) orelse return null;
+    const key = std.mem.indexOf(u8, init_block, "root_source_file = b.path(\"") orelse return null;
     const s = key + "root_source_file = b.path(\"".len;
-    const e = std.mem.indexOfScalarPos(u8, build_zig, s, '"') orelse return null;
-    return try gpa.dupe(u8, build_zig[s..e]);
+    const e = std.mem.indexOfScalarPos(u8, init_block, s, '"') orelse return null;
+    return try gpa.dupe(u8, init_block[s..e]);
 }
 
 test "rootsFromBuildZig picks addTest roots and skips other modules" {
@@ -731,6 +905,46 @@ test "rootsFromBuildZig picks addTest roots and skips other modules" {
         \\});
         \\const exe = b.addExecutable(.{ .root_module = not_a_test });
         \\const a_tests = b.addTest(.{ .root_module = a_module });
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 1), roots.items.len);
+    try std.testing.expectEqualStrings("src/a/root.zig", roots.items[0]);
+}
+
+test "a non-literal root_source_file does not borrow the next declaration's" {
+    // The window-versus-boundary defect, pinned on its own. `t_mod` roots at a
+    // loop variable, so it has no literal of its own; the declaration that
+    // FOLLOWS it does. Under the old 400-character window that literal was taken
+    // and `src/runtime/main.zig` — an executable — became a test root.
+    //
+    // The counter-factual is the fixture below it: the same shape with a literal
+    // in its OWN initializer must still be discovered, or the fix would have
+    // closed the defect by discovering nothing.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const t_mod = b.createModule(.{ .root_source_file = b.path(spec.path) });
+        \\const t = b.addTest(.{ .root_module = t_mod });
+        \\const exe_mod = b.createModule(.{ .root_source_file = b.path("src/runtime/main.zig") });
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 0), roots.items.len);
+}
+
+test "a literal root_source_file in the declaration's own initializer IS taken" {
+    const gpa = std.testing.allocator;
+    const src =
+        \\const t_mod = b.createModule(.{ .root_source_file = b.path("src/a/root.zig") });
+        \\const t = b.addTest(.{ .root_module = t_mod });
         \\
     ;
     var roots = try rootsFromBuildZig(gpa, src);
@@ -781,22 +995,26 @@ test "an inline field access whose name IS referenced is ALIVE" {
         .{ "m/graph.zig", "pub const Graph = struct {};\ntest \"graph\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
 }
 
 test "a bare string-array table of roots is discovered, and only its elements" {
-    // The IPC targets, built from a `[_][]const u8` list. Matched on the ELEMENT
-    // form: a loose "any .zig string in build.zig" would pick up `b.path` calls
-    // for executables and invent roots, and an invented root says ALIVE.
+    // The IPC targets, built from a `[_][]const u8` list walked by a loop that
+    // calls `addTest`. The executable's `b.path` argument sits in the same file
+    // and must not be taken: it builds a binary, not a test target.
     const gpa = std.testing.allocator;
     const src =
         \\const ipc_specs = [_][]const u8{
         \\    "tests/ipc/framing.zig",
         \\    "tests/ipc/shm.zig",
         \\};
+        \\for (ipc_specs) |p| {
+        \\    const t_mod = b.createModule(.{ .root_source_file = b.path(p) });
+        \\    const t = b.addTest(.{ .root_module = t_mod });
+        \\}
         \\const exe_mod = b.createModule(.{ .root_source_file = b.path("src/runtime/main.zig") });
         \\
     ;
@@ -808,6 +1026,84 @@ test "a bare string-array table of roots is discovered, and only its elements" {
     try std.testing.expectEqual(@as(usize, 2), roots.items.len);
     try std.testing.expectEqualStrings("tests/ipc/framing.zig", roots.items[0]);
     try std.testing.expectEqualStrings("tests/ipc/shm.zig", roots.items[1]);
+}
+
+test "quoted .zig paths that feed no test target are NOT roots" {
+    // THE INVENTED ROOT, pinned. These three lines are the arguments of a
+    // `zig fmt` system command in `build.zig`, and the previous element-shaped
+    // matcher took them for test roots — the false-ALIVE direction, since an
+    // invented root admits its closure and can mask a genuinely dead file.
+    //
+    // The discriminant is the WIRING: no loop walks this list, so nothing here
+    // builds a test target. The fixture that preceded this one only checked that
+    // a `b.path(...)` call was not matched, which is a different syntax, so it
+    // shared the implementation's blind spot instead of testing it.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const fmt_cmd = b.addSystemCommand(&.{
+        \\    b.graph.zig_exe,
+        \\    "fmt",
+        \\    "src/core/platform/window/wayland_protocols/core.zig",
+        \\    "src/core/platform/window/wayland_protocols/xdg_shell.zig",
+        \\});
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 0), roots.items.len);
+}
+
+test "a table walked by a loop that builds no test target is NOT a root list" {
+    // The twin of the fixture above, by the pairing rule: the table has the exact
+    // shape of a root list and a loop DOES walk it, so only the absence of
+    // `addTest` in the body separates the two. Its sibling is the IPC fixture,
+    // which is this file with `addTest` present and must yield two roots.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const shader_srcs = [_][]const u8{
+        \\    "src/shaders/a.zig",
+        \\    "src/shaders/b.zig",
+        \\};
+        \\for (shader_srcs) |p| {
+        \\    const c = b.addSystemCommand(&.{ "glslc", p });
+        \\}
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 0), roots.items.len);
+}
+
+test "a brace inside a string does not truncate the loop body" {
+    // `loopBody` brace-matches, so a `"{s}"` in a format call inside the loop —
+    // ordinary in `build.zig` — would close the body early under a naive scan and
+    // hide the `addTest` below it, turning a real root list into no roots at all.
+    // That is the false-DEAD direction, loud rather than green, but it would have
+    // condemned every root under a table that logs.
+    const gpa = std.testing.allocator;
+    const src =
+        \\const specs = [_][]const u8{
+        \\    "tests/a.zig",
+        \\};
+        \\for (specs) |p| {
+        \\    std.debug.print("building {s}}}\n", .{p});
+        \\    const t = b.addTest(.{ .root_module = m });
+        \\}
+        \\
+    ;
+    var roots = try rootsFromBuildZig(gpa, src);
+    defer {
+        for (roots.items) |r| gpa.free(r);
+        roots.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 1), roots.items.len);
+    try std.testing.expectEqualStrings("tests/a.zig", roots.items[0]);
 }
 
 test "a file referenced ONLY from outside the closure is DEAD" {
@@ -823,7 +1119,7 @@ test "a file referenced ONLY from outside the closure is DEAD" {
         .{ "m/victim.zig", "pub const V = u8;\ntest \"victim\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     // One dead FILE, not two: only files holding `test` blocks are counted, and
     // `outside.zig` holds none. Expecting two was my own error — the report
@@ -845,7 +1141,7 @@ test "the same file referenced from INSIDE the closure is ALIVE" {
         .{ "m/victim.zig", "pub const V = u8;\ntest \"victim\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
@@ -861,8 +1157,68 @@ test "a name occurring only in a COMMENT is not a reference" {
         .{ "m/orphan.zig", "test \"dead\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
+}
+
+test "a binding is not a reference to ITSELF, scanned as another file" {
+    // THE SELF-REFERENTIAL RULE, pinned. The cross-file search re-reads every
+    // live file including the one under analysis, and it passes `osrc.len` as the
+    // binding-line start — a sentinel meaning "no binding line to skip". So when
+    // the file scanned is the binding file, the exclusion window is empty and the
+    // binding line answers for itself: `pub const held = @import("held.zig");`
+    // became its own justification.
+    //
+    // It is the false-ALIVE direction and it admitted 37 blocks in the tree. The
+    // same-file test is now by PATH; it used to be pointer identity, which the
+    // production reader defeats by allocating a fresh buffer per call.
+    //
+    // The root is deliberately the ONLY live file, so the sole candidate the
+    // cross-file loop can find the name in is the binding file itself.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "pub const held = @import(\"held.zig\");\n" },
+        .{ "m/held.zig", "test \"held\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
+    try std.testing.expectEqualStrings("m/held.zig", r.dead.items[0].path);
+    try std.testing.expectEqual(@as(usize, 0), r.live_tests);
+}
+
+test "a commented-out reference guard is NOT an edge" {
+    // `src/etch/root.zig` exactly: the paragraph explaining why `zig_codegen` is
+    // held shows the guard that WOULD wire it — `//   _ = @import("…");` — and
+    // the head of that line ends in `_ =`, so the extractor took the comment for
+    // the code. Thirty-seven blocks were admitted by prose.
+    //
+    // Its twin is below: the same line without the `//`, which must be an edge.
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "// to wire it, write:\n//   _ = @import(\"held.zig\");\npub const held = @import(\"held.zig\");\n" },
+        .{ "m/held.zig", "test \"held\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
+    try std.testing.expectEqualStrings("m/held.zig", r.dead.items[0].path);
+    try std.testing.expectEqual(@as(usize, 0), r.live_tests);
+}
+
+test "the SAME guard in code IS an edge" {
+    const gpa = std.testing.allocator;
+    var r = try runFixture(gpa, &.{
+        .{ "m/root.zig", "comptime {\n    _ = @import(\"held.zig\");\n}\n" },
+        .{ "m/held.zig", "test \"held\" {}\n" },
+    }, &.{"m/root.zig"});
+    defer r.deinit(gpa);
+    defer Fixture.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
+    try std.testing.expectEqual(@as(usize, 1), r.live_tests);
 }
 
 test "the same name in CODE is a reference" {
@@ -872,7 +1228,7 @@ test "the same name in CODE is a reference" {
         .{ "m/orphan.zig", "pub const V = u8;\ntest \"live\" {}\n" },
     }, &.{"m/root.zig"});
     defer r.deinit(gpa);
-    defer Fixture.files.deinit(gpa);
+    defer Fixture.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), r.dead.items.len);
     try std.testing.expectEqual(@as(usize, 1), r.live_tests);
 }
