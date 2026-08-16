@@ -802,11 +802,22 @@ jobs:
           echo "--- witness set (reference window and discrete taken from ReleaseSafe) ---"
           ls -l witnesses/
           sha256sum witnesses/* | tee witnesses/SHA256SUMS.txt
+          # THE OUTPUT OF `zig version`, not the env var that requested it. The
+          # env var is what the workflow ASKED the setup action for; this is what
+          # the toolchain on the runner REPORTS. Recording the request in place of
+          # the observation is the class this milestone keeps finding, and a
+          # witness is exactly the artefact where it would cost most: the pinned
+          # version is one of `ARCH-031`'s three axes, and a silent drift between
+          # requested and installed would invalidate every file here with nothing
+          # in the record to show it.
+          zig_reported="$(zig version)"
+          echo "zig version reports: $zig_reported"
           {
             echo "reason=${{ steps.trailer.outputs.reason }}"
             echo "cell=ubuntu-24.04"
             echo "cpu=${{ env.ZIG_CPU }}"
-            echo "zig=${{ env.ZIG_VERSION }}"
+            echo "zig_requested=${{ env.ZIG_VERSION }}"
+            echo "zig_version_output=$zig_reported"
             echo "reference_window_mode=ReleaseSafe"
             echo "discrete_mode=ReleaseSafe"
             echo "cross_mode_agreement=$agree"
@@ -815,6 +826,21 @@ jobs:
             # history and unresolvable by any later reader.
             echo "sha=${{ github.event.pull_request.head.sha }}"
             echo "run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            # PER FILE, and not only per set. A reader holding one witness must be
+            # able to answer "which build produced this?" without reconstructing
+            # the assembly rules from the job. The two mode-independent kinds carry
+            # their generator mode nowhere else — their key is precision alone —
+            # so for them this table is the only record there is.
+            echo "---"
+            for f in witnesses/*.bin; do
+              base="$(basename "$f")"
+              case "$base" in
+                continuous-chain-*-Debug.bin)       gen=Debug ;;
+                continuous-chain-*-ReleaseSafe.bin) gen=ReleaseSafe ;;
+                *)                                  gen=ReleaseSafe ;;
+              esac
+              echo "witness=$base mode=$gen zig=$zig_reported cpu=${{ env.ZIG_CPU }} run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            done
           } > witnesses/PROVENANCE.txt
           cat witnesses/PROVENANCE.txt
 
