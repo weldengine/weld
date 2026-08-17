@@ -16,6 +16,7 @@ const config = @import("../../config.zig");
 const forge = @import("../../root.zig");
 const scenario = @import("scenario.zig");
 const trace = @import("trace.zig");
+const witness_mod = @import("witness.zig");
 
 const Scenario = scenario.Scenario;
 const Real = config.Real;
@@ -269,4 +270,79 @@ test "divergenceFrame refuses a window it cannot measure, instead of reporting n
         error.ReferenceWindowEmptyStride,
         divergenceFrame(gpa, &.{}, 0),
     );
+}
+
+test "every discrete trace VARIES inside the window the witnesses cover" {
+    // P1-1, AND THE DEFECT IT REPLACES WAS IN THE SPECIFICATION OF THE PROBE, not
+    // in the engine. The non-vacuity probe that preceded this one searched over 400
+    // frames and found a retained-pair removal at frame 196 — but the committed
+    // `discrete-*.bin` witnesses hold `window_frames` = 60. So inside the window
+    // that is actually COMPARED, three of the four traces were CONSTANT: island
+    // partition, sleep state and the retained pair set each took exactly ONE value
+    // over the sixty frames. They agreed between x86_64 and AArch64 because they did
+    // not move. A probe that measures one window and renders a verdict on another is
+    // the family this milestone is about, and it had reached the central oracle.
+    //
+    // THE MEASUREMENT IS ON BYTES, not on cardinalities, and that distinction was
+    // also measured: a first probe counted `constraints.items.len` and reported the
+    // manifold trace as constant at 11, while the SERIALISED segment takes 7 distinct
+    // values over the same frames. A count is not the trace; the trace is what the
+    // witness holds.
+    //
+    // WHAT MADE THE THREE MOVE IS SCENE TUNING, since a trace's variation is a
+    // property of the scenario and not of the physics. Measured before: island
+    // partition first changed at frame 71 and the first sleeper appeared at 70 —
+    // the same event one tick apart, a sleeper leaving the partition — and the first
+    // retained-pair removal was at 196. All three outside the window, two of them
+    // barely. After tuning: 30, 29 and 49.
+    const gpa = testing.allocator;
+    var art = try runCanonical(gpa, window_frames);
+    defer art.deinit(gpa);
+
+    const names = [_][]const u8{
+        "island partition",
+        "sleep state",
+        "per-pair manifold cardinality",
+        "retained pair set",
+    };
+    var distinct = [_]usize{ 0, 0, 0, 0 };
+    var seen: [4]std.ArrayListUnmanaged([]const u8) = .{ .empty, .empty, .empty, .empty };
+    defer for (&seen) |*l| l.deinit(gpa);
+
+    var off: usize = 0;
+    var f: u32 = 0;
+    while (f < window_frames) : (f += 1) {
+        const sp = try witness_mod.frameSpans(art.discrete.items, off);
+        var start = off;
+        for (sp.ends, 0..) |end, k| {
+            const seg = art.discrete.items[start..end];
+            var known = false;
+            for (seen[k].items) |prev| {
+                if (std.mem.eql(u8, prev, seg)) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                try seen[k].append(gpa, seg);
+                distinct[k] += 1;
+            }
+            start = end;
+        }
+        off = sp.ends[3];
+    }
+
+    // EVERY trace, not the one that happened to move. A constant trace discriminates
+    // NOTHING between two architectures whichever one it is, so the requirement is
+    // uniform and is asserted per trace rather than as an aggregate — an aggregate
+    // would be satisfied by one trace moving twelve times while three stand still,
+    // which is exactly the state this test was written to end.
+    for (names, distinct) |n, d| {
+        errdefer std.debug.print("trace `{s}` takes {d} distinct value(s) over {d} frames\n", .{ n, d, window_frames });
+        try testing.expect(d >= 2);
+    }
+
+    // The window must also be the one the witnesses cover, or the check above drifts
+    // back to measuring something else. Read from the artifact rather than restated.
+    try testing.expectEqual(@as(usize, 0), art.discrete.items.len - off);
 }

@@ -99,6 +99,8 @@ pub const Scenario = struct {
     /// The trigger, and the body that enters and leaves it.
     trigger: BodyId = undefined,
     trigger_visitor: BodyId = undefined,
+    /// A lone box whose only job is to fall asleep inside the COMPARED window.
+    lone_sleeper: BodyId = undefined,
     /// The character's terrain: a riser it climbs, a ramp it walks up, and two it
     /// cannot — the far one and the near one, which together close the excursion
     /// into a bowl. All static, so none enters `mobile`.
@@ -199,7 +201,7 @@ pub const Scenario = struct {
                 .body_type = .dynamic,
                 .shape = unit_box,
             };
-            d.position = av3(30, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
+            d.position = av3(35, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
             d.mass = 1;
             d.restitution = 0;
             id.* = try w.addBody(gpa, d);
@@ -211,7 +213,7 @@ pub const Scenario = struct {
                 .body_type = .dynamic,
                 .shape = unit_box,
             };
-            d.position = av3(42, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
+            d.position = av3(38, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
             d.mass = 1;
             d.restitution = 0;
             id.* = try w.addBody(gpa, d);
@@ -278,7 +280,7 @@ pub const Scenario = struct {
         ms.angular_damping = 0;
         self.mesh_sphere = try w.addBody(gpa, ms);
         try self.mobile.append(gpa, self.mesh_sphere);
-        w.bm.setLinearVelocity(self.mesh_sphere, vr(3, 0, 0));
+        w.bm.setLinearVelocity(self.mesh_sphere, vr(12, 0, 0));
 
         // --- (6) the trigger and its visitor, x = 80 -------------------------
         const trigger_box = try w.store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 2, 2) } });
@@ -320,6 +322,29 @@ pub const Scenario = struct {
         try self.mobile.append(gpa, self.trigger_visitor);
         w.bm.setLinearVelocity(self.trigger_visitor, vr(4, 0, 0));
         self.world.sensors_on = true;
+
+        // --- (6 bis) a lone box that settles at once, x = 15 -------------------
+        //
+        // ITS ONLY JOB IS TO SLEEP INSIDE THE COMPARED WINDOW. Sleep state and the
+        // island partition were both CONSTANT over the 60 frames the witnesses
+        // actually cover — the five-box stack first sleeps at frame 70 and the
+        // island count first moves at 71, which is the same event one tick later,
+        // a sleeper leaving the partition. Both fell just outside.
+        //
+        // A lone box on the half-space has no stack transient to spend, so it goes
+        // still almost immediately and sleeps `time_before_sleep` later. Isolated at
+        // x = 15, where nothing passes: the stack is at 0, the groups at 35-38, the
+        // slider runs in the z = 20 lane, the mesh begins at 55.
+        var lone = api.BodyDescriptor{
+            .entity = .{ .index = 65, .generation = 0 },
+            .body_type = .dynamic,
+            .shape = unit_box,
+        };
+        lone.position = av3(15, 0.5, 0);
+        lone.mass = 1;
+        lone.restitution = 0;
+        self.lone_sleeper = try w.addBody(gpa, lone);
+        try self.mobile.append(gpa, self.lone_sleeper);
 
         // --- (7) the character's terrain, x = −70 … −59 ----------------------
         //
@@ -558,7 +583,8 @@ test "scenario: builds, and every element is present" {
     defer s.deinit(gpa);
 
     // MOBILE = 5 stack + 2 group_a + 2 group_b + 1 slider + 1 mesh sphere
-    //        + 1 trigger visitor = 12. The arithmetic is written out so a reader
+    //        + 1 trigger visitor + 1 lone sleeper = 13. The arithmetic is written
+    // out so a reader
     // can check it against the constructor rather than trust the total.
     //
     // **THIS ASSERTION DID NOT DO WHAT ITS COMMENT CLAIMED, and M1.1.14's review
@@ -572,12 +598,12 @@ test "scenario: builds, and every element is present" {
     // between the two numbers, which is a smaller claim and is now the one written.
     // What covers the real case is the coverage test at the bottom of this file,
     // which asserts on the STREAM rather than on a count.
-    try testing.expectEqual(@as(usize, 12), s.mobile.items.len);
-    // ALL BODIES = the 12 above + the half-space ground + the static mesh + the
+    try testing.expectEqual(@as(usize, 13), s.mobile.items.len);
+    // ALL BODIES = the 13 above + the half-space ground + the static mesh + the
     // trigger + the riser + the THREE ramps + the character's kinematic presence
-    // = 20. The presence is a body like any other in the store (§1.12.2) and is
+    // = 21. The presence is a body like any other in the store (§1.12.2) and is
     // counted here for that reason.
-    try testing.expectEqual(@as(u32, 20), s.world.bm.count());
+    try testing.expectEqual(@as(u32, 21), s.world.bm.count());
     try testing.expectEqual(@as(u32, 1), s.chars.count());
     try testing.expect(s.world.sensors_on);
 }

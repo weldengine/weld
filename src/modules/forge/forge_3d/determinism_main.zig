@@ -92,13 +92,38 @@ pub fn main(init: std.process.Init) !void {
         a.poses.items.len,
     });
 
+    // P2-3 — THE REPRODUCIBILITY GATE COMES BEFORE ANY SIDE EFFECT, and until this
+    // correction it came after. The files were written and `NotSelfReproducible`
+    // was returned afterwards, so a run that could not repeat itself left a
+    // COMPLETE AND USABLE witness set on disk — the exact inverse of the comment
+    // that accompanied it. A gate placed after the act it is meant to prevent is
+    // not a gate.
+    if (!reproducible) return error.NotSelfReproducible;
+
+    // P1-2 — GENERATION WRITES AND EXITS. It reads no committed witness at all:
+    // not to compare, not to validate a length.
+    //
+    // The earlier form kept going, and the earlier correction — printing the
+    // comparison instead of gating on it — only fixed the case where the FORMAT is
+    // stable. The real case is a STRUCTURAL change: one more mobile body, a
+    // different `pose_stride`, and `divergenceFrame` raises
+    // `ReferenceWindowLengthMismatch`, which is an ERROR and not the `failed`
+    // boolean that was being neutralised. Under `set -euo pipefail` the CI step
+    // then dies AFTER writing the three files and BEFORE uploading them.
+    //
+    // MEASURED before this change, with one extra scalar per body in the pose dump:
+    // `rc=1`, `error: ReferenceWindowLengthMismatch`, three files on disk. And a
+    // structural change is exactly what the next scenario correction produces, so
+    // this path had to work before it was needed — the third time that ordering has
+    // imposed itself on this milestone, for the same reason each time.
     if (write_dir) |dir| {
         var name_buf: [128]u8 = undefined;
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "continuous-chain-{s}-{s}.bin", .{ precision_tag, mode_tag }), a.chain.items);
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "discrete-{s}.bin", .{precision_tag}), a.discrete.items);
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "reference-window-{s}.bin", .{precision_tag}), a.poses.items);
         std.debug.print("witnesses written : {s}\n", .{dir});
-        std.debug.print("mode              : GENERATION — the comparison below is INFORMATIONAL\n", .{});
+        std.debug.print("mode              : GENERATION — no committed witness was read\n", .{});
+        return;
     }
 
     // THE CHAIN VERDICT — level 1, x86_64 only. On any other ISA the comparison
@@ -150,24 +175,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("divergence frame  : none within K={d}\n", .{run.window_frames});
     }
 
-    // SELF-REPRODUCIBILITY GATES UNCONDITIONALLY, including a generation run: a run
-    // that cannot repeat itself must never be allowed to produce a witness, and
-    // that claim is independent of what the committed files currently say.
-    if (!reproducible) return error.NotSelfReproducible;
-
-    // THE COMPARISON DOES NOT GATE A GENERATION RUN, and the reason is that the
-    // opposite made regeneration work only when it was pointless. Measured before
-    // the fix: with the committed witnesses correct, `--write-witness` exited 0;
-    // with ONE byte of `discrete-f32.bin` altered — the only situation in which a
-    // regeneration means anything — it wrote all three files and then exited 1 on
-    // `error.WitnessMismatch`. In CI the generation step runs under
-    // `set -euo pipefail`, so it died exactly in the case it exists for.
-    //
-    // A regeneration is a DECLARED act, gated on a `Witness-regen:` trailer that a
-    // human wrote and a reviewer can read in the diff. Its whole premise is that
-    // the new bytes differ from the old ones; failing on that difference is asking
-    // the act to contradict itself. The verdicts are still printed, so a
-    // regeneration that changes nothing is visible as such, and one that changes
-    // something says which frame and which invariant moved.
-    if (failed and write_dir == null) return error.WitnessMismatch;
+    // Verification only — the generation path returned above, so no `write_dir`
+    // term is needed here and none is written: a condition that can no longer be
+    // false is not a guard, and this file has already removed one such.
+    if (failed) return error.WitnessMismatch;
 }
