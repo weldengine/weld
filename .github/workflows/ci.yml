@@ -488,7 +488,11 @@ jobs:
       # one small build, so paying it twelve times is cheap against a number per
       # platform that would otherwise be unchecked on two of the three.
       - name: dead-test conservation against the suite's own total
-        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=${{ env.COLLECTED_TESTS }}
+        # DELIBERATE FAULT — reverted by the very next commit. `+ 1` on the value the
+        # suite reported, so the tool's own per-platform expectation is confronted
+        # with a number that is wrong by one. This is the layer P2-7 is about: the
+        # one that existed behind a flag nobody passed.
+        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=$(( ${{ env.COLLECTED_TESTS }} + 1 ))
 
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
       # FLAG. Every cell replays the canonical scenario and compares its own output
