@@ -475,11 +475,19 @@ jobs:
       # what the bilateral control has meant since it was written — and what was
       # missing while `--expect-collected` sat behind a flag nobody passed.
       #
-      # Same cell as `lint`, for the same stated reason: it answers a property of the
-      # SOURCE, not of the host. `COLLECTED_TESTS` is set by the test step above and
-      # its absence fails there, so an empty value cannot reach this line silently.
+      # EVERY CELL, and NOT the one cell `lint` runs on — which was the first version
+      # of this step and left a hole the moment it went green. The lint RULE pass is
+      # one cell because it answers a property of the SOURCE; the conservation is not
+      # that kind of quantity. The collected total is PER PLATFORM — 1864 on Windows
+      # against 1866 elsewhere, the two `only_on = .windows` entries of `uncollected` —
+      # so a control on ubuntu alone leaves `expectedCollectedOn(.windows)` a declared
+      # number that nothing confronts, which is the very shape P2-7 exists to remove.
+      #
+      # `COLLECTED_TESTS` is set by the test step above and its absence fails there, so
+      # an empty value cannot reach this line silently. The step is a source scan plus
+      # one small build, so paying it twelve times is cheap against a number per
+      # platform that would otherwise be unchecked on two of the three.
       - name: dead-test conservation against the suite's own total
-        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=${{ env.COLLECTED_TESTS }}
 
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
