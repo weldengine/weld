@@ -91,6 +91,25 @@ pub fn dumpState(s: *const Scenario, gpa: std.mem.Allocator, out: *std.ArrayList
         for (lv.toArray()) |c| try putReal(out, gpa, c);
         for (av.toArray()) |c| try putReal(out, gpa, c);
     }
+
+    // THE CHARACTER, and its absence here was a defect and not an omission of
+    // detail. `mobile` holds rigid bodies; a virtual character owns no simulated
+    // body, so it entered NO artifact — the controller ran for 1000 frames, swept,
+    // depenetrated, classified its ground, and every bit of that was discarded.
+    // The scenario header listed it as element 7 of 7 the whole time.
+    //
+    // ITS OWN STATE, never its presence body's. The presence is a broadphase
+    // artifact whose pose is the capsule's CENTRE and whose velocities are always
+    // zero; the authoritative quantity is the BASE position the store holds, and
+    // routing through the body would serialise a derived value plus six zeros.
+    //
+    // THE GROUND VERDICT IS WHAT MAKES `cos_max_slope` OBSERVABLE, and therefore
+    // the deterministic cosine. Written as an integer-valued `Real` so the record
+    // stays one uniform stream of scalars: the three values are exactly
+    // representable at both precisions, so the encoding costs no information.
+    const ch = s.chars.get(s.character) orelse return;
+    for (ch.position.toArray()) |c| try putReal(out, gpa, c);
+    try putReal(out, gpa, @floatFromInt(@intFromEnum(ch.reported_ground)));
 }
 
 /// The rolling per-frame hash chain: `h₀` is all zeros, `hₙ = H(hₙ₋₁ ‖ dumpₙ)`.
@@ -295,4 +314,66 @@ test "the rotation term is weighted by the body radius" {
         try testing.expect(!bodyExceeds(0, chord_below, r));
         try testing.expect(bodyExceeds(0, chord_above, r));
     }
+}
+
+test "the character IS in the continuous state, and the proof is a discrimination" {
+    // WHY THIS TEST EXISTS. Until M1.1.14's review the character reached NO
+    // artifact: `dumpState` walked `s.mobile`, which holds rigid bodies, and a
+    // virtual character owns none — so the controller ran a thousand frames and its
+    // whole output was discarded. Adding it to the dump is one line, and one line
+    // is exactly what a later refactor removes without noticing.
+    //
+    // A LENGTH ASSERTION WOULD NOT DO. Counting scalars would pass on a dump that
+    // appended four zeros, or the wrong character, or the same body twice. What is
+    // asserted instead is a DISCRIMINATION on the object: move the character and
+    // NOTHING else, and the stream must change. If the character is not in it, the
+    // two dumps are byte-identical and this test fails — which is the state `main`
+    // was in when it was written.
+    const gpa = testing.allocator;
+
+    var a = try Scenario.init(gpa);
+    defer a.deinit(gpa);
+    var b = try Scenario.init(gpa);
+    defer b.deinit(gpa);
+
+    // Both worlds are stepped identically, so every RIGID body agrees bit for bit.
+    var f: u32 = 0;
+    while (f < 20) : (f += 1) {
+        try a.step(gpa, f);
+        try b.step(gpa, f);
+    }
+
+    var da: std.ArrayListUnmanaged(u8) = .empty;
+    defer da.deinit(gpa);
+    var db: std.ArrayListUnmanaged(u8) = .empty;
+    defer db.deinit(gpa);
+    try dumpState(&a, gpa, &da);
+    try dumpState(&b, gpa, &db);
+
+    // Control first: identical scenarios give identical dumps. Without this the
+    // discrimination below could be passing for any reason at all.
+    try testing.expectEqualSlices(u8, da.items, db.items);
+
+    // Now move ONLY the character in `b`. A teleport writes the character's own
+    // position and its presence body's pose; the presence is not in `mobile`, so no
+    // rigid-body record can carry this change.
+    const moved = a.chars.get(a.character).?.position.add(.{ .data = .{ 0.5, 0, 0 } });
+    try b.chars.setCharacterPosition(gpa, &b.world.bp, &b.world.bm, &b.world.store, b.character, moved);
+
+    db.clearRetainingCapacity();
+    try dumpState(&b, gpa, &db);
+    try testing.expect(!std.mem.eql(u8, da.items, db.items));
+
+    // And the ground VERDICT is in the stream too, which is what carries
+    // `cos_max_slope` into the witness. `setCharacterPosition` invalidates the
+    // verdict to `.in_air` by contract (§1.12.8), so this second discrimination
+    // isolates the verdict field: the position is restored to its original value,
+    // leaving the verdict as the only difference left.
+    try b.chars.setCharacterPosition(gpa, &b.world.bp, &b.world.bm, &b.world.store, b.character, a.chars.get(a.character).?.position);
+    try testing.expectEqual(api.GroundState.in_air, b.chars.get(b.character).?.reported_ground);
+    try testing.expectEqual(api.GroundState.grounded, a.chars.get(a.character).?.reported_ground);
+
+    db.clearRetainingCapacity();
+    try dumpState(&b, gpa, &db);
+    try testing.expect(!std.mem.eql(u8, da.items, db.items));
 }

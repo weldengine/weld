@@ -12,7 +12,7 @@
 //! in. Reordering the `init` below is not a refactor; it is a different scenario,
 //! and every committed witness becomes wrong. The order is numbered in the code.
 //!
-//! Seven elements, each present for a named reason and none decorative:
+//! Eight elements, each present for a named reason and none decorative:
 //!
 //! 1. **A static half-space ground.** The surface everything rests on, and the
 //!    one shape with no AABB at all — it exercises the unbounded proxy list
@@ -30,13 +30,31 @@
 //!    exercised and a two-term key would pass every trace.
 //! 6. **One sensor and one body entering then leaving it.** Sensor state and both
 //!    deltas (`engine-physics-solver.md` §1.13.11).
-//! 7. **A kinematic character on a scripted path over a step and a slope.** The
-//!    controller, and the site where a wrong `max_slope` conversion surfaces
-//!    first — which is the whole reason the deterministic cosine exists.
+//! 7. **A riser and three ramps, one walkable and two not, forming a closed bowl.**
+//!    They exist so that `cos_max_slope` DECIDES something: their surface cosines
+//!    bracket `cos(0.785) = 0.70738` at `0.894` and `0.6247`, and the bracket is
+//!    proven to bite in BOTH directions by a counter-factual at the bottom of this
+//!    file — metres of trajectory, not centimetres. Mesh ramps with literal
+//!    vertices, so the scenario contains no trigonometry of its own.
+//! 8. **A kinematic character on a scripted path across that terrain.** The
+//!    controller — its slope test, its step-up arm and its slide — and the site
+//!    where a wrong `max_slope` conversion surfaces first, which is the whole
+//!    reason the deterministic cosine exists.
+//!
+//! **Elements 7 and 8 were BOTH defective until M1.1.14's own review, and the two
+//! halves are one defect.** This header claimed "a step and a slope" while the
+//! scene held neither — nothing stood near the character but the flat half-space,
+//! so `max_slope` was never approached; and the character entered NO artifact,
+//! because `mobile` holds rigid bodies and a virtual character owns none, so the
+//! controller ran for a thousand frames and every bit of its output was discarded.
+//! A text asserting more than its code, and a computation with no observer: the
+//! milestone's two dominant families, in the file that defines what it measures.
 //!
 //! The elements are laid out in separate regions of X so that only the
 //! interactions listed above occur. The half-space is the exception: it is
-//! infinite and underlies all of them, which is intended.
+//! infinite and underlies all of them, which is intended. **That separation was
+//! itself false at x = 100** and is now true: see the note at element 7 for the
+//! arithmetic that put two other elements through the character's old region.
 
 const std = @import("std");
 const config = @import("../../config.zig");
@@ -81,6 +99,27 @@ pub const Scenario = struct {
     /// The trigger, and the body that enters and leaves it.
     trigger: BodyId = undefined,
     trigger_visitor: BodyId = undefined,
+    /// The character's terrain: a riser it climbs, a ramp it walks up, and two it
+    /// cannot — the far one and the near one, which together close the excursion
+    /// into a bowl. All static, so none enters `mobile`.
+    ///
+    /// The ramps exist to make `cos_max_slope` LOAD-BEARING, which is the whole
+    /// reason the deterministic cosine was written: their surface cosines are
+    /// `0.894` and `0.6247`, bracketing `cos(0.785) = 0.70738` by `0.187` and
+    /// `0.083`. Before M1.1.14's review this scenario had no relief at all — its
+    /// header claimed "a step and a slope" while nothing stood near the character
+    /// but the flat half-space, so `max_slope` was never approached and the cosine
+    /// the milestone added was exercised by no witness.
+    ///
+    /// **The slope test is the character's ONLY reason for stopping where it does,
+    /// and that is measured rather than assumed** (see the counter-factual test).
+    /// The steep ramps are not surfaces it stands on — it butts into them and the
+    /// verdict holds it there — so what carries the cosine into the witness is the
+    /// POSITION, not the `GroundState`, which stays `.grounded` for all 1000 frames.
+    step_block: BodyId = undefined,
+    walk_slope: BodyId = undefined,
+    steep_slope: BodyId = undefined,
+    back_slope: BodyId = undefined,
     /// The two static bodies, kept because a `BodyId` is a GENERATIONAL handle
     /// (`index:24 | generation:8`) and not a slot number: a probe that assumed
     /// "the ground is body 0" would silently observe nothing. Measured — that is
@@ -269,9 +308,156 @@ pub const Scenario = struct {
         w.bm.setLinearVelocity(self.trigger_visitor, vr(4, 0, 0));
         self.world.sensors_on = true;
 
-        // --- (7) the kinematic character, x = 100 ----------------------------
+        // --- (7) the character's terrain, x = −70 … −59 ----------------------
+        //
+        // WHY NEGATIVE X, and it is a correction rather than a preference. The
+        // character sat at x = 100 and the header promised that elements occupy
+        // separate X regions so only the listed interactions occur. That promise
+        // was already false there, by arithmetic on this file's own constants: the
+        // frictionless mesh sphere leaves the mesh at x = 65 carrying 3 m/s and
+        // reaches x ≈ 106 by frame 1000, and the trigger visitor starts at x = 72
+        // with 4 m/s and no gravity, reaching x ≈ 138. Both cross x = 100. Putting
+        // terrain there would couple three elements that the design keeps apart,
+        // so the character moves to the one region nothing else visits — the
+        // slider starts at x = −30 and travels toward +x, in the z = 20 lane.
+        //
+        // THE SLOPES ARE MESHES AND NOT ROTATED BOXES, and that is a MEASURED
+        // decision. Rotated boxes were tried first and abandoned after three
+        // rounds: a box rotated about +Z has a footprint wider than its
+        // half-extent by `|sin| · h`, so its leading edge is a corner at a height
+        // the reader must derive rather than read, its Z faces stay VERTICAL — and
+        // a vertical face is never ground whatever `max_slope` says
+        // (`character.zig`), so a character arriving along Z is blocked without the
+        // slope test ever running — and one placement floated the wedge 0.25 m
+        // above the plane and wedged the character in the crevice underneath for
+        // 775 of 1000 frames. A mesh ramp has literal vertices: the surface is
+        // exactly where the numbers say, the walkable ramp and the steep one meet
+        // at a vertex they SHARE to the bit, and there is no hidden extent to get
+        // wrong.
+        //
+        // NO TRIGONOMETRY, which matters in this file above all others: an `@sin`
+        // in the scenario would put back into the instrument exactly what
+        // `ARCH-031` rule 4 took out of the engine. A ramp's normal is the cross
+        // product of two exact integer-ish edges, so its cosine is exact algebra:
+        //   rise 1 over run 2 → n · up = 2/√5 = 0.894 → WALKABLE (≥ 0.70738)
+        //   rise 2.5 over run 2 → n · up = 0.6247 → TOO STEEP (< 0.70738)
+        // The margins are 0.187 and 0.083 — the tighter one is 700 000 f32
+        // epsilons, so no float noise can flip a verdict, while a cosine wrong in
+        // its first decimal flips one and a cosine wrong in both directions flips
+        // both. Both cosines checked against an independent computation, not read
+        // off the vertex table.
+        // THAT BRACKET IS THE POINT: an erroneously LARGE `cos_max_slope` makes the
+        // walkable ramp unclimbable and an erroneously SMALL one makes the steep
+        // ramp climbable, and each shows up as metres of difference in a position
+        // the continuous state carries.
+
+        // The riser, and its height is MEASURED rather than chosen. `tryStepUp`
+        // lifts by `step_height` and then advances by the motion REMAINING in that
+        // tick, so whether a riser is climbed depends on the caller's per-tick step
+        // and not on the riser height alone. Swept here: at 0.03 m/tick — the walk
+        // this scenario used before M1.1.14's review — NO riser is ever climbed,
+        // 0.15 m and 0.25 m alike; 0.15 m needs 0.06 m/tick and 0.25 m needs 0.10.
+        // So the scenario walked below the threshold of its own step arm, and the
+        // walk is now 0.06 with a 0.15 m riser: the cheapest pair that exercises
+        // `tryStepUp` at all. Not a defect in the controller — a sweep-based step
+        // arm cannot lift a character that never commits enough forward motion to
+        // land on the tread — but it is invisible without the sweep.
+        const riser_box = try w.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 1, 4) } });
+        var riser = api.BodyDescriptor{
+            .entity = .{ .index = 61, .generation = 0 },
+            .body_type = .static,
+            .shape = riser_box,
+        };
+        // Top face at y = 0.15, the body sunk well below the half-space rather than
+        // resting flush on it: static × static is `false` in the layer matrix so
+        // there is no pair either way, but a face exactly coplanar with the
+        // boundary is the configuration M1.1.13 measured a spurious second contact
+        // from, and it costs nothing to not reproduce it.
+        riser.position = av3(-65.5, -0.85, 0);
+        riser.friction = 0.5;
+        riser.restitution = 0;
+        self.step_block = try w.addBody(gpa, riser);
+
+        // The walkable ramp: from the plane at x = −62 up to y = 1 at x = −60.
+        // WINDING IS LOAD-BEARING — a `MeshShape` is single-sided (§1.11.17), so a
+        // reversed triangle is a surface the character falls through. It is not
+        // asserted from the vertex order but OBSERVED: the coverage test below
+        // requires the character to reach a height only this ramp can give it.
+        const walk_verts = [_]Vec3{
+            av3(-62, 0, -4), av3(-60, 1, -4),
+            av3(-62, 0, 4),  av3(-60, 1, 4),
+        };
+        const ramp_idx = [_]u32{ 0, 2, 1, 1, 2, 3 };
+        const walk_mesh = try w.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &walk_verts,
+            .indices = &ramp_idx,
+        } });
+        var walkable = api.BodyDescriptor{
+            .entity = .{ .index = 62, .generation = 0 },
+            .body_type = .static,
+            .shape = walk_mesh,
+        };
+        walkable.friction = 0.5;
+        walkable.restitution = 0;
+        self.walk_slope = try w.addBody(gpa, walkable);
+
+        // The steep ramp, continuing from the walkable one's crest at exactly
+        // (−60, 1) — shared to the bit, which is what leaves no crevice between
+        // them for the character to fall into.
+        const steep_verts = [_]Vec3{
+            av3(-60, 1, -4), av3(-58, 3.5, -4),
+            av3(-60, 1, 4),  av3(-58, 3.5, 4),
+        };
+        const steep_mesh = try w.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &steep_verts,
+            .indices = &ramp_idx,
+        } });
+        var steep = api.BodyDescriptor{
+            .entity = .{ .index = 63, .generation = 0 },
+            .body_type = .static,
+            .shape = steep_mesh,
+        };
+        steep.friction = 0.5;
+        steep.restitution = 0;
+        self.steep_slope = try w.addBody(gpa, steep);
+
+        // THE TERRAIN IS A BOWL, and the fourth ramp is what makes it one. A
+        // measured problem forced it: climbing costs forward progress, so a `+x`
+        // leg that ends 2.2 m short of its commanded 9 m is followed by a `−x` leg
+        // that spends all 9, and the character drifts 2.2 m per cycle for ever. Over
+        // 1000 frames that is cosmetic — it still meets the ramps every cycle — but
+        // this scenario is an INSTRUMENT that M1.1.25 and M1.A replay, possibly at
+        // other frame counts, and at ten times the length the character is 55 m away
+        // and the terrain is never touched again. An unbounded drift in a replayed
+        // instrument is a latent vacuity, so the excursion is closed by geometry
+        // rather than by tuning the leg lengths against the climb — a number that
+        // would silently stop matching the moment a ramp angle changed.
+        //
+        // Mirrored winding, and it is NOT the same index list: reflecting the
+        // profile reverses the triangles' orientation, so reusing `ramp_idx` here
+        // would point both normals DOWN and the character would fall through a
+        // surface that looks right in the vertex table.
+        const back_verts = [_]Vec3{
+            av3(-68, 0, -4), av3(-70, 2.5, -4),
+            av3(-68, 0, 4),  av3(-70, 2.5, 4),
+        };
+        const back_idx = [_]u32{ 0, 1, 2, 1, 3, 2 };
+        const back_mesh = try w.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &back_verts,
+            .indices = &back_idx,
+        } });
+        var back = api.BodyDescriptor{
+            .entity = .{ .index = 64, .generation = 0 },
+            .body_type = .static,
+            .shape = back_mesh,
+        };
+        back.friction = 0.5;
+        back.restitution = 0;
+        self.back_slope = try w.addBody(gpa, back);
+
+        // --- (8) the kinematic character, x = −66 ----------------------------
         var cd = api.CharacterDescriptor{ .entity = .{ .index = 60, .generation = 0 } };
-        cd.position = av3(100, 0, 0);
+        cd.position = av3(-63.5, 0, 0);
         self.character = try self.chars.createCharacter(gpa, &w.store, &w.bm, cd);
 
         return self;
@@ -311,17 +497,40 @@ pub const Scenario = struct {
 
     /// The character's displacement at `frame`, in metres.
     ///
-    /// Three phases, each exercising a different arm of the controller, and the
-    /// gravity term is applied throughout so the character is always resolving a
-    /// ground contact rather than floating: walk forward, walk into the slope,
-    /// then back. A pure function of the frame index by construction.
+    /// Four phases — `+x`, `+z`, `−x`, `−z` — over a period of 700 frames. **A
+    /// COMMANDED LOOP IS NOT A CLOSED LOOP**, and that was measured, not foreseen:
+    /// climbing costs forward progress, so a `+x` leg that ends 2.2 m short of the
+    /// metres it asked for is followed by a `−x` leg that spends all of them, and
+    /// the character walks away from its terrain at 2.2 m per cycle for ever. What
+    /// closes the excursion is GEOMETRY — the bowl of element 7 — and not the
+    /// symmetry of this function. The `+z`/`−z` pair does cancel, nothing blocking
+    /// motion along Z.
+    ///
+    /// **The `+x` leg is 300 frames and that length is load-bearing.** At 0.06 m per
+    /// frame it commands 18 m across a bowl 8 m wide, so the character spends most
+    /// of the leg PRESSED against the steep ramp — which is the only regime where
+    /// the slope verdict dominates the outcome. Measured: with a 150-frame leg it
+    /// arrived at the ramp's base with its budget spent, and a `cos_max_slope`
+    /// loosened enough to make that ramp walkable moved the trajectory by 0.23 m
+    /// instead of 1.72 m. The counter-factual test at the bottom of this file is
+    /// what would catch that weakening again.
+    ///
+    /// The walk is 0.06 and not 0.03 because `tryStepUp` is a per-tick sweep: at
+    /// 0.03 m/frame NO riser is ever climbed, at any height — swept and measured at
+    /// M1.1.14's review, where the scenario was found walking below the threshold of
+    /// its own step arm.
+    ///
+    /// The gravity term runs throughout so the character is always resolving a
+    /// ground contact rather than floating. A pure function of the frame index by
+    /// construction — no RNG, no state.
     fn scriptedDisplacement(frame: u32) Vec3r {
         const fall: Real = -0.02;
-        const walk: Real = 0.03;
-        return switch (frame % 300) {
-            0...99 => vr(walk, fall, 0),
-            100...199 => vr(0, fall, walk),
-            else => vr(-walk, fall, 0),
+        const walk: Real = 0.06;
+        return switch (frame % 700) {
+            0...299 => vr(walk, fall, 0),
+            300...349 => vr(0, fall, walk),
+            350...649 => vr(-walk, fall, 0),
+            else => vr(0, fall, -walk),
         };
     }
 };
@@ -337,20 +546,30 @@ test "scenario: builds, and every element is present" {
 
     // MOBILE = 5 stack + 2 group_a + 2 group_b + 1 slider + 1 mesh sphere
     //        + 1 trigger visitor = 12. The arithmetic is written out so a reader
-    // can check it against the constructor rather than trust the total, and the
-    // assertion is what fails when an element is added without being appended to
-    // `mobile` — which would silently shrink the continuous metric's coverage
-    // while every other test stayed green.
+    // can check it against the constructor rather than trust the total.
+    //
+    // **THIS ASSERTION DID NOT DO WHAT ITS COMMENT CLAIMED, and M1.1.14's review
+    // proved it by finding the case it was written for.** It used to say it "fails
+    // when an element is added without being appended to `mobile`, which would
+    // silently shrink the continuous metric's coverage". The character was added
+    // and not appended — deliberately, since a virtual character has no rigid body
+    // to append — and this test stayed green because whoever added it updated the
+    // TOTAL below in step. A count pinned in the same commit as the change it is
+    // meant to catch catches nothing; what it really guards is arithmetic drift
+    // between the two numbers, which is a smaller claim and is now the one written.
+    // What covers the real case is the coverage test at the bottom of this file,
+    // which asserts on the STREAM rather than on a count.
     try testing.expectEqual(@as(usize, 12), s.mobile.items.len);
     // ALL BODIES = the 12 above + the half-space ground + the static mesh + the
-    // trigger + the character's kinematic presence = 16. The presence is a body
-    // like any other in the store (§1.12.2) and is counted here for that reason.
-    try testing.expectEqual(@as(u32, 16), s.world.bm.count());
+    // trigger + the riser + the THREE ramps + the character's kinematic presence
+    // = 20. The presence is a body like any other in the store (§1.12.2) and is
+    // counted here for that reason.
+    try testing.expectEqual(@as(u32, 20), s.world.bm.count());
     try testing.expectEqual(@as(u32, 1), s.chars.count());
     try testing.expect(s.world.sensors_on);
 }
 
-test "scenario: steps without error, and the character stays on the ground" {
+test "scenario: steps without error, and the character resolves its ground" {
     const gpa = testing.allocator;
     var s = try Scenario.init(gpa);
     defer s.deinit(gpa);
@@ -358,15 +577,23 @@ test "scenario: steps without error, and the character stays on the ground" {
     var f: u32 = 0;
     while (f < 120) : (f += 1) try s.step(gpa, f);
 
-    // The controller resolved a ground contact rather than sinking through the
-    // half-space: a scripted fall of 2 cm per tick over 120 ticks would put an
-    // unresolved character 2.4 m under the plane.
+    // The controller resolved a ground contact rather than sinking: a scripted
+    // fall of 2 cm per tick over 120 ticks would put an unresolved character
+    // 2.4 m under the plane, and the terrain's lowest surface is the plane itself.
+    //
+    // The BAND is what changed at M1.1.14's review, and the reason is the whole
+    // point of the fix: this used to assert `|y| < 0.05`, which is only true of a
+    // character on FLAT GROUND. It passed for a thousand frames because the scene
+    // had no relief at all — the assertion was a witness to the defect rather than
+    // a guard against it. By frame 120 the character is partway up the walkable
+    // ramp, so the band is now the terrain's own vertical extent.
     const pos = s.chars.get(s.character).?.position.toArray();
     try testing.expect(pos[1] > -0.05);
-    try testing.expect(pos[1] < 0.05);
+    try testing.expect(pos[1] < 1.05);
+    try testing.expectEqual(api.GroundState.grounded, s.chars.get(s.character).?.reported_ground);
 }
 
-test "scenario: every one of the seven elements actually fires" {
+test "scenario: every one of the eight elements actually fires" {
     // THE SCOPE MEASUREMENT, and it is due BEFORE any witness is committed. A
     // witness taken over a scene where the groups never meet, the sensor never
     // triggers or the mesh never produces a second constraint would be perfectly
@@ -383,9 +610,18 @@ test "scenario: every one of the seven elements actually fires" {
     var max_islands: usize = 0;
     var entered: usize = 0;
     var exited: usize = 0;
+    var char_max_y: Real = -1e9;
+    var char_max_x: Real = -1e9;
+    var char_on_riser = false;
 
+    // ONE FULL SCRIPT CYCLE AND MORE, and the bound is not free to choose: the
+    // script's period is 700 frames, so a 400-frame window — what this loop used
+    // to run — is STRUCTURALLY unable to observe the second half of the script.
+    // Measured when the riser clause was added and failed: the character crosses it
+    // on the `−x` leg, around frame 750. A coverage test shorter than the period of
+    // the thing it covers is a coverage test with a blind half.
     var f: u32 = 0;
-    while (f < 400) : (f += 1) {
+    while (f < 750) : (f += 1) {
         try s.step(gpa, f);
 
         // (1) the half-space: a constraint EITHER of whose halves is the ground's
@@ -417,6 +653,19 @@ test "scenario: every one of the seven elements actually fires" {
         // (6) the two sensor deltas.
         entered += s.world.sensors.entered.items.len;
         exited += s.world.sensors.exited.items.len;
+
+        // (7) + (8) the terrain, accumulated over the RUN and not read at its end:
+        // the claim is that the character climbed, which is a property of the
+        // trajectory. A final-value assertion would depend on where this loop
+        // happens to stop — measured, it stops on the descent leg, so the first
+        // version of this check failed on a character that had climbed perfectly.
+        const cp = s.chars.get(s.character).?.position.toArray();
+        if (cp[1] > char_max_y) char_max_y = cp[1];
+        if (cp[0] > char_max_x) char_max_x = cp[0];
+        // Standing on the riser's tread: its top is at y = 0.15 and the capsule
+        // stands `padding` above it, so the band is tight around that and excludes
+        // both the plane below and the ramp above.
+        if (cp[0] > -66 and cp[0] < -65 and cp[1] > 0.14 and cp[1] < 0.18) char_on_riser = true;
     }
 
     try testing.expect(saw_ground_contact); // (1)
@@ -432,7 +681,99 @@ test "scenario: every one of the seven elements actually fires" {
     const v = s.world.bm.linearVelocity(s.slider).?.toArray()[0];
     try testing.expect(v > 4.9);
 
-    // (7) the character resolved a ground contact rather than sinking.
-    const y = s.chars.get(s.character).?.position.toArray()[1];
-    try testing.expect(y > -0.05 and y < 0.05);
+    // (7) + (8) THE TERRAIN, three clauses, each naming the arm it observes.
+    //
+    // It CLIMBED the walkable ramp: the ramp crests at y = 1 and the plane is at
+    // y = 0, so a character that never left the plane cannot reach here.
+    try testing.expect(char_max_y > 0.85);
+    // It was HELD by the steep one: the steep ramp's base is at x = −60, and a
+    // capsule of radius 0.3 pressed against it stands near −60.2. Passing this
+    // line would mean the slope test admitted a 51.3° surface — which is exactly
+    // what the counter-factual below makes it do, and it then reaches −58.8.
+    try testing.expect(char_max_x < -60.0);
+    // And `tryStepUp` fired: it stood on the riser's 0.15 m tread. This is the arm
+    // the scenario's former 0.03 m/tick walk could not exercise at any riser
+    // height — swept and measured at M1.1.14's review.
+    try testing.expect(char_on_riser);
+}
+
+test "scenario: the slope test DECIDES the character's trajectory, both ways" {
+    // THE NON-VACUITY OF ELEMENT 7, and it is the reason the two slopes exist at
+    // all. Element 7's clauses above prove the character climbed one ramp and was
+    // held by another; they do NOT prove that `cos_max_slope` is what decided it —
+    // a controller that climbed everything under 40° by some other rule would pass
+    // them identically. What discriminates is a COUNTER-FACTUAL ON THE OBJECT:
+    // change the cosine and nothing else, and watch the trajectory move.
+    //
+    // The bracket is `0.894` (walkable ramp) and `0.6247` (both steep ramps) around
+    // the default `cos(0.785) = 0.7074`. Measured, at f32, over 1000 frames:
+    //
+    //   max_slope 0.400 → cos 0.9211 → max_y 0.0063   x span 2.7 m
+    //   max_slope 0.785 → cos 0.7074 → max_y 0.9463   x span 7.7 m   (the default)
+    //   max_slope 1.200 → cos 0.3624 → max_y 2.6707   escapes the bowl
+    //
+    // Both directions, in METRES. Too large a cosine and the walkable ramp becomes
+    // unclimbable — the character never leaves the plane. Too small and the steep
+    // ramps become climbable — it crests both and leaves the terrain entirely. A
+    // cosine wrong in its first decimal is therefore not a rounding difference in
+    // this witness, it is a different scene.
+    const gpa = testing.allocator;
+
+    const Outcome = struct { max_y: Real, min_x: Real, max_x: Real };
+    const measure = struct {
+        fn run(a: std.mem.Allocator, max_slope: f32) !Outcome {
+            var s = try Scenario.init(a);
+            defer s.deinit(a);
+            // A SECOND character, built from the same descriptor but for its slope,
+            // and driven by the same script. Replacing the scenario's own would mean
+            // rebuilding the body order, which is part of the contract (see header).
+            var cd = api.CharacterDescriptor{ .entity = .{ .index = 70, .generation = 0 } };
+            cd.position = av3(-63.5, 0, 0);
+            cd.max_slope = max_slope;
+            const alt = try s.chars.createCharacter(a, &s.world.store, &s.world.bm, cd);
+
+            var out = Outcome{ .max_y = -1e9, .min_x = 1e9, .max_x = -1e9 };
+            var f: u32 = 0;
+            while (f < 1000) : (f += 1) {
+                _ = s.chars.moveCharacter(
+                    a,
+                    &s.world.bp,
+                    &s.world.bm,
+                    &s.world.store,
+                    alt,
+                    Scenario.scriptedDisplacement(f),
+                    fixed_dt,
+                ) catch unreachable;
+                try s.step(a, f);
+                const p = s.chars.get(alt).?.position.toArray();
+                if (p[1] > out.max_y) out.max_y = p[1];
+                if (p[0] < out.min_x) out.min_x = p[0];
+                if (p[0] > out.max_x) out.max_x = p[0];
+            }
+            return out;
+        }
+    }.run;
+
+    const strict = try measure(gpa, 0.40);
+    const actual = try measure(gpa, 0.785);
+    const loose = try measure(gpa, 1.20);
+
+    // A cosine STRICTER than the walkable ramp: the ramp is refused and the
+    // character stays on the plane. Bounds are loose by a wide margin on purpose —
+    // what is asserted is the SEPARATION between the three regimes, not a
+    // measurement, which is what keeps this test from re-pinning a value the
+    // solver is free to move.
+    try testing.expect(strict.max_y < 0.1);
+    try testing.expect(actual.max_y - strict.max_y > 0.5);
+
+    // A cosine LOOSER than the steep ramps: they become walkable and the character
+    // crests them, which the default run never does.
+    try testing.expect(loose.max_y - actual.max_y > 0.5);
+    try testing.expect(loose.max_x > actual.max_x);
+
+    // And the DEFAULT run stays inside the bowl the terrain forms — the property
+    // that keeps the instrument from drifting off its own scene when replayed at a
+    // longer frame count (M1.1.25, M1.A).
+    try testing.expect(actual.min_x > -68.5);
+    try testing.expect(actual.max_x < -60.0);
 }
