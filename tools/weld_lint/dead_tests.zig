@@ -247,7 +247,7 @@ pub const uncollected = [_]Uncollected{
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     return switch (os) {
-        .windows => 1864,
+        .windows => 1865,
         else => 1866,
     };
 }
