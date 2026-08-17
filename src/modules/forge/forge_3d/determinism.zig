@@ -6,9 +6,12 @@
 //! backwards: **assert, never install**. A module that re-installed the state at
 //! its entry point would repair its own thread and leave every other consumer
 //! of that thread — the renderer, the animation sampler, a plugin — running on
-//! the state it just silently fixed, with no diagnostic anywhere. Installing is
-//! Tier 0's job and happens once per thread, at creation
-//! (`foundation/math/float_env.zig`, which names its three call sites).
+//! the state it just silently fixed, with no diagnostic anywhere. Installing
+//! happens once per thread, at creation, and once per process, at entry
+//! (`foundation/math/float_env.zig`, which states the RULE and deliberately
+//! enumerates nothing — this sentence used to say "Tier 0's job" and "its three
+//! call sites", and M1.1.14 measured both false: the set is ten and three of them
+//! are inside modules, a thread born in a module being a thread all the same).
 //!
 //! **Where the entry point is, today and tomorrow.** There is no
 //! `PhysicsWorld.step()` yet — the orchestration lands at M1.1.15. What exists
