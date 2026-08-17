@@ -7,8 +7,18 @@
 
 const std = @import("std");
 const simd = @import("foundation").simd;
+const float_env = @import("foundation").math.float_env;
 
 pub fn main(init: std.process.Init) !void {
+    // `ARCH-031` rule 5 — every PROCESS ENTRY POINT installs the float environment,
+    // with no exception for a program that compares nothing today. An exception of
+    // that shape is a judgement, and a judgement does not survive: a program that
+    // compared nothing becomes a fixture, and a float-kernel bench measured under
+    // an unpinned environment measures a configuration that exists nowhere. These
+    // two kernels are integer today, which makes the cost nil and changes nothing
+    // about the rule.
+    float_env.install();
+
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());

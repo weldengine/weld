@@ -106,6 +106,12 @@ pub fn build(b: *std.Build) void {
     // `weld_core` (a C1.1 exit metric), so the single owner of the register
     // layout has to be reachable from `foundation`.
     core_module.addImport("foundation", foundation_module);
+    // M1.1.14 — `ARCH-031` rule 5: the shader hot-reload watcher creates a thread,
+    // so it must INSTALL the float environment. It reaches the single definition in
+    // `foundation/math/float_env.zig` directly rather than through a re-export
+    // across a tier boundary, which session 1 of this milestone deleted for adding
+    // a name without adding a definition.
+    render_module.addImport("foundation", foundation_module);
 
     const asset_pipeline_module = b.createModule(.{
         .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
@@ -1416,6 +1422,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     demo_module.addImport("weld_core", core_module);
+    demo_module.addImport("foundation", foundation_module);
     demo_module.addImport("weld_etch", etch_module);
     demo_module.addImport("fixture_facade", fixture_facade_module);
     const demo_exe = b.addExecutable(.{
@@ -1685,6 +1692,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     demo_codegen_module.addImport("weld_core", core_module);
+    demo_codegen_module.addImport("foundation", foundation_module);
     demo_codegen_module.addImport("cooked_demo", cooked_demo_module);
     const demo_codegen_exe = b.addExecutable(.{
         .name = "demo-etch-codegen",

@@ -225,6 +225,12 @@ const ReaderState = struct {
 };
 
 fn readerLoop(state: *ReaderState) void {
+    // `ARCH-031` rule 5 — a THREAD-CREATION site's body installs the float
+    // environment. `main` installing it does not cover this thread: the state is
+    // per-thread, and a reader that inherits the OS default is a second
+    // arithmetic in the same process.
+    foundation.math.float_env.install();
+
     // Sized to the largest frame the editor can send the runtime —
     // computed over the FULL incoming set (every editor→runtime type the
     // reader reads, whether or not it decodes it: `recvFrame` buffers the

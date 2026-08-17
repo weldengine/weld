@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const foundation = @import("foundation");
 const config = @import("config.zig");
 const run = @import("tests/determinism/run.zig");
 const trace = @import("tests/determinism/trace.zig");
@@ -46,6 +47,14 @@ fn writeFile(io: std.Io, dir_path: []const u8, name: []const u8, bytes: []const 
 }
 
 pub fn main(init: std.process.Init) !void {
+    // `ARCH-031` rule 5 — INSTALL, then let the module ASSERT. Until M1.1.14's own
+    // review this entry point asserted through the harness and never installed, so
+    // every witness in the set was produced under the environment the OS handed it.
+    // The assertion passed because that inherited state happens to be the engine
+    // default on Linux and Windows — which is precisely why an assertion is a
+    // DETECTION mechanism and not a substitute for installation.
+    foundation.math.float_env.install();
+
     const gpa = init.arena.allocator();
     const io = init.io;
     const argv = try init.minimal.args.toSlice(gpa);
@@ -89,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "discrete-{s}.bin", .{precision_tag}), a.discrete.items);
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "reference-window-{s}.bin", .{precision_tag}), a.poses.items);
         std.debug.print("witnesses written : {s}\n", .{dir});
+        std.debug.print("mode              : GENERATION — the comparison below is INFORMATIONAL\n", .{});
     }
 
     // THE CHAIN VERDICT — level 1, x86_64 only. On any other ISA the comparison
@@ -140,6 +150,24 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("divergence frame  : none within K={d}\n", .{run.window_frames});
     }
 
+    // SELF-REPRODUCIBILITY GATES UNCONDITIONALLY, including a generation run: a run
+    // that cannot repeat itself must never be allowed to produce a witness, and
+    // that claim is independent of what the committed files currently say.
     if (!reproducible) return error.NotSelfReproducible;
-    if (failed) return error.WitnessMismatch;
+
+    // THE COMPARISON DOES NOT GATE A GENERATION RUN, and the reason is that the
+    // opposite made regeneration work only when it was pointless. Measured before
+    // the fix: with the committed witnesses correct, `--write-witness` exited 0;
+    // with ONE byte of `discrete-f32.bin` altered — the only situation in which a
+    // regeneration means anything — it wrote all three files and then exited 1 on
+    // `error.WitnessMismatch`. In CI the generation step runs under
+    // `set -euo pipefail`, so it died exactly in the case it exists for.
+    //
+    // A regeneration is a DECLARED act, gated on a `Witness-regen:` trailer that a
+    // human wrote and a reviewer can read in the diff. Its whole premise is that
+    // the new bytes differ from the old ones; failing on that difference is asking
+    // the act to contradict itself. The verdicts are still printed, so a
+    // regeneration that changes nothing is visible as such, and one that changes
+    // something says which frame and which invariant moved.
+    if (failed and write_dir == null) return error.WitnessMismatch;
 }

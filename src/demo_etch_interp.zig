@@ -7,6 +7,7 @@
 //!     Demo S4 OK | mode=ReleaseSafe | entities=1000 | rules=5 | ticks=60 | rules_matched=N | errors=0 | total=Tms
 
 const std = @import("std");
+const foundation = @import("foundation");
 const builtin = @import("builtin");
 const etch = @import("weld_etch");
 const weld_core = @import("weld_core");
@@ -21,6 +22,13 @@ const Entities: u32 = 1_000;
 const Ticks: u32 = 60;
 
 pub fn main(init: std.process.Init) !void {
+    // `ARCH-031` rule 5 — every PROCESS ENTRY POINT installs the float environment,
+    // with no exception for a program that compares nothing today. An exception of
+    // that shape is a judgement, and a judgement does not survive: a program that
+    // compared nothing becomes a fixture, and a float-kernel bench measured under
+    // an unpinned environment measures a configuration that exists nowhere.
+    foundation.math.float_env.install();
+
     const gpa = init.gpa;
     const io = init.io;
 

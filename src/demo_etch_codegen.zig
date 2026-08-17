@@ -4,6 +4,7 @@
 //! diff it against `bench/fixtures/demo_5_rules_codegen.expected.txt`.
 
 const std = @import("std");
+const foundation = @import("foundation");
 const weld_core = @import("weld_core");
 const cooked = @import("cooked_demo");
 
@@ -14,6 +15,13 @@ const EntityId = weld_core.ecs.entity.EntityId;
 const Ticks: u32 = 10;
 
 pub fn main(init: std.process.Init) !void {
+    // `ARCH-031` rule 5 — every PROCESS ENTRY POINT installs the float environment,
+    // with no exception for a program that compares nothing today. An exception of
+    // that shape is a judgement, and a judgement does not survive: a program that
+    // compared nothing becomes a fixture, and a float-kernel bench measured under
+    // an unpinned environment measures a configuration that exists nowhere.
+    foundation.math.float_env.install();
+
     const gpa = init.gpa;
     const io = init.io;
 
