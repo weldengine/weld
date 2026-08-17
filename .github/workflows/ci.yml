@@ -488,11 +488,18 @@ jobs:
       # one small build, so paying it twelve times is cheap against a number per
       # platform that would otherwise be unchecked on two of the three.
       - name: dead-test conservation against the suite's own total
-        # DELIBERATE FAULT — reverted by the very next commit. `+ 1` on the value the
-        # suite reported, so the tool's own per-platform expectation is confronted
-        # with a number that is wrong by one. This is the layer P2-7 is about: the
-        # one that existed behind a flag nobody passed.
-        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=$(( ${{ env.COLLECTED_TESTS }} + 1 ))
+        # `shell: bash` DECLARED, and the deliberate red is what found the need. The
+        # step carried no `shell:`, so on windows-2025 it ran under `pwsh`. The plain
+        # form is a bare substitution and worked there — the green run printed
+        # `control OK at 1864` — but the counter-factual's `$(( N + 1 ))` became
+        # `$ 1865` under PowerShell, two tokens, and `zig build` answered
+        # `Expected -Dexpect-collected to be an integer of type usize`. So the
+        # Windows red proved an argument-parsing failure and NOT the conservation
+        # firing, and the negative witness on Windows is not established.
+        # Uniform across the twelve now, which also removes the trap for whoever next
+        # adds shell syntax here.
+        shell: bash
+        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=${{ env.COLLECTED_TESTS }}
 
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
       # FLAG. Every cell replays the canonical scenario and compares its own output
