@@ -1,4 +1,4 @@
-reason=first set, after the float @reduce fold and the per-root closure fix
+reason=canonical scenario extended with a riser, three mesh ramps forming a closed bowl, and the kinematic character serialised into the continuous state
 cell=ubuntu-24.04
 cpu=baseline
 zig_requested=0.16.0
@@ -6,14 +6,14 @@ zig_version_output=0.16.0
 reference_window_mode=ReleaseSafe
 discrete_mode=ReleaseSafe
 cross_mode_agreement=true
-sha=662cf075c050810c16a35e51d17b63a70d2a8fb4
-run=https://github.com/weldengine/weld/actions/runs/31933218714
+sha=e851ff001aec5bb0ad5ad918d0ed07e326ba8f5d
+run=https://github.com/weldengine/weld/actions/runs/32026918193
 ---
-witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
-witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/31933218714
+witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
+witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32026918193
