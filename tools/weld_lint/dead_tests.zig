@@ -223,6 +223,36 @@ pub const uncollected = [_]Uncollected{
 };
 
 /// Blocks the closure counts that `zig build test` does not collect, on `os`.
+/// The number of test blocks `zig build test` COLLECTS on each platform.
+///
+/// **THIS IS THE OTHER SIDE OF THE CONSERVATION, and until M1.1.14's review there
+/// was no other side.** `uncollectedOn` gives the declared gap, so
+/// `live_tests - gap` yields an EXPECTED collected total — and the tool printed
+/// that expectation and then printed `clean`, having compared it to nothing. The
+/// confrontation existed only behind an optional `--expect-collected=N` that
+/// neither `build.zig` nor the CI ever passed. A control that a path can bypass is
+/// not a control, and this one was the guard built AGAINST that very class.
+///
+/// **WHY A DECLARED NUMBER AND NOT A DERIVED ONE.** The tool cannot run the suite;
+/// it reads source. So the unconditional check confronts the closure against a
+/// number a human wrote down, which catches CLOSURE drift on every invocation with
+/// no flag to forget. What stops that number from being bumped to match a drifted
+/// closure is the SECOND layer: CI parses `zig build test`'s own reported total and
+/// passes it through `--expect-collected`, so the declared number is itself
+/// confronted with what the suite actually ran. Two independently produced numbers,
+/// which is the definition the bilateral control has carried since it was written.
+///
+/// **Windows is two lower** and the two blocks are the `only_on = .windows` entries
+/// above — `shm_posix.zig` and `transport_posix.zig`. That is arithmetic on this
+/// same table and not a second measurement, which is why the CI layer matters.
+pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
+    return switch (os) {
+        .windows => 1864,
+        else => 1866,
+    };
+}
+
+/// Blocks the closure counts that `zig build test` does not collect, on `os`.
 pub fn uncollectedOn(os: std.Target.Os.Tag) usize {
     var n: usize = 0;
     for (uncollected) |u| {

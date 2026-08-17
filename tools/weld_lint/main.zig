@@ -167,6 +167,41 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
         if (u.only_on != null and u.only_on.? != os) continue;
         try out.print("  uncollected: {s} ({d} block(s)): {s}\n", .{ u.path, u.blocks, u.reason });
     }
+    // LAYER ONE — THE UNCONDITIONAL CONFRONTATION, and its absence was the fourth
+    // instance of "a control that exists and a path bypasses" in this milestone,
+    // after the lint step in no workflow, the witnesses with no reader, and the
+    // cache save outside its own size guard. This one was inside the tool built
+    // against that family: the loop below runs ONLY when `--expect-collected=N` is
+    // passed, and neither `build.zig` nor the CI passed it, so the tool printed its
+    // expectation and then printed `clean` having compared it to nothing.
+    //
+    // `expected` is arithmetic on the closure and the declared gap; the number here
+    // is written down by a human from the suite's own reported total. Equal, not
+    // bounded: two computations of one quantity must AGREE, and a one-sided test
+    // would admit drift in the permitted direction.
+    const declared = dead_tests.expectedCollectedOn(os);
+    if (expected != declared) {
+        try out.print(
+            "dead-tests: CONSERVATION FAILED — closure gives {d} expected collected, " ++
+                "`expectedCollectedOn({t})` declares {d}.\n",
+            .{ expected, os, declared },
+        );
+        try out.writeAll("The closure and the declared suite total have parted. Do NOT bump the\n" ++
+            "declared number to match: that turns the control into arithmetic on itself,\n" ++
+            "which is exactly how this check came to print a verdict it never computed.\n" ++
+            "Run `zig build test --summary all`, read the collected total it reports, and\n" ++
+            "reconcile against THAT — then decompose with `--per-root --list` if the two\n" ++
+            "still disagree.\n");
+        return 1;
+    }
+    try out.print(
+        "dead-tests: conservation OK — closure and the declared suite total agree at {d}.\n",
+        .{expected},
+    );
+
+    // LAYER TWO — the suite-DERIVED confrontation. CI parses `zig build test`'s own
+    // summary and passes it here, which is what stops the declared number above from
+    // being quietly aligned to a drifted closure.
     for (argv_extra) |a| {
         const prefix = "--expect-collected=";
         if (!std.mem.startsWith(u8, a, prefix)) continue;

@@ -120,6 +120,19 @@ pub const Scenario = struct {
     walk_slope: BodyId = undefined,
     steep_slope: BodyId = undefined,
     back_slope: BodyId = undefined,
+    /// The LAST `moveCharacter` result, kept so a test can observe which body the
+    /// controller actually stood on.
+    ///
+    /// **A POSITION BAND IS A PROXY FOR A CONTACT AND THIS IS THE CONTACT.** The
+    /// scope test used to infer "the character reached the riser" from a box drawn
+    /// around the tread; `ground_body` is the controller's own answer to the same
+    /// question, so the assertion stops depending on a rectangle staying correct.
+    /// The result was DISCARDED here until M1.1.14's review — `_ = moveCharacter(...)`
+    /// — which is why no test could name what the character was standing on.
+    last_move: character_mod.MoveResult = .{
+        .position = Vec3r.zero,
+        .ground = .{},
+    },
     /// The two static bodies, kept because a `BodyId` is a GENERATIONAL handle
     /// (`index:24 | generation:8`) and not a slot number: a probe that assumed
     /// "the ground is body 0" would silently observe nothing. Measured — that is
@@ -478,7 +491,7 @@ pub const Scenario = struct {
     /// always asks for the same metres.
     pub fn step(self: *Scenario, gpa: std.mem.Allocator, frame: u32) !void {
         const d = scriptedDisplacement(frame);
-        _ = self.chars.moveCharacter(
+        self.last_move = self.chars.moveCharacter(
             gpa,
             &self.world.bp,
             &self.world.bm,
@@ -612,7 +625,8 @@ test "scenario: every one of the eight elements actually fires" {
     var exited: usize = 0;
     var char_max_y: Real = -1e9;
     var char_max_x: Real = -1e9;
-    var char_on_riser = false;
+    var stood_on_riser = false;
+    var stood_on_walk_slope = false;
 
     // ONE FULL SCRIPT CYCLE AND MORE, and the bound is not free to choose: the
     // script's period is 700 frames, so a 400-frame window — what this loop used
@@ -662,10 +676,16 @@ test "scenario: every one of the eight elements actually fires" {
         const cp = s.chars.get(s.character).?.position.toArray();
         if (cp[1] > char_max_y) char_max_y = cp[1];
         if (cp[0] > char_max_x) char_max_x = cp[0];
-        // Standing on the riser's tread: its top is at y = 0.15 and the capsule
-        // stands `padding` above it, so the band is tight around that and excludes
-        // both the plane below and the ramp above.
-        if (cp[0] > -66 and cp[0] < -65 and cp[1] > 0.14 and cp[1] < 0.18) char_on_riser = true;
+
+        // WHICH BODY THE CONTROLLER SAID IT WAS STANDING ON, read from its own
+        // answer rather than inferred from a box drawn around each obstacle. The
+        // earlier version tested a position band on the riser's tread, which is a
+        // PROXY: it holds only while that rectangle stays correct, and a character
+        // that never touched the riser but drifted through the band would satisfy it.
+        // `ground.body` is the contact itself.
+        const gb = s.last_move.ground.body;
+        if (gb == s.step_block) stood_on_riser = true;
+        if (gb == s.walk_slope) stood_on_walk_slope = true;
     }
 
     try testing.expect(saw_ground_contact); // (1)
@@ -681,20 +701,32 @@ test "scenario: every one of the eight elements actually fires" {
     const v = s.world.bm.linearVelocity(s.slider).?.toArray()[0];
     try testing.expect(v > 4.9);
 
-    // (7) + (8) THE TERRAIN, three clauses, each naming the arm it observes.
+    // (7) + (8) THE TERRAIN. **EACH CLAUSE ASSERTS THAT THE CHARACTER REACHED THE
+    // OBSTACLE, not that the obstacle exists**, and that distinction is the whole
+    // point: the review's finding was "no step and no slope nearby", and a step and a
+    // slope the character never touches satisfy those words and nothing else.
     //
-    // It CLIMBED the walkable ramp: the ramp crests at y = 1 and the plane is at
-    // y = 0, so a character that never left the plane cannot reach here.
+    // It STOOD ON the riser — the controller's own `ground.body`, so `tryStepUp`
+    // demonstrably fired and carried it onto the tread. This is the arm the
+    // scenario's former 0.03 m/tick walk could not exercise at ANY riser height.
+    try testing.expect(stood_on_riser);
+    // It STOOD ON the walkable ramp, again by `ground.body`: the slope test admitted
+    // a 26.6° surface as ground and the character bore on it.
+    try testing.expect(stood_on_walk_slope);
+    // And it CLIMBED that ramp rather than merely brushing its foot: the ramp crests
+    // at y = 1 and the plane is at y = 0, so this height is unreachable from the
+    // plane. `ground.body` alone would be satisfied by one tick of contact at the
+    // very bottom.
     try testing.expect(char_max_y > 0.85);
-    // It was HELD by the steep one: the steep ramp's base is at x = −60, and a
-    // capsule of radius 0.3 pressed against it stands near −60.2. Passing this
-    // line would mean the slope test admitted a 51.3° surface — which is exactly
-    // what the counter-factual below makes it do, and it then reaches −58.8.
+    // THE STEEP RAMP, and this clause is TWO-SIDED because the one-sided form was
+    // satisfiable by absence — `max_x < −60` holds just as well for a character that
+    // never came near it. The lower bound is the arrival: the ramp's base is at
+    // x = −60 and a capsule of radius 0.3 held against it stands near −60.19, so
+    // −60.4 requires contact. The upper bound is the refusal: passing −60 would mean
+    // the slope test admitted a 51.3° surface, which is exactly what the
+    // counter-factual below makes it do, and it then reaches −58.8.
+    try testing.expect(char_max_x > -60.4);
     try testing.expect(char_max_x < -60.0);
-    // And `tryStepUp` fired: it stood on the riser's 0.15 m tread. This is the arm
-    // the scenario's former 0.03 m/tick walk could not exercise at any riser
-    // height — swept and measured at M1.1.14's review.
-    try testing.expect(char_on_riser);
 }
 
 test "scenario: the slope test DECIDES the character's trajectory, both ways" {

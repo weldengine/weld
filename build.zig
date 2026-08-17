@@ -1968,6 +1968,30 @@ pub fn build(b: *std.Build) void {
     // `zig build lint -- src` belong to the rule pass beside it.
     const dead_tests_run = b.addRunArtifact(weld_lint_exe);
     dead_tests_run.addArg("dead-tests");
+
+    // M1.1.14 review — `-Dexpect-collected=N` FORWARDED, and the reason it exists is
+    // that the conservation it feeds was unreachable. The tool's suite-derived check
+    // sat behind `--expect-collected=N` and NOTHING passed it: not this file, not the
+    // CI. So the lint printed an expected-collected line and then printed `clean`,
+    // having compared nothing — the fourth instance in this milestone of a control
+    // that exists and a path bypasses, this time inside the tool built against that
+    // family.
+    //
+    // Two layers, and only this one is optional. The tool now confronts the closure
+    // against a DECLARED per-OS total on every invocation, with no flag to forget;
+    // this option supplies the second number, the total the suite itself reported.
+    // CI passes it from the same job that ran the tests. Locally it is optional
+    // because `zig build lint` cannot run the suite to learn the figure, and an
+    // option that silently defaults to the closure's own arithmetic would be the
+    // defect again in a new costume.
+    if (b.option(
+        usize,
+        "expect-collected",
+        "Confront the dead-test closure with a collected-test total from `zig build test`",
+    )) |n| {
+        dead_tests_run.addArg(b.fmt("--expect-collected={d}", .{n}));
+    }
+
     lint_step.dependOn(&dead_tests_run.step);
 
     const dead_tests_step = b.step(

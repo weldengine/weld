@@ -386,7 +386,33 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
+          # The suite's own COLLECTED TOTAL is captured here and handed to the
+          # dead-test conservation below. M1.1.14 review — that control existed
+          # behind an optional `--expect-collected=N` which NOTHING passed, so the
+          # tool printed an expectation and then printed `clean`, having compared it
+          # to nothing. The tool now checks a DECLARED total unconditionally; this
+          # step supplies the second, INDEPENDENT number, which is what stops the
+          # declared one from being bumped to match a drifted closure.
+          #
+          # `tee` and not a re-run: the number must come from the invocation that
+          # actually ran the tests. And the exit code is captured through
+          # PIPESTATUS, `set -euo pipefail` notwithstanding — a pipeline's status is
+          # the last command's, and this repository has pushed a red build under a
+          # green self-report exactly that way.
+          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          # "N/M tests passed" — M is the collected total. Absent or unparsable is a
+          # FAILURE and not a skip: a missing number is how a control comes to be
+          # bypassed, which is the defect this whole step exists to close.
+          collected="$(sed -n 's/.*[0-9][0-9]* of \([0-9][0-9]*\) tests passed.*/\1/p;s#.*[^0-9]\([0-9][0-9]*\)/\([0-9][0-9]*\) tests passed.*#\2#p' test-out.txt | tail -1)"
+          if ! printf '%s' "$collected" | grep -Eq '^[0-9]+$'; then
+            echo "::error::could not read the collected test total from the suite summary"
+            grep -n "tests passed" test-out.txt || true
+            exit 1
+          fi
+          echo "COLLECTED_TESTS=$collected" >> "$GITHUB_ENV"
+          echo "suite reported $collected collected tests"
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
@@ -440,6 +466,21 @@ jobs:
       - name: zig build lint
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.14 review — THE SUITE-DERIVED HALF OF THE CONSERVATION, on the cell.
+      # `zig build lint` above already runs the unconditional check of the closure
+      # against the DECLARED total. This confronts that declared number with the
+      # total the suite itself reported in this same job, captured from the run that
+      # actually executed the tests. Two independently produced numbers, which is
+      # what the bilateral control has meant since it was written — and what was
+      # missing while `--expect-collected` sat behind a flag nobody passed.
+      #
+      # Same cell as `lint`, for the same stated reason: it answers a property of the
+      # SOURCE, not of the host. `COLLECTED_TESTS` is set by the test step above and
+      # its absence fails there, so an empty value cannot reach this line silently.
+      - name: dead-test conservation against the suite's own total
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=${{ env.COLLECTED_TESTS }}
 
       # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
       # FLAG. Every cell replays the canonical scenario and compares its own output
