@@ -331,3 +331,144 @@ test "cos: the range stays in [-1, 1] across the whole declared domain" {
         try testing.expect(@abs(cos(f64, x)) <= 1.0);
     }
 }
+
+// --- P1-2: the committed bit table, and an oracle that is not `@cos` ---------
+//
+// WHY THIS EXISTS. The test above compares against `@cos`, and its own comment
+// concedes what that can and cannot establish: it proves the function is STABLE,
+// it cannot prove the function is a COSINE. Two implementations of the same wrong
+// idea agree. M1.1.14's review named this: the milestone's first behavioural
+// change was replacing `@cos` at the `max_slope` conversion, and nothing pinned
+// the VALUE that replacement produces.
+//
+// THE ORACLE IS ARBITRARY-PRECISION AND EXTERNAL, and the recipe is here rather
+// than the tool, because this repository is Zig and `tools/` holds Zig — the same
+// arbitrage as the float-environment site list, and for the same reason: a reader
+// who can RE-DERIVE does not have to trust.
+//
+//   1. pi to 80 digits by an alternating arctan series in exact decimal
+//      arithmetic — no floating point anywhere on the value path.
+//   2. pi computed TWICE by different Machin-like formulas and required to agree
+//      to 70 digits: `16·atan(1/5) − 4·atan(1/239)` and
+//      `20·atan(1/7) + 8·atan(3/79)`. Two independent computations forced onto one
+//      number, the control this milestone credits above every other.
+//      Both give 3.14159265358979323846264338327950288419716939937510...
+//   3. Each argument taken as its EXACT binary value — the f32 row is the cosine
+//      of the f32-rounding of the literal, not of the literal — reduced modulo
+//      2·pi by an exact integer quotient, then the Taylor series for cosine.
+//   4. The result rounded to the nearest representable value by comparing BOTH
+//      neighbours explicitly. A single `float()` conversion would inherit that
+//      conversion's rounding, and a Decimal → f64 → f32 path can double-round.
+//
+// TWO COLUMNS, TWO CLAIMS, AND THEY ARE NOT THE SAME CLAIM. `oracle` is the
+// correctly-rounded true cosine and carries CORRECTNESS. `engine` is what this
+// implementation emits and carries REPRODUCIBILITY — the change detector that must
+// hold on all twelve CI cells. Presenting the second as evidence for the first is
+// the defect family this milestone spent two sessions on, so it is said plainly:
+// the `engine` column is self-generated and validates nothing about accuracy.
+//
+// THE BOUND IS ABSOLUTE AND NOT IN ULP, and that is a measurement rather than a
+// preference. At the f64 nearest pi/2 the true cosine is 6.12e-17 — near-total
+// cancellation — and the implementation's error there is 1.6e11 ULP of that value
+// while being 2.0e-21 in ABSOLUTE terms, the SMALLEST absolute error in the whole
+// table. A ULP bound would fail there, spectacularly, on the most accurate row.
+// Cosine is bounded by one, so an absolute bound is its natural accuracy
+// statement.
+const CosCase = struct {
+    x: f64,
+    oracle_f32: u32,
+    oracle_f64: u64,
+    engine_f64: u64,
+};
+
+/// Twelve arguments, each present for a reason stated beside it.
+///
+/// At **f32 the implementation is correctly rounded on all twelve** — measured,
+/// so `oracle_f32` doubles as the reproducibility column there and no separate
+/// engine column exists for it. At f64 nine of twelve agree exactly and three do
+/// not; those three are what make the correctness bound do real work rather than
+/// restate an equality (asserted below).
+const cos_cases = [_]CosCase{
+    .{ .x = 0.0, .oracle_f32 = 0x3F800000, .oracle_f64 = 0x3FF0000000000000, .engine_f64 = 0x3FF0000000000000 }, // `nf = 0`: the three reduction steps vanish
+    .{ .x = 0.785, .oracle_f32 = 0x3F351765, .oracle_f64 = 0x3FE6A2ECB934B59A, .engine_f64 = 0x3FE6A2ECB934B59A }, // THE ENGINE'S OWN VALUE — `CharacterDescriptor.max_slope`'s default
+    .{ .x = 0.5, .oracle_f32 = 0x3F60A940, .oracle_f64 = 0x3FEC1528065B7D50, .engine_f64 = 0x3FEC1528065B7D50 }, // quadrant 0, `kernelCos`, argument exact in both formats
+    .{ .x = 2.0, .oracle_f32 = 0xBED51133, .oracle_f64 = 0xBFDAA22657537205, .engine_f64 = 0xBFDAA22657537205 }, // quadrant 1, `-kernelSin`
+    .{ .x = 3.5, .oracle_f32 = 0xBF6FBBA0, .oracle_f64 = 0xBFEDF77403C11A5F, .engine_f64 = 0xBFEDF77403C11A5F }, // quadrant 2, `-kernelCos`
+    .{ .x = 5.0, .oracle_f32 = 0x3E913C2C, .oracle_f64 = 0x3FD22785706B4AD9, .engine_f64 = 0x3FD22785706B4ADA }, // quadrant 3, `kernelSin` — 0.17 eps off
+    .{ .x = -0.785, .oracle_f32 = 0x3F351765, .oracle_f64 = 0x3FE6A2ECB934B59A, .engine_f64 = 0x3FE6A2ECB934B59A }, // the evenness fold: identical to `+0.785`
+    .{ .x = 1.5707963267948966, .oracle_f32 = 0xB33BBD2E, .oracle_f64 = 0x3C91A62633145C07, .engine_f64 = 0x3C91A64C66245C07 }, // f64 nearest pi/2: near-total cancellation, 2.0e-21 absolute
+    .{ .x = 0.7853981633974483, .oracle_f32 = 0x3F3504F3, .oracle_f64 = 0x3FE6A09E667F3BCD, .engine_f64 = 0x3FE6A09E667F3BCD }, // f64 nearest pi/4: the kernel boundary
+    .{ .x = 1000.0, .oracle_f32 = 0x3F0FF813, .oracle_f64 = 0x3FE1FF026793F1BB, .engine_f64 = 0x3FE1FF026793F1BB }, // Cody-Waite over 636 quadrants
+    .{ .x = 100000.0, .oracle_f32 = 0xBF7FD61C, .oracle_f64 = 0xBFEFFAC3841B3DA7, .engine_f64 = 0xBFEFFAC3841B3DA7 }, // Cody-Waite over 63661 quadrants
+    .{ .x = 1647099.0, .oracle_f32 = 0x3F724189, .oracle_f64 = 0x3FEE4831257A62DA, .engine_f64 = 0x3FEE4831257A62D4 }, // the largest integer under `max_argument` — 3.14 eps, the worst row
+};
+
+/// Absolute error budget, in units of `floatEps(f64)`. Measured worst case 3.14,
+/// at the argument nearest `max_argument`, where Cody-Waite has the least left to
+/// work with. Four, so the bound is not a re-statement of the measurement — and
+/// not forty, which would admit a real regression.
+const cos_abs_budget: f64 = 4.0;
+
+test "cos: the committed bit table — reproducibility, on every cell" {
+    // THE DETERMINISM CLAIM, and the one whose failure on ONE of twelve CI cells is
+    // the finding this milestone exists to produce. Bit equality, no tolerance: a
+    // deterministic function either emits the same bits everywhere or it does not.
+    for (cos_cases) |c| {
+        const got32: u32 = @bitCast(cos(f32, @floatCast(c.x)));
+        errdefer std.debug.print("cos: f32 bits moved at x = {d}\n", .{c.x});
+        try testing.expectEqual(c.oracle_f32, got32);
+
+        const got64: u64 = @bitCast(cos(f64, c.x));
+        errdefer std.debug.print("cos: f64 bits moved at x = {d}\n", .{c.x});
+        try testing.expectEqual(c.engine_f64, got64);
+    }
+}
+
+test "cos: it really is a cosine — against an oracle that never calls @cos" {
+    // THE CORRECTNESS CLAIM. The reference values come from exact decimal
+    // arithmetic outside this repository (recipe above); nothing on their path
+    // touched `@cos`, libm or Zig.
+    const eps = std.math.floatEps(f64);
+    for (cos_cases) |c| {
+        const want: f64 = @bitCast(c.oracle_f64);
+        const got = cos(f64, c.x);
+        const err = @abs(got - want);
+        errdefer std.debug.print(
+            "cos: at x = {d} the error is {d} eps, over the {d} eps budget\n",
+            .{ c.x, err / eps, cos_abs_budget },
+        );
+        try testing.expect(err <= cos_abs_budget * eps);
+    }
+
+    // At f32 the claim is STRONGER and is asserted as such: correctly rounded, all
+    // twelve. That is why the table needs no separate f32 engine column — and if
+    // this ever fails while the f64 rows hold, the narrowing has moved, not the
+    // kernel.
+    for (cos_cases) |c| {
+        const want32: f32 = @bitCast(c.oracle_f32);
+        try testing.expectEqual(want32, cos(f32, @floatCast(c.x)));
+    }
+}
+
+test "cos: the correctness bound is not a restatement of the bit table" {
+    // ANTI-VACUITY, and it is due: if `engine` equalled `oracle` on every row, the
+    // absolute bound above would be satisfied by construction and would measure
+    // nothing. It does not — three f64 rows differ, and the worst is 3.14 eps,
+    // which is 78% of the budget. So the bound is load-bearing on this table.
+    //
+    // Written as a property of the TABLE rather than as a count, so adding a row
+    // cannot silently make it vacuous: what is required is that some row exercise
+    // the bound, and that the worst row use a real fraction of it.
+    const eps = std.math.floatEps(f64);
+    var differing: usize = 0;
+    var worst: f64 = 0;
+    for (cos_cases) |c| {
+        if (c.oracle_f64 != c.engine_f64) differing += 1;
+        const want: f64 = @bitCast(c.oracle_f64);
+        const err = @abs(cos(f64, c.x) - want) / eps;
+        if (err > worst) worst = err;
+    }
+    try testing.expect(differing >= 1);
+    try testing.expect(worst > 1.0);
+    try testing.expect(worst <= cos_abs_budget);
+}
