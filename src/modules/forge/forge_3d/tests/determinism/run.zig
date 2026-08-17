@@ -92,8 +92,24 @@ pub fn runCanonical(gpa: std.mem.Allocator, frames: u32) !Artifacts {
 /// A MEASUREMENT, not a gate (C1.1 level 2 point 2): its value is recorded and
 /// its REGRESSION is the signal — a sharp drop between two milestones denounces a
 /// threshold that has become fragile. Nothing here asserts a bound on it.
+///
+/// **THE REFERENCE LENGTH IS REQUIRED EXACTLY, and that is P2-6's correction.** The
+/// loop used to carry `if (off + stride > reference.len) return null;` — so a
+/// reference that was EMPTY, TRUNCATED, or of the wrong precision returned `null`,
+/// which the entry point prints as `divergence frame : none within K=60`. Absent
+/// data read as a perfect match: the milestone's own defect family, in the function
+/// that produces its level-2-point-2 number. The two outcomes are now separated —
+/// `null` means measured and no divergence, an error means the input was not a
+/// window and no measurement was taken.
+///
+/// `stride` is the caller's, from `Artifacts.pose_stride`, so the check also catches
+/// a reference of the OTHER precision: the f64 window is exactly twice the f32 one
+/// and neither length divides the other's.
 pub fn divergenceFrame(gpa: std.mem.Allocator, reference: []const u8, stride: usize) !?u32 {
     forge.assertFloatEnvironment();
+
+    if (stride == 0) return error.ReferenceWindowEmptyStride;
+    if (reference.len != stride * window_frames) return error.ReferenceWindowLengthMismatch;
 
     var s = try Scenario.init(gpa);
     defer s.deinit(gpa);
@@ -101,8 +117,12 @@ pub fn divergenceFrame(gpa: std.mem.Allocator, reference: []const u8, stride: us
     var f: u32 = 0;
     while (f < window_frames) : (f += 1) {
         try s.step(gpa, f);
+        // No bounds test here, and it is not an omission: the entry check makes
+        // `off + stride <= reference.len` true for every `f < window_frames` by
+        // arithmetic. Keeping a runtime guard that cannot fire is what let the
+        // silent `null` live in the first place — a guard whose only reachable
+        // branch is the one nobody wanted.
         const off = @as(usize, f) * stride;
-        if (off + stride > reference.len) return null;
         if (trace.deviationExceeded(&s, reference[off..][0..stride])) return f;
     }
     return null;
@@ -199,4 +219,54 @@ test "the deviation metric fires on a run against a shifted reference" {
         std.mem.writeInt(if (Real == f32) u32 else u64, shifted[off..][0..w], @bitCast(moved), .little);
     }
     try testing.expectEqual(@as(?u32, 0), try divergenceFrame(gpa, shifted, a.pose_stride));
+}
+
+test "divergenceFrame refuses a window it cannot measure, instead of reporting none" {
+    // P2-6. The three ways a caller can hand over something that is not a window,
+    // each of which used to return `null` — and `null` is printed as "no divergence
+    // within K=60", so absent data read as a perfect match.
+    //
+    // A POSITIVE WITNESS FIRST, because "it errors on bad input" is satisfied by a
+    // function that errors on everything.
+    const gpa = testing.allocator;
+    var a = try runCanonical(gpa, window_frames);
+    defer a.deinit(gpa);
+    try testing.expect(a.pose_stride > 0);
+    try testing.expectEqual(a.pose_stride * window_frames, a.poses.items.len);
+    // A self-comparison: the same run against its own poses must measure, and
+    // measure no divergence. This is the case the guard must NOT break.
+    try testing.expectEqual(@as(?u32, null), try divergenceFrame(gpa, a.poses.items, a.pose_stride));
+
+    // (1) EMPTY. The commonest shape of the defect: a witness file that failed to
+    // load, or one that was never written.
+    try testing.expectError(
+        error.ReferenceWindowLengthMismatch,
+        divergenceFrame(gpa, &.{}, a.pose_stride),
+    );
+
+    // (2) TRUNCATED. One frame short — the shape a run that stopped early leaves.
+    try testing.expectError(
+        error.ReferenceWindowLengthMismatch,
+        divergenceFrame(gpa, a.poses.items[0 .. a.poses.items.len - a.pose_stride], a.pose_stride),
+    );
+
+    // (3) THE WRONG PRECISION. An f64 window is exactly twice an f32 one, so
+    // reading one as the other is a length error and not a subtle mis-parse. Both
+    // directions are constructed from the real stride rather than a literal.
+    try testing.expectError(
+        error.ReferenceWindowLengthMismatch,
+        divergenceFrame(gpa, a.poses.items, a.pose_stride * 2),
+    );
+    try testing.expectError(
+        error.ReferenceWindowLengthMismatch,
+        divergenceFrame(gpa, a.poses.items, a.pose_stride / 2),
+    );
+
+    // (4) A ZERO STRIDE, which is what `Artifacts.pose_stride` holds before the
+    // first frame has been dumped. Named apart because `0 * window_frames == 0`
+    // would let an EMPTY reference through the length test as a match.
+    try testing.expectError(
+        error.ReferenceWindowEmptyStride,
+        divergenceFrame(gpa, &.{}, 0),
+    );
 }

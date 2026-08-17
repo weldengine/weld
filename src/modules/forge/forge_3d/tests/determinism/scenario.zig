@@ -777,3 +777,99 @@ test "scenario: the slope test DECIDES the character's trajectory, both ways" {
     try testing.expect(actual.min_x > -68.5);
     try testing.expect(actual.max_x < -60.0);
 }
+
+test "scenario: the retained pair set really SHRINKS — the fourth trace is an oracle" {
+    // P1-5, THE NON-VACUITY OF THE FOURTH DISCRETE TRACE. The retained pair set is
+    // one of the four invariants every CI cell compares, and `trace.zig` states the
+    // hazard on itself: over a set that can only GROW, a trace agrees with itself by
+    // accumulation and proves nothing. The harness was pruned at M1.1.14 precisely
+    // so that stops being true — but the pruning being IMPLEMENTED and the canonical
+    // scenario EXERCISING it are two different claims, and `solver_test.zig`'s
+    // generic departure test establishes only the first. This establishes the second.
+    //
+    // ASSERTED ON THE SET, NEVER ON ITS CARDINALITY, and that distinction is
+    // measured rather than stylistic: the removal at frame 196 is followed by an
+    // ADDITION as the same sphere reaches the ground plane, so the size returns to
+    // what it was. A size-based probe sees the dip here only because the two events
+    // land on different ticks — had they coincided it would have reported nothing at
+    // all while the removal happened. What is required is that a key present once be
+    // absent later.
+    //
+    // WHAT LEAVES, and why it is structural rather than incidental: the pair is the
+    // static `MeshShape` and the frictionless sphere crossing it. The sphere carries
+    // a fixed 3 m/s, leaves the mesh at x = 65 around frame 180, and its fat AABB
+    // separates from the mesh's around frame 196 — permanently, there being nothing
+    // to bring it back. The event is a consequence of element 5's design, so it
+    // cannot quietly stop happening while that element still does what it is for.
+    const gpa = testing.allocator;
+    var s = try Scenario.init(gpa);
+    defer s.deinit(gpa);
+
+    var seen: std.ArrayListUnmanaged(u64) = .empty;
+    defer seen.deinit(gpa);
+    var removed: std.ArrayListUnmanaged(u64) = .empty;
+    defer removed.deinit(gpa);
+
+    var max_live: usize = 0;
+    var f: u32 = 0;
+    while (f < 400) : (f += 1) {
+        try s.step(gpa, f);
+        const live = s.world.active.items;
+        if (live.len > max_live) max_live = live.len;
+
+        // Anything seen before and not live now has been pruned. Recorded once.
+        for (seen.items) |k| {
+            var still = false;
+            for (live) |k2| {
+                if (k == k2) {
+                    still = true;
+                    break;
+                }
+            }
+            if (still) continue;
+            var already = false;
+            for (removed.items) |k2| {
+                if (k == k2) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) try removed.append(gpa, k);
+        }
+        for (live) |k| {
+            var known = false;
+            for (seen.items) |k2| {
+                if (k == k2) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) try seen.append(gpa, k);
+        }
+    }
+
+    // POSITIVE WITNESS FIRST. "A key disappeared" is satisfied by a set that was
+    // empty throughout, which is the vacuity this whole test exists against.
+    try testing.expect(max_live >= 2);
+    try testing.expect(seen.items.len >= 2);
+
+    // THE REMOVAL. At least one pair the harness held was pruned.
+    try testing.expect(removed.items.len >= 1);
+
+    // AND IT IS THE PAIR THE ANALYSIS NAMES, not merely some pair. Without this the
+    // test would pass on a removal caused by anything at all — a body recycled, a
+    // key mis-sorted — and would stop being evidence about pruning. The key is
+    // `min << 32 | max` over `BodyId`s, built here from the handles rather than
+    // hard-coded, since a `BodyId` is generational and not a slot number.
+    const lo = @min(s.mesh_body, s.mesh_sphere);
+    const hi = @max(s.mesh_body, s.mesh_sphere);
+    const want = (@as(u64, lo) << 32) | hi;
+    var found = false;
+    for (removed.items) |k| {
+        if (k == want) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
