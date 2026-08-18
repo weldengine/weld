@@ -97,7 +97,8 @@ pub fn dumpState(s: *const Scenario, gpa: std.mem.Allocator, out: *std.ArrayList
     // detail. `mobile` holds rigid bodies; a virtual character owns no simulated
     // body, so it entered NO artifact — the controller ran for 1000 frames, swept,
     // depenetrated, classified its ground, and every bit of that was discarded.
-    // The scenario header listed it as element 7 of 7 the whole time.
+    // The scenario header listed it as an element the whole time — numbered 7 of 7
+    // then, 9 of 9 now that the sleeper and the split terrain entry exist.
     //
     // ITS OWN STATE, never its presence body's. The presence is a broadphase
     // artifact whose pose is the capsule's CENTRE and whose velocities are always
@@ -317,7 +318,7 @@ pub fn deviationExceeded(s: *const Scenario, reference: []const u8) bool {
 /// Extracted so the SHAPE OF THE THRESHOLD is testable in isolation, and that is
 /// not tidiness. C1.1 says `1e-4 × body scale`, so the comparison is PER BODY
 /// against that body's own `r`. An absolute threshold would pass on the
-/// canonical scenario — its twelve mobile bodies are all of comparable size —
+/// canonical scenario — its THIRTEEN mobile bodies are all of comparable size —
 /// and would break silently the day a body of another scale entered the scene.
 /// That is the "assertion valid only through a tacit property of its fixture"
 /// class the brief names, and it becomes undetectable once a witness is

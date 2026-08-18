@@ -204,10 +204,20 @@ pub const Scenario = struct {
             try self.mobile.append(gpa, id.*);
         }
 
-        // --- (3) two groups, apart at t = 0, colliding partway ---------------
-        // Closing speed 4 m/s over a 12 m gap: contact around frame 180, well
-        // inside the 1000-frame chain and well after the stack has settled, so
-        // the island partition changes in a tick where nothing else does.
+        // --- (3) two groups, apart at t = 0, colliding inside the window ------
+        //
+        // TUNED, AND THE NUMBERS HERE ARE THE CURRENT ONES. Centres at 35 and 38, so
+        // a 2 m gap between surfaces; ±4 m/s, hence 8 m/s of closing speed;
+        // frictionless and undamped so the ground does not bleed it away. MEASURED:
+        // the two groups are in separate islands from frame 0, share one island at
+        // frame 15, and are separate again at frame 21 — all three inside the
+        // 60-frame window the witnesses cover.
+        //
+        // The comment this replaces described the ORIGINAL scene — 4 m/s of closing
+        // speed over a 12 m gap, contact around frame 180 — and survived the retune
+        // that moved every one of those figures. A stale tuning comment is a false
+        // live contract, not a detail: it is what a reader consults to know whether
+        // the element still does what it is for.
         for (&self.group_a, 0..) |*id, i| {
             var d = api.BodyDescriptor{
                 .entity = .{ .index = @intCast(10 + i), .generation = 0 },
@@ -1046,34 +1056,38 @@ test "the two groups are separate, then one island, then separate again" {
     try testing.expect(saw_cross_pair);
 }
 
-test "each sensor set reaches the chain, discriminated at its own frame" {
-    // P1-1, SECOND ROUND, and the first correction had the defect it was written
-    // against. The test was GATED ON `current` being non-empty, so it could not see
-    // what it protected: at entry `current` masks a missing `entered`, and the frame
-    // where only `exited` is populated is never observed at all. Removing BOTH deltas
-    // from `dumpState` left it green.
+test "each sensor set reaches the CHAIN DUMP, at a frame where it is non-empty" {
+    // P1, THIRD FORMULATION OF ONE QUESTION ON ONE ELEMENT. First the sensor reached
+    // no artifact at all. Then the test was gated on `current`, so it could not see a
+    // missing delta. Now the previous fix tested `dumpSensorSets` AGAINST ITSELF: it
+    // compared two direct calls, `full` was produced in the loop and entered no
+    // comparison, and the one integration check ran after the 60 frames — where all
+    // three sets are empty, so it compared emptiness. Making `dumpState` emit only
+    // `current` left the whole Forge suite green.
     //
-    // «A counter-factual has a correct INSTANT» is the lesson I had just written for
-    // the lockstep evaluated at the last frame, and the fix applied it to `current`
-    // and to neither of the other two. Three sets, therefore THREE independent
-    // discriminations, each evaluated at a frame where THAT set is non-empty.
+    // What that proved: the function can serialise three sets. What has to be proved:
+    // the three arrive in the COMPARED artifact. So the assertion is on the SUFFIX of
+    // what `dumpState` produces, at a frame where the set in question is non-empty.
     //
-    // The suppression is written as an EMPTY SET and never as an omission — see
-    // `dumpSensorSets`. Omitting would drop the length prefix too and change the
-    // bytes even at a frame where the set is legitimately empty, which would make
-    // each of these three green for a reason that has nothing to do with its frame.
+    // THE REFERENCE USES A LITERAL MASK AND NOT `all_sensor_sets`, which is the trap
+    // this correction had to avoid: with the reference reading the same constant the
+    // production reads, a counter-factual on production moves BOTH sides and the test
+    // fires for the wrong reason. The literal keeps the two independent.
     const gpa = testing.allocator;
     var s = try Scenario.init(gpa);
     defer s.deinit(gpa);
 
     const names = [_][]const u8{ "current", "entered", "exited" };
     var frames_seen = [_]u32{ 0, 0, 0 };
-    var discriminated = [_]bool{ false, false, false };
+    var in_chain = [_]bool{ false, false, false };
+    var contributes = [_]bool{ false, false, false };
 
     var full: std.ArrayListUnmanaged(u8) = .empty;
     defer full.deinit(gpa);
-    var suppressed: std.ArrayListUnmanaged(u8) = .empty;
-    defer suppressed.deinit(gpa);
+    var record: std.ArrayListUnmanaged(u8) = .empty;
+    defer record.deinit(gpa);
+    var without: std.ArrayListUnmanaged(u8) = .empty;
+    defer without.deinit(gpa);
 
     var f: u32 = 0;
     while (f < 60) : (f += 1) {
@@ -1086,36 +1100,38 @@ test "each sensor set reaches the chain, discriminated at its own frame" {
         for (lens, 0..) |n, k| {
             if (n == 0) continue;
             frames_seen[k] += 1;
-            var mask = trace_mod.all_sensor_sets;
-            mask[k] = false;
+
             full.clearRetainingCapacity();
-            suppressed.clearRetainingCapacity();
+            record.clearRetainingCapacity();
+            without.clearRetainingCapacity();
+
+            // The REAL path.
             try trace_mod.dumpState(&s, gpa, &full);
-            // Same frame, same world, the ONE set suppressed. Any difference is that
-            // set's contribution and nothing else's.
-            try trace_mod.dumpSensorSets(&s, gpa, &suppressed, mask);
-            var reference: std.ArrayListUnmanaged(u8) = .empty;
-            defer reference.deinit(gpa);
-            try trace_mod.dumpSensorSets(&s, gpa, &reference, trace_mod.all_sensor_sets);
-            if (!std.mem.eql(u8, reference.items, suppressed.items)) discriminated[k] = true;
+            // The complete record, from a LITERAL mask.
+            try trace_mod.dumpSensorSets(&s, gpa, &record, .{ true, true, true });
+            // The same record with this one set emptied — which is what makes the
+            // suffix test below specific to set `k` rather than to the record's shape.
+            var mask: trace_mod.SensorSetMask = .{ true, true, true };
+            mask[k] = false;
+            try trace_mod.dumpSensorSets(&s, gpa, &without, mask);
+
+            // (a) THE CHAIN DUMP CARRIES THE COMPLETE RECORD at this frame.
+            if (std.mem.endsWith(u8, full.items, record.items)) in_chain[k] = true;
+            // (b) AND THIS SET IS PART OF WHAT MAKES IT COMPLETE — otherwise (a) would
+            // hold just as well for a record that never mentions set `k`.
+            if (!std.mem.eql(u8, record.items, without.items)) contributes[k] = true;
         }
     }
 
-    // EACH set must have been non-empty at some frame inside the window — otherwise
-    // its discrimination below is vacuous — AND its suppression must have moved the
-    // bytes at such a frame.
-    for (names, frames_seen, discriminated) |n, seen, disc| {
-        errdefer std.debug.print("sensor set `{s}`: non-empty on {d} frame(s), discriminated={}\n", .{ n, seen, disc });
+    for (names, frames_seen, in_chain, contributes) |n, seen, chained, contrib| {
+        errdefer std.debug.print(
+            "sensor set `{s}`: non-empty on {d} frame(s), in dumpState={}, contributes={}\n",
+            .{ n, seen, chained, contrib },
+        );
+        // Non-vacuity first: a set that is never non-empty inside the window makes
+        // both clauses below meaningless.
         try testing.expect(seen >= 1);
-        try testing.expect(disc);
+        try testing.expect(chained);
+        try testing.expect(contrib);
     }
-
-    // And the whole record is IN `dumpState`, not merely producible beside it: the
-    // full dump must contain the sensor bytes the reference produced.
-    full.clearRetainingCapacity();
-    try trace_mod.dumpState(&s, gpa, &full);
-    var tail: std.ArrayListUnmanaged(u8) = .empty;
-    defer tail.deinit(gpa);
-    try trace_mod.dumpSensorSets(&s, gpa, &tail, trace_mod.all_sensor_sets);
-    try testing.expect(std.mem.endsWith(u8, full.items, tail.items));
 }
