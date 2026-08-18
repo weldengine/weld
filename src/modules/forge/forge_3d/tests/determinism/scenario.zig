@@ -41,15 +41,15 @@
 //!    the review, because a trigger resolves no impulse: all three sets can diverge
 //!    without displacing a body, so every artifact stayed identical while the sensor
 //!    pass disagreed. The visitor now crosses INSIDE the 60-frame window.
-//! 6 bis. **A lone box that settles at once and sleeps early.** Sleep state and the
+//! 7. **A lone box that settles at once and sleeps early.** Sleep state and the
 //!    island partition were both CONSTANT over the compared window before it.
-//! 7. **A riser and three ramps, one walkable and two not, forming a closed bowl.**
+//! 8. **A riser and three ramps, one walkable and two not, forming a closed bowl.**
 //!    They exist so that `cos_max_slope` DECIDES something: their surface cosines
 //!    bracket `cos(0.785) = 0.70738` at `0.894` and `0.6247`, and the bracket is
 //!    proven to bite in BOTH directions by a counter-factual at the bottom of this
 //!    file — metres of trajectory, not centimetres. Mesh ramps with literal
 //!    vertices, so the scenario contains no trigonometry of its own.
-//! 8. **A kinematic character on a scripted path across that terrain.** The
+//! 9. **A kinematic character on a scripted path across that terrain.** The
 //!    controller — its slope test, its step-up arm and its slide — and the site
 //!    where a wrong `max_slope` conversion surfaces first, which is the whole
 //!    reason the deterministic cosine exists.
@@ -349,7 +349,7 @@ pub const Scenario = struct {
         w.bm.setLinearVelocity(self.trigger_visitor, vr(12, 0, 0));
         self.world.sensors_on = true;
 
-        // --- (6 bis) a lone box that settles at once, x = 15 -------------------
+        // --- (7) a lone box that settles at once, x = 15 -----------------------
         //
         // ITS ONLY JOB IS TO SLEEP INSIDE THE COMPARED WINDOW. Sleep state and the
         // island partition were both CONSTANT over the 60 frames the witnesses
@@ -372,7 +372,7 @@ pub const Scenario = struct {
         self.lone_sleeper = try w.addBody(gpa, lone);
         try self.mobile.append(gpa, self.lone_sleeper);
 
-        // --- (7) the character's terrain, x = −70 … −59 ----------------------
+        // --- (8) the character's terrain, x = −70 … −59 ----------------------
         //
         // WHY NEGATIVE X, and it is a correction rather than a preference. The
         // character sat at x = 100 and the header promised that elements occupy
@@ -519,7 +519,7 @@ pub const Scenario = struct {
         back.restitution = 0;
         self.back_slope = try w.addBody(gpa, back);
 
-        // --- (8) the kinematic character, x = −66 ----------------------------
+        // --- (9) the kinematic character, x = −66 ----------------------------
         var cd = api.CharacterDescriptor{ .entity = .{ .index = 60, .generation = 0 } };
         cd.position = av3(-63.5, 0, 0);
         self.character = try self.chars.createCharacter(gpa, &w.store, &w.bm, cd);
@@ -659,7 +659,7 @@ test "scenario: steps without error, and the character resolves its ground" {
     try testing.expectEqual(api.GroundState.grounded, s.chars.get(s.character).?.reported_ground);
 }
 
-test "scenario: every one of the eight elements actually fires" {
+test "scenario: every one of the nine elements actually fires" {
     // THE SCOPE MEASUREMENT, and it is due BEFORE any witness is committed. A
     // witness taken over a scene where the groups never meet, the sensor never
     // triggers or the mesh never produces a second constraint would be perfectly
@@ -721,7 +721,7 @@ test "scenario: every one of the eight elements actually fires" {
         entered += s.world.sensors.entered.items.len;
         exited += s.world.sensors.exited.items.len;
 
-        // (7) + (8) the terrain, accumulated over the RUN and not read at its end:
+        // (8) + (9) the terrain, accumulated over the RUN and not read at its end:
         // the claim is that the character climbed, which is a property of the
         // trajectory. A final-value assertion would depend on where this loop
         // happens to stop — measured, it stops on the descent leg, so the first
@@ -754,7 +754,7 @@ test "scenario: every one of the eight elements actually fires" {
     const v = s.world.bm.linearVelocity(s.slider).?.toArray()[0];
     try testing.expect(v > 4.9);
 
-    // (7) + (8) THE TERRAIN. **EACH CLAUSE ASSERTS THAT THE CHARACTER REACHED THE
+    // (8) + (9) THE TERRAIN. **EACH CLAUSE ASSERTS THAT THE CHARACTER REACHED THE
     // OBSTACLE, not that the obstacle exists**, and that distinction is the whole
     // point: the review's finding was "no step and no slope nearby", and a step and a
     // slope the character never touches satisfy those words and nothing else.
@@ -959,32 +959,72 @@ test "scenario: the retained pair set really SHRINKS — the fourth trace is an 
     try testing.expect(found);
 }
 
-test "the two groups actually COLLIDE inside the window, and part again" {
-    // P1-2. `max_islands > min_islands` is true and VAGUE, and its vagueness is what
-    // let this through: measured on the committed bytes, the two groups NEVER met
-    // inside the 60 frames — their islands stayed separate, the gap closed to 2.272 m
-    // and reopened — and the single island variation came from the sleeper vanishing.
-    // The old criterion passed without the announced collision ever happening. It is
-    // KEPT, in the coverage test beside this one, and this is added rather than
-    // substituted: a weak-but-true criterion is not wrong, it is insufficient.
+test "the two groups are separate, then one island, then separate again" {
+    // P1-2, SECOND ROUND. The first version put two TRUE witnesses side by side with
+    // nothing joining them: `saw_cross_pair` on one hand, and `fell`/`rose` on the
+    // GLOBAL island count on the other. The sleeper already supplies a fall, any
+    // transition anywhere can supply a rise, and NOTHING tied either to
+    // `group_a`/`group_b` — so the test passed even if the groups stayed merged. A
+    // conjunction of facts is not the fact sought, which is the same class as the
+    // fourth trace agreeing with itself.
     //
-    // TWO CLAUSES, because a merge-only scene passes a weaker test. The pair must
-    // exist — a constraint whose two endpoints are one from each group — and the
-    // island count must both FALL and RISE, which is what a bounce gives and a
-    // sticky collision does not. Hence restitution 0.5 and friction 0 on the eight
-    // bodies: with ground friction bleeding the closing speed, they never arrived.
+    // The property the scenario ANNOUNCES is a sequence on those two groups:
+    // SEPARATE, then ONE ISLAND, then SEPARATE again. The global count is at best a
+    // consequence of it. So the membership is followed directly — which island holds
+    // `group_a[0]`, which holds `group_b[0]` — and the three phases are required in
+    // order.
+    //
+    // This REPLACES the count-based clauses rather than sitting beside them:
+    // juxtaposing a targeted assertion and a vague one strengthens nothing when
+    // nothing conjoins them, and that juxtaposition is what produced two parallel
+    // witnesses in the first place. `max_islands > min_islands` survives in the
+    // coverage test, where it answers a different question — that the partition moves
+    // at all.
     const gpa = testing.allocator;
     var s = try Scenario.init(gpa);
     defer s.deinit(gpa);
 
+    // MEASURED at the shipped tuning: apart from frame 0, merged at frame 15, apart
+    // again at frame 21 — six frames of contact, all three inside the window.
+    //
+    // The phase machine: 0 = waiting for them apart, 1 = seen apart, 2 = seen merged,
+    // 3 = seen apart again. It only ever advances, so a single frame in each state in
+    // the right order is what satisfies it — and a scene that merges and stays merged
+    // stops at 2.
+    var phase: u8 = 0;
     var saw_cross_pair = false;
-    var fell = false;
-    var rose = false;
-    var prev_islands: ?usize = null;
 
     var f: u32 = 0;
     while (f < 60) : (f += 1) {
         try s.step(gpa, f);
+
+        // Which island each group sits in, by MEMBERSHIP and not by count. Null when
+        // the body is in no island — asleep, or not awake yet — and that case
+        // advances nothing rather than being read as "separate".
+        var isl_a: ?usize = null;
+        var isl_b: ?usize = null;
+        for (s.world.islands.islandsSlice(), 0..) |isl, idx| {
+            for (s.world.islands.islandMembers(isl)) |m| {
+                if (m == s.group_a[0]) isl_a = idx;
+                if (m == s.group_b[0]) isl_b = idx;
+            }
+        }
+        if (isl_a == null or isl_b == null) continue;
+
+        const together = isl_a.? == isl_b.?;
+        switch (phase) {
+            0 => if (!together) {
+                phase = 1;
+            },
+            1 => if (together) {
+                phase = 2;
+            },
+            2 => if (!together) {
+                phase = 3;
+            },
+            else => {},
+        }
+
         for (s.world.constraints.items) |c| {
             const hi: BodyId = @intCast(c.pair_key >> 32);
             const lo: BodyId = @intCast(c.pair_key & 0xFFFF_FFFF);
@@ -992,78 +1032,90 @@ test "the two groups actually COLLIDE inside the window, and part again" {
             const b_side = hi == s.group_b[0] or hi == s.group_b[1] or lo == s.group_b[0] or lo == s.group_b[1];
             if (a_side and b_side) saw_cross_pair = true;
         }
-        const n = s.world.islands.islandsSlice().len;
-        if (prev_islands) |p| {
-            if (n < p) fell = true;
-            if (n > p) rose = true;
-        }
-        prev_islands = n;
     }
 
-    // THE COLLISION ITSELF, named on the bodies rather than inferred from a count.
+    // THE FULL SEQUENCE ON THESE TWO GROUPS. Phase 2 alone would be a merge-only
+    // scene; phase 3 is what proves the partition splits as well as joins, and both
+    // are read off the membership of these bodies rather than off a global count that
+    // the sleeper also moves.
+    errdefer std.debug.print("group island phase reached: {d} of 3\n", .{phase});
+    try testing.expectEqual(@as(u8, 3), phase);
+
+    // And the merge was a real CONTACT between the two groups, named on the bodies:
+    // a shared island could in principle come from a chain through a third body.
     try testing.expect(saw_cross_pair);
-    // BOTH DIRECTIONS. A merge alone would satisfy `max > min` and say nothing about
-    // a partition that can also split.
-    try testing.expect(fell);
-    try testing.expect(rose);
 }
 
-test "the sensor state reaches the chain — a trigger resolves no impulse" {
-    // P1-1. The sensor was an element of the scenario whose output reached NO
-    // artifact, and that is a LEVEL-1 hole rather than a level-2 one: a trigger
-    // resolves no impulse, so `current`, `entered` and `exited` can each diverge
-    // between two machines without displacing a single body, leaving the chain, the
-    // four discrete traces and the reference window all identical.
+test "each sensor set reaches the chain, discriminated at its own frame" {
+    // P1-1, SECOND ROUND, and the first correction had the defect it was written
+    // against. The test was GATED ON `current` being non-empty, so it could not see
+    // what it protected: at entry `current` masks a missing `entered`, and the frame
+    // where only `exited` is populated is never observed at all. Removing BOTH deltas
+    // from `dumpState` left it green.
     //
-    // Measured before the fix: over the 60 compared frames the visitor never reached
-    // the trigger at all — zero deltas, `current` never non-empty — so the element
-    // was absent from the window as well as from the artifacts. Two defects in one
-    // element. The visitor now starts at x = 76 with 12 m/s and both deltas land
-    // inside the window.
+    // «A counter-factual has a correct INSTANT» is the lesson I had just written for
+    // the lockstep evaluated at the last frame, and the fix applied it to `current`
+    // and to neither of the other two. Three sets, therefore THREE independent
+    // discriminations, each evaluated at a frame where THAT set is non-empty.
     //
-    // ASSERTED AS A DISCRIMINATION, never as a length: a length assertion passes on
-    // four appended zeros. Two scenarios are stepped in LOCKSTEP, identical but for
-    // `sensors_on`, and the comparison is taken at the first frame where membership
-    // is non-empty — not at the last frame, where the visitor has already left and
-    // the two states legitimately coincide. That subtlety cost this test one rewrite.
+    // The suppression is written as an EMPTY SET and never as an omission — see
+    // `dumpSensorSets`. Omitting would drop the length prefix too and change the
+    // bytes even at a frame where the set is legitimately empty, which would make
+    // each of these three green for a reason that has nothing to do with its frame.
     const gpa = testing.allocator;
-    var on = try Scenario.init(gpa);
-    defer on.deinit(gpa);
-    var off = try Scenario.init(gpa);
-    defer off.deinit(gpa);
-    off.world.sensors_on = false;
+    var s = try Scenario.init(gpa);
+    defer s.deinit(gpa);
 
-    var entered_total: usize = 0;
-    var exited_total: usize = 0;
-    var differed_at_membership = false;
-    var membership_seen = false;
+    const names = [_][]const u8{ "current", "entered", "exited" };
+    var frames_seen = [_]u32{ 0, 0, 0 };
+    var discriminated = [_]bool{ false, false, false };
 
-    var dump_on: std.ArrayListUnmanaged(u8) = .empty;
-    defer dump_on.deinit(gpa);
-    var dump_off: std.ArrayListUnmanaged(u8) = .empty;
-    defer dump_off.deinit(gpa);
+    var full: std.ArrayListUnmanaged(u8) = .empty;
+    defer full.deinit(gpa);
+    var suppressed: std.ArrayListUnmanaged(u8) = .empty;
+    defer suppressed.deinit(gpa);
 
     var f: u32 = 0;
     while (f < 60) : (f += 1) {
-        try on.step(gpa, f);
-        try off.step(gpa, f);
-        entered_total += on.world.sensors.entered.items.len;
-        exited_total += on.world.sensors.exited.items.len;
-        if (on.world.sensors.current.items.len == 0) continue;
-        membership_seen = true;
-        dump_on.clearRetainingCapacity();
-        dump_off.clearRetainingCapacity();
-        try trace_mod.dumpState(&on, gpa, &dump_on);
-        try trace_mod.dumpState(&off, gpa, &dump_off);
-        if (!std.mem.eql(u8, dump_on.items, dump_off.items)) differed_at_membership = true;
+        try s.step(gpa, f);
+        const lens = [_]usize{
+            s.world.sensors.current.items.len,
+            s.world.sensors.entered.items.len,
+            s.world.sensors.exited.items.len,
+        };
+        for (lens, 0..) |n, k| {
+            if (n == 0) continue;
+            frames_seen[k] += 1;
+            var mask = trace_mod.all_sensor_sets;
+            mask[k] = false;
+            full.clearRetainingCapacity();
+            suppressed.clearRetainingCapacity();
+            try trace_mod.dumpState(&s, gpa, &full);
+            // Same frame, same world, the ONE set suppressed. Any difference is that
+            // set's contribution and nothing else's.
+            try trace_mod.dumpSensorSets(&s, gpa, &suppressed, mask);
+            var reference: std.ArrayListUnmanaged(u8) = .empty;
+            defer reference.deinit(gpa);
+            try trace_mod.dumpSensorSets(&s, gpa, &reference, trace_mod.all_sensor_sets);
+            if (!std.mem.eql(u8, reference.items, suppressed.items)) discriminated[k] = true;
+        }
     }
 
-    // THE ELEMENT FIRES, inside the window: exactly one crossing in and one out.
-    try testing.expectEqual(@as(usize, 1), entered_total);
-    try testing.expectEqual(@as(usize, 1), exited_total);
-    try testing.expect(membership_seen);
+    // EACH set must have been non-empty at some frame inside the window — otherwise
+    // its discrimination below is vacuous — AND its suppression must have moved the
+    // bytes at such a frame.
+    for (names, frames_seen, discriminated) |n, seen, disc| {
+        errdefer std.debug.print("sensor set `{s}`: non-empty on {d} frame(s), discriminated={}\n", .{ n, seen, disc });
+        try testing.expect(seen >= 1);
+        try testing.expect(disc);
+    }
 
-    // AND IT IS IN THE CHAIN. With the sensor absent from `dumpState` these two were
-    // byte-identical while one world tracked an overlap and the other did not.
-    try testing.expect(differed_at_membership);
+    // And the whole record is IN `dumpState`, not merely producible beside it: the
+    // full dump must contain the sensor bytes the reference produced.
+    full.clearRetainingCapacity();
+    try trace_mod.dumpState(&s, gpa, &full);
+    var tail: std.ArrayListUnmanaged(u8) = .empty;
+    defer tail.deinit(gpa);
+    try trace_mod.dumpSensorSets(&s, gpa, &tail, trace_mod.all_sensor_sets);
+    try testing.expect(std.mem.endsWith(u8, full.items, tail.items));
 }

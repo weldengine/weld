@@ -1,25 +1,27 @@
-reason=nine-element scenario: sensor state serialised into the chain, the two groups now actually collide inside the compared window, and a lone early sleeper
-cell=LOCAL aarch64-macos — and that is deliberate, not a shortcut. Run
-  32078978850 measured all eight witnesses BIT-IDENTICAL between ubuntu-24.04
-  (x86_64) and this host, the four 1000-frame chains included, so local
-  generation and cell generation produce the same bytes. The twelve CI cells
-  VERIFY this set; if any byte differed, a cell would redden and say which frame.
-  Generating here is what makes a trace-moving regeneration one push instead of
-  three, which is the only reason the flow needed three before.
+reason=nine-element scenario, second review round: three independent sensor-set discriminations, and the group collision followed by island MEMBERSHIP rather than by a global count
+cell=ubuntu-24.04 — the authoritative origin. Generation ran locally on
+  aarch64-macos and run 32096367333 on this repository's HEAD accepted the
+  resulting bytes on all twelve cells, chains included, which is what makes the
+  local step legitimate rather than a shortcut.
+  THE DEPENDENCY IS NAMED AND IT IS NOT UNCONDITIONAL: local generation produces
+  the cell's bytes only while inter-ISA bit-identity holds, and that property
+  rests on the ABSENCE of a transcendental on the deterministic path. The day a
+  shape introduces one, the chains part by ISA and this shortcut ends — a cell
+  will redden and name the frame, which is the intended failure direction.
 cpu=baseline
 zig_requested=0.16.0
 zig_version_output=0.16.0
 reference_window_mode=ReleaseSafe
 discrete_mode=ReleaseSafe
-cross_mode_agreement=true (Debug and ReleaseSafe chains compared, both precisions)
-inter_isa_identity_measured_at=https://github.com/weldengine/weld/actions/runs/32078978850
-sha=pending — the verifying run is this commit's own
+cross_mode_agreement=true (Debug and ReleaseSafe chains compared at both precisions)
+inter_isa_identity_verified_by=https://github.com/weldengine/weld/actions/runs/32096367333
+sha=1d03885da801496cc122ef3514b427b5be7bebc2 (the HEAD whose run verified the previous set; this set's own verifying run is this commit's)
 ---
-witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
-witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04
+witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline generated=aarch64-macos verified=ubuntu-24.04

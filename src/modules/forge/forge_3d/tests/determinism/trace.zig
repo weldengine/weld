@@ -129,13 +129,43 @@ pub fn dumpState(s: *const Scenario, gpa: std.mem.Allocator, out: *std.ArrayList
     // The identity is written INDEX THEN GENERATION, both halves: a recycled slot
     // reuses the index, so an index-only record would read two different entities as
     // one. Length-prefixed, like every other length in this file.
-    const sensor_sets = [_][]const sensor_mod.EntityPair{
+    try dumpSensorSets(s, gpa, out, all_sensor_sets);
+}
+
+/// Which of the three sensor sets a dump carries. Index order is `current`,
+/// `entered`, `exited` — the order `dumpSensorSets` writes them in.
+pub const SensorSetMask = [3]bool;
+
+/// Production always carries all three.
+pub const all_sensor_sets: SensorSetMask = .{ true, true, true };
+
+/// Append the three sensor sets, each one either in full or AS AN EMPTY SET.
+///
+/// **A SUPPRESSED SET IS WRITTEN AS LENGTH ZERO, NEVER OMITTED, and that is what
+/// makes the test above it discriminate an INSTANT rather than a shape.** Omitting
+/// a set removes its length prefix too, so the bytes would differ even at a frame
+/// where the set is legitimately empty — and a probe that changes the output
+/// unconditionally proves nothing about the frame it was evaluated at. Written as
+/// length zero, a suppression is invisible exactly when the set is empty and
+/// visible exactly when it is not.
+///
+/// The mask exists for the test and production passes `all_sensor_sets`; there is
+/// one implementation, so the thing tested is the thing shipped.
+pub fn dumpSensorSets(
+    s: *const Scenario,
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    include: SensorSetMask,
+) !void {
+    const sets = [_][]const sensor_mod.EntityPair{
         s.world.sensors.current.items,
         s.world.sensors.entered.items,
         s.world.sensors.exited.items,
     };
-    for (sensor_sets) |set| {
-        try putU32(out, gpa, @intCast(set.len));
+    for (sets, include) |set, on| {
+        const n: usize = if (on) set.len else 0;
+        try putU32(out, gpa, @intCast(n));
+        if (!on) continue;
         for (set) |pair| {
             try putU32(out, gpa, pair.trigger.index);
             try putU32(out, gpa, pair.trigger.generation);
