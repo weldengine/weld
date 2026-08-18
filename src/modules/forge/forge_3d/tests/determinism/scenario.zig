@@ -688,6 +688,8 @@ test "scenario: every one of the nine elements actually fires" {
     var max_islands: usize = 0;
     var entered: usize = 0;
     var exited: usize = 0;
+    var lone_slept = false;
+    var groups_shared_island = false;
     var char_max_y: Real = -1e9;
     var char_max_x: Real = -1e9;
     var stood_on_riser = false;
@@ -722,6 +724,29 @@ test "scenario: every one of the nine elements actually fires" {
 
         // (2) sleep transitions.
         if (s.world.slept_last_tick > 0) saw_sleep = true;
+
+        // (7) THE LONE SLEEPER, BY IDENTITY. `saw_sleep` below is satisfied by the
+        // stack, so element 7 had NO observation of its own — measured, not deduced:
+        // forbidding `lone_sleeper` to sleep left this test green. A test that promises
+        // nine proofs and delivers seven is worse than one that promises seven.
+        if (s.world.bm.isSleeping(s.lone_sleeper) orelse false) lone_slept = true;
+
+        // (3) THE TWO GROUPS SHARING ONE ISLAND, by MEMBERSHIP and not by any count.
+        // The element lost its assertion here when the count predicate was
+        // unattributed — the right move, which left a hole. Coverage asks whether the
+        // element fires; the full SEPARATE → TOGETHER → SEPARATE sequence stays in the
+        // dedicated test, which is the only place it is established.
+        {
+            var ia: ?usize = null;
+            var ib: ?usize = null;
+            for (s.world.islands.islandsSlice(), 0..) |isl, idx| {
+                for (s.world.islands.islandMembers(isl)) |m| {
+                    if (m == s.group_a[0]) ia = idx;
+                    if (m == s.group_b[0]) ib = idx;
+                }
+            }
+            if (ia != null and ib != null and ia.? == ib.?) groups_shared_island = true;
+        }
 
         // THE ISLAND COUNT MOVES AT ALL — a coarse coverage probe and NOTHING MORE.
         // It is deliberately NOT attributed to element 3 and claims NEITHER direction:
@@ -759,7 +784,9 @@ test "scenario: every one of the nine elements actually fires" {
     }
 
     try testing.expect(saw_ground_contact); // (1)
-    try testing.expect(saw_sleep); // (2)
+    try testing.expect(saw_sleep); // (2) the stack, or any body — see (7) for identity
+    try testing.expect(groups_shared_island); // (3) by membership
+    try testing.expect(lone_slept); // (7) THIS body, by identity
     // The partition moves at all. Coarse, unattributed, and satisfied by any single
     // variation — the sequence on the two groups is asserted by its own test.
     try testing.expect(max_islands > min_islands);
