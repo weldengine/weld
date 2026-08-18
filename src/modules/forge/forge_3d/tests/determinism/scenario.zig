@@ -30,8 +30,10 @@
 //!    at all, the gap closing to 2.272 m and reopening, and `max_islands >
 //!    min_islands` passed on the sleeper alone, which is why that predicate is now
 //!    an unattributed coverage probe rather than this element's witness. Now
-//!    frictionless with restitution 0.5, and a dedicated test names the
-//!    `group_a ↔ group_b` constraint and requires the count to FALL and RISE.
+//!    frictionless with restitution 0.5, and they merge at frame 15 — inside the
+//!    60-frame window, measured. A dedicated test requires SEPARATE → TOGETHER →
+//!    SEPARATE on the island MEMBERSHIP of these two groups; it requires nothing of
+//!    the global island count, which is the separate and coarser probe above.
 //! 4. **The frictionless slider of M1.1.13.1.** Carries that milestone's named
 //!    ULP residual into the instrument, which is what Gate E re-measures.
 //! 5. **A sphere crossing the internal edge of a static `MeshShape`.** Several
@@ -615,6 +617,9 @@ pub const Scenario = struct {
 
 const testing = std.testing;
 const trace_mod = @import("trace.zig");
+// The compared window's width, from the ONE place that defines it. A second copy
+// here is how a bound drifts from the artifact it is supposed to bound.
+const window_frames = @import("run.zig").window_frames;
 
 test "scenario: builds, and every element is present" {
     const gpa = testing.allocator;
@@ -671,6 +676,13 @@ test "scenario: steps without error, and the character resolves its ground" {
     try testing.expectEqual(api.GroundState.grounded, s.chars.get(s.character).?.reported_ground);
 }
 
+/// True iff the observation fired AND fired strictly inside the compared window.
+/// `null` — never fired — is false: an observation that never happened is not one
+/// that happened late.
+fn firstFireInside(first: ?u32, win: u32) bool {
+    return if (first) |fr| fr < win else false;
+}
+
 test "scenario: every one of the nine elements actually fires" {
     // THE SCOPE MEASUREMENT, and it is due BEFORE any witness is committed. A
     // witness taken over a scene where the groups never meet, the sensor never
@@ -681,15 +693,16 @@ test "scenario: every one of the nine elements actually fires" {
     var s = try Scenario.init(gpa);
     defer s.deinit(gpa);
 
-    var saw_ground_contact = false;
-    var saw_sleep = false;
-    var saw_multi_constraint_pair = false;
+    var first_ground: ?u32 = null;
+    var first_any_sleep: ?u32 = null;
+    var first_multi_pair: ?u32 = null;
     var min_islands: usize = std.math.maxInt(usize);
     var max_islands: usize = 0;
     var entered: usize = 0;
     var exited: usize = 0;
-    var lone_slept = false;
-    var groups_shared_island = false;
+    var first_lone_sleep: ?u32 = null;
+    var first_shared_island: ?u32 = null;
+    var first_island_change: ?u32 = null;
     var char_max_y: Real = -1e9;
     var char_max_x: Real = -1e9;
     var stood_on_riser = false;
@@ -715,21 +728,25 @@ test "scenario: every one of the nine elements actually fires" {
         for (s.world.constraints.items) |c| {
             const hi: BodyId = @intCast(c.pair_key >> 32);
             const lo: BodyId = @intCast(c.pair_key & 0xFFFF_FFFF);
-            if (hi == s.ground or lo == s.ground) saw_ground_contact = true;
+            if ((hi == s.ground or lo == s.ground) and first_ground == null) first_ground = f;
             if (prev_key) |k| {
-                if (k == c.pair_key) saw_multi_constraint_pair = true;
+                if (k == c.pair_key and first_multi_pair == null) first_multi_pair = f;
             }
             prev_key = c.pair_key;
         }
 
-        // (2) sleep transitions.
-        if (s.world.slept_last_tick > 0) saw_sleep = true;
+        // A sleep transition ANYWHERE. Read the assertion below before attributing
+        // this to element 2 — MEASURED, it is element 7 that satisfies it.
+        if (s.world.slept_last_tick > 0 and first_any_sleep == null) first_any_sleep = f;
 
-        // (7) THE LONE SLEEPER, BY IDENTITY. `saw_sleep` below is satisfied by the
-        // stack, so element 7 had NO observation of its own — measured, not deduced:
-        // forbidding `lone_sleeper` to sleep left this test green. A test that promises
+        // (7) THE LONE SLEEPER, BY IDENTITY AND BY INSTANT. Element 7 had NO
+        // observation of its own until Codex measured its absence: the sleep line
+        // above is satisfied by ANY body, so forbidding `lone_sleeper` to sleep left
+        // this test green. The first repair gave it an identity and left it
+        // accumulating over 750 frames, and Codex measured THAT too — awake for the
+        // compared window and asleep afterwards was green again. A test that promises
         // nine proofs and delivers seven is worse than one that promises seven.
-        if (s.world.bm.isSleeping(s.lone_sleeper) orelse false) lone_slept = true;
+        if ((s.world.bm.isSleeping(s.lone_sleeper) orelse false) and first_lone_sleep == null) first_lone_sleep = f;
 
         // (3) THE TWO GROUPS SHARING ONE ISLAND, by MEMBERSHIP and not by any count.
         // The element lost its assertion here when the count predicate was
@@ -745,7 +762,7 @@ test "scenario: every one of the nine elements actually fires" {
                     if (m == s.group_b[0]) ib = idx;
                 }
             }
-            if (ia != null and ib != null and ia.? == ib.?) groups_shared_island = true;
+            if (ia != null and ib != null and ia.? == ib.? and first_shared_island == null) first_shared_island = f;
         }
 
         // THE ISLAND COUNT MOVES AT ALL — a coarse coverage probe and NOTHING MORE.
@@ -758,6 +775,7 @@ test "scenario: every one of the nine elements actually fires" {
         const n = s.world.islands.islandsSlice().len;
         if (n < min_islands) min_islands = n;
         if (n > max_islands) max_islands = n;
+        if (max_islands > min_islands and first_island_change == null) first_island_change = f;
 
         // (6) the two sensor deltas.
         entered += s.world.sensors.entered.items.len;
@@ -783,16 +801,54 @@ test "scenario: every one of the nine elements actually fires" {
         if (gb == s.walk_slope) stood_on_walk_slope = true;
     }
 
-    try testing.expect(saw_ground_contact); // (1)
-    try testing.expect(saw_sleep); // (2) the stack, or any body — see (7) for identity
-    try testing.expect(groups_shared_island); // (3) by membership
-    try testing.expect(lone_slept); // (7) THIS body, by identity
-    // The partition moves at all. Coarse, unattributed, and satisfied by any single
-    // variation — the sequence on the two groups is asserted by its own test.
-    try testing.expect(max_islands > min_islands);
-    try testing.expect(saw_multi_constraint_pair); // (5)
-    try testing.expectEqual(@as(usize, 1), entered); // (6) exactly one crossing in
-    try testing.expectEqual(@as(usize, 1), exited); // (6) and exactly one out
+    // AN OBSERVATION HAS AN INSTANT, NOT ONLY AN OBJECT — and the instant it must
+    // fall inside is the one its ARTIFACT is compared over. There are two spans, not
+    // one, and conflating them is what let an assertion be true outside everything
+    // verified:
+    //
+    //   * the FOUR DISCRETE TRACES — island partition, sleep state, per-pair manifold
+    //     cardinality, retained pair set — are compared over `window_frames` = 60,
+    //     on all twelve cells. A mechanism observed only in a discrete trace MUST
+    //     fire inside 60 or it lies outside every compared byte.
+    //   * the CONTINUOUS CHAIN is compared over `chain_frames` = 1000. A mechanism
+    //     carried by a body's thirteen scalars, by the character's base position or
+    //     by the serialised sensor sets is verified anywhere in that span, and
+    //     bounding it at 60 would be FALSE, not merely strict — the riser is stood
+    //     on at frame 422, measured.
+    //
+    // So the five discrete-carried observations below assert a FRAME, not a boolean.
+    // The correction came from Codex on element 7: its former boolean accumulated
+    // over 750 frames while the element exists to make the sleep-state trace
+    // non-constant inside 60, so keeping that body awake for the compared window and
+    // letting it sleep later left the test green. Identity had been fixed one round
+    // earlier and the instant had not — the same defect, one axis over.
+    const win = window_frames;
+    try testing.expect(firstFireInside(first_ground, win)); // (1) manifold cardinality
+    try testing.expect(firstFireInside(first_shared_island, win)); // (3) island partition
+    try testing.expect(firstFireInside(first_multi_pair, win)); // (5) manifold cardinality
+    try testing.expect(firstFireInside(first_lone_sleep, win)); // (7) sleep state, THIS body
+    // The partition moves at all, inside the window. Coarse, unattributed, and
+    // satisfied by any single variation — the sequence on the two groups is asserted
+    // by its own test.
+    try testing.expect(firstFireInside(first_island_change, win));
+
+    // ELEMENT 2's SLEEP TRANSITION IS **NOT** A DISCRETE-WINDOW WITNESS, and this
+    // line is deliberately not bounded at 60 because the bound would fail. MEASURED
+    // both ways: the scene's first sleep is frame 29 and it is element 7's body; with
+    // element 7 forbidden to sleep the first is frame 100 — outside the window. That
+    // is exactly the sentence element 7's header already carried ("sleep state and
+    // the island partition were both CONSTANT over the compared window before it"),
+    // and the assertion labelled (2) had been claiming otherwise. The stack's
+    // transition zeroes its velocities, so it IS verified — in the CHAIN, at frame
+    // 100 of 1000.
+    try testing.expect(first_any_sleep != null); // (2) chain-carried, frame 100 measured
+
+    // (6) THE SENSOR DELTAS are serialised into the chain dump, so their span is
+    // 1000 and not 60 — measured inside it anyway, entered at frame 7 and exited at
+    // frame 32. Counted over the whole run because the CARDINALITY is the claim:
+    // exactly one crossing each way, which a window bound could not express.
+    try testing.expectEqual(@as(usize, 1), entered);
+    try testing.expectEqual(@as(usize, 1), exited);
 
     // (4) the slider still carries speed: it is frictionless and undamped, so a
     // value far from 5 m/s would mean it hit something and stopped being the
