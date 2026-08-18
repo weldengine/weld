@@ -1,19 +1,25 @@
-reason=canonical scenario tuned so all four discrete traces vary inside the 60-frame window the witnesses cover, plus a lone early sleeper
-cell=ubuntu-24.04
+reason=nine-element scenario: sensor state serialised into the chain, the two groups now actually collide inside the compared window, and a lone early sleeper
+cell=LOCAL aarch64-macos — and that is deliberate, not a shortcut. Run
+  32078978850 measured all eight witnesses BIT-IDENTICAL between ubuntu-24.04
+  (x86_64) and this host, the four 1000-frame chains included, so local
+  generation and cell generation produce the same bytes. The twelve CI cells
+  VERIFY this set; if any byte differed, a cell would redden and say which frame.
+  Generating here is what makes a trace-moving regeneration one push instead of
+  three, which is the only reason the flow needed three before.
 cpu=baseline
 zig_requested=0.16.0
 zig_version_output=0.16.0
 reference_window_mode=ReleaseSafe
 discrete_mode=ReleaseSafe
-cross_mode_agreement=true
-sha=db34f8660e2b481db377493afef2fb3f188702aa
-run=https://github.com/weldengine/weld/actions/runs/32078978850
+cross_mode_agreement=true (Debug and ReleaseSafe chains compared, both precisions)
+inter_isa_identity_measured_at=https://github.com/weldengine/weld/actions/runs/32078978850
+sha=pending — the verifying run is this commit's own
 ---
-witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
-witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos
+witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline origin=LOCAL-aarch64-macos

@@ -10,11 +10,15 @@
 //! implementation convenience (`engine-phase-1-criteria.md` C1.1):
 //!
 //!   - the CONTINUOUS CHAIN is level 1, bit-exactness at identical ISA, build and
-//!     configuration. It is compared on x86_64 ONLY. Running it on AArch64 would
-//!     assert level 3 — inter-ISA bit-exactness — which C1.1 places explicitly
-//!     out of Phase 1, so a failure there would be a true negative dressed as a
-//!     defect. The skip is REPORTED, never silent: a check that quietly does
-//!     nothing is the failure mode this milestone has now hit three times.
+//!     configuration. **It is COMPARED ON EVERY HOST and GATED only where level 1
+//!     applies** — this changed at the milestone's close and the earlier text, which
+//!     said it was compared on x86_64 only, is superseded. On a non-level-1 host the
+//!     result is REPORTED and never gated, exactly like the divergence frame: its
+//!     REGRESSION is the signal, never its value. The old outright skip discarded the
+//!     strongest signal available, and measured at the close the eight witnesses are
+//!     BIT-IDENTICAL between `ubuntu-24.04` and aarch64-macOS, the chains included —
+//!     a MEASURED property of a pinned arithmetic, dated, and NOT a promotion of
+//!     level 3, which C1.1 still places out of Phase 1.
 //!   - the FOUR DISCRETE TRACES are level 2 point 1, compared by EVERY cell, ISA
 //!     included. They are derived from integers — handles, counts, keys — so they
 //!     are ISA-independent by construction, and that is precisely why a mismatch

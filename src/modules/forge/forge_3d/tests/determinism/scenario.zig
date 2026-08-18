@@ -12,7 +12,11 @@
 //! in. Reordering the `init` below is not a refactor; it is a different scenario,
 //! and every committed witness becomes wrong. The order is numbered in the code.
 //!
-//! Eight elements, each present for a named reason and none decorative:
+//! NINE elements, each present for a named reason and none decorative — and a
+//! REASON FOR PRESENCE IS NOT AN ORACLE, which is the correction of M1.1.14's own
+//! closing review: three of these nine were listed with their reason while their
+//! effect fell outside the compared window, outside every artifact, or both. Each
+//! entry below now states WHERE its effect is observed.
 //!
 //! 1. **A static half-space ground.** The surface everything rests on, and the
 //!    one shape with no AABB at all — it exercises the unbounded proxy list
@@ -21,7 +25,11 @@
 //!    transitions, and the deepest chain of contacts in the scene.
 //! 3. **Two groups starting apart and colliding partway through.** The island
 //!    partition changes in BOTH directions — two islands become one on contact,
-//!    and the trace would not see a merge-only scene.
+//!    and the trace would not see a merge-only scene. MEASURED after the review:
+//!    they never met inside the window at all, the gap closing to 2.272 m and
+//!    reopening, so `max_islands > min_islands` passed on the sleeper alone. Now
+//!    frictionless with restitution 0.5, and a dedicated test names the
+//!    `group_a ↔ group_b` constraint and requires the count to FALL and RISE.
 //! 4. **The frictionless slider of M1.1.13.1.** Carries that milestone's named
 //!    ULP residual into the instrument, which is what Gate E re-measures.
 //! 5. **A sphere crossing the internal edge of a static `MeshShape`.** Several
@@ -29,7 +37,12 @@
 //!    (`subshape_id`, M1.1.11.1) — without a mesh the key's totality is never
 //!    exercised and a two-term key would pass every trace.
 //! 6. **One sensor and one body entering then leaving it.** Sensor state and both
-//!    deltas (`engine-physics-solver.md` §1.13.11).
+//!    deltas (`engine-physics-solver.md` §1.13.11) — SERIALISED INTO THE CHAIN since
+//!    the review, because a trigger resolves no impulse: all three sets can diverge
+//!    without displacing a body, so every artifact stayed identical while the sensor
+//!    pass disagreed. The visitor now crosses INSIDE the 60-frame window.
+//! 6 bis. **A lone box that settles at once and sleeps early.** Sleep state and the
+//!    island partition were both CONSTANT over the compared window before it.
 //! 7. **A riser and three ramps, one walkable and two not, forming a closed bowl.**
 //!    They exist so that `cos_max_slope` DECIDES something: their surface cosines
 //!    bracket `cos(0.785) = 0.70738` at `0.894` and `0.6247`, and the bracket is
@@ -41,8 +54,8 @@
 //!    where a wrong `max_slope` conversion surfaces first, which is the whole
 //!    reason the deterministic cosine exists.
 //!
-//! **Elements 7 and 8 were BOTH defective until M1.1.14's own review, and the two
-//! halves are one defect.** This header claimed "a step and a slope" while the
+//! **Elements 3, 6, 8 and 9 were each defective until M1.1.14's review, and they are
+//! four instances of ONE class: a reason for presence read as an oracle.** This header claimed "a step and a slope" while the
 //! scene held neither — nothing stood near the character but the flat half-space,
 //! so `max_slope` was never approached; and the character entered NO artifact,
 //! because `mobile` holds rigid bodies and a virtual character owns none, so the
@@ -203,7 +216,17 @@ pub const Scenario = struct {
             };
             d.position = av3(35, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
             d.mass = 1;
-            d.restitution = 0;
+            // FRICTION AND DAMPING OFF, RESTITUTION 0.5 — three changes with one
+            // purpose. The pair had to MEET inside the compared window and it did
+            // not: measured, the closest the two groups came in 60 frames was
+            // 2.272 m between centres, because ground friction bled the closing
+            // speed away. And it had to meet AND PART, or the island trace shows
+            // only a merge and a merge-only scene passes a weaker test than the
+            // one intended.
+            d.restitution = 0.5;
+            d.friction = 0;
+            d.linear_damping = 0;
+            d.angular_damping = 0;
             id.* = try w.addBody(gpa, d);
             try self.mobile.append(gpa, id.*);
         }
@@ -215,12 +238,15 @@ pub const Scenario = struct {
             };
             d.position = av3(38, @floatCast(0.5 + @as(Real, @floatFromInt(i))), 0);
             d.mass = 1;
-            d.restitution = 0;
+            d.restitution = 0.5;
+            d.friction = 0;
+            d.linear_damping = 0;
+            d.angular_damping = 0;
             id.* = try w.addBody(gpa, d);
             try self.mobile.append(gpa, id.*);
         }
-        for (self.group_a) |id| w.bm.setLinearVelocity(id, vr(2, 0, 0));
-        for (self.group_b) |id| w.bm.setLinearVelocity(id, vr(-2, 0, 0));
+        for (self.group_a) |id| w.bm.setLinearVelocity(id, vr(4, 0, 0));
+        for (self.group_b) |id| w.bm.setLinearVelocity(id, vr(-4, 0, 0));
 
         // --- (4) the frictionless slider, z = 20 ------------------------------
         var slider = api.BodyDescriptor{
@@ -307,7 +333,7 @@ pub const Scenario = struct {
             .body_type = .dynamic,
             .shape = unit_box,
         };
-        visitor.position = av3(72, 2, 0);
+        visitor.position = av3(76, 2, 0);
         visitor.mass = 1;
         visitor.restitution = 0;
         visitor.friction = 0;
@@ -320,7 +346,7 @@ pub const Scenario = struct {
         visitor.gravity_factor = 0;
         self.trigger_visitor = try w.addBody(gpa, visitor);
         try self.mobile.append(gpa, self.trigger_visitor);
-        w.bm.setLinearVelocity(self.trigger_visitor, vr(4, 0, 0));
+        w.bm.setLinearVelocity(self.trigger_visitor, vr(12, 0, 0));
         self.world.sensors_on = true;
 
         // --- (6 bis) a lone box that settles at once, x = 15 -------------------
@@ -576,6 +602,7 @@ pub const Scenario = struct {
 // --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
+const trace_mod = @import("trace.zig");
 
 test "scenario: builds, and every element is present" {
     const gpa = testing.allocator;
@@ -930,4 +957,113 @@ test "scenario: the retained pair set really SHRINKS — the fourth trace is an 
         }
     }
     try testing.expect(found);
+}
+
+test "the two groups actually COLLIDE inside the window, and part again" {
+    // P1-2. `max_islands > min_islands` is true and VAGUE, and its vagueness is what
+    // let this through: measured on the committed bytes, the two groups NEVER met
+    // inside the 60 frames — their islands stayed separate, the gap closed to 2.272 m
+    // and reopened — and the single island variation came from the sleeper vanishing.
+    // The old criterion passed without the announced collision ever happening. It is
+    // KEPT, in the coverage test beside this one, and this is added rather than
+    // substituted: a weak-but-true criterion is not wrong, it is insufficient.
+    //
+    // TWO CLAUSES, because a merge-only scene passes a weaker test. The pair must
+    // exist — a constraint whose two endpoints are one from each group — and the
+    // island count must both FALL and RISE, which is what a bounce gives and a
+    // sticky collision does not. Hence restitution 0.5 and friction 0 on the eight
+    // bodies: with ground friction bleeding the closing speed, they never arrived.
+    const gpa = testing.allocator;
+    var s = try Scenario.init(gpa);
+    defer s.deinit(gpa);
+
+    var saw_cross_pair = false;
+    var fell = false;
+    var rose = false;
+    var prev_islands: ?usize = null;
+
+    var f: u32 = 0;
+    while (f < 60) : (f += 1) {
+        try s.step(gpa, f);
+        for (s.world.constraints.items) |c| {
+            const hi: BodyId = @intCast(c.pair_key >> 32);
+            const lo: BodyId = @intCast(c.pair_key & 0xFFFF_FFFF);
+            const a_side = hi == s.group_a[0] or hi == s.group_a[1] or lo == s.group_a[0] or lo == s.group_a[1];
+            const b_side = hi == s.group_b[0] or hi == s.group_b[1] or lo == s.group_b[0] or lo == s.group_b[1];
+            if (a_side and b_side) saw_cross_pair = true;
+        }
+        const n = s.world.islands.islandsSlice().len;
+        if (prev_islands) |p| {
+            if (n < p) fell = true;
+            if (n > p) rose = true;
+        }
+        prev_islands = n;
+    }
+
+    // THE COLLISION ITSELF, named on the bodies rather than inferred from a count.
+    try testing.expect(saw_cross_pair);
+    // BOTH DIRECTIONS. A merge alone would satisfy `max > min` and say nothing about
+    // a partition that can also split.
+    try testing.expect(fell);
+    try testing.expect(rose);
+}
+
+test "the sensor state reaches the chain — a trigger resolves no impulse" {
+    // P1-1. The sensor was an element of the scenario whose output reached NO
+    // artifact, and that is a LEVEL-1 hole rather than a level-2 one: a trigger
+    // resolves no impulse, so `current`, `entered` and `exited` can each diverge
+    // between two machines without displacing a single body, leaving the chain, the
+    // four discrete traces and the reference window all identical.
+    //
+    // Measured before the fix: over the 60 compared frames the visitor never reached
+    // the trigger at all — zero deltas, `current` never non-empty — so the element
+    // was absent from the window as well as from the artifacts. Two defects in one
+    // element. The visitor now starts at x = 76 with 12 m/s and both deltas land
+    // inside the window.
+    //
+    // ASSERTED AS A DISCRIMINATION, never as a length: a length assertion passes on
+    // four appended zeros. Two scenarios are stepped in LOCKSTEP, identical but for
+    // `sensors_on`, and the comparison is taken at the first frame where membership
+    // is non-empty — not at the last frame, where the visitor has already left and
+    // the two states legitimately coincide. That subtlety cost this test one rewrite.
+    const gpa = testing.allocator;
+    var on = try Scenario.init(gpa);
+    defer on.deinit(gpa);
+    var off = try Scenario.init(gpa);
+    defer off.deinit(gpa);
+    off.world.sensors_on = false;
+
+    var entered_total: usize = 0;
+    var exited_total: usize = 0;
+    var differed_at_membership = false;
+    var membership_seen = false;
+
+    var dump_on: std.ArrayListUnmanaged(u8) = .empty;
+    defer dump_on.deinit(gpa);
+    var dump_off: std.ArrayListUnmanaged(u8) = .empty;
+    defer dump_off.deinit(gpa);
+
+    var f: u32 = 0;
+    while (f < 60) : (f += 1) {
+        try on.step(gpa, f);
+        try off.step(gpa, f);
+        entered_total += on.world.sensors.entered.items.len;
+        exited_total += on.world.sensors.exited.items.len;
+        if (on.world.sensors.current.items.len == 0) continue;
+        membership_seen = true;
+        dump_on.clearRetainingCapacity();
+        dump_off.clearRetainingCapacity();
+        try trace_mod.dumpState(&on, gpa, &dump_on);
+        try trace_mod.dumpState(&off, gpa, &dump_off);
+        if (!std.mem.eql(u8, dump_on.items, dump_off.items)) differed_at_membership = true;
+    }
+
+    // THE ELEMENT FIRES, inside the window: exactly one crossing in and one out.
+    try testing.expectEqual(@as(usize, 1), entered_total);
+    try testing.expectEqual(@as(usize, 1), exited_total);
+    try testing.expect(membership_seen);
+
+    // AND IT IS IN THE CHAIN. With the sensor absent from `dumpState` these two were
+    // byte-identical while one world tracked an overlap and the other did not.
+    try testing.expect(differed_at_membership);
 }

@@ -246,13 +246,17 @@ pub const uncollected = [_]Uncollected{
 /// above — `shm_posix.zig` and `transport_posix.zig`. That is arithmetic on this
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
-    // Reconciled against `zig build test --summary all`, which reported 1867
+    // Reconciled against `zig build test --summary all`, which reported 1869
     // collected — NOT bumped to match the closure's own arithmetic, which is the
     // repair the failure message forbids. Windows is two lower, the two
     // `only_on = .windows` entries above.
+    //
+    // This control has now stopped two commits in a row on its first real uses, each
+    // time on a genuine test addition, and each time the number was re-derived from
+    // the suite rather than from the closure. That is the whole point of it.
     return switch (os) {
-        .windows => 1865,
-        else => 1867,
+        .windows => 1867,
+        else => 1869,
     };
 }
 

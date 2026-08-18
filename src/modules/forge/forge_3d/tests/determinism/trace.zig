@@ -25,6 +25,7 @@ const std = @import("std");
 const config = @import("../../config.zig");
 const api = @import("weld_forge");
 const Scenario = @import("scenario.zig").Scenario;
+const sensor_mod = @import("../../pipeline/sensor.zig");
 
 const Real = config.Real;
 const BodyId = api.BodyId;
@@ -110,6 +111,38 @@ pub fn dumpState(s: *const Scenario, gpa: std.mem.Allocator, out: *std.ArrayList
     const ch = s.chars.get(s.character) orelse return;
     for (ch.position.toArray()) |c| try putReal(out, gpa, c);
     try putReal(out, gpa, @floatFromInt(@intFromEnum(ch.reported_ground)));
+
+    // THE SENSOR STATE, and its absence was a LEVEL-1 coverage hole rather than a
+    // level-2 one. A trigger resolves no impulse: `current`, `entered` and `exited`
+    // can all diverge without displacing a single body, so the chain, the four
+    // discrete traces and the reference window would every one of them stay
+    // identical while the sensor pass disagreed between two machines. The scenario
+    // listed the sensor as an element the whole time, and its output reached NO
+    // artifact — presence in the scene mistaken for coverage.
+    //
+    // All THREE sets, and each for its own reason. `current` is the membership §1.13
+    // makes the source of truth, since the bus drops its oldest entry on saturation
+    // and a set rebuilt from the flow would be wrong on the first one. `entered` and
+    // `exited` are the two deltas, and a state that agreed while a delta did not
+    // would be a real divergence this dump would hide.
+    //
+    // The identity is written INDEX THEN GENERATION, both halves: a recycled slot
+    // reuses the index, so an index-only record would read two different entities as
+    // one. Length-prefixed, like every other length in this file.
+    const sensor_sets = [_][]const sensor_mod.EntityPair{
+        s.world.sensors.current.items,
+        s.world.sensors.entered.items,
+        s.world.sensors.exited.items,
+    };
+    for (sensor_sets) |set| {
+        try putU32(out, gpa, @intCast(set.len));
+        for (set) |pair| {
+            try putU32(out, gpa, pair.trigger.index);
+            try putU32(out, gpa, pair.trigger.generation);
+            try putU32(out, gpa, pair.other.index);
+            try putU32(out, gpa, pair.other.generation);
+        }
+    }
 }
 
 /// The rolling per-frame hash chain: `h₀` is all zeros, `hₙ = H(hₙ₋₁ ‖ dumpₙ)`.
