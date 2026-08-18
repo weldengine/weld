@@ -24,10 +24,12 @@
 //! 2. **The five-box stack of M1.1.13.1.** Manifold cardinality 4, sleep
 //!    transitions, and the deepest chain of contacts in the scene.
 //! 3. **Two groups starting apart and colliding partway through.** The island
-//!    partition changes in BOTH directions — two islands become one on contact,
-//!    and the trace would not see a merge-only scene. MEASURED after the review:
-//!    they never met inside the window at all, the gap closing to 2.272 m and
-//!    reopening, so `max_islands > min_islands` passed on the sleeper alone. Now
+//!    partition changes in BOTH DIRECTIONS ON THESE TWO GROUPS — separate, then one
+//!    island, then separate again — established by following island MEMBERSHIP and
+//!    not by any count. MEASURED after the review: they never met inside the window
+//!    at all, the gap closing to 2.272 m and reopening, and `max_islands >
+//!    min_islands` passed on the sleeper alone, which is why that predicate is now
+//!    an unattributed coverage probe rather than this element's witness. Now
 //!    frictionless with restitution 0.5, and a dedicated test names the
 //!    `group_a ↔ group_b` constraint and requires the count to FALL and RISE.
 //! 4. **The frictionless slider of M1.1.13.1.** Carries that milestone's named
@@ -66,7 +68,7 @@
 //! The elements are laid out in separate regions of X so that only the
 //! interactions listed above occur. The half-space is the exception: it is
 //! infinite and underlies all of them, which is intended. **That separation was
-//! itself false at x = 100** and is now true: see the note at element 7 for the
+//! itself false at x = 100** and is now true: see the note at element 8 for the
 //! arithmetic that put two other elements through the character's old region.
 
 const std = @import("std");
@@ -576,7 +578,7 @@ pub const Scenario = struct {
     /// climbing costs forward progress, so a `+x` leg that ends 2.2 m short of the
     /// metres it asked for is followed by a `−x` leg that spends all of them, and
     /// the character walks away from its terrain at 2.2 m per cycle for ever. What
-    /// closes the excursion is GEOMETRY — the bowl of element 7 — and not the
+    /// closes the excursion is GEOMETRY — the bowl of element 8 — and not the
     /// symmetry of this function. The `+z`/`−z` pair does cancel, nothing blocking
     /// motion along Z.
     ///
@@ -721,8 +723,13 @@ test "scenario: every one of the nine elements actually fires" {
         // (2) sleep transitions.
         if (s.world.slept_last_tick > 0) saw_sleep = true;
 
-        // (3) the island partition, in BOTH directions: the count must both rise
-        // and fall over the run, which a merge-only scene would not give.
+        // THE ISLAND COUNT MOVES AT ALL — a coarse coverage probe and NOTHING MORE.
+        // It is deliberately NOT attributed to element 3 and claims NEITHER direction:
+        // the predicate below is `max > min`, which one variation in either sense
+        // satisfies, and the lone sleeper leaving the partition supplies exactly that
+        // on its own. The two-direction property, and its attribution to the two
+        // groups, live in the dedicated test that follows island MEMBERSHIP — which is
+        // the only place either is actually established.
         const n = s.world.islands.islandsSlice().len;
         if (n < min_islands) min_islands = n;
         if (n > max_islands) max_islands = n;
@@ -753,7 +760,9 @@ test "scenario: every one of the nine elements actually fires" {
 
     try testing.expect(saw_ground_contact); // (1)
     try testing.expect(saw_sleep); // (2)
-    try testing.expect(max_islands > min_islands); // (3)
+    // The partition moves at all. Coarse, unattributed, and satisfied by any single
+    // variation — the sequence on the two groups is asserted by its own test.
+    try testing.expect(max_islands > min_islands);
     try testing.expect(saw_multi_constraint_pair); // (5)
     try testing.expectEqual(@as(usize, 1), entered); // (6) exactly one crossing in
     try testing.expectEqual(@as(usize, 1), exited); // (6) and exactly one out
@@ -793,8 +802,8 @@ test "scenario: every one of the nine elements actually fires" {
 }
 
 test "scenario: the slope test DECIDES the character's trajectory, both ways" {
-    // THE NON-VACUITY OF ELEMENT 7, and it is the reason the two slopes exist at
-    // all. Element 7's clauses above prove the character climbed one ramp and was
+    // THE NON-VACUITY OF ELEMENT 8, and it is the reason the two slopes exist at
+    // all. Element 8's clauses above prove the character climbed one ramp and was
     // held by another; they do NOT prove that `cos_max_slope` is what decided it —
     // a controller that climbed everything under 40° by some other rule would pass
     // them identically. What discriminates is a COUNTER-FACTUAL ON THE OBJECT:
