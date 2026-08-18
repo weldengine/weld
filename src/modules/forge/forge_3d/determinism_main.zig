@@ -126,20 +126,41 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // THE CHAIN VERDICT — level 1, x86_64 only. On any other ISA the comparison
-    // is SKIPPED and says so: asserting it there would be asserting inter-ISA
-    // bit-exactness, which C1.1 places out of Phase 1. A skip that prints nothing
-    // is indistinguishable from a pass, and this milestone has paid for that three
-    // times.
+    // THE CHAIN IS ALWAYS COMPARED, AND GATED ONLY WHERE LEVEL 1 APPLIES. The
+    // earlier form SKIPPED the comparison outright on any non-x86_64 host, which
+    // threw away the strongest signal available: measured at M1.1.14's close, the
+    // eight committed witnesses are BIT-IDENTICAL between `ubuntu-24.04` (x86_64)
+    // and aarch64-macOS, the 1000-frame chains included.
+    //
+    // That is not a surprise once the arithmetic is pinned. IEEE-754 specifies the
+    // correctly-rounded result of `+ - * /`, `sqrt` and comparisons, so two
+    // conforming implementations on the same inputs IN THE SAME ORDER give the same
+    // bits. The inter-ISA divergence sources are reassociation, contraction,
+    // transcendentals, denormals, rounding mode and extended precision — and this
+    // milestone removed every one of them: explicit left folds, no FMA, an in-tree
+    // cosine pinned to a bit table, FTZ/DAZ off, the rounding mode installed, and
+    // `-Dcpu=baseline`.
+    //
+    // **NO PROMISE IS ADDED, and C1.1 does not move.** Level 3 stays out of Phase 1:
+    // one measurement, one scenario, one machine pair of which one is not even in
+    // the matrix, and the property holds by the ABSENCE of a single transcendental
+    // on the path — the day a shape introduces one it would break, and a guard
+    // disabled at its first failure is not a guard. So on a non-level-1 host the
+    // comparison is REPORTED and never gated, exactly like the divergence frame: its
+    // REGRESSION is the signal, never its value. What the skip cost was the ability
+    // to learn the day the agreement ends.
     var failed = false;
-    if (!witness.chain_applies) {
-        std.debug.print("chain verdict     : SKIPPED (level 1 is intra-ISA; this host is {t})\n", .{builtin.cpu.arch});
-    } else if (witness.chain) |w| {
+    if (witness.chain) |w| {
+        const verdict: []const u8 = if (witness.chain_applies) "" else " (REPORTED, not gated — level 1 is intra-ISA)";
         if (witness.firstChainMismatch(a.chain.items, w, trace.digest_len)) |m| {
-            std.debug.print("chain verdict     : MISMATCH at frame {d}\n", .{m.frame});
-            failed = true;
+            std.debug.print("chain verdict     : MISMATCH at frame {d}{s}\n", .{ m.frame, verdict });
+            if (witness.chain_applies) failed = true;
         } else {
-            std.debug.print("chain verdict     : OK ({d} frames)\n", .{run.chain_frames});
+            std.debug.print("chain verdict     : OK ({d} frames){s}\n", .{ run.chain_frames, verdict });
+        }
+        if (!witness.chain_applies) {
+            std.debug.print("                    host is {t}; inter-ISA bit-identity is a MEASURED\n", .{builtin.cpu.arch});
+            std.debug.print("                    property as of M1.1.14, not a contract\n", .{});
         }
     } else {
         std.debug.print("chain verdict     : SKIPPED (no witness for mode {s})\n", .{mode_tag});

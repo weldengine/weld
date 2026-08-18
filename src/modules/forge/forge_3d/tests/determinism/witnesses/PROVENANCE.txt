@@ -1,17 +1,19 @@
-reason=INTERMEDIATE, LOCAL, NOT AUTHORITATIVE — generated on aarch64-macOS to
-  unblock the pre-push hook after the scenario change. The chain files are
-  aarch64 and the reference window is aarch64: BOTH ARE WRONG for their purpose,
-  the chain being intra-ISA (level 1, x86_64) and the window being the baseline
-  the ARM cell measures its divergence AGAINST. The next commit replaces all
-  eight from the `witness-generation` job on ubuntu-24.04. If you are reading
-  this line on `main`, that replacement did not happen and the set is invalid.
-cell=LOCAL-aarch64-macos
+reason=canonical scenario tuned so all four discrete traces vary inside the 60-frame window the witnesses cover, plus a lone early sleeper
+cell=ubuntu-24.04
 cpu=baseline
 zig_requested=0.16.0
 zig_version_output=0.16.0
 reference_window_mode=ReleaseSafe
 discrete_mode=ReleaseSafe
-cross_mode_agreement=true (measured locally on the four ISA-independent files)
-sha=pending
-run=pending
+cross_mode_agreement=true
+sha=db34f8660e2b481db377493afef2fb3f188702aa
+run=https://github.com/weldengine/weld/actions/runs/32078978850
 ---
+witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
+witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32078978850
