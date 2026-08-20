@@ -13,6 +13,7 @@
 //! behavior + §Notes decision 7).
 
 const std = @import("std");
+const foundation = @import("foundation");
 const compiler = @import("compiler.zig");
 const cache = @import("cache.zig");
 
@@ -78,6 +79,8 @@ pub fn init(allocator: std.mem.Allocator, config: Config) Watcher {
 
 /// Thread body — poll → diff → recompile loop.
 fn threadMain(watcher: *Watcher) void {
+    // `ARCH-031` rule 5 — a thread-creation site installs the float environment.
+    foundation.math.float_env.install();
     // i96 mirrors `std.Io.Timestamp.nanoseconds` width so the map value
     // round-trips losslessly. Zig 0.16's `Stat.mtime` shifted from i128
     // to a `Io.Timestamp` struct; we store the inner nanoseconds.

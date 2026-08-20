@@ -1,0 +1,28 @@
+reason=nine-element scenario, second review round — three independent sensor-set discriminations and the group collision followed by island membership
+cell=ubuntu-24.04
+cpu=baseline
+zig_requested=0.16.0
+zig_version_output=0.16.0
+reference_window_mode=ReleaseSafe
+discrete_mode=ReleaseSafe
+cross_mode_agreement=true
+sha=47dfbecdc46950610f78cc3817acd14b59a3ef29
+run=https://github.com/weldengine/weld/actions/runs/32132088988
+---
+witness=continuous-chain-f32-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=continuous-chain-f32-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=continuous-chain-f64-Debug.bin mode=Debug zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=continuous-chain-f64-ReleaseSafe.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=discrete-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=discrete-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=reference-window-f32.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+witness=reference-window-f64.bin mode=ReleaseSafe zig=0.16.0 cpu=baseline run=https://github.com/weldengine/weld/actions/runs/32132088988
+
+--- dependency, kept explicit because it is not unconditional ---
+This set was ALSO produced byte-identically by local generation on aarch64-macos,
+8 of 8, and that shortcut is what makes a trace-moving regeneration one push
+instead of three. It is valid ONLY while inter-ISA bit-identity holds, and that
+property rests on the ABSENCE of a transcendental on the deterministic path. The
+day a shape introduces one, the chains part by ISA, the shortcut ends, and a cell
+reddens naming the frame — the intended failure direction. The authoritative
+origin above is the cell, never the laptop.

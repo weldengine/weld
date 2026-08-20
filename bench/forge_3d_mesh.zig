@@ -185,7 +185,7 @@ pub fn main() !void {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             });
-            if (@reduce(.Max, @abs(raw.data)) == 0) continue;
+            if (raw.maxAbsComponent() == 0) continue;
             const unit = raw.scale(1 / raw.length());
             const q = query.RayQuery{
                 .origin = unit.scale(60),

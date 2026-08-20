@@ -820,7 +820,7 @@ test "traversal agrees with brute force" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            const offset = if (@reduce(.Max, @abs(away.data)) == 0) Vec3r.unit_x else away.scale(1 / away.length());
+            const offset = if (away.maxAbsComponent() == 0) Vec3r.unit_x else away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             const direction = offset.neg();
             const max_distance: Real = 60;
@@ -1270,7 +1270,7 @@ test "the ray bound prunes and still finds the nearest triangle" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            const offset = if (@reduce(.Max, @abs(away.data)) == 0) Vec3r.unit_x else away.scale(1 / away.length());
+            const offset = if (away.maxAbsComponent() == 0) Vec3r.unit_x else away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             const ray = broadphase_mod.Ray(Real).init(origin, offset.neg());
             const max_distance: Real = 60;
@@ -1596,7 +1596,7 @@ test "a back-face hit returns a flipped normal" {
             rand.float(Real) * 2 - 1,
             rand.float(Real) * 2 - 1,
         );
-        if (@reduce(.Max, @abs(raw.data)) == 0) continue;
+        if (raw.maxAbsComponent() == 0) continue;
         const direction = raw.scale(1 / raw.length());
         const origin = vr(4, 0, 0).sub(direction.scale(20));
         inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
@@ -1770,7 +1770,7 @@ test "the ray family agrees exactly with brute force over the mesh" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            if (away.maxAbsComponent() == 0) continue;
             const offset = away.scale(1 / away.length());
             const origin = target.add(offset.scale(30));
             // The direction the ENTRY will use, and the query is given the RAW one so the
@@ -2353,7 +2353,7 @@ test "the five remaining entries agree exactly with brute force over the mesh" {
                 rand.float(Real) * 2 - 1,
                 rand.float(Real) * 2 - 1,
             );
-            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            if (away.maxAbsComponent() == 0) continue;
             const offset = away.scale(1 / away.length());
             const origin = target.add(offset.scale(25));
             const raw_direction = offset.neg();
@@ -4574,4 +4574,68 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
         if (prev.pair_key != c.pair_key) continue;
         try testing.expect(prev.subshape_id < c.subshape_id);
     }
+}
+
+test "the frictionless-slider residual is rounding, not energy injection" {
+    // M1.1.14 — the qualification the brief owes on the M1.1.13.1 residual, and it
+    // is the FIRST branch of the alternative it imposed: the residual PERSISTS.
+    // Pinning the float environment did not move it — `5.000002` at f32, the same
+    // figure M1.1.13.1 recorded — so its cause was NOT the unpinned environment,
+    // which was this milestone's own subject.
+    //
+    // Measured after the libm removal, the explicit folds, the installed FPU and
+    // `-Dcpu=baseline`, counted in ULP AT THE VALUE 5.0:
+    //
+    //   f32  retained 5.000002     bits 0x40A00004          4 ULP
+    //   f64  retained 5.0          bits 0x4014000000000003  3 ULP
+    //
+    // THE DISCRIMINANT, IN EXACT FORM RATHER THAN IN DECIMALS. Energy injected at a
+    // PHYSICAL rate is precision-independent in relative terms, so reproducing the
+    // f32 excess at f64 means reproducing the same ABSOLUTE excess at the same
+    // value. 5.0 lies in [4, 8), so its exponent is 2 and
+    //
+    //   ULP_f32(5.0) = 2^(2-23) = 2^-21
+    //   ULP_f64(5.0) = 2^(2-52) = 2^-50
+    //
+    // whose ratio is 2^29. The f32 excess is therefore
+    //
+    //   4 ULP_f32 = 4 x 2^29 ULP_f64 = 2^31 ULP_f64
+    //
+    // against THREE measured — nine orders of margin. The form is stated as powers
+    // of two on purpose: it is checkable by exponent arithmetic, by any reader,
+    // without a machine. A ten-digit decimal in a permanent pin is unverifiable,
+    // and that is exactly how the first version of this number survived review.
+    //
+    // THAT FIRST VERSION READ 1 717 988 150 AND WAS WRONG BY 5/4, because it was
+    // `relative excess / eps`, which counts ULP AT 1.0 while the question is about
+    // ULP AT 5.0. A quantity computed on one base and reported on another — the
+    // same shape as collected-versus-source, local-versus-cell, and
+    // `live_tests`-versus-collected-total earlier in this milestone.
+    //
+    // THE f64 RESIDUAL'S CAUSE IS NOT ATTRIBUTED, and deliberately so. M1.1.12
+    // measured exactly 5.0 there; three ULP appear today. Two changes sit between
+    // those measurements — the TGS Soft port at M1.1.13.1, and this milestone's
+    // explicit left folds, which alter the summation order of `dot` and `lengthSq`
+    // and are of exactly this magnitude. Neither has been measured against this
+    // scene, so neither is named as the cause. The conclusion does not depend on
+    // it.
+    //
+    // The bound below is in ULP rather than in metres for the same reason the
+    // discriminant is: a metre bound would pass at f64 for an energy injection nine
+    // orders too large, and would be an assertion that cannot fail where it matters.
+    const gpa = testing.allocator;
+    const retained = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
+
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(Real));
+    const five: Real = 5.0;
+    const got: Bits = @bitCast(retained);
+    const want: Bits = @bitCast(five);
+
+    // POSITIVE WITNESS FIRST: there IS an excess. Without it the bound below is
+    // satisfied by a slider that lost speed, and the test would pin nothing.
+    try testing.expect(retained > five);
+
+    // And it is a handful of ULP. `8` is loose against the 4 and 3 measured and
+    // tight against the 2^31 an energy injection needs at f64.
+    try testing.expect(got - want <= 8);
 }

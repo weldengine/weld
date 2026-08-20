@@ -100,7 +100,7 @@ pub const Backend = struct {
     /// (`fromFd`). Kept open for the lifetime of the `Backend` per the
     /// macOS quirk documented in the file header. Closed in `close()`.
     fd: i32,
-    ptr: [*]align(std.heap.pageSize()) u8,
+    ptr: [*]align(std.heap.page_size_min) u8,
     size: usize,
 
     pub fn create(name: []const u8, size: usize) Error!Backend {
@@ -128,7 +128,7 @@ pub const Backend = struct {
         // `mmap` returns `MAP_FAILED == (void*)-1` on failure.
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
 
-        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(raw.?));
         return Backend{
             .name_z = name_z,
             .gpa = gpa,
@@ -155,7 +155,7 @@ pub const Backend = struct {
         const raw = sys.mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
 
-        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(raw.?));
         return Backend{
             .name_z = name_z,
             .gpa = gpa,
@@ -176,7 +176,7 @@ pub const Backend = struct {
         const raw = sys.mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
 
-        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(raw.?));
         return Backend{
             .name_z = null,
             .gpa = std.heap.page_allocator,

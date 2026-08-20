@@ -62,7 +62,7 @@ const Error = shm.Error;
 /// on Windows.
 pub const Backend = struct {
     mapping: Handle,
-    ptr: [*]align(std.heap.pageSize()) u8,
+    ptr: [*]align(std.heap.page_size_min) u8,
     size: usize,
 
     pub fn create(name: []const u8, size: usize) Error!Backend {
@@ -89,7 +89,7 @@ pub const Backend = struct {
         const view = sys.MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);
         if (view == null) return error.ShmMapFailed;
 
-        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(view.?));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(view.?));
         return Backend{ .mapping = mapping, .ptr = ptr, .size = size };
     }
 
@@ -107,7 +107,7 @@ pub const Backend = struct {
         const view = sys.MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);
         if (view == null) return error.ShmMapFailed;
 
-        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(view.?));
+        const ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(view.?));
         return Backend{ .mapping = mapping, .ptr = ptr, .size = size };
     }
 

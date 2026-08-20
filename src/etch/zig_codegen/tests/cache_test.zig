@@ -7,7 +7,10 @@ test "identical content hits cache, no regeneration" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const cache_dir = try tmp.dir.realpathAlloc(gpa, ".");
+    // `Io.Dir` carries no `realpath` in Zig 0.16. `tmpDir` creates
+    // `.zig-cache/tmp/<sub_path>` relative to CWD and `sub_path` is public;
+    // the cache API is CWD-relative and creates the directory itself.
+    const cache_dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer gpa.free(cache_dir);
 
     const src = "component A { x: int = 0 }";
@@ -21,7 +24,10 @@ test "modified content invalidates cache, regenerates" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const cache_dir = try tmp.dir.realpathAlloc(gpa, ".");
+    // `Io.Dir` carries no `realpath` in Zig 0.16. `tmpDir` creates
+    // `.zig-cache/tmp/<sub_path>` relative to CWD and `sub_path` is public;
+    // the cache API is CWD-relative and creates the directory itself.
+    const cache_dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer gpa.free(cache_dir);
 
     const src1 = "component A { x: int = 0 }";

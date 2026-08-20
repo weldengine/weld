@@ -65,7 +65,30 @@ pub const ShmRegion = struct {
     /// Page-aligned mapping pointer. Same address space-wise on the
     /// creator side; the attacher gets a fresh virtual address but
     /// the same physical pages.
-    ptr: [*]align(std.heap.pageSize()) u8,
+    ///
+    /// M1.1.14 — `page_size_min` AND NOT `pageSize()`, because a struct field's
+    /// alignment must be comptime-known and `pageSize()` is not on every target.
+    /// Where the page size is fixed it folds at comptime and this is a strict
+    /// no-op (x86_64 and Windows: min = max = 4096); where it is VARIABLE it
+    /// routes through `std.options.queryPageSize()` and a runtime atomic load, so
+    /// the field cannot be typed at all. aarch64-linux is that target — measured,
+    /// `page_size_min = 4096` against `page_size_max = 65536` — and the repository
+    /// simply did not compile for it until the ARM64 CI cell asked.
+    ///
+    /// THE BOUND IS THE MINIMUM, and the asymmetry is the whole point rather than
+    /// a preference. A pointer aligned to the real page is ALWAYS aligned to the
+    /// minimum, so this declaration is TRUE on every target; `page_size_max` would
+    /// declare `align(65536)` on aarch64-linux for memory `mmap` only guarantees
+    /// to 4096 — not a loose claim but a false one, and illegal behaviour caught
+    /// at runtime in Debug and ReleaseSafe. Weakening a claim is the safe
+    /// direction; strengthening one you cannot honour is not.
+    ///
+    /// NOT LOAD-BEARING, and that is a measurement rather than a reassurance:
+    /// every consumer of this pointer reaches it through an `@alignCast` to
+    /// `*Header` (`ipc/viewport.zig` lines 143, 197, 210), and `@alignOf(Header)`
+    /// is **8** on all four targets — three orders below the smallest
+    /// `page_size_min`. Nothing downstream asks for page alignment.
+    ptr: [*]align(std.heap.page_size_min) u8,
     /// Bytes mapped. POSIX `ftruncate`s to exactly this size; Windows
     /// rounds up to allocation granularity but `size` reports the
     /// caller-requested length.

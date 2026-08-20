@@ -3,6 +3,9 @@
 const std = @import("std");
 const ast_mod = @import("../../ast.zig");
 const root = @import("../root.zig");
+// `SourceSpan` is private in `ast.zig` and `pub` in `token.zig`, which declares
+// it. The test reaches its owner rather than widening a production surface.
+const token_mod = @import("../../token.zig");
 
 test "UnsupportedConstruct surfaced for out-of-subset input" {
     // Build an AST with a let whose value is a `path` ExprKind (out of the
@@ -14,7 +17,7 @@ test "UnsupportedConstruct surfaced for out-of-subset input" {
     var arena = try ast_mod.AstArena.init(gpa);
     defer arena.deinit(gpa);
 
-    const span: ast_mod.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
+    const span: token_mod.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
     const rule_name = try arena.strings.intern(gpa, "bad");
     const path_expr = try arena.addExpr(gpa, .path, 0, span);
     const let_id = try arena.addLetStmt(gpa, .{
@@ -42,7 +45,7 @@ test "UnsupportedConstruct surfaced for out-of-subset input" {
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
-    try std.testing.expectError(root.CodegenError.UnsupportedConstruct, root.generateToBuffer(gpa, &arena, "<unit>", &out));
+    try std.testing.expectError(root.errors.CodegenError.UnsupportedConstruct, root.generateToBuffer(gpa, &arena, "<unit>", &out));
 }
 
 test "NonPodComponent surfaced before codegen entry" {
@@ -54,7 +57,7 @@ test "NonPodComponent surfaced before codegen entry" {
     var arena = try ast_mod.AstArena.init(gpa);
     defer arena.deinit(gpa);
 
-    const span: ast_mod.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
+    const span: token_mod.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
     const comp_name = try arena.strings.intern(gpa, "Bad");
     const field_name = try arena.strings.intern(gpa, "x");
     const type_name = try arena.strings.intern(gpa, "NotABuiltin");
@@ -81,5 +84,5 @@ test "NonPodComponent surfaced before codegen entry" {
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
-    try std.testing.expectError(root.CodegenError.NonPodComponent, root.generateToBuffer(gpa, &arena, "<unit>", &out));
+    try std.testing.expectError(root.errors.CodegenError.NonPodComponent, root.generateToBuffer(gpa, &arena, "<unit>", &out));
 }

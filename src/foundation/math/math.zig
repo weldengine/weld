@@ -13,6 +13,8 @@ const vec = @import("vec.zig");
 const quat = @import("quat.zig");
 const mat3 = @import("mat3.zig");
 const aabb = @import("aabb.zig");
+const trig = @import("trig.zig");
+const reduce_mod = @import("reduce.zig");
 
 /// Generic vector constructor `Vec(N, T)`.
 pub const Vec = vec.Vec;
@@ -47,6 +49,12 @@ pub const triangleCrossDirection = @import("exact.zig").triangleCrossDirection;
 /// The power-of-two exponent that reduces three points below unit magnitude.
 pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 
+/// Ordered lane reductions — the sanctioned form for FLOAT vectors, and the reason `@reduce` may
+/// not be used on them. `@reduce` delegates the reduction order to the backend by construction, and
+/// two Zig 0.16 backends were measured at M1.1.14 to disagree on the same `x86_64` target. See
+/// `reduce.zig` for the two disassemblies and `ARCH-031` rule 3 for the contract.
+pub const reduce = reduce_mod;
+
 /// Generic quaternion constructor `Quat(T)`.
 pub const Quat = quat.Quat;
 /// f32 quaternion.
@@ -62,6 +70,27 @@ pub const Aabb = aabb.Aabb;
 /// f32 axis-aligned bounding box.
 pub const Aabbf = aabb.Aabbf;
 
+/// The floating-point EXECUTION state (`ARCH-031` rule 5) — rounding mode and
+/// denormal handling of the calling thread. Installed by Tier 0 at thread
+/// creation and at process entry, ASSERTED by every module whose output is
+/// compared.
+///
+/// It lives under `math/` rather than beside it because `engine-phase-1-criteria.md`
+/// C1.1 binds `forge_3d` to a whitelist of two dependencies — `foundation/math/`
+/// and `forge/api/` — and `forge_3d` is the module that has to assert. There is
+/// no facade in `core/platform/`: the tier rule is documented at the definition,
+/// not re-exported across the boundary. Added M1.1.14.
+pub const float_env = @import("float_env.zig");
+
+/// DETERMINISTIC cosine — no libm call, fixed operation order (`ARCH-031`
+/// rule 4). NOT a wrapper around `@cos`: `@cos` lowers to an external `cosf` /
+/// `cos` on every target the engine ships, and two C libraries disagree by an
+/// ULP. Domain-bounded by `max_argument`; see `trig.zig` for what that bound is
+/// and why serving past it would mean writing a replacement libm.
+pub const cos = trig.cos;
+/// The largest argument magnitude `cos` accepts, in radians.
+pub const max_trig_argument = trig.max_argument;
+
 // Pins so the inline tests in every sub-file are analysed when this module is
 // built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -69,4 +98,11 @@ comptime {
     _ = quat;
     _ = mat3;
     _ = aabb;
+    _ = trig;
+    _ = float_env;
+    // M1.1.14 — `exact.zig` is reached elsewhere only through `triangleIsFlat` and
+    // `triangleCrossDirection`, and referencing a DECL analyses that decl, never the
+    // file's `test` blocks. Measured: its two tests had never run — the exact integer
+    // arithmetic M1.1.11.1 spent eleven rounds establishing was unguarded.
+    _ = @import("exact.zig");
 }

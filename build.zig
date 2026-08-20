@@ -97,6 +97,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // M1.1.14 — Tier 0 gains a `foundation` dep. `foundation` imports nothing
+    // but std, so the graph stays acyclic (`ARCH-016`) and this is the shared
+    // bottom layer depending downward, not sideways. The one consumer is
+    // `platform/float_env.zig`, the platform layer's facade over
+    // `foundation/float_env.zig`: the float environment is INSTALLED by the
+    // platform layer and ASSERTED by `forge_3d`, and `forge_3d` may not import
+    // `weld_core` (a C1.1 exit metric), so the single owner of the register
+    // layout has to be reachable from `foundation`.
+    core_module.addImport("foundation", foundation_module);
+    // M1.1.14 — `ARCH-031` rule 5: the shader hot-reload watcher creates a thread,
+    // so it must INSTALL the float environment. It reaches the single definition in
+    // `foundation/math/float_env.zig` directly rather than through a re-export
+    // across a tier boundary, which session 1 of this milestone deleted for adding
+    // a name without adding a definition.
+    render_module.addImport("foundation", foundation_module);
+
     const asset_pipeline_module = b.createModule(.{
         .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
         .target = target,
@@ -316,6 +332,146 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&forge_3d_tests_run.step);
     const forge_3d_test_step = b.step("test-forge-3d", "Run only the forge_3d solver tests");
     forge_3d_test_step.dependOn(&forge_3d_tests_run.step);
+
+    // M1.1.14 — `zig build forge-determinism`: the determinism instrument, run
+    // at ONE worker over the canonical scenario. The step is deliberately an
+    // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a test:
+    // M1.1.25 replays it at N workers and M1.A on a rebuilt scheduler DAG, and a
+    // harness whose logic lived in its `main` would have to be re-entered through
+    // a process to be replayed. Its self-reproducibility and its artifact
+    // liveness are ALSO asserted inside `zig build test`, where the same library
+    // is exercised by `forge_3d`'s own suite.
+    //
+    // Its module carries the same imports as `forge_3d` itself because its root
+    // reaches the solver by relative path, exactly as the acceptance suite does.
+    const forge_determinism_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/forge_3d/determinism_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_determinism_module.addImport("foundation", foundation_module);
+    forge_determinism_module.addImport("weld_forge", forge_api_module);
+    forge_determinism_module.addOptions("build_options", forge_build_options);
+    const forge_determinism_exe = b.addExecutable(.{
+        .name = "forge-determinism",
+        .root_module = forge_determinism_module,
+    });
+    const forge_determinism_run = b.addRunArtifact(forge_determinism_exe);
+    if (b.args) |args| forge_determinism_run.addArgs(args);
+    const forge_determinism_step = b.step(
+        "forge-determinism",
+        "Run the canonical determinism scenario at one worker (M1.1.14)",
+    );
+    forge_determinism_step.dependOn(&forge_determinism_run.step);
+
+    // M1.1.14 — `zig build forge-asm-inventory`: the conformance test of
+    // `ARCH-031` rule 4, read in the EMITTED ASSEMBLY rather than in the source.
+    // `forge_3d` is compiled to assembly for the three targets the engine ships
+    // and every call site is inspected for a libm transcendental.
+    //
+    // The scanner is `tools/asm_inventory/` — a Zig program, not `grep`. Named
+    // substitution: the check has to anchor on the instruction mnemonic at line
+    // start, and the natural `\b` for that is a GNU extension that silently
+    // matches NOTHING on BSD grep. A scanner removes the class instead of
+    // dodging one instance of it, and it carries its own counter-factuals.
+    //
+    // A DEDICATED step and NOT part of `zig build test`: three cross-compiles
+    // of the whole physics module are minutes of work, `test` runs twice on
+    // every `git push` through the pre-push hook, and the answer is a property
+    // of the three TARGETS — it does not vary with the host that asks. So CI
+    // invokes it on one cell, exactly as it already does for
+    // `verify-synth-100`. The scanner's own tests are in `zig build test`.
+    const asm_inventory_module = b.createModule(.{
+        .root_source_file = b.path("tools/asm_inventory/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const asm_inventory_exe = b.addExecutable(.{
+        .name = "asm_inventory",
+        .root_module = asm_inventory_module,
+    });
+    const asm_inventory_run = b.addRunArtifact(asm_inventory_exe);
+
+    // The three targets of the determinism contract: the two OSes of level 1
+    // and the ISA of level 2 (`engine-phase-1-criteria.md` C1.1). Each is
+    // pinned to `baseline` for the same reason every CI cell is — a runner
+    // image that changes processor generation must not change what is emitted
+    // (`ARCH-031` rule 6).
+    const inventory_targets = [_][]const u8{
+        "x86_64-linux-gnu",
+        "x86_64-windows-gnu",
+        "aarch64-linux-gnu",
+    };
+    for (inventory_targets) |triple| {
+        const query = std.Target.Query.parse(.{
+            .arch_os_abi = triple,
+            .cpu_features = "baseline",
+        }) catch @panic("bad inventory target triple");
+        const resolved = b.resolveTargetQuery(query);
+
+        // The module chain has to be rebuilt per target: a `Module` is bound to
+        // its target at creation, so the host-bound handles above cannot serve.
+        // It mirrors the graph declared earlier in this file and nothing more —
+        // if that graph gains an edge, this loop is where it has to be repeated,
+        // and a missing edge is a compile error here rather than a silent gap.
+        const t_foundation = b.createModule(.{
+            .root_source_file = b.path("src/foundation/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        const t_core = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        });
+        t_core.addImport("foundation", t_foundation);
+        const t_forge_api = b.createModule(.{
+            .root_source_file = b.path("src/modules/forge/api/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_forge_api.addImport("foundation", t_foundation);
+        t_forge_api.addImport("weld_core", t_core);
+        const t_forge_3d = b.createModule(.{
+            .root_source_file = b.path("src/modules/forge/forge_3d/root.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_forge_3d.addImport("foundation", t_foundation);
+        t_forge_3d.addImport("weld_forge", t_forge_api);
+        t_forge_3d.addOptions("build_options", forge_build_options);
+
+        // Compiling `forge_3d/root.zig` DIRECTLY emits nothing — it is a
+        // re-export file and Zig is lazy. Measured before this indirection
+        // existed: `0 call sites examined` on all three targets, which the
+        // scanner refuses rather than reports as clean. The surface root forces
+        // the module's public functions into codegen; see its header.
+        const t_surface = b.createModule(.{
+            .root_source_file = b.path("tools/asm_inventory/forge_3d_surface.zig"),
+            .target = resolved,
+            .optimize = .ReleaseSafe,
+        });
+        t_surface.addImport("forge_3d", t_forge_3d);
+
+        const obj = b.addObject(.{
+            .name = b.fmt("forge_3d_asm_{s}", .{triple}),
+            .root_module = t_surface,
+        });
+        asm_inventory_run.addFileArg(obj.getEmittedAsm());
+    }
+
+    const asm_inventory_step = b.step(
+        "forge-asm-inventory",
+        "Assert zero libm transcendental call in forge_3d assembly (ARCH-031 rule 4)",
+    );
+    asm_inventory_step.dependOn(&asm_inventory_run.step);
+
+    // The scanner's own counter-factuals ride in `zig build test`: a scanner
+    // that cannot fire reports a clean tree for the wrong reason, and that is
+    // the failure this suite exists to make impossible.
+    const asm_inventory_tests = b.addTest(.{ .root_module = asm_inventory_module });
+    test_step.dependOn(&b.addRunArtifact(asm_inventory_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
@@ -697,6 +853,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_module.addImport("weld_core", core_module);
+    // M1.1.14 — the main thread installs the engine float environment
+    // (`ARCH-031` rule 5) from its single definition under `foundation/math/`.
+    runtime_module.addImport("foundation", foundation_module);
     const runtime_exe = b.addExecutable(.{
         .name = "weld-runtime",
         .root_module = runtime_module,
@@ -718,6 +877,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     editor_module.addImport("weld_core", core_module);
+    // M1.1.14 — same as the runtime: the main thread is not born of a spawn.
+    editor_module.addImport("foundation", foundation_module);
     // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
     // shared `shaders` facade — the same module the S2 spike uses.
     editor_module.addImport("shaders", shaders_module);
@@ -1261,6 +1422,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     demo_module.addImport("weld_core", core_module);
+    demo_module.addImport("foundation", foundation_module);
     demo_module.addImport("weld_etch", etch_module);
     demo_module.addImport("fixture_facade", fixture_facade_module);
     const demo_exe = b.addExecutable(.{
@@ -1530,6 +1692,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     demo_codegen_module.addImport("weld_core", core_module);
+    demo_codegen_module.addImport("foundation", foundation_module);
     demo_codegen_module.addImport("cooked_demo", cooked_demo_module);
     const demo_codegen_exe = b.addExecutable(.{
         .name = "demo-etch-codegen",
@@ -1788,6 +1951,55 @@ pub fn build(b: *std.Build) void {
     );
     lint_step.dependOn(&lint_run.step);
 
+    // M1.1.14 — the dead-test guard, ACTIVE. Every file holding a `test` block
+    // must belong to some test target's analysis closure or to a declared
+    // exclusion. It builds nothing and runs nothing: it reads `build.zig` for its
+    // roots and walks relative imports, so it costs a tree scan and rides on the
+    // existing lint gate rather than earning a cell of its own.
+    //
+    // WHY IT IS ACTIVE AND NOT ADVISORY. An uncollected `test` block is never
+    // ANALYSED, so the code it instantiates loses type-checking, not just
+    // assertions — which is how `zig_codegen/cache.zig` stopped compiling at the
+    // Zig 0.16 pin unnoticed and how a use-after-return in the render graph
+    // survived ten milestones. Writing that as doctrine while nothing enforced it
+    // is the prohibition this milestone named against itself.
+    //
+    // It takes no paths, so `b.args` is deliberately NOT forwarded: the args of
+    // `zig build lint -- src` belong to the rule pass beside it.
+    const dead_tests_run = b.addRunArtifact(weld_lint_exe);
+    dead_tests_run.addArg("dead-tests");
+
+    // M1.1.14 review — `-Dexpect-collected=N` FORWARDED, and the reason it exists is
+    // that the conservation it feeds was unreachable. The tool's suite-derived check
+    // sat behind `--expect-collected=N` and NOTHING passed it: not this file, not the
+    // CI. So the lint printed an expected-collected line and then printed `clean`,
+    // having compared nothing — the fourth instance in this milestone of a control
+    // that exists and a path bypasses, this time inside the tool built against that
+    // family.
+    //
+    // Two layers, and only this one is optional. The tool now confronts the closure
+    // against a DECLARED per-OS total on every invocation, with no flag to forget;
+    // this option supplies the second number, the total the suite itself reported.
+    // CI passes it from the same job that ran the tests. Locally it is optional
+    // because `zig build lint` cannot run the suite to learn the figure, and an
+    // option that silently defaults to the closure's own arithmetic would be the
+    // defect again in a new costume.
+    if (b.option(
+        usize,
+        "expect-collected",
+        "Confront the dead-test closure with a collected-test total from `zig build test`",
+    )) |n| {
+        dead_tests_run.addArg(b.fmt("--expect-collected={d}", .{n}));
+    }
+
+    lint_step.dependOn(&dead_tests_run.step);
+
+    const dead_tests_step = b.step(
+        "dead-tests",
+        "Report every file with `test` blocks outside all test-target closures",
+    );
+    dead_tests_step.dependOn(&dead_tests_run.step);
+
     const lint_commit_run = b.addRunArtifact(weld_lint_exe);
     lint_commit_run.addArg("commit-msg");
     if (b.args) |args| lint_commit_run.addArgs(args);
@@ -1810,4 +2022,56 @@ pub fn build(b: *std.Build) void {
     const lint_runner_run = b.addRunArtifact(lint_runner_test);
     lint_runner_run.step.dependOn(&b.addInstallArtifact(weld_lint_exe, .{}).step);
     test_step.dependOn(&lint_runner_run.step);
+
+    // M1.1.14 — the linter's OWN inline tests. The fixture corpus above proves
+    // each rule is WIRED into `runLint`, by running the real binary; it cannot
+    // prove a rule's logic, since the runner only reads an exit code and a
+    // fixture can say no more than "something fired". The two layers are
+    // complementary and neither substitutes for the other: a rule tested only
+    // inline can be left out of `main.zig` and still pass, and a rule covered
+    // only by fixtures can miscount, mis-scope its escape hatch, or flag its own
+    // prose without a single test noticing.
+    //
+    // Until this step existed, every `test` block under `tools/weld_lint/` was
+    // dead text — compiled by nothing, run by nothing. The root is `tests.zig`
+    // and NOT `main.zig`: a test build does not analyse a plain `const` import,
+    // so rooting here at `main.zig` ran zero tests while reporting success —
+    // measured, by appending a deliberately failing test and watching this step
+    // stay green.
+    const weld_lint_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/weld_lint/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const weld_lint_unit_test = b.addTest(.{ .root_module = weld_lint_test_module });
+    test_step.dependOn(&b.addRunArtifact(weld_lint_unit_test).step);
+
+    // M1.1.14 — three modules held `test` blocks that NO test target collected,
+    // so they had never run: `src/modules/render/` (49 blocks), `tools/bindgen/`
+    // (8) and `src/modules/audio/` (1). Found by counting source `test` blocks
+    // against the suite's own per-target totals, then confirming each by
+    // appending a deliberately failing test and watching the suite stay green.
+    // RENDER IS HELD, and the reason is what the sweep was for. Wiring its 49
+    // never-run tests turns two of them red, and a probe settled why: the
+    // render-graph passes return a `Pass` whose `reads`/`writes` slices point at
+    // an anonymous literal in `buildPass`'s OWN STACK FRAME. Measured on
+    // `depth_prepass`: `writes.ptr` is a stack address, `depth_attachment` reads
+    // `false` immediately after the call, and a fresh call at the SAME address
+    // reads `true` — a use-after-return, live since M0.4 and invisible because
+    // nothing ever compiled the tests that assert it. `forward.zig` fails
+    // identically. The fix is an ownership decision in the render graph, not a
+    // determinism change, so it is reported rather than taken here.
+    const render_tests = b.addTest(.{ .root_module = render_module });
+    test_step.dependOn(&b.addRunArtifact(render_tests).step);
+
+    const audio_tests = b.addTest(.{ .root_module = audio_module });
+    test_step.dependOn(&b.addRunArtifact(audio_tests).step);
+
+    const bindgen_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const bindgen_tests = b.addTest(.{ .root_module = bindgen_test_module });
+    test_step.dependOn(&b.addRunArtifact(bindgen_tests).step);
 }

@@ -484,7 +484,7 @@ fn terminal(
 /// never a multiplication by `1 / scale`, whose reciprocal overflows for a denormal.
 fn unitOf(comptime T: type, v: math.Vec(3, T)) ?math.Vec(3, T) {
     const Simd = @Vector(3, T);
-    const scale = @reduce(.Max, @abs(v.data));
+    const scale = v.maxAbsComponent();
     if (scale == 0) return null;
     const reduced: math.Vec(3, T) = .{ .data = v.data / @as(Simd, @splat(scale)) };
     return reduced.scale(1 / reduced.length());

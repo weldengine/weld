@@ -38,6 +38,10 @@
 const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
+// M1.1.14 — the engine float environment, installed at the head of every worker
+// thread (`ARCH-031` rule 5). Imported from its single definition rather than
+// through a Tier 0 facade; the tier rule lives at that definition.
+const float_env = @import("foundation").math.float_env;
 
 const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;
@@ -476,6 +480,18 @@ const livelock_budget_ns: i96 = 30 * std.time.ns_per_s;
 const livelock_check_stride: u64 = 1 << 16;
 
 fn workerMain(sched: *Scheduler, worker_idx: u32) void {
+    // M1.1.14 — FIRST statement of every engine worker thread. The float
+    // environment is per-thread and its default is not portable (it depends on
+    // the OS, the linked C runtime, and on what a graphics driver may have left
+    // behind), so it is installed rather than assumed (`ARCH-031` rule 5).
+    //
+    // This is the site the invariant names by role: the job system is
+    // work-stealing, so WHICH worker runs WHICH job is not a stable property,
+    // and a single worker with denormals flushed would make a result depend on
+    // scheduling. Installing here rather than in a module is what covers every
+    // thread instead of the ones a module happens to have created.
+    float_env.install();
+
     const self = &sched.workers[worker_idx];
     // M0.2.1 / E5 — last_generation now u32 to match packed gen_and_n's
     // generation half. Initial 0 matches `gen_and_n: .init(0)` which

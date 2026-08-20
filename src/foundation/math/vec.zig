@@ -9,6 +9,7 @@
 //! unit_z`, and rotating (1,0,0) by +90° about +Y yields (0,0,−1).
 
 const std = @import("std");
+const reduce = @import("reduce.zig");
 const exact = @import("exact.zig");
 
 /// Column vector of `N` components of scalar type `T`, backed by a
@@ -74,7 +75,7 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         }
         /// Dot product `self · other`.
         pub fn dot(self: Self, other: Self) T {
-            return @reduce(.Add, self.data * other.data);
+            return reduce.foldAdd(self.data * other.data);
         }
         /// Cross product `self × other` (right-handed, `N == 3` only).
         pub fn cross(self: Self, other: Self) Self {
@@ -91,7 +92,7 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         }
         /// Squared length `self · self` (no square root).
         pub fn lengthSq(self: Self) T {
-            return @reduce(.Add, self.data * self.data);
+            return reduce.foldAdd(self.data * self.data);
         }
         /// Euclidean length `sqrt(self · self)`.
         pub fn length(self: Self) T {
@@ -153,7 +154,7 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         /// re-derives. The direction is unaffected: it is scale-free by construction, which is exactly
         /// why the two are returned separately rather than as one vector.
         pub fn unitAndLength(self: Self) ?struct { unit: Self, length: ?T } {
-            const largest = @reduce(.Max, @abs(self.data));
+            const largest = reduce.foldMax(@abs(self.data));
             if (largest == 0) return null;
             const reduced: Self = .{ .data = self.data / @as(Simd, @splat(largest)) };
             const reduced_length = reduced.length();
@@ -166,7 +167,7 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
 
         /// Largest absolute component. Zero exactly when every component is zero.
         pub fn maxAbsComponent(self: Self) T {
-            return @reduce(.Max, @abs(self.data));
+            return reduce.foldMax(@abs(self.data));
         }
 
         /// Multiply every component by `2^exp`, EXACTLY.
@@ -378,8 +379,15 @@ pub fn CrossOutcome(comptime T: type) type {
 /// The test that moves between tiers is `isFinite` and exact zero — STRUCTURAL, never a tolerance,
 /// the same signal class the ray kernel reports as `.unrepresentable`. And it cannot be written on
 /// the largest component: one lane can come out NaN from `inf − inf` while the other two stay finite
-/// and non-zero — `(2.81e14, NaN, −2.81e14)` is measured — and `@reduce(.Max, @abs(…))` lowers to a
-/// NaN-IGNORING maximum, so a largest-component guard would let that NaN through.
+/// and non-zero — `(2.81e14, NaN, −2.81e14)` is measured — while `maxAbsComponent` is NaN-IGNORING,
+/// so a largest-component guard would let that NaN through.
+///
+/// That NaN-ignoring behaviour is now GUARANTEED rather than observed, and the difference is the
+/// point. Until M1.1.14 this paragraph read "`@reduce(.Max, @abs(…))` lowers to a NaN-ignoring
+/// maximum" — a claim about a LOWERING, which is a property of whichever code generator happened to
+/// be looked at and not of the language. `maxAbsComponent` folds `@max`, which the language
+/// specifies to return the non-NaN operand, so the behaviour this tier selection depends on is now
+/// owed by Zig and not lent by a backend.
 ///
 /// Tiers 2 and 3 are COLD by construction. Every vertex component must be finite.
 pub fn triangleCross(

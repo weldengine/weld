@@ -19,6 +19,21 @@ env:
   # cache automatically. The build.zig minor-version guard still enforces the
   # 0.16.x invariant on the local toolchain.
   ZIG_VERSION: "0.16.0"
+  # M1.1.14 — the third pinning axis of `ARCH-031` rule 6, alongside the
+  # compiler version above and the per-cell optimize mode. NO CELL COMPILES FOR
+  # ITS NATIVE CPU, and the motive is not parity between two OSes — two
+  # IEEE-strict builds agree anyway — it is stability IN TIME: a runner image
+  # that moves to a new processor generation would otherwise invalidate a
+  # committed determinism witness without a line of code having changed, and the
+  # diagnosis would go looking inside the engine.
+  #
+  # `baseline` rather than a named model or `x86_64_v2`: it is defined per
+  # architecture by the compiler, so the single value below is correct on
+  # x86_64 and on aarch64 alike, and it is the one choice that cannot drift with
+  # a runner refresh. The cost is SSE2-only codegen on x86_64; the CI legs are
+  # dominated by compilation rather than by test arithmetic, and determinism is
+  # not negotiable per cell (`ARCH-031`, Conséquences).
+  ZIG_CPU: "baseline"
 
 jobs:
   # M1.0.3-followup — doc-only fast path. `ci-gate` (en fin de fichier) devient
@@ -85,8 +100,44 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        # M1.1.14 / Gate D — `ubuntu-24.04-arm` carries the half of C1.1 that no
+        # machine in rotation can measure: two physical machines, three GPU
+        # configurations, no ARM64 among them. Level 2 point 1 — the four discrete
+        # traces identical to the x86_64 witness over 60 frames, at both precisions
+        # — is the PASS/FAIL, and it is verified by the `forge-determinism` step
+        # below like any other cell.
+        #
+        # A CONTINUOUS DIVERGENCE HERE IS NOT A FAILURE, and the point is worth
+        # writing where the cell is declared rather than only in the brief: level 2
+        # PREDICTS it. `engine-phase-1-criteria.md` C1.1 puts inter-ISA
+        # bit-exactness at level 3 and explicitly out of Phase 1, so the chain
+        # comparison skips on this ISA by design and prints that it did. What the
+        # cell must produce is the discrete parity and a divergence frame that is
+        # reproducible run to run; the frame's REGRESSION is the signal, never its
+        # value.
+        #
+        # This is the first time the repository compiles for AArch64 in CI. What
+        # falls here and is NOT the discrete parity is a finding to measure and
+        # record, not to fix under cover of this milestone.
+        os: [ubuntu-24.04, windows-2025, ubuntu-24.04-arm]
         mode: [Debug, ReleaseSafe]
+        # M1.1.14 / Gate E — THE PRECISION AXIS, `engine-platform.md` §8's third
+        # dimension, built rather than amended away. `-Dphysics_f64` is a supported
+        # build flag, and a supported flag no cell exercises is an untested
+        # configuration — the milestone's own named prohibition.
+        #
+        # AFFORDABLE, ON THE NUMBER AND NOT ON THE INTENTION. The cache returned to
+        # `windows-2025 / Debug` took it from 14 minutes to 4 of a 20-minute budget;
+        # every other cell sits between 1 and 9 minutes of its own. The one cell
+        # without margin was `ubuntu-24.04-arm / ReleaseSafe` at 25 of 55, and its
+        # cost was LOCATED before this axis was allowed to double it: 129 of 132
+        # `compile test` steps ran where a good run reuses 131, so the cost is
+        # COMPILATION and not test execution. Compilation does not depend on the
+        # precision — `-Dphysics_f64` moves a comptime constant, not a volume of
+        # code — so the f64 twin costs the same, and 25 minutes is a cache-miss
+        # figure rather than a steady state: the same cell ran in 1 minute when the
+        # cache served it.
+        precision: [false, true]
     runs-on: ${{ matrix.os }}
     # M0.1 hotfix — bumped from 10 to 20 min: Windows ReleaseSafe on the
     # 2-vCPU runner spends ~3 min on `zig build` then ~7 min on
@@ -181,16 +232,52 @@ jobs:
       # save cost exceeded the build it protected and pushed the job past its
       # ceiling. The Debug legs now run fully cold by design, so their build and
       # test wall-times are the honest cold numbers rather than a cache lottery.
+      # M1.1.14 — `ZIG_CPU` JOINS EVERY CACHE KEY, and this is a READING of the
+      # config rather than an experiment. The keys carried os, mode and Zig
+      # version but NOT the CPU axis this milestone introduced, so a
+      # `-Dcpu=baseline` build could restore a cache saved from a NATIVE-CPU
+      # build through either restore-key. Zig's manifests are cpu-aware, so that
+      # never returns a wrong object — it returns a MISS and rebuilds, leaving
+      # BOTH variants of everything in one `.zig-cache`.
+      #
+      # That bloat is what meets the 2 GB save cap recorded above
+      # (`was 6214569092; purged contents before save`), and the purge is the
+      # corruption mechanism: it deletes objects while the manifests referencing
+      # them survive into the saved archive, so the next restore hands
+      # `zig build` a manifest whose entry cannot be stat'd — `file_hash
+      # FileNotFound` on an executable the build believes it has.
+      #
+      # Every measured property of that failure follows: `ReleaseSafe` ONLY,
+      # because these cache steps are gated on that mode and Debug has none;
+      # `windows-2025` only, where the purge was observed; content varying at
+      # CONSTANT COMMIT, because which entries were purged depends on the save;
+      # and one commit green then red a day apart, because it depends on which
+      # generation was restored.
+      #
+      # Adding the axis fixes the `ARCH-031` rule 6 pinning AND makes every
+      # pre-M1.1.14 cache unrestorable — which is the point: those are the
+      # mixed-CPU archives that feed the purge.
+      # M1.1.14 / Gate E — THE RELEASESAFE-ONLY RESTRICTION IS LIFTED, because the
+      # measurement it rested on has been refuted. It was adopted when
+      # `Save Zig cache` went 39s -> 5m23 -> 7m39 and ate the Debug budget; BOTH
+      # causes of that inflation are now fixed — the key carried no CPU axis, so
+      # every run mixed two CPU variants into one archive, and the oversized result
+      # met a cap that purged it. A decision resting on a refuted measurement is
+      # not inherited, it is re-measured.
+      #
+      # `windows-2025 / Debug` is the cell that matters: 14 minutes of a 20-minute
+      # budget with no cache, against 5 of 55 for its ReleaseSafe sibling, which now
+      # builds in 2 seconds. It is also the cell a `{f32, f64}` axis would double,
+      # so this is the number that decides that axis.
       - name: Restore Zig cache
-        if: matrix.mode == 'ReleaseSafe'
         id: zig-cache
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
-            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
+            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
@@ -206,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build -Doptimize=${{ matrix.mode }}
+          zig build -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
           echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # CI cache refresh chore — mid-job save right after `zig build`: a run
@@ -218,25 +305,120 @@ jobs:
       # distinct from the full post-test save at the end of the job; the
       # zon-level prefix fallback of the restore step matches both, newest
       # first.
+      # M1.1.14 — THE SAVE IS ALL-OR-NOTHING. `actions/cache` purges contents when
+      # the archive exceeds its cap and saves what is left, which produces a
+      # `.zig-cache` whose manifests reference objects that are no longer there:
+      # the next restore hands `zig build` an entry it cannot stat, and the build
+      # fails with `file_hash FileNotFound` on something it believes it has.
+      # A cache that LIES costs more than no cache — this milestone spent six runs
+      # and two wrong hypotheses learning it.
+      #
+      # So the size is measured first and the save is SKIPPED, loudly, when it
+      # would be partial. A skipped save means the next run is cold: slower, and
+      # correct. Pinning `ZIG_CPU` in the key removed the cause that was inflating
+      # the archive here, but the cap will be met again for other reasons — the f64
+      # axis and the ARM cell both add targets — and the purge would corrupt just
+      # the same. The trigger was fixed; this fixes the mechanism.
+      # M1.1.14 — THE 2 GB CONSTANT HAD NO SOURCE ON THIS CACHE, and both ReleaseSafe
+      # cells have been permanently cold because of it. Measured, not argued:
+      #
+      #   * the line `Zig cache exceeded 2147483648 bytes (was …); purged contents
+      #     before save` is emitted by `Post Run weldengine/setup-zig@v0.1.0` — OUR
+      #     OWN action, in its post step, about the cache IT manages. It is not
+      #     `actions/cache`, and it is not this `.zig-cache`.
+      #   * `2147483648` occurs exactly TWICE in all of `.github/`: in the comment
+      #     quoting that message, and as the `limit=` below. It was transcribed
+      #     from one cache's cap onto a different cache.
+      #   * the volumes that action reports on the GLOBAL cache are far larger than
+      #     anything here — 14 700 387 106 bytes on ubuntu and 7 707 924 893 on
+      #     windows in bench run 31933791179 — so the two are not even the same
+      #     order of quantity.
+      #
+      # THIS RUN IS AN EXPERIMENT AND ITS LOG IS THE RESULT. The pre-check is
+      # raised to GitHub's documented repository-wide 10 GB so it stops pre-empting,
+      # and `actions/cache/save` is allowed to answer for itself. Two outcomes, both
+      # readable in the log and neither assumed here:
+      #
+      #   * it SAVES — then the cells stop being cold, and the next run yields the
+      #     warm `windows-2025 / ReleaseSafe` figure that decides the f64 matrix
+      #     axis. That number does not exist today.
+      #   * it REFUSES, with its own "over the … limit, not saving cache" — then
+      #     refusing is safe, the cells are cold for a reason that is finally the
+      #     platform's rather than ours, and the decision moves to what is cached.
+      #
+      # The outcome that would be a defect is a PURGE — a partial archive whose
+      # manifests outlive their objects, which the next restore turns into
+      # `file_hash FileNotFound`. Its signature is known and recorded: ReleaseSafe
+      # only, windows-2025 only, content varying at a CONSTANT commit. If it
+      # appears, this raise is reverted; a cache that lies costs more than no cache.
+      - name: Measure the Zig cache before saving
+        id: cache-size
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit=10737418240
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache: $bytes bytes (cap $limit)"
+          # The decomposition, so the "reduce what is cached" route is instructed by
+          # a measurement rather than by a guess. Measured locally, `o` is ~99 % of
+          # the tree — and it cannot be dropped, since a manifest without its object
+          # is the corruption above.
+          du -sk .zig-cache/* 2>/dev/null | sort -rn | head -5 || true
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
+            echo "::warning::A partial save leaves manifests referencing purged objects, which"
+            echo "::warning::the next restore turns into 'file_hash FileNotFound'. Cold is correct."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Save Zig cache (post-build)
-        if: matrix.mode == 'ReleaseSafe'
+        if: steps.cache-size.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
 
       - name: zig build test
         shell: bash
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test -Doptimize=${{ matrix.mode }}
+          # The suite's own COLLECTED TOTAL is captured here and handed to the
+          # dead-test conservation below. M1.1.14 review — that control existed
+          # behind an optional `--expect-collected=N` which NOTHING passed, so the
+          # tool printed an expectation and then printed `clean`, having compared it
+          # to nothing. The tool now checks a DECLARED total unconditionally; this
+          # step supplies the second, INDEPENDENT number, which is what stops the
+          # declared one from being bumped to match a drifted closure.
+          #
+          # `tee` and not a re-run: the number must come from the invocation that
+          # actually ran the tests. And the exit code is captured through
+          # PIPESTATUS, `set -euo pipefail` notwithstanding — a pipeline's status is
+          # the last command's, and this repository has pushed a red build under a
+          # green self-report exactly that way.
+          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          # "N/M tests passed" — M is the collected total. Absent or unparsable is a
+          # FAILURE and not a skip: a missing number is how a control comes to be
+          # bypassed, which is the defect this whole step exists to close.
+          collected="$(sed -n 's/.*[0-9][0-9]* of \([0-9][0-9]*\) tests passed.*/\1/p;s#.*[^0-9]\([0-9][0-9]*\)/\([0-9][0-9]*\) tests passed.*#\2#p' test-out.txt | tail -1)"
+          if ! printf '%s' "$collected" | grep -Eq '^[0-9]+$'; then
+            echo "::error::could not read the collected test total from the suite summary"
+            grep -n "tests passed" test-out.txt || true
+            exit 1
+          fi
+          echo "COLLECTED_TESTS=$collected" >> "$GITHUB_ENV"
+          echo "suite reported $collected collected tests"
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
       # `.etch` fixtures + the `etch_test` shim run over the green fixtures.
       - name: zig build test-etch
-        run: zig build test-etch -Doptimize=${{ matrix.mode }}
+        run: zig build test-etch -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
@@ -244,7 +426,7 @@ jobs:
       # between the committed bindings and what the regen produces
       # blocks the merge.
       - name: zig build bindgen-verify
-        run: zig build bindgen-verify
+        run: zig build bindgen-verify -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.8 / E3-D — D-S5-synth100-proper proof: the standalone
       # bench/fixtures/synth_100/ sub-project resolves the parent as a
@@ -253,7 +435,92 @@ jobs:
       # A nested cold build (~30 s) — one matrix leg is enough.
       - name: zig build verify-synth-100
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build verify-synth-100
+        run: zig build verify-synth-100 -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.14 — the conformance test of `ARCH-031` rule 4, read in the emitted
+      # assembly and not in the source: `forge_3d` is compiled for the three
+      # targets the engine ships and every call site is inspected for a libm
+      # transcendental. It answers a property of those three TARGETS, so one
+      # cell covers the matrix — same arbitration as `verify-synth-100` above,
+      # and the reason it is a dedicated step rather than part of `zig build
+      # test` (which the pre-push hook runs twice on every push) is written in
+      # `build.zig`. Not gated on the matrix mode of the cell: the step pins
+      # ReleaseSafe internally, since that is the mode a witness is produced in.
+      - name: zig build forge-asm-inventory
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build forge-asm-inventory -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.14 — `zig build lint` ON CI, and its absence was the ninth instance of
+      # this milestone's own failure mode. A grep over the whole of
+      # `.github/workflows/` returned NOTHING: the only caller was the `pre-commit`
+      # hook in `lefthook.yml`. So the brief lists "`zig build lint` green" as a CI
+      # criterion that no cell could produce, and — worse — BOTH guards this
+      # milestone built hang off this step: the dead-test closure and
+      # `no_float_reduce`. Neither ran in CI. A doctrine written on the strength of
+      # a guard nobody runs is the prohibition this milestone named against itself,
+      # and the local counter-factual that authorised it proved only that the
+      # LOCAL invocation reddens.
+      #
+      # One cell, because it answers a property of the SOURCE and not of the host —
+      # the same arbitration as `verify-synth-100` and `forge-asm-inventory` above.
+      - name: zig build lint
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.14 review — THE SUITE-DERIVED HALF OF THE CONSERVATION, on the cell.
+      # `zig build lint` above already runs the unconditional check of the closure
+      # against the DECLARED total. This confronts that declared number with the
+      # total the suite itself reported in this same job, captured from the run that
+      # actually executed the tests. Two independently produced numbers, which is
+      # what the bilateral control has meant since it was written — and what was
+      # missing while `--expect-collected` sat behind a flag nobody passed.
+      #
+      # EVERY CELL, and NOT the one cell `lint` runs on — which was the first version
+      # of this step and left a hole the moment it went green. The lint RULE pass is
+      # one cell because it answers a property of the SOURCE; the conservation is not
+      # that kind of quantity. The collected total is PER PLATFORM — 1864 on Windows
+      # against 1866 elsewhere, the two `only_on = .windows` entries of `uncollected` —
+      # so a control on ubuntu alone leaves `expectedCollectedOn(.windows)` a declared
+      # number that nothing confronts, which is the very shape P2-7 exists to remove.
+      #
+      # `COLLECTED_TESTS` is set by the test step above and its absence fails there, so
+      # an empty value cannot reach this line silently. The step is a source scan plus
+      # one small build, so paying it twelve times is cheap against a number per
+      # platform that would otherwise be unchecked on two of the three.
+      - name: dead-test conservation against the suite's own total
+        # `shell: bash` DECLARED, and the deliberate red is what found the need. The
+        # step carried no `shell:`, so on windows-2025 it ran under `pwsh`. The plain
+        # form is a bare substitution and worked there — the green run printed
+        # `control OK at 1864` — but the counter-factual's `$(( N + 1 ))` became
+        # `$ 1865` under PowerShell, two tokens, and `zig build` answered
+        # `Expected -Dexpect-collected to be an integer of type usize`. So the
+        # Windows red proved an argument-parsing failure and NOT the conservation
+        # firing, and the negative witness on Windows is not established.
+        # Uniform across the twelve now, which also removes the trap for whoever next
+        # adds shell syntax here.
+        shell: bash
+        run: zig build dead-tests -Dcpu=${{ env.ZIG_CPU }} -Dexpect-collected=${{ env.COLLECTED_TESTS }}
+
+      # M1.1.14 — THE DETERMINISM HARNESS, ON THE NORMAL PATH AND NOT BEHIND A
+      # FLAG. Every cell replays the canonical scenario and compares its own output
+      # against the committed witnesses. This is where C1.1 level 1 is verified on
+      # x86_64 and level 2 point 1 on the ARM64 cell; a witness with nothing reading
+      # it is a file.
+      #
+      # NO AGGREGATOR, by the arbitration in `engine-development-workflow.md` §7.3:
+      # each cell compares against the in-tree witness and fails ALONE, so a failure
+      # names the platform instead of announcing that two blobs differ.
+      #
+      # RESTORED AFTER BEING DELETED BY ACCIDENT, and the accident is worth its
+      # line. The commit that removed the temporary `lint` counter-factual cut a
+      # span running from that step's comment to the timing report's, and THIS step
+      # sat between them. Three runs then went green with no determinism check at
+      # all — a step that does not run cannot fail — which is the very property the
+      # deleted counter-factual existed to prove about `lint`. Measured, not
+      # inferred: `git show <sha>:.github/workflows/ci.yml | grep -c` returns 1 at
+      # `9a31746` and `a18b408`, and 0 from `c3d6073` onward.
+      - name: zig build forge-determinism
+        run: zig build forge-determinism -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       # M0.9 / E1 — CI wall-time + cache measurement, archived as an
       # artifact (measurement deliverable, not a gate). `always()` so a
@@ -270,14 +537,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt"
+          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}.txt"
           {
-            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }})"
+            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }}, ${{ matrix.precision }})"
             echo "os=${{ matrix.os }}"
             echo "mode=${{ matrix.mode }}"
+            echo "physics_f64=${{ matrix.precision }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
-            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
-            echo "cache_enabled=${{ matrix.mode == 'ReleaseSafe' }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
+            echo "cache_enabled=true"
+            # M1.1.14 — the archive size travels with the timings, because the
+            # decision it feeds is about matrix SHAPE and a reader weighing another
+            # axis needs both. Measured here: a Debug archive is far smaller than a
+            # ReleaseSafe one (0.59 GB against 2.86 on windows-2025), which is the
+            # other half of why the ReleaseSafe-only restriction was mis-founded.
+            echo "cache_bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 | awk '{print $1*1024}')"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
             echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
             echo "build_seconds=${BUILD_SECONDS:-NA}"
@@ -292,20 +566,49 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}
-          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt
+          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}
+          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}.txt
           retention-days: 30
 
       # CI cache refresh chore — full post-test cache save. `if: always()`
       # so a red test leg still saves whatever it compiled. This entry is
       # newer than the post-build save of the same run, so the zon-level
       # prefix fallback serves it first to the next run.
+      # M1.1.14 — THE ALL-OR-NOTHING GUARD WAS HALF-APPLIED, and this is where.
+      # `Save Zig cache (final)` carried `always() && matrix.mode == 'ReleaseSafe'`
+      # and never consulted `steps.cache-size.outputs.save`, so every run that
+      # printed `SKIPPING the save` saved anyway one step later — measured on run
+      # 31932309771, where the pre-check warned at 3 094 724 608 bytes, the
+      # post-build save was correctly skipped, and this one reported
+      # `Cache saved with key: …`. One of two save steps honoured the guard.
+      #
+      # It gets its OWN measurement rather than reusing the earlier output, because
+      # `always()` is deliberate here — the cache is worth saving even when the
+      # tests failed — and the earlier step is skipped when the build fails, which
+      # would silently turn `always()` into `never` on exactly those runs.
+      - name: Measure the Zig cache before the final save
+        if: always()
+        id: cache-size-final
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit=10737418240
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache (final): $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the final save."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Save Zig cache (final)
-        if: always() && matrix.mode == 'ReleaseSafe'
+        if: always() && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
@@ -334,9 +637,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-
+            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -369,7 +672,7 @@ jobs:
       - name: zig build (ReleaseSafe)
         run: |
           set -euo pipefail
-          zig build -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
       - name: Launch weston headless backend
         run: |
@@ -392,7 +695,7 @@ jobs:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           set -euo pipefail
-          zig build run-example-triangle -- \
+          zig build run-example-triangle -Dcpu=${{ env.ZIG_CPU }} -- \
             --smoke-test --vulkan-driver=software --capture-frame=10
 
       - name: Verify PSNR vs golden
@@ -413,7 +716,7 @@ jobs:
           # `test-render-capture` invocation (~3-5 min/run). The test raises a
           # typed error when PSNR < 40 dB, so a non-zero exit propagates
           # through pipefail.
-          zig build test-ppm-psnr -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+          zig build test-ppm-psnr -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} --summary all 2>&1 | tee test-output.txt
 
       - name: Upload capture artifact
         if: always()
@@ -449,9 +752,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-
+            zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |
@@ -479,7 +782,7 @@ jobs:
           mkdir -p out
           # Default `zig build` = Debug → render.zig enable_validation = true →
           # the validation layers load. Offscreen render → no surface/weston.
-          zig build run-vertical-slice -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
           echo "--- a frame was composed + captured ---"
           test -s out/vertical_slice.ppm
           echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
@@ -498,7 +801,7 @@ jobs:
           # E5 / C0.8 end-to-end: an editor-stub thread sends a real
           # ModifyComponent over the M0.7 transport; the slice applies it to the
           # live World; the render reflects it. Offscreen capture, validation on.
-          zig build run-vertical-slice -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
           echo "--- the post-edit frame composed + captured ---"
           test -s out/vertical_slice_ipc.ppm
           if grep -E "VUID-|Validation Error" slice-c08.log; then
@@ -522,7 +825,7 @@ jobs:
           # The editor blits the runtime mire via the E6-consolidated
           # src/editor/vk_blit.zig (now on the GAL); Debug build → GAL
           # validation layer + syncval feature.
-          zig build run-ipc-demo -- --frames=120 > vkblit.log 2>&1 || true
+          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || true
           echo "=== vk_blit GAL blit on lavapipe (E6) ==="
           echo "--- distinct VUIDs ---"
           grep -oE "VUID-[A-Za-z0-9-]+" vkblit.log | sort -u || echo "  (none)"
@@ -557,6 +860,229 @@ jobs:
             slice-c08.log
             vkblit.log
           retention-days: 30
+
+  witness-generation:
+    # M1.1.14 — generation of the committed determinism witnesses, GATED ON A
+    # COMMIT TRAILER.
+    #
+    # WHY A JOB HERE AND NOT A `workflow_dispatch` WORKFLOW OF ITS OWN. Measured,
+    # not assumed: `gh workflow run <new>.yml --ref <feature-branch>` returns
+    # `HTTP 404: workflow not found on the default branch`. GitHub requires a
+    # `workflow_dispatch` workflow to exist on the DEFAULT branch before it can be
+    # dispatched at all, whatever `--ref` says — so a new workflow file cannot be
+    # triggered until after the milestone merges, which is too late to produce the
+    # witnesses the milestone must commit. `ci.yml` is already on the default
+    # branch, so a job added here runs on the PR head today.
+    #
+    # WHY A COMMIT TRAILER RATHER THAN A DISPATCH INPUT. A witness pins a result in
+    # time, so producing one must be a DECLARED ACT and never a side effect. The
+    # declaration is `Witness-regen: <motive>` in the head commit message, which is
+    # STRONGER than a form field: it is reviewed in the diff, greppable, and
+    # permanent, where a dispatch input leaves no trace in the repository at all.
+    # Absent the trailer the job skips and costs nothing.
+    #
+    # PERMANENT, not scaffolding. M1.1.25 replays the harness at N workers, M1.A on
+    # a rebuilt scheduler DAG, and every shape added later moves the scenario —
+    # each needs a regeneration with provenance.
+    #
+    # NOT IN `ci-gate`'s `needs`. A conditional job in a required dependency makes
+    # the gate skip or fail depending on configuration; this job is a producer, not
+    # a verifier. What VERIFIES the witnesses is the ordinary matrix, comparing
+    # against the committed tree.
+    #
+    # LINUX BY CONSTRUCTION, and the consequence is intended: Linux is the
+    # reference, Windows the verifier. A Windows divergence is then THE measurement
+    # of the milestone. Regenerating on Windows to make such a divergence pass is
+    # forbidden by name — that is the silently re-baselined witness.
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # CHECK OUT THE PR HEAD COMMIT ITSELF, not the synthetic merge commit.
+      # MEASURED, and it took a live run to see it: on a `pull_request` event
+      # `actions/checkout` defaults to `refs/pull/N/merge`, whose message is
+      # `Merge <head> into <base>` — so `git log -1 --pretty=%B` read GitHub's
+      # generated text and never the commit the author wrote. The trailer gate
+      # could not fire, and it failed the way that costs the most: SILENTLY, by
+      # skipping, on a green job.
+      #
+      # The second consequence is worse and would have SHIPPED: `github.sha` is
+      # that same merge commit, an ephemeral object outside the branch history
+      # that nobody can resolve later — so `PROVENANCE.txt`, whose entire purpose
+      # is provenance, would have named a sha no reader could check out. Pinning
+      # the head sha fixes both, and it is the right tree to generate from
+      # anyway: a witness pins the reviewed commit, not a merge preview of it.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Read the Witness-regen trailer
+        id: trailer
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # LOUD, not silent, if the checkout ever drifts back. The failure above
+          # was invisible precisely because "no trailer" and "wrong commit" are
+          # the same observable, so the two are separated here: a checkout that
+          # is not the head commit FAILS, and only then may an absent trailer
+          # legitimately skip.
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$HEAD_SHA" ]; then
+            echo "::error::checked out $actual, expected PR head $HEAD_SHA"
+            echo "::error::the trailer would be read from the wrong commit message"
+            exit 1
+          fi
+          body="$(git log -1 --pretty=%B)"
+          echo "--- head commit $actual ---"; echo "$body"
+          if reason="$(printf '%s\n' "$body" | sed -n 's/^Witness-regen:[[:space:]]*//p' | head -1)" && [ -n "$reason" ]; then
+            echo "requested=true" >> "$GITHUB_OUTPUT"
+            echo "reason=$reason" >> "$GITHUB_OUTPUT"
+            echo "--- witness generation REQUESTED: $reason ---"
+          else
+            echo "requested=false" >> "$GITHUB_OUTPUT"
+            echo "--- no Witness-regen trailer; skipping generation ---"
+          fi
+
+      - uses: weldengine/setup-zig@v0.1.0
+        if: steps.trailer.outputs.requested == 'true'
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Generate one witness set per (precision, mode)
+        if: steps.trailer.outputs.requested == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for prec in false true; do
+            for mode in Debug ReleaseSafe; do
+              tag=$([ "$prec" = "true" ] && echo f64 || echo f32)
+              dir="out/$tag-$mode"
+              mkdir -p "$dir"
+              echo "=== $tag / $mode ==="
+              zig build forge-determinism \
+                -Doptimize=$mode -Dphysics_f64=$prec -Dcpu=${{ env.ZIG_CPU }} \
+                -- --write-witness "$dir"
+            done
+          done
+
+      # The two mode-independent witness kinds are keyed by PRECISION ALONE, which
+      # asserts that Debug and ReleaseSafe agree on them. That is a hypothesis, so
+      # it is MEASURED here rather than assumed by the file name.
+      #
+      # It is MEASURED AND REPORTED, and it does NOT fail the job. C1.1 level 1
+      # requires bit-exactness "à ISA, BUILD, configuration et nombre de workers
+      # identiques" — Debug and ReleaseSafe are two builds, so a disagreement
+      # between them does not breach level 1 and must not be dressed up as a
+      # level-1 failure. What a disagreement DOES breach is the two frozen keys,
+      # which is a design question and a STOP, not something this job may decide.
+      #
+      # This cell is also where such a disagreement is most likely, and that is
+      # measured rather than feared: `x86_64-linux` is the ONLY one of the eight
+      # (target, mode) corners the engine builds whose Debug uses Zig's SELF-HOSTED
+      # backend while its ReleaseSafe uses LLVM. Windows x86_64 and both aarch64
+      # targets are LLVM in both modes. So this comparison is the only one in the
+      # matrix that puts two independent instruction selections against each other.
+      - name: Measure the cross-mode agreement and assemble the set
+        if: steps.trailer.outputs.requested == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p witnesses
+          agree=true
+          for tag in f32 f64; do
+            for kind in discrete reference-window; do
+              a="out/$tag-Debug/$kind-$tag.bin"
+              b="out/$tag-ReleaseSafe/$kind-$tag.bin"
+              if cmp -s "$a" "$b"; then
+                echo "$kind-$tag.bin: Debug == ReleaseSafe"
+              else
+                agree=false
+                echo "::warning::$kind-$tag.bin DIFFERS between Debug and ReleaseSafe."
+                echo "::warning::Its witness key carries precision only, so the two keys are wrong."
+                echo "::warning::This is a STOP and a design question, not a level-1 failure:"
+                echo "::warning::C1.1 level 1 holds at identical BUILD, and these are two builds."
+              fi
+              # The REFERENCE WINDOW is taken from ReleaseSafe, NAMED and not
+              # implicit: without naming it a later regeneration could switch mode
+              # in silence, and if the two modes ever disagree the ARM64 cell would
+              # then fold an ISA difference and a BACKEND difference into one number.
+              cp "out/$tag-ReleaseSafe/$kind-$tag.bin" "witnesses/$kind-$tag.bin"
+            done
+            for mode in Debug ReleaseSafe; do
+              cp "out/$tag-$mode/continuous-chain-$tag-$mode.bin" "witnesses/"
+            done
+          done
+          echo "cross_mode_agreement=$agree"
+          echo "--- witness set (reference window and discrete taken from ReleaseSafe) ---"
+          ls -l witnesses/
+          sha256sum witnesses/* | tee witnesses/SHA256SUMS.txt
+          # THE OUTPUT OF `zig version`, not the env var that requested it. The
+          # env var is what the workflow ASKED the setup action for; this is what
+          # the toolchain on the runner REPORTS. Recording the request in place of
+          # the observation is the class this milestone keeps finding, and a
+          # witness is exactly the artefact where it would cost most: the pinned
+          # version is one of `ARCH-031`'s three axes, and a silent drift between
+          # requested and installed would invalidate every file here with nothing
+          # in the record to show it.
+          zig_reported="$(zig version)"
+          echo "zig version reports: $zig_reported"
+          {
+            echo "reason=${{ steps.trailer.outputs.reason }}"
+            echo "cell=ubuntu-24.04"
+            echo "cpu=${{ env.ZIG_CPU }}"
+            echo "zig_requested=${{ env.ZIG_VERSION }}"
+            echo "zig_version_output=$zig_reported"
+            echo "reference_window_mode=ReleaseSafe"
+            echo "discrete_mode=ReleaseSafe"
+            echo "cross_mode_agreement=$agree"
+            # The PR HEAD sha, never `github.sha` — on a `pull_request` event the
+            # latter is the ephemeral merge commit, which is outside the branch
+            # history and unresolvable by any later reader.
+            echo "sha=${{ github.event.pull_request.head.sha }}"
+            echo "run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            # PER FILE, and not only per set. A reader holding one witness must be
+            # able to answer "which build produced this?" without reconstructing
+            # the assembly rules from the job. The two mode-independent kinds carry
+            # their generator mode nowhere else — their key is precision alone —
+            # so for them this table is the only record there is.
+            echo "---"
+            for f in witnesses/*.bin; do
+              base="$(basename "$f")"
+              case "$base" in
+                continuous-chain-*-Debug.bin)       gen=Debug ;;
+                continuous-chain-*-ReleaseSafe.bin) gen=ReleaseSafe ;;
+                *)                                  gen=ReleaseSafe ;;
+              esac
+              echo "witness=$base mode=$gen zig=$zig_reported cpu=${{ env.ZIG_CPU }} run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            done
+          } > witnesses/PROVENANCE.txt
+          cat witnesses/PROVENANCE.txt
+
+      - name: Upload the witness set
+        if: steps.trailer.outputs.requested == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: determinism-witnesses
+          path: witnesses/
+          retention-days: 90
+
+      # THE PER-MODE OUTPUTS, kept whole. The assembled set above collapses the
+      # two mode-independent kinds onto their ReleaseSafe copy, so when the
+      # cross-mode measurement reports a DISAGREEMENT the artifact no longer
+      # contains the disagreeing pair — the one thing needed to characterise it.
+      # Measured the hard way: the first run reported reference-window-f32
+      # differing and left nothing to diff. A measurement that reports a
+      # difference must retain both sides of it.
+      - name: Upload the raw per-mode outputs
+        if: steps.trailer.outputs.requested == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: determinism-raw-per-mode
+          path: out/
+          retention-days: 90
 
   # M1.0.3-followup — l'UNIQUE check required. La branch protection ne requiert
   # que ce job (Guy applique les réglages repo). Il agrège les jobs lourds :

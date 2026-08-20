@@ -386,7 +386,7 @@ test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned 
     var nested: std.ArrayListUnmanaged(u8) = .empty;
     defer nested.deinit(gpa);
     try std.testing.expectError(
-        root.CodegenError.UnsupportedConstruct,
+        root.errors.CodegenError.UnsupportedConstruct,
         root.generateToBuffer(gpa, &pr.ast, "<test>", &nested),
     );
 }
@@ -585,7 +585,7 @@ test "collection allocations require the frame arena: fn-body push fails loud (M
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
     try std.testing.expectError(
-        root.CodegenError.UnsupportedConstruct,
+        root.errors.CodegenError.UnsupportedConstruct,
         root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
     );
 }
@@ -725,7 +725,7 @@ test "closure captures are bounded to POD scalars: string capture fails loud (M0
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
     try std.testing.expectError(
-        root.CodegenError.UnsupportedConstruct,
+        root.errors.CodegenError.UnsupportedConstruct,
         root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
     );
 }
@@ -847,7 +847,7 @@ test "throwing closure call outside a let initializer fails loud (M0.8 E3-C tran
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
     try std.testing.expectError(
-        root.CodegenError.UnsupportedConstruct,
+        root.errors.CodegenError.UnsupportedConstruct,
         root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
     );
 }
