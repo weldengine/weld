@@ -620,6 +620,9 @@ const trace_mod = @import("trace.zig");
 // The compared window's width, from the ONE place that defines it. A second copy
 // here is how a bound drifts from the artifact it is supposed to bound.
 const window_frames = @import("run.zig").window_frames;
+const chain_frames = @import("run.zig").chain_frames;
+const sensor_mod = @import("../../pipeline/sensor.zig");
+const EntityId = api.EntityId; // the module's own route, as `body_manager.zig` and `sensor.zig` take it
 
 test "scenario: builds, and every element is present" {
     const gpa = testing.allocator;
@@ -676,6 +679,14 @@ test "scenario: steps without error, and the character resolves its ground" {
     try testing.expectEqual(api.GroundState.grounded, s.chars.get(s.character).?.reported_ground);
 }
 
+/// `EntityId` carries no `eql`, and the comparison is written out on BOTH fields
+/// rather than bitcast to the packed `u64` — the same rule the sensor dump follows,
+/// field order in a packed struct being a layout accident.
+fn samePair(pr: sensor_mod.EntityPair, trigger: EntityId, other: EntityId) bool {
+    return pr.trigger.index == trigger.index and pr.trigger.generation == trigger.generation and
+        pr.other.index == other.index and pr.other.generation == other.generation;
+}
+
 /// True iff the observation fired AND fired strictly inside the compared window.
 /// `null` — never fired — is false: an observation that never happened is not one
 /// that happened late.
@@ -694,8 +705,8 @@ test "scenario: every one of the nine elements actually fires" {
     defer s.deinit(gpa);
 
     var first_ground: ?u32 = null;
-    var first_any_sleep: ?u32 = null;
-    var first_multi_pair: ?u32 = null;
+    var first_stack_sleep: ?u32 = null;
+    var first_mesh_multi_pair: ?u32 = null;
     var min_islands: usize = std.math.maxInt(usize);
     var max_islands: usize = 0;
     var entered: usize = 0;
@@ -708,14 +719,22 @@ test "scenario: every one of the nine elements actually fires" {
     var stood_on_riser = false;
     var stood_on_walk_slope = false;
 
-    // ONE FULL SCRIPT CYCLE AND MORE, and the bound is not free to choose: the
-    // script's period is 700 frames, so a 400-frame window — what this loop used
-    // to run — is STRUCTURALLY unable to observe the second half of the script.
-    // Measured when the riser clause was added and failed: the character crosses it
-    // on the `−x` leg, around frame 750. A coverage test shorter than the period of
-    // the thing it covers is a coverage test with a blind half.
+    // THE LOOP RUNS THE SPAN THE ASSERTIONS CLAIM — `chain_frames`, not 750. The
+    // bound was never free to choose: the script's period is 700 frames, so the
+    // 400-frame window this loop originally ran is STRUCTURALLY unable to see the
+    // script's second half, and the riser clause failed when it was added for that
+    // reason (the character stands on it at frame 422, measured). 750 covered one
+    // period and still LIED about its own reach: the assertions below name the
+    // chain's 1000-frame span, so a second sensor entry or exit anywhere in 750..999
+    // escaped `exactly one` entirely. The claimed scope was the correct one and the
+    // loop was the part that was wrong.
+    //
+    // MEASURED at the full span, and no assertion had to be relaxed to get there:
+    // entered = 1, exited = 1, max_x = −60.1875, max_y = 0.946324, slider v = 5.0.
+    // What the extra 250 frames buy is not a new observation, it is the removal of an
+    // unexamined gap between what is asserted and what is traversed.
     var f: u32 = 0;
-    while (f < 750) : (f += 1) {
+    while (f < chain_frames) : (f += 1) {
         try s.step(gpa, f);
 
         // (1) the half-space: a constraint EITHER of whose halves is the ground's
@@ -730,14 +749,32 @@ test "scenario: every one of the nine elements actually fires" {
             const lo: BodyId = @intCast(c.pair_key & 0xFFFF_FFFF);
             if ((hi == s.ground or lo == s.ground) and first_ground == null) first_ground = f;
             if (prev_key) |k| {
-                if (k == c.pair_key and first_multi_pair == null) first_multi_pair = f;
+                // The pair must be THE MESH PAIR, by both identities. `k == pair_key`
+                // alone is an aggregate: it says some pair carried two constraints, and
+                // the claim is that the MESH did. Nothing but a multi-triangle contact
+                // produces it today, which is precisely the kind of tacit property this
+                // test has now been caught relying on three times.
+                const is_mesh_pair = (hi == s.mesh_body and lo == s.mesh_sphere) or
+                    (hi == s.mesh_sphere and lo == s.mesh_body);
+                if (k == c.pair_key and is_mesh_pair and first_mesh_multi_pair == null) first_mesh_multi_pair = f;
             }
             prev_key = c.pair_key;
         }
 
-        // A sleep transition ANYWHERE. Read the assertion below before attributing
-        // this to element 2 — MEASURED, it is element 7 that satisfies it.
-        if (s.world.slept_last_tick > 0 and first_any_sleep == null) first_any_sleep = f;
+        // (2) THE STACK SLEEPS, BY IDENTITY — five named bodies, not a counter.
+        // THIRD INSTANCE of one class on this single test, and the previous repair
+        // MOVED it rather than closing it: `slept_last_tick > 0` is generic, so it
+        // was satisfied at frame 29 by element 7's body while the line claimed the
+        // stack's transition at 100. Codex measured the consequence — forbidding all
+        // five stack bodies to sleep left the whole suite green.
+        if (first_stack_sleep == null) {
+            for (s.stack) |b| {
+                if (s.world.bm.isSleeping(b) orelse false) {
+                    first_stack_sleep = f;
+                    break;
+                }
+            }
+        }
 
         // (7) THE LONE SLEEPER, BY IDENTITY AND BY INSTANT. Element 7 had NO
         // observation of its own until Codex measured its absence: the sleep line
@@ -778,8 +815,17 @@ test "scenario: every one of the nine elements actually fires" {
         if (max_islands > min_islands and first_island_change == null) first_island_change = f;
 
         // (6) the two sensor deltas.
-        entered += s.world.sensors.entered.items.len;
-        exited += s.world.sensors.exited.items.len;
+        // (6) THE SENSOR DELTAS, filtered to THE trigger and THE visitor. The raw
+        // set lengths are an aggregate: any trigger and any visitor would count, and
+        // the claim is one crossing by that body of that sensor.
+        const trig_e = s.world.bm.entity(s.trigger).?;
+        const visit_e = s.world.bm.entity(s.trigger_visitor).?;
+        for (s.world.sensors.entered.items) |pr| {
+            if (samePair(pr, trig_e, visit_e)) entered += 1;
+        }
+        for (s.world.sensors.exited.items) |pr| {
+            if (samePair(pr, trig_e, visit_e)) exited += 1;
+        }
 
         // (8) + (9) the terrain, accumulated over the RUN and not read at its end:
         // the claim is that the character climbed, which is a property of the
@@ -825,7 +871,7 @@ test "scenario: every one of the nine elements actually fires" {
     const win = window_frames;
     try testing.expect(firstFireInside(first_ground, win)); // (1) manifold cardinality
     try testing.expect(firstFireInside(first_shared_island, win)); // (3) island partition
-    try testing.expect(firstFireInside(first_multi_pair, win)); // (5) manifold cardinality
+    try testing.expect(firstFireInside(first_mesh_multi_pair, win)); // (5) manifold cardinality
     try testing.expect(firstFireInside(first_lone_sleep, win)); // (7) sleep state, THIS body
     // The partition moves at all, inside the window. Coarse, unattributed, and
     // satisfied by any single variation — the sequence on the two groups is asserted
@@ -841,7 +887,7 @@ test "scenario: every one of the nine elements actually fires" {
     // and the assertion labelled (2) had been claiming otherwise. The stack's
     // transition zeroes its velocities, so it IS verified — in the CHAIN, at frame
     // 100 of 1000.
-    try testing.expect(first_any_sleep != null); // (2) chain-carried, frame 100 measured
+    try testing.expect(first_stack_sleep != null); // (2) chain-carried, by identity
 
     // (6) THE SENSOR DELTAS are serialised into the chain dump, so their span is
     // 1000 and not 60 — measured inside it anyway, entered at frame 7 and exited at
