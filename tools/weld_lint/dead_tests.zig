@@ -246,17 +246,21 @@ pub const uncollected = [_]Uncollected{
 /// above — `shm_posix.zig` and `transport_posix.zig`. That is arithmetic on this
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
-    // Reconciled against `zig build test --summary all`, which reported 1869
-    // collected — NOT bumped to match the closure's own arithmetic, which is the
-    // repair the failure message forbids. Windows is two lower, the two
-    // `only_on = .windows` entries above.
+    // Reconciled against `zig build test --summary all`, which reported **1875
+    // collected on macOS** (1856 passed + 19 skipped) at M1.1.15 — NOT bumped to
+    // match the closure's own arithmetic, which is the repair the failure message
+    // forbids. The two numbers agree here, and they were produced independently:
+    // 1875 is what the suite ran, and the closure separately arrives at 1875 from
+    // this table. Windows is two lower, the two `only_on = .windows` entries above.
     //
-    // This control has now stopped two commits in a row on its first real uses, each
-    // time on a genuine test addition, and each time the number was re-derived from
-    // the suite rather than from the closure. That is the whole point of it.
+    // This control has now stopped three commits in a row on its first real uses,
+    // each time on a genuine test addition, and each time the number was re-derived
+    // from the suite rather than from the closure. That is the whole point of it.
+    // M1.1.15 added six blocks in `forge_3d/tests/world_test.zig`, which is the whole
+    // of this bump: 1869 → 1875.
     return switch (os) {
-        .windows => 1867,
-        else => 1869,
+        .windows => 1873,
+        else => 1875,
     };
 }
 

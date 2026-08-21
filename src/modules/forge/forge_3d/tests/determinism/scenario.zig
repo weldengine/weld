@@ -361,7 +361,9 @@ pub const Scenario = struct {
         self.trigger_visitor = try w.addBody(gpa, visitor);
         try self.mobile.append(gpa, self.trigger_visitor);
         w.bm.setLinearVelocity(self.trigger_visitor, vr(12, 0, 0));
-        self.world.sensors_on = true;
+        // Nothing switches the sensor pass on: step 10 bis is UNCONDITIONAL from
+        // M1.1.15 (`../../world.zig`). The scenario only has to CONTAIN a trigger,
+        // which is what the composition test below asserts.
 
         // --- (7) a lone box that settles at once, x = 15 -----------------------
         //
@@ -652,7 +654,16 @@ test "scenario: builds, and every element is present" {
     // counted here for that reason.
     try testing.expectEqual(@as(u32, 21), s.world.bm.count());
     try testing.expectEqual(@as(u32, 1), s.chars.count());
-    try testing.expect(s.world.sensors_on);
+    // THE TRIGGER IS PRESENT, asserted on the body's ROLE rather than on a world
+    // flag. Until M1.1.15 this line read `expect(s.world.sensors_on)`, a claim about
+    // a switch the harness carried and production would not: step 10 bis is now
+    // unconditional, so that switch is gone and the claim it made — "this scenario
+    // exercises the sensor pass" — splits in two. The half that belongs here is
+    // COMPOSITION: the scene holds a trigger body, so the pass has something to
+    // enumerate. The half that belongs to the cycle — that the pass runs whether or
+    // not anyone asked — is asserted where the cycle lives, in
+    // `tests/world_test.zig`.
+    try testing.expectEqual(@as(?bool, true), s.world.bm.isTrigger(s.trigger));
 }
 
 test "scenario: steps without error, and the character resolves its ground" {

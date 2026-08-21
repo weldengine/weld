@@ -617,7 +617,6 @@ test "falling asleep inside a trigger never produces an exit" {
     // becomes eligible after `time_before_sleep` (0.5 s = 30 ticks at 60 Hz).
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     _ = try addBox(gpa, &world, av(2, 2, 2), av(0, 0, 0), 1, true, 0);
     const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(0.3, 0.3, 0.3) } });
@@ -662,7 +661,6 @@ test "a sleeping trigger still detects an arriving body" {
     const gpa = testing.allocator;
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     // A DYNAMIC trigger, so it can actually fall asleep — a static body never carries the
     // sleeping flag at all, and asserting on it would prove nothing.
@@ -693,7 +691,6 @@ test "a detection wakes nobody" {
     const gpa = testing.allocator;
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     const tshape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av(2, 2, 2) } });
     _ = try world.addBody(gpa, .{
@@ -938,7 +935,6 @@ test "clearing the role leaves an overlapping sleeper asleep until the caller co
     // ACTUALLY asleep, and a world that never sleeps cannot show it.
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     // A trigger volume with a DYNAMIC body resting inside it. While the role is on, the pair
     // is detected and the body sleeps: a trigger reaches no constraint, so the body is a
@@ -1074,7 +1070,6 @@ test "the owed wake dispatches on the shape, and a half-space trigger needs the 
     const gpa = testing.allocator;
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     // **THE SECOND SHAPE THE ROLE ADMITS, and the one a single recipe cannot serve.** A
     // half-space keeps the sensor role — it is a volume with an interior — and it is exactly
@@ -1169,7 +1164,6 @@ test "the composition must wake the body whose role changed, not only what it ov
     const gpa = testing.allocator;
     var world = harness.World.init(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    world.sensors_on = true;
 
     // **THE THIRD BRANCH, and it is the one the other two cases could not show.** There, the
     // sleeper was what the trigger OVERLAPPED, so waking the overlapped bodies was enough.
