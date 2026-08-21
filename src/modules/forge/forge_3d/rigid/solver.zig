@@ -80,17 +80,28 @@ pub const SolverStats = struct {
     solve_sweeps: u32 = 0,
     /// Relax sweeps (one per substep).
     relax_sweeps: u32 = 0,
-    /// Constraint POINTS the warm start injected this tick, summed over substeps.
+    /// Counters the reported telemetry surface deliberately EXCLUDES.
     ///
-    /// NOT part of what `get_solver_iterations_stats` reports — `engine-physics-solver.md`
-    /// §1.8.2 states the reported set as the solve/relax sweeps and explicitly excludes
-    /// the warm-start applications. This field is not that surface: it exists so the
-    /// APPLICATION half of warm start is observable where it happens, since "applied
-    /// once per substep, every substep" (§1.7 step 6) is otherwise a claim no test can
-    /// reach. It counts real injections rather than loop turns: a `substep_count` of 4
-    /// over one 4-point manifold reads 16, and hoisting the call out of the loop reads
-    /// 4 — which is the counter-factual that gives the number its meaning.
-    warm_start_injections: u32 = 0,
+    /// `engine-physics-solver.md` §1.8.2 arrests what `get_solver_iterations_stats`
+    /// reports — the solve/relax sweeps — and states that the warm-start applications
+    /// are not counted. **That exclusion is carried by the TYPE and not by this
+    /// paragraph.** Left to a doc comment, it would fall to whoever later maps
+    /// `SolverStats` onto the reported surface: the field would travel across with the
+    /// siblings it sits beside, and a rule that rests on a future author's attention is
+    /// an intention rather than a guarantee — the wording of `ARCH-031`'s own
+    /// conformance test, and it applies here. Nested, the boundary is visible at every
+    /// read site and a field crosses it only by being moved out, deliberately.
+    not_reported: struct {
+        /// Constraint POINTS the warm start injected this tick, summed over substeps.
+        ///
+        /// It exists so the APPLICATION half of warm start is observable where it
+        /// happens, since "applied once per substep, every substep" (§1.7 step 6) is
+        /// otherwise a claim no test can reach. It counts real injections rather than
+        /// loop turns: a `substep_count` of 4 over one 4-point manifold reads 16, and
+        /// hoisting the call out of the loop reads 4 — the counter-factual that gives
+        /// the number its meaning.
+        warm_start_injections: u32 = 0,
+    } = .{},
     /// The smallest separation any biased sweep observed this tick, or `null` if no
     /// point was evaluated at all. Negative means overlap.
     min_separation: ?Real = null,
@@ -447,7 +458,8 @@ pub fn solveTick(
     while (substep < cfg.substep_count) : (substep += 1) {
         integration.integrateVelocitiesNoReset(bm, h, gravity);
 
-        for (islands) |isl| stats.warm_start_injections += applyWarmStartRange(bm, constraints, isl.constraint_from, isl.constraint_to);
+        for (islands) |isl| stats.not_reported.warm_start_injections +=
+            applyWarmStartRange(bm, constraints, isl.constraint_from, isl.constraint_to);
 
         for (islands) |isl| {
             const range = solveRangeReport(bm, constraints, isl.constraint_from, isl.constraint_to, cfg, h);

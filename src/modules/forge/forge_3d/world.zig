@@ -179,8 +179,8 @@ pub const PhysicsWorld = struct {
     /// The island partition of the last tick (step 5).
     islands: rigid.IslandManager = .{},
     /// Last tick's solver telemetry (steps 6 and 7) — substeps executed, solve and
-    /// relax sweeps, warm-start injections, and the minimum separation any biased
-    /// sweep observed.
+    /// relax sweeps, and the minimum separation any biased sweep observed, plus the
+    /// `not_reported` counters §1.8.2 excludes from the telemetry surface.
     solver_stats: rigid.SolverStats = .{},
     /// Islands put to sleep at step 11 of the last tick.
     slept_last_tick: u32 = 0,
@@ -326,12 +326,17 @@ pub const PhysicsWorld = struct {
     /// recorder wired at the call site instead would be blind to exactly the
     /// mutation it exists to catch — the work reordered while the records stay put.
     ///
-    /// **The bound is structural, and MEASURED rather than assumed.** Swapping the
-    /// BODIES of two stage methods while leaving each `enter()` in place leaves the
-    /// whole forge suite green, order test included. So this convention is what makes
-    /// the recorded order the executed one; no test enforces it, and the note is here
-    /// rather than only in `tests/world_test.zig` because this is the file where the
-    /// convention can be broken.
+    /// **The bound is structural, and it is MEASURED — with the scope the measurement
+    /// actually supports.** Swapping the BODIES of two stage methods while leaving each
+    /// `enter()` in place is invisible to every test ONLY where inverting those two
+    /// stages is physically harmless. Measured both ways: on `(proxy_update,
+    /// sensor_pass)`, whose inversion cannot alter body state, the whole forge suite
+    /// stays green; on `(build_constraints, island_partition)`, whose inversion
+    /// partitions last tick's constraints, the same mutation gives `3 failed, 35
+    /// crashed` — the same yield as swapping the CALLS, minus the order test. So the
+    /// physical guards cover every consequential pair on their own, and this convention
+    /// is what covers the harmless ones. The note lives here and not only in
+    /// `tests/world_test.zig` because this is the file where it can be broken.
     fn enter(self: *PhysicsWorld, step_id: Step) void {
         if (self.trace) |t| t.record(step_id);
     }

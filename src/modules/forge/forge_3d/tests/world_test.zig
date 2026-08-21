@@ -74,7 +74,7 @@ fn totalConstraintPoints(world: *const PhysicsWorld) u32 {
 
 // --- step order ---------------------------------------------------------------
 
-test "step executes the eleven cycle steps in the frozen order" {
+test "step executes the nine coded steps of the eleven-anchor cycle in order" {
     const gpa = testing.allocator;
     var world = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer world.deinit(gpa);
@@ -114,29 +114,41 @@ test "step executes the eleven cycle steps in the frozen order" {
     try testing.expectEqual(world_mod.executed_step_count, trace.order().len);
     try testing.expectEqual(@as(u32, 0), trace.dropped);
 
-    // COUNTER-FACTUALS, RUN, with their measured yield — four of them, because the
-    // recorder's own blind spot is one of the things they had to measure.
+    // COUNTER-FACTUALS, RUN — five, each naming the PAIR it moved, because a
+    // counter-factual that does not name its object does not bound its conclusion.
     //
-    // (A) Swapping the `stepProxyUpdate` and `stepSensorPass` CALLS: `1 failed` out
-    //     of 561, and it is this test. That adjacency has no physical consequence —
-    //     the sensor pass takes a `*const BodyManager` — so THIS assertion is its
-    //     only guard, and it holds.
-    // (B) Hoisting the warm start out of the substep loop: the cadence test below
-    //     fails with `expected 16, found 4`, and six physics tests fail with it. One
-    //     of the seven NAMES the cause; the six report the symptom.
-    // (D) Swapping the `stepBuildConstraints` and `stepIslandPartition` CALLS — an
-    //     order that does have physical consequence: `4 failed, 35 crashed`. Where
-    //     the order matters physically, dozens of guards fire and this one is not
-    //     load-bearing.
-    // (C) THE RESIDUAL, and it is written down rather than implied: swapping the
-    //     BODIES of two stage methods while leaving each `enter()` in place leaves
-    //     the WHOLE suite green — 560/561, this test included. A record moved away
-    //     from its work is undetectable by any test here. What bounds it is
-    //     STRUCTURAL and not a test: each `enter()` is the first statement of the
-    //     stage method that carries its name, so moving a stage in `step()` moves
-    //     its record, and separating the two is a visible edit inside a named method
-    //     rather than a reordering of a sequence. That is a smaller claim than "the
-    //     order is verified", and it is the true one.
+    // Two pairs are used, and they differ in one property that decides everything
+    // below: whether inverting the two stages has a PHYSICAL consequence.
+    //   - `(proxy_update, sensor_pass)` — stages 10 and 10 bis. Inverting them is
+    //     physically harmless: the sensor pass takes a `*const BodyManager`, so it
+    //     cannot alter one bit of body state, and reading proxies from before the
+    //     update instead of after changes only what the sensor state reports.
+    //   - `(build_constraints, island_partition)` — stages 4 and 5. Inverting them
+    //     partitions LAST tick's constraint array and then rebuilds it, so the island
+    //     ranges the solver consumes no longer describe the constraints it solves.
+    //
+    // (A) CALLS of 10 / 10 bis swapped: `1 failed` of 561, and it is this test.
+    // (D) CALLS of 4 / 5 swapped: `4 failed, 35 crashed`.
+    // (C) BODIES of 10 / 10 bis swapped, each `enter()` left in place: the whole suite
+    //     GREEN, 560/561, this test included.
+    // (C') BODIES of 4 / 5 swapped, each `enter()` left in place: `3 failed, 35
+    //     crashed`, and this test PASSES — which is exactly (D) MINUS this test.
+    // (B) the warm start hoisted out of the substep loop: see the cadence test below.
+    //
+    // WHAT THAT MEASURES, in its bounded form. A record separated from its work is
+    // undetectable ONLY where inverting the two stages is physically harmless: (C') is
+    // the measurement that says so, since moving the work without its record produced
+    // the same 35 crashes as moving the calls. Everywhere the order has a physical
+    // consequence the physics guards fire on their own, loudly, and this test is not
+    // load-bearing there.
+    //
+    // WHICH IS WHY THIS TEST EXISTS, and it is the claim that was buried under the
+    // residual: the one adjacency where nothing else fires is precisely the harmless
+    // one — 10 / 10 bis, where (A) reports `1 failed` of 561 and every other guard in
+    // the suite stays green. Without this assertion that adjacency could be inverted
+    // in silence. The structural convention — each `enter()` the first statement of
+    // the stage method carrying its name — is what keeps the recorded order the
+    // executed one on the harmless pairs, and it is the only place it has to.
 }
 
 test "the step trace is reset per tick and its order is stable across ticks" {
@@ -184,7 +196,7 @@ test "substep cadence: warm start is applied inside the substep loop, every subs
     // is something to inject. Without this the equality below holds at zero.
     try testing.expect(points > 0);
     try testing.expectEqual(@as(u32, 4), world.solver_stats.substeps_executed);
-    try testing.expectEqual(points * 4, world.solver_stats.warm_start_injections);
+    try testing.expectEqual(points * 4, world.solver_stats.not_reported.warm_start_injections);
 
     // THE PAIRED NEGATIVE, at one substep on the same scene: the injections collapse
     // to exactly one pass over the points. Together the two readings discriminate —
@@ -199,7 +211,7 @@ test "substep cadence: warm start is applied inside the substep loop, every subs
     const single_points = totalConstraintPoints(&single);
     try testing.expect(single_points > 0);
     try testing.expectEqual(@as(u32, 1), single.solver_stats.substeps_executed);
-    try testing.expectEqual(single_points, single.solver_stats.warm_start_injections);
+    try testing.expectEqual(single_points, single.solver_stats.not_reported.warm_start_injections);
 
     // COUNTER-FACTUAL, RUN: hoisting the `applyWarmStartRange` loop out of the substep
     // loop in `rigid/solver.zig` makes this test report `expected 16, found 4` — the
