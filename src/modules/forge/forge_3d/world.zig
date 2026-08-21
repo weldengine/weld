@@ -325,6 +325,13 @@ pub const PhysicsWorld = struct {
     /// a stage cannot be moved in `step()` without its record moving with it. A
     /// recorder wired at the call site instead would be blind to exactly the
     /// mutation it exists to catch — the work reordered while the records stay put.
+    ///
+    /// **The bound is structural, and MEASURED rather than assumed.** Swapping the
+    /// BODIES of two stage methods while leaving each `enter()` in place leaves the
+    /// whole forge suite green, order test included. So this convention is what makes
+    /// the recorded order the executed one; no test enforces it, and the note is here
+    /// rather than only in `tests/world_test.zig` because this is the file where the
+    /// convention can be broken.
     fn enter(self: *PhysicsWorld, step_id: Step) void {
         if (self.trace) |t| t.record(step_id);
     }

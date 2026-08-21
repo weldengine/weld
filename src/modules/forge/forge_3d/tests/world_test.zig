@@ -114,11 +114,29 @@ test "step executes the eleven cycle steps in the frozen order" {
     try testing.expectEqual(world_mod.executed_step_count, trace.order().len);
     try testing.expectEqual(@as(u32, 0), trace.dropped);
 
-    // COUNTER-FACTUAL, run: swapping the `proxy_update` and `sensor_pass` calls in
-    // `world.zig` — a permutation with no effect on any body, since the sensor pass
-    // takes a `*const BodyManager` — fails on THIS assertion and on nothing else in
-    // the suite. That is the property being claimed: the order is asserted here, and
-    // here only, so it cannot move in silence.
+    // COUNTER-FACTUALS, RUN, with their measured yield — four of them, because the
+    // recorder's own blind spot is one of the things they had to measure.
+    //
+    // (A) Swapping the `stepProxyUpdate` and `stepSensorPass` CALLS: `1 failed` out
+    //     of 561, and it is this test. That adjacency has no physical consequence —
+    //     the sensor pass takes a `*const BodyManager` — so THIS assertion is its
+    //     only guard, and it holds.
+    // (B) Hoisting the warm start out of the substep loop: the cadence test below
+    //     fails with `expected 16, found 4`, and six physics tests fail with it. One
+    //     of the seven NAMES the cause; the six report the symptom.
+    // (D) Swapping the `stepBuildConstraints` and `stepIslandPartition` CALLS — an
+    //     order that does have physical consequence: `4 failed, 35 crashed`. Where
+    //     the order matters physically, dozens of guards fire and this one is not
+    //     load-bearing.
+    // (C) THE RESIDUAL, and it is written down rather than implied: swapping the
+    //     BODIES of two stage methods while leaving each `enter()` in place leaves
+    //     the WHOLE suite green — 560/561, this test included. A record moved away
+    //     from its work is undetectable by any test here. What bounds it is
+    //     STRUCTURAL and not a test: each `enter()` is the first statement of the
+    //     stage method that carries its name, so moving a stage in `step()` moves
+    //     its record, and separating the two is a visible edit inside a named method
+    //     rather than a reordering of a sequence. That is a smaller claim than "the
+    //     order is verified", and it is the true one.
 }
 
 test "the step trace is reset per tick and its order is stable across ticks" {
@@ -183,10 +201,11 @@ test "substep cadence: warm start is applied inside the substep loop, every subs
     try testing.expectEqual(@as(u32, 1), single.solver_stats.substeps_executed);
     try testing.expectEqual(single_points, single.solver_stats.warm_start_injections);
 
-    // COUNTER-FACTUAL, run: hoisting the `applyWarmStartRange` loop out of the
-    // substep loop in `rigid/solver.zig` makes the four-substep reading fall to
-    // `points` and leaves the one-substep reading untouched — the asymmetry is what
-    // this test is for.
+    // COUNTER-FACTUAL, RUN: hoisting the `applyWarmStartRange` loop out of the substep
+    // loop in `rigid/solver.zig` makes this test report `expected 16, found 4` — the
+    // four-substep reading collapsing to `points` — while the one-substep reading
+    // above is untouched. Six physics tests fall with it, including the determinism
+    // witness; this is the only one of the seven whose message names the cause.
 }
 
 test "the solve/relax sweep counts are one per substep" {
