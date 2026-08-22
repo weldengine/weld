@@ -273,9 +273,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // reported 1893 — 1874 passed + 19 skipped, macOS aarch64).
     // F-D1 added one signal test to `tests/physics/transform_sync_test.zig` (1893 → 1894,
     // suite reported 1894 — 1875 passed + 19 skipped, macOS aarch64).
+    // Gate E added three to `forge/api/precision.zig` (1894 → 1897, suite reported 1897 —
+    // 1878 passed + 19 skipped, macOS aarch64) and seven to the new
+    // `weld_lint/rules/no_precision_crossing.zig` (1897 → 1904, suite reported 1904 —
+    // 1885 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1892,
-        else => 1894,
+        .windows => 1902,
+        else => 1904,
     };
 }
 

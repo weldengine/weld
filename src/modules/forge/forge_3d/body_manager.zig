@@ -227,9 +227,9 @@ pub const BodyManager = struct {
         // `Body.rotation` for the invariant this establishes). Deliberately NOT
         // folded into `convQuat`: that name says "convert", and hiding a semantic
         // operation behind it would make the invariant invisible at the call site.
-        const rotation_r = convQuat(desc.rotation).normalize();
+        const rotation_r = config.cross.quatToSolver(desc.rotation).normalize();
         const body = Body{
-            .position = convVec3(desc.position),
+            .position = config.cross.vec3ToSolver(desc.position),
             .rotation = rotation_r,
             .linear_velocity = Vec3r.zero,
             .angular_velocity = Vec3r.zero,
@@ -254,7 +254,7 @@ pub const BodyManager = struct {
             // The sleep window opens at the creation pose, closed (`sleep_time`
             // zero) — a fresh body has not yet stood still for any length of time.
             .sleep_time = 0,
-            .sleep_ref_position = convVec3(desc.position),
+            .sleep_ref_position = config.cross.vec3ToSolver(desc.position),
             // The SAME normalised value as `.rotation`, not a second conversion.
             // Were the reference left un-normalised, the first window sweep would
             // read `Δq = q ⊗ conj(q_ref)` as a near-identity offset by the
@@ -286,7 +286,7 @@ pub const BodyManager = struct {
             // candidate (see `Body.world_aabb` for the measurement). NaN elsewhere, so a
             // wrong read is loud rather than plausible. Exhaustive on the class, no `else`.
             .world_aabb = switch (shape.class()) {
-                .triangle_soup => worldAabb(shape, convVec3(desc.position), rotation_r),
+                .triangle_soup => worldAabb(shape, config.cross.vec3ToSolver(desc.position), rotation_r),
                 .convex, .half_space => Aabbr.fromMinMax(
                     Vec3r.splat(std.math.nan(Real)),
                     Vec3r.splat(std.math.nan(Real)),
@@ -2613,18 +2613,6 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
         // so the four arms are exhaustive over what can reach here.
         else => unreachable,
     }
-}
-
-/// Widen the descriptor's f32 `Vec3` to solver precision.
-fn convVec3(v: ApiVec3) Vec3r {
-    const a = v.toArray();
-    return Vec3r.fromArray(.{ a[0], a[1], a[2] });
-}
-
-/// Widen the descriptor's f32 `Quatf` to solver precision.
-fn convQuat(q: ApiQuat) Quatr {
-    const a = q.toArray();
-    return Quatr.fromArray(.{ a[0], a[1], a[2], a[3] });
 }
 
 // --- tests -------------------------------------------------------------------

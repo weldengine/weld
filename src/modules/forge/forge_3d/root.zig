@@ -64,6 +64,11 @@ pub const Real = config.Real;
 pub const Vec3r = config.Vec3r;
 /// Quaternion at solver precision.
 pub const Quatr = config.Quatr;
+
+/// **The module's one precision crossing**, instantiated at `Real` in `config.zig`. World ↔
+/// solver conversions go through here and through nothing else
+/// (`engine-physics-queries.md` §1.11.8); `no_precision_crossing` checks it.
+pub const cross = config.cross;
 /// 3×3 matrix at solver precision.
 pub const Mat3r = config.Mat3r;
 /// Axis-aligned bounding box at solver precision.

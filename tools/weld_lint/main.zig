@@ -22,6 +22,7 @@ const c_module_isolation = @import("rules/c_module_isolation.zig");
 const conventional_commit = @import("rules/conventional_commit.zig");
 const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
 const no_float_reduce = @import("rules/no_float_reduce.zig");
+const no_precision_crossing = @import("rules/no_precision_crossing.zig");
 const dead_tests = @import("dead_tests.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
@@ -81,6 +82,7 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try c_module_isolation.check(arena, file, source, &diags);
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
+        try no_precision_crossing.check(arena, file, source, &diags);
     }
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
@@ -319,7 +321,7 @@ const usage_text =
     \\      Walk the given paths (default `src bench tests tools`) and
     \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
     \\      c_module_isolation, no_device_dispatch_outside_gal,
-    \\      no_float_reduce. Exits 0
+    \\      no_float_reduce, no_precision_crossing. Exits 0
     \\      if clean, 1 if any rule fires.
     \\
     \\  weld_lint dead-tests [--list] [--per-root]

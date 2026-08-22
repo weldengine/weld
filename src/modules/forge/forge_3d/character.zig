@@ -1412,7 +1412,7 @@ pub const CharacterStore = struct {
         // Infallible from here.
         const record = Character{
             .entity = desc.entity,
-            .position = convVec3(desc.position),
+            .position = config.cross.vec3ToSolver(desc.position),
             .radius = desc.radius,
             .height = desc.height,
             .step_height = desc.step_height,
@@ -2039,13 +2039,4 @@ fn contactPointVelocity(bm: *const BodyManager, body: BodyId, point: Vec3r) Vec3
     const angular = bm.angularVelocity(body) orelse return Vec3r.zero;
     const centre_of_mass = bm.position(body) orelse return Vec3r.zero;
     return linear.add(angular.cross(point.sub(centre_of_mass)));
-}
-
-/// Widen a descriptor `f32` `Vec3` to solver precision. The public surface is `f32`
-/// (§1.11.8, §1.12.11) and widening it is one grouped decision at M1.1.15; this is the
-/// abstraction point, so that decision touches the conversions and no call site.
-fn convVec3(v: math.Vec3) Vec3r {
-    if (Real == f32) return v;
-    const a = v.toArray();
-    return Vec3r.fromArray(.{ a[0], a[1], a[2] });
 }

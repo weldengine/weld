@@ -71,24 +71,35 @@ const Velocity = api.Velocity;
 const Sleeping = api.Sleeping;
 const PhysicsWorld = forge_3d.PhysicsWorld;
 const Vec3r = forge_3d.Vec3r;
-const Quatr = forge_3d.Quatr;
-const Real = forge_3d.Real;
+
+/// THE precision crossing — see `forge/api/precision.zig`. This file converts in both
+/// directions on every tick, so it is the seam most able to grow a second conversion; it
+/// spells none of its own, and `no_precision_crossing` is what enforces that.
+const cross = forge_3d.cross;
+const WorldReal = api.precision.WorldReal;
+const WorldVec3 = api.precision.WorldVec3;
+const WorldQuat = api.precision.WorldQuat;
 
 /// The solver pose of `body`, in the ECS `Transform`'s own layout, or null on a stale
 /// handle. One conversion site, so the two representations cannot drift apart in two
 /// places.
-fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]f32, rot: [4]f32 } {
+fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]WorldReal, rot: [4]WorldReal } {
     const p = pw.bm.position(body) orelse return null;
     const r = pw.bm.rotation(body).?;
-    const pa = p.toArray();
-    return .{
-        .pos = .{ @floatCast(pa[0]), @floatCast(pa[1]), @floatCast(pa[2]) },
-        .rot = .{ @floatCast(r.x), @floatCast(r.y), @floatCast(r.z), @floatCast(r.w) },
-    };
+    return .{ .pos = cross.vec3ToWorld(p).toArray(), .rot = cross.quatToWorld(r).toArray() };
 }
 
-fn vecFrom(a: [3]f32) Vec3r {
-    return Vec3r.fromArray(.{ @floatCast(a[0]), @floatCast(a[1]), @floatCast(a[2]) });
+fn vecFrom(a: [3]WorldReal) Vec3r {
+    return cross.vec3ToSolver(WorldVec3.fromArray(a));
+}
+
+/// The solver's two velocity columns for `body`, in world-scalar array form — the shape the
+/// ECS `Velocity` carries, so the comparison and the write read the same bytes.
+fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3]WorldReal, angular: [3]WorldReal } {
+    return .{
+        .linear = cross.vec3ToWorld(pw.bm.linearVelocity(body).?).toArray(),
+        .angular = cross.vec3ToWorld(pw.bm.angularVelocity(body).?).toArray(),
+    };
 }
 
 /// Push what gameplay owns INTO the solver — before step 1 of the cycle.
@@ -109,17 +120,19 @@ pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
             // every tick would keep everything resting on the platform permanently awake.
             if (ecs.get(Transform, entity)) |t| {
                 const current = solverPose(pw, body).?;
-                if (!std.mem.eql(f32, &current.pos, &t.pos) or !std.mem.eql(f32, &current.rot, &t.rot)) {
+                if (!std.mem.eql(WorldReal, &current.pos, &t.pos) or
+                    !std.mem.eql(WorldReal, &current.rot, &t.rot))
+                {
                     // Through `setBodyTransform` and NOT through a hand-rolled sequence:
                     // that entry already composes the wake, W4 on the retained partners
                     // and the proxy refresh, and a second composition here would be the
                     // one that drifts.
-                    try pw.setBodyTransform(gpa, body, vecFrom(t.pos), Quatr{
-                        .x = @floatCast(t.rot[0]),
-                        .y = @floatCast(t.rot[1]),
-                        .z = @floatCast(t.rot[2]),
-                        .w = @floatCast(t.rot[3]),
-                    });
+                    try pw.setBodyTransform(
+                        gpa,
+                        body,
+                        vecFrom(t.pos),
+                        cross.quatToSolver(WorldQuat.fromArray(t.rot)),
+                    );
                 }
             }
         }
@@ -129,14 +142,9 @@ pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
         // `Velocity` and the solver applies it — and the write composes wake + write like
         // any other external mutation.
         if (ecs.get(Velocity, entity)) |v| {
-            const lin = pw.bm.linearVelocity(body).?.toArray();
-            const ang = pw.bm.angularVelocity(body).?.toArray();
-            const same_lin = @as(f32, @floatCast(lin[0])) == v.linear[0] and
-                @as(f32, @floatCast(lin[1])) == v.linear[1] and
-                @as(f32, @floatCast(lin[2])) == v.linear[2];
-            const same_ang = @as(f32, @floatCast(ang[0])) == v.angular[0] and
-                @as(f32, @floatCast(ang[1])) == v.angular[1] and
-                @as(f32, @floatCast(ang[2])) == v.angular[2];
+            const held = solverVelocity(pw, body);
+            const same_lin = std.mem.eql(WorldReal, &held.linear, &v.linear);
+            const same_ang = std.mem.eql(WorldReal, &held.angular, &v.angular);
             if (!same_lin or !same_ang) {
                 pw.setLinearVelocity(body, vecFrom(v.linear));
                 pw.setAngularVelocity(body, vecFrom(v.angular));
@@ -178,7 +186,9 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
         if (body_type == .dynamic) {
             if (ecs.get(Transform, entity)) |t| {
                 const pose = solverPose(pw, body).?;
-                if (!std.mem.eql(f32, &t.pos, &pose.pos) or !std.mem.eql(f32, &t.rot, &pose.rot)) {
+                if (!std.mem.eql(WorldReal, &t.pos, &pose.pos) or
+                    !std.mem.eql(WorldReal, &t.rot, &pose.rot))
+                {
                     const w = ecs.getMut(Transform, entity).?;
                     w.pos = pose.pos;
                     w.rot = pose.rot;
@@ -192,14 +202,13 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
         // held awake by a character standing on it republishes a constant zero forever, and
         // `Velocity` is `@replicated(strategy: .rollback)` — a false mark ships a delta.
         if (ecs.get(Velocity, entity)) |v| {
-            const lin = pw.bm.linearVelocity(body).?.toArray();
-            const ang = pw.bm.angularVelocity(body).?.toArray();
-            const out_lin: [3]f32 = .{ @floatCast(lin[0]), @floatCast(lin[1]), @floatCast(lin[2]) };
-            const out_ang: [3]f32 = .{ @floatCast(ang[0]), @floatCast(ang[1]), @floatCast(ang[2]) };
-            if (!std.mem.eql(f32, &v.linear, &out_lin) or !std.mem.eql(f32, &v.angular, &out_ang)) {
+            const out = solverVelocity(pw, body);
+            if (!std.mem.eql(WorldReal, &v.linear, &out.linear) or
+                !std.mem.eql(WorldReal, &v.angular, &out.angular))
+            {
                 const w = ecs.getMut(Velocity, entity).?;
-                w.linear = out_lin;
-                w.angular = out_ang;
+                w.linear = out.linear;
+                w.angular = out.angular;
             }
         }
     }
