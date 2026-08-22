@@ -14,6 +14,9 @@ const types = @import("types.zig");
 
 /// Rigid-body material + simulation parameters.
 pub const RigidBody = components.RigidBody;
+/// A body whose island is ASLEEP — the zero-size marker the orchestrator adds and
+/// removes, and the only way a rule can ask whether a body is sleeping (M1.1.15).
+pub const Sleeping = components.Sleeping;
 /// A collision shape attached to an entity.
 pub const CollisionShape = components.CollisionShape;
 /// Per-shape parameter union overlaid by `CollisionShape.shape_type`.
