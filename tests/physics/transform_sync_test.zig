@@ -276,3 +276,59 @@ test "authority per BodyType" {
     try testing.expectEqual(@as(f32, 77), ecs.get(Transform, sta.entity).?.pos[0]);
     try testing.expectEqual(@as(Real, 40), pw.bm.position(sta.body).?.toArray()[0]);
 }
+
+/// Was `T`'s slot for `entity` stamped at the world's CURRENT tick? This reads the SIGNAL
+/// `Changed<T>` is built on (`core/ecs/world.zig` `getMut` → `archetype.markChanged`), and
+/// deliberately not the value: under the defect these guards refuse, the value is already
+/// correct and only the signal lies.
+fn markedThisTick(ecs: *World, comptime T: type, entity: EntityId) bool {
+    const loc = ecs.dynamicLocation(entity).?;
+    const arch = ecs.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const col = arch.componentIndex(ecs.componentId(@typeName(T)).?).?;
+    return arch.changedTick(chunk, col, loc.slot) == ecs.current_tick;
+}
+
+test "publication does not mark a component whose value did not change" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+
+    // ZERO gravity and sleeping OFF: the body is awake forever and exactly immobile, which
+    // is the awake-and-immobile case the `Sleeping` marker says nothing about. Immobility
+    // is EXACT and not approximate here — `v = 0` damped is `0`, and `x + 0 · dt` is `x` —
+    // so a mark can only come from an unconditional write, never from a settling residue.
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2, 0 });
+
+    // One tick to let publication write whatever it wants to write once.
+    ecs.beginFrame();
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+    const settled_pos = ecs.get(Transform, b.entity).?.pos;
+
+    // From here on, nothing in the scene changes. Every further tick opens a NEW ECS frame,
+    // so a stamp at `current_tick` can only have been made during that tick — and the test
+    // touches no component itself, so publication is the only possible author.
+    var k: u32 = 0;
+    while (k < 8) : (k += 1) {
+        ecs.beginFrame();
+        try sync.stepSynchronised(gpa, &pw, &ecs);
+        try testing.expect(!markedThisTick(&ecs, Transform, b.entity));
+        try testing.expect(!markedThisTick(&ecs, Velocity, b.entity));
+    }
+    // The body genuinely did not move, so the quiet signal is not hiding a lost write.
+    try testing.expectEqualSlices(f32, &settled_pos, &ecs.get(Transform, b.entity).?.pos);
+
+    // NON-VACUITY, and it is what separates this from a `syncOut` that publishes NOTHING.
+    // A gameplay `Velocity` write goes in, the body moves, and the marks must FIRE.
+    ecs.beginFrame();
+    ecs.getMut(Velocity, b.entity).?.linear = .{ 3, 0, 0 };
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+
+    // A fresh tick the test does not touch: any stamp below is publication's own.
+    ecs.beginFrame();
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+    try testing.expect(markedThisTick(&ecs, Transform, b.entity));
+    try testing.expect(ecs.get(Transform, b.entity).?.pos[0] > settled_pos[0]);
+}

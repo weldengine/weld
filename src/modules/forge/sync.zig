@@ -19,11 +19,23 @@
 //!   - `static` — no per-tick synchronisation in either direction. A static body that
 //!     moves is a teleportation through the interface, which wakes by W4.
 //!
-//! **A write is pushed only when it CHANGED.** Sync-in compares the ECS value against
-//! the solver's before writing, because an unchanged value is not a mutation and pushing
-//! it every tick would compose a wake every tick — nothing resting on a kinematic
-//! platform could ever sleep, and §1.8.4's whole separation would be undone by the seam
-//! meant to respect it.
+//! **A write is pushed only when it CHANGED, IN BOTH DIRECTIONS.** The rule has one motive
+//! per side and neither side may skip it.
+//!
+//!   - INWARD, because an unchanged value is not a mutation and pushing it every tick would
+//!     compose a wake every tick — nothing resting on a kinematic platform could ever sleep,
+//!     and §1.8.4's whole separation would be undone by the seam meant to respect it.
+//!   - OUTWARD, because `World.getMut` marks `changed_tick` UNCONDITIONALLY and the
+//!     `Changed<T>` filter is built on that mark. Publishing a bit-identical value would
+//!     make every awake body report a change every tick: a rule gated on
+//!     `changed Velocity` would run for nothing, and `Velocity` being
+//!     `@replicated(strategy: .rollback)`, the false delta leaves on the wire. The
+//!     `Sleeping` marker covers the sleepers; the awake-and-immobile are the dominant case
+//!     in an arena scene and the marker says nothing about them.
+//!
+//! Both halves read before they write. The guard on the outward half asserts the SIGNAL —
+//! `changed_tick` against the world's current tick — and never the value, because the value
+//! is already correct under the defect; it is the signal that lies.
 //!
 //! **THE ORDER OF THE `Sleeping` TAG AGAINST PUBLICATION, and why it is this way.** An
 //! island falls asleep at step 11, AFTER steps 6 and 7 wrote its final pose. Sync-out
@@ -159,21 +171,36 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
 
         // The POSE goes out for a DYNAMIC body only: gameplay owns a kinematic pose, and
         // publishing it back would be this seam overwriting the authority it just read.
+        // READ FIRST, `getMut` ONLY ON A REAL DIFFERENCE — the symmetric half of the rule
+        // sync-in applies. `World.getMut` marks `changed_tick` UNCONDITIONALLY and
+        // `Changed<T>` is built on that mark, so republishing a bit-identical pose would
+        // report a change that did not happen, every tick, for every awake body.
         if (body_type == .dynamic) {
-            if (ecs.getMut(Transform, entity)) |t| {
+            if (ecs.get(Transform, entity)) |t| {
                 const pose = solverPose(pw, body).?;
-                t.pos = pose.pos;
-                t.rot = pose.rot;
+                if (!std.mem.eql(f32, &t.pos, &pose.pos) or !std.mem.eql(f32, &t.rot, &pose.rot)) {
+                    const w = ecs.getMut(Transform, entity).?;
+                    w.pos = pose.pos;
+                    w.rot = pose.rot;
+                }
             }
         }
 
         // The VELOCITY goes out for both simulated kinds — resolved by the solver for a
-        // dynamic body, derived by `moveKinematic` for a kinematic one.
-        if (ecs.getMut(Velocity, entity)) |v| {
+        // dynamic body, derived by `moveKinematic` for a kinematic one. Same read-first
+        // rule, and it is the channel that bites hardest: an immobile kinematic platform
+        // held awake by a character standing on it republishes a constant zero forever, and
+        // `Velocity` is `@replicated(strategy: .rollback)` — a false mark ships a delta.
+        if (ecs.get(Velocity, entity)) |v| {
             const lin = pw.bm.linearVelocity(body).?.toArray();
             const ang = pw.bm.angularVelocity(body).?.toArray();
-            v.linear = .{ @floatCast(lin[0]), @floatCast(lin[1]), @floatCast(lin[2]) };
-            v.angular = .{ @floatCast(ang[0]), @floatCast(ang[1]), @floatCast(ang[2]) };
+            const out_lin: [3]f32 = .{ @floatCast(lin[0]), @floatCast(lin[1]), @floatCast(lin[2]) };
+            const out_ang: [3]f32 = .{ @floatCast(ang[0]), @floatCast(ang[1]), @floatCast(ang[2]) };
+            if (!std.mem.eql(f32, &v.linear, &out_lin) or !std.mem.eql(f32, &v.angular, &out_ang)) {
+                const w = ecs.getMut(Velocity, entity).?;
+                w.linear = out_lin;
+                w.angular = out_ang;
+            }
         }
     }
 
