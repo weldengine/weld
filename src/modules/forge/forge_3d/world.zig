@@ -269,12 +269,7 @@ pub const PhysicsWorld = struct {
     /// in a candidate pair with it is woken, because removing it changes what
     /// supports them and a sleeper emits nothing in broadphase that could notice.
     pub fn removeBody(self: *PhysicsWorld, id: BodyId) void {
-        for (self.active.items) |key| {
-            const a: BodyId = @intCast(key >> 32);
-            const b: BodyId = @intCast(key & 0xFFFF_FFFF);
-            if (a != id and b != id) continue;
-            self.bm.wakeBody(if (a == id) b else a);
-        }
+        self.wakeRetainedPartners(id);
         for (self.bodies.items, 0..) |entry, i| {
             if (entry.id != id) continue;
             self.bp.remove(entry.proxy);
@@ -317,6 +312,17 @@ pub const PhysicsWorld = struct {
         );
         const proxy = try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, presence).?, presence);
         self.chars.setPresenceProxy(id, proxy);
+
+        // AND REGISTERED IN THIS WORLD'S OWN BODY LIST, which is a SECOND fact and not a
+        // restatement of the insertion — the defect found by the W4 test at gate C lived
+        // exactly in the gap between the two. `pairStillOverlaps` resolves a retained
+        // pair's endpoints through `proxyOf`, which searches this list; an unregistered
+        // presence resolves to `null`, so step 2 pruned EVERY pair involving it on EVERY
+        // tick, and the retained set — which IS the wake graph (§1.8.7) — could never
+        // hold a character. W4 was structurally unable to fire for the one producer the
+        // engine has. The proxy handle survives a `resizeCharacter`, which updates it in
+        // place, so this registration stays valid for the character's whole life.
+        try self.bodies.append(gpa, .{ .id = presence, .proxy = proxy });
         return id;
     }
 
@@ -324,7 +330,76 @@ pub const PhysicsWorld = struct {
     /// The store owns that release — it holds the proxy handle — so this is a delegation
     /// and not a second removal path.
     pub fn destroyCharacter(self: *PhysicsWorld, gpa: std.mem.Allocator, id: api.CharacterId) void {
+        // Deregister BEFORE delegating: the store removes the proxy and the presence
+        // body, so an entry left here would hand step 10 a proxy the broadphase has
+        // freed. Ordered removal, for the same reason `removeBody` uses one — the sweep
+        // order of this list stays stable.
+        if (self.chars.getCharacterInnerBody(id) catch null) |presence| {
+            for (self.bodies.items, 0..) |entry, i| {
+                if (entry.id != presence) continue;
+                _ = self.bodies.orderedRemove(i);
+                break;
+            }
+        }
         self.chars.destroyCharacter(gpa, &self.bp, &self.store, &self.bm, id);
+    }
+
+    /// Move a character, then apply W4 for it.
+    ///
+    /// **W3 is structurally blind to a controller, and W4 is the only cause that covers
+    /// it** (`engine-physics-solver.md` §1.8.5). A presence is a kinematic body moved by
+    /// POSE WRITE, so its velocity columns stay exactly zero while it crosses the scene
+    /// and W3's true-zero test never sees it move. A character walking into a sleeping
+    /// stack would sink into it with no diagnostic. The controller is the engine's first
+    /// real producer of W4, and this is where that producer lives.
+    pub fn moveCharacter(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        id: api.CharacterId,
+        displacement: Vec3r,
+        dt: Real,
+    ) !character_mod.MoveResult {
+        const result = try self.chars.moveCharacter(gpa, &self.bp, &self.bm, &self.store, id, displacement, dt);
+        self.wakePresencePartners(id);
+        return result;
+    }
+
+    /// Teleport a character, then apply W4 for it — same cause, same reason as
+    /// `moveCharacter`: the presence's pose changed and its velocity columns did not.
+    pub fn setCharacterPosition(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        id: api.CharacterId,
+        position: Vec3r,
+    ) !void {
+        try self.chars.setCharacterPosition(gpa, &self.bp, &self.bm, &self.store, id, position);
+        self.wakePresencePartners(id);
+    }
+
+    /// Resize a character, and apply W4 only on SUCCESS.
+    ///
+    /// `false` means the target volume was occupied and NOTHING moved — a legitimate
+    /// gameplay answer and not an error (`engine-physics-queries.md` §1.12.7). Waking on
+    /// a refused resize would wake for a mutation that did not happen, which is the
+    /// always-wake rule wearing the shape of a correct one.
+    pub fn resizeCharacter(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        id: api.CharacterId,
+        radius: f32,
+        height: f32,
+    ) !bool {
+        const ok = try self.chars.resizeCharacter(gpa, &self.bp, &self.bm, &self.store, id, radius, height);
+        if (ok) self.wakePresencePartners(id);
+        return ok;
+    }
+
+    /// W4 for a character: wake the sleepers retained in a pair with its PRESENCE. A
+    /// character without a presence has no pair to be retained in, so there is nothing
+    /// to wake and the absence is the correct answer rather than a skipped case.
+    fn wakePresencePartners(self: *PhysicsWorld, id: api.CharacterId) void {
+        const presence = (self.chars.getCharacterInnerBody(id) catch return) orelse return;
+        self.wakeRetainedPartners(presence);
     }
 
     /// How many proxies the broadphase holds in `layer` — tree leaves plus the layer's
@@ -342,6 +417,99 @@ pub const PhysicsWorld = struct {
         } = .{};
         self.bp.forEachInLayer(layer, &counter);
         return counter.n;
+    }
+
+    // --- wake composition (§1.8.4, §1.8.5) ------------------------------------
+    //
+    // The store keeps the two INTENTIONS apart and this tier composes them. A
+    // solver-internal write — what the substep loop and the restitution pass do every
+    // tick to every body in contact — must NOT rearm a sleep window, or nothing in
+    // contact would ever sleep; an EXTERNAL mutation must wake and rearm. So
+    // `setLinearVelocity`, `setAngularVelocity`, `setPosition` and `setRotation` are
+    // non-activating in the store BY CONTRACT, and the entries below are the ones that
+    // add the wake. `addForce`, `addTorque` and `addImpulse` are external by
+    // construction — the solver has zero call sites on them — and activate in the store
+    // itself, so this tier delegates them unchanged rather than waking twice.
+
+    /// Wake every sleeper RETAINED IN A PAIR with `id` — wake cause W4 (§1.8.5).
+    ///
+    /// The retained candidate set IS the wake graph (§1.8.7): a sleeper emits nothing in
+    /// broadphase, so nothing else could notice that what supported it has moved or gone.
+    /// One helper and not a copy per producer, because the five producers of W4 —
+    /// body removal, static/kinematic teleportation, and the controller's three — differ
+    /// in what they do to their own body and not at all in what they owe their partners.
+    fn wakeRetainedPartners(self: *PhysicsWorld, id: BodyId) void {
+        for (self.active.items) |key| {
+            const a: BodyId = @intCast(key >> 32);
+            const b: BodyId = @intCast(key & 0xFFFF_FFFF);
+            if (a != id and b != id) continue;
+            self.bm.wakeBody(if (a == id) b else a);
+        }
+    }
+
+    /// Refresh `id`'s broadphase proxy from its current pose, so a query issued between
+    /// two ticks finds the body where it now is and not where step 10 last left it. An
+    /// UNBOUNDED proxy has no box to refresh.
+    fn refreshProxy(self: *PhysicsWorld, gpa: std.mem.Allocator, id: BodyId) !void {
+        const proxy = self.proxyOf(id) orelse return;
+        if (proxy.kind == .unbounded) return;
+        if (self.bm.bodyAabb(&self.store, id)) |aabb| try self.bp.update(gpa, proxy, aabb);
+    }
+
+    /// TELEPORT `id` to a pose. Writes the pose and derives NO velocity — the split
+    /// against `moveKinematic` is contractual and not an oversight
+    /// (`engine-physics-queries.md` §1.12.5): a platform moved by this entry keeps
+    /// velocity columns at zero, which is exactly why a character standing on one needs
+    /// the other entry to report a truthful `ground_velocity`.
+    ///
+    /// Composes the wake: the body itself, because a teleport is an external mutation
+    /// (§1.8.4), and W4 on its retained partners, because a static or kinematic body that
+    /// moves changes what supports the sleepers around it and they cannot see it happen.
+    /// No-op on a stale handle.
+    pub fn setBodyTransform(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        id: BodyId,
+        position: Vec3r,
+        rotation: config.Quatr,
+    ) !void {
+        if (self.bm.position(id) == null) return; // stale handle
+        self.wakeRetainedPartners(id);
+        self.bm.wakeBody(id);
+        self.bm.setPosition(id, position);
+        self.bm.setRotation(id, rotation);
+        try self.refreshProxy(gpa, id);
+    }
+
+    /// Set the linear velocity from gameplay: wake, then write. The store's setter is
+    /// non-activating because the solver drives it every substep; this entry is the one
+    /// an external caller reaches, and it is where the wake belongs.
+    pub fn setLinearVelocity(self: *PhysicsWorld, id: BodyId, velocity: Vec3r) void {
+        self.bm.wakeBody(id);
+        self.bm.setLinearVelocity(id, velocity);
+    }
+
+    /// Set the angular velocity from gameplay — same composition, same reason.
+    pub fn setAngularVelocity(self: *PhysicsWorld, id: BodyId, velocity: Vec3r) void {
+        self.bm.wakeBody(id);
+        self.bm.setAngularVelocity(id, velocity);
+    }
+
+    /// Accumulate a world-space force. ALREADY activating in the store, which is where
+    /// it belongs: a force is external by construction and the solver has no call site
+    /// on it. Delegated rather than re-woken here, so the wake happens once.
+    pub fn addForce(self: *PhysicsWorld, id: BodyId, force: Vec3r) void {
+        self.bm.addForce(id, force);
+    }
+
+    /// Accumulate a world-space torque — same reasoning as `addForce`.
+    pub fn addTorque(self: *PhysicsWorld, id: BodyId, torque: Vec3r) void {
+        self.bm.addTorque(id, torque);
+    }
+
+    /// Apply a world-space impulse — same reasoning as `addForce`.
+    pub fn addImpulse(self: *PhysicsWorld, id: BodyId, impulse: Vec3r) void {
+        self.bm.addImpulse(id, impulse);
     }
 
     /// The proxy of `id`, or `null` once the body has been removed.

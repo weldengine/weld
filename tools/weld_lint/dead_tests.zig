@@ -263,9 +263,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // skipped, macOS aarch64). The CI layer confronts both branches on the matrix
     // platforms themselves: measured 1875 on `ubuntu-24.04` and 1873 on `windows-2025`
     // at gate A, through `-Dexpect-collected` fed by each cell's own total.
+    // Gate C added six more to `world_test.zig` (1878 → 1884, suite reported 1884 —
+    // 1865 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1876,
-        else => 1878,
+        .windows => 1882,
+        else => 1884,
     };
 }
 

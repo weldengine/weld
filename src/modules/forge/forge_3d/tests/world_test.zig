@@ -443,3 +443,225 @@ test "a character created without a presence inserts no proxy" {
     try testing.expect((try world.chars.getCharacterInnerBody(solid)) != null);
     try testing.expectEqual([4]u32{ 0, 1, 0, 0 }, classCounts(&world));
 }
+
+// --- wake composition (Gate C) -------------------------------------------------
+
+/// Step until `id` is asleep, or fail. Sleeping is ON here, deliberately: these tests
+/// ask "does this wake?", which is the one question that needs a sleeper.
+fn stepUntilAsleep(gpa: std.mem.Allocator, world: *PhysicsWorld, id: BodyId, budget: u32) !u32 {
+    var t: u32 = 0;
+    while (t < budget) : (t += 1) {
+        try world.step(gpa);
+        if (world.bm.isSleeping(id).?) return t + 1;
+    }
+    return error.NeverFellAsleep;
+}
+
+test "external mutation wakes and resets the window; a solver-internal write does neither" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    _ = try stepUntilAsleep(gpa, &world, box, 200);
+    try testing.expect(world.bm.isSleeping(box).?);
+
+    // DIRECTION ONE — the solver's own write path does NOT wake. These are the setters
+    // the substep loop and the restitution pass drive on every body in contact, every
+    // tick; if they woke, nothing in contact could ever sleep, which is the whole reason
+    // §1.8.4 splits the two intentions.
+    //
+    // THE WINDOW IS READ AS A VALUE AND NOT AS A FLAG, and the value corrected this
+    // test: a sleeping body's `sleep_time` is the ACCUMULATED window that made it
+    // eligible — measured 0.5 s, which is `time_before_sleep` — and zero is what a WAKE
+    // writes. So the two directions read DIFFERENT values on the same field, which
+    // discriminates more sharply than the pair of zeroes first asserted here.
+    const window_asleep = world.bm.sleepTime(box).?;
+    try testing.expect(window_asleep > 0);
+    world.bm.setLinearVelocity(box, vr(3, 0, 0));
+    world.bm.setPosition(box, vr(0, 1.5, 0));
+    world.bm.setRotation(box, config.Quatr.identity);
+    try testing.expect(world.bm.isSleeping(box).?);
+    try testing.expectEqual(window_asleep, world.bm.sleepTime(box).?);
+
+    // DIRECTION TWO — the same write through the gameplay-facing entry wakes AND rearms.
+    // Without direction one above, this assertion is satisfied by a rule that wakes on
+    // every write whatever its origin, which is not the rule.
+    world.setLinearVelocity(box, vr(3, 0, 0));
+    try testing.expect(!world.bm.isSleeping(box).?);
+    try testing.expectEqual(@as(Real, 0), world.bm.sleepTime(box).?);
+
+    // AND THE WINDOW IS REALLY REARMED, not merely zero-because-it-was-zero: let it
+    // accumulate, then wake again and read the drop. A wake that only cleared the
+    // sleeping flag would leave the window where it stood.
+    _ = try stepUntilAsleep(gpa, &world, box, 200);
+    var t: u32 = 0;
+    while (t < 5) : (t += 1) try world.step(gpa);
+    const accumulated = world.bm.sleepTime(box).?;
+    try testing.expect(accumulated > 0);
+    world.addImpulse(box, vr(0.5, 0, 0));
+    try testing.expect(!world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.sleepTime(box).? < accumulated);
+}
+
+test "W4: removing a body wakes the sleepers retained in pair with it" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    // A SECOND, DISTANT sleeper that shares no pair with the ground. It is what makes
+    // this a test of the wake GRAPH rather than of a wake-everything: after the removal
+    // it must still be asleep, and a scene without it cannot tell the two apart.
+    const far_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
+    var far_ground = api.BodyDescriptor{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = far_shape,
+    };
+    far_ground.position = av3(100, 0, 0);
+    _ = try world.addBody(gpa, far_ground);
+    const far_box = try addBoxBody(gpa, &world, .dynamic, false, 11, .{ 100, 1.0, 0 });
+
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+    _ = try stepUntilAsleep(gpa, &world, far_box, 300);
+    try testing.expect(world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?);
+
+    // The ground under `box` goes. `box` is retained in a pair with it, `far_box` is not.
+    const ground = world.bodies.items[0].id;
+    world.removeBody(ground);
+    try testing.expect(!world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?); // the counter-factual, in scene
+}
+
+test "W4: static teleportation wakes the sleepers retained in pair with it" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    const far_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
+    var far_ground = api.BodyDescriptor{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = far_shape,
+    };
+    far_ground.position = av3(100, 0, 0);
+    const far_ground_id = try world.addBody(gpa, far_ground);
+    const far_box = try addBoxBody(gpa, &world, .dynamic, false, 11, .{ 100, 1.0, 0 });
+
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+    _ = try stepUntilAsleep(gpa, &world, far_box, 300);
+
+    // Teleporting the DISTANT ground wakes the body above IT and leaves the other
+    // asleep — both halves in one scene, so "it wakes" and "it wakes only what it
+    // should" are read from the same act.
+    try world.setBodyTransform(gpa, far_ground_id, vr(100, -0.2, 0), config.Quatr.identity);
+    try testing.expect(!world.bm.isSleeping(far_box).?);
+    try testing.expect(world.bm.isSleeping(box).?);
+}
+
+test "setBodyTransform derives no velocity" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+
+    const platform = try addBoxBody(gpa, &world, .kinematic, false, 1, .{ 0, 0, 0 });
+    try testing.expectEqual(Vec3r.zero, world.bm.linearVelocity(platform).?);
+    try testing.expectEqual(Vec3r.zero, world.bm.angularVelocity(platform).?);
+
+    // A teleport of one metre over one tick. If this entry derived a velocity the way
+    // `moveKinematic` is required to, the linear column would read 60 m/s; it reads
+    // zero, and that is the contract — the split between the two entries is what makes
+    // `ground_velocity` truthful for one and silent for the other (§1.12.5).
+    try world.setBodyTransform(gpa, platform, vr(1, 0, 0), config.Quatr.identity);
+    try testing.expectEqual(vr(1, 0, 0), world.bm.position(platform).?);
+    try testing.expectEqual(Vec3r.zero, world.bm.linearVelocity(platform).?);
+    try testing.expectEqual(Vec3r.zero, world.bm.angularVelocity(platform).?);
+}
+
+/// Whether the retained candidate set holds the pair `(a, b)`, in either order.
+fn retainsPair(world: *const PhysicsWorld, a: BodyId, b: BodyId) bool {
+    const lo = @min(a, b);
+    const hi = @max(a, b);
+    const key = (@as(u64, lo) << 32) | hi;
+    for (world.active.items) |k| {
+        if (k == key) return true;
+    }
+    return false;
+}
+
+test "W4: moveCharacter wakes the sleeping bodies retained in pair with the presence" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    // A SECOND sleeper, far away and sharing no pair with the presence. It is the
+    // counter-factual, and it is IN THE SCENE rather than in a second test: the same act
+    // must wake one and not the other, which is the level the claim is made at.
+    const far_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
+    var far_ground = api.BodyDescriptor{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = far_shape,
+    };
+    far_ground.position = av3(100, 0, 0);
+    _ = try world.addBody(gpa, far_ground);
+    const far_box = try addBoxBody(gpa, &world, .dynamic, false, 11, .{ 100, 1.0, 0 });
+
+    // The character stands BESIDE the box, inside the broadphase fat margin and out of
+    // contact: close enough that the pair is retained, far enough that no manifold is
+    // built. That band is the whole point — if the capsule touched, `build`'s wake
+    // fixpoint (§1.8.5) would wake the box every tick and this test would be measuring
+    // that instead of W4.
+    const hero = try world.createCharacter(gpa, .{
+        .entity = .{ .index = 20, .generation = 0 },
+        .position = av3(0.85, 0.5, 0),
+    });
+    const presence = (try world.chars.getCharacterInnerBody(hero)).?;
+
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+    _ = try stepUntilAsleep(gpa, &world, far_box, 300);
+
+    // PRECONDITIONS, asserted so the test cannot pass vacuously: the pair exists, the
+    // distant one does not, both bodies are asleep, and nothing is in contact with the
+    // presence — the last is what separates W4 from the build fixpoint.
+    try testing.expect(retainsPair(&world, presence, box));
+    try testing.expect(!retainsPair(&world, presence, far_box));
+    try testing.expect(world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?);
+    for (world.constraints.items) |c| {
+        try testing.expect(c.body_a != presence and c.body_b != presence);
+    }
+
+    // ONE ACT, TWO READINGS.
+    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    try testing.expect(!world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?);
+}
+
+test "W4: a character moving where it is retained with nobody wakes nobody" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    // The same scene as above MINUS the adjacency: the character stands far from the
+    // sleeper. The sleeper is present and asleep, so a wake WOULD be visible — which is
+    // what makes this a counter-factual at the right instant rather than a world in
+    // which nothing sleeps.
+    const hero = try world.createCharacter(gpa, .{
+        .entity = .{ .index = 20, .generation = 0 },
+        .position = av3(40, 0.5, 0),
+    });
+    const presence = (try world.chars.getCharacterInnerBody(hero)).?;
+
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+    try testing.expect(world.bm.isSleeping(box).?);
+    try testing.expect(!retainsPair(&world, presence, box));
+
+    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    try testing.expect(world.bm.isSleeping(box).?);
+}
