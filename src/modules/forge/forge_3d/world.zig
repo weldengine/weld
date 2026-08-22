@@ -66,6 +66,7 @@ const broadphase = @import("pipeline/broadphase.zig");
 const sleep = @import("pipeline/sleep.zig");
 const sensor = @import("pipeline/sensor.zig");
 const rigid = @import("rigid/root.zig");
+const character_mod = @import("character.zig");
 const determinism = @import("determinism.zig");
 const api = @import("weld_forge");
 
@@ -78,6 +79,8 @@ const Bp = broadphase.Broadphase(Real);
 const ContactConstraint = rigid.ContactConstraint;
 const ContactCache = rigid.ContactCache;
 const SolverConfig = rigid.SolverConfig;
+const CharacterStore = character_mod.CharacterStore;
+const BroadphaseLayer = broadphase.BroadphaseLayer;
 
 /// One executed stage of the cycle, in the order `step()` runs them.
 ///
@@ -184,6 +187,10 @@ pub const PhysicsWorld = struct {
     solver_stats: rigid.SolverStats = .{},
     /// Islands put to sleep at step 11 of the last tick.
     slept_last_tick: u32 = 0,
+    /// The character controllers. The orchestrator holds them because a controller's
+    /// broadphase PRESENCE has to be inserted, and the store that creates it cannot
+    /// choose a layer — the `BodyType` → `BroadphaseLayer` derivation lives here.
+    chars: CharacterStore = .{},
     /// The sensor state, rebuilt in full at STEP 10 BIS of every tick (M1.1.13).
     sensors: sensor.SensorState = .{},
     /// Where `step()` records the order it entered its stages, when a caller wants
@@ -218,6 +225,7 @@ pub const PhysicsWorld = struct {
 
     /// Release every owned buffer.
     pub fn deinit(self: *PhysicsWorld, gpa: std.mem.Allocator) void {
+        self.chars.deinit(gpa);
         self.sensors.deinit(gpa);
         self.store.deinit(gpa);
         self.bm.deinit(gpa);
@@ -274,6 +282,66 @@ pub const PhysicsWorld = struct {
             break;
         }
         self.bm.removeBody(id);
+    }
+
+    /// Create a character controller AND insert its broadphase presence.
+    ///
+    /// **This is the half the store cannot do.** `CharacterStore.createCharacter` builds
+    /// the presence — a `.kinematic` body carrying the controller's own capsule
+    /// (`engine-physics-queries.md` §1.12.2) — but a proxy needs a LAYER, and the layer
+    /// comes from the `BodyType` → `BroadphaseLayer` derivation this file owns. Without
+    /// the insertion the presence exists in the body store and is invisible to every
+    /// query, which C1.8 refuses twice over: the player's attack goes through
+    /// raycast/overlap, and the follow camera's anti-wall sweep starts from the player.
+    ///
+    /// The layer is derived from the presence's OWN stored flags rather than from a
+    /// literal, so a presence follows the same fixed priority as any other body —
+    /// `is_trigger` first, then body type (`engine-physics-solver.md` §1.13.3). A
+    /// hard-coded `.dynamic` would agree with the rule today and stop agreeing the day
+    /// the rule moves.
+    ///
+    /// TRANSACTIONAL: if the insertion fails, the character is destroyed rather than left
+    /// half-built with a presence no tree holds.
+    pub fn createCharacter(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        desc: api.CharacterDescriptor,
+    ) !api.CharacterId {
+        const id = try self.chars.createCharacter(gpa, &self.store, &self.bm, desc);
+        errdefer self.chars.destroyCharacter(gpa, &self.bp, &self.store, &self.bm, id);
+
+        const presence = (try self.chars.getCharacterInnerBody(id)) orelse return id;
+        const layer = BodyManager.broadLayerFor(
+            self.bm.isTrigger(presence).?,
+            self.bm.bodyType(presence).?,
+        );
+        const proxy = try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, presence).?, presence);
+        self.chars.setPresenceProxy(id, proxy);
+        return id;
+    }
+
+    /// Destroy a character, releasing its presence body and the proxy inserted above.
+    /// The store owns that release — it holds the proxy handle — so this is a delegation
+    /// and not a second removal path.
+    pub fn destroyCharacter(self: *PhysicsWorld, gpa: std.mem.Allocator, id: api.CharacterId) void {
+        self.chars.destroyCharacter(gpa, &self.bp, &self.store, &self.bm, id);
+    }
+
+    /// How many proxies the broadphase holds in `layer` — tree leaves plus the layer's
+    /// live unbounded slots.
+    ///
+    /// PER CLASS, and never a total, because that is the only form that discriminates: a
+    /// body inserted into the wrong class satisfies a total and fails a per-class count.
+    pub fn proxyCountIn(self: *const PhysicsWorld, layer: BroadphaseLayer) u32 {
+        var counter: struct {
+            n: u32 = 0,
+            pub fn add(c: *@This(), user_data: u32) void {
+                _ = user_data;
+                c.n += 1;
+            }
+        } = .{};
+        self.bp.forEachInLayer(layer, &counter);
+        return counter.n;
     }
 
     /// The proxy of `id`, or `null` once the body has been removed.

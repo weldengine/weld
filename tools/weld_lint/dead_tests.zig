@@ -256,11 +256,16 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // This control has now stopped three commits in a row on its first real uses,
     // each time on a genuine test addition, and each time the number was re-derived
     // from the suite rather than from the closure. That is the whole point of it.
-    // M1.1.15 added six blocks in `forge_3d/tests/world_test.zig`, which is the whole
-    // of this bump: 1869 → 1875.
+    // M1.1.15 bumps this twice, once per gate that adds blocks, and each time the number
+    // is re-derived from the SUITE: gate A added six blocks in
+    // `forge_3d/tests/world_test.zig` (1869 → 1875, suite reported 1875), gate B added
+    // three more to the same file (1875 → 1878, suite reported 1878 — 1859 passed + 19
+    // skipped, macOS aarch64). The CI layer confronts both branches on the matrix
+    // platforms themselves: measured 1875 on `ubuntu-24.04` and 1873 on `windows-2025`
+    // at gate A, through `-Dexpect-collected` fed by each cell's own total.
     return switch (os) {
-        .windows => 1873,
-        else => 1875,
+        .windows => 1876,
+        else => 1878,
     };
 }
 

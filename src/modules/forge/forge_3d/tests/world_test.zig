@@ -307,3 +307,139 @@ test "a world with no trigger produces an empty sensor state rather than skippin
     try testing.expectEqual(@as(usize, 0), world.sensors.entered.items.len);
     try testing.expectEqual(@as(usize, 0), world.sensors.exited.items.len);
 }
+
+// --- proxies and body lifetime (Gate B) ---------------------------------------
+
+const BroadphaseLayer = @import("../pipeline/broadphase.zig").BroadphaseLayer;
+
+/// The four per-class proxy counts, in enum order — the only shape a count of proxies
+/// is allowed to take here. A TOTAL is satisfied by a body inserted into the wrong
+/// class, which is the whole defect these tests exist to catch.
+fn classCounts(world: *const PhysicsWorld) [4]u32 {
+    return .{
+        world.proxyCountIn(.static),
+        world.proxyCountIn(.dynamic),
+        world.proxyCountIn(.debris),
+        world.proxyCountIn(.trigger),
+    };
+}
+
+fn addBoxBody(
+    gpa: std.mem.Allocator,
+    world: *PhysicsWorld,
+    body_type: api.BodyType,
+    is_trigger: bool,
+    entity_index: u32,
+    centre: [3]f32,
+) !BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var desc = api.BodyDescriptor{
+        .entity = .{ .index = entity_index, .generation = 0 },
+        .body_type = body_type,
+        .shape = shape,
+    };
+    desc.position = av3(centre[0], centre[1], centre[2]);
+    desc.is_trigger = is_trigger;
+    if (body_type == .dynamic) desc.mass = 1;
+    return world.addBody(gpa, desc);
+}
+
+test "a proxy exists for every live body and for every character presence, and none outlives its owner" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+
+    // Five bodies spread over three classes, plus a HALF-SPACE, which is the case a
+    // tree-only count would miss: it has no AABB at all and lives in the layer's
+    // unbounded list (`engine-physics-shapes.md` §1.11.15). `proxyCountIn` walks both.
+    const ground = try addBoxBody(gpa, &world, .static, false, 1, .{ 0, 0, 0 });
+    const dyn = try addBoxBody(gpa, &world, .dynamic, false, 2, .{ 0, 5, 0 });
+    const platform = try addBoxBody(gpa, &world, .kinematic, false, 3, .{ 10, 0, 0 });
+    const trigger = try addBoxBody(gpa, &world, .static, true, 4, .{ 20, 0, 0 });
+
+    const plane_shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = -10 } });
+    const plane = api.BodyDescriptor{
+        .entity = .{ .index = 5, .generation = 0 },
+        .body_type = .static,
+        .shape = plane_shape,
+    };
+    _ = try world.addBody(gpa, plane);
+
+    // AND A CHARACTER — trap named in the gate: the presence is inserted by the
+    // orchestrator and by nothing else, so a counting scene without one is green on the
+    // empty set of exactly what this test exists to guard.
+    const hero = try world.createCharacter(gpa, .{ .entity = .{ .index = 6, .generation = 0 } });
+    try testing.expect((try world.chars.getCharacterInnerBody(hero)) != null);
+
+    // static  = ground box + half-space              -> 2
+    // dynamic = dynamic box + kinematic platform + presence -> 3
+    // debris  = nothing declares it                  -> 0
+    // trigger = the sensor                           -> 1
+    try testing.expectEqual([4]u32{ 2, 3, 0, 1 }, classCounts(&world));
+
+    // NOTHING OUTLIVES ITS OWNER, measured AFTER destruction and in a scene where an
+    // orphan WOULD be visible: five other proxies remain, so a leaked one shows up as an
+    // excess in its class rather than being hidden by an empty world.
+    world.destroyCharacter(gpa, hero);
+    try testing.expectEqual([4]u32{ 2, 2, 0, 1 }, classCounts(&world));
+
+    world.removeBody(dyn);
+    try testing.expectEqual([4]u32{ 2, 1, 0, 1 }, classCounts(&world));
+
+    world.removeBody(trigger);
+    try testing.expectEqual([4]u32{ 2, 1, 0, 0 }, classCounts(&world));
+
+    world.removeBody(platform);
+    world.removeBody(ground);
+    try testing.expectEqual([4]u32{ 1, 0, 0, 0 }, classCounts(&world));
+}
+
+test "trigger role wins over body type in class assignment" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+
+    // THE PAIR IS THE TEST. A kinematic sensor alone would be satisfied by an
+    // implementation that sends every KINEMATIC body to `trigger`; its twin without the
+    // role pins that the discriminant is `is_trigger` and not the body type. The two
+    // differ in exactly one field.
+    const sensor_body = try addBoxBody(gpa, &world, .kinematic, true, 1, .{ 0, 0, 0 });
+    const plain = try addBoxBody(gpa, &world, .kinematic, false, 2, .{ 10, 0, 0 });
+
+    try testing.expectEqual([4]u32{ 0, 1, 0, 1 }, classCounts(&world));
+    try testing.expectEqual(@as(?bool, true), world.bm.isTrigger(sensor_body));
+    try testing.expectEqual(@as(?bool, false), world.bm.isTrigger(plain));
+    try testing.expectEqual(@as(?api.BodyType, .kinematic), world.bm.bodyType(sensor_body));
+    try testing.expectEqual(@as(?api.BodyType, .kinematic), world.bm.bodyType(plain));
+
+    // And the rule read directly, in both orders, so the priority is asserted and not
+    // merely exhibited by a scene that happens to agree with it.
+    const BM = @TypeOf(world.bm);
+    try testing.expectEqual(BroadphaseLayer.trigger, BM.broadLayerFor(true, .kinematic));
+    try testing.expectEqual(BroadphaseLayer.trigger, BM.broadLayerFor(true, .static));
+    try testing.expectEqual(BroadphaseLayer.trigger, BM.broadLayerFor(true, .dynamic));
+    try testing.expectEqual(BroadphaseLayer.dynamic, BM.broadLayerFor(false, .kinematic));
+    try testing.expectEqual(BroadphaseLayer.static, BM.broadLayerFor(false, .static));
+    try testing.expectEqual(BroadphaseLayer.dynamic, BM.broadLayerFor(false, .dynamic));
+}
+
+test "a character created without a presence inserts no proxy" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+
+    // The paired negative of the counting test: `inner_body = false` is a legal choice,
+    // and it must leave every class empty. Without it, "the presence is inserted" is
+    // satisfied by an orchestrator that inserts a proxy for every character whatever the
+    // descriptor asked for.
+    const ghost = try world.createCharacter(gpa, .{
+        .entity = .{ .index = 1, .generation = 0 },
+        .inner_body = false,
+    });
+    try testing.expectEqual(@as(?BodyId, null), try world.chars.getCharacterInnerBody(ghost));
+    try testing.expectEqual([4]u32{ 0, 0, 0, 0 }, classCounts(&world));
+
+    const solid = try world.createCharacter(gpa, .{ .entity = .{ .index = 2, .generation = 0 } });
+    try testing.expect((try world.chars.getCharacterInnerBody(solid)) != null);
+    try testing.expectEqual([4]u32{ 0, 1, 0, 0 }, classCounts(&world));
+}
