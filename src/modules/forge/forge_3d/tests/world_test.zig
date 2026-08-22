@@ -665,3 +665,65 @@ test "W4: a character moving where it is retained with nobody wakes nobody" {
     _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
     try testing.expect(world.bm.isSleeping(box).?);
 }
+
+test "moveKinematic derives both velocities from the target pose over dt" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+    const platform = try addBoxBody(gpa, &world, .kinematic, false, 1, .{ 0, 0, 0 });
+
+    // A ROTATION-ONLY MOVE, which is the case that discriminates: an implementation
+    // deriving only the linear half still passes a combined move, because its linear
+    // answer would be right and the angular error would hide behind it. Here the position
+    // does not change at all, so the linear column must read exactly zero and everything
+    // the test asserts is angular.
+    //
+    // The target is written as quaternion COMPONENTS rather than as an angle, so the
+    // expectation comes from the contract — `ω = 2·vec(dq)/dt` — and not from re-running
+    // the implementation's own path. `(0, 0.6, 0, 0.8)` is unit by construction.
+    const s: Real = 0.6;
+    const c: Real = 0.8;
+    const target_rot = config.Quatr{ .x = 0, .y = s, .z = 0, .w = c };
+    try world.moveKinematic(gpa, platform, Vec3r.zero, target_rot, fixed_dt);
+
+    const w1 = world.bm.angularVelocity(platform).?.toArray();
+    const expected_wy = 2 * s / fixed_dt;
+    try testing.expect(std.math.approxEqAbs(Real, expected_wy, w1[1], 1e-4));
+    // THE AXIS, asserted too: a formula that got the magnitude from the wrong components
+    // would still satisfy a magnitude-only check.
+    try testing.expectEqual(@as(Real, 0), w1[0]);
+    try testing.expectEqual(@as(Real, 0), w1[2]);
+    // And the angular half is genuinely NON-ZERO, which is what a linear-only
+    // implementation fails: it would report exactly zero here.
+    try testing.expect(@abs(w1[1]) > 1);
+    try testing.expectEqual(Vec3r.zero, world.bm.linearVelocity(platform).?);
+    // The pose was WRITTEN — this entry moves the body, unlike a velocity-only one.
+    try testing.expect(std.math.approxEqAbs(Real, s, world.bm.rotation(platform).?.y, 1e-6));
+
+    // THE SHORT-PATH TWIN. `q` and `−q` are the same rotation, so the same move written
+    // with the negated target must give the SAME angular velocity. Without the sign
+    // normalisation this reads as a near-full turn the other way — opposite sign and a
+    // much larger magnitude — so the pair is what makes the flip observable.
+    var twin = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer twin.deinit(gpa);
+    const p2 = try addBoxBody(gpa, &twin, .kinematic, false, 1, .{ 0, 0, 0 });
+    const negated = config.Quatr{ .x = 0, .y = -s, .z = 0, .w = -c };
+    try twin.moveKinematic(gpa, p2, Vec3r.zero, negated, fixed_dt);
+    const w2 = twin.bm.angularVelocity(p2).?.toArray();
+    try testing.expect(std.math.approxEqAbs(Real, w1[1], w2[1], 1e-4));
+
+    // THE LINEAR HALF, on a translation-only move of the same world.
+    const before = world.bm.position(platform).?;
+    try world.moveKinematic(gpa, platform, vr(0.5, 0, 0), target_rot, fixed_dt);
+    const lin = world.bm.linearVelocity(platform).?.toArray();
+    try testing.expect(std.math.approxEqAbs(Real, 0.5 / fixed_dt, lin[0], 1e-3));
+    try testing.expectEqual(@as(Real, 0), lin[1]);
+    try testing.expectEqual(@as(Real, 0), lin[2]);
+    // The rotation did not change this time, so the angular column falls back to zero —
+    // the mirror of the rotation-only case above, and what stops a stale `ω` from
+    // surviving a move that carried no rotation.
+    const w3 = world.bm.angularVelocity(platform).?.toArray();
+    try testing.expect(@abs(w3[1]) < 1e-4);
+    try testing.expect(std.math.approxEqAbs(Real, 0.5, world.bm.position(platform).?.toArray()[0], 1e-6));
+    try testing.expect(before.toArray()[0] == 0);
+}

@@ -481,6 +481,67 @@ pub const PhysicsWorld = struct {
         try self.refreshProxy(gpa, id);
     }
 
+    /// Move a KINEMATIC body to a target pose over `dt`, deriving both velocities from
+    /// the move — the entry `setBodyTransform` is deliberately not.
+    ///
+    /// **It writes the pose AND publishes the velocities**, and that pairing is the whole
+    /// point (`engine-physics-queries.md` §1.12.5). The problem the two entries exist to
+    /// separate is a platform the gameplay drives tick after tick: moved by
+    /// `setBodyTransform` its velocity columns stay at zero and `ground_velocity` reports
+    /// 0 for something visibly in motion; moved by this entry the columns carry the motion
+    /// that actually happened. An entry that published a velocity WITHOUT moving the body
+    /// would only mirror the same lie the other way round, and one that moved the body
+    /// without publishing would be `setBodyTransform` under a second name — either way the
+    /// caller would have to compose the two, which is a missing operation and not a
+    /// documented recipe.
+    ///
+    /// **Kinematic bodies are never integrated, and that is load-bearing rather than a
+    /// gap.** `integratePositions` skips every non-dynamic body, so a presence crosses the
+    /// scene with velocity columns at exactly zero and W3's true-zero test never sees it —
+    /// which is precisely why W4 exists at all (`engine-physics-solver.md` §1.8.5). Making
+    /// the integrator advance kinematics would give a presence a non-zero velocity, W3
+    /// would start firing, and the reasoning that justifies W4 would collapse. So the pose
+    /// is written here, not integrated from `ω` later.
+    ///
+    /// **The angular derivation carries no trigonometry, and it needs none.** With no
+    /// integrator consuming `ω`, its single consumer is `ground_velocity = v + ω × r`, so
+    /// there is nothing an exact axis-angle extraction would be exact AGAINST — while
+    /// `acos` is an external transcendental `ARCH-031` rule 4 forbids on a compared path.
+    /// `ω = 2 · vec(q_target · conj(q_current)) / dt`, with the sign normalised so the
+    /// SHORT path is taken: `q` and `−q` are the same rotation, and without the flip a
+    /// small turn expressed by the negated quaternion would read as a near-full turn the
+    /// other way.
+    ///
+    /// Composes the wake like any external pose write: the body, and W4 on its retained
+    /// partners. No-op on a stale handle.
+    pub fn moveKinematic(
+        self: *PhysicsWorld,
+        gpa: std.mem.Allocator,
+        id: BodyId,
+        target_position: Vec3r,
+        target_rotation: config.Quatr,
+        dt: Real,
+    ) !void {
+        std.debug.assert(std.math.isFinite(dt) and dt > 0);
+        const current_position = self.bm.position(id) orelse return; // stale handle
+        const current_rotation = self.bm.rotation(id).?;
+
+        const inv_dt = 1.0 / dt;
+        const linear = target_position.sub(current_position).scale(inv_dt);
+
+        var dq = target_rotation.mul(current_rotation.conjugate());
+        if (dq.w < 0) dq = dq.scale(-1); // short path: q and −q are one rotation
+        const angular = Vec3r.fromArray(.{ dq.x, dq.y, dq.z }).scale(2 * inv_dt);
+
+        self.wakeRetainedPartners(id);
+        self.bm.wakeBody(id);
+        self.bm.setLinearVelocity(id, linear);
+        self.bm.setAngularVelocity(id, angular);
+        self.bm.setPosition(id, target_position);
+        self.bm.setRotation(id, target_rotation);
+        try self.refreshProxy(gpa, id);
+    }
+
     /// Set the linear velocity from gameplay: wake, then write. The store's setter is
     /// non-activating because the solver drives it every substep; this entry is the one
     /// an external caller reaches, and it is where the wake belongs.

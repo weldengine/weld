@@ -265,9 +265,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // at gate A, through `-Dexpect-collected` fed by each cell's own total.
     // Gate C added six more to `world_test.zig` (1878 → 1884, suite reported 1884 —
     // 1865 passed + 19 skipped, macOS aarch64).
+    // `moveKinematic` added one more at the gate C round-trip (1884 → 1885, suite
+    // reported 1885 — 1866 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1882,
-        else => 1884,
+        .windows => 1883,
+        else => 1885,
     };
 }
 
