@@ -18,6 +18,21 @@ const ShapeType = types.ShapeType;
 /// dependency; Notes decision 2). All physics call sites use `api.Velocity`.
 pub const Velocity = core.ecs.components.Velocity;
 
+/// A body whose island is ASLEEP — a zero-size marker the orchestrator adds and removes
+/// as islands sleep and wake (`engine-physics-solver.md` §1.8.6).
+///
+/// **It is the only way a rule can ask whether a body is asleep**, and it is what carries
+/// the archetype-level skip `engine-physics-forge.md` §1.4 credits to native ECS
+/// integration: a query that excludes it steps over a whole archetype of resting debris
+/// instead of testing a flag per entity. The skip lives HERE, in the `Transform`
+/// synchronisation, and not in the solver — whose body store is a SoA indexed by `BodyId`
+/// and knows nothing of archetypes.
+///
+/// ZERO-SIZE, deliberately: a marker carries no data, and giving it a payload byte would
+/// invite one. It is `extern struct {}` so it stays POD under `ARCH-004` like every other
+/// component here.
+pub const Sleeping = extern struct {};
+
 /// A rigid body's material and simulation parameters
 /// (`engine-physics-forge.md` §2). Position/rotation live on the ECS
 /// `Transform`; velocity on `Velocity`; accumulated forces on `PhysicsForces`.
@@ -197,4 +212,46 @@ test "CollisionShape mirrors the two authoring fields of the body descriptor" {
     // padding byte 46, so the size stays 52, the alignment 4 and the three pinned offsets
     // unchanged — every assert above passes and this one reports `expected 7, found 8`.
     try testing.expectEqual(@as(usize, 7), @typeInfo(CollisionShape).@"struct".fields.len);
+}
+
+test "Sleeping is a zero-size POD marker" {
+    // The size is the contract: a marker with a payload byte is a different thing, and the
+    // next reader would put a field in it. Pinned in both directions — the size AND the
+    // field count — because a single `u8` field would keep neither.
+    try testing.expectEqual(@as(usize, 0), @sizeOf(Sleeping));
+    try testing.expectEqual(@as(usize, 0), @typeInfo(Sleeping).@"struct".fields.len);
+    try testing.expect(@typeInfo(Sleeping).@"struct".layout == .@"extern");
+}
+
+test "Sleeping survives registration, spawn, add and remove in a real World" {
+    // THE UNKNOWN THIS TEST EXISTS FOR. No zero-size component existed anywhere in the
+    // repository before this one — the ECS's own `Tag` fixture is a `u32` — so "the chunk
+    // layout tolerates a zero-size column" was an assumption and not a fact. The chunk's
+    // per-slot cost carries `EntityId` plus two ticks per component whatever the component
+    // measures, so the capacity divisor cannot reach zero; that is an argument, and this is
+    // the measurement.
+    const gpa = testing.allocator;
+    var world = core.ecs.World.init();
+    defer world.deinit(gpa);
+
+    // The entity carries what a physics body carries — `Transform` and `Velocity` — and
+    // the marker goes on top, which is exactly the shape the orchestrator drives.
+    const e = try world.spawn(gpa, .{}, .{});
+    try testing.expect(world.get(Sleeping, e) == null);
+
+    try world.addComponent(gpa, e, Sleeping, .{});
+    try testing.expect(world.get(Sleeping, e) != null);
+
+    // BOTH DIRECTIONS, because the orchestrator drives both: a body that wakes loses the
+    // marker and one that sleeps again regains it, each transition an archetype migration.
+    try world.removeComponent(gpa, e, Sleeping);
+    try testing.expect(world.get(Sleeping, e) == null);
+    try world.addComponent(gpa, e, Sleeping, .{});
+    try testing.expect(world.get(Sleeping, e) != null);
+
+    // And the entity's OTHER components survived the two migrations — a zero-size column
+    // must not disturb the ones beside it, which is the half of this that a size assert
+    // cannot reach.
+    try testing.expect(world.get(core.ecs.components.Transform, e) != null);
+    try testing.expect(world.get(Velocity, e) != null);
 }

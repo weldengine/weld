@@ -267,9 +267,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // 1865 passed + 19 skipped, macOS aarch64).
     // `moveKinematic` added one more at the gate C round-trip (1884 → 1885, suite
     // reported 1885 — 1866 passed + 19 skipped, macOS aarch64).
+    // Gate D added two to `forge/api/components.zig` with the `Sleeping` marker
+    // (1885 → 1887, suite reported 1887 — 1868 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1883,
-        else => 1885,
+        .windows => 1885,
+        else => 1887,
     };
 }
 
