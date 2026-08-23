@@ -702,3 +702,29 @@ test "two solid bodies on one entity elect the smaller identity" {
     try testing.expectEqual(@as(f32, @floatCast(pw.bm.position(first).?.toArray()[1])), published);
     try testing.expect(@abs(pw.bm.position(second).?.toArray()[1] - published) > 7);
 }
+
+test "a solid body wins over a trigger of SMALLER identity" {
+    // NON-VACUITY for the criterion's SECOND level, and it exists because the counter-factual
+    // that removes that level measured NOTHING against the tests above: in each of them the
+    // solid happens to be created first, so identity alone already elects it. Here the trigger
+    // is created FIRST and therefore has the smaller handle — only the solid-before-trigger
+    // level can still elect the solid.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+
+    const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+    const trigger = try addSibling(gpa, &pw, entity, true, .{ 0, 9, 0 });
+    const solid = try addSibling(gpa, &pw, entity, false, .{ 0, 1, 0 });
+    try testing.expect(trigger < solid); // the premise: the loser has the SMALLER identity
+
+    var k: u32 = 0;
+    while (k < 5) : (k += 1) try frame(gpa, &pw, &ecs);
+
+    const published = ecs.get(Transform, entity).?.pos[1];
+    try testing.expectEqual(@as(f32, @floatCast(pw.bm.position(solid).?.toArray()[1])), published);
+    try testing.expect(@abs(pw.bm.position(trigger).?.toArray()[1] - published) > 7);
+}

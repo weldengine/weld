@@ -302,9 +302,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The fifth pass RE-SCOPED `syncIn` out of the milestone: four reception tests removed,
     // two reduced to their publication half, and the linter's path coverage re-tested
     // (1933 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
+    // The fifth pass RE-SCOPED `syncIn` out of the milestone: four reception tests removed, two
+    // reduced to their publication half, the linter's path coverage re-tested, and one added
+    // for the election criterion's second level (1933 -> 1930, suite reported 1930 - 1911
+    // passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1927,
-        else => 1929,
+        .windows => 1928,
+        else => 1930,
     };
 }
 
