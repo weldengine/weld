@@ -70,6 +70,21 @@
 //! distinction is carried on the registration record (`world.BodyKind`) rather than inferred
 //! here, because it cannot be recovered from the entity or from the body type.
 //!
+//! **A TRIGGER BODY IS EXCLUDED FROM PUBLICATION AND KEPT IN RECEPTION**, and the corpus
+//! imposes the pattern rather than tolerating it. `engine-physics-solver.md` §1.13.1 states
+//! that a MIXED BODY DOES NOT EXIST: an entity that must both collide and detect carries TWO
+//! bodies, and §1.13.8 rule 2 restates it when it drops the reflexive pair, "without which an
+//! entity carrying a trigger body and a solid body would detect itself". So the two-bodies-
+//! one-entity shape is the normal case here, not the exotic one, and excluding only the
+//! character presence covered the instance and not the class.
+//!
+//! Which of the two carries the facts is settled by §1.13.7: a trigger body has NO manifold,
+//! NO constraint, NO impulse and NO island entry. It has no resolved fact to publish — its
+//! pose is whatever gameplay put there and its velocity and sleep state are meaningless. So
+//! sync-out publishes neither its pose, nor its velocity, nor its sleep state, and an
+//! entity's `Sleeping` marker is its SOLID body's. Sync-in keeps pushing it, because a
+//! trigger that does not follow its entity detects the wrong region.
+//!
 //! **What the tag buys, stated at the size the measurement supports.** `Sleeping` is what
 //! lets a gameplay query step over a whole archetype of resting bodies
 //! (`engine-physics-solver.md` §1.8.6) — that is the archetype-level skip
@@ -189,6 +204,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // is published on the very tick it moved, instead of a tick later.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
+        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const entity = pw.bm.entity(entry.id) orelse continue;
         if (pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) == null) continue;
@@ -200,6 +216,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // comes after this one.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
+        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const body = entry.id;
         const entity = pw.bm.entity(body) orelse continue;
         const body_type = pw.bm.bodyType(body).?;
@@ -258,6 +275,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // them and their `Transform` holds the last pose the solver computed.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
+        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const entity = pw.bm.entity(entry.id) orelse continue;
         if (!pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) != null) continue;
@@ -281,7 +299,7 @@ const SystemContext = core.ecs.SystemContext;
 const Reads = core.ecs.Reads;
 const Writes = core.ecs.Writes;
 
-/// The handle the three systems reach the solver through, held as an ECS resource.
+/// The handle the registered systems reach the solver through, held as an ECS resource.
 ///
 /// **A `SystemFn` receives only a `SystemContext`**, which carries the `World` and no channel
 /// for a module's own state, so the pointer has to live somewhere the context can reach.
@@ -335,8 +353,17 @@ pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorl
 }
 
 /// Read the published handle back, or null if nothing was published.
-fn resolve(ecs: *World, gpa: std.mem.Allocator) !?PhysicsWorldRef {
-    const id = try ecs.ensureComponentRegistered(gpa, PhysicsWorldRef);
+///
+/// **A PURE LOOKUP, and that is the point.** The first version obtained the id by REGISTERING
+/// the type here, on `ctx.gpa` — the FRAME allocator — and a registration keeps the type's
+/// name for the world's whole life. A frame allocator handing out memory the registry retains
+/// is the same defect this file avoids one level up, arriving through the lookup instead of
+/// through the physics. `componentId` resolves an already-registered name and allocates
+/// nothing; a world where nothing was published has no such name, which is absence and not
+/// failure. `publishPhysicsWorld` is the only site that registers, and it takes the
+/// persistent allocator.
+fn resolve(ecs: *World) ?PhysicsWorldRef {
+    const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return null;
     const bytes = ecs.resources.getResource(id) orelse return null;
     if (bytes.len != @sizeOf(PhysicsWorldRef)) return null;
     var ref: PhysicsWorldRef = undefined;
@@ -347,55 +374,83 @@ fn resolve(ecs: *World, gpa: std.mem.Allocator) !?PhysicsWorldRef {
     return ref;
 }
 
+/// Whether a physics world has been published into `ecs` — so a caller can assert its wiring
+/// instead of discovering its absence as a frame that silently did nothing.
+pub fn hasPhysicsWorld(ecs: *World) bool {
+    return resolve(ecs) != null;
+}
+
 fn syncInSystem(ctx: SystemContext) anyerror!void {
-    const ref = (try resolve(ctx.world, ctx.gpa)) orelse return;
+    const ref = resolve(ctx.world) orelse return;
     try syncIn(ref.allocator(), ref.worldPtr().?, ctx.world);
 }
 
-fn stepSystem(ctx: SystemContext) anyerror!void {
-    const ref = (try resolve(ctx.world, ctx.gpa)) orelse return;
+/// The tick AND the publication, in ONE system, and the merge is the fix rather than a tidy.
+///
+/// **They were two systems, and a gameplay write to `Velocity` was lost between them.** The
+/// phases run `pre_update → fixed_update → update → post_update`. A rule writing `Velocity`
+/// in `update` writes it AFTER sync-in has read it, and a publication in `post_update`
+/// overwrote it before the next frame's sync-in could see it — so the write never reached the
+/// solver at all, while C1.1 requires in as many words that an Etch system can write
+/// `Velocity` and the solver apply it.
+///
+/// **An intra-phase ordering constraint cannot fix it**, and that is a property of the
+/// scheduler and not a gap in it: there is no `runs_before` / `runs_after`, and the only
+/// intra-phase order is the `Writes(X) → Reads(X)` edge. Giving the tick a declared access
+/// purely to manufacture that edge would make the declared set a lie, and `ARCH-030` makes
+/// the declared set the TYPE of the view a system receives — the fabricated access would be
+/// the defect and not the fix. Merging moves the order out of the scheduler and into code,
+/// where it is a line and not a graph property. The sequence then holds: `update` observes
+/// the poses of the tick that just ran, and its writes survive to the next `pre_update`.
+fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
+    const ref = resolve(ctx.world) orelse return;
     try ref.worldPtr().?.step(ref.allocator());
-}
-
-fn syncOutSystem(ctx: SystemContext) anyerror!void {
-    const ref = (try resolve(ctx.world, ctx.gpa)) orelse return;
     try syncOut(ref.allocator(), ref.worldPtr().?, ctx.world, ctx.cmd);
 }
 
-/// Register the three systems that drive the physics frame, in the order they must run.
+const sync_in_name = "forge_sync_in";
+const step_name = "forge_step_and_publish";
+
+fn isRegistered(sched: *const SystemScheduler, phase: core.ecs.Phase, wanted: []const u8) bool {
+    for (sched.systemsInPhase(phase)) |d| {
+        if (std.mem.eql(u8, d.name, wanted)) return true;
+    }
+    return false;
+}
+
+/// Register the two systems that drive the physics frame.
 ///
-/// **THREE AND NOT TWO, and the reading is deliberate.** The milestone's scope names the two
-/// synchronisation systems "and their registration". A sync-in and a sync-out registered with
-/// nothing between them would advance no simulation: it is the same defect as an unregistered
-/// pair, one level down. The tick is what the two halves synchronise around, so it is
-/// registered with them.
+/// **TWO, with the publication riding the tick** — `stepAndPublishSystem` carries why three
+/// was wrong. `pre_update` takes what gameplay owns into the solver; `fixed_update` advances
+/// the tick and publishes what the solver resolved, and that is the phase `ARCH-031` names as
+/// inside the float discipline's perimeter and where a fixed-timestep tick belongs. Each
+/// system's declared accesses are exactly what it does, which is what a future `ARCH-030`
+/// enforcement will check.
 ///
-/// **THE ORDER COMES FROM THE PHASES, NOT FROM THE ACCESSES, and that is forced.** The DAG is
-/// forward dataflow — a writer precedes its readers — and two writers of one component in one
-/// phase is a `WriteWriteConflict` by construction. All three of these write the solver, so
-/// no access declaration can sequence them; phases execute in enum order and do. Sync-in sits
-/// in `pre_update`, the tick in `fixed_update` — which `ARCH-031` names as inside the float
-/// discipline's perimeter, and which is where a fixed-timestep tick belongs — and sync-out in
-/// `post_update`, after the gameplay of `update` has had the previous frame's poses.
+/// **PREFLIGHT AND NOT IDEMPOTENCE, because of which failure is real.** Calling this twice on
+/// one scheduler is the failure a caller can actually produce, and it is deterministic: both
+/// names are checked absent from their phases BEFORE the first registration, so a second call
+/// mutates nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it
+/// in silence, which hides a double wiring rather than naming it — and a partial state is
+/// exactly what this check exists to prevent.
 ///
-/// The accesses declared are real and are what a future `ARCH-030` enforcement will check:
-/// sync-in READS what gameplay owns, sync-out WRITES what the solver resolved.
+/// RESIDUAL, stated rather than hidden: an allocation failure BETWEEN the two registrations
+/// leaves the first standing, because `SystemScheduler` exposes no removal. Closing that
+/// needs a scheduler change and not a change here.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
+    if (isRegistered(sched, .pre_update, sync_in_name)) return error.SystemAlreadyRegistered;
+    if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
+
     try sched.registerSystem(gpa, ecs, .{
         .phase = .pre_update,
-        .name = "forge_sync_in",
+        .name = sync_in_name,
         .run = syncInSystem,
         .accesses = &.{ Reads(Transform), Reads(Velocity) },
     });
     try sched.registerSystem(gpa, ecs, .{
         .phase = .fixed_update,
-        .name = "forge_physics_step",
-        .run = stepSystem,
-    });
-    try sched.registerSystem(gpa, ecs, .{
-        .phase = .post_update,
-        .name = "forge_sync_out",
-        .run = syncOutSystem,
+        .name = step_name,
+        .run = stepAndPublishSystem,
         .accesses = &.{ Writes(Transform), Writes(Velocity) },
     });
 }

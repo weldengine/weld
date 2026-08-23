@@ -62,7 +62,10 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
 
-    if (paths.len == 0) {
+    // Whether this invocation reads the whole tree. Aggregate controls — the ones whose
+    // verdict depends on having seen every file — may only run when it does.
+    const full_scan = paths.len == 0;
+    if (full_scan) {
         for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
     } else {
         for (paths) |p| try scan.collectZigFiles(arena, io, p, &files);
@@ -91,7 +94,16 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     }
 
     // The second half of the bilateral control: a declared escape nobody used is stale.
-    try no_precision_crossing.checkDeclarations(arena, &crossing_tally, &diags);
+    //
+    // ONLY ON A FULL SCAN. This subcommand also accepts an explicit path list — the
+    // `pre-commit` hook passes the staged files — and over a partial set an escape's own file
+    // may simply not have been read. Running the stale check there would report the first
+    // real exemption as stale on the next targeted scan, which is a guard failing on correct
+    // input: the worst kind, because the fix a reader would reach for is deleting the
+    // declaration.
+    if (full_scan) {
+        try no_precision_crossing.checkDeclarations(arena, &crossing_tally, &diags);
+    }
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {

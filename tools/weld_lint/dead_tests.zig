@@ -285,9 +285,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `world_test.zig`, a presence test and the registration test in `transform_sync_test.zig`,
     // and two Windows-spelling tests on the lint rule (1909 → 1917, suite reported 1917 —
     // 1898 passed + 19 skipped, macOS aarch64).
+    // The NO-GO pass merged the tick and the publication and added the C1.1 gameplay-write
+    // guard (1918 -> 1919, suite reported 1919 - 1900 passed + 19 skipped, macOS aarch64).
+    // The NO-GO pass merged the tick and the publication, then added the C1.1 gameplay-write
+    // guard, the trigger pair, the pre-publication dispatch and the double registration
+    // (1918 -> 1922, suite reported 1922 - 1903 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1916,
-        else => 1918,
+        .windows => 1920,
+        else => 1922,
     };
 }
 
