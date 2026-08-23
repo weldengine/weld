@@ -70,20 +70,28 @@
 //! distinction is carried on the registration record (`world.BodyKind`) rather than inferred
 //! here, because it cannot be recovered from the entity or from the body type.
 //!
-//! **A TRIGGER BODY IS EXCLUDED FROM PUBLICATION AND KEPT IN RECEPTION**, and the corpus
-//! imposes the pattern rather than tolerating it. `engine-physics-solver.md` §1.13.1 states
-//! that a MIXED BODY DOES NOT EXIST: an entity that must both collide and detect carries TWO
-//! bodies, and §1.13.8 rule 2 restates it when it drops the reflexive pair, "without which an
-//! entity carrying a trigger body and a solid body would detect itself". So the two-bodies-
-//! one-entity shape is the normal case here, not the exotic one, and excluding only the
-//! character presence covered the instance and not the class.
+//! **ONE ELECTED PUBLISHER PER ENTITY, and the reception is a separate question.**
+//! `engine-physics-solver.md` §1.13.1 states that a MIXED BODY DOES NOT EXIST: an entity that
+//! must both collide and detect carries TWO bodies, and §1.13.8 rule 2 restates it when it
+//! drops the reflexive pair, "without which an entity carrying a trigger body and a solid
+//! body would detect itself". Two bodies on one entity is the normal shape here, and the
+//! descriptor admits every combination — two solids and two triggers included — so the seam
+//! must answer WHICH ONE speaks for the entity, for every combination and not just the
+//! documented one.
 //!
-//! Which of the two carries the facts is settled by §1.13.7: a trigger body has NO manifold,
-//! NO constraint, NO impulse and NO island entry. It has no resolved fact to publish — its
-//! pose is whatever gameplay put there and its velocity and sleep state are meaningless. So
-//! sync-out publishes neither its pose, nor its velocity, nor its sleep state, and an
-//! entity's `Sleeping` marker is its SOLID body's. Sync-in keeps pushing it, because a
-//! trigger that does not follow its entity detects the wrong region.
+//! `electedPublisher` answers it with one criterion at two levels, and everything else in
+//! this file's outward direction defers to it. An earlier version excluded triggers outright
+//! and was WRONG TWICE OVER: §1.13.7 denies a trigger a manifold, a constraint, an impulse and
+//! an island entry, and says nothing about INTEGRATION — `integration.zig` filters on body
+//! type alone, so a `.dynamic` trigger falls under gravity and its pose IS a resolved fact —
+//! and an exclusion arbitrates only solid-against-trigger, leaving two triggers or two solids
+//! in silent last-write-wins. **Do not reintroduce a blanket skip here**: it is what this
+//! election replaced, and the reasons above are why.
+//!
+//! RECEPTION is governed by TYPE and by nothing else: a kinematic pose belongs to gameplay
+//! whether the body is a trigger or not, and a trigger that does not follow its entity
+//! detects the wrong region. The character presence is the one registration excluded from
+//! BOTH directions, for the reason stated above.
 //!
 //! **What the tag buys, stated at the size the measurement supports.** `Sleeping` is what
 //! lets a gameplay query step over a whole archetype of resting bodies
@@ -136,32 +144,63 @@ fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3
     };
 }
 
-/// Whether this registration must stay silent because a solid body on the same entity is the
-/// authority. TRUE only for a trigger whose entity carries a competing publisher.
-fn yieldsToASolidBody(pw: *const PhysicsWorld, entry: forge_3d.BodyProxy, entity: EntityId) bool {
-    if (!(pw.bm.isTrigger(entry.id) orelse false)) return false;
-    return hasCompetingPublisher(pw, entity, entry.id);
+/// Whether `entity`'s `T` was stamped changed AFTER `since`.
+///
+/// **This is the exact question, not a heuristic.** `World.getMut` stamps `changed_tick`
+/// unconditionally, and the outward direction of this file never calls it for a component it
+/// does not own — a kinematic `Transform` is gameplay's and physics never publishes it. So
+/// the stamp on such a component moves if and only if gameplay wrote it.
+fn changedSince(ecs: *World, comptime T: type, entity: EntityId, since: u64) bool {
+    const cid = ecs.componentId(@typeName(T)) orelse return false;
+    const loc = ecs.dynamicLocation(entity) orelse return false;
+    const arch = ecs.dynamicArchetype(loc.archetype_idx);
+    const col = arch.componentIndex(cid) orelse return false;
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    // `>=` AND NOT `>`, and the boundary case is the normal one. Sync-in runs in `pre_update`
+    // and records the tick it ran at; a gameplay write in `update` of that SAME frame carries
+    // that same tick number while being strictly later in time. A strict comparison drops it
+    // for good — measured: the C1.1 write from an `update` system never reached the solver.
+    // Re-pushing a value the publication wrote at the same tick is harmless, because the value
+    // comparison below still has to find a difference before anything is written.
+    return @as(u64, arch.changedTick(chunk, col, loc.slot)) >= since;
 }
 
-/// Whether some OTHER registered body publishes on `entity`'s behalf.
+/// The ONE body that publishes on `entity`'s behalf, or null if none may.
 ///
-/// **This is the concurrency test the trigger rule turns on**, and it replaces an exclusion
-/// by nature that was too broad. A body qualifies as a competing publisher only if it is a
-/// `rigid_body` registration (a character presence publishes for nobody — see above) and is
-/// not itself a trigger (two triggers on one entity settle nothing between them).
+/// **An ELECTION and not an exclusion, because exclusion only covered the normative case.**
+/// Yielding "when a solid body exists" arbitrates solid + trigger and nothing else: two
+/// triggers on one entity do not arbitrate each other, and two solids never enter the
+/// arbitration at all. `BodyDescriptor` admits both, so both are legal configurations, and
+/// under exclusion both were silent last-write-wins — which `engine-physics-solver.md`
+/// §1.13.6 refuses in as many words.
 ///
-/// Linear in the registration list, per trigger, per tick. Same shape as `proxyOf` and
-/// carried by the same open item — it costs nothing on a scene with no trigger and is not
-/// worth an index before one exists.
-fn hasCompetingPublisher(pw: *const PhysicsWorld, entity: EntityId, self_id: api.BodyId) bool {
+/// ONE criterion at TWO levels: the non-trigger body of smallest identity if one exists,
+/// otherwise the trigger of smallest identity. A character presence is never eligible — it is
+/// the controller's inner body and answers for nobody.
+///
+/// **Identity is the COMPLETE handle**, index and generation together, exactly as §1.13.11's
+/// ordering key is. That is what makes the election independent of insertion order, hence
+/// deterministic: rebuilding the same scene in a different sequence elects the same body.
+fn electedPublisher(pw: *const PhysicsWorld, entity: EntityId) ?api.BodyId {
+    var best_solid: ?api.BodyId = null;
+    var best_trigger: ?api.BodyId = null;
     for (pw.bodies.items) |other| {
-        if (other.id == self_id) continue;
-        if (other.kind != .rigid_body) continue;
-        if (pw.bm.isTrigger(other.id) orelse false) continue;
+        if (other.kind != .rigid_body) continue; // a presence answers for nobody
         const owner = pw.bm.entity(other.id) orelse continue;
-        if (owner.index == entity.index and owner.generation == entity.generation) return true;
+        if (owner.index != entity.index or owner.generation != entity.generation) continue;
+        if (pw.bm.isTrigger(other.id) orelse false) {
+            if (best_trigger == null or other.id < best_trigger.?) best_trigger = other.id;
+        } else {
+            if (best_solid == null or other.id < best_solid.?) best_solid = other.id;
+        }
     }
-    return false;
+    return best_solid orelse best_trigger;
+}
+
+/// Whether this registration is the entity's elected publisher.
+fn publishes(pw: *const PhysicsWorld, entry: forge_3d.BodyProxy, entity: EntityId) bool {
+    const elected = electedPublisher(pw, entity) orelse return false;
+    return elected == entry.id;
 }
 
 /// Push what gameplay owns INTO the solver — before step 1 of the cycle.
@@ -170,6 +209,18 @@ fn hasCompetingPublisher(pw: *const PhysicsWorld, entity: EntityId, self_id: api
 /// differs from what the solver already holds. An entity that has lost its `Transform`,
 /// or died, is skipped rather than guessed at.
 pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
+    // THE WATERMARK, and without it this direction UNDOES the other entries of the module.
+    // `moveKinematic` writes the pose and both velocities into the SOLVER; the ECS `Transform`
+    // is untouched, because gameplay owns a kinematic pose and physics never publishes it. A
+    // value comparison then reads "they differ" and pushes the STALE ECS pose back through
+    // `setBodyTransform`, cancelling the move before the step — and the same for the velocity
+    // setters and for teleporting a kinematic. Comparing VALUES cannot tell "gameplay wrote"
+    // from "the solver moved"; the change stamp can, and it is exact here (see
+    // `changedSince`). This is F-D1's rule in the other direction: push only what was written.
+    const ref = resolve(ecs) orelse return error.PhysicsWorldNotPublished;
+    const since = ref.last_in_tick;
+    defer recordSyncInTick(ecs, ecs.current_tick);
+
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
         const body = entry.id;
@@ -182,6 +233,7 @@ pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
             // change: an unchanged pose is not a mutation, and composing a wake for it
             // every tick would keep everything resting on the platform permanently awake.
             if (ecs.get(Transform, entity)) |t| {
+                if (!changedSince(ecs, Transform, entity, since)) continue;
                 const current = solverPose(pw, body).?;
                 if (!std.mem.eql(WorldReal, &current.pos, &t.pos) or
                     !std.mem.eql(WorldReal, &current.rot, &t.rot))
@@ -205,6 +257,7 @@ pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
         // `Velocity` and the solver applies it — and the write composes wake + write like
         // any other external mutation.
         if (ecs.get(Velocity, entity)) |v| {
+            if (!changedSince(ecs, Velocity, entity, since)) continue;
             const held = solverVelocity(pw, body);
             const same_lin = std.mem.eql(WorldReal, &held.linear, &v.linear);
             const same_ang = std.mem.eql(WorldReal, &held.angular, &v.angular);
@@ -231,9 +284,8 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // (1) UNTAG THE WOKEN, BEFORE publishing — so the first pose a waking body moved to
     // is published on the very tick it moved, instead of a tick later.
     for (pw.bodies.items) |entry| {
-        if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
         const entity = pw.bm.entity(entry.id) orelse continue;
-        if (yieldsToASolidBody(pw, entry, entity)) continue;
+        if (!publishes(pw, entry, entity)) continue;
         if (pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) == null) continue;
         if (cmd) |c| try c.removeComponent(entity, Sleeping) else try ecs.removeComponent(gpa, entity, Sleeping);
@@ -243,10 +295,9 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // is not tagged yet, so its final pose is published here — the whole reason pass (3)
     // comes after this one.
     for (pw.bodies.items) |entry| {
-        if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
         const body = entry.id;
         const entity = pw.bm.entity(body) orelse continue;
-        if (yieldsToASolidBody(pw, entry, entity)) continue;
+        if (!publishes(pw, entry, entity)) continue;
         const body_type = pw.bm.bodyType(body).?;
         if (body_type == .static) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
@@ -302,9 +353,8 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // (3) TAG THE NEWLY ASLEEP, AFTER publishing. From the next tick on, pass (2) skips
     // them and their `Transform` holds the last pose the solver computed.
     for (pw.bodies.items) |entry| {
-        if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
         const entity = pw.bm.entity(entry.id) orelse continue;
-        if (yieldsToASolidBody(pw, entry, entity)) continue;
+        if (!publishes(pw, entry, entity)) continue;
         if (!pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) != null) continue;
         if (cmd) |c| try c.addComponent(entity, Sleeping, .{}) else try ecs.addComponent(gpa, entity, Sleeping, .{});
@@ -348,6 +398,10 @@ pub const PhysicsWorldRef = extern struct {
     /// The two halves of a `std.mem.Allocator`, which is `{ ptr, vtable }`.
     alloc_ptr: usize = 0,
     alloc_vtable: usize = 0,
+    /// The ECS tick at which sync-in last ran. A component whose `changed_tick` is at or
+    /// below this was not written by gameplay since, so pushing it would be pushing back a
+    /// value the solver has already moved past.
+    last_in_tick: u64 = 0,
 
     fn pack(world: *PhysicsWorld, gpa: std.mem.Allocator) PhysicsWorldRef {
         return .{
@@ -401,6 +455,19 @@ fn resolve(ecs: *World) ?PhysicsWorldRef {
     @memcpy(std.mem.asBytes(&ref), bytes);
     if (ref.world == 0) return null;
     return ref;
+}
+
+/// Advance the sync-in watermark. Written through the resource because that is the ONE
+/// storage both call paths share — a second copy for the direct path is a second thing to
+/// drift.
+fn recordSyncInTick(ecs: *World, tick: u32) void {
+    const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return;
+    const slot = ecs.resources.getMutResource(id) orelse return;
+    if (slot.len != @sizeOf(PhysicsWorldRef)) return;
+    var ref: PhysicsWorldRef = undefined;
+    @memcpy(std.mem.asBytes(&ref), slot);
+    ref.last_in_tick = tick;
+    @memcpy(slot, std.mem.asBytes(&ref));
 }
 
 /// Whether a physics world has been published into `ecs` — so a caller can assert its wiring
@@ -470,6 +537,31 @@ fn isRegistered(sched: *const SystemScheduler, phase: core.ecs.Phase, wanted: []
     return false;
 }
 
+/// Whether any write in `accesses` already has a writer in `phase`.
+///
+/// **The preflight checks DESCRIPTORS and not just names, because that is the failure that
+/// actually happens.** A `WriteWriteConflict` is ordinary and deterministic — some other
+/// system already writes `Transform` in `fixed_update` — and checking only for a duplicate
+/// name would let the first registration land and the second be refused, which is the partial
+/// state the preflight exists to prevent. Matched on `type_name`, which is what
+/// `registerSystem` itself reports the conflict on.
+fn wouldConflict(
+    sched: *const SystemScheduler,
+    phase: core.ecs.Phase,
+    accesses: []const core.ecs.AccessDescriptor,
+) bool {
+    for (accesses) |mine| {
+        if (mine.kind != .writes and mine.kind != .writes_resource) continue;
+        for (sched.systemsInPhase(phase)) |d| {
+            for (d.accesses) |theirs| {
+                if (theirs.kind != .writes and theirs.kind != .writes_resource) continue;
+                if (std.mem.eql(u8, theirs.type_name, mine.type_name)) return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// Register the two systems that drive the physics frame.
 ///
 /// **TWO, with the publication riding the tick** — `stepAndPublishSystem` carries why three
@@ -486,12 +578,19 @@ fn isRegistered(sched: *const SystemScheduler, phase: core.ecs.Phase, wanted: []
 /// in silence, which hides a double wiring rather than naming it — and a partial state is
 /// exactly what this check exists to prevent.
 ///
-/// RESIDUAL, stated rather than hidden: an allocation failure BETWEEN the two registrations
-/// leaves the first standing, because `SystemScheduler` exposes no removal. Closing that
-/// needs a scheduler change and not a change here.
+/// BOTH DESCRIPTORS are preflighted, names and write conflicts alike, before the first
+/// registration touches the scheduler — a `WriteWriteConflict` is an ordinary deterministic
+/// failure and not a residual, so leaving it to land halfway through would be the partial
+/// state this check exists to prevent.
+///
+/// RESIDUAL, stated rather than hidden: an ALLOCATION failure between the two registrations
+/// leaves the first standing, because `SystemScheduler` exposes no removal. Closing that needs
+/// a scheduler change and not a change here — the same Tier 0 gap the Closing notes name.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
     if (isRegistered(sched, .pre_update, sync_in_name)) return error.SystemAlreadyRegistered;
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
+    if (wouldConflict(sched, .pre_update, &sync_in_accesses)) return error.WriteWriteConflict;
+    if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;
 
     try sched.registerSystem(gpa, ecs, .{
         .phase = .pre_update,

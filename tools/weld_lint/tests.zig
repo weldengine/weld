@@ -35,6 +35,9 @@ comptime {
     _ = @import("rules/no_precision_crossing.zig");
     _ = @import("rules/conventional_commit.zig");
     // Shared machinery.
+    // `main.zig` too: the lint subcommand's own path-coverage logic lives there, and a
+    // helper nobody elaborates is a helper nobody tests.
+    _ = @import("main.zig");
     _ = @import("dead_tests.zig");
     _ = @import("scan.zig");
     _ = @import("diagnostic.zig");

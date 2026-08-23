@@ -296,9 +296,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The third NO-GO pass added the two lone-trigger cases, the write-conflict guard, the
     // isolated resolver test and the declared-access guard (1922 -> 1927, suite reported 1927
     // - 1908 passed + 19 skipped, macOS aarch64).
+    // The fourth NO-GO pass added the two election tests, the update-issued moveKinematic
+    // guard and three on the linter's path coverage, and wired `weld_lint/main.zig` into the
+    // closure (1927 -> 1933, suite reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1925,
-        else => 1927,
+        .windows => 1931,
+        else => 1933,
     };
 }
 

@@ -118,14 +118,20 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
 }
 
-/// Whether `paths` reaches every default lint root. A path covers a root when it IS that root
-/// or contains it as a prefix — `.` and `src` both cover `src`, and `src/core` covers nothing.
+/// Whether `paths` reaches every default lint root.
+///
+/// **Normalised before judging, because the same set has several spellings.** `src`, `./src`
+/// and an absolute `/…/weld/src` name one directory and used to give three different verdicts:
+/// the first counted, the other two did not, so a hook or a script that spelled its roots any
+/// other way silently lost the aggregate control. A leading `./` is stripped, trailing
+/// separators are stripped, and a path counts for a root when it IS that root or ENDS WITH it
+/// as a whole path component — which covers the prefixed and absolute forms together. `.`
+/// covers every root.
 fn coversEveryRoot(paths: []const [:0]const u8) bool {
     for (default_lint_paths) |root| {
         var covered = false;
-        for (paths) |p| {
-            const trimmed = std.mem.trimEnd(u8, p, "/\\");
-            if (std.mem.eql(u8, trimmed, ".") or std.mem.eql(u8, trimmed, root)) {
+        for (paths) |raw| {
+            if (pathCoversRoot(raw, root)) {
                 covered = true;
                 break;
             }
@@ -133,6 +139,54 @@ fn coversEveryRoot(paths: []const [:0]const u8) bool {
         if (!covered) return false;
     }
     return true;
+}
+
+/// Whether one given path covers `root`. Separated from the loop so the normalisation is
+/// testable on its own rather than only through a full scan.
+fn pathCoversRoot(raw: []const u8, root: []const u8) bool {
+    var p = std.mem.trimEnd(u8, raw, "/\\");
+    while (std.mem.startsWith(u8, p, "./") or std.mem.startsWith(u8, p, ".\\")) p = p[2..];
+    if (p.len == 0 or std.mem.eql(u8, p, ".")) return true;
+    if (std.mem.eql(u8, p, root)) return true;
+    // A whole trailing component, so `/home/x/weld/src` covers `src` and `mysrc` does not.
+    if (p.len > root.len + 1 and std.mem.endsWith(u8, p, root)) {
+        const sep = p[p.len - root.len - 1];
+        if (sep == '/' or sep == '\\') return true;
+    }
+    return false;
+}
+
+test "a root is covered under every spelling that names it" {
+    // The three forms that used to give three verdicts.
+    try std.testing.expect(pathCoversRoot("src", "src"));
+    try std.testing.expect(pathCoversRoot("./src", "src"));
+    try std.testing.expect(pathCoversRoot("src/", "src"));
+    try std.testing.expect(pathCoversRoot("/home/x/weld/src", "src"));
+    try std.testing.expect(pathCoversRoot("C:\\weld\\src", "src"));
+    // `.` is every root at once.
+    try std.testing.expect(pathCoversRoot(".", "src"));
+    try std.testing.expect(pathCoversRoot("./", "src"));
+}
+
+test "a path that merely ends in the root's letters does not cover it" {
+    // NON-VACUITY for the suffix rule: without the separator check `mysrc` would count, and
+    // the aggregate control would run on a scan that never read `src`.
+    try std.testing.expect(!pathCoversRoot("mysrc", "src"));
+    try std.testing.expect(!pathCoversRoot("/home/x/mysrc", "src"));
+    try std.testing.expect(!pathCoversRoot("src/core", "src"));
+    try std.testing.expect(!pathCoversRoot("tests", "src"));
+}
+
+test "every default root must be named for a scan to count as full" {
+    try std.testing.expect(coversEveryRoot(&.{"."}));
+    try std.testing.expect(!coversEveryRoot(&.{"src"}));
+    // The explicit spelling of a full scan, which is the case that regressed.
+    const full = [_][:0]const u8{ "src", "bench", "tests", "tools" };
+    // Pinned against the real list rather than assumed equal to it: a root added to
+    // `default_lint_paths` and not here would make this test pass while covering less.
+    try std.testing.expectEqual(default_lint_paths.len, full.len);
+    for (default_lint_paths, full) |declared, spelled| try std.testing.expectEqualStrings(declared, spelled);
+    try std.testing.expect(coversEveryRoot(&full));
 }
 
 fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, out: *std.Io.Writer) !u8 {
