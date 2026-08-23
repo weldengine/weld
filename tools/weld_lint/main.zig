@@ -120,13 +120,17 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
 
 /// Whether `paths` reaches every default lint root.
 ///
-/// **Normalised before judging, because the same set has several spellings.** `src`, `./src`
-/// and an absolute `/…/weld/src` name one directory and used to give three different verdicts:
-/// the first counted, the other two did not, so a hook or a script that spelled its roots any
-/// other way silently lost the aggregate control. A leading `./` is stripped, trailing
-/// separators are stripped, and a path counts for a root when it IS that root or ENDS WITH it
-/// as a whole path component — which covers the prefixed and absolute forms together. `.`
-/// covers every root.
+/// **An ABSOLUTE path never counts, and that is a deliberate fail-closed.** Matching by suffix
+/// counted `/tmp/elsewhere/src` as covering `src`, so a scan of an unrelated tree switched the
+/// aggregate control on and reported every declaration stale. Canonicalising against the
+/// repository root would be the exact fix, and it is not available: Zig 0.16 removed
+/// `std.fs.cwd()`, `std.Io.Dir` carries no `realpath`, and `std.process` no `getCwd` — the same
+/// removal `M1.D.5` records. Rather than a string heuristic that would be wrong in the other
+/// direction, an absolute path is simply not evidence of coverage: the control stays OFF, which
+/// costs a full scan spelled absolutely and cannot switch it on for a tree nobody read.
+///
+/// `zig build lint` and the `pre-commit` hook both pass relative roots or no argument at all,
+/// so the paths that matter are unaffected.
 fn coversEveryRoot(paths: []const [:0]const u8) bool {
     for (default_lint_paths) |root| {
         var covered = false;
@@ -142,37 +146,35 @@ fn coversEveryRoot(paths: []const [:0]const u8) bool {
 }
 
 /// Whether one given path covers `root`. Separated from the loop so the normalisation is
-/// testable on its own rather than only through a full scan.
+/// testable on its own rather than only through a full scan. A leading `./` is stripped and
+/// trailing separators are stripped; `.` covers every root; an absolute path covers none.
 fn pathCoversRoot(raw: []const u8, root: []const u8) bool {
     var p = std.mem.trimEnd(u8, raw, "/\\");
     while (std.mem.startsWith(u8, p, "./") or std.mem.startsWith(u8, p, ".\\")) p = p[2..];
     if (p.len == 0 or std.mem.eql(u8, p, ".")) return true;
-    if (std.mem.eql(u8, p, root)) return true;
-    // A whole trailing component, so `/home/x/weld/src` covers `src` and `mysrc` does not.
-    if (p.len > root.len + 1 and std.mem.endsWith(u8, p, root)) {
-        const sep = p[p.len - root.len - 1];
-        if (sep == '/' or sep == '\\') return true;
-    }
-    return false;
+    if (p[0] == '/' or p[0] == '\\') return false;
+    if (p.len > 2 and p[1] == ':') return false; // a Windows drive-absolute path
+    return std.mem.eql(u8, p, root);
 }
 
-test "a root is covered under every spelling that names it" {
-    // The three forms that used to give three verdicts.
+test "a root is covered under every relative spelling that names it" {
     try std.testing.expect(pathCoversRoot("src", "src"));
     try std.testing.expect(pathCoversRoot("./src", "src"));
     try std.testing.expect(pathCoversRoot("src/", "src"));
-    try std.testing.expect(pathCoversRoot("/home/x/weld/src", "src"));
-    try std.testing.expect(pathCoversRoot("C:\\weld\\src", "src"));
-    // `.` is every root at once.
     try std.testing.expect(pathCoversRoot(".", "src"));
     try std.testing.expect(pathCoversRoot("./", "src"));
 }
 
-test "a path that merely ends in the root's letters does not cover it" {
-    // NON-VACUITY for the suffix rule: without the separator check `mysrc` would count, and
-    // the aggregate control would run on a scan that never read `src`.
+test "an absolute path is never evidence of coverage" {
+    // THE CASE THE SUFFIX FORM GOT WRONG — a scan of an unrelated tree switched the aggregate
+    // control on, and every declaration then read as stale. Fail-closed: the repository's own
+    // absolute path does not count either, which costs a full scan spelled absolutely and
+    // cannot be wrong in the dangerous direction.
+    try std.testing.expect(!pathCoversRoot("/tmp/elsewhere/src", "src"));
+    try std.testing.expect(!pathCoversRoot("/home/x/weld/src", "src"));
+    try std.testing.expect(!pathCoversRoot("C:\\weld\\src", "src"));
+    // And the ordinary negatives hold.
     try std.testing.expect(!pathCoversRoot("mysrc", "src"));
-    try std.testing.expect(!pathCoversRoot("/home/x/mysrc", "src"));
     try std.testing.expect(!pathCoversRoot("src/core", "src"));
     try std.testing.expect(!pathCoversRoot("tests", "src"));
 }
@@ -180,7 +182,6 @@ test "a path that merely ends in the root's letters does not cover it" {
 test "every default root must be named for a scan to count as full" {
     try std.testing.expect(coversEveryRoot(&.{"."}));
     try std.testing.expect(!coversEveryRoot(&.{"src"}));
-    // The explicit spelling of a full scan, which is the case that regressed.
     const full = [_][:0]const u8{ "src", "bench", "tests", "tools" };
     // Pinned against the real list rather than assumed equal to it: a root added to
     // `default_lint_paths` and not here would make this test pass while covering less.

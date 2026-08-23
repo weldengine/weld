@@ -299,9 +299,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The fourth NO-GO pass added the two election tests, the update-issued moveKinematic
     // guard and three on the linter's path coverage, and wired `weld_lint/main.zig` into the
     // closure (1927 -> 1933, suite reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
+    // The fifth pass RE-SCOPED `syncIn` out of the milestone: four reception tests removed,
+    // two reduced to their publication half, and the linter's path coverage re-tested
+    // (1933 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1931,
-        else => 1933,
+        .windows => 1927,
+        else => 1929,
     };
 }
 

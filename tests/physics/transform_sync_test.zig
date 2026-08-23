@@ -64,6 +64,38 @@ fn spawnLinked(
     return .{ .entity = entity, .body = body };
 }
 
+/// Bind a SECOND body to an entity that already has one — the shape
+/// `engine-physics-solver.md` §1.13.1 makes normal: "a mixed body does not exist; an entity
+/// that must both collide and detect carries two bodies".
+fn addTriggerBody(
+    gpa: std.mem.Allocator,
+    pw: *PhysicsWorld,
+    entity: EntityId,
+    centre: [3]f32,
+) !api.BodyId {
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(1, 1, 1) } });
+    var desc = api.BodyDescriptor{
+        .entity = entity,
+        .body_type = .kinematic,
+        .shape = shape,
+    };
+    desc.position = av3(centre[0], centre[1], centre[2]);
+    desc.is_trigger = true;
+    return try pw.addBody(gpa, desc);
+}
+
+/// One driven frame on the DIRECT path: open the ECS frame, then run the tick and its
+/// publication.
+///
+/// **The frame boundary is the caller's and never `stepAndPublish`'s.** An app loop and
+/// `dispatchFrame` both open the frame themselves, so modelling it here keeps the two paths
+/// identical in shape — and the change-detection guard below needs the tick to advance to say
+/// anything at all.
+fn frame(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
+    ecs.beginFrame();
+    try sync.stepAndPublish(gpa, pw, ecs);
+}
+
 /// Ground at the origin (top face y = 0.5) plus a dynamic unit box resting flush on it.
 fn restingScene(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorld) !struct {
     ground: EntityId,
@@ -217,35 +249,9 @@ test "Sleeping tag tracks island state in both directions" {
     try testing.expect(ecs.get(Velocity, scene.box_entity) != null);
 }
 
-test "gameplay Velocity write is applied by the solver and wakes the body" {
-    const gpa = testing.allocator;
-    var ecs = World.init();
-    defer ecs.deinit(gpa);
-    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
-    defer pw.deinit(gpa);
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-    const scene = try restingScene(gpa, &ecs, &pw);
-
-    var t: u32 = 0;
-    while (t < 400 and !pw.bm.isSleeping(scene.box).?) : (t += 1) {
-        try frame(gpa, &pw, &ecs);
-    }
-    try testing.expect(pw.bm.isSleeping(scene.box).?);
-
-    // C1.1's own wording: an Etch system can write `Velocity` and the solver applies it.
-    // Written on the ECS component, which is the only surface a rule has.
-    ecs.getMut(Velocity, scene.box_entity).?.linear = .{ 3, 0, 0 };
-    try frame(gpa, &pw, &ecs);
-
-    // APPLIED — the solver carries it — and the body WOKE, because a gameplay write is an
-    // external mutation. Both halves: a seam that pushed the value without waking would
-    // hand it to a body the solver skips.
-    try testing.expect(!pw.bm.isSleeping(scene.box).?);
-    try testing.expect(pw.bm.linearVelocity(scene.box).?.toArray()[0] > 0.5);
-    try testing.expect(ecs.get(Transform, scene.box_entity).?.pos[0] > 1e-4);
-}
-
-test "authority per BodyType" {
+test "publication authority per BodyType" {
+    // The PUBLICATION half only. The reception half — a kinematic `Transform` written by
+    // gameplay reaching the solver — moved to M1.1.26 with `syncIn`; see Closing notes.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -257,9 +263,9 @@ test "authority per BodyType" {
     const kin = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
     const sta = try spawnLinked(gpa, &ecs, &pw, .static, .{ 0.5, 0.5, 0.5 }, .{ 40, 0, 0 });
 
-    // DYNAMIC — the SOLVER is the authority. A gameplay write to `Transform` is
-    // overwritten at the next sync-out, and that is the contract: the legitimate ways to
-    // move a dynamic body are `setBodyTransform`, a force or an impulse.
+    // DYNAMIC — the SOLVER is the authority over the pose, so a gameplay write to `Transform`
+    // is overwritten by the publication. That is the contract and not a bug: the legitimate
+    // ways to move a dynamic body are `setBodyTransform`, a force or an impulse.
     ecs.getMut(Transform, dyn.entity).?.pos = .{ 99, 99, 99 };
     try frame(gpa, &pw, &ecs);
     try testing.expect(ecs.get(Transform, dyn.entity).?.pos[0] != 99);
@@ -268,18 +274,15 @@ test "authority per BodyType" {
         ecs.get(Transform, dyn.entity).?.pos[1],
     );
 
-    // KINEMATIC — GAMEPLAY is the authority. A `Transform` written by a rule is pushed in
-    // at sync-in and survives the tick, and the solver's own pose follows it.
+    // KINEMATIC — gameplay owns the pose, so the publication does NOT write it back. The ECS
+    // value stands and the solver's own pose is unmoved, because nothing here pushes it in.
     ecs.getMut(Transform, kin.entity).?.pos = .{ 25, 3, 0 };
     try frame(gpa, &pw, &ecs);
     try testing.expectEqual(@as(f32, 25), ecs.get(Transform, kin.entity).?.pos[0]);
-    try testing.expectEqual(@as(f32, 3), ecs.get(Transform, kin.entity).?.pos[1]);
-    try testing.expectEqual(@as(Real, 25), pw.bm.position(kin.body).?.toArray()[0]);
+    try testing.expectEqual(@as(Real, 20), pw.bm.position(kin.body).?.toArray()[0]);
 
-    // STATIC — no per-tick synchronisation in EITHER direction. The ECS write stands
-    // because nothing publishes over it, and the solver pose does NOT follow it, because
-    // nothing pushes it in: a static body that moves is a teleportation through
-    // `setBodyTransform`, not a `Transform` write.
+    // STATIC — no publication at all, so the ECS write stands and the solver is unmoved. A
+    // static body that moves is a teleportation through `setBodyTransform`.
     ecs.getMut(Transform, sta.entity).?.pos = .{ 77, 0, 0 };
     try frame(gpa, &pw, &ecs);
     try testing.expectEqual(@as(f32, 77), ecs.get(Transform, sta.entity).?.pos[0]);
@@ -328,11 +331,10 @@ test "publication does not mark a component whose value did not change" {
     // The body genuinely did not move, so the quiet signal is not hiding a lost write.
     try testing.expectEqualSlices(f32, &settled_pos, &ecs.get(Transform, b.entity).?.pos);
 
-    // NON-VACUITY, and it is what separates this from a `syncOut` that publishes NOTHING.
-    // A gameplay `Velocity` write goes in, the body moves, and the marks must FIRE.
-    ecs.beginFrame();
-    ecs.getMut(Velocity, b.entity).?.linear = .{ 3, 0, 0 };
-    try frame(gpa, &pw, &ecs);
+    // NON-VACUITY, and it is what separates this from a publication that writes NOTHING. The
+    // body is set moving through the INTERFACE — `syncIn` left for M1.1.26, so the ECS is no
+    // longer a way in — and the marks must then FIRE.
+    pw.setLinearVelocity(b.body, vr(3, 0, 0));
 
     // A fresh tick the test does not touch: any stamp below is publication's own.
     try frame(gpa, &pw, &ecs);
@@ -389,24 +391,6 @@ test "a character presence never answers for its entity, in either direction" {
     try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(presence).?.toArray()[0]);
 }
 
-/// A gameplay rule, standing in for an Etch system: it writes `Velocity` from `update`.
-///
-/// **The position in the frame is the whole point.** A test writing `Velocity` from its own
-/// body between two dispatches writes it OUTSIDE any phase, where the next `pre_update`
-/// picks it up and the defect never shows. C1.1's claim is about a system, so the guard has
-/// to be one.
-const GameplayPush = struct {
-    var target_entity: EntityId = undefined;
-    var frames_left: u32 = 0;
-
-    fn run(ctx: core.ecs.SystemContext) anyerror!void {
-        if (frames_left == 0) return;
-        frames_left -= 1;
-        const v = ctx.world.getMut(Velocity, target_entity) orelse return;
-        v.linear = .{ 4, 0, 0 };
-    }
-};
-
 test "the registered systems drive a real frame: the solver's pose reaches the ECS" {
     // THE DELIVERABLE F5 NAMES. Before this, `stepSynchronised` had no caller outside this
     // file: the seam existed only in its own tests, and the milestone shipped a mechanism
@@ -435,9 +419,10 @@ test "the registered systems drive a real frame: the solver's pose reaches the E
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
     try sync.registerSystems(gpa, &sched, &ecs);
 
-    // TWO systems: the publication rides the tick in `fixed_update`. Three, with the
-    // publication alone in `post_update`, is what lost a gameplay `Velocity` write.
-    try testing.expectEqual(@as(usize, 2), sched.systemCount());
+    // ONE system: the publication rides the tick in `fixed_update`. Splitting it into a tick
+    // and a `post_update` publication is what lost a gameplay `Velocity` write, and the
+    // inward direction left for M1.1.26 — see Closing notes.
+    try testing.expectEqual(@as(usize, 1), sched.systemCount());
 
     const start = ecs.get(Transform, faller.entity).?.pos[1];
     var f: u32 = 0;
@@ -450,93 +435,11 @@ test "the registered systems drive a real frame: the solver's pose reaches the E
     try testing.expectEqual(@as(f32, @floatCast(solver)), published);
 }
 
-test "a gameplay Velocity written from an update system reaches the solver" {
-    // C1.1, literally: an Etch system can write `Velocity` and the solver applies it. The
-    // write is issued FROM A SYSTEM IN `update`, which is the only position that exercises
-    // the defect — between two dispatches it lands outside every phase and the next
-    // `pre_update` reads it whatever the publication does.
-    const gpa = testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var ecs = World.init();
-    defer ecs.deinit(gpa);
-    // ZERO gravity: the only thing that can move this body along +X is the pushed velocity,
-    // so displacement along X is attributable and not a component of a fall.
-    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
-    defer pw.deinit(gpa);
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-
-    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2, 0 });
-
-    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
-    try jobs.start();
-    defer jobs.deinit(gpa);
-
-    var sched = core.ecs.SystemScheduler.init();
-    defer sched.deinit(gpa);
-
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-    try sync.registerSystems(gpa, &sched, &ecs);
-
-    GameplayPush.target_entity = b.entity;
-    GameplayPush.frames_left = 1; // ONE write, so what is measured is that it survived
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .update,
-        .name = "gameplay_push",
-        .run = GameplayPush.run,
-        .accesses = &.{core.ecs.Writes(Velocity)},
-    });
-
-    const start_x = ecs.get(Transform, b.entity).?.pos[0];
-    var f: u32 = 0;
-    while (f < 10) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
-
-    // The SOLVER carries it — the assertion is on the solver's own column and not on the
-    // published mirror, so a publication that echoed the ECS back to itself cannot satisfy it.
-    try testing.expect(pw.bm.linearVelocity(b.body).?.toArray()[0] > 3.9);
-    // And the body actually moved, which no amount of velocity bookkeeping alone would do.
-    try testing.expect(ecs.get(Transform, b.entity).?.pos[0] > start_x + 0.2);
-}
-
-/// One driven frame on the DIRECT path: open the ECS frame, then run the tick with both
-/// halves of the seam around it.
-///
-/// **The frame boundary is the caller's and never `stepSynchronised`'s.** Sync-in gates on
-/// the change stamp against a watermark, so a tick that never advances leaves every stamp
-/// equal to the watermark and no gameplay write is ever seen — which is exactly what an app
-/// loop or `dispatchFrame` avoids by opening the frame itself. Modelling that here rather
-/// than folding `beginFrame` into the seam keeps the two paths identical in shape.
-fn frame(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
-    ecs.beginFrame();
-    try sync.stepSynchronised(gpa, pw, ecs);
-}
-
-/// Bind a SECOND body to an entity that already has one — the shape
-/// `engine-physics-solver.md` §1.13.1 makes normal: "a mixed body does not exist; an entity
-/// that must both collide and detect carries two bodies".
-fn addTriggerBody(
-    gpa: std.mem.Allocator,
-    pw: *PhysicsWorld,
-    entity: EntityId,
-    centre: [3]f32,
-) !api.BodyId {
-    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(1, 1, 1) } });
-    var desc = api.BodyDescriptor{
-        .entity = entity,
-        .body_type = .kinematic,
-        .shape = shape,
-    };
-    desc.position = av3(centre[0], centre[1], centre[2]);
-    desc.is_trigger = true;
-    return try pw.addBody(gpa, desc);
-}
-
-test "a trigger body publishes nothing and still receives the entity's pose" {
-    // §1.13.7: a trigger body has no manifold, no constraint, no impulse and no island entry
-    // — it has no resolved fact to publish. §1.13.1 makes two-bodies-one-entity the normal
-    // shape, so the entity's facts are its SOLID body's.
+test "a trigger sharing an entity with a solid body does not publish" {
+    // §1.13.7 denies a trigger a manifold, a constraint, an impulse and an island entry, and
+    // §1.13.1 makes two-bodies-one-entity the normal shape. The election settles which of the
+    // two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
+    // trigger — left for M1.1.26 with `syncIn`; see Closing notes.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -547,32 +450,19 @@ test "a trigger body publishes nothing and still receives the entity's pose" {
     _ = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
     const solid = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 4, 0 });
 
-    // Registered AFTER the solid, so under the defect it is the trigger that wins the last
-    // write of the tick — the order that makes the defect visible rather than benign.
-    const trigger = try addTriggerBody(gpa, &pw, solid.entity, .{ 9, 9, 9 });
+    // Registered AFTER the solid, so under a last-write-wins seam it is the trigger that wins
+    // the tick — the order that makes the defect visible rather than benign.
+    _ = try addTriggerBody(gpa, &pw, solid.entity, .{ 9, 9, 9 });
 
     var t: u32 = 0;
-    while (t < 19) : (t += 1) try frame(gpa, &pw, &ecs);
+    while (t < 20) : (t += 1) try frame(gpa, &pw, &ecs);
 
-    // The pose the ECS holds going INTO the last tick. Sync-in runs before the step, so this
-    // is exactly what the last tick pushes into the trigger — the relationship is one tick,
-    // and stating it is better than absorbing it in a tolerance.
-    const before_last = ecs.get(Transform, solid.entity).?.pos;
-    try frame(gpa, &pw, &ecs);
-
-    // PUBLICATION: the entity's Transform is the SOLID's pose, to the bit. Under the defect
-    // it is the trigger's, which is nine metres away — so this is not a tolerance question.
+    // The entity's Transform is the SOLID's pose, to the bit. Under the defect it is the
+    // trigger's, nine metres away — not a tolerance question.
     const published = ecs.get(Transform, solid.entity).?.pos;
     const solid_pose = pw.bm.position(solid.body).?.toArray();
     try testing.expectEqual(@as(f32, @floatCast(solid_pose[1])), published[1]);
     try testing.expect(published[1] < 3.9); // NON-VACUITY: the solid really fell
-
-    // RECEPTION is kept: sync-in pushed the entity's pose into the trigger, because a trigger
-    // that does not follow its entity detects the wrong region. Bit-exact against the pose
-    // that tick read, on the trigger's own solver column, which started nine metres away.
-    const trigger_pose = pw.bm.position(trigger).?.toArray();
-    try testing.expectEqual(before_last[1], @as(f32, @floatCast(trigger_pose[1])));
-    try testing.expect(trigger_pose[0] < 1.0); // it moved off (9,9,9)
 }
 
 test "resolving an unpublished world registers nothing" {
@@ -626,13 +516,12 @@ test "registering the systems twice is refused, and refused before anything is r
     defer sched.deinit(gpa);
 
     try sync.registerSystems(gpa, &sched, &ecs);
-    try testing.expectEqual(@as(usize, 2), sched.systemCount());
+    try testing.expectEqual(@as(usize, 1), sched.systemCount());
 
-    // PREFLIGHT: the second call must not register the first system before discovering the
-    // second is a duplicate. The count is what discriminates — an implementation that
-    // registered then failed would leave three.
+    // PREFLIGHT: refused before anything is registered. The count is what discriminates — an
+    // implementation that registered then failed would leave two.
     try testing.expectError(error.SystemAlreadyRegistered, sync.registerSystems(gpa, &sched, &ecs));
-    try testing.expectEqual(@as(usize, 2), sched.systemCount());
+    try testing.expectEqual(@as(usize, 1), sched.systemCount());
 }
 
 /// A trigger body ALONE on its own entity, of a chosen type.
@@ -680,25 +569,6 @@ test "a lone dynamic trigger is integrated, so it publishes its own pose" {
     try testing.expectEqual(@as(f32, @floatCast(solver)), published);
 }
 
-test "a lone kinematic trigger still receives what gameplay writes" {
-    // Reception is governed by TYPE and the trigger rule never touched it. A kinematic body's
-    // pose is gameplay's, trigger or not.
-    const gpa = testing.allocator;
-    var ecs = World.init();
-    defer ecs.deinit(gpa);
-    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
-    defer pw.deinit(gpa);
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-
-    const t = try spawnLoneTrigger(gpa, &ecs, &pw, .kinematic, .{ 0, 1, 0 });
-    ecs.getMut(Transform, t.entity).?.pos = .{ 7, 3, -2 };
-    try frame(gpa, &pw, &ecs);
-
-    const solver = pw.bm.position(t.body).?.toArray();
-    try testing.expectEqual(@as(f32, 7), @as(f32, @floatCast(solver[0])));
-    try testing.expectEqual(@as(f32, -2), @as(f32, @floatCast(solver[2])));
-}
-
 test "a competing writer of Transform in fixed_update is refused at registration" {
     // P1-2, and this is a FUTURE conflict written down rather than a defect here.
     // `engine-coordinate-system.md` §4.3 runs `TransformSystem` at the head of `fixed_update`
@@ -740,12 +610,12 @@ test "a competing writer of Transform in fixed_update is refused at registration
     });
 }
 
-test "both systems declare the solver resource they mutate through the pointer" {
-    // P2-3, and this test exists because its counter-factual first measured NOTHING: dropping
-    // the declaration left every test green, which is a declaration nobody checks — the exact
-    // class this milestone keeps finding. `ARCH-030` makes the declared set the TYPE of the
-    // view a system receives, so an undeclared mutation lets two physics modules sit in one
-    // phase with no edge between them and gives the future enforcement nothing to catch.
+test "the registered system declares the solver resource it mutates through the pointer" {
+    // This test exists because its counter-factual first measured NOTHING: dropping the
+    // declaration left every test green, which is a declaration nobody checks — and writing it
+    // is what surfaced the dangling access slice. `ARCH-030` makes the declared set the TYPE
+    // of the view a system receives, so an undeclared mutation lets two physics modules sit in
+    // one phase with no edge between them.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -753,18 +623,18 @@ test "both systems declare the solver resource they mutate through the pointer" 
     defer sched.deinit(gpa);
     try sync.registerSystems(gpa, &sched, &ecs);
 
-    const wanted = @typeName(sync.PhysicsWorldRef);
-    for ([_]core.ecs.Phase{ .pre_update, .fixed_update }) |phase| {
-        const systems = sched.systemsInPhase(phase);
-        try testing.expectEqual(@as(usize, 1), systems.len);
-        var declared = false;
-        for (systems[0].accesses) |a| {
-            if (a.kind == .writes_resource and std.mem.eql(u8, a.type_name, wanted)) declared = true;
-        }
-        // Named per phase rather than counted over the pair: an aggregate would pass with one
-        // system declaring it twice and the other not at all.
-        try testing.expect(declared);
+    const systems = sched.systemsInPhase(.fixed_update);
+    try testing.expectEqual(@as(usize, 1), systems.len);
+    var declared = false;
+    for (systems[0].accesses) |a| {
+        if (a.kind == .writes_resource and
+            std.mem.eql(u8, a.type_name, @typeName(sync.PhysicsWorldRef))) declared = true;
     }
+    try testing.expect(declared);
+
+    // And nothing is registered in `pre_update` any more: the inward direction left with
+    // `syncIn`. Asserted rather than assumed, so a re-registration there is visible.
+    try testing.expectEqual(@as(usize, 0), sched.systemsInPhase(.pre_update).len);
 }
 
 /// Bind another body of a chosen role to an entity that already has one.
@@ -831,78 +701,4 @@ test "two solid bodies on one entity elect the smaller identity" {
     const published = ecs.get(Transform, entity).?.pos[1];
     try testing.expectEqual(@as(f32, @floatCast(pw.bm.position(first).?.toArray()[1])), published);
     try testing.expect(@abs(pw.bm.position(second).?.toArray()[1] - published) > 7);
-}
-
-/// A gameplay rule that drives a kinematic platform through `moveKinematic`, from `update`.
-const KinematicDriver = struct {
-    var world: *PhysicsWorld = undefined;
-    var gpa: std.mem.Allocator = undefined;
-    var body: api.BodyId = 0;
-    var target: [3]f32 = .{ 0, 0, 0 };
-    var pending: u32 = 0;
-
-    fn run(_: core.ecs.SystemContext) anyerror!void {
-        if (pending == 0) return;
-        pending -= 1;
-        try world.moveKinematic(
-            gpa,
-            body,
-            vr(target[0], target[1], target[2]),
-            pw_identity,
-            fixed_dt,
-        );
-    }
-    const pw_identity = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 1 };
-};
-
-test "moveKinematic issued from an update system is not undone by the next sync-in" {
-    // P1-2. `moveKinematic` writes the pose and both velocities into the SOLVER; gameplay owns
-    // a kinematic `Transform` and physics never publishes it, so the ECS copy stays where it
-    // was. A sync-in comparing VALUES reads "they differ" and pushes the stale ECS pose back
-    // through `setBodyTransform`, cancelling the move before the step.
-    //
-    // The call is issued FROM A SYSTEM IN `update`, which is the only position that exercises
-    // it: made from the test body between frames it would be picked up as an ordinary gameplay
-    // write and the defect would not show.
-    const gpa = testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var ecs = World.init();
-    defer ecs.deinit(gpa);
-    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
-    defer pw.deinit(gpa);
-
-    const platform = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 2, 0.5, 2 }, .{ 0, 1, 0 });
-
-    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
-    try jobs.start();
-    defer jobs.deinit(gpa);
-    var sched = core.ecs.SystemScheduler.init();
-    defer sched.deinit(gpa);
-
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-    try sync.registerSystems(gpa, &sched, &ecs);
-
-    KinematicDriver.world = &pw;
-    KinematicDriver.gpa = gpa;
-    KinematicDriver.body = platform.body;
-    KinematicDriver.target = .{ 5, 1, 0 };
-    KinematicDriver.pending = 1;
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .update,
-        .name = "kinematic_driver",
-        .run = KinematicDriver.run,
-        .accesses = &.{},
-    });
-
-    var f: u32 = 0;
-    while (f < 4) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
-
-    // THE SOLVER kept the move. Under the defect it is back at x = 0, because sync-in pushed
-    // the untouched ECS pose over it on the very next frame.
-    try testing.expectEqual(@as(f32, 5), @as(f32, @floatCast(pw.bm.position(platform.body).?.toArray()[0])));
-    // And the derived velocity survived too — the other half `moveKinematic` exists for.
-    try testing.expect(pw.bm.linearVelocity(platform.body).?.toArray()[0] != 0);
 }

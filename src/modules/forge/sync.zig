@@ -79,14 +79,23 @@
 //! must answer WHICH ONE speaks for the entity, for every combination and not just the
 //! documented one.
 //!
-//! `electedPublisher` answers it with one criterion at two levels, and everything else in
-//! this file's outward direction defers to it. An earlier version excluded triggers outright
-//! and was WRONG TWICE OVER: §1.13.7 denies a trigger a manifold, a constraint, an impulse and
-//! an island entry, and says nothing about INTEGRATION — `integration.zig` filters on body
-//! type alone, so a `.dynamic` trigger falls under gravity and its pose IS a resolved fact —
-//! and an exclusion arbitrates only solid-against-trigger, leaving two triggers or two solids
-//! in silent last-write-wins. **Do not reintroduce a blanket skip here**: it is what this
-//! election replaced, and the reasons above are why.
+//! `electPublishers` answers it with one criterion at two levels, and everything else in this
+//! file's outward direction defers to it. An earlier version excluded triggers outright and
+//! was WRONG TWICE OVER.
+//!
+//! First, on the corpus. §1.13.7 denies a trigger a manifold, a constraint and an impulse, and
+//! the amended text distinguishes TWO kinds of island entry: a CONSTRAINT island, which a
+//! trigger cannot enter by construction since no pair reaches it, and an INTEGRATION
+//! SINGLETON, which it enters explicitly — the singleton comes from the enumeration of
+//! dynamic bodies and not from any pair, and without one a dynamic trigger could never sleep
+//! and would be integrated forever. So a `.dynamic` trigger falls under gravity and its pose
+//! IS a fact the solver resolved. An earlier version of this comment read the exclusion as
+//! total and was corrected with the corpus.
+//!
+//! Second, on the arbitration itself: excluding triggers arbitrates only
+//! solid-against-trigger, leaving two triggers or two solids in silent last-write-wins.
+//! **Do not reintroduce a blanket skip here**: it is what this election replaced, and both
+//! reasons above are why.
 //!
 //! RECEPTION is governed by TYPE and by nothing else: a kinematic pose belongs to gameplay
 //! whether the body is a trigger or not, and a trigger that does not follow its entity
@@ -131,10 +140,6 @@ fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]World
     return .{ .pos = cross.vec3ToWorld(p).toArray(), .rot = cross.quatToWorld(r).toArray() };
 }
 
-fn vecFrom(a: [3]WorldReal) Vec3r {
-    return cross.vec3ToSolver(WorldVec3.fromArray(a));
-}
-
 /// The solver's two velocity columns for `body`, in world-scalar array form — the shape the
 /// ECS `Velocity` carries, so the comparison and the write read the same bytes.
 fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3]WorldReal, angular: [3]WorldReal } {
@@ -144,129 +149,83 @@ fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3
     };
 }
 
-/// Whether `entity`'s `T` was stamped changed AFTER `since`.
+/// Which registrations publish, decided ONCE per tick.
 ///
-/// **This is the exact question, not a heuristic.** `World.getMut` stamps `changed_tick`
-/// unconditionally, and the outward direction of this file never calls it for a component it
-/// does not own — a kinematic `Transform` is gameplay's and physics never publishes it. So
-/// the stamp on such a component moves if and only if gameplay wrote it.
-fn changedSince(ecs: *World, comptime T: type, entity: EntityId, since: u64) bool {
-    const cid = ecs.componentId(@typeName(T)) orelse return false;
-    const loc = ecs.dynamicLocation(entity) orelse return false;
-    const arch = ecs.dynamicArchetype(loc.archetype_idx);
-    const col = arch.componentIndex(cid) orelse return false;
-    const chunk = arch.chunks.items[loc.chunk_idx];
-    // `>=` AND NOT `>`, and the boundary case is the normal one. Sync-in runs in `pre_update`
-    // and records the tick it ran at; a gameplay write in `update` of that SAME frame carries
-    // that same tick number while being strictly later in time. A strict comparison drops it
-    // for good — measured: the C1.1 write from an `update` system never reached the solver.
-    // Re-pushing a value the publication wrote at the same tick is harmless, because the value
-    // comparison below still has to find a difference before anything is written.
-    return @as(u64, arch.changedTick(chunk, col, loc.slot)) >= since;
-}
+/// **A PRE-PASS, because the per-body form was quadratic.** The first version asked
+/// "who is my entity's publisher?" from inside each of the three publication passes, and each
+/// answer swept the whole registration list: 3·N² comparisons, 363 million of them at C1.1's
+/// 11 000 bodies, paid in full by a scene with no trigger and no multi-body entity at all.
+/// The question is per ENTITY and its answer does not change during a tick, so it is answered
+/// once.
+///
+/// **Deterministic and without a hashed container.** Candidates are sorted on the composite
+/// key `(entity, is_trigger, body)` — total, since body handles are unique — and the FIRST
+/// entry of each entity run wins: `is_trigger = false` sorts ahead, so the run's head is the
+/// non-trigger of smallest identity when one exists and the trigger of smallest identity
+/// otherwise. That is `electedPublisher`'s two-level criterion expressed as an ordering.
+/// §1.13.11's discipline governs anything that could become a compared path, and a sort
+/// answers it at no extra cost.
+const PublisherTable = struct {
+    /// One flag per registration, in registration order.
+    publishes: []bool,
 
-/// The ONE body that publishes on `entity`'s behalf, or null if none may.
-///
-/// **An ELECTION and not an exclusion, because exclusion only covered the normative case.**
-/// Yielding "when a solid body exists" arbitrates solid + trigger and nothing else: two
-/// triggers on one entity do not arbitrate each other, and two solids never enter the
-/// arbitration at all. `BodyDescriptor` admits both, so both are legal configurations, and
-/// under exclusion both were silent last-write-wins — which `engine-physics-solver.md`
-/// §1.13.6 refuses in as many words.
-///
-/// ONE criterion at TWO levels: the non-trigger body of smallest identity if one exists,
-/// otherwise the trigger of smallest identity. A character presence is never eligible — it is
-/// the controller's inner body and answers for nobody.
-///
-/// **Identity is the COMPLETE handle**, index and generation together, exactly as §1.13.11's
-/// ordering key is. That is what makes the election independent of insertion order, hence
-/// deterministic: rebuilding the same scene in a different sequence elects the same body.
-fn electedPublisher(pw: *const PhysicsWorld, entity: EntityId) ?api.BodyId {
-    var best_solid: ?api.BodyId = null;
-    var best_trigger: ?api.BodyId = null;
-    for (pw.bodies.items) |other| {
-        if (other.kind != .rigid_body) continue; // a presence answers for nobody
-        const owner = pw.bm.entity(other.id) orelse continue;
-        if (owner.index != entity.index or owner.generation != entity.generation) continue;
-        if (pw.bm.isTrigger(other.id) orelse false) {
-            if (best_trigger == null or other.id < best_trigger.?) best_trigger = other.id;
-        } else {
-            if (best_solid == null or other.id < best_solid.?) best_solid = other.id;
-        }
+    fn deinit(self: PublisherTable, gpa: std.mem.Allocator) void {
+        gpa.free(self.publishes);
     }
-    return best_solid orelse best_trigger;
-}
+};
 
-/// Whether this registration is the entity's elected publisher.
-fn publishes(pw: *const PhysicsWorld, entry: forge_3d.BodyProxy, entity: EntityId) bool {
-    const elected = electedPublisher(pw, entity) orelse return false;
-    return elected == entry.id;
-}
+const Candidate = struct {
+    entity: u64,
+    /// `0` for a solid body, `1` for a trigger — the second level of the criterion, carried
+    /// in the sort key rather than in a branch.
+    trigger: u8,
+    body: api.BodyId,
+    registration: u32,
 
-/// Push what gameplay owns INTO the solver — before step 1 of the cycle.
-///
-/// `kinematic` poses and `Velocity` writes on any simulated body, each only when it
-/// differs from what the solver already holds. An entity that has lost its `Transform`,
-/// or died, is skipped rather than guessed at.
-pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
-    // THE WATERMARK, and without it this direction UNDOES the other entries of the module.
-    // `moveKinematic` writes the pose and both velocities into the SOLVER; the ECS `Transform`
-    // is untouched, because gameplay owns a kinematic pose and physics never publishes it. A
-    // value comparison then reads "they differ" and pushes the STALE ECS pose back through
-    // `setBodyTransform`, cancelling the move before the step — and the same for the velocity
-    // setters and for teleporting a kinematic. Comparing VALUES cannot tell "gameplay wrote"
-    // from "the solver moved"; the change stamp can, and it is exact here (see
-    // `changedSince`). This is F-D1's rule in the other direction: push only what was written.
-    const ref = resolve(ecs) orelse return error.PhysicsWorldNotPublished;
-    const since = ref.last_in_tick;
-    defer recordSyncInTick(ecs, ecs.current_tick);
-
-    for (pw.bodies.items) |entry| {
-        if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
-        const body = entry.id;
-        const entity = pw.bm.entity(body) orelse continue;
-        const body_type = pw.bm.bodyType(body).?;
-        if (body_type == .static) continue; // no per-tick sync in either direction
-
-        if (body_type == .kinematic) {
-            // GAMEPLAY IS THE AUTHORITY over a kinematic pose. Pushed only on a real
-            // change: an unchanged pose is not a mutation, and composing a wake for it
-            // every tick would keep everything resting on the platform permanently awake.
-            if (ecs.get(Transform, entity)) |t| {
-                if (!changedSince(ecs, Transform, entity, since)) continue;
-                const current = solverPose(pw, body).?;
-                if (!std.mem.eql(WorldReal, &current.pos, &t.pos) or
-                    !std.mem.eql(WorldReal, &current.rot, &t.rot))
-                {
-                    // Through `setBodyTransform` and NOT through a hand-rolled sequence:
-                    // that entry already composes the wake, W4 on the retained partners
-                    // and the proxy refresh, and a second composition here would be the
-                    // one that drifts.
-                    try pw.setBodyTransform(
-                        gpa,
-                        body,
-                        vecFrom(t.pos),
-                        cross.quatToSolver(WorldQuat.fromArray(t.rot)),
-                    );
-                }
-            }
-        }
-
-        // `Velocity` written by a rule reaches the solver BEFORE step 3, so the tick that
-        // follows integrates it. C1.1 requires exactly this — an Etch system can write
-        // `Velocity` and the solver applies it — and the write composes wake + write like
-        // any other external mutation.
-        if (ecs.get(Velocity, entity)) |v| {
-            if (!changedSince(ecs, Velocity, entity, since)) continue;
-            const held = solverVelocity(pw, body);
-            const same_lin = std.mem.eql(WorldReal, &held.linear, &v.linear);
-            const same_ang = std.mem.eql(WorldReal, &held.angular, &v.angular);
-            if (!same_lin or !same_ang) {
-                pw.setLinearVelocity(body, vecFrom(v.linear));
-                pw.setAngularVelocity(body, vecFrom(v.angular));
-            }
-        }
+    fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+        if (a.entity != b.entity) return a.entity < b.entity;
+        if (a.trigger != b.trigger) return a.trigger < b.trigger;
+        return a.body < b.body;
     }
+};
+
+/// Build the table. A character presence is never a candidate — it is the controller's inner
+/// body and answers for nobody.
+fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !PublisherTable {
+    const n = pw.bodies.items.len;
+    const flags = try gpa.alloc(bool, n);
+    errdefer gpa.free(flags);
+    @memset(flags, false);
+    if (n == 0) return .{ .publishes = flags };
+
+    const cands = try gpa.alloc(Candidate, n);
+    defer gpa.free(cands);
+
+    var count: usize = 0;
+    for (pw.bodies.items, 0..) |entry, reg| {
+        if (entry.kind != .rigid_body) continue;
+        const owner = pw.bm.entity(entry.id) orelse continue;
+        cands[count] = .{
+            // Index AND generation, as §1.13.11's ordering key is: the complete identity, so
+            // a recycled slot never inherits the previous entity's election.
+            .entity = (@as(u64, owner.generation) << 32) | owner.index,
+            .trigger = if (pw.bm.isTrigger(entry.id) orelse false) 1 else 0,
+            .body = entry.id,
+            .registration = @intCast(reg),
+        };
+        count += 1;
+    }
+    const live = cands[0..count];
+    std.mem.sort(Candidate, live, {}, Candidate.lessThan);
+
+    var i: usize = 0;
+    while (i < live.len) {
+        flags[live[i].registration] = true; // head of the run: the elected body
+        const key = live[i].entity;
+        i += 1;
+        while (i < live.len and live[i].entity == key) i += 1;
+    }
+    return .{ .publishes = flags };
 }
 
 /// Publish what the solver owns OUT to the ECS — after step 11 of the cycle.
@@ -281,11 +240,14 @@ pub fn syncIn(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
 /// Three passes, and the order between them is the contract this file's header argues:
 /// untag the woken, publish everything untagged, tag the newly asleep.
 pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*CommandBuffer) !void {
+    const table = try electPublishers(gpa, pw);
+    defer table.deinit(gpa);
+
     // (1) UNTAG THE WOKEN, BEFORE publishing — so the first pose a waking body moved to
     // is published on the very tick it moved, instead of a tick later.
-    for (pw.bodies.items) |entry| {
+    for (pw.bodies.items, 0..) |entry, reg| {
+        if (!table.publishes[reg]) continue;
         const entity = pw.bm.entity(entry.id) orelse continue;
-        if (!publishes(pw, entry, entity)) continue;
         if (pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) == null) continue;
         if (cmd) |c| try c.removeComponent(entity, Sleeping) else try ecs.removeComponent(gpa, entity, Sleeping);
@@ -294,10 +256,10 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // (2) PUBLISH everything not tagged. A body that fell asleep at step 11 of THIS tick
     // is not tagged yet, so its final pose is published here — the whole reason pass (3)
     // comes after this one.
-    for (pw.bodies.items) |entry| {
+    for (pw.bodies.items, 0..) |entry, reg| {
+        if (!table.publishes[reg]) continue;
         const body = entry.id;
         const entity = pw.bm.entity(body) orelse continue;
-        if (!publishes(pw, entry, entity)) continue;
         const body_type = pw.bm.bodyType(body).?;
         if (body_type == .static) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
@@ -352,20 +314,19 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
 
     // (3) TAG THE NEWLY ASLEEP, AFTER publishing. From the next tick on, pass (2) skips
     // them and their `Transform` holds the last pose the solver computed.
-    for (pw.bodies.items) |entry| {
+    for (pw.bodies.items, 0..) |entry, reg| {
+        if (!table.publishes[reg]) continue;
         const entity = pw.bm.entity(entry.id) orelse continue;
-        if (!publishes(pw, entry, entity)) continue;
         if (!pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) != null) continue;
         if (cmd) |c| try c.addComponent(entity, Sleeping, .{}) else try ecs.addComponent(gpa, entity, Sleeping, .{});
     }
 }
 
-/// One full tick with both halves of the synchronisation around it — the shape a
-/// registered system pair will drive, and the one the tests exercise so the ORDER is
-/// measured rather than left to each call site to remember.
-pub fn stepSynchronised(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
-    try syncIn(gpa, pw, ecs);
+/// One full tick followed by its publication — the shape the registered system drives, and
+/// the one the tests exercise so the order is measured rather than left to each call site to
+/// remember. There is no inward half here any more: see the header.
+pub fn stepAndPublish(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !void {
     try pw.step(gpa);
     try syncOut(gpa, pw, ecs, null);
 }
@@ -374,7 +335,6 @@ pub fn stepSynchronised(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) 
 
 const SystemScheduler = core.ecs.SystemScheduler;
 const SystemContext = core.ecs.SystemContext;
-const Reads = core.ecs.Reads;
 const Writes = core.ecs.Writes;
 const WritesResource = core.ecs.WritesResource;
 
@@ -398,10 +358,6 @@ pub const PhysicsWorldRef = extern struct {
     /// The two halves of a `std.mem.Allocator`, which is `{ ptr, vtable }`.
     alloc_ptr: usize = 0,
     alloc_vtable: usize = 0,
-    /// The ECS tick at which sync-in last ran. A component whose `changed_tick` is at or
-    /// below this was not written by gameplay since, so pushing it would be pushing back a
-    /// value the solver has already moved past.
-    last_in_tick: u64 = 0,
 
     fn pack(world: *PhysicsWorld, gpa: std.mem.Allocator) PhysicsWorldRef {
         return .{
@@ -457,28 +413,10 @@ fn resolve(ecs: *World) ?PhysicsWorldRef {
     return ref;
 }
 
-/// Advance the sync-in watermark. Written through the resource because that is the ONE
-/// storage both call paths share — a second copy for the direct path is a second thing to
-/// drift.
-fn recordSyncInTick(ecs: *World, tick: u32) void {
-    const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return;
-    const slot = ecs.resources.getMutResource(id) orelse return;
-    if (slot.len != @sizeOf(PhysicsWorldRef)) return;
-    var ref: PhysicsWorldRef = undefined;
-    @memcpy(std.mem.asBytes(&ref), slot);
-    ref.last_in_tick = tick;
-    @memcpy(slot, std.mem.asBytes(&ref));
-}
-
 /// Whether a physics world has been published into `ecs` — so a caller can assert its wiring
 /// instead of discovering its absence as a frame that silently did nothing.
 pub fn hasPhysicsWorld(ecs: *World) bool {
     return resolve(ecs) != null;
-}
-
-fn syncInSystem(ctx: SystemContext) anyerror!void {
-    const ref = resolve(ctx.world) orelse return;
-    try syncIn(ref.allocator(), ref.worldPtr().?, ctx.world);
 }
 
 /// The tick AND the publication, in ONE system, and the merge is the fix rather than a tidy.
@@ -504,7 +442,6 @@ fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     try syncOut(ref.allocator(), ref.worldPtr().?, ctx.world, ctx.cmd);
 }
 
-const sync_in_name = "forge_sync_in";
 const step_name = "forge_step_and_publish";
 
 /// The two access sets, as FILE-SCOPE constants and not as `&.{ ... }` temporaries inside
@@ -519,11 +456,6 @@ const step_name = "forge_step_and_publish";
 /// that did was the test asserting they are declared. The tree's other call sites survive by
 /// accident — they register inside the same function that consumes the scheduler — so the API
 /// invites this, and the safe form is the one that does not depend on where the caller lives.
-const sync_in_accesses = [_]core.ecs.AccessDescriptor{
-    Reads(Transform),
-    Reads(Velocity),
-    WritesResource(PhysicsWorldRef),
-};
 const step_accesses = [_]core.ecs.AccessDescriptor{
     Writes(Transform),
     Writes(Velocity),
@@ -587,17 +519,9 @@ fn wouldConflict(
 /// leaves the first standing, because `SystemScheduler` exposes no removal. Closing that needs
 /// a scheduler change and not a change here — the same Tier 0 gap the Closing notes name.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
-    if (isRegistered(sched, .pre_update, sync_in_name)) return error.SystemAlreadyRegistered;
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
-    if (wouldConflict(sched, .pre_update, &sync_in_accesses)) return error.WriteWriteConflict;
     if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;
 
-    try sched.registerSystem(gpa, ecs, .{
-        .phase = .pre_update,
-        .name = sync_in_name,
-        .run = syncInSystem,
-        .accesses = &sync_in_accesses,
-    });
     try sched.registerSystem(gpa, ecs, .{
         .phase = .fixed_update,
         .name = step_name,
