@@ -279,9 +279,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // 1885 passed + 19 skipped, macOS aarch64).
     // Gate E added two to the new `src/interfaces/PhysicsModule.zig` (1904 → 1906, suite
     // reported 1906 — 1887 passed + 19 skipped, macOS aarch64).
+    // The F-F1/F-F2 closing pass on `no_precision_crossing` added three (1906 → 1909, suite
+    // reported 1909 — 1890 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1904,
-        else => 1906,
+        .windows => 1907,
+        else => 1909,
     };
 }
 

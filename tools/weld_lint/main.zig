@@ -71,6 +71,11 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
     defer diags.deinit(arena);
 
+    // Owned here rather than inside the rule: the aggregate half of
+    // `no_precision_crossing`'s bilateral control needs state across files, and module-level
+    // state would survive between runs and contaminate that rule's own unit tests.
+    var crossing_tally: no_precision_crossing.Tally = .{};
+
     for (files.items) |file| {
         const source = scan.readSourceZ(arena, io, file) catch |err| {
             try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
@@ -82,8 +87,11 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try c_module_isolation.check(arena, file, source, &diags);
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
-        try no_precision_crossing.check(arena, file, source, &diags);
+        try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
     }
+
+    // The second half of the bilateral control: a declared escape nobody used is stale.
+    try no_precision_crossing.checkDeclarations(arena, &crossing_tally, &diags);
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
