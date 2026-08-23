@@ -225,8 +225,10 @@ pub const BodyManager = struct {
         }
         // Normalised ONCE, here, and shared by both rotation fields below (see
         // `Body.rotation` for the invariant this establishes). Deliberately NOT
-        // folded into `convQuat`: that name says "convert", and hiding a semantic
-        // operation behind it would make the invariant invisible at the call site.
+        // folded into the crossing: `quatToSolver` says "convert", and hiding a
+        // semantic operation behind it would make the invariant invisible at the
+        // call site — and the crossing is now SHARED, so folding it there would
+        // impose this normalisation on every other caller too.
         const rotation_r = config.cross.quatToSolver(desc.rotation).normalize();
         const body = Body{
             .position = config.cross.vec3ToSolver(desc.position),

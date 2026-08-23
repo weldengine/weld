@@ -839,8 +839,9 @@ test "baseToCentre is the one offset, and it agrees at both precisions" {
 
     // The `f32` form the presence's descriptor is built from and the `Real` form every later
     // pose write uses must agree BIT for bit on the SAME height: halving is exact in binary
-    // floating point and widening is exact, so `widen(h · 0.5) == widen(h) · 0.5`. If that ever
-    // stopped holding, the base↔centre offset would exist at two values.
+    // floating point and widening is exact, so widening `h · 0.5` and halving the widened `h`
+    // give the same number. If that ever stopped holding, the base↔centre offset would exist
+    // at two values.
     //
     // The height is taken from ONE `f32` variable and widened, not written as the same decimal
     // literal at two precisions — `f32(1.8)` and `f64(1.8)` are DIFFERENT NUMBERS, so a literal

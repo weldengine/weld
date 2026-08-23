@@ -180,7 +180,8 @@ pub const Character = struct {
 /// Generic over the scalar because both precisions need it: the `BodyDescriptor` the presence
 /// is created from is `f32` (§1.12.11), while every later pose write is at `Real`. That is
 /// safe rather than merely convenient — halving is exact in binary floating point, and
-/// widening is exact, so `widen(h_f32 * 0.5)` and `widen(h_f32) * 0.5` are the same number.
+/// widening is exact, so widening `h_f32 * 0.5` and halving the widened `h_f32` give the
+/// same number.
 pub fn baseToCentre(comptime T: type, height: T) math.Vec(3, T) {
     return math.Vec(3, T).unit_y.scale(height * 0.5);
 }
