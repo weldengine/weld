@@ -41,7 +41,7 @@
 //! all three can reach.
 //!
 //! **One point, four faces, and the reading is deliberate.** A vector and a quaternion
-//! cannot share a signature, and hiding both behind an `anytype` façade would erase the
+//! cannot share a signature, and hiding both behind an `anytype` facade would erase the
 //! very types the boundary exists to name. What "single point" buys is that there is ONE
 //! place to edit and ONE place to audit — which the `no_precision_crossing` lint rule turns
 //! from an intention into a check.

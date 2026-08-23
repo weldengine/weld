@@ -298,48 +298,13 @@ pub const BodyDescriptor = struct {
     trigger_layer_mask: u32 = 0xFFFFFFFF,
 };
 
-// --- Body pose and velocity entries — semantics frozen here ---
+// --- Body pose and velocity entries ---
 //
-// `PhysicsModule`'s function declarations live in `src/interfaces/PhysicsModule.zig`,
-// which does not exist yet: it lands at M1.1.15 with `ModuleContext`, and this file is
-// the day-1 mirror of `engine-tier-interfaces.md` §1 until then (see the file header).
-// So the SEMANTICS of three body entries are recorded here, next to the frozen types
-// they traffic in, and they move with the declarations when that file lands.
-//
-// DESTINATION: M1.1.15 MOVES this block onto those three declarations in
-// `src/interfaces/PhysicsModule.zig`. It is not duplicated there — two copies of a
-// contract are two things that can disagree, which is the whole subject of the block.
-//
-//   - `setBodyTransform(id, position, rotation)` is a TELEPORTATION. It writes the pose
-//     and derives NO velocity: a kinematic body moved through it keeps velocity columns
-//     of exactly zero. That is not an oversight to be repaired — it is the same split the
-//     reference draws between `SetPositionAndRotation` and `MoveKinematic`.
-//
-//     The consequence is load-bearing for the character controller and it is why this
-//     note exists: `CharacterMoveResult.ground_velocity` is measured AT THE CONTACT
-//     POINT, so it reads the support's `v + ω × r`. A platform teleported through this
-//     entry therefore reports a ground velocity of ZERO while visibly moving
-//     (`engine-physics-forge.md` §1.12.5). The fix is to drive such a platform with
-//     `moveKinematic`, never to make this entry guess a velocity from two poses it was
-//     not given a `dt` for.
-//
-//   - `moveKinematic(id, target_position, target_rotation, dt)` is what DERIVES both
-//     velocities from a target pose over a `dt`, on the shape of
-//     `BodyInterface::MoveKinematic`. Its signature freezes at M1.1.12; its body is a
-//     typed stub until M1.1.15, deriving a velocity belonging to the tick cycle and the
-//     wake composition, which arrive with `PhysicsWorld`. Same pattern C1.1 authorises by
-//     name for `createJoint` and M1.1.9 already executed on five query entries.
-//
-//   - `setAngularVelocity(id, ω)` closes a gap dating from M1.1.0: `PhysicsModule2D`
-//     carries `setAngularVelocity2D` and the reference carries both, while 3D carried only
-//     the linear setter — so `ω` was authorable by NO caller at all, and the rotational
-//     term of `ground_velocity` had no source. `BodyManager` has had the column setter
-//     since M1.1.8; what was missing is the interface entry.
-//
-// Write intent, unchanged from §1.8.4: a pose or velocity WRITE is non-activating (it is
-// the solver's own path), while an external mutation — force, torque, impulse — wakes. The
-// interface tier composes wake + write for every setter it exposes to gameplay, and a
-// character presence moved by pose write is wake cause W4, never W3 (§1.12.10).
+// The semantics of `setBodyTransform`, `moveKinematic` and `setAngularVelocity` were
+// recorded here while `src/interfaces/PhysicsModule.zig` did not exist, and that block
+// named this move as its destination. M1.1.15 CREATED the file and MOVED the block onto its
+// three declarations. It is not duplicated: two copies of a contract are two things that
+// can disagree, which was the whole subject of the block.
 
 /// Everything needed to create one character controller
 /// (`engine-physics-forge.md` §1.12). A controller is VIRTUAL: it takes part in no
@@ -547,10 +512,11 @@ pub const CharacterMoveResult = struct {
     /// The default is the SENTINEL and not `0`, and the reason is structural:
     /// `PackedId.pack(0, 0)` is `0`, so with `0` as the default NO bit configuration of this
     /// field would mean absence. The field would be unreadable without consulting a
-    /// neighbouring one — and that coupling is invisible at the C ABI level. `engine-c-api.md`
-    /// carries neither `struct_size` nor a minor version, so a Tier 3 caller reading
-    /// `ground_body` alone has no way to learn it was supposed to read `ground_state` first,
-    /// and no future version can teach it.
+    /// neighbouring one — and that coupling is invisible at the C ABI level: a Tier 3 caller
+    /// reading `ground_body` alone has no way to learn it was supposed to read
+    /// `ground_state` first. `struct_size` does not help here and never could
+    /// (`ARCH-018`): it tells a plugin which fields the host SENT, never what a sent value
+    /// means, and `0` is a perfectly well-formed handle to slot 0.
     ground_body: BodyId = PackedId.dead,
 
     /// Velocity AT THE CONTACT POINT, hence `v + ω × r` and not the support's linear
@@ -882,9 +848,12 @@ test "BodyDescriptor defaults match the brief" {
 
     // Referencing every field by name makes a rename or a removal a COMPILE error; this
     // count is what makes an ADDITION visible, which no by-name reference can catch. Same
-    // shape as `CharacterDescriptor`'s below, and for the same reason: after the M1.1.15
-    // freeze, `engine-c-api.md` carrying no `struct_size` and no minor version, appending
-    // one defaulted field here is an ABI break and not a source-compatible addition.
+    // shape as `CharacterDescriptor`'s below, and for the same reason — which is NOT the one
+    // written here before: `engine-c-api.md` §1.1 bis carries `struct_size` and a minor
+    // version, and `ARCH-018` states the contract, so a defaulted field appended AT THE END
+    // is a supported minor addition. What breaks the contract is an insertion anywhere else
+    // or a change to an existing field, and this count is what keeps either from happening
+    // unnoticed.
     // COUNTER-FACTUAL MEASURED: appending one defaulted field leaves every assert above
     // passing and reports `expected 16, found 17` here.
     try testing.expectEqual(@as(usize, 16), @typeInfo(BodyDescriptor).@"struct".fields.len);
@@ -1038,10 +1007,20 @@ test "GroundState is the ternary verdict, u8-backed, in engine-movement.md's ord
 test "CharacterDescriptor mirrors engine-tier-interfaces.md §1 field for field" {
     // Field NAMES and defaults are the contract. Referencing each field by name makes a
     // rename or a removal a COMPILE error; the field-COUNT assert is what makes an
-    // ADDITION visible, which no by-name reference can catch. Both directions matter here
-    // and not merely in principle: after the M1.1.15 freeze, `engine-c-api.md` carrying no
-    // `struct_size` and no minor version, adding one defaulted field to this descriptor is
-    // an ABI break for every Tier 3 plugin rather than a source-compatible addition.
+    // ADDITION visible, which no by-name reference can catch.
+    //
+    // The reason previously given for the second half was FALSE and is corrected here: it
+    // argued that `engine-c-api.md` carries no `struct_size` and no minor version, so any
+    // added field would be an ABI break. It carries both — `engine-c-api.md` §1.1 bis — and
+    // `ARCH-018` states the evolution contract in full: every surface struct leads with a
+    // `struct_size` the HOST fills, the API table carries a minor version beside the major,
+    // a plugin reads `struct_size` before touching a field, and members are appended AT THE
+    // END and nowhere else. A defaulted field appended at the end is therefore exactly the
+    // source- and binary-compatible addition that contract exists to allow.
+    //
+    // What the count assert is really worth, then: an addition ANYWHERE BUT THE END, or a
+    // change to an existing field, breaks the contract, and this assert is what makes the
+    // difference a deliberate decision rather than a drift nobody saw.
     const d = CharacterDescriptor{ .entity = EntityId.dead };
 
     try testing.expect(d.position.eql(Vec3.zero));
@@ -1112,9 +1091,14 @@ test "CharacterMoveResult mirrors engine-tier-interfaces.md §1 field for field"
     // `PackedId.dead`, and DIFFERENT FROM 0. The second half is the one that catches a
     // regression to the old default, which was `0` — a valid handle to slot 0 generation 0,
     // hence a field with no bit configuration meaning absence, readable only in company of
-    // `ground_state` and silently so across the C ABI. `engine-c-api.md` carries no
-    // `struct_size` and no minor version, so after the M1.1.15 freeze that default would
-    // have been frozen into the ABI.
+    // `ground_state` and silently so across the C ABI.
+    //
+    // The former justification — that `engine-c-api.md` carries no `struct_size` and no
+    // minor version — was FALSE; it carries both (§1.1 bis, contract in `ARCH-018`). The
+    // real reason is stronger and is what stands: `struct_size` protects a plugin against
+    // READING a field the host never sent. It says nothing whatever about the VALUE of a
+    // field the host did send, so a default that means "slot 0, generation 0" would be
+    // shipped, in bounds and well-formed, to every plugin that reads it.
     try testing.expectEqual(@as(BodyId, PackedId.dead), r.ground_body);
     try testing.expect(r.ground_body != 0);
     try testing.expect(r.ground_velocity.eql(Vec3.zero));

@@ -260,7 +260,14 @@ pub const groundSweepDistance = character_mod.groundSweepDistance;
 /// What one `moveCharacter` returns: the resolved BASE position plus the ground verdict at that
 /// new pose. No remaining displacement and no collision counter — a caller that wants to know
 /// whether it was blocked compares what it asked for against what it got.
-pub const CharacterMoveResult = character_mod.MoveResult;
+///
+/// **Named `MoveResult` and not `CharacterMoveResult`**, which is what this alias used to be
+/// called. `api.CharacterMoveResult` is a DIFFERENT type — flat, six fields, at the world
+/// scalar — and this one is two fields nesting `GroundInfo` at solver precision. Both lived
+/// in one import graph under one name, and one of the two is about to become irreversible.
+/// The interface tier owes the flatten-and-narrow between them, at the same named crossing
+/// as everything else that changes precision.
+pub const MoveResult = character_mod.MoveResult;
 /// The slide loop's iteration ceiling. Exhausting it stops the character SHORT, never further.
 pub const max_slide_iterations = character_mod.max_slide_iterations;
 /// The depenetration loop's iteration ceiling, same discipline and same failure direction.

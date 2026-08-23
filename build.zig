@@ -173,6 +173,17 @@ pub fn build(b: *std.Build) void {
     forge_sync_module.addImport("forge_3d", forge_3d_module);
     forge_sync_module.addImport("foundation", foundation_module);
 
+    // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
+    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.26. It holds
+    // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
+    // `weld_forge` for `BodyId` and for the world-scalar aliases and nothing else.
+    const interfaces_physics_module = b.createModule(.{
+        .root_source_file = b.path("src/interfaces/PhysicsModule.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    interfaces_physics_module.addImport("weld_forge", forge_api_module);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -343,6 +354,11 @@ pub fn build(b: *std.Build) void {
     // `zig build test`; `zig build test-forge-3d` runs just these.
     const forge_sync_tests = b.addTest(.{ .root_module = forge_sync_module });
     test_step.dependOn(&b.addRunArtifact(forge_sync_tests).step);
+
+    // M1.1.15 / gate E — the interface file's own tests: the attestation that no protocol
+    // version is declared yet, and that the three signatures follow the world scalar.
+    const interfaces_physics_tests = b.addTest(.{ .root_module = interfaces_physics_module });
+    test_step.dependOn(&b.addRunArtifact(interfaces_physics_tests).step);
 
     const forge_3d_tests = b.addTest(.{ .root_module = forge_3d_module });
     const forge_3d_tests_run = b.addRunArtifact(forge_3d_tests);
