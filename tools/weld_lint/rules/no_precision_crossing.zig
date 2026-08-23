@@ -237,12 +237,36 @@ fn governs(file: []const u8) bool {
 }
 
 /// The index of `file` in `declared_escapes`, or null. Matched on a path SUFFIX so an
-/// absolute and a relative spelling of the same file agree.
+/// absolute and a relative spelling of the same file agree, and SEPARATOR-INSENSITIVELY so a
+/// POSIX-spelled declaration matches the `\\`-spelled path the runner passes on Windows.
+///
+/// The first version compared with `std.mem.endsWith` against a POSIX-spelled entry, which on
+/// Windows can never match: the escape would silently stop exempting, the site would be
+/// reported as an undeclared marker, and the tree would go red on one platform only. The
+/// awareness already existed one function below — `isTest` handles `\\tests\\` beside
+/// `/tests/` — and this one had lost it.
 fn declaredIndexFor(file: []const u8) ?usize {
     for (declared_escapes, 0..) |e, i| {
-        if (std.mem.endsWith(u8, file, e.file)) return i;
+        if (endsWithPath(file, e.file)) return i;
     }
     return null;
+}
+
+/// Whether `path` ends with `suffix`, treating `/` and `\\` as the same separator. Compared
+/// from the end so a longer absolute path matches a relative declaration.
+fn endsWithPath(path: []const u8, suffix: []const u8) bool {
+    if (suffix.len > path.len) return false;
+    const tail = path[path.len - suffix.len ..];
+    for (tail, suffix) |a, b| {
+        if (a == b) continue;
+        if (isSep(a) and isSep(b)) continue;
+        return false;
+    }
+    return true;
+}
+
+fn isSep(c: u8) bool {
+    return c == '/' or c == '\\';
 }
 
 /// Whether `file` is a test file — a `/tests/` directory component, or a `_test.zig` name.
@@ -304,6 +328,46 @@ test "the perimeter is the forge module AND the interface tier, and nothing else
     try std.testing.expectEqual(@as(usize, 0), try countOn("src/core/ecs/world.zig", "const x: f32 = @floatCast(y);\n"));
     try std.testing.expectEqual(@as(usize, 0), try countOn("src/foundation/math/vec.zig", "const x: f32 = @floatCast(y);\n"));
     try std.testing.expectEqual(@as(usize, 0), try countOn("src/etch/ecs_bridge.zig", "const x: f32 = @floatCast(y);\n"));
+}
+
+test "every path predicate holds in the Windows spelling too" {
+    // THE MISSING HALF. The rule's perimeter, its boundary exemption and its test exclusion
+    // were each measured in the POSIX spelling only, while the runner passes `\\`-separated
+    // paths on Windows — so a rule that worked on two platforms and not on the third would
+    // have passed every test above.
+    try std.testing.expectEqual(@as(usize, 1), try countOn(
+        "src\\modules\\forge\\forge_3d\\body_manager.zig",
+        "const x: f32 = @floatCast(y);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), try countOn(
+        "src\\interfaces\\PhysicsModule.zig",
+        "const x: f32 = @floatCast(y);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try countOn(
+        "src\\modules\\forge\\api\\precision.zig",
+        "const x: f32 = @floatCast(y);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try countOn(
+        "src\\modules\\forge\\forge_3d\\tests\\mesh_test.zig",
+        "const x: f32 = @floatCast(y);\n",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try countOn(
+        "src\\core\\ecs\\world.zig",
+        "const x: f32 = @floatCast(y);\n",
+    ));
+}
+
+test "a declared escape matches whichever separator the runner used" {
+    // The declaration is written in POSIX spelling by convention; the path is not under this
+    // rule's control. Both directions are measured, and the mixed case is what a naive
+    // `endsWith` fails.
+    try std.testing.expect(endsWithPath("src/modules/forge/forge_3d/body_manager.zig", "forge_3d/body_manager.zig"));
+    try std.testing.expect(endsWithPath("src\\modules\\forge\\forge_3d\\body_manager.zig", "forge_3d/body_manager.zig"));
+    try std.testing.expect(endsWithPath("src/modules/forge/forge_3d/body_manager.zig", "forge_3d\\body_manager.zig"));
+    // NON-VACUITY: it is a suffix match on path components and not a substring test that
+    // says yes to everything.
+    try std.testing.expect(!endsWithPath("src/modules/forge/forge_3d/mesh.zig", "forge_3d/body_manager.zig"));
+    try std.testing.expect(!endsWithPath("body_manager.zig", "forge_3d/body_manager.zig"));
 }
 
 test "the boundary file itself is allowed to narrow" {

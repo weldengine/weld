@@ -281,9 +281,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // reported 1906 — 1887 passed + 19 skipped, macOS aarch64).
     // The F-F1/F-F2 closing pass on `no_precision_crossing` added three (1906 → 1909, suite
     // reported 1909 — 1890 passed + 19 skipped, macOS aarch64).
+    // The closing NO-GO pass added eight: three transactionality tests plus a W4 test in
+    // `world_test.zig`, a presence test and the registration test in `transform_sync_test.zig`,
+    // and two Windows-spelling tests on the lint rule (1909 → 1917, suite reported 1917 —
+    // 1898 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1907,
-        else => 1909,
+        .windows => 1915,
+        else => 1917,
     };
 }
 

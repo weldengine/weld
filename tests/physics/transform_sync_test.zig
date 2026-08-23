@@ -27,6 +27,9 @@ const testing = std.testing;
 const fixed_dt: Real = 1.0 / 60.0;
 const gravity_y: Real = -9.81;
 
+/// The same timestep as `fixed_dt`, in the `f32` the frame context carries.
+const fixed_dt_f32: f32 = 1.0 / 60.0;
+
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
 }
@@ -331,4 +334,96 @@ test "publication does not mark a component whose value did not change" {
     try sync.stepSynchronised(gpa, &pw, &ecs);
     try testing.expect(markedThisTick(&ecs, Transform, b.entity));
     try testing.expect(ecs.get(Transform, b.entity).?.pos[0] > settled_pos[0]);
+}
+
+test "a character presence never answers for its entity, in either direction" {
+    // ONE ENTITY, TWO BODIES. `character.zig` creates the presence with
+    // `.entity = desc.entity`, so the body store cannot tell the controller's inner body from
+    // the entity's own. Walked as an ordinary body by this seam it corrupts BOTH directions,
+    // and both halves are measured here because each fails differently.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // Ground, so the character has something to stand on and the scene is not degenerate.
+    _ = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
+
+    const hero = try ecs.spawn(gpa, .{ .pos = .{ 0, 0.5, 0 } }, .{});
+    const character = try pw.createCharacter(gpa, .{ .entity = hero, .position = av3(0, 0.5, 0) });
+    const presence = (try pw.chars.getCharacterInnerBody(character)).?;
+    try testing.expectEqual(hero, pw.bm.entity(presence).?);
+
+    // PRECONDITION, so the test cannot pass because the presence was never registered: it IS
+    // in the world's body list, which is what makes it reachable by the seam at all.
+    var registered = false;
+    for (pw.bodies.items) |e| {
+        if (e.id == presence) registered = true;
+    }
+    try testing.expect(registered);
+
+    // INWARD. A gameplay write to the character's `Transform` must NOT teleport the presence:
+    // that would bypass `moveCharacter`'s sweep and depenetration, which is what a controller
+    // is for. The presence is kinematic, so before the fix `syncIn` saw a kinematic whose
+    // pose differed and pushed it straight through `setBodyTransform`.
+    ecs.getMut(Transform, hero).?.pos = .{ 40, 60, 80 };
+    const presence_before = pw.bm.position(presence).?.toArray();
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+    const presence_after = pw.bm.position(presence).?.toArray();
+    try testing.expect(@abs(presence_after[0] - presence_before[0]) < 1.0);
+    try testing.expect(@abs(presence_after[2] - presence_before[2]) < 1.0);
+    try testing.expect(presence_after[1] < 40); // nowhere near the written pose
+
+    // OUTWARD. The presence is moved by pose write, so its velocity columns are zero forever.
+    // Published into the entity they would overwrite the entity's own `Velocity` with a
+    // constant zero, every tick. The value written here survives because the seam skips it.
+    ecs.getMut(Velocity, hero).?.linear = .{ 7, 0, 0 };
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+    try testing.expectEqual(@as(f32, 7), ecs.get(Velocity, hero).?.linear[0]);
+    try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(presence).?.toArray()[0]);
+}
+
+test "the registered systems drive a real frame: the solver's pose reaches the ECS" {
+    // THE DELIVERABLE F5 NAMES. Before this, `stepSynchronised` had no caller outside this
+    // file: the seam existed only in its own tests, and the milestone shipped a mechanism
+    // nothing executed. What is measured here is the SCHEDULER path — `registerSystems` plus
+    // `dispatchFrame` — and not the direct composition the tests above drive.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    _ = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
+    const faller = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 4, 0 });
+
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    try sync.registerSystems(gpa, &sched, &ecs);
+
+    // THREE systems and not two, across three phases — the order cannot come from the
+    // accesses, since all three write the solver and two writers in one phase is a
+    // `WriteWriteConflict` by construction.
+    try testing.expectEqual(@as(usize, 3), sched.systemCount());
+
+    const start = ecs.get(Transform, faller.entity).?.pos[1];
+    var f: u32 = 0;
+    while (f < 30) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+
+    // The body fell in the SOLVER and the ECS learned about it, per entity and by identity.
+    const published = ecs.get(Transform, faller.entity).?.pos[1];
+    const solver = pw.bm.position(faller.body).?.toArray()[1];
+    try testing.expect(published < start - 0.05); // NON-VACUITY: it really moved
+    try testing.expectEqual(@as(f32, @floatCast(solver)), published);
 }

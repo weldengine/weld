@@ -161,7 +161,24 @@ pub const StepTrace = struct {
     }
 };
 
-const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy };
+/// What a registered proxy belongs to.
+///
+/// **A character presence carries the SAME `entity` as its character** (`character.zig`
+/// creates it with `.entity = desc.entity`), so nothing in the body store distinguishes the
+/// two: they are one entity with two bodies. Anything walking this list and keying on the
+/// entity — the ECS sync seam does exactly that, in both directions — needs the distinction
+/// spelled out here, because it cannot be recovered downstream.
+pub const BodyKind = enum {
+    /// A body created through `addBody`: the ECS entity's own rigid body.
+    rigid_body,
+    /// The virtual controller's inner body, created by the character store. It is driven
+    /// ONLY by `moveCharacter` and its siblings; it is not the entity's rigid body and does
+    /// not answer for it.
+    character_presence,
+};
+
+/// A body registered in this world, with the broadphase proxy that represents it.
+pub const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy, kind: BodyKind };
 
 /// The physics world: the shape store, the body store, the broadphase, the warm-start
 /// cache, the island partition, the per-tick scratches, and `step()`.
@@ -246,6 +263,13 @@ pub const PhysicsWorld = struct {
     /// `else`.
     pub fn addBody(self: *PhysicsWorld, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
+        // TRANSACTIONAL, in the shape `createCharacter` already had: three fallible steps in
+        // sequence, so each one undoes what precedes it on the way out. Without these, a
+        // failing `bp.insert` left a body no proxy represents — invisible to every query and
+        // to pair generation — and a failing `bodies.append` left a body AND a leaked proxy
+        // that step 10 would go on updating for a registration that does not exist.
+        errdefer self.bm.removeBody(id);
+
         const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
         const shape = self.store.get(desc.shape).?;
         const proxy = switch (shape.class()) {
@@ -261,7 +285,9 @@ pub const PhysicsWorld = struct {
                 }, id);
             },
         };
-        try self.bodies.append(gpa, .{ .id = id, .proxy = proxy });
+        errdefer self.bp.remove(proxy);
+
+        try self.bodies.append(gpa, .{ .id = id, .proxy = proxy, .kind = .rigid_body });
         return id;
     }
 
@@ -322,7 +348,7 @@ pub const PhysicsWorld = struct {
         // hold a character. W4 was structurally unable to fire for the one producer the
         // engine has. The proxy handle survives a `resizeCharacter`, which updates it in
         // place, so this registration stays valid for the character's whole life.
-        try self.bodies.append(gpa, .{ .id = presence, .proxy = proxy });
+        try self.bodies.append(gpa, .{ .id = presence, .proxy = proxy, .kind = .character_presence });
         return id;
     }
 
@@ -335,6 +361,11 @@ pub const PhysicsWorld = struct {
         // freed. Ordered removal, for the same reason `removeBody` uses one — the sweep
         // order of this list stays stable.
         if (self.chars.getCharacterInnerBody(id) catch null) |presence| {
+            // W4 FIRST, which is what `removeBody` does in its own first instruction and
+            // what this path did not. The cause does not care which entry removes the body:
+            // a sleeper retained in a pair with the presence loses what it was resting
+            // against, and a sleeper emits nothing in broadphase that could notice.
+            self.wakeRetainedPartners(presence);
             for (self.bodies.items, 0..) |entry, i| {
                 if (entry.id != presence) continue;
                 _ = self.bodies.orderedRemove(i);
@@ -463,9 +494,27 @@ pub const PhysicsWorld = struct {
     /// the other entry to report a truthful `ground_velocity`.
     ///
     /// Composes the wake: the body itself, because a teleport is an external mutation
-    /// (§1.8.4), and W4 on its retained partners, because a static or kinematic body that
-    /// moves changes what supports the sleepers around it and they cannot see it happen.
-    /// No-op on a stale handle.
+    /// (§1.8.4), and W4 on its retained partners, because a body that moves changes what
+    /// supports the sleepers around it and they cannot see it happen. No-op on a stale
+    /// handle.
+    ///
+    /// **W4 IS APPLIED TO A DYNAMIC BODY TOO, DELIBERATELY, and §1.8.5's letter is narrower
+    /// than its own reason.** The text names "removal of a body, or teleportation of a
+    /// static/kinematic", and the reason it gives is that a sleeper emits nothing in
+    /// broadphase that could notice. That reason holds identically for a teleported DYNAMIC
+    /// body: its own island wakes through W1 then W2, but the sleepers of ANOTHER island
+    /// retained in a pair with it wake through nothing at all. Restricting W4 to the two
+    /// named kinds would manufacture a silent false negative on a legal configuration, which
+    /// §1.13.6 refuses in as many words after two review rounds paid to learn it. The
+    /// broader application is the correct one; the corpus amendment is carried separately.
+    ///
+    /// **TRANSACTIONAL ON THE POSE.** The proxy refresh reserves and can fail. Before this
+    /// was written the pose had already been committed when it did, leaving the broadphase
+    /// describing a body that had moved — and a caller who retried would be retrying against
+    /// a store that already held the target. The pose is restored on failure, so the
+    /// broadphase and the store agree again and a retry is a retry. The WAKES are not rolled
+    /// back and that is a decision, not an omission: a spurious wake costs simulation time
+    /// and never an answer, while a stale proxy is a wrong answer.
     pub fn setBodyTransform(
         self: *PhysicsWorld,
         gpa: std.mem.Allocator,
@@ -473,7 +522,13 @@ pub const PhysicsWorld = struct {
         position: Vec3r,
         rotation: config.Quatr,
     ) !void {
-        if (self.bm.position(id) == null) return; // stale handle
+        const prev_position = self.bm.position(id) orelse return; // stale handle
+        const prev_rotation = self.bm.rotation(id).?;
+        errdefer {
+            self.bm.setPosition(id, prev_position);
+            self.bm.setRotation(id, prev_rotation);
+        }
+
         self.wakeRetainedPartners(id);
         self.bm.wakeBody(id);
         self.bm.setPosition(id, position);
@@ -514,6 +569,14 @@ pub const PhysicsWorld = struct {
     ///
     /// Composes the wake like any external pose write: the body, and W4 on its retained
     /// partners. No-op on a stale handle.
+    ///
+    /// **TRANSACTIONAL ON POSE AND VELOCITIES, and the second half is what makes a retry
+    /// honest.** Both are derived FROM the current pose, so committing them before the
+    /// fallible proxy refresh left a failed call with the target already stored — and a
+    /// retry then computed `target − current` over a difference of zero, publishing a null
+    /// velocity for a move that had happened. That is exactly the lie this entry exists to
+    /// remove, arriving through the error path. Restoring pose and velocities makes the
+    /// retry recompute the same non-zero derivation.
     pub fn moveKinematic(
         self: *PhysicsWorld,
         gpa: std.mem.Allocator,
@@ -532,6 +595,15 @@ pub const PhysicsWorld = struct {
         var dq = target_rotation.mul(current_rotation.conjugate());
         if (dq.w < 0) dq = dq.scale(-1); // short path: q and −q are one rotation
         const angular = Vec3r.fromArray(.{ dq.x, dq.y, dq.z }).scale(2 * inv_dt);
+
+        const prev_linear = self.bm.linearVelocity(id).?;
+        const prev_angular = self.bm.angularVelocity(id).?;
+        errdefer {
+            self.bm.setPosition(id, current_position);
+            self.bm.setRotation(id, current_rotation);
+            self.bm.setLinearVelocity(id, prev_linear);
+            self.bm.setAngularVelocity(id, prev_angular);
+        }
 
         self.wakeRetainedPartners(id);
         self.bm.wakeBody(id);

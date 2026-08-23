@@ -37,6 +37,19 @@ fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
 
+/// A dynamic unit box at `(x, y, z)` — the descriptor the transactionality sweeps use.
+fn dynamicAt(shape: api.ShapeId, x: f32, y: f32, z: f32) api.BodyDescriptor {
+    var d = api.BodyDescriptor{
+        .entity = .{ .index = 7, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    };
+    d.mass = 1;
+    d.restitution = 0;
+    d.position = av3(x, y, z);
+    return d;
+}
+
 /// A static ground box (half-extents 5 × 0.5 × 5) centred on the origin, so its top
 /// face is at `y = 0.5`, plus a dynamic unit box resting FLUSH on it (centre at
 /// `y = 1.0`, zero penetration). Contacts therefore exist from the first tick, which
@@ -726,4 +739,166 @@ test "moveKinematic derives both velocities from the target pose over dt" {
     try testing.expect(@abs(w3[1]) < 1e-4);
     try testing.expect(std.math.approxEqAbs(Real, 0.5, world.bm.position(platform).?.toArray()[0], 1e-6));
     try testing.expect(before.toArray()[0] == 0);
+}
+
+test "addBody is transactional: no fail index leaves a body, a proxy or a registration" {
+    // EXHAUSTIVE FAIL-INDEX SWEEP, the shape M1.1.1-HF2 used on the ECS spawn path: a single
+    // chosen index proves one branch, and the branch that leaks is exactly the one nobody
+    // chose. Every index up to the successful call's allocation count is driven, and after
+    // each failure the world must be indistinguishable from one where nothing was attempted.
+    const gpa = testing.allocator;
+
+    // Baseline: how many allocations does a successful `addBody` take? Counted rather than
+    // guessed, so the sweep covers the whole call and not a prefix of it.
+    var counting = std.testing.FailingAllocator.init(gpa, .{ .fail_index = std.math.maxInt(usize) });
+    var base = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer base.deinit(counting.allocator());
+    const base_shape = try base.store.createShape(counting.allocator(), .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const before = counting.allocations;
+    _ = try base.addBody(counting.allocator(), dynamicAt(base_shape, 0, 5, 0));
+    const needed = counting.allocations - before;
+    try testing.expect(needed > 0); // otherwise the sweep below is vacuous
+
+    var idx: usize = 0;
+    while (idx < needed) : (idx += 1) {
+        var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = std.math.maxInt(usize) });
+        var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+        defer pw.deinit(fa.allocator());
+        const shape = try pw.store.createShape(fa.allocator(), .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+        // Arm the failure only now, so the shape creation above is not what fails.
+        fa.fail_index = fa.allocations + idx;
+        const result = pw.addBody(fa.allocator(), dynamicAt(shape, 0, 5, 0));
+
+        if (result) |_| {
+            // This index was not an allocation site of `addBody`; nothing to assert.
+            continue;
+        } else |_| {
+            // THREE observables, because the three fallible steps fail differently: the body
+            // store, the broadphase, and the registration list. A single one of them would
+            // pass against two of the three leaks.
+            try testing.expectEqual(@as(usize, 0), pw.bodies.items.len);
+            try testing.expectEqual(@as(u32, 0), pw.proxyCountIn(.dynamic));
+            try testing.expectEqual(@as(u32, 0), pw.bm.count());
+        }
+    }
+}
+
+test "a failed pose write leaves the store where the broadphase still says it is" {
+    // The proxy refresh reserves and can fail. Before the fix the pose was already committed
+    // when it did, so the broadphase described a body that had moved and nothing could
+    // notice. Asserted on the POSE BITS — the quantity that diverged — and not on the error,
+    // which was returned before the fix too.
+    //
+    // The failure is DRIVEN rather than assumed: `Broadphase.update` only allocates when the
+    // moved log has to grow, so one move is not enough to reach the error path. The loop
+    // keeps moving until an allocation is actually needed, and `failed` is what makes this a
+    // measurement instead of a test that never reached the branch it names.
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const id = try pw.addBody(gpa, dynamicAt(shape, 0, 5, 0));
+
+    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var failed = false;
+    var attempt: u32 = 0;
+    while (attempt < 64 and !failed) : (attempt += 1) {
+        const before_pos = pw.bm.position(id).?.toArray();
+        const before_rot = pw.bm.rotation(id).?;
+        const target = vr(@as(Real, @floatFromInt(attempt)) * 100 + 100, 5, 0);
+        if (pw.setBodyTransform(fa.allocator(), id, target, before_rot)) {
+            continue; // this move needed no allocation
+        } else |_| {
+            failed = true;
+            try testing.expectEqual(before_pos, pw.bm.position(id).?.toArray());
+            try testing.expectEqual(before_rot.x, pw.bm.rotation(id).?.x);
+            try testing.expectEqual(before_rot.w, pw.bm.rotation(id).?.w);
+        }
+    }
+    try testing.expect(failed);
+}
+
+test "a failed moveKinematic leaves a retry able to derive the same velocity" {
+    // The velocities are derived FROM the current pose, so committing the pose before the
+    // fallible refresh made a retry compute `target - target` and publish ZERO for a move
+    // that had happened — the exact lie this entry exists to remove, arriving by the error
+    // path. What is asserted is the RETRY's answer, because that is where the lie appeared:
+    // asserting only the restored pose would pass against a fix that restored the pose and
+    // left the velocities at their derived values.
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var desc = dynamicAt(shape, 0, 5, 0);
+    desc.body_type = .kinematic;
+    desc.mass = 0;
+    const id = try pw.addBody(gpa, desc);
+
+    const dt: Real = 1.0 / 60.0;
+    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var failed = false;
+    var attempt: u32 = 0;
+    while (attempt < 64 and !failed) : (attempt += 1) {
+        const from = pw.bm.position(id).?.toArray();
+        const rot = pw.bm.rotation(id).?;
+        const target = vr(@as(Real, @floatFromInt(attempt)) * 100 + 100, 5, 0);
+        if (pw.moveKinematic(fa.allocator(), id, target, rot, dt)) {
+            continue;
+        } else |_| {
+            failed = true;
+            // The pose is back where it was, so the retry has a real distance to derive from.
+            try testing.expectEqual(from, pw.bm.position(id).?.toArray());
+            try pw.moveKinematic(gpa, id, target, rot, dt);
+            const v = pw.bm.linearVelocity(id).?.toArray();
+            const expected = (target.toArray()[0] - from[0]) / dt;
+            try testing.expectEqual(expected, v[0]);
+            try testing.expect(v[0] != 0);
+        }
+    }
+    try testing.expect(failed);
+}
+
+test "W4: destroying a character wakes the sleepers retained in pair with its presence" {
+    // `removeBody` applies W4 in its FIRST instruction and `destroyCharacter` applied it
+    // nowhere — one property on one path and not on its twin. The cause does not care which
+    // entry removes the body: a sleeper retained against the presence loses what it was
+    // beside, and a sleeper emits nothing in broadphase that could notice.
+    //
+    // Same scene as the `moveCharacter` W4 test, and the same in-scene counter-factual: one
+    // act must wake the near sleeper and NOT the distant one, which is the level the claim is
+    // made at. A test with only the near body would pass against an implementation that woke
+    // the entire world.
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    const far_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
+    var far_ground = api.BodyDescriptor{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = far_shape,
+    };
+    far_ground.position = av3(100, 0, 0);
+    _ = try world.addBody(gpa, far_ground);
+    const far_box = try addBoxBody(gpa, &world, .dynamic, false, 11, .{ 100, 1.0, 0 });
+
+    const hero = try world.createCharacter(gpa, .{
+        .entity = .{ .index = 20, .generation = 0 },
+        .position = av3(0.85, 0.5, 0),
+    });
+    const presence = (try world.chars.getCharacterInnerBody(hero)).?;
+
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+    _ = try stepUntilAsleep(gpa, &world, far_box, 300);
+
+    try testing.expect(retainsPair(&world, presence, box));
+    try testing.expect(!retainsPair(&world, presence, far_box));
+    try testing.expect(world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?);
+
+    world.destroyCharacter(gpa, hero);
+    try testing.expect(!world.bm.isSleeping(box).?);
+    try testing.expect(world.bm.isSleeping(far_box).?);
 }
