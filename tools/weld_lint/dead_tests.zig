@@ -286,8 +286,8 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // and two Windows-spelling tests on the lint rule (1909 → 1917, suite reported 1917 —
     // 1898 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1915,
-        else => 1917,
+        .windows => 1916,
+        else => 1918,
     };
 }
 

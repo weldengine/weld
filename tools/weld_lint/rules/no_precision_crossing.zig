@@ -246,7 +246,17 @@ fn governs(file: []const u8) bool {
 /// awareness already existed one function below — `isTest` handles `\\tests\\` beside
 /// `/tests/` — and this one had lost it.
 fn declaredIndexFor(file: []const u8) ?usize {
-    for (declared_escapes, 0..) |e, i| {
+    return declaredIndexIn(&declared_escapes, file);
+}
+
+/// The lookup itself, over an explicit list. Split for the same reason as `reportStale`: the
+/// tree's list is EMPTY, so this function never iterates and a test driving `declaredIndexFor`
+/// could not tell a separator-aware match from a POSIX-only one. Measured — the first
+/// counter-factual written for the separator fix reverted the comparison here and failed no
+/// test at all, because the only test on it drove `endsWithPath` directly and proved the
+/// helper correct without proving the call site used it.
+fn declaredIndexIn(declared: []const DeclaredEscape, file: []const u8) ?usize {
+    for (declared, 0..) |e, i| {
         if (endsWithPath(file, e.file)) return i;
     }
     return null;
@@ -355,6 +365,19 @@ test "every path predicate holds in the Windows spelling too" {
         "src\\core\\ecs\\world.zig",
         "const x: f32 = @floatCast(y);\n",
     ));
+}
+
+test "the lookup itself is separator-aware, not merely the helper it calls" {
+    // NON-VACUITY for the test below. `declared_escapes` is empty, so `declaredIndexFor`
+    // never iterates and a POSIX-only comparison inside it is unreachable — a probe that
+    // reverted it failed nothing. This drives the shipped lookup over a fixture, which is
+    // what makes the separator awareness observable AT THE CALL SITE.
+    const fixture = [_]DeclaredEscape{
+        .{ .file = "forge_3d/body_manager.zig", .reason = "probe", .owner = "probe" },
+    };
+    try std.testing.expectEqual(@as(?usize, 0), declaredIndexIn(&fixture, "src/modules/forge/forge_3d/body_manager.zig"));
+    try std.testing.expectEqual(@as(?usize, 0), declaredIndexIn(&fixture, "src\\modules\\forge\\forge_3d\\body_manager.zig"));
+    try std.testing.expectEqual(@as(?usize, null), declaredIndexIn(&fixture, "src/modules/forge/forge_3d/mesh.zig"));
 }
 
 test "a declared escape matches whichever separator the runner used" {
