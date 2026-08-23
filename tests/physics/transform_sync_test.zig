@@ -717,3 +717,30 @@ test "a competing writer of Transform in fixed_update is refused at registration
         .accesses = &.{core.ecs.Writes(Transform)},
     });
 }
+
+test "both systems declare the solver resource they mutate through the pointer" {
+    // P2-3, and this test exists because its counter-factual first measured NOTHING: dropping
+    // the declaration left every test green, which is a declaration nobody checks — the exact
+    // class this milestone keeps finding. `ARCH-030` makes the declared set the TYPE of the
+    // view a system receives, so an undeclared mutation lets two physics modules sit in one
+    // phase with no edge between them and gives the future enforcement nothing to catch.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+    try sync.registerSystems(gpa, &sched, &ecs);
+
+    const wanted = @typeName(sync.PhysicsWorldRef);
+    for ([_]core.ecs.Phase{ .pre_update, .fixed_update }) |phase| {
+        const systems = sched.systemsInPhase(phase);
+        try testing.expectEqual(@as(usize, 1), systems.len);
+        var declared = false;
+        for (systems[0].accesses) |a| {
+            if (a.kind == .writes_resource and std.mem.eql(u8, a.type_name, wanted)) declared = true;
+        }
+        // Named per phase rather than counted over the pair: an aggregate would pass with one
+        // system declaring it twice and the other not at all.
+        try testing.expect(declared);
+    }
+}

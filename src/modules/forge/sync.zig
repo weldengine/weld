@@ -440,6 +440,29 @@ fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
 const sync_in_name = "forge_sync_in";
 const step_name = "forge_step_and_publish";
 
+/// The two access sets, as FILE-SCOPE constants and not as `&.{ ... }` temporaries inside
+/// `registerSystems`.
+///
+/// **This is a defect fixed, not a style choice, and it was measured.** A `&.{ ... }` literal
+/// in the struct passed to `registerSystem` is a temporary whose lifetime ends with the
+/// enclosing block. `SystemScheduler` stores the descriptor — slice included — so once
+/// `registerSystems` returns, every `type_name` in it points at dead stack: reading them
+/// printed an empty string and then took a FAULT. Nothing crashed earlier because the DAG
+/// edges are computed AT registration and no later path reads the accesses; the first thing
+/// that did was the test asserting they are declared. The tree's other call sites survive by
+/// accident — they register inside the same function that consumes the scheduler — so the API
+/// invites this, and the safe form is the one that does not depend on where the caller lives.
+const sync_in_accesses = [_]core.ecs.AccessDescriptor{
+    Reads(Transform),
+    Reads(Velocity),
+    WritesResource(PhysicsWorldRef),
+};
+const step_accesses = [_]core.ecs.AccessDescriptor{
+    Writes(Transform),
+    Writes(Velocity),
+    WritesResource(PhysicsWorldRef),
+};
+
 fn isRegistered(sched: *const SystemScheduler, phase: core.ecs.Phase, wanted: []const u8) bool {
     for (sched.systemsInPhase(phase)) |d| {
         if (std.mem.eql(u8, d.name, wanted)) return true;
@@ -474,12 +497,12 @@ pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *Wo
         .phase = .pre_update,
         .name = sync_in_name,
         .run = syncInSystem,
-        .accesses = &.{ Reads(Transform), Reads(Velocity), WritesResource(PhysicsWorldRef) },
+        .accesses = &sync_in_accesses,
     });
     try sched.registerSystem(gpa, ecs, .{
         .phase = .fixed_update,
         .name = step_name,
         .run = stepAndPublishSystem,
-        .accesses = &.{ Writes(Transform), Writes(Velocity), WritesResource(PhysicsWorldRef) },
+        .accesses = &step_accesses,
     });
 }
