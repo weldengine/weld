@@ -64,8 +64,14 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
 
     // Whether this invocation reads the whole tree. Aggregate controls — the ones whose
     // verdict depends on having seen every file — may only run when it does.
-    const full_scan = paths.len == 0;
-    if (full_scan) {
+    //
+    // "No argument" was the FIRST form and it traded a false positive for a false negative:
+    // `weld_lint lint src bench tests tools` names every default root explicitly and covers
+    // everything, yet skipped the aggregate control. The test is now on COVERAGE — every
+    // default root reached by some given path — so both spellings of a full scan qualify and
+    // a genuinely partial list still does not.
+    const full_scan = paths.len == 0 or coversEveryRoot(paths);
+    if (paths.len == 0) {
         for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
     } else {
         for (paths) |p| try scan.collectZigFiles(arena, io, p, &files);
@@ -110,6 +116,23 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
+}
+
+/// Whether `paths` reaches every default lint root. A path covers a root when it IS that root
+/// or contains it as a prefix — `.` and `src` both cover `src`, and `src/core` covers nothing.
+fn coversEveryRoot(paths: []const [:0]const u8) bool {
+    for (default_lint_paths) |root| {
+        var covered = false;
+        for (paths) |p| {
+            const trimmed = std.mem.trimEnd(u8, p, "/\\");
+            if (std.mem.eql(u8, trimmed, ".") or std.mem.eql(u8, trimmed, root)) {
+                covered = true;
+                break;
+            }
+        }
+        if (!covered) return false;
+    }
+    return true;
 }
 
 fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, out: *std.Io.Writer) !u8 {

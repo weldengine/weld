@@ -555,11 +555,27 @@ test "a trigger body publishes nothing and still receives the entity's pose" {
     try testing.expect(trigger_pose[0] < 1.0); // it moved off (9,9,9)
 }
 
-test "a frame dispatched before publication registers nothing and does nothing" {
-    // P1-3. The resolver used to obtain its id by REGISTERING the handle type on `ctx.gpa` —
-    // the per-frame allocator — and a registration keeps the name for the world's whole life.
-    // The counter-factual is a dispatch BEFORE publication: a test that always publishes first
-    // finds the type already registered and never takes the other path.
+test "resolving an unpublished world registers nothing" {
+    // P1-3, and the object is `resolve` ITSELF. It used to obtain its id by REGISTERING the
+    // handle type, and inside a system that meant `ctx.gpa` — the per-frame allocator — while
+    // a registration keeps the type's name for the world's whole life.
+    //
+    // Isolated here rather than measured through a dispatch: since `registerSystems` declares
+    // `WritesResource(PhysicsWorldRef)`, registration now interns that name legitimately, with
+    // the PERSISTENT allocator, before any frame runs. A test that dispatched first would find
+    // the name already there and could not tell the two paths apart.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+
+    try testing.expect(ecs.componentId(@typeName(sync.PhysicsWorldRef)) == null);
+    try testing.expect(!sync.hasPhysicsWorld(&ecs));
+    // THE ASSERTION: the lookup left the registry untouched. Under the defect this call is
+    // what interns the name.
+    try testing.expect(ecs.componentId(@typeName(sync.PhysicsWorldRef)) == null);
+}
+
+test "a frame dispatched before publication does nothing" {
     const gpa = testing.allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
@@ -579,9 +595,6 @@ test "a frame dispatched before publication registers nothing and does nothing" 
     var f: u32 = 0;
     while (f < 3) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
 
-    // THE ASSERTION IS ON THE REGISTRY, not on the absence of a crash: the defect's signature
-    // is a type name interned during the frame, which a frame allocator later frees.
-    try testing.expect(ecs.componentId(@typeName(sync.PhysicsWorldRef)) == null);
     try testing.expect(!sync.hasPhysicsWorld(&ecs));
 }
 
@@ -600,4 +613,107 @@ test "registering the systems twice is refused, and refused before anything is r
     // registered then failed would leave three.
     try testing.expectError(error.SystemAlreadyRegistered, sync.registerSystems(gpa, &sched, &ecs));
     try testing.expectEqual(@as(usize, 2), sched.systemCount());
+}
+
+/// A trigger body ALONE on its own entity, of a chosen type.
+fn spawnLoneTrigger(
+    gpa: std.mem.Allocator,
+    ecs: *World,
+    pw: *PhysicsWorld,
+    body_type: api.BodyType,
+    centre: [3]f32,
+) !struct { entity: EntityId, body: api.BodyId } {
+    const entity = try ecs.spawn(gpa, .{ .pos = .{ centre[0], centre[1], centre[2] } }, .{});
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var desc = api.BodyDescriptor{ .entity = entity, .body_type = body_type, .shape = shape };
+    desc.position = av3(centre[0], centre[1], centre[2]);
+    desc.is_trigger = true;
+    if (body_type == .dynamic) desc.mass = 1;
+    return .{ .entity = entity, .body = try pw.addBody(gpa, desc) };
+}
+
+test "a lone dynamic trigger is integrated, so it publishes its own pose" {
+    // THE CASE AN EXCLUSION BY NATURE GOT WRONG. §1.13.7 says a trigger has no manifold, no
+    // constraint, no impulse and no island entry — and says NOTHING about integration.
+    // `integration.zig` filters on `body_type != .dynamic` and never on the trigger flag, so a
+    // dynamic trigger falls under gravity: its pose IS a fact the solver resolved. Excluded
+    // from publication it would drift away from its entity in silence, and its detection
+    // volume with it.
+    //
+    // The rule is exclusion by CONCURRENCY, not by nature: a trigger yields only when another
+    // body on the same entity publishes for it. Alone, it publishes per its type.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const t = try spawnLoneTrigger(gpa, &ecs, &pw, .dynamic, .{ 0, 4, 0 });
+
+    var k: u32 = 0;
+    while (k < 20) : (k += 1) try sync.stepSynchronised(gpa, &pw, &ecs);
+
+    const solver = pw.bm.position(t.body).?.toArray()[1];
+    const published = ecs.get(Transform, t.entity).?.pos[1];
+    try testing.expect(solver < 4.0 - 0.1); // NON-VACUITY: it really fell in the solver
+    try testing.expectEqual(@as(f32, @floatCast(solver)), published);
+}
+
+test "a lone kinematic trigger still receives what gameplay writes" {
+    // Reception is governed by TYPE and the trigger rule never touched it. A kinematic body's
+    // pose is gameplay's, trigger or not.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const t = try spawnLoneTrigger(gpa, &ecs, &pw, .kinematic, .{ 0, 1, 0 });
+    ecs.getMut(Transform, t.entity).?.pos = .{ 7, 3, -2 };
+    try sync.stepSynchronised(gpa, &pw, &ecs);
+
+    const solver = pw.bm.position(t.body).?.toArray();
+    try testing.expectEqual(@as(f32, 7), @as(f32, @floatCast(solver[0])));
+    try testing.expectEqual(@as(f32, -2), @as(f32, @floatCast(solver[2])));
+}
+
+test "a competing writer of Transform in fixed_update is refused at registration" {
+    // P1-2, and this is a FUTURE conflict written down rather than a defect here.
+    // `engine-coordinate-system.md` §4.3 runs `TransformSystem` at the head of `fixed_update`
+    // AND in `post_update`, writing `Transform` in both, while `scheduler.zig` makes two
+    // writers of one component in one phase a hard registration error with no declarative
+    // ordering to resolve it. `TransformSystem` exists NOWHERE in this repository — measured
+    // — so nothing is broken today.
+    //
+    // The conflict is DECLARATIVE and not physical: §4.3 has dynamic bodies carry no parent by
+    // convention, so the two systems write DISJOINT entity sets. The access model cannot
+    // express that disjunction, and that is the real gap. This test makes the wall a measured
+    // fact instead of an invisible incompatibility, and it will fail loudly on the day someone
+    // attempts the assembly rather than during the integration of `TransformSystem`.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    try sync.registerSystems(gpa, &sched, &ecs);
+
+    const Competitor = struct {
+        fn run(_: core.ecs.SystemContext) anyerror!void {}
+    };
+    try testing.expectError(error.WriteWriteConflict, sched.registerSystem(gpa, &ecs, .{
+        .phase = .fixed_update,
+        .name = "transform_system_stand_in",
+        .run = Competitor.run,
+        .accesses = &.{core.ecs.Writes(Transform)},
+    }));
+
+    // NON-VACUITY: the same registration in a phase forge does not write is accepted, so what
+    // the assertion above measures is the conflict and not a registration that always fails.
+    try sched.registerSystem(gpa, &ecs, .{
+        .phase = .late_update,
+        .name = "transform_system_stand_in_elsewhere",
+        .run = Competitor.run,
+        .accesses = &.{core.ecs.Writes(Transform)},
+    });
 }

@@ -290,9 +290,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The NO-GO pass merged the tick and the publication, then added the C1.1 gameplay-write
     // guard, the trigger pair, the pre-publication dispatch and the double registration
     // (1918 -> 1922, suite reported 1922 - 1903 passed + 19 skipped, macOS aarch64).
+    // The third NO-GO pass added the two lone-trigger cases, the write-conflict guard and the
+    // isolated resolver test (1922 -> 1926, suite reported 1926 - 1907 passed + 19 skipped,
+    // macOS aarch64).
     return switch (os) {
-        .windows => 1920,
-        else => 1922,
+        .windows => 1924,
+        else => 1926,
     };
 }
 

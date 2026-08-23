@@ -498,15 +498,14 @@ pub const PhysicsWorld = struct {
     /// supports the sleepers around it and they cannot see it happen. No-op on a stale
     /// handle.
     ///
-    /// **W4 IS APPLIED TO A DYNAMIC BODY TOO, DELIBERATELY, and §1.8.5's letter is narrower
-    /// than its own reason.** The text names "removal of a body, or teleportation of a
-    /// static/kinematic", and the reason it gives is that a sleeper emits nothing in
-    /// broadphase that could notice. That reason holds identically for a teleported DYNAMIC
-    /// body: its own island wakes through W1 then W2, but the sleepers of ANOTHER island
-    /// retained in a pair with it wake through nothing at all. Restricting W4 to the two
-    /// named kinds would manufacture a silent false negative on a legal configuration, which
-    /// §1.13.6 refuses in as many words after two review rounds paid to learn it. The
-    /// broader application is the correct one; the corpus amendment is carried separately.
+    /// **W4 IS APPLIED TO A DYNAMIC BODY TOO, and §1.8.5 now says so.** The reasoning that
+    /// carried the decision, kept because it is what the amended text rests on: a sleeper
+    /// emits nothing in broadphase that could notice a change, and that holds identically for
+    /// a teleported DYNAMIC body — its own island wakes through W1 then W2, but the sleepers
+    /// of ANOTHER island retained in a pair with it wake through nothing at all. An earlier
+    /// wording named only removal and static/kinematic teleportation, which would have
+    /// manufactured a silent false negative on a legal configuration — the thing §1.13.6
+    /// refuses in as many words.
     ///
     /// **TRANSACTIONAL ON THE POSE.** The proxy refresh reserves and can fail. Before this
     /// was written the pose had already been committed when it did, leaving the broadphase

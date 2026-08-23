@@ -136,6 +136,34 @@ fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3
     };
 }
 
+/// Whether this registration must stay silent because a solid body on the same entity is the
+/// authority. TRUE only for a trigger whose entity carries a competing publisher.
+fn yieldsToASolidBody(pw: *const PhysicsWorld, entry: forge_3d.BodyProxy, entity: EntityId) bool {
+    if (!(pw.bm.isTrigger(entry.id) orelse false)) return false;
+    return hasCompetingPublisher(pw, entity, entry.id);
+}
+
+/// Whether some OTHER registered body publishes on `entity`'s behalf.
+///
+/// **This is the concurrency test the trigger rule turns on**, and it replaces an exclusion
+/// by nature that was too broad. A body qualifies as a competing publisher only if it is a
+/// `rigid_body` registration (a character presence publishes for nobody — see above) and is
+/// not itself a trigger (two triggers on one entity settle nothing between them).
+///
+/// Linear in the registration list, per trigger, per tick. Same shape as `proxyOf` and
+/// carried by the same open item — it costs nothing on a scene with no trigger and is not
+/// worth an index before one exists.
+fn hasCompetingPublisher(pw: *const PhysicsWorld, entity: EntityId, self_id: api.BodyId) bool {
+    for (pw.bodies.items) |other| {
+        if (other.id == self_id) continue;
+        if (other.kind != .rigid_body) continue;
+        if (pw.bm.isTrigger(other.id) orelse false) continue;
+        const owner = pw.bm.entity(other.id) orelse continue;
+        if (owner.index == entity.index and owner.generation == entity.generation) return true;
+    }
+    return false;
+}
+
 /// Push what gameplay owns INTO the solver — before step 1 of the cycle.
 ///
 /// `kinematic` poses and `Velocity` writes on any simulated body, each only when it
@@ -204,8 +232,8 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // is published on the very tick it moved, instead of a tick later.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
-        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const entity = pw.bm.entity(entry.id) orelse continue;
+        if (yieldsToASolidBody(pw, entry, entity)) continue;
         if (pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) == null) continue;
         if (cmd) |c| try c.removeComponent(entity, Sleeping) else try ecs.removeComponent(gpa, entity, Sleeping);
@@ -216,9 +244,9 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // comes after this one.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
-        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const body = entry.id;
         const entity = pw.bm.entity(body) orelse continue;
+        if (yieldsToASolidBody(pw, entry, entity)) continue;
         const body_type = pw.bm.bodyType(body).?;
         if (body_type == .static) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
@@ -275,8 +303,8 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
     // them and their `Transform` holds the last pose the solver computed.
     for (pw.bodies.items) |entry| {
         if (entry.kind == .character_presence) continue; // see the header: one entity, two bodies
-        if (pw.bm.isTrigger(entry.id) orelse false) continue; // publishes no resolved fact
         const entity = pw.bm.entity(entry.id) orelse continue;
+        if (yieldsToASolidBody(pw, entry, entity)) continue;
         if (!pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) != null) continue;
         if (cmd) |c| try c.addComponent(entity, Sleeping, .{}) else try ecs.addComponent(gpa, entity, Sleeping, .{});
@@ -298,6 +326,7 @@ const SystemScheduler = core.ecs.SystemScheduler;
 const SystemContext = core.ecs.SystemContext;
 const Reads = core.ecs.Reads;
 const Writes = core.ecs.Writes;
+const WritesResource = core.ecs.WritesResource;
 
 /// The handle the registered systems reach the solver through, held as an ECS resource.
 ///
@@ -445,12 +474,12 @@ pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *Wo
         .phase = .pre_update,
         .name = sync_in_name,
         .run = syncInSystem,
-        .accesses = &.{ Reads(Transform), Reads(Velocity) },
+        .accesses = &.{ Reads(Transform), Reads(Velocity), WritesResource(PhysicsWorldRef) },
     });
     try sched.registerSystem(gpa, ecs, .{
         .phase = .fixed_update,
         .name = step_name,
         .run = stepAndPublishSystem,
-        .accesses = &.{ Writes(Transform), Writes(Velocity) },
+        .accesses = &.{ Writes(Transform), Writes(Velocity), WritesResource(PhysicsWorldRef) },
     });
 }

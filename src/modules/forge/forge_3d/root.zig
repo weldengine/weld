@@ -343,6 +343,13 @@ pub const Step = world_mod.Step;
 /// A recorder for the ORDER `step()` entered its stages in — what turns "each stage
 /// ran" into "the stages ran in this sequence".
 pub const StepTrace = world_mod.StepTrace;
+
+/// A body registered in a `PhysicsWorld`, with its broadphase proxy and what it belongs to.
+/// The ECS sync seam walks this list and needs `BodyKind` to tell a character presence from
+/// the entity's own body — one entity can own both.
+pub const BodyProxy = world_mod.BodyProxy;
+/// What a registered proxy belongs to.
+pub const BodyKind = world_mod.BodyKind;
 /// How many anchors execute. Pinned so adding or removing a stage is a deliberate
 /// edit of `world.zig` and of the order test together.
 pub const executed_step_count = world_mod.executed_step_count;
