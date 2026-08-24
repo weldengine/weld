@@ -311,9 +311,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // suite reported 1927 - 1908 passed + 19 skipped, macOS aarch64).
     // The seventh pass added the `Sleeping` conflict twin and the presence-removal guard
     // (1927 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
+    // The eighth pass moved the presence-removal guard into `world_test.zig` with its wake
+    // half, and pinned the absent inward direction as one named test (1929 -> 1930, suite
+    // reported 1930 - 1911 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1927,
-        else => 1929,
+        .windows => 1928,
+        else => 1930,
     };
 }
 

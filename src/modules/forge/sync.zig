@@ -102,8 +102,8 @@ const PhysicsWorld = forge_3d.PhysicsWorld;
 const CommandBuffer = core.ecs.CommandBuffer;
 const Vec3r = forge_3d.Vec3r;
 
-/// THE precision crossing — see `forge/api/precision.zig`. This file converts in both
-/// directions on every tick, so it is the seam most able to grow a second conversion; it
+/// THE precision crossing — see `forge/api/precision.zig`. This file narrows solver values to
+/// the world scalar on every tick, so it is the seam most able to grow a second conversion; it
 /// spells none of its own, and `no_precision_crossing` is what enforces that.
 const cross = forge_3d.cross;
 const WorldReal = api.precision.WorldReal;
@@ -423,7 +423,7 @@ fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
 
 const step_name = "forge_step_and_publish";
 
-/// The two access sets, as FILE-SCOPE constants and not as `&.{ ... }` temporaries inside
+/// The system's access set, as a FILE-SCOPE constant and not as a `&.{ ... }` temporary inside
 /// `registerSystems`.
 ///
 /// **This is a defect fixed, not a style choice, and it was measured.** A `&.{ ... }` literal
@@ -435,6 +435,8 @@ const step_name = "forge_step_and_publish";
 /// that did was the test asserting they are declared. The tree's other call sites survive by
 /// accident — they register inside the same function that consumes the scheduler — so the API
 /// invites this, and the safe form is the one that does not depend on where the caller lives.
+/// It was two sets when the seam registered two systems; it is one now, and the reason to keep
+/// it at file scope is unchanged.
 const step_accesses = [_]core.ecs.AccessDescriptor{
     Writes(Transform),
     Writes(Velocity),
@@ -496,10 +498,15 @@ fn wouldConflict(
 /// nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it in
 /// silence, hiding a double wiring rather than naming it.
 ///
-/// The DESCRIPTOR is preflighted, name and write conflicts alike — a `WriteWriteConflict` is
-/// an ordinary deterministic failure and not a residual. With ONE system there is no partial
-/// state to leave behind, which is what retired the allocation residual the two-system form
-/// carried.
+/// **The preflight covers the DETERMINISTIC failures — the name and the write conflicts — and
+/// covers OOM not at all.** `registerSystem` appends edges and several tracker entries before
+/// any allocation can fail, and its `errdefer`s do not undo all of them: after an allocation
+/// failure the scheduler must be treated as UNUSABLE, and a retry can report
+/// `WriteWriteConflict` against a `systemCount()` of zero. Moving to one system removed the
+/// residual BETWEEN two calls and nothing inside one. The real fix is a rollback in
+/// `SystemScheduler`, which is Tier 0 and already recorded there with its owner; promising an
+/// absence of residue that no mechanism holds would be worse than saying nothing, because it
+/// excuses the next reader from checking.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
     if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;

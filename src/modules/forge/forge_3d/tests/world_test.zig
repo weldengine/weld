@@ -902,3 +902,53 @@ test "W4: destroying a character wakes the sleepers retained in pair with its pr
     try testing.expect(!world.bm.isSleeping(box).?);
     try testing.expect(world.bm.isSleeping(far_box).?);
 }
+
+test "removeBody refuses a character presence, and refuses it before any mutation" {
+    // THE SEQUENCE, reachable through public entries alone: `getCharacterInnerBody` hands out
+    // the presence's `BodyId`, `removeBody` used to release its proxy and its registration, and
+    // `destroyCharacter` then released a proxy the broadphase had already freed — tripping
+    // `Broadphase.remove`'s assertion.
+    //
+    // TWO HALVES, because the name claims both. A proxy count alone measures that nothing was
+    // RELEASED; it says nothing about the wake, and a scene with no retained sleeper would stay
+    // green with the filter moved after `wakeRetainedPartners` — exactly the side effect the
+    // name promises is absent.
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer world.deinit(gpa);
+    const box = try groundAndRestingBox(gpa, &world);
+
+    // Beside the box, inside the fat margin and out of contact — the same band the W4 tests
+    // use, so the pair is retained without a manifold that would wake the box every tick.
+    const hero = try world.createCharacter(gpa, .{
+        .entity = .{ .index = 20, .generation = 0 },
+        .position = av3(0.85, 0.5, 0),
+    });
+    const presence = (try world.chars.getCharacterInnerBody(hero)).?;
+    _ = try stepUntilAsleep(gpa, &world, box, 300);
+
+    // PRECONDITIONS, so neither half can pass vacuously: the pair exists — without it "still
+    // asleep" is true for free — and the box is asleep.
+    try testing.expect(retainsPair(&world, presence, box));
+    try testing.expect(world.bm.isSleeping(box).?);
+    const before = world.proxyCountIn(.dynamic);
+
+    world.removeBody(presence);
+
+    // (a) NOTHING WAS RELEASED. Per class and not a total: a refusal that had still freed the
+    // proxy would satisfy a total against another class's count and fail here.
+    try testing.expectEqual(before, world.proxyCountIn(.dynamic));
+    try testing.expect((try world.chars.getCharacterInnerBody(hero)) != null);
+    // (b) AND NOTHING WOKE. This is the half a proxy count cannot reach.
+    try testing.expect(world.bm.isSleeping(box).?);
+
+    // DISCRIMINATION, in the same scene: a legitimate W4 producer on the same presence DOES
+    // wake it, so (b) is measuring a refused act and not a scene where nothing ever wakes.
+    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    try testing.expect(!world.bm.isSleeping(box).?);
+
+    // And the real release path still works, which is what makes the refusal a no-op and not a
+    // leak.
+    world.destroyCharacter(gpa, hero);
+    try testing.expectEqual(before - 1, world.proxyCountIn(.dynamic));
+}

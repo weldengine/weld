@@ -214,7 +214,7 @@ test "the waking tick publishes the pose it moved to" {
     try testing.expect(@abs(published[0]) > 1e-5);
 }
 
-test "Sleeping tag tracks island state in both directions" {
+test "Sleeping tag tracks island state through both transitions" {
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -253,7 +253,9 @@ test "Sleeping tag tracks island state in both directions" {
 
 test "publication authority per BodyType" {
     // The PUBLICATION half only. The reception half — a kinematic `Transform` written by
-    // gameplay reaching the solver — moved to M1.1.26 with `syncIn`; see Closing notes.
+    // gameplay reaching the solver — moved to M1.1.26 with `syncIn`; see Closing notes. Two
+    // assertions that the SOLVER had not moved were dropped with it: with no inward direction
+    // they held for every body and named nothing about authority.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -276,19 +278,17 @@ test "publication authority per BodyType" {
         ecs.get(Transform, dyn.entity).?.pos[1],
     );
 
-    // KINEMATIC — gameplay owns the pose, so the publication does NOT write it back. The ECS
-    // value stands and the solver's own pose is unmoved, because nothing here pushes it in.
+    // KINEMATIC — gameplay owns the pose, so the publication does NOT write it back and the
+    // ECS value stands.
     ecs.getMut(Transform, kin.entity).?.pos = .{ 25, 3, 0 };
     try frame(gpa, &pw, &ecs);
     try testing.expectEqual(@as(f32, 25), ecs.get(Transform, kin.entity).?.pos[0]);
-    try testing.expectEqual(@as(Real, 20), pw.bm.position(kin.body).?.toArray()[0]);
 
-    // STATIC — no publication at all, so the ECS write stands and the solver is unmoved. A
-    // static body that moves is a teleportation through `setBodyTransform`.
+    // STATIC — no publication at all, so the ECS write stands. A static body that moves is a
+    // teleportation through `setBodyTransform`, never a `Transform` write.
     ecs.getMut(Transform, sta.entity).?.pos = .{ 77, 0, 0 };
     try frame(gpa, &pw, &ecs);
     try testing.expectEqual(@as(f32, 77), ecs.get(Transform, sta.entity).?.pos[0]);
-    try testing.expectEqual(@as(Real, 40), pw.bm.position(sta.body).?.toArray()[0]);
 }
 
 /// Was `T`'s slot for `entity` stamped at the world's CURRENT tick? This reads the SIGNAL
@@ -344,11 +344,16 @@ test "publication does not mark a component whose value did not change" {
     try testing.expect(ecs.get(Transform, b.entity).?.pos[0] > settled_pos[0]);
 }
 
-test "a character presence never answers for its entity, in either direction" {
+test "a character presence never publishes for its entity" {
     // ONE ENTITY, TWO BODIES. `character.zig` creates the presence with
     // `.entity = desc.entity`, so the body store cannot tell the controller's inner body from
-    // the entity's own. Walked as an ordinary body by this seam it corrupts BOTH directions,
-    // and both halves are measured here because each fails differently.
+    // the entity's own. Walked as an ordinary body it would publish its own velocity — exactly
+    // zero forever, a presence being kinematic and moved by pose write — over the entity's.
+    //
+    // This test measured a second half until the re-scope: that a gameplay `Transform` write
+    // did not teleport the presence. There is no inward direction left here, so that assertion
+    // held for EVERY body and discriminated nothing. The absence itself is pinned once, by
+    // name, in `no component write reaches the solver` below.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -372,18 +377,6 @@ test "a character presence never answers for its entity, in either direction" {
     }
     try testing.expect(registered);
 
-    // INWARD. A gameplay write to the character's `Transform` must NOT teleport the presence:
-    // that would bypass `moveCharacter`'s sweep and depenetration, which is what a controller
-    // is for. The presence is kinematic, so before the fix `syncIn` saw a kinematic whose
-    // pose differed and pushed it straight through `setBodyTransform`.
-    ecs.getMut(Transform, hero).?.pos = .{ 40, 60, 80 };
-    const presence_before = pw.bm.position(presence).?.toArray();
-    try frame(gpa, &pw, &ecs);
-    const presence_after = pw.bm.position(presence).?.toArray();
-    try testing.expect(@abs(presence_after[0] - presence_before[0]) < 1.0);
-    try testing.expect(@abs(presence_after[2] - presence_before[2]) < 1.0);
-    try testing.expect(presence_after[1] < 40); // nowhere near the written pose
-
     // OUTWARD. The presence is moved by pose write, so its velocity columns are zero forever.
     // Published into the entity they would overwrite the entity's own `Velocity` with a
     // constant zero, every tick. The value written here survives because the seam skips it.
@@ -393,7 +386,7 @@ test "a character presence never answers for its entity, in either direction" {
     try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(presence).?.toArray()[0]);
 }
 
-test "the registered systems drive a real frame: the solver's pose reaches the ECS" {
+test "the registered system drives a real frame: the solver's pose reaches the ECS" {
     // THE DELIVERABLE F5 NAMES. Before this, `stepSynchronised` had no caller outside this
     // file: the seam existed only in its own tests, and the milestone shipped a mechanism
     // nothing executed. What is measured here is the SCHEDULER path — `registerSystems` plus
@@ -512,7 +505,7 @@ test "a frame dispatched before publication does nothing" {
     try testing.expect(!sync.hasPhysicsWorld(&ecs));
 }
 
-test "registering the systems twice is refused, and refused before anything is registered" {
+test "registering twice is refused, and refused before anything is registered" {
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -766,31 +759,48 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
     });
 }
 
-test "removeBody refuses a character presence, and refuses it before any mutation" {
-    // THE SEQUENCE, reachable through public entries alone: `getCharacterInnerBody` hands out
-    // the presence's `BodyId`, `removeBody` used to release its proxy and registration, and
-    // `destroyCharacter` then released a proxy the broadphase had already freed — tripping
-    // `Broadphase.remove`'s assertion.
+test "no component write reaches the solver: the inward direction is M1.1.26's" {
+    // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
+    // shape as a second half — "the solver did not follow the ECS write" — and after the
+    // re-scope each held for every body and discriminated nothing, which is a test counted and
+    // half empty. Gathered here, the claim is exactly what this milestone delivers: the ECS →
+    // solver direction is not wired, and the day someone wires it without M1.1.26's design this
+    // fails and says so.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
-    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
 
-    const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 2, 0 } }, .{});
-    const character = try pw.createCharacter(gpa, .{ .entity = entity });
-    const presence = (try pw.chars.getCharacterInnerBody(character)).?;
+    const dyn = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2, 0 });
+    const kin = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
 
-    const before = pw.proxyCountIn(.dynamic);
-    pw.removeBody(presence);
+    const dyn_pose = pw.bm.position(dyn.body).?.toArray();
+    const kin_pose = pw.bm.position(kin.body).?.toArray();
 
-    // PER CLASS and not a total: a no-op that had still released the proxy would satisfy a
-    // total against some other class's count and fail here.
-    try testing.expectEqual(before, pw.proxyCountIn(.dynamic));
-    try testing.expect((try pw.chars.getCharacterInnerBody(character)) != null);
+    // Every component the seam knows, written on both simulated kinds.
+    ecs.getMut(Transform, dyn.entity).?.pos = .{ 90, 91, 92 };
+    ecs.getMut(Transform, kin.entity).?.pos = .{ 93, 94, 95 };
+    ecs.getMut(Velocity, dyn.entity).?.linear = .{ 5, 0, 0 };
+    ecs.getMut(Velocity, kin.entity).?.linear = .{ 6, 0, 0 };
 
-    // And the real path still works, which is what makes the refusal a no-op and not a leak.
-    pw.destroyCharacter(gpa, character);
-    try testing.expectEqual(before - 1, pw.proxyCountIn(.dynamic));
+    var k: u32 = 0;
+    while (k < 5) : (k += 1) try frame(gpa, &pw, &ecs);
+
+    // ZERO gravity and no contact, so the solver has no reason of its own to move either body:
+    // any movement here would be a component write that got through.
+    try testing.expectEqual(kin_pose[0], pw.bm.position(kin.body).?.toArray()[0]);
+    try testing.expectEqual(kin_pose[1], pw.bm.position(kin.body).?.toArray()[1]);
+    try testing.expectEqual(dyn_pose[0], pw.bm.position(dyn.body).?.toArray()[0]);
+    try testing.expectEqual(dyn_pose[1], pw.bm.position(dyn.body).?.toArray()[1]);
+    try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(dyn.body).?.toArray()[0]);
+    try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(kin.body).?.toArray()[0]);
+
+    // NON-VACUITY: the API path DOES move the solver, so the scene is one where movement is
+    // possible and the assertions above are about the component path and not about a world
+    // where nothing ever moves.
+    pw.setLinearVelocity(dyn.body, vr(5, 0, 0));
+    try frame(gpa, &pw, &ecs);
+    try testing.expect(pw.bm.position(dyn.body).?.toArray()[0] > dyn_pose[0]);
 }
