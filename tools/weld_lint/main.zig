@@ -22,6 +22,7 @@ const c_module_isolation = @import("rules/c_module_isolation.zig");
 const conventional_commit = @import("rules/conventional_commit.zig");
 const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
 const no_float_reduce = @import("rules/no_float_reduce.zig");
+const no_precision_crossing = @import("rules/no_precision_crossing.zig");
 const dead_tests = @import("dead_tests.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
@@ -70,6 +71,11 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
     defer diags.deinit(arena);
 
+    // Owned here rather than inside the rule: the aggregate half of
+    // `no_precision_crossing`'s bilateral control needs state across files, and module-level
+    // state would survive between runs and contaminate that rule's own unit tests.
+    var crossing_tally: no_precision_crossing.Tally = .{};
+
     for (files.items) |file| {
         const source = scan.readSourceZ(arena, io, file) catch |err| {
             try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
@@ -81,7 +87,12 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try c_module_isolation.check(arena, file, source, &diags);
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
+        try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
     }
+
+    // The second half of the bilateral control. It needs no notion of a "full scan": it
+    // follows the files this invocation actually READ, so a partial list simply says less.
+    try no_precision_crossing.checkDeclarations(arena, io, &crossing_tally, &diags);
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
@@ -319,7 +330,7 @@ const usage_text =
     \\      Walk the given paths (default `src bench tests tools`) and
     \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
     \\      c_module_isolation, no_device_dispatch_outside_gal,
-    \\      no_float_reduce. Exits 0
+    \\      no_float_reduce, no_precision_crossing. Exits 0
     \\      if clean, 1 if any rule fires.
     \\
     \\  weld_lint dead-tests [--list] [--per-root]

@@ -80,6 +80,28 @@ pub const SolverStats = struct {
     solve_sweeps: u32 = 0,
     /// Relax sweeps (one per substep).
     relax_sweeps: u32 = 0,
+    /// Counters the reported telemetry surface deliberately EXCLUDES.
+    ///
+    /// `engine-physics-solver.md` §1.8.2 arrests what `get_solver_iterations_stats`
+    /// reports — the solve/relax sweeps — and states that the warm-start applications
+    /// are not counted. **That exclusion is carried by the TYPE and not by this
+    /// paragraph.** Left to a doc comment, it would fall to whoever later maps
+    /// `SolverStats` onto the reported surface: the field would travel across with the
+    /// siblings it sits beside, and a rule that rests on a future author's attention is
+    /// an intention rather than a guarantee — the wording of `ARCH-031`'s own
+    /// conformance test, and it applies here. Nested, the boundary is visible at every
+    /// read site and a field crosses it only by being moved out, deliberately.
+    not_reported: struct {
+        /// Constraint POINTS the warm start injected this tick, summed over substeps.
+        ///
+        /// It exists so the APPLICATION half of warm start is observable where it
+        /// happens, since "applied once per substep, every substep" (§1.7 step 6) is
+        /// otherwise a claim no test can reach. It counts real injections rather than
+        /// loop turns: a `substep_count` of 4 over one 4-point manifold reads 16, and
+        /// hoisting the call out of the loop reads 4 — the counter-factual that gives
+        /// the number its meaning.
+        warm_start_injections: u32 = 0,
+    } = .{},
     /// The smallest separation any biased sweep observed this tick, or `null` if no
     /// point was evaluated at all. Negative means overlap.
     min_separation: ?Real = null,
@@ -269,16 +291,19 @@ fn solveFrictionPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *Constr
 }
 
 /// Inject each point's CURRENT accumulated impulses into the body velocities — once
-/// per substep, immediately after the velocity integration.
+/// per substep, immediately after the velocity integration. Returns the number of
+/// points it injected, which is what makes the per-substep cadence observable.
 ///
 /// The accumulators include everything earlier substeps of this tick solved, which is
 /// exactly the point: this is the APPLICATION half of warm start, and the SEEDING half
 /// ran once at `prepare` (`contact_constraint.seedWarmStart`). The two must stay
 /// distinct functions — re-seeding here would re-read the cache every substep and
 /// throw away the tick's own progress.
-pub fn applyWarmStartRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize) void {
+pub fn applyWarmStartRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize) u32 {
+    var injected: u32 = 0;
     for (constraints[from..to]) |*c| {
         for (0..c.count) |i| {
+            injected += 1;
             const pt = &c.points[i];
             const impulse = c.normal.scale(pt.normal_impulse)
                 .add(c.tangent1.scale(pt.tangent1_impulse))
@@ -287,6 +312,7 @@ pub fn applyWarmStartRange(bm: *BodyManager, constraints: []ContactConstraint, f
             applyImpulse(bm, c, pt.r_a, pt.r_b, impulse);
         }
     }
+    return injected;
 }
 
 /// The BIASED sweep over the constraint index range `[from, to)` — normal points
@@ -432,7 +458,8 @@ pub fn solveTick(
     while (substep < cfg.substep_count) : (substep += 1) {
         integration.integrateVelocitiesNoReset(bm, h, gravity);
 
-        for (islands) |isl| applyWarmStartRange(bm, constraints, isl.constraint_from, isl.constraint_to);
+        for (islands) |isl| stats.not_reported.warm_start_injections +=
+            applyWarmStartRange(bm, constraints, isl.constraint_from, isl.constraint_to);
 
         for (islands) |isl| {
             const range = solveRangeReport(bm, constraints, isl.constraint_from, isl.constraint_to, cfg, h);

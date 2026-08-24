@@ -246,17 +246,81 @@ pub const uncollected = [_]Uncollected{
 /// above — `shm_posix.zig` and `transport_posix.zig`. That is arithmetic on this
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
-    // Reconciled against `zig build test --summary all`, which reported 1869
-    // collected — NOT bumped to match the closure's own arithmetic, which is the
-    // repair the failure message forbids. Windows is two lower, the two
-    // `only_on = .windows` entries above.
+    // Reconciled against `zig build test --summary all`, which reported **1875
+    // collected on macOS** (1856 passed + 19 skipped) at M1.1.15 — NOT bumped to
+    // match the closure's own arithmetic, which is the repair the failure message
+    // forbids. The two numbers agree here, and they were produced independently:
+    // 1875 is what the suite ran, and the closure separately arrives at 1875 from
+    // this table. Windows is two lower, the two `only_on = .windows` entries above.
     //
-    // This control has now stopped two commits in a row on its first real uses, each
-    // time on a genuine test addition, and each time the number was re-derived from
-    // the suite rather than from the closure. That is the whole point of it.
+    // This control has now stopped three commits in a row on its first real uses,
+    // each time on a genuine test addition, and each time the number was re-derived
+    // from the suite rather than from the closure. That is the whole point of it.
+    // M1.1.15 bumps this twice, once per gate that adds blocks, and each time the number
+    // is re-derived from the SUITE: gate A added six blocks in
+    // `forge_3d/tests/world_test.zig` (1869 → 1875, suite reported 1875), gate B added
+    // three more to the same file (1875 → 1878, suite reported 1878 — 1859 passed + 19
+    // skipped, macOS aarch64). The CI layer confronts both branches on the matrix
+    // platforms themselves: measured 1875 on `ubuntu-24.04` and 1873 on `windows-2025`
+    // at gate A, through `-Dexpect-collected` fed by each cell's own total.
+    // Gate C added six more to `world_test.zig` (1878 → 1884, suite reported 1884 —
+    // 1865 passed + 19 skipped, macOS aarch64).
+    // `moveKinematic` added one more at the gate C round-trip (1884 → 1885, suite
+    // reported 1885 — 1866 passed + 19 skipped, macOS aarch64).
+    // Gate D added two to `forge/api/components.zig` with the `Sleeping` marker
+    // (1885 → 1887, suite reported 1887 — 1868 passed + 19 skipped, macOS aarch64).
+    // Gate D added six in `tests/physics/transform_sync_test.zig` (1887 → 1893, suite
+    // reported 1893 — 1874 passed + 19 skipped, macOS aarch64).
+    // F-D1 added one signal test to `tests/physics/transform_sync_test.zig` (1893 → 1894,
+    // suite reported 1894 — 1875 passed + 19 skipped, macOS aarch64).
+    // Gate E added three to `forge/api/precision.zig` (1894 → 1897, suite reported 1897 —
+    // 1878 passed + 19 skipped, macOS aarch64) and seven to the new
+    // `weld_lint/rules/no_precision_crossing.zig` (1897 → 1904, suite reported 1904 —
+    // 1885 passed + 19 skipped, macOS aarch64).
+    // Gate E added two to the new `src/interfaces/PhysicsModule.zig` (1904 → 1906, suite
+    // reported 1906 — 1887 passed + 19 skipped, macOS aarch64).
+    // The F-F1/F-F2 closing pass on `no_precision_crossing` added three (1906 → 1909, suite
+    // reported 1909 — 1890 passed + 19 skipped, macOS aarch64).
+    // The closing NO-GO pass added eight: three transactionality tests plus a W4 test in
+    // `world_test.zig`, a presence test and the registration test in `transform_sync_test.zig`,
+    // and two Windows-spelling tests on the lint rule (1909 → 1917, suite reported 1917 —
+    // 1898 passed + 19 skipped, macOS aarch64).
+    // The NO-GO pass merged the tick and the publication and added the C1.1 gameplay-write
+    // guard (1918 -> 1919, suite reported 1919 - 1900 passed + 19 skipped, macOS aarch64).
+    // The NO-GO pass merged the tick and the publication, then added the C1.1 gameplay-write
+    // guard, the trigger pair, the pre-publication dispatch and the double registration
+    // (1918 -> 1922, suite reported 1922 - 1903 passed + 19 skipped, macOS aarch64).
+    // The third NO-GO pass added the two lone-trigger cases, the write-conflict guard and the
+    // isolated resolver test (1922 -> 1926, suite reported 1926 - 1907 passed + 19 skipped,
+    // macOS aarch64).
+    // The third NO-GO pass added the two lone-trigger cases, the write-conflict guard, the
+    // isolated resolver test and the declared-access guard (1922 -> 1927, suite reported 1927
+    // - 1908 passed + 19 skipped, macOS aarch64).
+    // The fourth NO-GO pass added the two election tests, the update-issued moveKinematic
+    // guard and three on the linter's path coverage, and wired `weld_lint/main.zig` into the
+    // closure (1927 -> 1933, suite reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
+    // The fifth pass RE-SCOPED `syncIn` out of the milestone: four reception tests removed,
+    // two reduced to their publication half, and the linter's path coverage re-tested
+    // (1933 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
+    // The fifth pass RE-SCOPED `syncIn` out of the milestone: four reception tests removed, two
+    // reduced to their publication half, the linter's path coverage re-tested, and one added
+    // for the election criterion's second level (1933 -> 1930, suite reported 1930 - 1911
+    // passed + 19 skipped, macOS aarch64).
+    // The sixth pass replaced the lint completeness machinery with visited declarations: the
+    // three path-coverage tests go, one four-combination stale test arrives (1930 -> 1927,
+    // suite reported 1927 - 1908 passed + 19 skipped, macOS aarch64).
+    // The seventh pass added the `Sleeping` conflict twin and the presence-removal guard
+    // (1927 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
+    // The eighth pass moved the presence-removal guard into `world_test.zig` with its wake
+    // half, and pinned the absent inward direction as one named test (1929 -> 1930, suite
+    // reported 1930 - 1911 passed + 19 skipped, macOS aarch64).
+    // The ninth pass added the publish/withdraw lifetime guard (1930 -> 1931, suite reported
+    // 1931 - 1912 passed + 19 skipped, macOS aarch64).
+    // The tenth pass closed the publication lifetime from both sides (1931 -> 1933, suite
+    // reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1867,
-        else => 1869,
+        .windows => 1931,
+        else => 1933,
     };
 }
 

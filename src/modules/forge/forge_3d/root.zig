@@ -52,6 +52,9 @@ const character_mod = @import("character.zig");
 // M1.1.14 — the module's entry-point check on the floating-point execution
 // state (`ARCH-031` rule 5). Scalar-free; re-exported as two functions below.
 const determinism_mod = @import("determinism.zig");
+// M1.1.15 — `PhysicsWorld`, the sole owner of the per-tick cycle. Re-exported below;
+// the comptime pin analyses its acceptance suite.
+const world_mod = @import("world.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -61,6 +64,11 @@ pub const Real = config.Real;
 pub const Vec3r = config.Vec3r;
 /// Quaternion at solver precision.
 pub const Quatr = config.Quatr;
+
+/// **The module's one precision crossing**, instantiated at `Real` in `config.zig`. World ↔
+/// solver conversions go through here and through nothing else
+/// (`engine-physics-queries.md` §1.11.8); `no_precision_crossing` checks it.
+pub const cross = config.cross;
 /// 3×3 matrix at solver precision.
 pub const Mat3r = config.Mat3r;
 /// Axis-aligned bounding box at solver precision.
@@ -252,7 +260,14 @@ pub const groundSweepDistance = character_mod.groundSweepDistance;
 /// What one `moveCharacter` returns: the resolved BASE position plus the ground verdict at that
 /// new pose. No remaining displacement and no collision counter — a caller that wants to know
 /// whether it was blocked compares what it asked for against what it got.
-pub const CharacterMoveResult = character_mod.MoveResult;
+///
+/// **Named `MoveResult` and not `CharacterMoveResult`**, which is what this alias used to be
+/// called. `api.CharacterMoveResult` is a DIFFERENT type — flat, six fields, at the world
+/// scalar — and this one is two fields nesting `GroundInfo` at solver precision. Both lived
+/// in one import graph under one name, and one of the two is about to become irreversible.
+/// The interface tier owes the flatten-and-narrow between them, at the same named crossing
+/// as everything else that changes precision.
+pub const MoveResult = character_mod.MoveResult;
 /// The slide loop's iteration ceiling. Exhausting it stops the character SHORT, never further.
 pub const max_slide_iterations = character_mod.max_slide_iterations;
 /// The depenetration loop's iteration ceiling, same discipline and same failure direction.
@@ -314,6 +329,31 @@ pub const checkFloatEnvironment = determinism_mod.checkFloatEnvironment;
 /// by whatever drives a tick; `PhysicsWorld.step()` inherits the call at M1.1.15.
 pub const assertFloatEnvironment = determinism_mod.assertFloatEnvironment;
 
+// --- Orchestration (M1.1.15) ---
+
+/// The physics world: the SOLE OWNER of the per-tick cycle
+/// (`engine-physics-solver.md` §1.7). It holds the shape store, the body store, the
+/// broadphase, the warm-start cache and the island partition, executes the eleven
+/// steps in their frozen order — step 10 bis included — and owns the substep cadence
+/// and the per-tick scratches. Bound to `Real` through the module's own `config.zig`.
+pub const PhysicsWorld = world_mod.PhysicsWorld;
+/// One executed stage of the cycle. The enum carries exactly the anchors that RUN;
+/// step 3 and step 5 bis own no code and step 8 is retired at a frozen number.
+pub const Step = world_mod.Step;
+/// A recorder for the ORDER `step()` entered its stages in — what turns "each stage
+/// ran" into "the stages ran in this sequence".
+pub const StepTrace = world_mod.StepTrace;
+
+/// A body registered in a `PhysicsWorld`, with its broadphase proxy and what it belongs to.
+/// The ECS sync seam walks this list and needs `BodyKind` to tell a character presence from
+/// the entity's own body — one entity can own both.
+pub const BodyProxy = world_mod.BodyProxy;
+/// What a registered proxy belongs to.
+pub const BodyKind = world_mod.BodyKind;
+/// How many anchors execute. Pinned so adding or removing a stage is a deliberate
+/// edit of `world.zig` and of the order test together.
+pub const executed_step_count = world_mod.executed_step_count;
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -332,6 +372,7 @@ comptime {
     _ = sensor_mod;
     _ = query_mod;
     _ = character_mod;
+    _ = world_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
@@ -350,6 +391,7 @@ comptime {
     _ = @import("tests/mesh_test.zig");
     _ = @import("tests/character_test.zig");
     _ = @import("tests/sensor_test.zig");
+    _ = @import("tests/world_test.zig");
     // M1.1.14 — the determinism instrument: canonical scenario + artifacts.
     _ = @import("tests/determinism/scenario.zig");
     _ = @import("tests/determinism/trace.zig");

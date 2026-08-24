@@ -287,18 +287,18 @@ pub const MeshData = struct {
         {
             var t: usize = 0;
             while (t < indices.len) : (t += 3) {
-                const v0 = widen(vertices[indices[t]]);
-                const v1 = widen(vertices[indices[t + 1]]);
-                const v2 = widen(vertices[indices[t + 2]]);
+                const v0 = config.cross.vec3ToSolver(vertices[indices[t]]);
+                const v1 = config.cross.vec3ToSolver(vertices[indices[t + 1]]);
+                const v2 = config.cross.vec3ToSolver(vertices[indices[t + 2]]);
                 if (isDegenerate(v0, v1, v2)) return error.MeshTriangleDegenerate;
             }
         }
 
         const owned_vertices = try gpa.alloc(Vec3r, vertices.len);
         errdefer gpa.free(owned_vertices);
-        var bound = Aabbr.fromMinMax(widen(vertices[0]), widen(vertices[0]));
+        var bound = Aabbr.fromMinMax(config.cross.vec3ToSolver(vertices[0]), config.cross.vec3ToSolver(vertices[0]));
         for (vertices, owned_vertices) |src, *dst| {
-            dst.* = widen(src);
+            dst.* = config.cross.vec3ToSolver(src);
             bound = bound.expand(dst.*);
         }
         const owned_indices = try gpa.dupe(u32, indices);
@@ -1039,11 +1039,4 @@ pub fn isDegenerate(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
     // The direction is a separate question, asked of `faceCross` on geometry this predicate has
     // already admitted.
     return math.triangleIsFlat(Real, v0, v1, v2);
-}
-
-/// Widen a descriptor vertex to solver precision. Exact: a per-component `f32` → `Real`
-/// conversion.
-fn widen(v: ApiVec3) Vec3r {
-    const c = v.toArray();
-    return Vec3r.fromArray(.{ c[0], c[1], c[2] });
 }

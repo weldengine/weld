@@ -10,10 +10,17 @@
 const components = @import("components.zig");
 const types = @import("types.zig");
 
+/// **The module's single precision boundary** — the world scalar, its aggregates, and the
+/// one named crossing between it and a solver scalar (`engine-physics-queries.md` §1.11.8).
+pub const precision = @import("precision.zig");
+
 // --- ECS components (extern POD) ---
 
 /// Rigid-body material + simulation parameters.
 pub const RigidBody = components.RigidBody;
+/// A body whose island is ASLEEP — the zero-size marker the orchestrator adds and
+/// removes, and the only way a rule can ask whether a body is sleeping (M1.1.15).
+pub const Sleeping = components.Sleeping;
 /// A collision shape attached to an entity.
 pub const CollisionShape = components.CollisionShape;
 /// Per-shape parameter union overlaid by `CollisionShape.shape_type`.
@@ -89,4 +96,5 @@ pub const ClosestPointResult = types.ClosestPointResult;
 comptime {
     _ = components;
     _ = types;
+    _ = precision;
 }

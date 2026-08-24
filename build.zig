@@ -159,6 +159,31 @@ pub fn build(b: *std.Build) void {
     forge_3d_module.addImport("weld_forge", forge_api_module);
     forge_3d_module.addOptions("build_options", forge_build_options);
 
+    // M1.1.15 / gate D — `forge/sync.zig`, the ECS <-> solver seam. It is the ONE module
+    // that sees both sides: `weld_core` for the World and the `Transform`, `weld_forge`
+    // for the physics components, and `forge_3d` for `PhysicsWorld`. `forge_3d` itself
+    // keeps its two-import discipline and never learns about the ECS.
+    const forge_sync_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/sync.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_sync_module.addImport("weld_core", core_module);
+    forge_sync_module.addImport("weld_forge", forge_api_module);
+    forge_sync_module.addImport("forge_3d", forge_3d_module);
+    forge_sync_module.addImport("foundation", foundation_module);
+
+    // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
+    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.26. It holds
+    // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
+    // `weld_forge` for `BodyId` and for the world-scalar aliases and nothing else.
+    const interfaces_physics_module = b.createModule(.{
+        .root_source_file = b.path("src/interfaces/PhysicsModule.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    interfaces_physics_module.addImport("weld_forge", forge_api_module);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -327,6 +352,14 @@ pub fn build(b: *std.Build) void {
     // inline tests in config/shape/body/body_manager + the acceptance suite
     // under forge_3d/tests/. root.zig pins them all. Added to
     // `zig build test`; `zig build test-forge-3d` runs just these.
+    const forge_sync_tests = b.addTest(.{ .root_module = forge_sync_module });
+    test_step.dependOn(&b.addRunArtifact(forge_sync_tests).step);
+
+    // M1.1.15 / gate E — the interface file's own tests: the attestation that no protocol
+    // version is declared yet, and that the three signatures follow the world scalar.
+    const interfaces_physics_tests = b.addTest(.{ .root_module = interfaces_physics_module });
+    test_step.dependOn(&b.addRunArtifact(interfaces_physics_tests).step);
+
     const forge_3d_tests = b.addTest(.{ .root_module = forge_3d_module });
     const forge_3d_tests_run = b.addRunArtifact(forge_3d_tests);
     test_step.dependOn(&forge_3d_tests_run.step);
@@ -542,6 +575,10 @@ pub fn build(b: *std.Build) void {
         render: bool = false,
         /// M0.6 — when set, imports the `weld_asset_pipeline` module.
         asset_pipeline: bool = false,
+        /// M1.1.15 — when set, imports the Forge synchronisation seam and the two
+        /// modules it joins, so a test can drive a `PhysicsWorld` against a real ECS
+        /// `World`.
+        forge: bool = false,
         /// M0.6 / E2 — when set, imports the `foundation` module (simd).
         foundation: bool = false,
         /// M1.0.4 — when set, imports `weld_etch` (the scene cook driver). A
@@ -558,6 +595,7 @@ pub fn build(b: *std.Build) void {
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
+        .{ .path = "tests/physics/transform_sync_test.zig", .forge = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -793,6 +831,12 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.asset_pipeline) {
             t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
+        }
+        if (spec.forge) {
+            t_mod.addImport("weld_forge", forge_api_module);
+            t_mod.addImport("forge_3d", forge_3d_module);
+            t_mod.addImport("forge_sync", forge_sync_module);
+            t_mod.addImport("foundation", foundation_module);
         }
         if (spec.foundation) {
             t_mod.addImport("foundation", foundation_module);

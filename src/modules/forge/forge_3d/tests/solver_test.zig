@@ -2,53 +2,22 @@
 //! replacing the M1.1.6 Sequential Impulses suite and absorbing the M1.1.7 NGS
 //! suite, whose model no longer exists.
 //!
-//! `World` composes the full per-tick pipeline IN TESTS ONLY (the production
-//! `step()` orchestration is M1.1.15). The normative cycle
-//! (`engine-physics-solver.md` §1.7), in order — step numbers are STABLE anchors and
-//! step 8 is retired at a frozen number:
-//!   (1)  `Broadphase.computePairs` on the current poses (moved-driven deltas)
-//!   (2)  candidate-pair retention: merge the deltas into a PERSISTENT set
-//!   (3)  external forces — READ-ONLY, and it owns no code. The force/torque
-//!        accumulators are constant for the whole of `step()` (nothing writes them
-//!        between ticks), so they ARE the tick's accelerations and every substep
-//!        reads them directly. The uniform §2 reset is not here: it runs once at the
-//!        END of step 6, because clearing an accumulator before anything consumes it
-//!        delivers `F/m·0` (blocker B1).
-//!   (4)  `cache.beginTick` → `build` (narrowphase `collidePair` per candidate,
-//!        `prepare` capturing `v_n⁻` PRE-GRAVITY, the local anchors, the softness
-//!        selection and the warm-start SEEDING, plus the wake fixpoint of §1.8.5)
-//!   (5)  island partition + activation (W2, W3) — never puts anything to sleep
-//!   (6)  the SUBSTEP LOOP and (7) the restitution pass, both inside
-//!        `rigid.solveTick`: per substep `integrateVelocitiesNoReset(h)` → warm-start
-//!        APPLICATION → biased solve (normal points only) → `integratePositions(h)` →
-//!        relax (normal points unbiased, then friction); after the loop the uniform
-//!        accumulator reset, then restitution per island.
-//!   (8)  retired — there is no position pass. Position error is corrected by the
-//!        bias inside step 6, and penetration recovery is PACED by
-//!        `contact_push_max_speed` rather than resorbed in one frame.
-//!   (9)  `storeContacts` (harvest) → `cache.endTick` (sort + swap)
-//!   (10) broadphase proxy updates on the final poses — skips sleeping bodies
-//!   (10 bis) the sensor pass (§1.13.4), when `sensors_on`
-//!   (11) sleep window sweep on the POST-SOLVE state, then the sleep transition:
-//!        the only point in the cycle where a body falls asleep.
+//! **The cycle this suite drives left this file at M1.1.15.** `World` below is an
+//! alias for `forge_3d.PhysicsWorld` (`../world.zig`), which is now the sole owner
+//! of the eleven steps of `engine-physics-solver.md` §1.7 — their order, the
+//! candidate-pair retention rule, the substep cadence and the per-tick scratches.
+//! Nothing here re-implements any of it, and that is the property that makes every
+//! measurement below a measurement of the engine rather than of a second copy of
+//! the cycle written for the tests. The step-by-step description of the cycle lives
+//! in `../world.zig`'s header and NOT here, deliberately: two copies of a normative
+//! order is how the second one goes stale — this header carried "keeps EVERY emitted
+//! pair (never drops)" for a full milestone after the pruning landed.
 //!
-//! Sleeping is ENABLED by default here. Every convergence measurement — resting box,
-//! five-box stack, mass ratio, drift — sets `sleep_cfg.allow_sleeping = false`, which
-//! is normative and not a convenience (§1.8.3): a displacement-bounded criterion lets
-//! a slowly creeping body sleep, so a converging-or-not question must be asked with
-//! sleeping off.
-//!
-//! `computePairs` is moved-driven with fat-AABB hysteresis (it reports a pair only
-//! when a proxy moves enough to exit its fat AABB), so the consumer keeps a
-//! PERSISTENT candidate set (`active`, a sorted-deduped key list) and merges each
-//! tick's deltas into it. NORMATIVE retention rule for the M1.1.15
-//! `step()`/`PhysicsWorld` (b2ContactManager semantics): a pair is retained while the
-//! two FAT broadphase AABBs overlap, dropped only when they separate. This harness
-//! keeps EVERY emitted pair (never drops) — a conservative superset of that rule,
-//! valid in test: the narrowphase filters non-touching pairs, so a retained separated
-//! pair costs a redundant `collidePair` and never a wrong contact. Dropping a
-//! contacting pair on transient separation would lose it until the body sank past the
-//! margin.
+//! Sleeping is ENABLED by default. Every convergence measurement — resting box,
+//! five-box stack, mass ratio, drift — sets `sleep_cfg.allow_sleeping = false` (or
+//! opens the world with `initNoSleep`), which is normative and not a convenience
+//! (§1.8.3): a displacement-bounded criterion lets a slowly creeping body sleep, so
+//! a converging-or-not question must be asked with sleeping off.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -59,6 +28,8 @@ const integration = @import("../pipeline/integration.zig");
 const sleep = @import("../pipeline/sleep.zig");
 const sensor = @import("../pipeline/sensor.zig");
 const rigid = @import("../rigid/root.zig");
+// M1.1.15 — the per-tick cycle, now production. `World` below is this type.
+const world_mod = @import("../world.zig");
 // M1.1.14 — the module's float-environment check, asserted where a world opens.
 const determinism = @import("../determinism.zig");
 const api = @import("weld_forge");
@@ -88,283 +59,16 @@ pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
 
-// The harness does NOT compute a broad layer of its own. It calls
-// `BodyManager.broadLayerFor`, the same derivation production will use, so a trigger
-// lands in the `trigger` class BY THE RULE and not by a literal that happens to agree
-// with it.
+// --- the cycle under test -----------------------------------------------------
 
-fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
-    std.mem.sort(u64, list.items, {}, std.sort.asc(u64));
-    if (list.items.len == 0) return;
-    var w: usize = 1;
-    var i: usize = 1;
-    while (i < list.items.len) : (i += 1) {
-        if (list.items[i] != list.items[w - 1]) {
-            list.items[w] = list.items[i];
-            w += 1;
-        }
-    }
-    list.shrinkRetainingCapacity(w);
-}
-
-const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy };
-
-/// A minimal physics world composing the full contact-solver pipeline for tests.
-/// The single definition of the normative per-tick cycle (see the file header).
-pub const World = struct {
-    store: ShapeStore = .{},
-    bm: BodyManager = .{},
-    bp: Bp,
-    cache: ContactCache = .{},
-    cfg: SolverConfig = .{},
-    /// Sleep tuning. Enabled by default; convergence measurements switch it off.
-    sleep_cfg: sleep.SleepConfig = .{},
-    gravity: Vec3r,
-    dt: Real,
-    bodies: std.ArrayListUnmanaged(BodyProxy) = .empty,
-    active: std.ArrayListUnmanaged(u64) = .empty,
-    constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty,
-    scratch: std.ArrayListUnmanaged(Bp.Pair) = .empty,
-    /// The island partition of the last tick (step 5).
-    islands: rigid.IslandManager = .{},
-    /// Last tick's solver telemetry (steps 6 and 7) — substeps executed, solve and
-    /// relax sweeps, and the minimum separation any biased sweep observed.
-    solver_stats: rigid.SolverStats = .{},
-    /// Islands put to sleep at step 11 of the last tick.
-    slept_last_tick: u32 = 0,
-    /// The sensor state, updated at STEP 10 BIS when `sensors_on` (M1.1.13).
-    sensors: sensor.SensorState = .{},
-    /// Whether step 10 bis runs. Set by the sensor suite before its first step.
-    sensors_on: bool = false,
-
-    /// A world with the given gravity and fixed timestep. Default `SolverConfig`,
-    /// sleeping ENABLED.
-    pub fn init(gravity: Vec3r, dt: Real) World {
-        // M1.1.14 — THE physics entry point, until `PhysicsWorld` exists at
-        // M1.1.15 and inherits this call. Opening a world on a thread whose
-        // float environment is not the engine's makes every number this world
-        // produces incomparable with the same world opened elsewhere, so the
-        // state is checked once, here, where a world begins — and ASSERTED, not
-        // installed (`ARCH-031` rule 5; the reason the two verbs differ is in
-        // `../determinism.zig`).
-        determinism.assertFloatEnvironment();
-        return .{ .bp = Bp.init(.{}), .gravity = gravity, .dt = dt };
-    }
-
-    /// `init` with sleeping switched off — the world every MEASUREMENT of the solver
-    /// uses: settling, penetration recovery, drift, friction decay, determinism.
-    ///
-    /// Normative, not a convenience (§1.8.3). The sleep criterion is a displacement
-    /// bound over a window, so a body creeping at 5 mm/s moves 2.5 mm per 0.5 s window
-    /// against a 15 mm bound and falls asleep while still creeping. Ask "does this
-    /// settle?" with sleeping on and the answer you measure is "it fell asleep", which
-    /// is not the same question.
-    pub fn initNoSleep(gravity: Vec3r, dt: Real) World {
-        var world = init(gravity, dt);
-        world.sleep_cfg.allow_sleeping = false;
-        return world;
-    }
-
-    /// Release every owned buffer.
-    pub fn deinit(self: *World, gpa: std.mem.Allocator) void {
-        self.sensors.deinit(gpa);
-        self.store.deinit(gpa);
-        self.bm.deinit(gpa);
-        self.bp.deinit(gpa);
-        self.cache.deinit(gpa);
-        self.bodies.deinit(gpa);
-        self.active.deinit(gpa);
-        self.constraints.deinit(gpa);
-        self.scratch.deinit(gpa);
-        self.islands.deinit(gpa);
-        self.* = undefined;
-    }
-
-    /// Create a body and insert its broadphase proxy on the matching layer.
-    /// Dispatches on the shape CLASS: an unbounded half-space has no world AABB and
-    /// goes into the layer's flat list (§1.11.15); a MESH is a finite surface, so it
-    /// takes the bounded arm. Exhaustive on the class, no `else`.
-    pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
-        const id = try self.bm.addBody(gpa, &self.store, desc);
-        const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
-        const shape = self.store.get(desc.shape).?;
-        const proxy = switch (shape.class()) {
-            .convex, .triangle_soup => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
-            .half_space => blk: {
-                const world = shape_mod.halfSpace(shape).transformed(
-                    self.bm.rotation(id).?,
-                    self.bm.position(id).?,
-                );
-                break :blk try self.bp.insertUnbounded(gpa, layer, .{
-                    .normal = world.normal,
-                    .distance = world.distance,
-                }, id);
-            },
-        };
-        try self.bodies.append(gpa, .{ .id = id, .proxy = proxy });
-        return id;
-    }
-
-    /// Remove a body, applying wake cause W4 (§1.8.5) first: every sleeper retained
-    /// in a candidate pair with it is woken, because removing it changes what
-    /// supports them and a sleeper emits nothing in broadphase that could notice.
-    pub fn removeBody(self: *World, id: BodyId) void {
-        for (self.active.items) |key| {
-            const a: BodyId = @intCast(key >> 32);
-            const b: BodyId = @intCast(key & 0xFFFF_FFFF);
-            if (a != id and b != id) continue;
-            self.bm.wakeBody(if (a == id) b else a);
-        }
-        for (self.bodies.items, 0..) |entry, i| {
-            if (entry.id != id) continue;
-            self.bp.remove(entry.proxy);
-            _ = self.bodies.orderedRemove(i); // ordered: the sweep order stays stable
-            break;
-        }
-        self.bm.removeBody(id);
-    }
-
-    /// The proxy of `id`, or `null` once the body has been removed.
-    fn proxyOf(self: *const World, id: BodyId) ?Bp.Proxy {
-        for (self.bodies.items) |b| {
-            if (b.id == id) return b.proxy;
-        }
-        return null;
-    }
-
-    /// Whether a retained pair still satisfies §1.7 step 2 — "removal on FAT-AABB
-    /// separation only".
-    ///
-    /// Three cases, exhaustive on what a proxy can be, and the middle one is why
-    /// this is not a two-box test. A half-space has no box at all (§1.11.15), so a
-    /// pair with one on either side is tested by the SAME exact predicate the
-    /// traversal uses, `Aabb.overlapsHalfSpace` from `foundation/math` — never a
-    /// second copy of that formula. Two half-spaces both force static bodies and
-    /// can never separate, so such a pair is retained unconditionally.
-    ///
-    /// The FAT boxes are the ones compared, deliberately. Comparing the tight boxes
-    /// would purge on a transient sub-margin separation and lose the contact until
-    /// the body sank back past the margin — the defect `test "small hop within the
-    /// fat margin keeps the contact pair alive"` was written for at M1.1.6. The
-    /// margin exists precisely so that this test has hysteresis.
-    fn pairStillOverlaps(self: *const World, a: BodyId, b: BodyId) bool {
-        // A removed body's pair serves nothing: W4 has already woken whoever was
-        // retained with it, at `removeBody`, and there is no proxy left to test.
-        const pa = self.proxyOf(a) orelse return false;
-        const pb = self.proxyOf(b) orelse return false;
-
-        const box_a = self.bp.proxyAabb(pa);
-        const box_b = self.bp.proxyAabb(pb);
-        if (box_a) |ba| {
-            if (box_b) |bb| return ba.overlaps(bb);
-            const hs = self.bp.unboundedShape(pb) orelse return false;
-            return ba.overlapsHalfSpace(hs.normal, hs.distance);
-        }
-        if (box_b) |bb| {
-            const hs = self.bp.unboundedShape(pa) orelse return false;
-            return bb.overlapsHalfSpace(hs.normal, hs.distance);
-        }
-        return true; // two half-spaces: both static, no separation is possible
-    }
-
-    /// Advance one fixed tick through the normative cycle (file header).
-    pub fn step(self: *World, gpa: std.mem.Allocator) !void {
-        // (1) broadphase candidate deltas → (2) persistent active set.
-        //
-        // The set is PERSISTENT and its retention is a CORRECTNESS condition of
-        // sleep (§1.8.7), not merely warm-start persistence — a sleeper emits
-        // nothing in broadphase, so these retained pairs ARE the wake graph.
-        //
-        // M1.1.14 — it is also PRUNED, on the one condition §1.7 step 2 allows:
-        // the two FAT AABBs have separated. Until this milestone the harness kept
-        // every pair it had ever seen, a conservative superset of the normative
-        // rule; that is sound for the wake graph but makes the retained set a
-        // monotonically growing sequence, and a determinism trace over a set that
-        // can only grow passes by ACCUMULATION and proves nothing. The
-        // non-vacuity probe on this set is what turns it back into an oracle.
-        try self.bp.computePairs(gpa, &self.scratch);
-        for (self.scratch.items) |p| try self.active.append(gpa, (@as(u64, p.a) << 32) | p.b);
-        sortDedup(&self.active);
-        {
-            var w: usize = 0;
-            for (self.active.items) |key| {
-                const a: BodyId = @intCast(key >> 32);
-                const b: BodyId = @intCast(key & 0xFFFF_FFFF);
-                if (!self.pairStillOverlaps(a, b)) continue;
-                self.active.items[w] = key;
-                w += 1;
-            }
-            self.active.shrinkRetainingCapacity(w);
-        }
-
-        // (3) external forces — read-only, no code. See the file header.
-
-        // (4) build: narrowphase per candidate; `prepare` captures `v_n⁻` PRE-GRAVITY
-        // (the velocity integration has moved into the substep loop), selects the
-        // softness, SEEDS the warm start from the cache, and the wake fixpoint runs.
-        self.cache.beginTick();
-        try rigid.build(
-            gpa,
-            &self.constraints,
-            &self.bm,
-            &self.store,
-            self.active.items,
-            rigid.prepareContext(self.cfg, self.dt, &self.cache),
-        );
-
-        // (5) partition into islands and arbitrate activation. Reorders the
-        // constraint array into one contiguous range per island. Wakes only.
-        try self.islands.partition(gpa, &self.bm, self.constraints.items);
-
-        // (6) the substep loop and (7) the restitution pass. Islands advance in
-        // LOCKSTEP inside: every stage sweeps all intervals before the next begins.
-        self.solver_stats = rigid.solveTick(
-            &self.bm,
-            self.constraints.items,
-            self.islands.islandsSlice(),
-            self.cfg,
-            self.dt,
-            self.gravity,
-        );
-
-        // (9) harvest solved impulses into the cache, then finalize (sort + swap).
-        try rigid.storeContacts(gpa, &self.cache, self.constraints.items);
-        self.cache.endTick();
-
-        // (10) broadphase proxy updates to the final poses.
-        for (self.bodies.items) |b| {
-            const sleeping = self.bm.isSleeping(b.id) orelse continue; // stale handle
-            if (sleeping) continue; // a sleeper's AABB is unchanged by construction
-            // An UNBOUNDED proxy has no box to update and cannot move: a half-space
-            // forces a STATIC body, so its pairs are established once at insertion
-            // and then carried by the retention rule of step 2 (§1.11.15).
-            if (b.proxy.kind == .unbounded) continue;
-            if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
-        }
-
-        // (10 BIS) the sensor pass (§1.13.4). Placement rests on two claims of
-        // UNEQUAL rank: BEFORE step 11 is MEASURED (the sleep case asserts that
-        // falling asleep inside a trigger never produces an exit, and a sleep filter
-        // on the traversal makes it fail); AFTER step 10 is a DESIGN REASONING — the
-        // poses there are the ones the tick publishes, so an `enter` cannot announce
-        // a crossing the solver then undoes.
-        if (self.sensors_on) try self.sensors.update(gpa, &self.bp, &self.bm, &self.store);
-
-        // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep
-        // every island all of whose members are eligible.
-        sleep.updateWindows(&self.bm, self.dt, self.sleep_cfg);
-        self.slept_last_tick = self.islands.sleepEligibleIslands(&self.bm, self.sleep_cfg);
-    }
-
-    /// Deepest penetration across the manifolds this world currently holds.
-    pub fn deepestPenetration(self: *const World) Real {
-        var deepest: Real = 0;
-        for (self.constraints.items) |c| {
-            for (0..c.count) |i| deepest = @max(deepest, c.points[i].penetration);
-        }
-        return deepest;
-    }
-};
+/// The per-tick cycle, MOVED to production at M1.1.15. Every suite that drives a
+/// world drives THIS type, so there is exactly one composition of the eleven steps
+/// in the module — see `../world.zig` for the order and the retention rule.
+///
+/// `PhysicsWorld.addBody` computes no broad layer of its own either: it calls
+/// `BodyManager.broadLayerFor`, so a trigger lands in the `trigger` class BY THE
+/// RULE and not by a literal that happens to agree with it.
+pub const World = world_mod.PhysicsWorld;
 
 // --- named envelopes ----------------------------------------------------------
 //
@@ -1369,7 +1073,7 @@ test "per-feature warm start: surviving points keep impulses, a vanished one col
     // Applying it moves both bodies, and it credits `total_normal_impulse` with the
     // CURRENT accumulator — the first of the three contributions the restitution
     // predicate reads.
-    rigid.applyWarmStartRange(&bm, constraints.items, 0, 1);
+    _ = rigid.applyWarmStartRange(&bm, constraints.items, 0, 1);
     try testing.expect(!bm.linearVelocity(a).?.approxEql(Vec3r.zero, 0));
     try testing.expectApproxEqAbs(@as(Real, 3), c.points[0].total_normal_impulse, 1e-5);
 }

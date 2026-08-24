@@ -7,6 +7,7 @@
 
 const math = @import("foundation").math;
 const build_options = @import("build_options");
+const api = @import("weld_forge");
 
 /// The solver scalar type. `f32` by default; `f64` when built with
 /// `-Dphysics_f64=true`.
@@ -20,3 +21,9 @@ pub const Quatr = math.Quat(Real);
 pub const Mat3r = math.Mat3(Real);
 /// Axis-aligned bounding box at solver precision.
 pub const Aabbr = math.Aabb(Real);
+
+/// **The one precision crossing of the module, instantiated at `Real`.** Every world ↔
+/// solver conversion goes through here and nowhere else; the `no_precision_crossing` lint
+/// rule is what makes that a check rather than a convention
+/// (`engine-physics-queries.md` §1.11.8).
+pub const cross = api.precision.Crossing(Real);
