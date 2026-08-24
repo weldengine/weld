@@ -476,26 +476,30 @@ fn wouldConflict(
     return false;
 }
 
-/// Register the two systems that drive the physics frame.
+/// Register the ONE system that drives the physics frame.
 ///
-/// **TWO, with the publication riding the tick** — `stepAndPublishSystem` carries why three
-/// was wrong. `pre_update` takes what gameplay owns into the solver; `fixed_update` advances
-/// the tick and publishes what the solver resolved, and that is the phase `ARCH-031` names as
-/// inside the float discipline's perimeter and where a fixed-timestep tick belongs. Each
-/// system's declared accesses are exactly what it does, which is what a future `ARCH-030`
-/// enforcement will check.
+/// `fixed_update` advances the tick and publishes what the solver resolved — the phase
+/// `ARCH-031` names as inside the float discipline's perimeter, and where a fixed-timestep
+/// tick belongs. The publication rides the tick rather than sitting in a later phase, so
+/// `update` observes the poses of the tick that just ran instead of the previous one. The
+/// ECS → solver direction is M1.1.26's and registers nothing here.
+///
+/// The declared accesses are exactly what the system does, which is what a future `ARCH-030`
+/// enforcement will check — `Transform`, `Velocity` and the `Sleeping` marker it migrates,
+/// plus the solver resource it mutates through the published pointer. Undeclared, two physics
+/// modules could sit in one phase with no edge between them and the enforcement would have
+/// nothing to catch them on.
 ///
 /// **PREFLIGHT AND NOT IDEMPOTENCE, because of which failure is real.** Calling this twice on
 /// one scheduler is the failure a caller can actually produce, and it is deterministic: the
 /// name and the write conflicts are checked BEFORE the registration, so a second call mutates
-/// nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it
-/// in silence, which hides a double wiring rather than naming it — and a partial state is
-/// exactly what this check exists to prevent.
+/// nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it in
+/// silence, hiding a double wiring rather than naming it.
 ///
-/// The DESCRIPTOR is preflighted, name and write conflicts alike, before the registration
-/// touches the scheduler — a `WriteWriteConflict` is an ordinary deterministic failure and not
-/// a residual. With ONE system there is no partial state to leave behind, which is what
-/// retired the allocation residual the two-system form carried.
+/// The DESCRIPTOR is preflighted, name and write conflicts alike — a `WriteWriteConflict` is
+/// an ordinary deterministic failure and not a residual. With ONE system there is no partial
+/// state to leave behind, which is what retired the allocation residual the two-system form
+/// carried.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
     if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;

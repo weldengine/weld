@@ -52,9 +52,10 @@
 //! pass cannot alter one bit of body state either way, which is why making it
 //! unconditional leaves every committed witness byte-identical.
 //!
-//! **What this file does NOT own.** ECS synchronisation lives one tier up
-//! (`../sync.zig`): sync-in runs before step 1, sync-out after step 11, so step
-//! 10 bis sees the poses the tick publishes, which is its stated premise. The
+//! **What this file does NOT own.** The ECS publication lives one tier up
+//! (`../sync.zig`) and runs after step 11, so what reaches an entity is the pose
+//! the tick resolved. The ECS → solver direction is M1.1.26's, with the Tier 1
+//! service; nothing here reads a component. The
 //! resolution is SINGLE-WORKER: per-island parallel solving is M1.1.25, and the
 //! scratch buffers below are therefore unique rather than per-island (§1.8.8).
 
@@ -166,7 +167,7 @@ pub const StepTrace = struct {
 /// **A character presence carries the SAME `entity` as its character** (`character.zig`
 /// creates it with `.entity = desc.entity`), so nothing in the body store distinguishes the
 /// two: they are one entity with two bodies. Anything walking this list and keying on the
-/// entity — the ECS sync seam does exactly that, in both directions — needs the distinction
+/// entity — the ECS publication seam does exactly that — needs the distinction
 /// spelled out here, because it cannot be recovered downstream.
 pub const BodyKind = enum {
     /// A body created through `addBody`: the ECS entity's own rigid body.

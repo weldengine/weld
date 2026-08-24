@@ -1,8 +1,10 @@
-//! M1.1.15 gate D — ECS ↔ solver synchronisation, both directions.
+//! M1.1.15 — the solver → ECS publication.
 //!
-//! What this file measures is the SEAM: who owns which fact, when each side reads the
-//! other, and what the `Sleeping` marker does to publication. The physics itself is
-//! measured by `forge_3d`'s own suite and is not re-measured here.
+//! What this file measures is the SEAM: which body speaks for an entity, what is published per
+//! `BodyType`, and what the `Sleeping` marker does to publication. The ECS → solver direction
+//! is M1.1.26's, with the Tier 1 Etch service — the tests that measured it left with it, and
+//! two more kept only their publication half. The physics itself is measured by `forge_3d`'s
+//! own suite and is not re-measured here.
 //!
 //! Every assertion names an ENTITY and reads that entity's own components. An aggregate
 //! another entity could satisfy is not an assertion about the one named.
@@ -39,7 +41,7 @@ fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
 }
 
 /// An ECS entity carrying `Transform` and `Velocity`, plus a physics body bound to it by
-/// entity identity — the binding the seam walks in both directions.
+/// entity identity — the binding the publication seam walks.
 fn spawnLinked(
     gpa: std.mem.Allocator,
     ecs: *World,
