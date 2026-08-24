@@ -314,9 +314,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The eighth pass moved the presence-removal guard into `world_test.zig` with its wake
     // half, and pinned the absent inward direction as one named test (1929 -> 1930, suite
     // reported 1930 - 1911 passed + 19 skipped, macOS aarch64).
+    // The ninth pass added the publish/withdraw lifetime guard (1930 -> 1931, suite reported
+    // 1931 - 1912 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1928,
-        else => 1930,
+        .windows => 1929,
+        else => 1931,
     };
 }
 

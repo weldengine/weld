@@ -763,44 +763,111 @@ test "no component write reaches the solver: the inward direction is M1.1.26's" 
     // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
     // shape as a second half — "the solver did not follow the ECS write" — and after the
     // re-scope each held for every body and discriminated nothing, which is a test counted and
-    // half empty. Gathered here, the claim is exactly what this milestone delivers: the ECS →
-    // solver direction is not wired, and the day someone wires it without M1.1.26's design this
-    // fails and says so.
+    // half empty.
+    //
+    // Driven through `registerSystems` and `dispatchFrame`, which is the PRODUCTION path: the
+    // first version went through `stepAndPublish`, so an inward read reintroduced inside
+    // `stepAndPublishSystem` would have left it green. And every field the departed `syncIn`
+    // acted on is written here — position AND rotation, linear AND angular — because the name
+    // says "no component write" and a body that walked only two of the four would claim a
+    // wider set than it visits.
     const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var ecs = World.init();
     defer ecs.deinit(gpa);
     var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
-    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
 
     const dyn = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2, 0 });
     const kin = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
 
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs);
+    try sync.registerSystems(gpa, &sched, &ecs);
+
     const dyn_pose = pw.bm.position(dyn.body).?.toArray();
     const kin_pose = pw.bm.position(kin.body).?.toArray();
+    const dyn_rot = pw.bm.rotation(dyn.body).?;
+    const kin_rot = pw.bm.rotation(kin.body).?;
 
-    // Every component the seam knows, written on both simulated kinds.
-    ecs.getMut(Transform, dyn.entity).?.pos = .{ 90, 91, 92 };
-    ecs.getMut(Transform, kin.entity).?.pos = .{ 93, 94, 95 };
-    ecs.getMut(Velocity, dyn.entity).?.linear = .{ 5, 0, 0 };
-    ecs.getMut(Velocity, kin.entity).?.linear = .{ 6, 0, 0 };
+    // EVERY field the inward direction acted on, on both simulated kinds.
+    for ([_]EntityId{ dyn.entity, kin.entity }) |e| {
+        const t = ecs.getMut(Transform, e).?;
+        t.pos = .{ 90, 91, 92 };
+        t.rot = .{ 0.5, 0.5, 0.5, 0.5 }; // a unit quaternion, and not the identity
+        const v = ecs.getMut(Velocity, e).?;
+        v.linear = .{ 5, 0, 0 };
+        v.angular = .{ 0, 3, 0 };
+    }
 
-    var k: u32 = 0;
-    while (k < 5) : (k += 1) try frame(gpa, &pw, &ecs);
+    var f: u32 = 0;
+    while (f < 5) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
 
     // ZERO gravity and no contact, so the solver has no reason of its own to move either body:
-    // any movement here would be a component write that got through.
+    // any movement here is a component write that got through.
     try testing.expectEqual(kin_pose[0], pw.bm.position(kin.body).?.toArray()[0]);
     try testing.expectEqual(kin_pose[1], pw.bm.position(kin.body).?.toArray()[1]);
     try testing.expectEqual(dyn_pose[0], pw.bm.position(dyn.body).?.toArray()[0]);
     try testing.expectEqual(dyn_pose[1], pw.bm.position(dyn.body).?.toArray()[1]);
+    try testing.expectEqual(dyn_rot.w, pw.bm.rotation(dyn.body).?.w);
+    try testing.expectEqual(kin_rot.w, pw.bm.rotation(kin.body).?.w);
     try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(dyn.body).?.toArray()[0]);
     try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(kin.body).?.toArray()[0]);
+    try testing.expectEqual(@as(Real, 0), pw.bm.angularVelocity(dyn.body).?.toArray()[1]);
+    try testing.expectEqual(@as(Real, 0), pw.bm.angularVelocity(kin.body).?.toArray()[1]);
 
-    // NON-VACUITY: the API path DOES move the solver, so the scene is one where movement is
-    // possible and the assertions above are about the component path and not about a world
-    // where nothing ever moves.
+    // NON-VACUITY: the API path DOES move the solver on this very scene, so the assertions
+    // above are about the component path and not about a world where nothing ever moves.
     pw.setLinearVelocity(dyn.body, vr(5, 0, 0));
-    try frame(gpa, &pw, &ecs);
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
     try testing.expect(pw.bm.position(dyn.body).?.toArray()[0] > dyn_pose[0]);
+}
+
+test "the published handle is withdrawn before the world it names is destroyed" {
+    // P1-1, and the sequence is the whole test. `publishPhysicsWorld` writes raw pointers,
+    // `PhysicsWorld.deinit` frees and poisons, and nothing used to clear the resource:
+    // `hasPhysicsWorld` kept answering true and the next dispatch dereferenced a dead address.
+    // The ordinary runtime order being safe is not a contract.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    {
+        var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+        _ = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 4, 0 });
+        try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+        try sync.registerSystems(gpa, &sched, &ecs);
+        try testing.expect(sync.hasPhysicsWorld(&ecs));
+
+        try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+
+        // WITHDRAWN BEFORE DESTROYED, and asserted in that order: after this line nothing can
+        // reach the world, which is what makes the destruction below safe.
+        sync.unpublishPhysicsWorld(&ecs);
+        try testing.expect(!sync.hasPhysicsWorld(&ecs));
+        pw.deinit(gpa);
+    }
+
+    // And a frame dispatched afterwards is a no-op rather than a dereference of freed memory.
+    // Under the defect this is where the world would be read back.
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expect(!sync.hasPhysicsWorld(&ecs));
 }

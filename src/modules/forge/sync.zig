@@ -370,6 +370,28 @@ pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorl
     try ecs.addResource(gpa, id, std.mem.asBytes(&ref));
 }
 
+/// Withdraw the published handle. The SYMMETRIC half of `publishPhysicsWorld`, and the caller
+/// that published is the one that withdraws.
+///
+/// **Without it the resource outlives the world it names.** `publishPhysicsWorld` writes raw
+/// pointers, `PhysicsWorld.deinit` frees and poisons, and nothing clears the resource —
+/// `hasPhysicsWorld` kept answering true and the next dispatch dereferenced a dead address.
+/// That the runtime's ordinary order happens to be safe changes nothing: a lifetime contract
+/// nothing enforces is not a contract, and this is the same shape as `removeBody` accepting a
+/// character presence — two operations each correct, whose sequence breaks.
+///
+/// The handle is ZEROED rather than the resource removed: `resolve` already reads zero as
+/// absence, the slot keeps its registered id so a later `publishPhysicsWorld` reuses it, and
+/// nothing has to be freed on a path a caller may run during teardown. `PhysicsWorld` still
+/// knows nothing of the ECS, which is the invariant this seam has held since it was written.
+pub fn unpublishPhysicsWorld(ecs: *World) void {
+    const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return;
+    const slot = ecs.resources.getMutResource(id) orelse return;
+    if (slot.len != @sizeOf(PhysicsWorldRef)) return;
+    const cleared = PhysicsWorldRef{};
+    @memcpy(slot, std.mem.asBytes(&cleared));
+}
+
 /// Read the published handle back, or null if nothing was published.
 ///
 /// **A PURE LOOKUP, and that is the point.** The first version obtained the id by REGISTERING
@@ -503,10 +525,11 @@ fn wouldConflict(
 /// any allocation can fail, and its `errdefer`s do not undo all of them: after an allocation
 /// failure the scheduler must be treated as UNUSABLE, and a retry can report
 /// `WriteWriteConflict` against a `systemCount()` of zero. Moving to one system removed the
-/// residual BETWEEN two calls and nothing inside one. The real fix is a rollback in
-/// `SystemScheduler`, which is Tier 0 and already recorded there with its owner; promising an
-/// absence of residue that no mechanism holds would be worse than saying nothing, because it
-/// excuses the next reader from checking.
+/// residual BETWEEN two calls and nothing inside one. The real fix is that `registerSystem` be
+/// TRANSACTIONAL FOR ITSELF — a Tier 0 debt recorded in `engine-ecs-internals.md`, and a
+/// different one from the absence of a group removal recorded beside it. Promising an absence
+/// of residue that no mechanism holds would be worse than saying nothing, because it excuses
+/// the next reader from checking.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
     if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;
