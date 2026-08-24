@@ -394,7 +394,7 @@ test "a character presence never publishes for its entity" {
 }
 
 test "the registered system drives a real frame: the solver's pose reaches the ECS" {
-    // THE DELIVERABLE F5 NAMES. Before this, `stepSynchronised` had no caller outside this
+    // THE DELIVERABLE F5 NAMES. Before this, the composition entry had no caller outside this
     // file: the seam existed only in its own tests, and the milestone shipped a mechanism
     // nothing executed. What is measured here is the SCHEDULER path — `registerSystems` plus
     // `dispatchFrame` — and not the direct composition the tests above drive.

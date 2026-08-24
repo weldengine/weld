@@ -395,9 +395,16 @@ pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorl
 /// **`expected` is checked, and that is the second half of the same defect.** A withdrawal
 /// that cleared whatever it found would let a LATE teardown erase a world published after it:
 /// publish A, publish B, then run A's deferred cleanup, and every frame afterwards is a silent
-/// no-op. Clearing only the caller's own handle makes a late withdrawal harmless however far
-/// behind it runs — and a withdrawal that finds someone else's handle is a NO-OP, matching the
-/// repository's pattern for an unhandleable handle rather than raising on a teardown path.
+/// no-op. A withdrawal that finds someone else's handle is a NO-OP, matching the repository's
+/// pattern for an unhandleable handle rather than raising on a teardown path.
+///
+/// **THE CHECK IS ON THE ADDRESS, and that bounds what it protects.** It separates two worlds
+/// ALIVE AT THE SAME TIME, which is the case above and the only one any path in this
+/// repository produces. It does NOT separate two GENERATIONS occupying the same storage: a
+/// world destroyed, a second one allocated at the same address, and a late withdrawal aimed at
+/// the first would clear the second. Closing that needs an opaque publication token rather
+/// than a pointer comparison, which is recorded with its owner in the brief's Closing notes.
+/// The limit is written here rather than widened.
 ///
 /// The handle is ZEROED rather than the resource removed: the accessor already reads zero as
 /// absence, the slot keeps its registered id so a later publication reuses it, and nothing has
