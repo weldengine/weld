@@ -116,6 +116,7 @@ test "solver pose reaches Transform for every awake body" {
     var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     // TWO dynamic bodies at different heights, so an assertion that read the wrong one —
     // or an aggregate over both — could not pass by accident: they fall to different
@@ -154,6 +155,7 @@ test "a sleeping island's Transform is not rewritten and its pose is bit-frozen"
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     const scene = try restingScene(gpa, &ecs, &pw);
 
     var t: u32 = 0;
@@ -193,6 +195,7 @@ test "the waking tick publishes the pose it moved to" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     const scene = try restingScene(gpa, &ecs, &pw);
 
     var t: u32 = 0;
@@ -221,6 +224,7 @@ test "Sleeping tag tracks island state through both transitions" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     const scene = try restingScene(gpa, &ecs, &pw);
 
     // A FULL CYCLE EACH WAY: absent while awake, present once asleep, absent again on
@@ -262,6 +266,7 @@ test "publication authority per BodyType" {
     var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     const dyn = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 10, 0 });
     const kin = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
@@ -315,6 +320,7 @@ test "publication does not mark a component whose value did not change" {
     var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2, 0 });
 
     // One tick to let publication write whatever it wants to write once.
@@ -360,6 +366,7 @@ test "a character presence never publishes for its entity" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     // Ground, so the character has something to stand on and the scene is not degenerate.
     _ = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
@@ -412,6 +419,7 @@ test "the registered system drives a real frame: the solver's pose reaches the E
     defer sched.deinit(gpa);
 
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.registerSystems(gpa, &sched, &ecs);
 
     // ONE system: the publication rides the tick in `fixed_update`. Splitting it into a tick
@@ -443,6 +451,7 @@ test "a trigger sharing an entity with a solid body does not publish" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     _ = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
     const solid = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 4, 0 });
@@ -476,7 +485,7 @@ test "resolving an unpublished world registers nothing" {
     defer ecs.deinit(gpa);
 
     try testing.expect(ecs.componentId(@typeName(sync.PhysicsWorldRef)) == null);
-    try testing.expect(!sync.hasPhysicsWorld(&ecs));
+    try testing.expect(sync.publishedPhysicsWorld(&ecs) == null);
     // THE ASSERTION: the lookup left the registry untouched. Under the defect this call is
     // what interns the name.
     try testing.expect(ecs.componentId(@typeName(sync.PhysicsWorldRef)) == null);
@@ -497,12 +506,12 @@ test "a frame dispatched before publication does nothing" {
     defer sched.deinit(gpa);
 
     try sync.registerSystems(gpa, &sched, &ecs);
-    try testing.expect(!sync.hasPhysicsWorld(&ecs));
+    try testing.expect(sync.publishedPhysicsWorld(&ecs) == null);
 
     var f: u32 = 0;
     while (f < 3) : (f += 1) try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
 
-    try testing.expect(!sync.hasPhysicsWorld(&ecs));
+    try testing.expect(sync.publishedPhysicsWorld(&ecs) == null);
 }
 
 test "registering twice is refused, and refused before anything is registered" {
@@ -555,6 +564,7 @@ test "a lone dynamic trigger is integrated, so it publishes its own pose" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     const t = try spawnLoneTrigger(gpa, &ecs, &pw, .dynamic, .{ 0, 4, 0 });
 
@@ -661,6 +671,7 @@ test "two triggers on one entity elect the smaller identity, not the last writer
     var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
     const first = try addSibling(gpa, &pw, entity, true, .{ 0, 1, 0 });
@@ -687,6 +698,7 @@ test "two solid bodies on one entity elect the smaller identity" {
     var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
     const first = try addSibling(gpa, &pw, entity, false, .{ 0, 2, 0 });
@@ -713,6 +725,7 @@ test "a solid body wins over a trigger of SMALLER identity" {
     var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
 
     const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
     const trigger = try addSibling(gpa, &pw, entity, true, .{ 0, 9, 0 });
@@ -791,7 +804,7 @@ test "no component write reaches the solver: the inward direction is M1.1.26's" 
     defer sched.deinit(gpa);
 
     try sync.publishPhysicsWorld(gpa, &ecs, &pw);
-    defer sync.unpublishPhysicsWorld(&ecs);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.registerSystems(gpa, &sched, &ecs);
 
     const dyn_pose = pw.bm.position(dyn.body).?.toArray();
@@ -835,7 +848,7 @@ test "no component write reaches the solver: the inward direction is M1.1.26's" 
 test "the published handle is withdrawn before the world it names is destroyed" {
     // P1-1, and the sequence is the whole test. `publishPhysicsWorld` writes raw pointers,
     // `PhysicsWorld.deinit` frees and poisons, and nothing used to clear the resource:
-    // `hasPhysicsWorld` kept answering true and the next dispatch dereferenced a dead address.
+    // the accessor kept answering with a dead address and the next dispatch dereferenced it.
     // The ordinary runtime order being safe is not a contract.
     const gpa = testing.allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -854,20 +867,87 @@ test "the published handle is withdrawn before the world it names is destroyed" 
         var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
         _ = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 4, 0 });
         try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+        defer sync.unpublishPhysicsWorld(&ecs, &pw);
         try sync.registerSystems(gpa, &sched, &ecs);
-        try testing.expect(sync.hasPhysicsWorld(&ecs));
+        try testing.expect(sync.publishedPhysicsWorld(&ecs) != null);
 
         try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
 
         // WITHDRAWN BEFORE DESTROYED, and asserted in that order: after this line nothing can
         // reach the world, which is what makes the destruction below safe.
-        sync.unpublishPhysicsWorld(&ecs);
-        try testing.expect(!sync.hasPhysicsWorld(&ecs));
+        sync.unpublishPhysicsWorld(&ecs, &pw);
+        try testing.expect(sync.publishedPhysicsWorld(&ecs) == null);
         pw.deinit(gpa);
     }
 
     // And a frame dispatched afterwards is a no-op rather than a dereference of freed memory.
     // Under the defect this is where the world would be read back.
     try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
-    try testing.expect(!sync.hasPhysicsWorld(&ecs));
+    try testing.expect(sync.publishedPhysicsWorld(&ecs) == null);
+}
+
+test "a late withdrawal cannot erase the world published after it" {
+    // THE SEQUENCE: publish A, publish B, then run A's deferred teardown. A withdrawal that
+    // cleared whatever it found would erase B, and every frame afterwards would be a silent
+    // no-op — the owner of B having done nothing wrong and nobody having withdrawn it.
+    //
+    // The assertion is on the IDENTITY of the resolved handle and never on a boolean: a
+    // withdrawal that had erased B and left something else resolvable would satisfy
+    // "something is published" and fail only here.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+
+    var a = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer a.deinit(gpa);
+    var b = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer b.deinit(gpa);
+
+    try sync.publishPhysicsWorld(gpa, &ecs, &a);
+    try testing.expectEqual(@as(?*PhysicsWorld, &a), sync.publishedPhysicsWorld(&ecs));
+
+    // A withdraws itself, then B takes the slot — the ordered form the contract asks for.
+    sync.unpublishPhysicsWorld(&ecs, &a);
+    try sync.publishPhysicsWorld(gpa, &ecs, &b);
+    try testing.expectEqual(@as(?*PhysicsWorld, &b), sync.publishedPhysicsWorld(&ecs));
+
+    // A's LATE teardown, however far behind it runs. It must find someone else's handle and
+    // leave it alone.
+    sync.unpublishPhysicsWorld(&ecs, &a);
+    try testing.expectEqual(@as(?*PhysicsWorld, &b), sync.publishedPhysicsWorld(&ecs));
+
+    // And B's own withdrawal still works, so the guard refuses the wrong caller and not every
+    // caller — without this the test would pass against a withdrawal that never clears.
+    sync.unpublishPhysicsWorld(&ecs, &b);
+    try testing.expectEqual(@as(?*PhysicsWorld, null), sync.publishedPhysicsWorld(&ecs));
+}
+
+test "publishing over a live publication is refused, and leaves the first in place" {
+    // The twin: a silent replacement is the exact counterpart of a blind withdrawal — it makes
+    // A disappear without anyone having withdrawn it. Refused, not replaced.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+
+    var a = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer a.deinit(gpa);
+    var b = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer b.deinit(gpa);
+
+    try sync.publishPhysicsWorld(gpa, &ecs, &a);
+    defer sync.unpublishPhysicsWorld(&ecs, &a);
+
+    try testing.expectError(
+        error.PhysicsWorldAlreadyPublished,
+        sync.publishPhysicsWorld(gpa, &ecs, &b),
+    );
+    // IDENTITY again: a refusal that had still written B would leave a boolean green.
+    try testing.expectEqual(@as(?*PhysicsWorld, &a), sync.publishedPhysicsWorld(&ecs));
+
+    // And the ordered form is accepted, so the refusal is about a LIVE publication and not
+    // about publishing twice ever.
+    sync.unpublishPhysicsWorld(&ecs, &a);
+    try sync.publishPhysicsWorld(gpa, &ecs, &b);
+    try testing.expectEqual(@as(?*PhysicsWorld, &b), sync.publishedPhysicsWorld(&ecs));
+    sync.unpublishPhysicsWorld(&ecs, &b);
 }

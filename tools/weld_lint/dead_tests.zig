@@ -316,9 +316,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // reported 1930 - 1911 passed + 19 skipped, macOS aarch64).
     // The ninth pass added the publish/withdraw lifetime guard (1930 -> 1931, suite reported
     // 1931 - 1912 passed + 19 skipped, macOS aarch64).
+    // The tenth pass closed the publication lifetime from both sides (1931 -> 1933, suite
+    // reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1929,
-        else => 1931,
+        .windows => 1931,
+        else => 1933,
     };
 }
 

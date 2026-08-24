@@ -359,11 +359,23 @@ pub const PhysicsWorldRef = extern struct {
     }
 };
 
-/// Publish `pw` into `ecs` so the registered systems can find it. Idempotent per world.
+/// Publish `pw` into `ecs` so the registered system can find it.
+///
+/// **REFUSES to replace a live publication**, with `error.PhysicsWorldAlreadyPublished`. A
+/// silent replacement is the exact counterpart of a blind withdrawal: it makes the first world
+/// disappear without anyone having withdrawn it, and the frames that follow drive a world its
+/// owner believes is still wired. Withdraw first, then publish — the two entries are a pair.
+///
+/// The signature is not frozen: `PhysicsModule` does not carry it, so an error channel costs
+/// nothing that a later milestone would have to live with.
 pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorld) !void {
     const id = try ecs.ensureComponentRegistered(gpa, PhysicsWorldRef);
     const ref = PhysicsWorldRef.pack(pw, gpa);
     if (ecs.resources.getMutResource(id)) |slot| {
+        if (slot.len != @sizeOf(PhysicsWorldRef)) return error.PhysicsWorldAlreadyPublished;
+        var current: PhysicsWorldRef = undefined;
+        @memcpy(std.mem.asBytes(&current), slot);
+        if (current.world != 0) return error.PhysicsWorldAlreadyPublished;
         @memcpy(slot, std.mem.asBytes(&ref));
         return;
     }
@@ -374,20 +386,30 @@ pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorl
 /// that published is the one that withdraws.
 ///
 /// **Without it the resource outlives the world it names.** `publishPhysicsWorld` writes raw
-/// pointers, `PhysicsWorld.deinit` frees and poisons, and nothing clears the resource —
-/// `hasPhysicsWorld` kept answering true and the next dispatch dereferenced a dead address.
-/// That the runtime's ordinary order happens to be safe changes nothing: a lifetime contract
-/// nothing enforces is not a contract, and this is the same shape as `removeBody` accepting a
+/// pointers, `PhysicsWorld.deinit` frees and poisons, and nothing cleared the resource — the
+/// accessor kept answering with a dead address and the next dispatch dereferenced it. That the
+/// runtime's ordinary order happens to be safe changes nothing: a lifetime contract nothing
+/// enforces is not a contract, and this is the same shape as `removeBody` accepting a
 /// character presence — two operations each correct, whose sequence breaks.
 ///
-/// The handle is ZEROED rather than the resource removed: `resolve` already reads zero as
-/// absence, the slot keeps its registered id so a later `publishPhysicsWorld` reuses it, and
-/// nothing has to be freed on a path a caller may run during teardown. `PhysicsWorld` still
-/// knows nothing of the ECS, which is the invariant this seam has held since it was written.
-pub fn unpublishPhysicsWorld(ecs: *World) void {
+/// **`expected` is checked, and that is the second half of the same defect.** A withdrawal
+/// that cleared whatever it found would let a LATE teardown erase a world published after it:
+/// publish A, publish B, then run A's deferred cleanup, and every frame afterwards is a silent
+/// no-op. Clearing only the caller's own handle makes a late withdrawal harmless however far
+/// behind it runs — and a withdrawal that finds someone else's handle is a NO-OP, matching the
+/// repository's pattern for an unhandleable handle rather than raising on a teardown path.
+///
+/// The handle is ZEROED rather than the resource removed: the accessor already reads zero as
+/// absence, the slot keeps its registered id so a later publication reuses it, and nothing has
+/// to be freed. `PhysicsWorld` still knows nothing of the ECS, which is the invariant this
+/// seam has held since it was written.
+pub fn unpublishPhysicsWorld(ecs: *World, expected: *PhysicsWorld) void {
     const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return;
     const slot = ecs.resources.getMutResource(id) orelse return;
     if (slot.len != @sizeOf(PhysicsWorldRef)) return;
+    var current: PhysicsWorldRef = undefined;
+    @memcpy(std.mem.asBytes(&current), slot);
+    if (current.world != @intFromPtr(expected)) return; // someone else's publication
     const cleared = PhysicsWorldRef{};
     @memcpy(slot, std.mem.asBytes(&cleared));
 }
@@ -414,29 +436,16 @@ fn resolve(ecs: *World) ?PhysicsWorldRef {
     return ref;
 }
 
-/// Whether a physics world has been published into `ecs` — so a caller can assert its wiring
-/// instead of discovering its absence as a frame that silently did nothing.
-pub fn hasPhysicsWorld(ecs: *World) bool {
-    return resolve(ecs) != null;
+/// The world published into `ecs`, or null if none is.
+///
+/// Answers with the IDENTITY and not a boolean, because a boolean cannot tell "B is still
+/// published" from "B was erased and something else answers": the tests that guard this
+/// lifetime need the difference, and a caller asserting its own wiring does too.
+pub fn publishedPhysicsWorld(ecs: *World) ?*PhysicsWorld {
+    const ref = resolve(ecs) orelse return null;
+    return ref.worldPtr();
 }
 
-/// The tick AND the publication, in ONE system, and the merge is the fix rather than a tidy.
-///
-/// **The publication rides the tick rather than sitting in a later phase.** With the two
-/// separate — the tick in `fixed_update`, the publication in `post_update` — `update` would
-/// observe the poses of the PREVIOUS tick, a frame of latency nothing asks for. The merge is
-/// also what removed a defect the inward direction used to suffer, before that direction left
-/// for M1.1.26: a `Velocity` written in `update` was overwritten by a later publication before
-/// anything could read it.
-///
-/// **An intra-phase ordering constraint cannot fix it**, and that is a property of the
-/// scheduler and not a gap in it: there is no `runs_before` / `runs_after`, and the only
-/// intra-phase order is the `Writes(X) → Reads(X)` edge. Giving the tick a declared access
-/// purely to manufacture that edge would make the declared set a lie, and `ARCH-030` makes
-/// the declared set the TYPE of the view a system receives — the fabricated access would be
-/// the defect and not the fix. Merging moves the order out of the scheduler and into code,
-/// where it is a line and not a graph property. The sequence then holds: `update` observes the
-/// poses of the tick that just ran.
 fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     const ref = resolve(ctx.world) orelse return;
     try ref.worldPtr().?.step(ref.allocator());
