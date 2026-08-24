@@ -54,12 +54,26 @@
 //! binary, with a declared exclusion list and a bilateral control.
 //!
 //! The control is bilateral in the same sense: an escape used without a declaration is
-//! reported at its site, and a declaration nobody uses is reported as stale. The list is
-//! EMPTY today — measured, not assumed: zero `@floatCast` survives in the perimeter and the
-//! marker occurs nowhere in the tree outside this file's own test sources. Zero is the
-//! cheapest moment in the project's life to install the mechanism, and both directions are
-//! exercised by this file's tests rather than by the tree's silence.
-
+//! reported at its site, and a declaration whose file was READ and carried no marker is
+//! reported as stale. The list is EMPTY today — measured, not assumed: zero `@floatCast`
+//! survives in the perimeter and the marker occurs nowhere in the tree outside this file's own
+//! test sources. Zero is the cheapest moment in the project's life to install the mechanism,
+//! and both directions are exercised by this file's tests rather than by the tree's silence.
+//!
+//! **THE STALE HALF FOLLOWS VISITED FILES, and that is what makes it correct under a partial
+//! scan.** `lint` also accepts an explicit path list — the `pre-commit` hook passes staged
+//! files — and a declaration whose file was not read says NOTHING: it is neither used nor
+//! stale, because nobody looked. Two earlier forms tried to establish COMPLETENESS of the scan
+//! instead, first from an empty argument list and then from a set of root names, and each
+//! traded one wrong verdict for another; the second was defended with a claim that
+//! canonicalising the paths was impossible at Zig 0.16, which was FALSE —
+//! `std.process.currentPathAlloc` and `std.Io.Dir.realPathFileAbsoluteAlloc` both exist. The
+//! question does not need asking: a per-file fact answers it with neither a false positive nor
+//! a false negative, whatever the caller's spelling.
+//!
+//! The one residual that reasoning leaves is a declaration whose file has been DELETED — never
+//! visited, hence never stale, hence immortal. Closed by testing that the declared path
+//! exists.
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
@@ -117,9 +131,11 @@ pub const declared_escapes = [_]DeclaredEscape{};
 /// What the per-file pass observed, owned by the caller so no state survives between runs
 /// and so the unit tests below cannot contaminate one another.
 pub const Tally = struct {
-    /// One counter per declared escape — a declaration nobody uses is stale, and a stale
-    /// declaration is how an exemption outlives the reason it was granted for.
-    seen: [declared_escapes.len]u32 = @splat(0),
+    /// Whether the declaration's file was READ during this scan. A file nobody looked at
+    /// cannot make its declaration stale.
+    visited: [declared_escapes.len]bool = @splat(false),
+    /// How many marked narrowings the declaration exempted.
+    marked: [declared_escapes.len]u32 = @splat(0),
 };
 
 /// Hook called by `main.runLint` once per `.zig` file.
@@ -134,6 +150,13 @@ pub fn check(
     out: *std.ArrayList(diag.Diagnostic),
     tally: *Tally,
 ) !void {
+    // The visit is recorded BEFORE the perimeter test, deliberately: a declaration pointing at
+    // a file this rule does not govern would otherwise never be visited, never be stale, and
+    // sit there for good. Recorded, it is read and unmarked, hence reported.
+    if (declaredIndexIn(&declared_escapes, file)) |i| {
+        const seen: []bool = &tally.visited;
+        seen[i] = true;
+    }
     if (!governs(file)) return;
 
     var tokenizer = std.zig.Tokenizer.init(source);
@@ -151,8 +174,8 @@ pub fn check(
                 // indexing a zero-length ARRAY is a compile error even on a branch that
                 // cannot be reached. A slice moves the bound to run time, so the mechanism
                 // compiles at a count of zero — which is the count it must be installed at.
-                const seen: []u32 = &tally.seen;
-                seen[i] += 1;
+                const hits: []u32 = &tally.marked;
+                hits[i] += 1;
                 continue;
             }
             // The marker is present and the file is not declared: the site is NOT exempt,
@@ -178,15 +201,17 @@ pub fn check(
     }
 }
 
-/// The second half of the bilateral control, called once after every file has been visited:
-/// a declaration nobody used is reported. Without it the list only ever grows, and an
-/// exemption granted for a site that has since been fixed keeps the door open behind it.
+/// The second half of the bilateral control, called once after the scan.
+///
+/// A declaration is stale when its file was READ and carried no marker, or when the file does
+/// not exist at all. A file the scan never opened says nothing either way.
 pub fn checkDeclarations(
     arena: std.mem.Allocator,
+    io: std.Io,
     tally: *const Tally,
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
-    try reportStale(arena, &declared_escapes, &tally.seen, out);
+    try reportStale(arena, io, &declared_escapes, &tally.visited, &tally.marked, out);
 }
 
 /// The body of the control, over an explicit list. Split out for ONE reason: the tree's list
@@ -199,19 +224,44 @@ pub fn checkDeclarations(
 /// tree's control at a fixture by accident.
 fn reportStale(
     arena: std.mem.Allocator,
+    io: std.Io,
     declared: []const DeclaredEscape,
-    seen: []const u32,
+    visited: []const bool,
+    marked: []const u32,
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
-    std.debug.assert(declared.len == seen.len);
-    for (declared, seen) |e, n| {
-        if (n != 0) continue;
+    std.debug.assert(declared.len == visited.len and declared.len == marked.len);
+    for (declared, visited, marked) |e, was_read, hits| {
+        // THE DELETED-FILE RESIDUAL, and it is the reason this needs `io` at all. A declaration
+        // whose file is gone is never visited, hence never stale by the rule above, hence
+        // immortal. The path is repo-relative and the linter runs from the repository root —
+        // the same assumption `scan.zig` makes with `Dir.cwd()`.
+        const exists = blk: {
+            _ = std.Io.Dir.cwd().statFile(io, e.file, .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (!exists) {
+            try out.append(arena, .{
+                .file = e.file,
+                .line = 1,
+                .col = 1,
+                .rule = name,
+                .message = "this `declared_escapes` entry names a file that does not exist — the declaration outlived what it exempted and should be removed",
+            });
+            continue;
+        }
+        // NOT VISITED SAYS NOTHING. `lint` accepts a partial file list, so a declaration whose
+        // file this scan never opened is neither used nor stale: reporting it would be a guard
+        // failing on correct input, and the fix a reader would reach for is deleting a
+        // declaration that was doing its job.
+        if (!was_read) continue;
+        if (hits != 0) continue;
         try out.append(arena, .{
             .file = e.file,
             .line = 1,
             .col = 1,
             .rule = name,
-            .message = "this `declared_escapes` entry exempts nothing — no marked narrowing was found in the file, so the declaration is stale and should be removed",
+            .message = "this `declared_escapes` entry exempts nothing — its file was read and carried no marked narrowing, so the declaration is stale and should be removed",
         });
     }
 }
@@ -456,45 +506,69 @@ test "the marker's per-site reach is unchanged, and it does not reach down a lin
     ));
 }
 
-test "the declaration list is empty, and both halves of the control run on it" {
-    // The list being empty, the tree can hold no exempt site: the previous test measures
-    // that directly. This one measures the OTHER half — a declaration nobody used — on the
-    // real list, which is vacuous today and must be, since an entry here with no marked site
-    // would be reported by `checkDeclarations` and turn the tree red.
+test "the declaration list is empty, and the control runs on it" {
     try std.testing.expectEqual(@as(usize, 0), declared_escapes.len);
 
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
     defer diags.deinit(arena_state.allocator());
     const tally: Tally = .{};
-    try checkDeclarations(arena_state.allocator(), &tally, &diags);
+    try checkDeclarations(arena_state.allocator(), threaded.io(), &tally, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
-test "a used declaration is silent and an unused one is reported — on the shipped code" {
-    // NON-VACUITY for the test above, which runs on an EMPTY list and would therefore pass
-    // against a control that returned immediately. This drives `reportStale`, the function
-    // `checkDeclarations` delegates to, over a NON-empty fixture — the shipped code, not a
-    // mirror of it — so both outcomes of the stale half are exercised.
-    const fixture = [_]DeclaredEscape{
-        .{ .file = "probe.zig", .reason = "a probe", .owner = "none" },
+test "stale follows the VISITED file, and a missing file is reported whatever the visit" {
+    // NON-VACUITY for the test above, which runs on an EMPTY list and would pass against a
+    // control that returned immediately. This drives `reportStale` — the shipped body, not a
+    // mirror of it — over a non-empty fixture, on all four combinations that matter.
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `build.zig` exists at the repository root, where the linter runs; the second path does
+    // not exist anywhere, which is the point of it.
+    const present = [_]DeclaredEscape{.{ .file = "build.zig", .reason = "a probe", .owner = "none" }};
+    const missing = [_]DeclaredEscape{.{ .file = "no_such_file_xyz.zig", .reason = "a probe", .owner = "none" }};
+
+    const Case = struct {
+        fn count(
+            alloc: std.mem.Allocator,
+            handle: std.Io,
+            declared: []const DeclaredEscape,
+            visited: bool,
+            marked: u32,
+        ) !usize {
+            var arena_state = std.heap.ArenaAllocator.init(alloc);
+            defer arena_state.deinit();
+            var diags: std.ArrayList(diag.Diagnostic) = .empty;
+            defer diags.deinit(arena_state.allocator());
+            try reportStale(
+                arena_state.allocator(),
+                handle,
+                declared,
+                &.{visited},
+                &.{marked},
+                &diags,
+            );
+            return diags.items.len;
+        }
     };
 
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-
-    var unused: std.ArrayList(diag.Diagnostic) = .empty;
-    defer unused.deinit(arena_state.allocator());
-    try reportStale(arena_state.allocator(), &fixture, &.{0}, &unused);
-    try std.testing.expectEqual(@as(usize, 1), unused.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, unused.items[0].message, "stale") != null);
-    try std.testing.expectEqualStrings("probe.zig", unused.items[0].file);
-
-    var used: std.ArrayList(diag.Diagnostic) = .empty;
-    defer used.deinit(arena_state.allocator());
-    try reportStale(arena_state.allocator(), &fixture, &.{3}, &used);
-    try std.testing.expectEqual(@as(usize, 0), used.items.len);
+    // READ and unmarked: stale. This is the case the control exists for.
+    try std.testing.expectEqual(@as(usize, 1), try Case.count(gpa, io, &present, true, 0));
+    // READ and marked: silent, the declaration is doing its job.
+    try std.testing.expectEqual(@as(usize, 0), try Case.count(gpa, io, &present, true, 3));
+    // NOT READ: silent. A partial scan says less, never something false — this is the whole
+    // reason the control follows visits instead of trying to establish completeness.
+    try std.testing.expectEqual(@as(usize, 0), try Case.count(gpa, io, &present, false, 0));
+    // MISSING FILE: reported even unvisited, which is the residual that rule leaves — a
+    // declaration whose file is gone is never visited, hence would be immortal.
+    try std.testing.expectEqual(@as(usize, 1), try Case.count(gpa, io, &missing, false, 0));
 }
 
 test "the rule is written on tokens, so prose naming the builtin is not a site" {

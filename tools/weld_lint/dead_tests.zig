@@ -306,9 +306,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // reduced to their publication half, the linter's path coverage re-tested, and one added
     // for the election criterion's second level (1933 -> 1930, suite reported 1930 - 1911
     // passed + 19 skipped, macOS aarch64).
+    // The sixth pass replaced the lint completeness machinery with visited declarations: the
+    // three path-coverage tests go, one four-combination stale test arrives (1930 -> 1927,
+    // suite reported 1927 - 1908 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1928,
-        else => 1930,
+        .windows => 1925,
+        else => 1927,
     };
 }
 

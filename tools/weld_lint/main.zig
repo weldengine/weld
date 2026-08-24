@@ -62,15 +62,6 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
 
-    // Whether this invocation reads the whole tree. Aggregate controls — the ones whose
-    // verdict depends on having seen every file — may only run when it does.
-    //
-    // "No argument" was the FIRST form and it traded a false positive for a false negative:
-    // `weld_lint lint src bench tests tools` names every default root explicitly and covers
-    // everything, yet skipped the aggregate control. The test is now on COVERAGE — every
-    // default root reached by some given path — so both spellings of a full scan qualify and
-    // a genuinely partial list still does not.
-    const full_scan = paths.len == 0 or coversEveryRoot(paths);
     if (paths.len == 0) {
         for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
     } else {
@@ -99,95 +90,15 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
     }
 
-    // The second half of the bilateral control: a declared escape nobody used is stale.
-    //
-    // ONLY ON A FULL SCAN. This subcommand also accepts an explicit path list — the
-    // `pre-commit` hook passes the staged files — and over a partial set an escape's own file
-    // may simply not have been read. Running the stale check there would report the first
-    // real exemption as stale on the next targeted scan, which is a guard failing on correct
-    // input: the worst kind, because the fix a reader would reach for is deleting the
-    // declaration.
-    if (full_scan) {
-        try no_precision_crossing.checkDeclarations(arena, &crossing_tally, &diags);
-    }
+    // The second half of the bilateral control. It needs no notion of a "full scan": it
+    // follows the files this invocation actually READ, so a partial list simply says less.
+    try no_precision_crossing.checkDeclarations(arena, io, &crossing_tally, &diags);
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
-}
-
-/// Whether `paths` reaches every default lint root.
-///
-/// **An ABSOLUTE path never counts, and that is a deliberate fail-closed.** Matching by suffix
-/// counted `/tmp/elsewhere/src` as covering `src`, so a scan of an unrelated tree switched the
-/// aggregate control on and reported every declaration stale. Canonicalising against the
-/// repository root would be the exact fix, and it is not available: Zig 0.16 removed
-/// `std.fs.cwd()`, `std.Io.Dir` carries no `realpath`, and `std.process` no `getCwd` — the same
-/// removal `M1.D.5` records. Rather than a string heuristic that would be wrong in the other
-/// direction, an absolute path is simply not evidence of coverage: the control stays OFF, which
-/// costs a full scan spelled absolutely and cannot switch it on for a tree nobody read.
-///
-/// `zig build lint` and the `pre-commit` hook both pass relative roots or no argument at all,
-/// so the paths that matter are unaffected.
-fn coversEveryRoot(paths: []const [:0]const u8) bool {
-    for (default_lint_paths) |root| {
-        var covered = false;
-        for (paths) |raw| {
-            if (pathCoversRoot(raw, root)) {
-                covered = true;
-                break;
-            }
-        }
-        if (!covered) return false;
-    }
-    return true;
-}
-
-/// Whether one given path covers `root`. Separated from the loop so the normalisation is
-/// testable on its own rather than only through a full scan. A leading `./` is stripped and
-/// trailing separators are stripped; `.` covers every root; an absolute path covers none.
-fn pathCoversRoot(raw: []const u8, root: []const u8) bool {
-    var p = std.mem.trimEnd(u8, raw, "/\\");
-    while (std.mem.startsWith(u8, p, "./") or std.mem.startsWith(u8, p, ".\\")) p = p[2..];
-    if (p.len == 0 or std.mem.eql(u8, p, ".")) return true;
-    if (p[0] == '/' or p[0] == '\\') return false;
-    if (p.len > 2 and p[1] == ':') return false; // a Windows drive-absolute path
-    return std.mem.eql(u8, p, root);
-}
-
-test "a root is covered under every relative spelling that names it" {
-    try std.testing.expect(pathCoversRoot("src", "src"));
-    try std.testing.expect(pathCoversRoot("./src", "src"));
-    try std.testing.expect(pathCoversRoot("src/", "src"));
-    try std.testing.expect(pathCoversRoot(".", "src"));
-    try std.testing.expect(pathCoversRoot("./", "src"));
-}
-
-test "an absolute path is never evidence of coverage" {
-    // THE CASE THE SUFFIX FORM GOT WRONG — a scan of an unrelated tree switched the aggregate
-    // control on, and every declaration then read as stale. Fail-closed: the repository's own
-    // absolute path does not count either, which costs a full scan spelled absolutely and
-    // cannot be wrong in the dangerous direction.
-    try std.testing.expect(!pathCoversRoot("/tmp/elsewhere/src", "src"));
-    try std.testing.expect(!pathCoversRoot("/home/x/weld/src", "src"));
-    try std.testing.expect(!pathCoversRoot("C:\\weld\\src", "src"));
-    // And the ordinary negatives hold.
-    try std.testing.expect(!pathCoversRoot("mysrc", "src"));
-    try std.testing.expect(!pathCoversRoot("src/core", "src"));
-    try std.testing.expect(!pathCoversRoot("tests", "src"));
-}
-
-test "every default root must be named for a scan to count as full" {
-    try std.testing.expect(coversEveryRoot(&.{"."}));
-    try std.testing.expect(!coversEveryRoot(&.{"src"}));
-    const full = [_][:0]const u8{ "src", "bench", "tests", "tools" };
-    // Pinned against the real list rather than assumed equal to it: a root added to
-    // `default_lint_paths` and not here would make this test pass while covering less.
-    try std.testing.expectEqual(default_lint_paths.len, full.len);
-    for (default_lint_paths, full) |declared, spelled| try std.testing.expectEqualStrings(declared, spelled);
-    try std.testing.expect(coversEveryRoot(&full));
 }
 
 fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8, out: *std.Io.Writer) !u8 {

@@ -436,9 +436,11 @@ test "the registered systems drive a real frame: the solver's pose reaches the E
 }
 
 test "a trigger sharing an entity with a solid body does not publish" {
-    // §1.13.7 denies a trigger a manifold, a constraint, an impulse and an island entry, and
-    // §1.13.1 makes two-bodies-one-entity the normal shape. The election settles which of the
-    // two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
+    // §1.13.7 denies a trigger a manifold, a constraint and an impulse, and the amended text
+    // distinguishes TWO kinds of island entry: the CONSTRAINT island it cannot enter, no pair
+    // reaching it, and the INTEGRATION SINGLETON it does enter — which is why a dynamic trigger
+    // can ever stop being integrated. §1.13.1 makes two-bodies-one-entity the normal shape, and
+    // the election settles which of the two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
     // trigger — left for M1.1.26 with `syncIn`; see Closing notes.
     const gpa = testing.allocator;
     var ecs = World.init();
@@ -543,11 +545,12 @@ fn spawnLoneTrigger(
 
 test "a lone dynamic trigger is integrated, so it publishes its own pose" {
     // THE CASE AN EXCLUSION BY NATURE GOT WRONG. §1.13.7 says a trigger has no manifold, no
-    // constraint, no impulse and no island entry — and says NOTHING about integration.
-    // `integration.zig` filters on `body_type != .dynamic` and never on the trigger flag, so a
-    // dynamic trigger falls under gravity: its pose IS a fact the solver resolved. Excluded
-    // from publication it would drift away from its entity in silence, and its detection
-    // volume with it.
+    // constraint and no impulse, and its island exclusion is the CONSTRAINT island only: the
+    // amended text grants it the INTEGRATION SINGLETON, without which it could never sleep and
+    // would be integrated forever. `integration.zig` filters on `body_type != .dynamic` and
+    // never on the trigger flag, so a dynamic trigger falls under gravity: its pose IS a fact
+    // the solver resolved. Excluded from publication it would drift away from its entity in
+    // silence, and its detection volume with it.
     //
     // The rule is exclusion by CONCURRENCY, not by nature: a trigger yields only when another
     // body on the same entity publishes for it. Alone, it publishes per its type.

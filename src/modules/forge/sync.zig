@@ -1,76 +1,60 @@
-//! `forge/sync.zig` — ECS ↔ solver synchronisation, both directions.
+//! `forge/sync.zig` — the solver → ECS publication.
 //!
-//! `PhysicsWorld` owns the tick and knows nothing of the ECS; this file is the seam
-//! between them. **Sync-in runs before step 1 and sync-out after step 11**, so the
-//! sensor pass at step 10 bis sees the poses the tick publishes, which is its stated
-//! premise (`engine-physics-solver.md` §1.13.4).
+//! `PhysicsWorld` owns the tick and knows nothing of the ECS; this file is the seam between
+//! them. **It publishes AFTER step 11**, so what reaches an entity is the pose the tick
+//! resolved and never an intermediate one.
 //!
-//! **Authority per `BodyType`, and one authority per fact.**
+//! **THE INWARD DIRECTION IS NOT HERE, and its absence is a decision.** ECS → solver — the
+//! `Transform` and `Velocity` a rule writes reaching the solver — belongs to **M1.1.26**, with
+//! the Tier 1 Etch service. The reason is a property of the ECS: the tick says WHEN a write
+//! happened and never WHO produced it, and no comparison of change stamps can manufacture
+//! that. A solver-side provenance does not close it either, since `moveKinematic` moves a
+//! kinematic body whose pose this file deliberately does not publish — gameplay being its
+//! authority — so the ECS copy would stay stale and the entity would render at the old pose.
+//! Authority by `BodyType` cannot tell a kinematic driven by its component from one driven by
+//! the API, and both are legal. The service is the first place that sees both paths.
 //!
-//!   - `dynamic` — the SOLVER is the authority over the pose. A gameplay write to
-//!     `Transform` on a dynamic body is overwritten at the next sync-out, and that is
-//!     the contract rather than a bug: the legitimate ways to move a dynamic body are
-//!     `setBodyTransform`, a force or an impulse. Making the sync detect and honour a
-//!     direct write would give two authorities over one fact, which is the defect class
-//!     this module refuses everywhere.
-//!   - `kinematic` — GAMEPLAY is the authority over the pose. A `Transform` written by a
-//!     rule is pushed in at sync-in; `moveKinematic` is what derives velocities from a
-//!     target pose when the caller wants a platform a standing character inherits.
-//!   - `static` — no per-tick synchronisation in either direction. A static body that
-//!     moves is a teleportation through the interface, which wakes by W4.
+//! **What is published, per `BodyType`.**
 //!
-//! **A write is pushed only when it CHANGED, IN BOTH DIRECTIONS.** The rule has one motive
-//! per side and neither side may skip it.
+//!   - `dynamic` — the SOLVER is the authority over the pose, so the pose goes out. A gameplay
+//!     write to `Transform` on a dynamic body is overwritten, and that is the contract rather
+//!     than a bug: the legitimate ways to move one are `setBodyTransform`, a force or an
+//!     impulse.
+//!   - `kinematic` — GAMEPLAY owns the pose, so the pose is NOT written back; the velocity is,
+//!     because `moveKinematic` derives it and a character standing on the platform reads it.
+//!   - `static` — nothing is published. A static body that moves is a teleportation through
+//!     the interface, which wakes by W4.
 //!
-//!   - INWARD, because an unchanged value is not a mutation and pushing it every tick would
-//!     compose a wake every tick — nothing resting on a kinematic platform could ever sleep,
-//!     and §1.8.4's whole separation would be undone by the seam meant to respect it.
-//!   - OUTWARD, because `World.getMut` marks `changed_tick` UNCONDITIONALLY and the
-//!     `Changed<T>` filter is built on that mark. Publishing a bit-identical value would
-//!     make every awake body report a change every tick: a rule gated on
-//!     `changed Velocity` would run for nothing, and `Velocity` being
-//!     `@replicated(strategy: .rollback)`, the false delta leaves on the wire. The
-//!     `Sleeping` marker covers the sleepers; the awake-and-immobile are the dominant case
-//!     in an arena scene and the marker says nothing about them.
+//! **A value is written only when it CHANGED.** `World.getMut` marks `changed_tick`
+//! UNCONDITIONALLY and the `Changed<T>` filter is built on that mark, so republishing a
+//! bit-identical value would make every awake body report a change every tick: a rule gated on
+//! `changed Velocity` would run for nothing, and `Velocity` being
+//! `@replicated(strategy: .rollback)`, the false delta leaves on the wire. The `Sleeping`
+//! marker covers the sleepers; the awake-and-immobile are the dominant case in an arena scene
+//! and the marker says nothing about them. The guard asserts the SIGNAL — `changed_tick`
+//! against the world's current tick — and never the value, because the value is already
+//! correct under the defect; it is the signal that lies.
 //!
-//! Both halves read before they write. The guard on the outward half asserts the SIGNAL —
-//! `changed_tick` against the world's current tick — and never the value, because the value
-//! is already correct under the defect; it is the signal that lies.
+//! **THE ORDER OF THE `Sleeping` MARKER AGAINST PUBLICATION, and why it is this way.** An
+//! island falls asleep at step 11, AFTER steps 6 and 7 wrote its final pose, and this pass
+//! runs after step 11 and skips marked bodies. Mark first and that final pose is NEVER
+//! published: the entity keeps the pose of tick N−1 and holds it until the body wakes, so the
+//! object rests at a slightly wrong place forever and jumps when woken. A test that only
+//! checks "a sleeper's pose is bit-frozen" PASSES on that defect — the pose is frozen, on the
+//! wrong value — which is why the order is written here and guarded by an assertion on the
+//! VALUE. So: the marker is REMOVED before publication and ADDED after it. Both transition
+//! ticks publish, and every tick in between is skipped.
 //!
-//! **THE ORDER OF THE `Sleeping` TAG AGAINST PUBLICATION, and why it is this way.** An
-//! island falls asleep at step 11, AFTER steps 6 and 7 wrote its final pose. Sync-out
-//! runs after step 11 and skips tagged bodies. Tag first and that final pose is NEVER
-//! published: the entity's `Transform` keeps the pose of tick N−1 and holds it until the
-//! body wakes, so the object rests at a slightly wrong place forever and jumps when
-//! woken. The test that "a sleeper's pose is bit-frozen" PASSES on that defect — the pose
-//! is frozen, on the wrong value — which is why the order is written here and guarded by
-//! an assertion on the VALUE and not only on its immobility.
+//! **A CHARACTER PRESENCE IS NEVER A PUBLISHER**, because it shares its character's ECS
+//! entity: `character.zig` creates it with `.entity = desc.entity`, so one entity owns two
+//! bodies and nothing in the body store separates them. Walked as an ordinary body it would
+//! publish its own velocity — exactly zero forever, a presence being kinematic and moved by
+//! pose write — over the entity's own, every tick. It is driven by `moveCharacter` and its
+//! siblings and by nothing else. The distinction is carried on the registration record
+//! (`world.BodyKind`) rather than inferred here, because it cannot be recovered from the
+//! entity or from the body type.
 //!
-//! So: the tag is REMOVED before publication and ADDED after it. Both transition ticks
-//! publish — the sleeping tick publishes the last pose the solver computed, the waking
-//! tick publishes the first pose it moved to — and every tick in between is skipped. The
-//! mirror ordering (add before, remove after) trades the first defect for its twin on
-//! wake, where the first moved pose would go unpublished.
-//!
-//! **A CHARACTER PRESENCE IS SKIPPED IN BOTH DIRECTIONS, and the reason is that it shares
-//! its character's ECS entity.** `character.zig` creates the presence with
-//! `.entity = desc.entity`, so one entity owns two bodies and nothing in the body store
-//! separates them. Walked as an ordinary body the presence corrupts BOTH directions of this
-//! seam, and neither failure is exotic — it is the controller, on its central path:
-//!
-//!   - OUTWARD, it publishes the presence's `Velocity` — exactly zero forever, since a
-//!     presence is kinematic and moved by pose write — into the character entity's
-//!     `Velocity`, every tick, overwriting whatever the entity's own body published.
-//!   - INWARD, a gameplay write to the character's `Transform` reads as a kinematic pose
-//!     change and goes through `setBodyTransform`, which TELEPORTS the presence past
-//!     `moveCharacter`'s sweep and depenetration — the two things that make a controller a
-//!     controller.
-//!
-//! The presence is driven by `moveCharacter` and its siblings and by nothing else. The
-//! distinction is carried on the registration record (`world.BodyKind`) rather than inferred
-//! here, because it cannot be recovered from the entity or from the body type.
-//!
-//! **ONE ELECTED PUBLISHER PER ENTITY, and the reception is a separate question.**
+//! **ONE ELECTED PUBLISHER PER ENTITY.**
 //! `engine-physics-solver.md` §1.13.1 states that a MIXED BODY DOES NOT EXIST: an entity that
 //! must both collide and detect carries TWO bodies, and §1.13.8 rule 2 restates it when it
 //! drops the reflexive pair, "without which an entity carrying a trigger body and a solid
@@ -96,11 +80,6 @@
 //! solid-against-trigger, leaving two triggers or two solids in silent last-write-wins.
 //! **Do not reintroduce a blanket skip here**: it is what this election replaced, and both
 //! reasons above are why.
-//!
-//! RECEPTION is governed by TYPE and by nothing else: a kinematic pose belongs to gameplay
-//! whether the body is a trigger or not, and a trigger that does not follow its entity
-//! detects the wrong region. The character presence is the one registration excluded from
-//! BOTH directions, for the reason stated above.
 //!
 //! **What the tag buys, stated at the size the measurement supports.** `Sleeping` is what
 //! lets a gameplay query step over a whole archetype of resting bodies
@@ -278,8 +257,8 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
 
         // The POSE goes out for a DYNAMIC body only: gameplay owns a kinematic pose, and
         // publishing it back would be this seam overwriting the authority it just read.
-        // READ FIRST, `getMut` ONLY ON A REAL DIFFERENCE — the symmetric half of the rule
-        // sync-in applies. `World.getMut` marks `changed_tick` UNCONDITIONALLY and
+        // READ FIRST, `getMut` ONLY ON A REAL DIFFERENCE. `World.getMut` marks
+        // `changed_tick` UNCONDITIONALLY and
         // `Changed<T>` is built on that mark, so republishing a bit-identical pose would
         // report a change that did not happen, every tick, for every awake body.
         if (body_type == .dynamic) {
@@ -421,12 +400,12 @@ pub fn hasPhysicsWorld(ecs: *World) bool {
 
 /// The tick AND the publication, in ONE system, and the merge is the fix rather than a tidy.
 ///
-/// **They were two systems, and a gameplay write to `Velocity` was lost between them.** The
-/// phases run `pre_update → fixed_update → update → post_update`. A rule writing `Velocity`
-/// in `update` writes it AFTER sync-in has read it, and a publication in `post_update`
-/// overwrote it before the next frame's sync-in could see it — so the write never reached the
-/// solver at all, while C1.1 requires in as many words that an Etch system can write
-/// `Velocity` and the solver apply it.
+/// **The publication rides the tick rather than sitting in a later phase.** With the two
+/// separate — the tick in `fixed_update`, the publication in `post_update` — `update` would
+/// observe the poses of the PREVIOUS tick, a frame of latency nothing asks for. The merge is
+/// also what removed a defect the inward direction used to suffer, before that direction left
+/// for M1.1.26: a `Velocity` written in `update` was overwritten by a later publication before
+/// anything could read it.
 ///
 /// **An intra-phase ordering constraint cannot fix it**, and that is a property of the
 /// scheduler and not a gap in it: there is no `runs_before` / `runs_after`, and the only
@@ -434,8 +413,8 @@ pub fn hasPhysicsWorld(ecs: *World) bool {
 /// purely to manufacture that edge would make the declared set a lie, and `ARCH-030` makes
 /// the declared set the TYPE of the view a system receives — the fabricated access would be
 /// the defect and not the fix. Merging moves the order out of the scheduler and into code,
-/// where it is a line and not a graph property. The sequence then holds: `update` observes
-/// the poses of the tick that just ran, and its writes survive to the next `pre_update`.
+/// where it is a line and not a graph property. The sequence then holds: `update` observes the
+/// poses of the tick that just ran.
 fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     const ref = resolve(ctx.world) orelse return;
     try ref.worldPtr().?.step(ref.allocator());
@@ -504,20 +483,16 @@ fn wouldConflict(
 /// enforcement will check.
 ///
 /// **PREFLIGHT AND NOT IDEMPOTENCE, because of which failure is real.** Calling this twice on
-/// one scheduler is the failure a caller can actually produce, and it is deterministic: both
-/// names are checked absent from their phases BEFORE the first registration, so a second call
-/// mutates nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it
+/// one scheduler is the failure a caller can actually produce, and it is deterministic: the
+/// name and the write conflicts are checked BEFORE the registration, so a second call mutates
+/// nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it
 /// in silence, which hides a double wiring rather than naming it — and a partial state is
 /// exactly what this check exists to prevent.
 ///
-/// BOTH DESCRIPTORS are preflighted, names and write conflicts alike, before the first
-/// registration touches the scheduler — a `WriteWriteConflict` is an ordinary deterministic
-/// failure and not a residual, so leaving it to land halfway through would be the partial
-/// state this check exists to prevent.
-///
-/// RESIDUAL, stated rather than hidden: an ALLOCATION failure between the two registrations
-/// leaves the first standing, because `SystemScheduler` exposes no removal. Closing that needs
-/// a scheduler change and not a change here — the same Tier 0 gap the Closing notes name.
+/// The DESCRIPTOR is preflighted, name and write conflicts alike, before the registration
+/// touches the scheduler — a `WriteWriteConflict` is an ordinary deterministic failure and not
+/// a residual. With ONE system there is no partial state to leave behind, which is what
+/// retired the allocation residual the two-system form carried.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
     if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;
