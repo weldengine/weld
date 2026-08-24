@@ -438,6 +438,9 @@ const step_name = "forge_step_and_publish";
 const step_accesses = [_]core.ecs.AccessDescriptor{
     Writes(Transform),
     Writes(Velocity),
+    // The `Sleeping` transitions are STRUCTURAL — they migrate the entity between archetypes —
+    // so `Writes` is the closest the access model can express, not a description of the effect.
+    Writes(Sleeping),
     WritesResource(PhysicsWorldRef),
 };
 

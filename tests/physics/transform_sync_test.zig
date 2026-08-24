@@ -731,3 +731,64 @@ test "a solid body wins over a trigger of SMALLER identity" {
     try testing.expectEqual(@as(f32, @floatCast(pw.bm.position(solid).?.toArray()[1])), published);
     try testing.expect(@abs(pw.bm.position(trigger).?.toArray()[1] - published) > 7);
 }
+
+test "a competing writer of Sleeping in fixed_update is refused at registration" {
+    // The twin of the `Transform` conflict test. The publication adds and removes the marker,
+    // so a second writer of it in the same phase must be refused — without the declaration it
+    // would pass the preflight, and `ARCH-030` will make the declared set the TYPE of the view
+    // a system receives at M1.A.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+    try sync.registerSystems(gpa, &sched, &ecs);
+
+    const Competitor = struct {
+        fn run(_: core.ecs.SystemContext) anyerror!void {}
+    };
+    try testing.expectError(error.WriteWriteConflict, sched.registerSystem(gpa, &ecs, .{
+        .phase = .fixed_update,
+        .name = "sleeping_writer_stand_in",
+        .run = Competitor.run,
+        .accesses = &.{core.ecs.Writes(Sleeping)},
+    }));
+
+    // NON-VACUITY: the same writer in a phase forge does not write is accepted, so what the
+    // assertion above measures is the conflict and not a registration that always fails.
+    try sched.registerSystem(gpa, &ecs, .{
+        .phase = .late_update,
+        .name = "sleeping_writer_elsewhere",
+        .run = Competitor.run,
+        .accesses = &.{core.ecs.Writes(Sleeping)},
+    });
+}
+
+test "removeBody refuses a character presence, and refuses it before any mutation" {
+    // THE SEQUENCE, reachable through public entries alone: `getCharacterInnerBody` hands out
+    // the presence's `BodyId`, `removeBody` used to release its proxy and registration, and
+    // `destroyCharacter` then released a proxy the broadphase had already freed — tripping
+    // `Broadphase.remove`'s assertion.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+
+    const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 2, 0 } }, .{});
+    const character = try pw.createCharacter(gpa, .{ .entity = entity });
+    const presence = (try pw.chars.getCharacterInnerBody(character)).?;
+
+    const before = pw.proxyCountIn(.dynamic);
+    pw.removeBody(presence);
+
+    // PER CLASS and not a total: a no-op that had still released the proxy would satisfy a
+    // total against some other class's count and fail here.
+    try testing.expectEqual(before, pw.proxyCountIn(.dynamic));
+    try testing.expect((try pw.chars.getCharacterInnerBody(character)) != null);
+
+    // And the real path still works, which is what makes the refusal a no-op and not a leak.
+    pw.destroyCharacter(gpa, character);
+    try testing.expectEqual(before - 1, pw.proxyCountIn(.dynamic));
+}

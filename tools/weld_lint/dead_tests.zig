@@ -309,9 +309,11 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The sixth pass replaced the lint completeness machinery with visited declarations: the
     // three path-coverage tests go, one four-combination stale test arrives (1930 -> 1927,
     // suite reported 1927 - 1908 passed + 19 skipped, macOS aarch64).
+    // The seventh pass added the `Sleeping` conflict twin and the presence-removal guard
+    // (1927 -> 1929, suite reported 1929 - 1910 passed + 19 skipped, macOS aarch64).
     return switch (os) {
-        .windows => 1925,
-        else => 1927,
+        .windows => 1927,
+        else => 1929,
     };
 }
 

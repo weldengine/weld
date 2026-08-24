@@ -295,6 +295,21 @@ pub const PhysicsWorld = struct {
     /// in a candidate pair with it is woken, because removing it changes what
     /// supports them and a sleeper emits nothing in broadphase that could notice.
     pub fn removeBody(self: *PhysicsWorld, id: BodyId) void {
+        // A CHARACTER PRESENCE IS NOT REMOVABLE HERE, and the sequence is reachable without
+        // doing anything illegal: `getCharacterInnerBody` is a public entry, and its `BodyId`
+        // handed to this one released the proxy, the registration and the body — after which
+        // `destroyCharacter` released a proxy the broadphase had already freed and tripped
+        // `Broadphase.remove`'s assertion. A presence's lifetime runs through
+        // `destroyCharacter` and through nothing else.
+        //
+        // A NO-OP rather than an error: the frozen signature returns `void`, and the repository
+        // already answers an unhandleable handle this way (`setPresenceProxy`). The filter sits
+        // BEFORE every mutation, `wakeRetainedPartners` included — a refused call that had
+        // still woken the scene would be a side effect with no operation behind it.
+        for (self.bodies.items) |entry| {
+            if (entry.id == id and entry.kind == .character_presence) return;
+        }
+
         self.wakeRetainedPartners(id);
         for (self.bodies.items, 0..) |entry, i| {
             if (entry.id != id) continue;
