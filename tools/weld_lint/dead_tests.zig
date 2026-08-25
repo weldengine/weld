@@ -318,9 +318,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // 1931 - 1912 passed + 19 skipped, macOS aarch64).
     // The tenth pass closed the publication lifetime from both sides (1931 -> 1933, suite
     // reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
+    // M1.1.15.1 gate A added three blocks for `core.ModuleContext`: one inline field-set pin
+    // in `src/core/module_context.zig` and the two named tests of
+    // `tests/core/module_context_test.zig` (1933 -> 1936, suite reported 1936 - 1917 passed +
+    // 19 skipped, macOS aarch64). The three carry no platform dispatch, so Windows moves by
+    // the same three; that step is arithmetic on this table, and the `-Dexpect-collected`
+    // layer fed by each cell's own total is what confronts it independently.
     return switch (os) {
-        .windows => 1931,
-        else => 1933,
+        .windows => 1934,
+        else => 1936,
     };
 }
 

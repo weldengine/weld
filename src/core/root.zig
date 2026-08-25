@@ -132,6 +132,13 @@ pub const scene = @import("scene/root.zig");
 /// by the Etch runtime.
 pub const memory = @import("memory/root.zig");
 
+/// The Tier 0 context handed to every Tier 1 module at `init` (M1.1.15.1).
+/// Normative shape in `engine-tier-interfaces.md` §0: FOUR fields, and the count is
+/// the contract — the motive for each absent field is on the type itself. Spelled
+/// `core.ModuleContext` by `src/interfaces/`, which is why the alias is flat here
+/// rather than behind a namespace.
+pub const ModuleContext = @import("module_context.zig").ModuleContext;
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -218,6 +225,11 @@ comptime {
     _ = scene.loader;
     // M1.0.5 — pin the Tier-0 persistent heap (moved from src/etch).
     _ = memory.persistent;
+    // M1.1.15.1 — pin `ModuleContext` so `module_context.zig`'s inline field-set
+    // test is collected. A bare `pub const` re-export creates no reference and
+    // collects nothing (`engine-zig-conventions.md` §13): the discriminant is the
+    // REFERENCE, never the import syntax.
+    _ = ModuleContext;
     // M0.3 — pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;

@@ -623,6 +623,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/core/events/saturation_test.zig" },
         .{ .path = "tests/core/events/lifetime_test.zig" },
         .{ .path = "tests/core/events/scheduler_integration_test.zig" },
+        // M1.1.15.1 / gate A — `core.ModuleContext`: the four-field pin and its negative
+        // twin (exactly one field reaches component registration and the event bus).
+        .{ .path = "tests/core/module_context_test.zig" },
         .{ .path = "tests/bindgen/roundtrip_test.zig" },
         .{ .path = "tests/core/plugin_loader/api_stub_test.zig" },
         .{ .path = "tests/core/plugin_loader/load_unload_test.zig", .needs_stub_plugins = true },
