@@ -438,11 +438,11 @@ fn hasPair(items: []const sensor.EntityPair, trigger: u32, other: u32) bool {
 }
 
 /// Move a body and refresh its broadphase proxy — what step 10 does for one body.
-fn moveTo(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyId, p: [3]Real) !void {
+fn moveTo(world: *harness.World, id: api.BodyId, p: [3]Real) void {
     world.bm.setPosition(id, Vec3r.fromArray(p));
     for (world.bodies.items) |b| {
         if (b.id != id) continue;
-        try world.bp.update(gpa, b.proxy, world.bm.bodyAabb(&world.store, id).?);
+        world.bp.update(b.proxy, world.bm.bodyAabb(&world.store, id).?);
     }
 }
 
@@ -464,7 +464,7 @@ test "one enter, no delta while maintained, one exit" {
     try testing.expectEqual(@as(usize, 0), state.exited.items.len);
 
     // ENTER: exactly one, and the state holds exactly one pair.
-    try moveTo(gpa, &world, body, .{ 0.5, 0, 0 });
+    moveTo(&world, body, .{ 0.5, 0, 0 });
     try state.update(gpa, &world.bp, &world.bm, &world.store);
     try testing.expectEqual(@as(usize, 1), state.entered.items.len);
     try testing.expectEqual(@as(usize, 0), state.exited.items.len);
@@ -481,7 +481,7 @@ test "one enter, no delta while maintained, one exit" {
     }
 
     // EXIT: exactly one, and the state is empty again.
-    try moveTo(gpa, &world, body, .{ 10, 0, 0 });
+    moveTo(&world, body, .{ 10, 0, 0 });
     try state.update(gpa, &world.bp, &world.bm, &world.store);
     try testing.expectEqual(@as(usize, 0), state.entered.items.len);
     try testing.expectEqual(@as(usize, 1), state.exited.items.len);
@@ -651,7 +651,7 @@ test "falling asleep inside a trigger never produces an exit" {
     // POSITIVE CONTROL: woken and moved out, the same scene DOES produce an exit — so the
     // apparatus can observe the thing the invariant denies.
     world.bm.wakeBody(body);
-    try moveTo(gpa, &world, body, .{ 20, 0, 0 });
+    moveTo(&world, body, .{ 20, 0, 0 });
     try world.step(gpa);
     try testing.expectEqual(@as(usize, 1), world.sensors.exited.items.len);
     try testing.expect(hasPair(world.sensors.exited.items, 1, 2));
@@ -680,7 +680,7 @@ test "a sleeping trigger still detects an arriving body" {
 
     // The trigger is asleep and the body walks in: detection is unchanged. The pass is
     // filtered by no sleep state on EITHER side, and this is the trigger's side.
-    try moveTo(gpa, &world, body, .{ 0.5, 0, 0 });
+    moveTo(&world, body, .{ 0.5, 0, 0 });
     try world.step(gpa);
     try testing.expectEqual(true, world.bm.isSleeping(trigger).?); // still asleep
     try testing.expectEqual(@as(usize, 1), world.sensors.entered.items.len);
@@ -786,7 +786,7 @@ test "every cause of disappearance produces exactly one exit" {
         world.bm.setShape(&world.store, body, small);
         for (world.bodies.items) |b| {
             if (b.id != body) continue;
-            try world.bp.update(gpa, b.proxy, world.bm.bodyAabb(&world.store, body).?);
+            world.bp.update(b.proxy, world.bm.bodyAabb(&world.store, body).?);
         }
         try state.update(gpa, &world.bp, &world.bm, &world.store);
         try testing.expectEqual(@as(usize, 1), state.exited.items.len);

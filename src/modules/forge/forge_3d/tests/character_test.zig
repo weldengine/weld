@@ -1350,7 +1350,7 @@ test "an unobstructed move serves the whole displacement" {
 
     // Nothing in the scene: the base moves by exactly the displacement asked for, and the verdict
     // at the new pose is `.in_air`.
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, -3), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(2, 0, -3), 1.0 / 60.0);
     try testing.expect(r.position.approxEql(v(2, 5, -3), tol));
     try testing.expectEqual(api.GroundState.in_air, r.ground.state);
     // The record is authoritative and now agrees with the result.
@@ -1372,7 +1372,7 @@ test "a move into a wall keeps the tangential component and cancels the normal o
     const id = try addMover(gpa, &world, &chars, desc);
 
     // Asked for (3, 0, 1) — into the wall, plus a metre along +Z the wall does not oppose.
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
 
     // **THE MOTION IS OBLIQUE, AND THAT CHANGES THE CLOSED FORM.** The capsule's radius is 0.3, so
     // its surface reaches the wall when the centre is at x = 1.7; but the character travels along
@@ -1417,7 +1417,7 @@ test "a move into a crease slides along the edge, and exactly parallel normals a
 
         // Driven into both walls AND upward. The two horizontal components are cancelled by the
         // two planes and the +Y component survives along the crease.
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 1, 3), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 1, 3), 1.0 / 60.0);
 
         // Same oblique correction as the wall test, now along `d = (3,1,3)/√19`: both horizontal
         // components stop at `1.7 − padding · 3/√19 = 1.7 − 0.02 · 0.6882472 = 1.6862350`. The two
@@ -1482,7 +1482,7 @@ test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by
     const id = try addMover(gpa, &world, &chars, desc);
 
     // Asked for nothing at all, so the ONLY thing that can move the character is depenetration.
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
 
     // **THE TWO ANSWERS DIFFER MEASURABLY, which is what makes this test discriminate.** The
     // manifold pushes along the SLOPE's normal (0.5, 0.866, 0), so the correction has a non-zero X
@@ -1583,7 +1583,7 @@ test "a trigger wall does not stop a sweep, and the same wall as a solid does" {
         desc.position = av(0, 0, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
         try testing.expect(r.position.approxEql(v(3, 0, 1), api_tol));
     }
 
@@ -1602,7 +1602,7 @@ test "a trigger wall does not stop a sweep, and the same wall as a solid does" {
         desc.position = av(0, 0, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 0, 1), 1.0 / 60.0);
         const root10: Real = @sqrt(@as(Real, 10));
         try testing.expectApproxEqAbs(1.7 - 0.02 * (3.0 / root10), r.position.toArray()[0], api_tol);
         try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[2], api_tol);
@@ -1632,7 +1632,7 @@ test "a trigger volume does not depenetrate the character, and the same volume a
         desc.position = av(0, 0, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
         try testing.expectEqual(@as(Real, 0), r.position.toArray()[0]);
         try testing.expectEqual(@as(Real, 0), r.position.toArray()[1]);
         try testing.expectEqual(@as(Real, 0), r.position.toArray()[2]);
@@ -1656,7 +1656,7 @@ test "a trigger volume does not depenetrate the character, and the same volume a
         desc.position = av(0, 0, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
         try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[0], api_tol);
         try testing.expectApproxEqAbs(@as(Real, 0.0315470), r.position.toArray()[1], api_tol);
         try testing.expectEqual(api.GroundState.grounded, r.ground.state);
@@ -1736,7 +1736,7 @@ test "self-exclusion is what lets a character move at all" {
     desc.position = av(0, 5, 0);
     const id = try addMover(gpa, &world, &chars, desc);
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
     try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
 }
 
@@ -1762,7 +1762,7 @@ test "after a move a ray finds the entity at the NEW pose and never at the old o
         api_tol,
     );
 
-    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
+    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
 
     // After: the capsule is at x = 5, so the same ray hits at 15 − 0.3 = 14.7. Both halves matter —
     // the NEW distance, and the fact that nothing answers at the OLD one any more, which is what
@@ -1828,7 +1828,7 @@ test "moveCharacter wakes a sleeping body it touches" {
 
     // Walk into it. The box's −X face is at x = 1.5, the capsule's radius is 0.3, so contact is
     // made and the sweep reports it.
-    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
 
     // WAKE CAUSE W4, and not W3: a presence moved by pose write keeps velocity columns of exactly
     // zero while it crosses the scene, so W3's true-zero velocity test never sees it move
@@ -1863,8 +1863,8 @@ test "the move consumes no predictive_contact_distance, and the ceilings stop sh
     generous.predictive_contact_distance = 0.5;
     const b = try addMover(gpa, &world, &chars, generous);
 
-    const ra = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, a, v(3, 0, 0), 1.0 / 60.0);
-    const rb = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, b, v(3, 0, 0), 1.0 / 60.0);
+    const ra = try chars.moveCharacter(&world.bp, &world.bm, &world.store, a, v(3, 0, 0), 1.0 / 60.0);
+    const rb = try chars.moveCharacter(&world.bp, &world.bm, &world.store, b, v(3, 0, 0), 1.0 / 60.0);
     // Both stop at 2 − 0.3 − 0.02 = 1.68, the wall face minus the radius minus the padding.
     try testing.expectApproxEqAbs(@as(Real, 1.68), ra.position.toArray()[0], api_tol);
     try testing.expectApproxEqAbs(ra.position.toArray()[0], rb.position.toArray()[0], api_tol);
@@ -1885,11 +1885,11 @@ test "moveCharacter reports a stale handle as a typed error" {
     defer chars.deinit(gpa);
 
     const id = try addMover(gpa, &world, &chars, baseDescriptor());
-    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
     chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
     try testing.expectError(
         error.StaleCharacter,
-        chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0),
+        chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0),
     );
 }
 
@@ -1926,7 +1926,7 @@ test "a step below step_height is climbed and a step above it blocks — both di
         defer chars.deinit(gpa);
         const id = try stepScene(gpa, &world, &chars, 0.25, 0.3);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
 
         // The character ends RESTING on the step top: `padding` above y = 0.25, so base = 0.27.
         // The lift is exactly `step_height` — the padding cancels between the two resting
@@ -1948,7 +1948,7 @@ test "a step below step_height is climbed and a step above it blocks — both di
         defer chars.deinit(gpa);
         const id = try stepScene(gpa, &world, &chars, 0.35, 0.3);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
 
         // The height is UNCHANGED: no lift survives a failed attempt.
         try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
@@ -1981,7 +1981,7 @@ test "a step is NOT a slope: a climb onto something too steep to stand on is ref
     desc.position = av(0, 0.02, 0);
     const id = try addMover(gpa, &world, &chars, desc);
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
 
     // It never ends up standing on the ramp: the verdict is not `.grounded` on a 70° face, and the
     // height has not been ratcheted upward by a climb that should not have been accepted.
@@ -2016,7 +2016,7 @@ test "descent sticks to the floor only when the character ENTERED grounded" {
         desc.position = av(-0.5, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
         // Landed on the lower floor, `padding` above it: −0.2 + 0.02 = −0.18.
         try testing.expectApproxEqAbs(@as(Real, -0.18), r.position.toArray()[1], api_tol);
         try testing.expectEqual(api.GroundState.grounded, r.ground.state);
@@ -2041,7 +2041,7 @@ test "descent sticks to the floor only when the character ENTERED grounded" {
         // state really is `.in_air`.
         try testing.expectEqual(api.GroundState.in_air, (try chars.groundOf(&world.bp, &world.bm, &world.store, id)).state);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1.5, 0, 0), 1.0 / 60.0);
         // Height UNCHANGED: a falling character is not pulled down, even with the floor in reach.
         // Without the entry condition it would be stuck to 0.02 — which is what makes this the
         // discriminating half.
@@ -2085,7 +2085,7 @@ test "an intermediate wall buys no horizontal progress — the reference's v5.6.
             defer chars.deinit(gpa);
             const id = try stepScene(gpa, &world, &chars, h, step_height);
 
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, requested, 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, requested, 1.0 / 60.0);
             reached[i] = r.position.toArray()[0];
             // No lift survives either way.
             try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
@@ -2141,7 +2141,7 @@ test "the slide is CONSTRAINED by the slope: four cases" {
         var desc = baseDescriptor();
         desc.position = av(0, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
         // 30° is inside the 45° limit, so the rule does not apply and the rise is real.
         try testing.expect(r.position.toArray()[1] > 0.2);
         try testing.expectEqual(api.GroundState.grounded, r.ground.state);
@@ -2158,7 +2158,7 @@ test "the slide is CONSTRAINED by the slope: four cases" {
         var desc = baseDescriptor();
         desc.position = av(0, 0.02, 0);
         const id = try addMover(gpa, &world, &chars, desc);
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
         // Height UNCHANGED, and the character is standing on the FLOOR (normal +Y) rather than on
         // the cliff it was pushed into.
         try testing.expectApproxEqAbs(@as(Real, 0.02), r.position.toArray()[1], api_tol);
@@ -2185,7 +2185,7 @@ test "the slide is CONSTRAINED by the slope: four cases" {
         var desc = baseDescriptor();
         desc.position = av(0, 0.5, 0);
         const id = try addMover(gpa, &world, &chars, desc);
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.3, -0.3, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0.3, -0.3, 0), 1.0 / 60.0);
         // It DESCENDS — the cap never turns a downward motion into an upward one, which is the half
         // that says the guard does not over-fire.
         try testing.expect(r.position.toArray()[1] < 0.5);
@@ -2205,7 +2205,7 @@ test "the slide is CONSTRAINED by the slope: four cases" {
         // Diagonally INTO the steep face and upward, so the motion really is projected — a purely
         // upward step would leave the surface and never reach the cap at all.
         const asked: Real = 0.4;
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.3, asked, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0.3, asked, 0), 1.0 / 60.0);
         // The requested rise is SERVED, and the second half is what makes this discriminating: it is
         // not merely non-zero, it is the whole amount asked for.
         try testing.expectApproxEqAbs(0.02 + asked, r.position.toArray()[1], api_tol);
@@ -2237,7 +2237,7 @@ test "a low kerb with level ground either side is stepped OVER, and the move is 
     var desc = baseDescriptor();
     desc.position = av(0, 0.02, 0);
     const id = try addMover(gpa, &world, &chars, desc);
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
 
     // The whole 2 m is served and the height is unchanged: over the kerb and down the other side.
     try testing.expectApproxEqAbs(@as(Real, 2), r.position.toArray()[0], api_tol);
@@ -2445,7 +2445,7 @@ test "the push is unilateral: the box moves, the character does not react to it"
         desc.max_push_force = max_push;
         const id = try addMover(gpa, &world, &chars, desc);
 
-        const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.1, 0, 0), 1.0 / 60.0);
+        const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0.1, 0, 0), 1.0 / 60.0);
         box_speed[i] = world.bm.linearVelocity(box).?.toArray()[0];
         char_x[i] = r.position.toArray()[0];
     }
@@ -2477,13 +2477,13 @@ test "setCharacterPosition teleports without resolving and invalidates the repor
     const id = try addMover(gpa, &world, &chars, desc);
 
     // A move first, so there IS a reported verdict to invalidate.
-    const moved = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    const moved = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
     try testing.expectEqual(api.GroundState.grounded, moved.ground.state);
     try testing.expectEqual(api.GroundState.grounded, chars.reportedGround(id).?);
 
     // Teleport INTO the floor — 0.5 m under it. It resolves nothing, so the character stays there:
     // that is the contract and not a limitation, the caller having asked to BE somewhere.
-    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(3, -0.5, 0));
+    chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(3, -0.5, 0));
     try testing.expect(chars.get(id).?.position.approxEql(v(3, -0.5, 0), tol));
     // The reported verdict is INVALIDATED to `.in_air`, the safe failure direction: one tick of
     // gravity rather than a character believed to be standing where it no longer is.
@@ -2493,7 +2493,7 @@ test "setCharacterPosition teleports without resolving and invalidates the repor
     // entries that return something have no honest answer for a dead handle and carry an error
     // channel, while `destroyCharacter` and this one return nothing, so the no-op IS the answer.
     chars.destroyCharacter(gpa, &world.bp, &world.store, &world.bm, id);
-    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(9, 9, 9));
+    chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(9, 9, 9));
     try testing.expectEqual(@as(?character_mod.Character, null), chars.get(id));
 }
 
@@ -2518,7 +2518,7 @@ test "presence freshness on the second and third write paths, and resize reflect
         const id = try addMover(gpa, &world, &chars, desc);
         const presence = (try chars.getCharacterInnerBody(id)).?;
 
-        try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0));
+        chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(5, 0, 0));
 
         // From −Z at x = 5: the old box sits around x = 0 with a 0.1 m fat margin and is nowhere near
         // this ray, so without the proxy update the presence is never offered and this misses.
@@ -2602,7 +2602,7 @@ test "resize and teleport both wake what their new volume reaches" {
             // A teleport ONTO the box wakes it: the new pose reaches it, and a presence moved by pose
             // write has velocity columns of exactly zero, so W3 could never see it (§1.12.10).
             .teleport => {
-                try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0.02, 0));
+                chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(5, 0.02, 0));
                 try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
             },
         }
@@ -2639,7 +2639,7 @@ test "a character squeezed under a low ceiling WALKS, and is never driven throug
         var previous: Real = 0;
         var k: u32 = 0;
         while (k < 2) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
             const p = r.position.toArray();
             // The whole metre, both calls: a character squeezed VERTICALLY with clear horizontal space
             // has no reason not to walk.
@@ -2683,7 +2683,7 @@ test "the step's FORWARD sweep keeps the padding stand-off, which the lift's can
     desc.position = av(0, 0.02, 0);
     const id = try addMover(gpa, &world, &chars, desc);
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(3, 0, 0), 1.0 / 60.0);
     const p = r.position.toArray();
 
     // The step's forward sweep runs from the LIFTED pose, where the capsule clears the step top and
@@ -2808,7 +2808,7 @@ test "gravity on a steep face slides DOWN it, and the cap does not cancel the de
     const id = try addMover(gpa, &world, &chars, desc);
     const start = chars.get(id).?.position;
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0, -0.5, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0, -0.5, 0), 1.0 / 60.0);
     const moved = r.position.sub(start).toArray();
 
     // CLOSED FORM. Travelling along −Y closes the clearance at the rate `cos 60° = 1/2`, so contact
@@ -2876,7 +2876,7 @@ test "a doorway narrower than the character NEVER ejects it, whatever the iterat
             // Along +Z, which neither wall blocks — and which is nonetheless never served: the two
             // wall normals are ANTIPARALLEL, so their crease is exactly parallel and
             // `slideAlongCrease` returns its documented third answer, no edge to slide along.
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0, 0, 0.2), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0, 0, 0.2), 1.0 / 60.0);
             const p = r.position.toArray();
 
             try testing.expectApproxEqAbs(offset, @abs(p[0]), api_tol);
@@ -2947,7 +2947,7 @@ test "P1-1 the pushes are accumulated and applied ONCE, after the publication" {
 
     // `dt = 1 s` so the derived speed is `10 / 1 = 10 m/s`, a sane number rather than the 600 m/s a
     // 10 m displacement at 60 Hz implies.
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
 
     // The character stops `padding` short of the box: 8 − 0.5 − 0.3 − 0.02 = 7.18.
     try testing.expectApproxEqAbs(@as(Real, 7.18), r.position.toArray()[0], api_tol);
@@ -2994,7 +2994,7 @@ test "P1-1 the force ceiling holds however many contacts one body takes" {
     desc.max_push_force = 5;
     const id = try addMover(gpa, &world, &chars, desc);
 
-    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
+    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(10, 0, 0), 1);
 
     // **`max_push_force` IS A CEILING PER CALL, NOT PER CONTACT**, and an earlier form broke that: the
     // pushes were appended without coalescing and applied one `addImpulse` per entry, each capped at
@@ -3011,8 +3011,34 @@ test "P1-1 the force ceiling holds however many contacts one body takes" {
     try testing.expectApproxEqAbs(@as(Real, 5), world.bm.linearVelocity(box).?.toArray()[0], api_tol);
 }
 
-test "P1-1 a publication that fails leaves every body velocity untouched" {
+test "P1-1 setCharacterPosition cannot fail, and the push it precedes still happens once" {
+    // REPLACES `test "P1-1 a publication that fails leaves every body velocity untouched"`.
+    // That test injected an allocation failure into `setCharacterPosition` and asserted that
+    // nothing in the world had moved. Its object is gone: `syncPresenceTo`'s only fallible
+    // call was `Broadphase.update`, which became infallible at M1.1.15.1, so this entry has
+    // no failure to inject and its long comment about needing BOTH `fail_index` and
+    // `resize_fail_index` describes a door that no longer exists.
+    //
+    // Two properties survive and are asserted here. The FIRST is the new one and it is
+    // structural: the entry matches the frozen `void` signature and takes no allocator. The
+    // SECOND is what the old test really protected — a teleport disturbs nothing, and the
+    // push that a subsequent move owes still happens exactly once.
     const gpa = testing.allocator;
+
+    // Structural half. Fails the day an allocator or an error union comes back.
+    const info = @typeInfo(@TypeOf(CharacterStore.setCharacterPosition)).@"fn";
+    try testing.expectEqual(void, info.return_type.?);
+    inline for (info.params) |param| try testing.expect(param.type.? != std.mem.Allocator);
+    // NON-VACUITY: `resizeCharacter` legitimately keeps both, so the walk above is not a
+    // predicate that never finds anything.
+    const rc = @typeInfo(@TypeOf(CharacterStore.resizeCharacter)).@"fn";
+    try testing.expect(@typeInfo(rc.return_type.?) == .error_union);
+    var resize_takes_allocator = false;
+    inline for (rc.params) |param| {
+        if (param.type.? == std.mem.Allocator) resize_takes_allocator = true;
+    }
+    try testing.expect(resize_takes_allocator);
+
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
     var chars: CharacterStore = .{};
@@ -3033,39 +3059,24 @@ test "P1-1 a publication that fails leaves every body velocity untouched" {
     desc.max_push_force = 100;
     const id = try addMover(gpa, &world, &chars, desc);
 
-    // **The injection needs BOTH fail indices, and the second one is why gate F recorded this
-    // failure as un-injectable.** `syncPresenceTo`'s only fallible call is `Broadphase.update`, whose
-    // reservation grows an `ArrayListUnmanaged`, and a list grows through `remap` first, falling back
-    // to `alloc` only when that returns null. With `fail_index` alone the growth went through `remap`
-    // and the call reported ZERO allocations seen. `resize_fail_index` closes the other door.
-    //
-    // **MEASURED LIMIT, stated rather than implied.** The growth lands on the 34th append for this
-    // operation sequence, and an append happens only when a proxy leaves its fat box — so it lands on
-    // a POSE WRITE that travels. Five constructions were tried to land it on a call that also pushes,
-    // and none did: a move that pushes is a move that barely advances, hence does not refit, hence
-    // never grows the log. So what this test pins is the invariant on the reachable half — a failed
-    // publication changes no velocity anywhere — and the ORDERING that protects the push is carried
-    // by the structural argument in `PendingPushes`, not by a counterfactual here.
-    var fired = false;
+    // The same 60 teleports the old loop drove, now with nothing to inject. Sixty is kept
+    // rather than reduced: the old comment measured the moved log's growth landing on the
+    // 34th append, so this range is what USED to cross an allocation boundary and is now
+    // asserted to cross none.
     var round: u32 = 0;
     while (round < 60) : (round += 1) {
         const f: Real = @floatFromInt(round);
-        var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0, .resize_fail_index = 0 });
-        chars.setCharacterPosition(fa.allocator(), &world.bp, &world.bm, &world.store, id, v(20 + f * 5, 0.02, 0)) catch |e| {
-            try testing.expectEqual(error.OutOfMemory, e);
-            fired = true;
-            break;
-        };
+        chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(20 + f * 5, 0.02, 0));
     }
-    // NON-VACUITY: without this the loop could pass by never having injected anything.
-    try testing.expect(fired);
 
-    // Nothing in the world moved — no velocity, and the character's own record is where it was.
+    // A teleport disturbs nothing: the box has never been touched.
     try testing.expect(world.bm.linearVelocity(box).?.eql(Vec3r.zero));
 
-    // RETRYABLE with a working allocator, and the push then happens exactly once per contact.
-    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(0, 0.02, 0));
-    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
+    // And the push still happens — which is also what makes the zero above non-vacuous, the
+    // same body going from exactly zero to strictly positive under the entry that should
+    // move it.
+    chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(0, 0.02, 0));
+    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(5, 0, 0), 1.0 / 60.0);
     try testing.expect(world.bm.linearVelocity(box).?.toArray()[0] > 0);
 }
 
@@ -3084,7 +3095,7 @@ test "P1-2 a teleport leaves no permanently fat leaf behind it" {
     const presence = (try chars.getCharacterInnerBody(id)).?;
 
     // 50 m in one teleport, far beyond the 0.1 m fat margin.
-    try chars.setCharacterPosition(gpa, &world.bp, &world.bm, &world.store, id, v(50, 0.02, 0));
+    chars.setCharacterPosition(&world.bp, &world.bm, &world.store, id, v(50, 0.02, 0));
 
     // A small box at the MIDPOINT of that trajectory, where the character has never been and is not
     // now. An interim form published the UNION of the old and the new box, and `Bvh.update` returns
@@ -3243,7 +3254,7 @@ test "a base EXACTLY on the floor is no longer frozen — seven heights, both di
             desc.position = av(0, start_y, 0);
             const id = try addMover(gpa, &world, &chars, desc);
 
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
 
             // The whole metre, at EVERY height including zero.
             try testing.expectApproxEqAbs(@as(Real, 1), r.position.toArray()[0], api_tol);
@@ -3319,7 +3330,7 @@ test "the stand-off floor serves a zero padding, and its scale limit is MEASURED
             var previous: Real = 0;
             var k: u32 = 0;
             while (k < 3) : (k += 1) {
-                const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+                const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
                 try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
                 previous = r.position.toArray()[0];
             }
@@ -3341,7 +3352,7 @@ test "the stand-off floor serves a zero padding, and its scale limit is MEASURED
         var previous: Real = 0;
         var k: u32 = 0;
         while (k < 3) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
             try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
             previous = r.position.toArray()[0];
         }
@@ -3377,7 +3388,7 @@ test "a 1 km collider serves every call — the cast/manifold disagreement, clos
             var previous: Real = 0;
             var k: u32 = 0;
             while (k < 3) : (k += 1) {
-                const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+                const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
                 previous = r.position.toArray()[0];
             }
 
@@ -3502,7 +3513,7 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
 
         var prev: Real = 0;
         for (row.served, 0..) |expected, k| {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(0.5, -0.05, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(0.5, -0.05, 0), 1.0 / 60.0);
             const served = r.position.toArray()[0] - prev;
             prev = r.position.toArray()[0];
             errdefer std.debug.print("row {s}, call {d}\n", .{ row.name, k });
@@ -3553,7 +3564,7 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
         // Walk into it, generously, so the stop is the wall and not the request running out.
         var k: u32 = 0;
         while (k < 4) : (k += 1) {
-            _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
+            _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(2, 0, 0), 1.0 / 60.0);
         }
         // The capsule's surface reaches `radius` ahead of its base, so the base rests at
         // `wall_face − radius − padding`. `padding` and NOT the floor: that is the whole assertion.
@@ -3589,7 +3600,7 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
         var previous: Real = 0;
         var k: u32 = 0;
         while (k < 3) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
             try testing.expectApproxEqAbs(previous + 1, r.position.toArray()[0], api_tol);
             previous = r.position.toArray()[0];
         }
@@ -3661,7 +3672,7 @@ test "one mesh carrying both floor and wall: the wall still blocks, at six yaws"
         const d = rotY(yaw, 3, 0);
         var k: u32 = 0;
         while (k < 4) : (k += 1) {
-            _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
+            _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
         }
         const p = chars.get(id).?.position.toArray();
         // Distance travelled ALONG the yawed direction — the quantity the rotation leaves invariant.
@@ -3729,7 +3740,7 @@ test "the mesh scene at six yaws: the wall blocks, and the squeeze residue is PI
                 var k: u32 = 0;
                 const d = rotY(yaw, 3, 0);
                 while (k < 4) : (k += 1) {
-                    _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
+                    _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(d[0], 0, d[1]), 1.0 / 60.0);
                 }
                 const p = chars.get(id).?.position.toArray();
                 const u = rotY(yaw, 1, 0);
@@ -3894,7 +3905,7 @@ test "STRESS: a 7200-triangle floor under a moving capsule, at six yaws" {
         var previous: Real = -1;
         var k: u32 = 0;
         while (k < 2) : (k += 1) {
-            const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(u[0], 0, u[1]), 1.0 / 60.0);
+            const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(u[0], 0, u[1]), 1.0 / 60.0);
             const q = r.position.toArray();
             try testing.expectApproxEqAbs(previous + 1, q[0] * u[0] + q[2] * u[1], 1e-3);
             previous = q[0] * u[0] + q[2] * u[1];
@@ -3972,7 +3983,7 @@ test "an ACTIVE EDGE at exact tangency blocks — the face normal is not enough"
 
     var k: u32 = 0;
     while (k < 3) : (k += 1) {
-        _ = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
+        _ = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(1, 0, 0), 1.0 / 60.0);
     }
     const p = chars.get(id).?.position.toArray();
 
@@ -4187,7 +4198,7 @@ test "a DENORMAL displacement is served, not read as empty" {
     // case, rather than a second literal that would make the other leg look like it tested the same.
     if (Real == f32) try testing.expectEqual(@as(Real, 0), tiny * tiny);
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(tiny, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(tiny, 0, 0), 1.0 / 60.0);
 
     // **BIT-EXACTLY the displacement, and an inequality here would admit the defect.** The old
     // behaviour left the pose at exactly zero, which any `x >= 0` accepts; the character starts at
@@ -4217,7 +4228,7 @@ test "a HUGE displacement is bounded by the geometry, not by an infinity" {
     const huge: Real = 1e30;
     if (Real == f32) try testing.expect(!std.math.isFinite(huge * huge));
 
-    const r = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(huge, 0, 0), 1.0 / 60.0);
+    const r = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(huge, 0, 0), 1.0 / 60.0);
     const x = r.position.toArray()[0];
     try testing.expect(std.math.isFinite(x));
     // Served up to the wall and no further: the request is bounded by what is in the way.
@@ -4244,7 +4255,7 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // `f32` range the vector came through, so a `Real`-scaled literal would hand the two builds two
     // different inputs and hide the defect instead of asserting it.
     const big: Real = 0.75 * std.math.floatMax(f32);
-    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(big, 0, big), 1.0 / 60.0));
 
     // **AND THE EDGE THE BOUND ALONE COULD NOT CATCH.** With the norm computed at `Real`, this vector
     // is refused at `f64` and accepted at `f32`, because the `f32` reduction rounds `1 + 4e-8` to
@@ -4252,7 +4263,7 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // components are formed in `f32` and widened, so both builds receive the identical vector.
     const edge_x: Real = std.math.floatMax(f32);
     const edge_y: Real = @as(f32, 0.0002 * std.math.floatMax(f32));
-    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, edge_y, 0), 1.0 / 60.0));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(edge_x, edge_y, 0), 1.0 / 60.0));
 
     // **AND THE ACCEPTED SIDE OF THE SAME FRONTIER, which is what pins the predicate rather than
     // merely bounding it.** §1.12.6 makes the EXPRESSION normative, so the suite has to lock the
@@ -4277,7 +4288,7 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // BROADPHASE, on the far-field limit this file already records: a node box that far out has
     // `(min + max) · 0.5` overflowing. A different limit, and not the one under test.
     const near_y: Real = @as(f32, 1e-9 * std.math.floatMax(f32));
-    const served_edge = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, -near_y, 0), 1.0 / 60.0);
+    const served_edge = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(edge_x, -near_y, 0), 1.0 / 60.0);
     for (served_edge.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
 
     // ORDER. The vertical component points DOWN into the floor for the same reason as above, and the
@@ -4287,24 +4298,24 @@ test "a displacement whose NORM is not representable is REFUSED, not saturated" 
     // this file already records, which is a different limit from the one under test.
     _ = try addBox(gpa, &world, av(4, 4, 0.5), av(0, 0, -3), 966);
     const ord: Real = @as(f32, 7e-9 * std.math.floatMax(f32));
-    const served_order = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, -ord, -ord), 1.0 / 60.0);
+    const served_order = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(edge_x, -ord, -ord), 1.0 / 60.0);
     for (served_order.position.toArray()) |component| try testing.expect(std.math.isFinite(component));
 
     // REDUCTION FORM. Refused by the ordered sum, accepted by `hypot`.
     const red: Real = @as(f32, 9e-9 * std.math.floatMax(f32));
-    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(edge_x, red, 0), 1.0 / 60.0));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(edge_x, red, 0), 1.0 / 60.0));
 
     // A NON-FINITE component is the same class and the same answer.
-    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
+    try testing.expectError(error.InvalidDisplacement, chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(std.math.inf(Real), 0, 0), 1.0 / 60.0));
 
     // And the domain's two open ends stay open: EXACT zero is a legal no-op, and a component large
     // enough to be interesting but whose norm IS representable is served.
     const before = chars.get(id).?.position.toArray()[0];
-    const still = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
+    const still = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, Vec3r.zero, 1.0 / 60.0);
     try testing.expectApproxEqAbs(before, still.position.toArray()[0], api_tol);
     // A single component of the same magnitude has a REPRESENTABLE norm and is served, at both
     // precisions — the domain excludes the norm, not the magnitude.
-    const served = try chars.moveCharacter(gpa, &world.bp, &world.bm, &world.store, id, v(big, 0, 0), 1.0 / 60.0);
+    const served = try chars.moveCharacter(&world.bp, &world.bm, &world.store, id, v(big, 0, 0), 1.0 / 60.0);
     try testing.expect(std.math.isFinite(served.position.toArray()[0]));
 }
 

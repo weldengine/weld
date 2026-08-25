@@ -559,7 +559,6 @@ pub const Scenario = struct {
     pub fn step(self: *Scenario, gpa: std.mem.Allocator, frame: u32) !void {
         const d = scriptedDisplacement(frame);
         self.last_move = self.chars.moveCharacter(
-            gpa,
             &self.world.bp,
             &self.world.bm,
             &self.world.store,
@@ -980,7 +979,6 @@ test "scenario: the slope test DECIDES the character's trajectory, both ways" {
             var f: u32 = 0;
             while (f < 1000) : (f += 1) {
                 _ = s.chars.moveCharacter(
-                    a,
                     &s.world.bp,
                     &s.world.bm,
                     &s.world.store,

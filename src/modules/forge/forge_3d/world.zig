@@ -401,12 +401,11 @@ pub const PhysicsWorld = struct {
     /// real producer of W4, and this is where that producer lives.
     pub fn moveCharacter(
         self: *PhysicsWorld,
-        gpa: std.mem.Allocator,
         id: api.CharacterId,
         displacement: Vec3r,
         dt: Real,
     ) !character_mod.MoveResult {
-        const result = try self.chars.moveCharacter(gpa, &self.bp, &self.bm, &self.store, id, displacement, dt);
+        const result = try self.chars.moveCharacter(&self.bp, &self.bm, &self.store, id, displacement, dt);
         self.wakePresencePartners(id);
         return result;
     }
@@ -415,11 +414,10 @@ pub const PhysicsWorld = struct {
     /// `moveCharacter`: the presence's pose changed and its velocity columns did not.
     pub fn setCharacterPosition(
         self: *PhysicsWorld,
-        gpa: std.mem.Allocator,
         id: api.CharacterId,
         position: Vec3r,
-    ) !void {
-        try self.chars.setCharacterPosition(gpa, &self.bp, &self.bm, &self.store, id, position);
+    ) void {
+        self.chars.setCharacterPosition(&self.bp, &self.bm, &self.store, id, position);
         self.wakePresencePartners(id);
     }
 
@@ -497,10 +495,10 @@ pub const PhysicsWorld = struct {
     /// Refresh `id`'s broadphase proxy from its current pose, so a query issued between
     /// two ticks finds the body where it now is and not where step 10 last left it. An
     /// UNBOUNDED proxy has no box to refresh.
-    fn refreshProxy(self: *PhysicsWorld, gpa: std.mem.Allocator, id: BodyId) !void {
+    fn refreshProxy(self: *PhysicsWorld, id: BodyId) void {
         const proxy = self.proxyOf(id) orelse return;
         if (proxy.kind == .unbounded) return;
-        if (self.bm.bodyAabb(&self.store, id)) |aabb| try self.bp.update(gpa, proxy, aabb);
+        if (self.bm.bodyAabb(&self.store, id)) |aabb| self.bp.update(proxy, aabb);
     }
 
     /// TELEPORT `id` to a pose. Writes the pose and derives NO velocity — the split
@@ -523,32 +521,32 @@ pub const PhysicsWorld = struct {
     /// manufactured a silent false negative on a legal configuration — the thing §1.13.6
     /// refuses in as many words.
     ///
-    /// **TRANSACTIONAL ON THE POSE.** The proxy refresh reserves and can fail. Before this
-    /// was written the pose had already been committed when it did, leaving the broadphase
-    /// describing a body that had moved — and a caller who retried would be retrying against
-    /// a store that already held the target. The pose is restored on failure, so the
-    /// broadphase and the store agree again and a retry is a retry. The WAKES are not rolled
-    /// back and that is a decision, not an omission: a spurious wake costs simulation time
-    /// and never an answer, while a stale proxy is a wrong answer.
+    /// **`void`, matching the frozen signature, since M1.1.15.1 — and the rollback it used to
+    /// carry is GONE because what it protected against is gone.** The paragraph here used to
+    /// read: the proxy refresh reserves and can fail, the pose had already been committed
+    /// when it did, so the broadphase described a body that had moved and a caller who
+    /// retried was retrying against a store already holding the target; the pose was
+    /// therefore restored on failure. Every clause of that turned on `Broadphase.update`
+    /// being able to allocate. It cannot: the moved log carries at most one entry per proxy
+    /// per consumption epoch and its capacity is reserved at proxy insertion, so
+    /// `refreshProxy` is infallible and this entry has no error path at all.
+    ///
+    /// **The property the rollback protected still holds, by construction rather than by
+    /// repair**: the store and the broadphase never disagree about where this body is,
+    /// because nothing between the pose write and the proxy refresh can interrupt them.
     pub fn setBodyTransform(
         self: *PhysicsWorld,
-        gpa: std.mem.Allocator,
         id: BodyId,
         position: Vec3r,
         rotation: config.Quatr,
-    ) !void {
-        const prev_position = self.bm.position(id) orelse return; // stale handle
-        const prev_rotation = self.bm.rotation(id).?;
-        errdefer {
-            self.bm.setPosition(id, prev_position);
-            self.bm.setRotation(id, prev_rotation);
-        }
+    ) void {
+        _ = self.bm.position(id) orelse return; // stale handle
 
         self.wakeRetainedPartners(id);
         self.bm.wakeBody(id);
         self.bm.setPosition(id, position);
         self.bm.setRotation(id, rotation);
-        try self.refreshProxy(gpa, id);
+        self.refreshProxy(id);
     }
 
     /// Move a KINEMATIC body to a target pose over `dt`, deriving both velocities from
@@ -585,21 +583,26 @@ pub const PhysicsWorld = struct {
     /// Composes the wake like any external pose write: the body, and W4 on its retained
     /// partners. No-op on a stale handle.
     ///
-    /// **TRANSACTIONAL ON POSE AND VELOCITIES, and the second half is what makes a retry
-    /// honest.** Both are derived FROM the current pose, so committing them before the
-    /// fallible proxy refresh left a failed call with the target already stored — and a
-    /// retry then computed `target − current` over a difference of zero, publishing a null
-    /// velocity for a move that had happened. That is exactly the lie this entry exists to
-    /// remove, arriving through the error path. Restoring pose and velocities makes the
-    /// retry recompute the same non-zero derivation.
+    /// **`void`, matching the frozen signature, since M1.1.15.1 — and the rollback is GONE
+    /// with the failure that motivated it.** It used to restore pose AND velocities, and the
+    /// second half was the interesting one: both are derived FROM the current pose, so
+    /// committing them before the fallible proxy refresh left a failed call with the target
+    /// already stored, and a retry then computed `target − current` over a difference of
+    /// zero and published a null velocity for a move that had happened — exactly the lie
+    /// this entry exists to remove, arriving through the error path. `Broadphase.update` no
+    /// longer allocates, `refreshProxy` is infallible, and there is no failed call to retry.
+    ///
+    /// The derivation-from-current-pose ordering is UNCHANGED and still matters: the
+    /// velocities are computed before the pose is written, because computing them after
+    /// would difference the target against itself. That was always a data-flow requirement
+    /// and never a transactional one.
     pub fn moveKinematic(
         self: *PhysicsWorld,
-        gpa: std.mem.Allocator,
         id: BodyId,
         target_position: Vec3r,
         target_rotation: config.Quatr,
         dt: Real,
-    ) !void {
+    ) void {
         std.debug.assert(std.math.isFinite(dt) and dt > 0);
         const current_position = self.bm.position(id) orelse return; // stale handle
         const current_rotation = self.bm.rotation(id).?;
@@ -611,22 +614,13 @@ pub const PhysicsWorld = struct {
         if (dq.w < 0) dq = dq.scale(-1); // short path: q and −q are one rotation
         const angular = Vec3r.fromArray(.{ dq.x, dq.y, dq.z }).scale(2 * inv_dt);
 
-        const prev_linear = self.bm.linearVelocity(id).?;
-        const prev_angular = self.bm.angularVelocity(id).?;
-        errdefer {
-            self.bm.setPosition(id, current_position);
-            self.bm.setRotation(id, current_rotation);
-            self.bm.setLinearVelocity(id, prev_linear);
-            self.bm.setAngularVelocity(id, prev_angular);
-        }
-
         self.wakeRetainedPartners(id);
         self.bm.wakeBody(id);
         self.bm.setLinearVelocity(id, linear);
         self.bm.setAngularVelocity(id, angular);
         self.bm.setPosition(id, target_position);
         self.bm.setRotation(id, target_rotation);
-        try self.refreshProxy(gpa, id);
+        self.refreshProxy(id);
     }
 
     /// Set the linear velocity from gameplay: wake, then write. The store's setter is
@@ -804,7 +798,13 @@ pub const PhysicsWorld = struct {
 
     /// (10) Broadphase proxy updates on the final poses — skipping sleepers, whose
     /// AABB is unchanged by construction.
-    fn stepProxyUpdate(self: *PhysicsWorld, gpa: std.mem.Allocator) !void {
+    ///
+    /// **INFALLIBLE since M1.1.15.1, and this is one of the eight allocation sites the tick
+    /// carried.** `Broadphase.update` reserved a moved-log slot on every call; the moved
+    /// log now carries at most one entry per proxy per consumption epoch and its capacity
+    /// is reserved at proxy insertion, so this whole step allocates nothing. The other
+    /// seven remain, and they are why `step` still declares an error channel.
+    fn stepProxyUpdate(self: *PhysicsWorld) void {
         self.enter(.proxy_update);
         for (self.bodies.items) |b| {
             const sleeping = self.bm.isSleeping(b.id) orelse continue; // stale handle
@@ -813,7 +813,7 @@ pub const PhysicsWorld = struct {
             // forces a STATIC body, so its pairs are established once at insertion
             // and then carried by the retention rule of step 2 (§1.11.15).
             if (b.proxy.kind == .unbounded) continue;
-            if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
+            if (self.bm.bodyAabb(&self.store, b.id)) |aabb| self.bp.update(b.proxy, aabb);
         }
     }
 
@@ -855,7 +855,7 @@ pub const PhysicsWorld = struct {
         self.stepSolveTick(); //                (6) + (7)
         //                                      (8) retired at a frozen number
         try self.stepHarvestContacts(gpa); //   (9)
-        try self.stepProxyUpdate(gpa); //       (10)
+        self.stepProxyUpdate(); //              (10)
         try self.stepSensorPass(gpa); //        (10 bis)
         self.stepSleepTransition(); //          (11)
     }

@@ -326,9 +326,15 @@ const WritesResource = core.ecs.WritesResource;
 /// resource keyed on this type collides with nothing by construction.
 ///
 /// **It carries the allocator too, and that is not a convenience.** `ctx.gpa` is the
-/// PER-FRAME allocator, while `refreshProxy` reaches `Broadphase.update`, which RESERVES
-/// memory the broadphase keeps across ticks. Handing a frame allocator to it would free that
-/// memory out from under the tree at the end of the frame.
+/// PER-FRAME allocator, while `step` grows structures the solver keeps ACROSS ticks — the
+/// retained candidate set, the constraint array, the island partition, the warm-start cache
+/// and the sensor state. Handing a frame allocator to those would free them out from under
+/// the solver at the end of the frame.
+///
+/// The site this paragraph used to name — `refreshProxy` reaching `Broadphase.update`,
+/// which reserved a moved-log slot — is no longer one of them: that entry became
+/// allocation-free at M1.1.15.1. The REASON is unchanged and the list above is what carries
+/// it now; only the example moved.
 /// Stored as three raw words rather than as typed fields, because the ECS registry builds a
 /// resource's default bytes from a default-constructed value and a pointer has no meaningful
 /// default. Zero means "nothing published", which `resolve` reports as absence.

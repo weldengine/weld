@@ -660,7 +660,7 @@ fn runBph(gpa: std.mem.Allocator, bph: *BphF) !void {
                 rng.float(f32) * 30 - 15,
                 rng.float(f32) * 30 - 15,
             }, 0.5 + rng.float(f32) * 2.0);
-            try bph.update(gpa, live.items[idx], bx);
+            bph.update(live.items[idx], bx);
         } else {
             const idx = rng.intRangeLessThan(usize, 0, live.items.len);
             bph.remove(live.swapRemove(idx));
@@ -819,60 +819,181 @@ test "insert is atomic under allocation failure (no orphan leaf)" {
     }
 }
 
-test "update is atomic under allocation failure (no hysteresis poisoning)" {
+// ---------------------------------------------------------------------------
+// M1.1.15.1 / gate B — the moved-log uniqueness invariant.
+//
+// REPLACES `test "update is atomic under allocation failure (no hysteresis poisoning)"`,
+// whose object no longer exists: `Broadphase.update` has no allocation and therefore no
+// failure, so "atomic under allocation failure" is not a property it can have or lack. The
+// two things that test really established are kept and are asserted below by other means —
+// the log does not grow without bound (now: it holds ONE entry per proxy per epoch, which
+// is strictly stronger than the old "the reserve precedes the tree write"), and a move is
+// never lost to hysteresis (now: asserted directly on the pair set, with no failure needed
+// to provoke it).
+// ---------------------------------------------------------------------------
+
+test "repeated updates of one proxy log it once per epoch" {
     const gpa = std.testing.allocator;
     const dyn: usize = @intFromEnum(Layer.dynamic);
 
     var bph = BphF.init(.{ .margin = 0.1 });
     defer bph.deinit(gpa);
 
-    // Stationary pair target (ud 3), the proxy under test p @ origin (ud 2),
-    // and a filler (ud 1) shuttled to consume the moved-log's capacity.
+    // A stationary pair target (ud 3) and the proxy under test (ud 2).
     _ = try bph.insert(gpa, .dynamic, boxCe(.{ 100, 0, 0 }, 0.5), 3);
     const p = try bph.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 2);
-    const filler = try bph.insert(gpa, .dynamic, boxCe(.{ -100, 0, 0 }, 0.5), 1);
 
     var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
     defer pairs.deinit(gpa);
-    try bph.computePairs(gpa, &pairs); // drain the moved-log (capacity retained)
+    try bph.computePairs(gpa, &pairs); // consume: logs empty, marks clear
+    try std.testing.expectEqual(@as(usize, 0), bph.moved[dyn].items.len);
 
-    // Fill the moved-log back to exactly capacity by shuttling the filler
-    // between two far cells (each move exits its fat box ⇒ re-insert ⇒ mark).
-    // p stays at the origin. The NEXT mark then has to grow the log — the
-    // allocation the failing update will hit.
-    var at_a = true;
-    var guard: usize = 0;
-    while (bph.moved[dyn].items.len < bph.moved[dyn].capacity and guard < 256) : (guard += 1) {
-        const fx: f32 = if (at_a) -200 else -100;
-        try bph.update(gpa, filler, boxCe(.{ fx, 0, 0 }, 0.5));
-        at_a = !at_a;
-    }
-    try std.testing.expectEqual(bph.moved[dyn].capacity, bph.moved[dyn].items.len); // log is full
-
-    // Failing update on p: the log grow is the sole fallible op and (with the
-    // fix) precedes the allocation-free tree re-insert, so p must stay put.
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, bph.update(failing.allocator(), p, boxCe(.{ 50, 0, 0 }, 0.5)));
-
-    // Anti-poisoning: p is still queryable at the origin, NOT at the target.
-    {
-        var at_old = Collector{ .gpa = gpa };
-        defer at_old.deinit();
-        _ = bph.queryAabb(boxCe(.{ 0, 0, 0 }, 0.1), &at_old);
-        try std.testing.expect(at_old.contains(2));
-
-        var at_new = Collector{ .gpa = gpa };
-        defer at_new.deinit();
-        _ = bph.queryAabb(boxCe(.{ 50, 0, 0 }, 0.1), &at_new);
-        try std.testing.expect(!at_new.contains(2));
+    // MOVES, each one leaving the fat box so the tree really re-inserts — the count is
+    // reported so the verdict says the size of what it measured, and so a future edit that
+    // silently reduces it cannot pass as the same test.
+    const moves: usize = 32;
+    var i: usize = 0;
+    while (i < moves) : (i += 1) {
+        const x: f32 = @floatFromInt(10 * (i + 1));
+        bph.update(p, boxCe(.{ x, 0, 0 }, 0.5));
     }
 
-    // Retry with a healthy allocator: p moves onto the target, and `computePairs`
-    // reports (2,3) — the move was NOT lost to hysteresis poisoning.
-    try bph.update(gpa, p, boxCe(.{ 100, 0, 0 }, 0.5));
+    // THE INVARIANT. Pre-invariant this reads `moves`; the discriminating number is 1.
+    try std.testing.expectEqual(@as(usize, 1), bph.moved[dyn].items.len);
+    try std.testing.expectEqual(p.id, bph.moved[dyn].items[0]);
+    try std.testing.expect(bph.moved_mark[dyn].items[p.id]);
+
+    // AND THE MOVE IS NOT LOST — the half of the removed test that survives. The last
+    // position is 320, so `p` does not meet ud 3 at 100; move it there and the pair appears.
+    bph.update(p, boxCe(.{ 100, 0, 0 }, 0.5));
+    try std.testing.expectEqual(@as(usize, 1), bph.moved[dyn].items.len); // still one
     pairs.clearRetainingCapacity();
     try bph.computePairs(gpa, &pairs);
     try std.testing.expect(hasPair(pairs.items, 2, 3));
+
+    // CONSUMPTION CLEARS THE MARK — without this the proxy is never logged again, which is
+    // the failure mode the mark's own doc names.
+    try std.testing.expect(!bph.moved_mark[dyn].items[p.id]);
+    bph.update(p, boxCe(.{ 0, 0, 0 }, 0.5));
+    try std.testing.expectEqual(@as(usize, 1), bph.moved[dyn].items.len);
+}
+
+test "a proxy removed and its slot reused before consumption does not double-log" {
+    const gpa = std.testing.allocator;
+    const dyn: usize = @intFromEnum(Layer.dynamic);
+
+    var bph = BphF.init(.{ .margin = 0.1 });
+    defer bph.deinit(gpa);
+
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // Two proxies so the tree has an internal node, then consume so the epoch is clean.
+    _ = try bph.insert(gpa, .dynamic, boxCe(.{ 100, 0, 0 }, 0.5), 3);
+    const a = try bph.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 2);
+    try bph.computePairs(gpa, &pairs);
+    try std.testing.expectEqual(@as(usize, 0), bph.moved[dyn].items.len);
+
+    // `a` moves — one entry, mark set on its id.
+    bph.update(a, boxCe(.{ 50, 0, 0 }, 0.5));
+    try std.testing.expectEqual(@as(usize, 1), bph.moved[dyn].items.len);
+    try std.testing.expect(bph.moved_mark[dyn].items[a.id]);
+
+    // `a` is REMOVED while its entry is still in the log, and the LIFO free-list hands its
+    // slot straight back to the next insertion.
+    bph.remove(a);
+    const b = try bph.insert(gpa, .dynamic, boxCe(.{ 100, 0, 0 }, 0.5), 9);
+    try std.testing.expectEqual(a.id, b.id); // the race this test exists for
+
+    // ONE entry, not two: the entry already in the log names the id, and the id now names
+    // `b`. Clearing the mark at `remove` would have produced two here.
+    try std.testing.expectEqual(@as(usize, 1), bph.moved[dyn].items.len);
+
+    // And `b` IS crossed — the entry serves the new occupant, so the pair with ud 3 at the
+    // same place appears. Without that, "one entry" would be satisfied by losing `b`.
+    pairs.clearRetainingCapacity();
+    try bph.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, 3, 9));
+    try std.testing.expect(!bph.moved_mark[dyn].items[b.id]);
+}
+
+test "moved_unbounded obeys the same uniqueness invariant" {
+    const gpa = std.testing.allocator;
+    const st: usize = @intFromEnum(Layer.static);
+
+    var bph = BphF.init(.{ .margin = 0.1 });
+    defer bph.deinit(gpa);
+
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // A body the plane can pair with, in a layer that pairs with `static`.
+    _ = try bph.insert(gpa, .dynamic, boxCe(.{ 0, -1, 0 }, 0.5), 1);
+
+    const floor_plane = BphF.UnboundedShape{ .normal = Vec3.unit_y, .distance = 0 };
+    const plane = try bph.insertUnbounded(gpa, .static, floor_plane, 7);
+    try std.testing.expectEqual(@as(usize, 1), bph.moved_unbounded[st].items.len);
+    try std.testing.expect(bph.unbounded[st].items[plane.id].logged);
+
+    // Consumption clears both, exactly as on the bounded log.
+    try bph.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, 1, 7));
+    try std.testing.expectEqual(@as(usize, 0), bph.moved_unbounded[st].items.len);
+    try std.testing.expect(!bph.unbounded[st].items[plane.id].logged);
+
+    // THE REUSE RACE, on this structure: retire the plane while its entry is still pending,
+    // then insert another, which the LIFO free-list puts in the same slot.
+    const second = try bph.insertUnbounded(gpa, .static, floor_plane, 8);
+    try std.testing.expectEqual(@as(usize, 1), bph.moved_unbounded[st].items.len);
+    bph.remove(second);
+    const third = try bph.insertUnbounded(gpa, .static, floor_plane, 9);
+    try std.testing.expectEqual(second.id, third.id); // same slot
+    try std.testing.expectEqual(@as(usize, 1), bph.moved_unbounded[st].items.len); // still one
+
+    // And the NEW occupant is the one served.
+    pairs.clearRetainingCapacity();
+    try bph.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, 1, 9));
+    try std.testing.expect(!hasPair(pairs.items, 1, 8));
+}
+
+test "update is infallible once capacity is reserved at insert" {
+    // THE SIGNATURE IS THE PROPERTY. `update` takes no allocator and returns no error
+    // union, so it cannot allocate and cannot fail — a claim the type system carries and
+    // that no runtime probe could establish as strongly. This is what lets the three pose
+    // setters of `engine-tier-interfaces.md` §1 return `void`.
+    const info = @typeInfo(@TypeOf(BphF.update)).@"fn";
+    try std.testing.expectEqual(void, info.return_type.?);
+    inline for (info.params) |param| {
+        try std.testing.expect(param.type.? != std.mem.Allocator);
+    }
+    // NON-VACUITY: the same walk over `insert`, which legitimately keeps both — otherwise
+    // the two assertions above would be satisfied by a predicate that never finds anything.
+    const ins = @typeInfo(@TypeOf(BphF.insert)).@"fn";
+    try std.testing.expect(@typeInfo(ins.return_type.?) == .error_union);
+    var insert_takes_allocator = false;
+    inline for (ins.params) |param| {
+        if (param.type.? == std.mem.Allocator) insert_takes_allocator = true;
+    }
+    try std.testing.expect(insert_takes_allocator);
+
+    // AND THE RESERVE IS REAL, measured on the structure: after N inserts the log's
+    // capacity covers the tree's whole node pool, which bounds every id it can ever hold.
+    const gpa = std.testing.allocator;
+    const dyn: usize = @intFromEnum(Layer.dynamic);
+    var bph = BphF.init(.{ .margin = 0.1 });
+    defer bph.deinit(gpa);
+
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        const x: f32 = @floatFromInt(n * 10);
+        _ = try bph.insert(gpa, .dynamic, boxCe(.{ x, 0, 0 }, 0.5), @intCast(n + 1));
+    }
+    try std.testing.expect(bph.moved[dyn].capacity >= bph.trees[dyn].poolLen());
+    try std.testing.expect(bph.moved_mark[dyn].items.len >= bph.trees[dyn].poolLen());
+    // The bound BITES: 64 leaves make strictly more than 64 pool slots, so this is not the
+    // trivially-true `capacity >= leafCount`.
+    try std.testing.expect(bph.trees[dyn].poolLen() > 64);
 }
 
 // ---------------------------------------------------------------------------

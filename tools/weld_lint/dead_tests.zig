@@ -324,9 +324,19 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // 19 skipped, macOS aarch64). The three carry no platform dispatch, so Windows moves by
     // the same three; that step is arithmetic on this table, and the `-Dexpect-collected`
     // layer fed by each cell's own total is what confronts it independently.
+    // M1.1.15.1 gate B is a net +3 over gate A, and it is a net of removals and additions
+    // rather than a bare addition — declared here because a floor that only ever grows
+    // hides what left. REMOVED, three tests whose object the infallible `Broadphase.update`
+    // deleted: `update is atomic under allocation failure` (broadphase_test), `a failed pose
+    // write leaves the store where the broadphase still says it is` and `a failed
+    // moveKinematic leaves a retry able to derive the same velocity` (world_test), plus `P1-1
+    // a publication that fails leaves every body velocity untouched` (character_test) —
+    // four. ADDED, seven: the four uniqueness-invariant tests in broadphase_test, two
+    // allocation-free/no-divergence tests in world_test, and the rewritten P1-1.
+    // (1936 -> 1939, suite reported 1939 - 1920 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1934,
-        else => 1936,
+        .windows => 1937,
+        else => 1939,
     };
 }
 
