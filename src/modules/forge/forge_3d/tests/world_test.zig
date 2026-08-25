@@ -784,6 +784,104 @@ test "addBody is transactional: no fail index leaves a body, a proxy or a regist
     }
 }
 
+test "proxyOf resolves through the index and rejects a stale generation" {
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+    const first = try pw.addBody(gpa, dynamicAt(shape, 0, 5, 0));
+    const first_proxy = pw.proxyOf(first).?;
+
+    // A REMOVED HANDLE ANSWERS `null` even though its index is still in range and still
+    // carries the generation it was bound with. That is what `IndexSlot.live` is for: the
+    // slot allocator bumps the generation on FREE, so this table keeps the OLD one, and a
+    // comparison alone would match and answer with a node the broadphase has freed.
+    pw.removeBody(first);
+    try testing.expect(pw.proxyOf(first) == null);
+
+    // RECYCLED: the same index comes back with a different generation.
+    const second = try pw.addBody(gpa, dynamicAt(shape, 10, 5, 0));
+    try testing.expectEqual(
+        api.PackedId.unpack(first).index,
+        api.PackedId.unpack(second).index,
+    ); // the race this test exists for
+    try testing.expect(api.PackedId.unpack(first).generation != api.PackedId.unpack(second).generation);
+
+    // The STALE handle still answers `null` — never the new occupant's proxy, which is the
+    // failure a bare index lookup would produce.
+    try testing.expect(pw.proxyOf(first) == null);
+    const second_proxy = pw.proxyOf(second).?;
+    try testing.expect(second_proxy.id == pw.bodies.items[0].proxy.id);
+    // NON-VACUITY: the lookup really does find something, so the two `null`s above are the
+    // absence of a SECOND answer and not the absence of any.
+    _ = first_proxy;
+}
+
+test "the index and the registration list agree on every live body" {
+    // TWO SOURCES ANSWERING DIFFERENTLY ABOUT ONE FACT IS A DEFECT, NEVER AN ENVELOPE — and
+    // this one is not hypothetical: the moment the index landed, a caller that re-pointed a
+    // body's proxy by writing the registration record alone left `proxyOf` returning a freed
+    // node, and step 2 asserted inside `Bvh.proxyAabb`. `rebindProxy` is the single writer
+    // that closed it; this is the guard that would catch the next one.
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+    // A mixed population: rigid bodies, a removal that leaves a hole, and a character
+    // presence — which is registered by a different entry and is exactly the body the
+    // M1.1.15 gate C defect went missing on.
+    var ids: [6]api.BodyId = undefined;
+    for (&ids, 0..) |*slot, i| {
+        // `f32` and NOT `Real`: `BodyDescriptor` is the PUBLIC surface, which follows the
+        // world scalar and not the solver's (`engine-physics-queries.md` §1.11.8). The `f64`
+        // leg is what caught this — at the default precision the two coincide and the type
+        // system proves nothing.
+        const x: f32 = @floatFromInt(i * 3);
+        slot.* = try pw.addBody(gpa, dynamicAt(shape, x, 5, 0));
+    }
+    pw.removeBody(ids[2]);
+    const hero = try pw.createCharacter(gpa, .{ .entity = .{ .index = 77, .generation = 0 }, .position = av3(-5, 0, 0) });
+
+    // DIRECTION 1 — every registration resolves through the index, to the SAME proxy.
+    var walked: usize = 0;
+    for (pw.bodies.items) |entry| {
+        const viaIndex = pw.proxyOf(entry.id) orelse return error.RegisteredBodyMissingFromIndex;
+        try testing.expectEqual(entry.proxy.layer, viaIndex.layer);
+        try testing.expectEqual(entry.proxy.kind, viaIndex.kind);
+        try testing.expectEqual(entry.proxy.id, viaIndex.id);
+        walked += 1;
+    }
+    // The SIZE of what was walked: five surviving rigid bodies plus one presence.
+    try testing.expectEqual(@as(usize, 6), walked);
+    try testing.expectEqual(pw.bodies.items.len, walked);
+
+    // DIRECTION 2 — every LIVE index slot names a registration. Without this half, an index
+    // that kept a slot alive after a removal would pass direction 1 unnoticed.
+    var live_slots: usize = 0;
+    for (pw.index.items, 0..) |slot, idx| {
+        if (!slot.live) continue;
+        live_slots += 1;
+        var found = false;
+        for (pw.bodies.items) |entry| {
+            if (api.PackedId.unpack(entry.id).index == idx) found = true;
+        }
+        try testing.expect(found);
+    }
+    try testing.expectEqual(walked, live_slots);
+
+    pw.destroyCharacter(gpa, hero);
+    // And the presence leaves BOTH: a destroy that deregistered only the list would leave a
+    // live slot here.
+    var after: usize = 0;
+    for (pw.index.items) |slot| {
+        if (slot.live) after += 1;
+    }
+    try testing.expectEqual(pw.bodies.items.len, after);
+    try testing.expectEqual(@as(usize, 5), after);
+}
+
 test "the three pose setters are allocation-free and infallible" {
     // REPLACES `test "a failed pose write leaves the store where the broadphase still says
     // it is"` and `test "a failed moveKinematic leaves a retry able to derive the same

@@ -590,7 +590,10 @@ fn clearTriggerRole(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyI
     for (world.bodies.items) |*b| {
         if (b.id != id) continue;
         world.bp.remove(b.proxy);
-        b.proxy = switch (record.class()) {
+        // THROUGH `rebindProxy`, never by writing the record: the proxy is held both here
+        // and in the dense index behind `proxyOf` (M1.1.15.1), and writing one leaves the
+        // other answering with a freed node.
+        const rebound = switch (record.class()) {
             .convex, .triangle_soup => try world.bp.insert(
                 gpa,
                 layer,
@@ -608,6 +611,7 @@ fn clearTriggerRole(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyI
                 }, id);
             },
         };
+        world.rebindProxy(id, rebound);
     }
 }
 

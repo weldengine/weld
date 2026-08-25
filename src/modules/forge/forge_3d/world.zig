@@ -181,6 +181,25 @@ pub const BodyKind = enum {
 /// A body registered in this world, with the broadphase proxy that represents it.
 pub const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy, kind: BodyKind };
 
+/// One slot of the dense `BodyId.index` -> proxy table (`M1.D.13`, M1.1.15.1).
+const IndexSlot = struct {
+    /// Meaningful only while `live`.
+    proxy: Bp.Proxy = undefined,
+    /// The generation of the handle that BOUND this slot. Compared against the caller's,
+    /// never trusted on its own — see `live`.
+    generation: u8 = 0,
+    /// Whether a live registration occupies the slot.
+    ///
+    /// **NOT redundant with the generation comparison, and the reason is exact.**
+    /// `slot_alloc` bumps a slot's generation when it FREES it, so a recycled index hands
+    /// out a handle whose generation differs from the previous occupant's — that half is
+    /// covered. What is not: a body removed and its index NOT reused. This table still
+    /// holds the generation of the handle that bound it, which is the removed handle's
+    /// own, so the comparison would match and `proxyOf` would answer with a proxy the
+    /// broadphase has already freed.
+    live: bool = false,
+};
+
 /// The physics world: the shape store, the body store, the broadphase, the warm-start
 /// cache, the island partition, the per-tick scratches, and `step()`.
 pub const PhysicsWorld = struct {
@@ -194,6 +213,26 @@ pub const PhysicsWorld = struct {
     gravity: Vec3r,
     dt: Real,
     bodies: std.ArrayListUnmanaged(BodyProxy) = .empty,
+    /// Dense side table `BodyId.index` -> `{ generation, proxy }`, closing `M1.D.13`.
+    ///
+    /// **AN ACCELERATOR BESIDE `bodies`, NEVER A REPLACEMENT FOR IT.** The list carries the
+    /// deterministic ITERATION ORDER that the publisher election and step 10's proxy sweep
+    /// both depend on; this table answers a lookup and has no order at all. Removing the
+    /// list in favour of this would substitute the index-ascending order of a slot
+    /// allocator for the registration order, which is a different sequence and a change no
+    /// test would name.
+    ///
+    /// **SIZED ON THE HIGH-WATER MARK OF LIVE INDICES, never on the representable range.**
+    /// `BodyId` is `index:24 | generation:8`, so a table sized eagerly on the index width
+    /// would be 16.7 M slots. It grows to `index + 1` as handles are bound and never
+    /// shrinks, which bounds it by the largest index the slot allocator has ever handed
+    /// out — and that allocator recycles LIFO, so the mark tracks the live PEAK rather than
+    /// the total ever created.
+    ///
+    /// NO HASHED CONTAINER, here as everywhere on this path: the determinism discipline of
+    /// `engine-physics-solver.md` §1.7.1 and §1.13.11 forbids one, and the flat unbounded
+    /// lists of `engine-physics-shapes.md` §1.11.15 are the same rule one level down.
+    index: std.ArrayListUnmanaged(IndexSlot) = .empty,
     active: std.ArrayListUnmanaged(u64) = .empty,
     constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty,
     scratch: std.ArrayListUnmanaged(Bp.Pair) = .empty,
@@ -250,6 +289,7 @@ pub const PhysicsWorld = struct {
         self.bp.deinit(gpa);
         self.cache.deinit(gpa);
         self.bodies.deinit(gpa);
+        self.index.deinit(gpa);
         self.active.deinit(gpa);
         self.constraints.deinit(gpa);
         self.scratch.deinit(gpa);
@@ -271,6 +311,11 @@ pub const PhysicsWorld = struct {
         // that step 10 would go on updating for a registration that does not exist.
         errdefer self.bm.removeBody(id);
 
+        // The index's growth is fallible and runs HERE, before the proxy exists and before
+        // the registration — so the two `errdefer`s below cover everything that can still
+        // fail, and the bind at the end cannot.
+        try self.indexReserve(gpa, id);
+
         const layer = BodyManager.broadLayerFor(desc.is_trigger, desc.body_type);
         const shape = self.store.get(desc.shape).?;
         const proxy = switch (shape.class()) {
@@ -289,6 +334,7 @@ pub const PhysicsWorld = struct {
         errdefer self.bp.remove(proxy);
 
         try self.bodies.append(gpa, .{ .id = id, .proxy = proxy, .kind = .rigid_body });
+        self.indexBind(id, proxy); // infallible, and last: nothing after it can fail
         return id;
     }
 
@@ -316,6 +362,7 @@ pub const PhysicsWorld = struct {
             if (entry.id != id) continue;
             self.bp.remove(entry.proxy);
             _ = self.bodies.orderedRemove(i); // ordered: the sweep order stays stable
+            self.indexUnbind(id);
             break;
         }
         self.bm.removeBody(id);
@@ -348,6 +395,9 @@ pub const PhysicsWorld = struct {
         errdefer self.chars.destroyCharacter(gpa, &self.bp, &self.store, &self.bm, id);
 
         const presence = (try self.chars.getCharacterInnerBody(id)) orelse return id;
+        // Same ordering as `addBody`: the index's only fallible step runs before the proxy
+        // exists, so the bind at the end is infallible.
+        try self.indexReserve(gpa, presence);
         const layer = BodyManager.broadLayerFor(
             self.bm.isTrigger(presence).?,
             self.bm.bodyType(presence).?,
@@ -365,6 +415,7 @@ pub const PhysicsWorld = struct {
         // engine has. The proxy handle survives a `resizeCharacter`, which updates it in
         // place, so this registration stays valid for the character's whole life.
         try self.bodies.append(gpa, .{ .id = presence, .proxy = proxy, .kind = .character_presence });
+        self.indexBind(presence, proxy); // infallible, and last
         return id;
     }
 
@@ -385,6 +436,7 @@ pub const PhysicsWorld = struct {
             for (self.bodies.items, 0..) |entry, i| {
                 if (entry.id != presence) continue;
                 _ = self.bodies.orderedRemove(i);
+                self.indexUnbind(presence);
                 break;
             }
         }
@@ -655,11 +707,77 @@ pub const PhysicsWorld = struct {
     }
 
     /// The proxy of `id`, or `null` once the body has been removed.
+    ///
+    /// **O(1) SINCE M1.1.15.1 (`M1.D.13`), and it was Θ(N).** It walked the registration
+    /// list, and `pairStillOverlaps` resolves BOTH endpoints of EVERY retained pair through
+    /// it, on every tick — step 2 of the eleven — so the retention cost was Θ(P·N) in the
+    /// pairs and the bodies. `refreshProxy` calls it too, so every pose setter paid a scan
+    /// as well. Measured on the code and not on a bench, there being no bench: the C1.1
+    /// instrument is created in this same milestone.
+    ///
+    /// A STALE HANDLE ANSWERS `null`, and that is what the generation is for. Both halves
+    /// are needed and neither is redundant: the generation catches a recycled index whose
+    /// slot now belongs to someone else, `live` catches an index freed and not reused. See
+    /// `IndexSlot`.
     pub fn proxyOf(self: *const PhysicsWorld, id: BodyId) ?Bp.Proxy {
-        for (self.bodies.items) |b| {
-            if (b.id == id) return b.proxy;
+        const p = api.PackedId.unpack(id);
+        if (p.index >= self.index.items.len) return null;
+        const slot = self.index.items[p.index];
+        if (!slot.live or slot.generation != p.generation) return null;
+        return slot.proxy;
+    }
+
+    /// Reserve room in the index for `id`'s slot. FALLIBLE, and it is called BEFORE any
+    /// mutation the caller would have to undo — the transactional shape `addBody` and
+    /// `createCharacter` both hold, and which the closing review of M1.1.15 established for
+    /// the two of them together.
+    fn indexReserve(self: *PhysicsWorld, gpa: std.mem.Allocator, id: BodyId) !void {
+        const idx: usize = api.PackedId.unpack(id).index;
+        if (idx < self.index.items.len) return;
+        try self.index.ensureTotalCapacity(gpa, idx + 1);
+    }
+
+    /// Bind `id` to `proxy`. INFALLIBLE: `indexReserve` for the same `id` has already run,
+    /// so the growth below is assume-capacity. What breaks if that ordering is dropped:
+    /// `appendAssumeCapacity` panics — loudly in Debug and ReleaseSafe, which is the
+    /// failure direction this repository chooses.
+    fn indexBind(self: *PhysicsWorld, id: BodyId, proxy: Bp.Proxy) void {
+        const p = api.PackedId.unpack(id);
+        while (self.index.items.len <= p.index) self.index.appendAssumeCapacity(.{});
+        self.index.items[p.index] = .{ .proxy = proxy, .generation = p.generation, .live = true };
+    }
+
+    /// Re-point a REGISTERED body at a new proxy, in both places that hold one.
+    ///
+    /// **THE ONE WRITER OF A BODY'S PROXY AFTER REGISTRATION, and it exists because the
+    /// proxy became a fact held twice at M1.1.15.1.** The registration record carries it for
+    /// step 10's sweep, which walks `bodies` in order; the dense index carries it so
+    /// `proxyOf` is O(1). Two holders of one fact is a drift waiting to happen, and it
+    /// happened immediately: a caller that re-inserted a body's proxy by writing the
+    /// registration record alone left `proxyOf` answering with a node the broadphase had
+    /// already freed, and step 2 then asserted inside `Bvh.proxyAabb`. Caught by the
+    /// existing sensor suite the moment the index landed.
+    ///
+    /// In production nothing calls this: `addBody` and `createCharacter` are the only paths
+    /// that bind a proxy, and they do it once. It exists so that a caller which DOES need to
+    /// re-point one cannot update half of the truth.
+    pub fn rebindProxy(self: *PhysicsWorld, id: BodyId, proxy: Bp.Proxy) void {
+        for (self.bodies.items) |*b| {
+            if (b.id != id) continue;
+            b.proxy = proxy;
+            self.indexBind(id, proxy);
+            return;
         }
-        return null;
+    }
+
+    /// Release `id`'s slot. A handle that does not own the slot releases nothing — a stale
+    /// caller must not evict the live occupant of a recycled index.
+    fn indexUnbind(self: *PhysicsWorld, id: BodyId) void {
+        const p = api.PackedId.unpack(id);
+        if (p.index >= self.index.items.len) return;
+        const slot = &self.index.items[p.index];
+        if (!slot.live or slot.generation != p.generation) return;
+        slot.live = false;
     }
 
     /// Whether a retained pair still satisfies §1.7 step 2 — "removal on FAT-AABB

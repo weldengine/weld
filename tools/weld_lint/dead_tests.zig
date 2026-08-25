@@ -340,9 +340,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // publication guard), and two in `src/interfaces/PhysicsModule.zig` — one extended, one
     // new for the `Step` contract. (1939 -> 1946, suite reported 1946 - 1927 passed + 19
     // skipped, macOS aarch64.)
+    // M1.1.15.1 gate D adds three for the dense `BodyId` index (`M1.D.13`): two in
+    // `forge_3d/tests/world_test.zig` — the stale-generation resolution and the two-way
+    // agreement between the index and the registration list — and one in
+    // `tests/physics/transform_sync_test.zig` for the publication order the index must not
+    // touch. (1946 -> 1949, suite reported 1949 - 1930 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1944,
-        else => 1946,
+        .windows => 1947,
+        else => 1949,
     };
 }
 

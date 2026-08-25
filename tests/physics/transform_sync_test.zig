@@ -661,6 +661,75 @@ fn addSibling(
     return try pw.addBody(gpa, desc);
 }
 
+test "publication order is unchanged by the index" {
+    // **THE DENSE `BodyId` INDEX OF M1.1.15.1 IS AN ACCELERATOR AND NOT AN ORDER**, and this
+    // is what says so. `proxyOf` became O(1) by reading a table keyed on the body index; the
+    // two orders that the publication actually depends on — the registration order of
+    // `bodies`, and the identity order the election sorts by — must be exactly what they
+    // were. The scene is built so REGISTRATION ORDER AND IDENTITY ORDER DISAGREE, because
+    // with them in step no assertion here could tell which one is being followed.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
+
+    const spare = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+    const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+
+    // **THE CONSTRUCTION RESTS ON A LAYOUT FACT, and getting it backwards is how the first
+    // version of this test failed on its own premise.** `PackedId` is
+    // `index:24 | generation:8`, and a Zig packed struct puts its FIRST field in the LOW
+    // bits — so a handle's numeric value is GENERATION-MAJOR, and a recycled index carries a
+    // LARGER identity than a fresh one, not a smaller. The election compares the raw handle
+    // (`Candidate.lessThan`, `a.body < b.body`), so to make registration order and identity
+    // order disagree, the entity's FIRST body must be the recycled one.
+    const throwaway = try addSibling(gpa, &pw, spare, false, .{ 0, 0, 0 });
+    pw.removeBody(throwaway);
+    const registered_first = try addSibling(gpa, &pw, entity, false, .{ 0, 1, 0 }); // recycled: high identity
+    const registered_second = try addSibling(gpa, &pw, entity, false, .{ 0, 9, 0 }); // fresh: low identity
+
+    // THE PREMISE, asserted rather than assumed — the whole test is vacuous without it.
+    try testing.expect(registered_second < registered_first); // identity order is REVERSED
+    try testing.expectEqual(registered_first, pw.bodies.items[0].id); // registration order
+    try testing.expectEqual(registered_second, pw.bodies.items[1].id);
+
+    var k: u32 = 0;
+    while (k < 5) : (k += 1) try frame(gpa, &pw, &ecs);
+
+    // (1) THE ELECTION STILL FOLLOWS IDENTITY, not the registration list and not the index's
+    // own ascending order. The two candidates are eight metres apart, so an election that
+    // picked the other one cannot satisfy this.
+    const published = ecs.get(Transform, entity).?.pos[1];
+    try testing.expectEqual(
+        @as(f32, @floatCast(pw.bm.position(registered_second).?.toArray()[1])),
+        published,
+    );
+    try testing.expect(@abs(pw.bm.position(registered_first).?.toArray()[1] - published) > 7);
+
+    // (2) `bodies` KEPT ITS ORDER across the ticks. The index does not touch this list, and
+    // a future edit that made the list follow the table instead would reverse these two.
+    try testing.expectEqual(@as(usize, 2), pw.bodies.items.len);
+    try testing.expectEqual(registered_first, pw.bodies.items[0].id);
+    try testing.expectEqual(registered_second, pw.bodies.items[1].id);
+
+    // (3) STEP 10 REFRESHED EVERY REGISTERED PROXY, whatever order it walked them in: each
+    // body's stored fat box contains its tight box at the pose the tick ended on. A sweep
+    // that lost a body — the M1.1.15 gate C defect, where a registration gap made step 2
+    // prune every pair of one body — leaves that body's box stale and fails here.
+    var refreshed: usize = 0;
+    for (pw.bodies.items) |entry| {
+        const fat = pw.bp.proxyAabb(entry.proxy).?;
+        const tight = pw.bm.bodyAabb(&pw.store, entry.id).?;
+        try testing.expect(fat.contains(tight.min));
+        try testing.expect(fat.contains(tight.max));
+        refreshed += 1;
+    }
+    try testing.expectEqual(pw.bodies.items.len, refreshed);
+}
+
 test "two triggers on one entity elect the smaller identity, not the last writer" {
     // Exclusion by concurrency arbitrated solid-against-trigger and nothing else: two triggers
     // do not exclude each other, so both wrote and the entity kept whichever came last in the
