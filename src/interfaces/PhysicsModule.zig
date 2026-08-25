@@ -88,6 +88,41 @@ pub const MoveKinematic = fn (BodyId, WorldVec3, WorldQuat, f32) void;
 /// Set a body's angular velocity. The entry without which `ω` had no author at all.
 pub const SetAngularVelocity = fn (BodyId, WorldVec3) void;
 
+// --- The tick, and what its error channel means -------------------------------
+//
+// `step` is `anyerror!void` and NOT `void`, on eight allocation sites measured inside the
+// cycle at M1.1.15.1 — pair generation, the retained candidate set, the constraint array,
+// the island partition, the warm-start cache, the sensor pass and the two the substep loop
+// reaches. The reservation seam of that milestone closed exactly one, step 10's proxy
+// update; the other seven grow structures whose size follows the scene, and no up-front
+// reservation bounds them without bounding the scene. A `void` signature would have only
+// two exits, both refused: swallow the failure and return a tick whose result is wrong
+// without saying so, or panic and turn memory pressure into a process abort.
+//
+// **THE FAILURE CONTRACT — the tick is NOT atomic and does not become atomic.** This is the
+// half a signature cannot state, and neither `engine-tier-interfaces.md`,
+// `engine-physics-solver.md` nor `engine-physics-forge.md` carried it before M1.1.15.1: an
+// `error.OutOfMemory` out of `step` leaves the world **UNSPECIFIED but NOT CORRUPTED**. The
+// structural invariants hold — no dangling index, no orphan proxy, no retained pair naming
+// a dead body — and the simulation semantics do not, some of the eleven steps having run
+// and others not.
+//
+// **The only permitted recovery is to stop ticking that world and `deinit` it.** Replaying
+// the tick, resuming at the next one, and publishing to the ECS after a failed step are
+// CALLER ERRORS, not degraded modes. An implementation is not required to make any of the
+// three safe, and `forge/sync.zig` obeys the third by construction: its `try` on the call
+// returns before the publication runs.
+//
+// **WHAT THE SIGNATURE DOES NOT AUTHORISE: allocating in steady state.** The eight sites
+// are amortised growths on capacity-retaining lists, so a stabilised scene ticks without
+// allocating — and a fallible signature would say nothing the day a non-amortised site is
+// added. The property is MEASURED, not deduced: instrumented allocator, zero allocations in
+// steady state, on the C1.1 bench.
+
+/// Advance the simulation by one fixed step. See the contract above — the error is not a
+/// precaution, and what it leaves behind is specified.
+pub const Step = fn (f32) anyerror!void;
+
 // --- tests -------------------------------------------------------------------
 
 const std = @import("std");
@@ -106,6 +141,27 @@ test "the interface is NOT frozen: no protocol version is declared here" {
     try testing.expect(@hasDecl(@This(), "SetBodyTransform"));
     try testing.expect(@hasDecl(@This(), "MoveKinematic"));
     try testing.expect(@hasDecl(@This(), "SetAngularVelocity"));
+    try testing.expect(@hasDecl(@This(), "Step"));
+}
+
+test "step declares an error channel, and the three pose setters do not" {
+    // The two halves of the allocator/fallibility contract of `engine-tier-interfaces.md`
+    // §0, asserted against each other so neither can drift alone: `step` can allocate and
+    // says so; the three pose setters cannot and say so. The `void` half is CONDITIONAL on
+    // the moved-log uniqueness invariant (M1.1.15.1) — if that invariant falls, these
+    // signatures are what must change, and this test is what makes that visible.
+    const st = @typeInfo(Step).@"fn";
+    try testing.expect(@typeInfo(st.return_type.?) == .error_union);
+    try testing.expectEqual(void, @typeInfo(st.return_type.?).error_union.payload);
+    try testing.expectEqual(f32, st.params[0].type.?);
+
+    inline for (.{ SetBodyTransform, MoveKinematic, SetAngularVelocity }) |Entry| {
+        const info = @typeInfo(Entry).@"fn";
+        try testing.expectEqual(void, info.return_type.?);
+        inline for (info.params) |param| {
+            try testing.expect(param.type.? != std.mem.Allocator);
+        }
+    }
 }
 
 test "the three signatures are written at the world scalar, not at a literal f32" {

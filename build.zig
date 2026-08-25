@@ -173,6 +173,20 @@ pub fn build(b: *std.Build) void {
     forge_sync_module.addImport("forge_3d", forge_3d_module);
     forge_sync_module.addImport("foundation", foundation_module);
 
+    // M1.1.15.1 / gate C — `forge/module.zig`, the `Forge3DModule` adapter. Same import set
+    // as `forge_sync`: `weld_core` for `ModuleContext`, `weld_forge` for the frozen
+    // descriptor and query types, `forge_3d` for `PhysicsWorld` and the query family.
+    // `forge_3d` keeps its two-import discipline and never learns about the ECS.
+    const forge_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/module.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_module.addImport("weld_core", core_module);
+    forge_module.addImport("weld_forge", forge_api_module);
+    forge_module.addImport("forge_3d", forge_3d_module);
+    forge_module.addImport("foundation", foundation_module);
+
     // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
     // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.26. It holds
     // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
@@ -354,6 +368,8 @@ pub fn build(b: *std.Build) void {
     // `zig build test`; `zig build test-forge-3d` runs just these.
     const forge_sync_tests = b.addTest(.{ .root_module = forge_sync_module });
     test_step.dependOn(&b.addRunArtifact(forge_sync_tests).step);
+    const forge_module_tests = b.addTest(.{ .root_module = forge_module });
+    test_step.dependOn(&b.addRunArtifact(forge_module_tests).step);
 
     // M1.1.15 / gate E — the interface file's own tests: the attestation that no protocol
     // version is declared yet, and that the three signatures follow the world scalar.
@@ -596,6 +612,9 @@ pub fn build(b: *std.Build) void {
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
         .{ .path = "tests/physics/transform_sync_test.zig", .forge = true },
+        // M1.1.15.1 / gate C — `Forge3DModule`: the allocator/fallibility shape of the
+        // frozen surface, and the `step` failure contract of RD-3.
+        .{ .path = "tests/physics/forge_module_test.zig", .forge = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -839,6 +858,7 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("weld_forge", forge_api_module);
             t_mod.addImport("forge_3d", forge_3d_module);
             t_mod.addImport("forge_sync", forge_sync_module);
+            t_mod.addImport("forge_module", forge_module);
             t_mod.addImport("foundation", foundation_module);
         }
         if (spec.foundation) {

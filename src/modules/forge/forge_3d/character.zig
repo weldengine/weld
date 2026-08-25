@@ -1810,6 +1810,15 @@ pub const CharacterStore = struct {
             .radius = radius,
             .half_height = capsuleHalfHeight(f32, radius, height),
         } });
+        // DORMANT SINCE M1.1.15.1, AND KEPT DELIBERATELY — do not read it as dead code.
+        // `createShape` above is now the LAST fallible step of this function:
+        // `syncPresenceTo` became infallible when `Broadphase.update` stopped allocating, so
+        // no `try` remains below and this `errdefer` can no longer fire. It stays because the
+        // deletion test says so — remove it, and a fallible step added underneath leaks the
+        // new capsule with no diagnostic. It is a structural pairing with an allocation, not
+        // a runtime check making a claim, so it costs nothing while it does not fire. The
+        // occupied-volume `return false` below is NOT an error path and destroys the shape
+        // explicitly, which is why that one cannot rely on this.
         errdefer store.destroyShape(gpa, new_shape);
         const new_record = store.get(new_shape) orelse unreachable;
         const new_probe = shape_mod.supportShape(new_record);

@@ -845,6 +845,37 @@ pub const PhysicsWorld = struct {
     /// read-only — the force accumulators are constant for the whole tick and every
     /// substep reads them directly — and step 5 bis is the empty composite seam of
     /// §1.7.3, which costs nothing precisely because it has no call.
+    ///
+    /// **THE FAILURE CONTRACT — THE TICK IS NOT ATOMIC AND DOES NOT BECOME ATOMIC.**
+    /// Written at M1.1.15.1, when the error channel was made deliberate rather than
+    /// incidental; no document of the corpus carried this before, `engine-tier-interfaces.md`,
+    /// `engine-physics-solver.md` and `engine-physics-forge.md` all specifying that the tick
+    /// may fail and none saying what it leaves behind.
+    ///
+    /// An `error.OutOfMemory` out of this function leaves the world **UNSPECIFIED but NOT
+    /// CORRUPTED**. What holds is STRUCTURAL: no dangling index, no orphan proxy, no
+    /// retained pair naming a dead body — every registered body still resolves in the store
+    /// and through `proxyOf`. What does NOT hold is simulation semantics: some of the eleven
+    /// steps ran and others did not, and a partial tick is not a physical state.
+    ///
+    /// **The only permitted recovery is to stop ticking this world and `deinit` it.**
+    /// Replaying the tick, resuming at the next one, and publishing to the ECS afterwards
+    /// are CALLER ERRORS. Nothing here is written to make any of the three safe, and the
+    /// dirty marks of the moved log are one reason among several: proxies marked, and
+    /// `computePairs` never reached to clear them.
+    ///
+    /// **Seven of the eight allocation sites remain**, and they are why the channel exists:
+    /// pair generation, the retained candidate set, the constraint array, the island
+    /// partition, the warm-start cache, the sensor pass and the substep loop's harvest. The
+    /// eighth — step 10's proxy update — was closed by the moved-log reservation seam of
+    /// M1.1.15.1, and it is the only one an up-front reservation could close without
+    /// bounding the scene itself.
+    ///
+    /// **This signature does NOT authorise allocating in steady state.** The seven are
+    /// amortised growths on capacity-retaining lists; a stabilised scene ticks without
+    /// allocating, and that property is MEASURED under an instrumented allocator on the C1.1
+    /// bench rather than deduced from the signature — which would say nothing the day a
+    /// non-amortised site is added.
     pub fn step(self: *PhysicsWorld, gpa: std.mem.Allocator) !void {
         try self.stepBroadphasePairs(gpa); //   (1)
         try self.stepPairRetention(gpa); //     (2)

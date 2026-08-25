@@ -334,9 +334,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // four. ADDED, seven: the four uniqueness-invariant tests in broadphase_test, two
     // allocation-free/no-divergence tests in world_test, and the rewritten P1-1.
     // (1936 -> 1939, suite reported 1939 - 1920 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.1 gate C adds seven: five in the new `tests/physics/forge_module_test.zig`
+    // (the surface's allocator/fallibility shape, the void/fallible split, the owned-allocator
+    // lifecycle, the `step` failure sweep with its no-failure counter-factual, and the ECS
+    // publication guard), and two in `src/interfaces/PhysicsModule.zig` — one extended, one
+    // new for the `Step` contract. (1939 -> 1946, suite reported 1946 - 1927 passed + 19
+    // skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1937,
-        else => 1939,
+        .windows => 1944,
+        else => 1946,
     };
 }
 
