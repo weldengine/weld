@@ -679,12 +679,25 @@ test "createCharacter is transactional: no allocation failure leaves a live slot
         }
     }
 
-    // NON-VACUITY: the sweep has to have exercised at least one failure, otherwise it
-    // asserted nothing at all. Four allocations are structurally required — the shape store's
-    // slot metadata and its column, then the body manager's two — plus this store's own two,
-    // so the count cannot be zero and cannot be one.
-    try testing.expect(failing_indices >= 2);
-    // And it must have TERMINATED by succeeding, not by exhausting the loop bound.
+    // **EXACT, NOT A LOWER BOUND — and the difference is what makes this sweep able to see a
+    // SWALLOWED failure.** The loop's failure branch asserts that nothing was mutated, and
+    // that assertion is satisfied identically by a correct transaction and by a
+    // `createCharacter` that caught an `error.OutOfMemory` internally and then failed at the
+    // NEXT allocation: same error out, same empty stores. `std.testing.FailingAllocator` does
+    // not advance its index on a failure, so from `fail_index` onwards every allocation
+    // fails and a swallow is invisible to any "an error came out" oracle — the class
+    // measured at M1.1.15.1 / gate C, where a counter-factual on `stepAndPublish` passed
+    // twice against a deliberate swallow before an instrument that could express the
+    // question was written.
+    //
+    // What a swallow DOES change is the length of the failing prefix: the call would get
+    // through at an earlier index and the loop would break sooner. So the count is asserted
+    // EXACTLY. Six allocations, measured on both precisions: the shape store's slot metadata
+    // and its column, the body manager's two, and this store's own two. A lower bound of two
+    // let four of them disappear silently.
+    try testing.expectEqual(@as(u32, 6), failing_indices);
+    // And it TERMINATED by succeeding, not by exhausting the loop bound — implied by the
+    // equality above, kept because it names the other way this loop can end.
     try testing.expect(failing_indices < 64);
 }
 

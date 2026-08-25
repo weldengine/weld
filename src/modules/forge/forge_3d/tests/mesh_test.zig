@@ -313,9 +313,14 @@ test "createShape is transactional under OOM" {
 
         const result = store.createShape(gpa, oneTriangle());
         if (result) |_| {
-            // First index at which nothing failed: every earlier index exercised a real
-            // allocation point, so the sweep above was complete.
-            try testing.expect(failing_index > 0);
+            // **EXACT, NOT `> 0`, and for the reason the identical sweep in `character_test`
+            // now states: a loose bound cannot see a SWALLOWED failure.** The failure branch
+            // asserts `store.count() == 0`, which a correct transaction and a `createShape`
+            // that caught an OOM internally and failed at the next allocation both satisfy —
+            // `std.testing.FailingAllocator` never recovers, so "an error came out" is not an
+            // oracle for swallowing. What a swallow changes is WHERE the failing prefix ends:
+            // the call gets through earlier. Nine allocations, measured on both precisions.
+            try testing.expectEqual(@as(usize, 9), failing_index);
             try testing.expectEqual(@as(u32, 1), store.count());
             break;
         } else |err| {
