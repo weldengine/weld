@@ -285,6 +285,9 @@ pub const Forge3DModule = struct {
 
     pub fn overlapShape(self: *Forge3DModule, q: api.OverlapQuery, out: []EntityId) anyerror!u32 {
         const Filler = struct {
+            /// Frozen `anyerror!u32`: this entry CAN report, so it must.
+            const reports_allocation_failure = true;
+
             w: *PhysicsWorld,
             req: query.OverlapRequest,
             fn fill(f: @This(), buf: []BodyId) anyerror!u32 {
@@ -296,6 +299,10 @@ pub const Forge3DModule = struct {
 
     pub fn overlapAabb(self: *Forge3DModule, min: Vec3, max: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
         const Filler = struct {
+            /// Frozen bare `u32`: no channel, so an exhausted allocator degrades to a
+            /// correct prefix. See `stageBodies`.
+            const reports_allocation_failure = false;
+
             w: *PhysicsWorld,
             lo: Vec3r,
             hi: Vec3r,
@@ -317,6 +324,10 @@ pub const Forge3DModule = struct {
 
     pub fn pointQuery(self: *Forge3DModule, point: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
         const Filler = struct {
+            /// Frozen bare `u32`: no channel, so an exhausted allocator degrades to a
+            /// correct prefix. See `stageBodies`.
+            const reports_allocation_failure = false;
+
             w: *PhysicsWorld,
             p: Vec3r,
             f: query.Filter,
@@ -446,20 +457,37 @@ pub const Forge3DModule = struct {
         return n;
     }
 
-    /// A staging slice of `n` body handles: the stack below the floor, the reusable buffer
-    /// above it.
+    /// A staging slice of `n` body handles, PROPAGATING an allocation failure.
     ///
-    /// **Allocation failure returns a SHORTER slice rather than an error, and that is a
-    /// deliberate asymmetry.** Two of the three callers are frozen as bare `u32` with no
-    /// error channel, so the alternatives are to panic on memory pressure or to answer with
-    /// the largest correct prefix the floor allows. The prefix is correct — the solver's
-    /// retention key makes any prefix of its ordered answer the right prefix — and this is a
-    /// DEGRADATION UNDER EXHAUSTION, not a designed cap: it cannot fire on a healthy
-    /// allocator, where F2's 256 fired on every call.
-    fn stageBodies(self: *Forge3DModule, n: usize, stack: []BodyId) []BodyId {
+    /// The stack below the floor, the reusable buffer above it.
+    fn stageBodiesFallible(self: *Forge3DModule, n: usize, stack: []BodyId) ![]BodyId {
         if (n <= stack.len) return stack[0..n];
-        self.scratch_bodies.resize(self.gpa, n) catch return stack;
+        try self.scratch_bodies.resize(self.gpa, n);
         return self.scratch_bodies.items[0..n];
+    }
+
+    /// The same staging, ABSORBING an allocation failure into a shorter slice.
+    ///
+    /// **THE ENUMERATION IS FOUR CALLERS, THREE OF THEM BARE, and getting it wrong is what
+    /// made the earlier arbitration invalid.** This comment used to read "two of the three
+    /// callers are frozen as bare `u32`"; measured, the staging has FOUR callers —
+    /// `raycastAll`, `overlapAabb` and `pointQuery` are frozen `u32` with no channel, and
+    /// `overlapShape` is frozen `anyerror!u32` and therefore CAN report. An arbitration is
+    /// worth exactly what the enumeration of its scope is worth, and this one silently
+    /// swallowed an `OutOfMemory` on the one entry whose frozen signature declares it
+    /// transmissible.
+    ///
+    /// For the three bare entries the alternatives really are to panic on memory pressure or
+    /// to answer with the largest correct prefix the floor allows. The prefix IS correct —
+    /// any prefix of the solver's ordered answer is the right prefix — and this is a
+    /// DEGRADATION UNDER EXHAUSTION, not a designed cap: it cannot fire on a healthy
+    /// allocator, where the old 256 fired on every call. Whether three frozen signatures
+    /// SHOULD be unable to report an allocation failure is a contract decision that belongs
+    /// to M1.1.15.2, before its assert block, and is recorded there rather than settled here.
+    ///
+    /// `overlapShape` is the exception, and it reports.
+    fn stageBodies(self: *Forge3DModule, n: usize, stack: []BodyId) []BodyId {
+        return self.stageBodiesFallible(n, stack) catch stack;
     }
 
     /// Project bodies onto DEDUPLICATED entities, retaining under the §1.11.14 key.
@@ -480,7 +508,14 @@ pub const Forge3DModule = struct {
         var stack: [stack_hits]BodyId = undefined;
         var want: usize = out.len;
         while (true) {
-            const buf = self.stageBodies(want, &stack);
+            // ROUTED BY THE FILLER'S DECLARED CHANNEL, and declared per call site rather
+            // than inferred here — a single enumeration written in one place is exactly what
+            // was wrong before, and a `const` on each filler cannot drift from the signature
+            // it sits next to.
+            const buf = if (@TypeOf(filler).reports_allocation_failure)
+                try self.stageBodiesFallible(want, &stack)
+            else
+                self.stageBodies(want, &stack);
             const found = try filler.fill(buf);
             const n = self.dedupEntities(buf[0..found], out);
             if (n == out.len) return n; // the slice is full: exact
