@@ -358,9 +358,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // the frozen surface having no velocity getter), `addForce` against `addImpulse`,
     // `destroyShape` against a no-op, and `pointQuery` against `overlapAabb`.
     // (1956 -> 1961, suite reported 1961 - 1942 passed + 19 skipped, macOS aarch64.)
+    // H1 added one: the entity-major premise guarded in EVERY mode rather than by a
+    // `std.debug.assert` that ReleaseFast compiles to nothing.
+    // (1961 -> 1962, suite reported 1962 - 1943 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1959,
-        else => 1961,
+        .windows => 1960,
+        else => 1962,
     };
 }
 

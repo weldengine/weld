@@ -102,6 +102,11 @@ pub const Forge3DModule = struct {
     /// unavoidable. What IS avoidable — and was the F2 defect — is letting that step BOUND
     /// the answer. These grow on demand and are never shrunk, so a steady query load
     /// allocates once and then never again; below `stack_hits` they are not touched at all.
+    /// How many times the entity-major premise below was found VIOLATED. Observable so the
+    /// guard can be tested, and so a violation in the field is a number rather than a
+    /// silence. See `dedupEntities`.
+    unordered_projections: u32 = 0,
+
     scratch_bodies: std.ArrayListUnmanaged(BodyId) = .empty,
     scratch_hits: std.ArrayListUnmanaged(query.RayHit) = .empty,
 
@@ -438,16 +443,49 @@ pub const Forge3DModule = struct {
     /// `root.keyLess`, which is ENTITY-MAJOR with `BodyId` only as the final tie-break, so
     /// every body of one entity forms one contiguous run. The debug assertion below states
     /// that dependency where it is relied on rather than in a comment far from it.
-    fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) u32 {
+    /// **THE PREMISE IS GUARDED IN EVERY MODE, and a `std.debug.assert` could not do it.**
+    /// This function used to assert the entity-major order and nothing more. That assert is
+    /// compiled to NOTHING in ReleaseFast — the mode the C1.1 bench runs in and the mode a
+    /// game ships — so the guard was live in exactly the two matrix cells where its breach
+    /// costs nothing and absent in the one where it silently reproduces the defect F1 closed:
+    /// an entity returned twice, damage applied twice.
+    ///
+    /// And the premise is NOT this file's to keep. Entity-major order is a property of
+    /// `query/overlap.zig`'s `OverlapCollector.finish`; it can stop being true through a
+    /// change in ITS owner with nothing here moving, which is precisely the case a guard
+    /// exists for. The repository already applies this doctrine next door — `query/root.zig`
+    /// replaces a release-stripped class assert with an ACTIVE `probeAdmissible` check for
+    /// the same reason, in the same words.
+    ///
+    /// **The answer is never wrong, not even under a violated premise.** On detection the
+    /// function stops trusting adjacency and scans what it has already written — which is
+    /// exact, because everything written before the break was deduplicated adjacently over an
+    /// ordered run. Cost: one integer comparison per projected body on the fast path, inside
+    /// a loop that already performs one; and O(n^2) only on a path that is by construction
+    /// never taken.
+    ///
+    /// The violation is COUNTED rather than swallowed. Two of the three callers are frozen
+    /// bare `u32` and have nowhere to report it, so a counter is what makes "detected" true
+    /// rather than a word.
+    ///
+    /// Public for the guard's own test: the counter-factual has to feed this function an
+    /// order the solver will not produce, which no caller of the four entries can arrange.
+    pub fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) u32 {
         var n: u32 = 0;
+        var ordered = true;
         var have_last = false;
         var last: EntityId = undefined;
         for (bodies) |b| {
             const e = self.world.bm.entity(b) orelse continue;
-            if (have_last) {
-                if (std.meta.eql(e, last)) continue;
-                std.debug.assert(!query.keyLess(e, b, last, b)); // entity-major, non-decreasing
+            if (have_last and ordered and query.keyLess(e, b, last, b)) {
+                ordered = false;
+                self.unordered_projections +|= 1;
             }
+            const already = if (ordered)
+                have_last and std.meta.eql(e, last)
+            else
+                containsEntity(out[0..n], e);
+            if (already) continue;
             if (n >= out.len) break;
             out[n] = e;
             n += 1;
@@ -455,6 +493,15 @@ pub const Forge3DModule = struct {
             have_last = true;
         }
         return n;
+    }
+
+    /// Linear membership, reached only once the entity-major premise has been observed
+    /// broken. Its cost is the reason the fast path exists, not a reason to skip the check.
+    fn containsEntity(written: []const EntityId, e: EntityId) bool {
+        for (written) |w| {
+            if (std.meta.eql(w, e)) return true;
+        }
+        return false;
     }
 
     /// A staging slice of `n` body handles, PROPAGATING an allocation failure.

@@ -1086,3 +1086,39 @@ test "pointQuery tests the SOLID where overlapAabb tests the box" {
     // And it is not blind: a point genuinely inside the solid is found.
     try testing.expectEqual(@as(u32, 1), s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
 }
+
+test "the entity-major premise is guarded in every mode, and a breach yields no duplicate" {
+    // H1. Adjacent deduplication is correct ONLY under an entity-major order, and that order
+    // belongs to `query/overlap.zig`'s collector, not to the adapter. The premise used to be
+    // held by a `std.debug.assert`, which is compiled to nothing in ReleaseFast — live in the
+    // two matrix cells where a breach costs nothing, absent in the mode a game ships.
+    //
+    // No caller of the four entries can arrange a non-entity-major order, which is why this
+    // test drives `dedupEntities` directly with one.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const high_a = try s.place(5, 0);
+    const low = try s.place(3, 2);
+    const high_b = try s.place(5, 4);
+
+    var out: [8]EntityId = undefined;
+
+    // NON-VACUITY, in the other direction first: an ORDERED run must not trip the guard, or
+    // a counter that always fires would prove nothing below.
+    try testing.expectEqual(@as(u32, 2), s.m.dedupEntities(&.{ low, high_a }, &out));
+    try testing.expectEqual(@as(u32, 0), s.m.unordered_projections);
+
+    // THE BREACH: entity 5, then 3, then 5 again. Adjacent deduplication emits 5, 3, 5 —
+    // three entries, one of them a duplicate, which is the F1 defect reproduced through a
+    // premise rather than through the code.
+    const n = s.m.dedupEntities(&.{ high_a, low, high_b }, &out);
+    try testing.expectEqual(@as(u32, 2), n);
+    try testing.expect(s.m.unordered_projections >= 1);
+
+    // And the answer itself carries no duplicate — asserted on the SET, because a count of
+    // two would also be produced by dropping a distinct entity.
+    try testing.expectEqual(@as(u32, 5), out[0].index);
+    try testing.expectEqual(@as(u32, 3), out[1].index);
+}
