@@ -95,6 +95,16 @@ pub const Forge3DModule = struct {
     /// adapter moves the world with it.
     world: PhysicsWorld,
 
+    /// Reusable staging for the entries that fill a caller slice, ABOVE the stack floor.
+    ///
+    /// The solver family writes solver-scalar records and the frozen family reads
+    /// world-scalar ones, so the two cannot share a buffer and a staging step is
+    /// unavoidable. What IS avoidable — and was the F2 defect — is letting that step BOUND
+    /// the answer. These grow on demand and are never shrunk, so a steady query load
+    /// allocates once and then never again; below `stack_hits` they are not touched at all.
+    scratch_bodies: std.ArrayListUnmanaged(BodyId) = .empty,
+    scratch_hits: std.ArrayListUnmanaged(query.RayHit) = .empty,
+
     // --- Lifecycle ---
 
     /// Open a physics world for this module.
@@ -109,6 +119,8 @@ pub const Forge3DModule = struct {
     }
 
     pub fn deinit(self: *Forge3DModule) void {
+        self.scratch_bodies.deinit(self.gpa);
+        self.scratch_hits.deinit(self.gpa);
         self.world.deinit(self.gpa);
     }
 
@@ -241,13 +253,28 @@ pub const Forge3DModule = struct {
         return query.raycastAny(&self.world.bp, &self.world.bm, &self.world.store, rayQuery(q));
     }
 
-    /// Allocation-free on a caller-supplied slice: the count is the return value and `out`
-    /// is filled in place, so the entry needs no allocator even though it produces a list.
+    /// Fills the caller's slice, and **`out.len` is the only bound**.
+    ///
+    /// No deduplication here, deliberately: a `RaycastHit` carries `body` alongside
+    /// `entity` plus its own position, normal and distance, so two bodies of one entity are
+    /// two real hits and collapsing them would destroy information the caller was handed.
+    /// §1.11.14's mandatory deduplication governs the tier that DISCARDS the body — the
+    /// three `[]EntityId` entries — and this entry does not discard it.
+    ///
+    /// Staging above `stack_hits` uses the reusable buffer; if it cannot grow, the answer
+    /// degrades to the largest correct prefix rather than panicking, this entry being frozen
+    /// as a bare `u32`.
     pub fn raycastAll(self: *Forge3DModule, q: api.RaycastQuery, out: []api.RaycastHit) u32 {
-        var scratch: [max_hits]query.RayHit = undefined;
-        const n = @min(out.len, scratch.len);
-        const found = query.raycastAll(&self.world.bp, &self.world.bm, &self.world.store, rayQuery(q), scratch[0..n]);
-        for (0..found) |i| out[i] = rayHit(scratch[i]);
+        if (out.len == 0) return 0;
+        var stack: [stack_hits]query.RayHit = undefined;
+        const buf: []query.RayHit = if (out.len <= stack.len) blk: {
+            break :blk stack[0..out.len];
+        } else blk: {
+            self.scratch_hits.resize(self.gpa, out.len) catch break :blk stack[0..];
+            break :blk self.scratch_hits.items[0..out.len];
+        };
+        const found = query.raycastAll(&self.world.bp, &self.world.bm, &self.world.store, rayQuery(q), buf);
+        for (0..found) |i| out[i] = rayHit(buf[i]);
         return found;
     }
 
@@ -257,39 +284,51 @@ pub const Forge3DModule = struct {
     }
 
     pub fn overlapShape(self: *Forge3DModule, q: api.OverlapQuery, out: []EntityId) anyerror!u32 {
-        var scratch: [max_hits]BodyId = undefined;
-        const n = @min(out.len, scratch.len);
-        const found = try query.overlapShape(&self.world.bp, &self.world.bm, &self.world.store, overlapRequest(q), scratch[0..n]);
-        return self.entitiesOf(scratch[0..found], out);
+        const Filler = struct {
+            w: *PhysicsWorld,
+            req: query.OverlapRequest,
+            fn fill(f: @This(), buf: []BodyId) anyerror!u32 {
+                return query.overlapShape(&f.w.bp, &f.w.bm, &f.w.store, f.req, buf);
+            }
+        };
+        return self.collectEntities(out, Filler{ .w = &self.world, .req = overlapRequest(q) });
     }
 
     pub fn overlapAabb(self: *Forge3DModule, min: Vec3, max: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
-        var scratch: [max_hits]BodyId = undefined;
-        const n = @min(out.len, scratch.len);
-        const found = query.overlapAabb(
-            &self.world.bp,
-            &self.world.bm,
-            &self.world.store,
-            cross.vec3ToSolver(min),
-            cross.vec3ToSolver(max),
-            solverFilter(filter),
-            scratch[0..n],
-        );
-        return self.entitiesOf(scratch[0..found], out);
+        const Filler = struct {
+            w: *PhysicsWorld,
+            lo: Vec3r,
+            hi: Vec3r,
+            f: query.Filter,
+            /// `error{}` and not `anyerror`: this entry is frozen as a bare `u32`, and an
+            /// empty error set is what lets `collectEntities` be shared with the fallible
+            /// `overlapShape` without either of them lying about its channel.
+            fn fill(self_: @This(), buf: []BodyId) error{}!u32 {
+                return query.overlapAabb(&self_.w.bp, &self_.w.bm, &self_.w.store, self_.lo, self_.hi, self_.f, buf);
+            }
+        };
+        return self.collectEntities(out, Filler{
+            .w = &self.world,
+            .lo = cross.vec3ToSolver(min),
+            .hi = cross.vec3ToSolver(max),
+            .f = solverFilter(filter),
+        }) catch |e| switch (e) {};
     }
 
     pub fn pointQuery(self: *Forge3DModule, point: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
-        var scratch: [max_hits]BodyId = undefined;
-        const n = @min(out.len, scratch.len);
-        const found = query.pointQuery(
-            &self.world.bp,
-            &self.world.bm,
-            &self.world.store,
-            cross.vec3ToSolver(point),
-            solverFilter(filter),
-            scratch[0..n],
-        );
-        return self.entitiesOf(scratch[0..found], out);
+        const Filler = struct {
+            w: *PhysicsWorld,
+            p: Vec3r,
+            f: query.Filter,
+            fn fill(self_: @This(), buf: []BodyId) error{}!u32 {
+                return query.pointQuery(&self_.w.bp, &self_.w.bm, &self_.w.store, self_.p, self_.f, buf);
+            }
+        };
+        return self.collectEntities(out, Filler{
+            .w = &self.world,
+            .p = cross.vec3ToSolver(point),
+            .f = solverFilter(filter),
+        }) catch |e| switch (e) {};
     }
 
     pub fn closestPoint(self: *Forge3DModule, point: Vec3, max_distance: f32, filter: api.PhysicsQueryFilter) ?api.ClosestPointResult {
@@ -353,26 +392,102 @@ pub const Forge3DModule = struct {
 
     // --- helpers -------------------------------------------------------------
 
-    /// The staging bound for the entries that fill a caller slice. The solver family writes
-    /// solver-scalar records and the frozen family reads world-scalar ones, so the two
-    /// cannot share a buffer; this is the depth of the stack staging that joins them, and it
-    /// is a CAP on what one call returns, never a silent truncation — the entries take
-    /// `@min(out.len, scratch.len)` so the collector itself sees the smaller bound and
-    /// applies its own ordering to it.
-    const max_hits: usize = 256;
+    /// The staging depth held on the STACK, and the floor below which no query allocates.
+    ///
+    /// It is a floor, never a ceiling: F2 was exactly this constant used as `@min(out.len,
+    /// 256)`, which capped four public entries below the caller's own slice — a caller who
+    /// sized 512 and received 256 could not tell a truncated answer from a scene that really
+    /// held 256. The frozen interface declares `out.len` as the ONLY bound.
+    pub const stack_hits: usize = 256;
 
-    /// Body handles to their entities, deduplicated is NOT performed here: the solver
-    /// family already returns one entry per body under the §1.11.14 key, and collapsing to
-    /// entities is the service's job at M1.1.15.2, which is where the corpus puts
-    /// entity-level deduplication.
-    fn entitiesOf(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) u32 {
+    /// Kept for the tests that assert the cap is gone. Same value, and the name says what it
+    /// now is.
+    pub const max_hits: usize = stack_hits;
+
+    /// Body handles to their entities, DEDUPLICATED, writing at most `out.len`.
+    ///
+    /// **The deduplication is MANDATORY here and nowhere else.**
+    /// `engine-physics-queries.md` §1.11.14: *"No deduplication in the solver. The solver's
+    /// identity is the body; it returns bodies. Deduplication belongs to the tier that
+    /// PROJECTS BODIES ONTO ENTITIES and is MANDATORY there: an entity returned twice by an
+    /// overlap would translate into damage applied twice."* The frozen signatures of
+    /// `overlapShape`, `overlapAabb` and `pointQuery` return `[]EntityId`, so this function
+    /// IS that tier. Deferring it to the Tier 1 service would defer it to a caller that
+    /// receives entities already projected — nothing would ever deduplicate.
+    ///
+    /// **`raycastAll` is NOT in this class, and the distinction is the body identity.** Its
+    /// frozen result is `[]RaycastHit`, and a hit carries `body` alongside `entity` plus its
+    /// own position, normal and distance. Nothing is projected away, so two bodies of one
+    /// entity are two real hits and collapsing them would DESTROY information the caller was
+    /// handed. §1.11.14's damage-applied-twice argument is about the tier that discards the
+    /// body; this one does not discard it.
+    ///
+    /// **ADJACENT deduplication is exact here, and that is a property of the solver's key,
+    /// not an approximation.** `query/overlap.zig`'s `OverlapCollector.finish` sorts on
+    /// `root.keyLess`, which is ENTITY-MAJOR with `BodyId` only as the final tie-break, so
+    /// every body of one entity forms one contiguous run. The debug assertion below states
+    /// that dependency where it is relied on rather than in a comment far from it.
+    fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) u32 {
         var n: u32 = 0;
+        var have_last = false;
+        var last: EntityId = undefined;
         for (bodies) |b| {
+            const e = self.world.bm.entity(b) orelse continue;
+            if (have_last) {
+                if (std.meta.eql(e, last)) continue;
+                std.debug.assert(!query.keyLess(e, b, last, b)); // entity-major, non-decreasing
+            }
             if (n >= out.len) break;
-            out[n] = self.world.bm.entity(b) orelse continue;
+            out[n] = e;
             n += 1;
+            last = e;
+            have_last = true;
         }
         return n;
+    }
+
+    /// A staging slice of `n` body handles: the stack below the floor, the reusable buffer
+    /// above it.
+    ///
+    /// **Allocation failure returns a SHORTER slice rather than an error, and that is a
+    /// deliberate asymmetry.** Two of the three callers are frozen as bare `u32` with no
+    /// error channel, so the alternatives are to panic on memory pressure or to answer with
+    /// the largest correct prefix the floor allows. The prefix is correct — the solver's
+    /// retention key makes any prefix of its ordered answer the right prefix — and this is a
+    /// DEGRADATION UNDER EXHAUSTION, not a designed cap: it cannot fire on a healthy
+    /// allocator, where F2's 256 fired on every call.
+    fn stageBodies(self: *Forge3DModule, n: usize, stack: []BodyId) []BodyId {
+        if (n <= stack.len) return stack[0..n];
+        self.scratch_bodies.resize(self.gpa, n) catch return stack;
+        return self.scratch_bodies.items[0..n];
+    }
+
+    /// Project bodies onto DEDUPLICATED entities, retaining under the §1.11.14 key.
+    ///
+    /// **Retention is on the entity set and never on the bodies, which is why this is a
+    /// LOOP and not one call.** Collecting `out.len` bodies and collapsing them afterwards
+    /// under-fills the slice and evicts unique entities that were entitled to it: with the
+    /// entity-major key, one entity holding three bodies consumes three of four slots and
+    /// the answer names two entities where four exist. So when duplicates eat the budget and
+    /// the solver was saturated, the staging DOUBLES and the query runs again.
+    ///
+    /// Termination: `want` doubles and the world holds finitely many bodies, so the
+    /// `found < buf.len` exit — the solver was not saturated, hence exhaustive — is reached.
+    /// The loop also exits the moment the slice is full, which is the common case and costs
+    /// exactly one query.
+    fn collectEntities(self: *Forge3DModule, out: []EntityId, filler: anytype) !u32 {
+        if (out.len == 0) return 0;
+        var stack: [stack_hits]BodyId = undefined;
+        var want: usize = out.len;
+        while (true) {
+            const buf = self.stageBodies(want, &stack);
+            const found = try filler.fill(buf);
+            const n = self.dedupEntities(buf[0..found], out);
+            if (n == out.len) return n; // the slice is full: exact
+            if (found < buf.len) return n; // the solver was not saturated: exhaustive
+            if (buf.len < want) return n; // the staging could not grow: degraded prefix
+            want = buf.len * 2;
+        }
     }
 
     fn solverFilter(f: api.PhysicsQueryFilter) query.Filter {
