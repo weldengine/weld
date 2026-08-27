@@ -345,9 +345,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // agreement between the index and the registration list — and one in
     // `tests/physics/transform_sync_test.zig` for the publication order the index must not
     // touch. (1946 -> 1949, suite reported 1949 - 1930 passed + 19 skipped, macOS aarch64.)
+    // THE M1.1.15.1 REOPENING (F1/F2/F3) added seven to `tests/physics/forge_module_test.zig`:
+    // three that pin the two defects the external review named — deduplication at the
+    // projecting tier, retention on the entity set, and the absence of a staging cap — and
+    // four that take the rest of the adapter's surface from signature to behaviour, the
+    // class sweep having measured 9 behaviour-asserted entries against 19 that were not.
+    // (1949 -> 1956, suite reported 1956 - 1937 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1947,
-        else => 1949,
+        .windows => 1954,
+        else => 1956,
     };
 }
 

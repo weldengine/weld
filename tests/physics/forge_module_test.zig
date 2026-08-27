@@ -482,3 +482,332 @@ test "a failed step propagates, and the ECS publication does not run after it" {
         std.mem.asBytes(&ecs.get(Transform, entity).?.pos),
     ));
 }
+
+// --- the surface's BEHAVIOUR -------------------------------------------------
+//
+// **THE HALF THAT WAS MISSING, AND ITS ABSENCE IS THE CAUSE OF F1 AND F2.** Everything
+// above asserts that the twenty-eight entries EXIST and have the declared shape. Not one of
+// them asserts what an entry ANSWERS. Two defects lived in exactly that gap: `entitiesOf`
+// projected bodies onto entities without deduplicating, which
+// `engine-physics-queries.md` §1.11.14 makes MANDATORY at the projecting tier, and a
+// private staging bound of 256 capped four public entries below the caller's own slice.
+// Both are invisible to a signature walk, and both are visible to the first call that
+// carries a duplicate or asks for more than 256.
+//
+// The scene below therefore carries TWO bodies on ONE entity and hands out slices WIDER
+// than the staging.
+
+/// A module with a scene, driven only through `Forge3DModule` — never through
+/// `PhysicsWorld` underneath it. Reaching past the adapter would test the solver again,
+/// which is already tested, and would leave the adapter's own projection unexercised, which
+/// is the whole point.
+const Scene = struct {
+    fx: *Fixture,
+    m: Forge3DModule,
+    unit_box: api.ShapeId,
+
+    fn init(gpa: std.mem.Allocator) !Scene {
+        const fx = try Fixture.init(gpa);
+        var m = try Forge3DModule.init(&fx.ctx);
+        const unit_box = try m.createShape(.{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        return .{ .fx = fx, .m = m, .unit_box = unit_box };
+    }
+
+    fn deinit(self: *Scene, gpa: std.mem.Allocator) void {
+        self.m.deinit();
+        self.fx.deinit(gpa);
+    }
+
+    /// A static box at `x` owned by `entity`. Static so nothing moves and every query below
+    /// answers about placement rather than about simulation.
+    fn place(self: *Scene, entity: u32, x: f32) !api.BodyId {
+        return self.m.addBody(.{
+            .entity = .{ .index = entity, .generation = 0 },
+            .body_type = .static,
+            .shape = self.unit_box,
+            .position = av3(x, 0, 0),
+        });
+    }
+};
+
+/// Wider than `Forge3DModule.max_hits`, so a staging bound below the caller's slice shows up as a
+/// short answer instead of hiding behind it.
+const wide: usize = 512;
+
+test "the three entity-projecting entries deduplicate: one entity, two bodies, one answer" {
+    // §1.11.14: "No deduplication in the solver. The solver's identity is the BODY; it
+    // returns bodies. Deduplication belongs to the tier that PROJECTS BODIES ONTO ENTITIES
+    // and is MANDATORY there: an entity returned twice by an overlap would translate into
+    // damage applied twice." The frozen signatures return `[]EntityId`, so THIS is that
+    // tier and the obligation is this file's to check.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // ONE entity, TWO bodies, both inside every probe below.
+    _ = try s.place(7, -0.2);
+    _ = try s.place(7, 0.2);
+
+    var out: [wide]EntityId = undefined;
+
+    // NON-VACUITY FIRST: the probe really reaches both bodies. Without this, a `1` below
+    // would be indistinguishable from a probe that found a single body.
+    const solver_bodies = s.m.world.bodies.items.len;
+    try testing.expectEqual(@as(usize, 2), solver_bodies);
+
+    const by_box = s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out);
+    try testing.expectEqual(@as(u32, 1), by_box);
+    try testing.expectEqual(@as(u32, 7), out[0].index);
+
+    const by_point = s.m.pointQuery(av3(-0.2, 0, 0), .{}, &out);
+    try testing.expectEqual(@as(u32, 1), by_point);
+
+    const by_shape = try s.m.overlapShape(.{ .shape = s.unit_box, .position = av3(0, 0, 0) }, &out);
+    try testing.expectEqual(@as(u32, 1), by_shape);
+}
+
+test "retention is on the deduplicated entity set, not on the bodies" {
+    // THE SECOND-ORDER DEFECT, and the one a naive fix reproduces. Deduplicating AFTER the
+    // truncation cannot be right: collecting `out.len` BODIES and then collapsing them
+    // under-fills the slice and evicts unique entities that were entitled to it. The
+    // ordering key is entity-major, so entity 1's three bodies come first — a
+    // four-body collection sees {1,1,1,2} and answers two entities where four exist.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.place(1, -0.30);
+    _ = try s.place(1, -0.10);
+    _ = try s.place(1, 0.10);
+    _ = try s.place(2, 2.0);
+    _ = try s.place(3, 4.0);
+    _ = try s.place(4, 6.0);
+
+    var out: [4]EntityId = undefined;
+    const n = s.m.overlapAabb(av3(-10, -2, -2), av3(10, 2, 2), .{}, &out);
+
+    // Four distinct entities exist inside the box and four slots were offered.
+    try testing.expectEqual(@as(u32, 4), n);
+    for (out, [_]u32{ 1, 2, 3, 4 }) |got, want| try testing.expectEqual(want, got.index);
+}
+
+test "no entry caps its answer below the caller's slice" {
+    // A private staging depth is an implementation detail; the caller sized `out` and the
+    // frozen interface declares `out.len` as the only bound. 400 real hits into a slice of
+    // 512 must answer 400 — a `256` here is indistinguishable, to the caller, from a scene
+    // that really held 256.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const n_bodies: u32 = 400;
+    try testing.expect(n_bodies > Forge3DModule.max_hits); // the probe must exceed the staging
+    for (0..n_bodies) |i| _ = try s.place(@intCast(i + 1), @as(f32, @floatFromInt(i)) * 2.0);
+
+    var out: [wide]EntityId = undefined;
+    try testing.expect(out.len > n_bodies); // the slice must not be the limit either
+
+    const by_box = s.m.overlapAabb(av3(-2, -2, -2), av3(900, 2, 2), .{}, &out);
+    try testing.expectEqual(n_bodies, by_box);
+
+    // THE PROBE IS CUBIC ON PURPOSE, and the first version of this test was not.
+    // A 1000 x 2 x 2 box is a 500:1 aspect ratio, which is past the ~30:1 the GJK path is
+    // documented reliable to for radius-0 box cores. Measured, same 400 bodies and the same
+    // query with only the probe's shape changed: 500:1 answers 265, 1:1 answers 400. That is
+    // the known narrowphase limit and NOT the staging under test, so the probe is chosen to
+    // stay inside it — a test that cannot tell its own subject from a neighbouring limit
+    // measures neither.
+    const by_shape = try s.m.overlapShape(
+        .{ .shape = try s.m.createShape(.{ .box = .{ .half_extents = av3(500, 500, 500) } }), .position = av3(400, 0, 0) },
+        &out,
+    );
+    try testing.expectEqual(n_bodies, by_shape);
+
+    var hits: [wide]api.RaycastHit = undefined;
+    const by_ray = s.m.raycastAll(.{
+        .origin = av3(-10, 0, 0),
+        .direction = av3(1, 0, 0),
+        .max_distance = 2000,
+    }, &hits);
+    try testing.expectEqual(n_bodies, by_ray);
+}
+
+// --- the class sweep ---------------------------------------------------------
+//
+// **F1 AND F2 ARE NOT TWO DEFECTS, THEY ARE THE FIRST TWO OF NINETEEN.** Classified by
+// reading the file rather than by grepping it, the twenty-eight entries stood at 9
+// behaviour-asserted, 8 called with their answer never asserted, and 11 never called at
+// all. Fixing the two named instances and stopping would have left seventeen entries whose
+// only guarantee is that they compile — which is how the two named ones got through in the
+// first place. The tests below take the remaining surface to behaviour.
+//
+// What stays deliberately un-asserted is named at each site, so a reader can see the
+// residual instead of inferring coverage from the absence of a gap.
+
+test "the read-back mutators move what they claim to move" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const e = api.EntityId{ .index = 1, .generation = 0 };
+    const body = try s.m.addBody(.{
+        .entity = e,
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+
+    // setLinearVelocity — called by the lifecycle test and never read back. A body given
+    // +X velocity and no gravity must be further along +X after a tick, and the SIGN is
+    // what discriminates: an entry that dropped the write leaves it at the origin.
+    s.m.setLinearVelocity(body, av3(3, 0, 0));
+    try s.m.step(fixed_dt);
+    const after_v = s.m.getBodyTransform(body).position.toArray()[0];
+    try testing.expect(after_v > 0.01);
+
+    // addImpulse — an immediate velocity change, so the NEXT tick must travel further than
+    // the previous one did. Asserted as a comparison and not against a constant, which
+    // keeps the check independent of the timestep.
+    s.m.addImpulse(body, av3(6, 0, 0));
+    try s.m.step(fixed_dt);
+    const after_i = s.m.getBodyTransform(body).position.toArray()[0];
+    try testing.expect(after_i - after_v > after_v);
+
+    // setAngularVelocity — never called anywhere before this. There is no angular getter on
+    // the frozen surface, so the observable is the ORIENTATION after a tick.
+    const before_rot = s.m.getBodyTransform(body).rotation;
+    s.m.setAngularVelocity(body, av3(0, 8, 0));
+    try s.m.step(fixed_dt);
+    const after_rot = s.m.getBodyTransform(body).rotation;
+    try testing.expect(!std.meta.eql(before_rot, after_rot));
+
+    // moveKinematic — never called before. It DERIVES both velocities from a target pose
+    // over dt, where `setBodyTransform` teleports and derives nothing; the split is
+    // contractual, so the test drives a kinematic body to a target and checks it arrived.
+    const plate = try s.m.addBody(.{
+        .entity = .{ .index = 2, .generation = 0 },
+        .body_type = .kinematic,
+        .shape = s.unit_box,
+        .position = av3(0, -5, 0),
+    });
+    s.m.moveKinematic(plate, av3(0, -5, 4), foundation.math.Quatf.identity, fixed_dt);
+    try s.m.step(fixed_dt);
+    try testing.expect(s.m.getBodyTransform(plate).position.toArray()[2] > 0.01);
+
+    // removeBody — called before and never observed. After it, no query finds the body.
+    var out: [8]EntityId = undefined;
+    try testing.expect(s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out) >= 2);
+    s.m.removeBody(plate);
+    s.m.removeBody(body);
+    try testing.expectEqual(@as(u32, 0), s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out));
+}
+
+test "the four single-result query entries answer about the scene" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.place(11, 5.0);
+
+    const q = api.RaycastQuery{ .origin = av3(-5, 0, 0), .direction = av3(1, 0, 0), .max_distance = 100 };
+
+    // raycast — never called before. Asserted on the ENTITY and on the DISTANCE, because a
+    // projection defect of the F1 family would show up in the first and a scalar-crossing
+    // defect in the second. The box spans [4.5, 5.5], so the near face is at 9.5 from -5.
+    const hit = s.m.raycast(q) orelse return error.ExpectedHit;
+    try testing.expectEqual(@as(u32, 11), hit.entity.index);
+    try testing.expectApproxEqAbs(@as(f32, 9.5), hit.distance, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 4.5), hit.position.toArray()[0], 1e-3);
+
+    // raycastAny — both verdicts, because a stub returning `true` unconditionally passes a
+    // one-sided check.
+    try testing.expect(s.m.raycastAny(q));
+    try testing.expect(!s.m.raycastAny(.{ .origin = av3(-5, 40, 0), .direction = av3(1, 0, 0), .max_distance = 100 }));
+
+    // shapeCast — never called before. A unit box swept along +X meets the target's near
+    // face half its own extent early, so the time of impact is 9.0 and not 9.5; that
+    // difference is what distinguishes a real cast from a raycast wearing its name.
+    const cast = (try s.m.shapeCast(.{
+        .shape = s.unit_box,
+        .origin = av3(-5, 0, 0),
+        .direction = av3(1, 0, 0),
+        .max_distance = 100,
+    })) orelse return error.ExpectedHit;
+    try testing.expectEqual(@as(u32, 11), cast.entity.index);
+    try testing.expectApproxEqAbs(@as(f32, 9.0), cast.distance, 1e-3);
+
+    // closestPoint — never called before. Distance to the SURFACE, so 3.5 from x = 1 and
+    // not 4.0 to the centre.
+    const near = s.m.closestPoint(av3(1, 0, 0), 100, .{}) orelse return error.ExpectedHit;
+    try testing.expectEqual(@as(u32, 11), near.entity.index);
+    try testing.expectApproxEqAbs(@as(f32, 3.5), near.distance, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 4.5), near.position.toArray()[0], 1e-3);
+
+    // And the negative: out of range answers nothing rather than answering the far thing.
+    try testing.expect(s.m.closestPoint(av3(1, 0, 0), 1.0, .{}) == null);
+}
+
+test "the character entries move and report a ground" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // A floor to stand on, so `moveCharacter` has a ground to report and the result is not
+    // vacuously `.in_air`.
+    const floor = try s.m.createShape(.{ .box = .{ .half_extents = av3(20, 0.5, 20) } });
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 90, .generation = 0 },
+        .body_type = .static,
+        .shape = floor,
+        .position = av3(0, -0.5, 0),
+    });
+
+    const hero = try s.m.createCharacter(.{
+        .entity = .{ .index = 91, .generation = 0 },
+        .position = av3(0, 0, 0),
+        .radius = 0.3,
+        .height = 1.6,
+    });
+
+    // setCharacterPosition — called by the lifecycle test and never observed. The presence
+    // body is the observable the frozen surface offers.
+    s.m.setCharacterPosition(hero, av3(2, 0, 0));
+    const inner = (try s.m.getCharacterInnerBody(hero)) orelse return error.ExpectedPresence;
+    try testing.expectApproxEqAbs(@as(f32, 2), s.m.getBodyTransform(inner).position.toArray()[0], 1e-3);
+
+    // moveCharacter — never called before. Asserted on BOTH halves of its result: the
+    // position advanced, and the ground was found. A stub returning a zeroed result passes
+    // neither.
+    const r = try s.m.moveCharacter(hero, av3(0.5, 0, 0), fixed_dt);
+    try testing.expect(r.position.toArray()[0] > 2.01);
+    try testing.expectEqual(api.GroundState.grounded, r.ground_state);
+    try testing.expectEqual(@as(u32, 90), r.ground_entity.index);
+    try testing.expectApproxEqAbs(@as(f32, 1), r.ground_normal.toArray()[1], 1e-3);
+
+    // destroyCharacter — called before and never observed. After it the handle is dead, and
+    // the entry that reads it says so rather than answering about a stale presence.
+    s.m.destroyCharacter(hero);
+    try testing.expect(s.m.getCharacterInnerBody(hero) catch null == null);
+}
+
+test "pointQuery does not cap either, and deduplicates at the same time" {
+    // The fourth entry of the capped family, and the one the line scene above cannot reach:
+    // a point lies inside one body of a row. Four hundred CO-LOCATED boxes put it inside all
+    // of them at once, which exercises the cap and the deduplication on the same call.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const distinct: u32 = 400;
+    for (0..distinct) |i| _ = try s.place(@intCast(i + 1), 0);
+    // ...plus a second body on an entity that already has one, so the answer is the number
+    // of ENTITIES and not the number of bodies.
+    _ = try s.place(1, 0);
+    try testing.expectEqual(@as(usize, distinct + 1), s.m.world.bodies.items.len);
+
+    var out: [wide]EntityId = undefined;
+    try testing.expect(out.len > distinct);
+    try testing.expectEqual(distinct, s.m.pointQuery(av3(0, 0, 0), .{}, &out));
+}
