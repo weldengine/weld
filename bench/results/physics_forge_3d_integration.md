@@ -9,7 +9,8 @@ tense. `bench/forge_3d_raycast.zig` and `bench/forge_3d_shapecast.zig` do reach 
 but they interrogate a **static** scene — they never tick. So C1.1's figures were neither met
 nor refuted: they were not measured, which is not the same thing.
 
-Two targets are **GATED**, so this step fails rather than reports. One shape is **REPORTED**.
+Two targets are **GATED**, so this step fails rather than reports — frame time on the **p99**
+(see below for why not the median) and zero allocation in steady state. One shape is **REPORTED**.
 
 ## Method, stated before the figures
 
@@ -35,14 +36,30 @@ its contact set, so structural convergence would measure the fall rather than th
 
 ## Gated results — 1 000 dynamic + 10 000 static, 60 Hz, f32
 
-| Mode | median / frame | max / frame | budget | margin | awake dyn | steady allocations |
-|---|---|---|---|---|---|---|
-| ReleaseFast | **2.001 ms** | 2.370 ms | 16.6 ms | **8.3×** | 1000 / 1000 | **0** |
-| ReleaseSafe | **2.436 ms** | 7.873 ms | 16.6 ms | **6.8×** | 1000 / 1000 | **0** |
+**The gated statistic is the p99, not the median.** The brief says "frame time <= 16.6 ms" with
+no statistic, and the first version of this instrument settled that silently on the median — the
+permissive reading. A 60 Hz frame budget is a real-time constraint: one frame in a hundred at
+20 ms is a visible hitch, and a median never sees it. Nearest rank, stated rather than left to a
+library convention: `ceil(0.99 x 240) - 1 = 237` zero-based, the **third-worst frame** of the
+window.
 
-Steady state opened at frame 31 in both. P = 8 809 retained pairs, 1 000 constraints. The
-anti-DCE checksum is `-3660009.420159` and is **identical in the two modes**, so the two rows
-measure the same simulation and not two different ones.
+Steady state opened at frame 31 in every run. P = 8 809 retained pairs, 1 000 constraints,
+1 000 awake dynamic bodies of 11 000 total, **zero allocation attempts in steady state**.
+
+| Mode | median | **p99 (gated)** | max | budget | margin on p99 |
+|---|---|---|---|---|---|
+| ReleaseFast | 2.028–2.144 ms | **2.113–3.576 ms** | 2.235–4.589 ms | 16.6 ms | **4.6x** worst observed |
+| ReleaseSafe | 2.152–2.436 ms | **2.253–5.467 ms** | 2.275–7.873 ms | 16.6 ms | **3.0x** worst observed |
+
+Ranges over five runs per mode, and they are reported as ranges because **the tail is machine
+noise, not engine variance** — a fact that argues both ways and is therefore worth stating
+plainly. Across those runs the median moved by 6 %, the p99 by up to 2.4x, and the max by up to
+3.5x, on identical code and an identical scene; the anti-DCE checksum is bit-identical
+throughout, ReleaseFast and ReleaseSafe alike, so the simulation is the same one every time.
+Gating on the p99 therefore buys sensitivity to hitches and **costs stability**, and the margin
+claim above is deliberately stated on the WORST p99 observed rather than on a best or a mean.
+The median is the most stable statistic and the least informative; the max is the most
+informative and the least stable.
 
 ## Retention shape of step 2 — reported, not gated
 
@@ -87,13 +104,14 @@ assigns it by name: "*`build`'s per-tick deferred-index buffer is the one alloca
 build path and moves to the orchestrator's scratch*". **This bench is the first measurement of
 it.** It is left where its owner put it; what is new here is the number.
 
-## Non-vacuity — the four guards were each made to fail
+## Non-vacuity — every guard was made to fail
 
 An instrument that has never failed is not known to be able to.
 
 | Counter-factual | Result |
 |---|---|
-| budget lowered to 1 ms | `GATE FAILED: median frame 2160000 ns exceeds … 1000000 ns`, exit 1 |
+| **three 20 ms hitches injected, budget UNCHANGED at 16.6 ms** | `GATE FAILED: p99 frame 20000000 ns exceeds … 16600000 ns (median 2050000, max 20000000)`, exit 1. **This is the discriminating one**: the median of that same run is 2.050 ms and clears the budget by 8x, so a median gate would have passed a run containing three visible hitches. No threshold was tuned to obtain it |
+| budget lowered below the measured p99 | `GATE FAILED: … exceeds …`, exit 1 |
 | one 8-byte allocation injected per measured frame | `GATE FAILED: 240 allocation attempts in steady state`, exit 1 — **exactly 240 for 240 frames**, so the counter is exact and not approximate |
 | gated scene allowed to sleep | `GATE FAILED: only 0 of 1000 dynamic bodies awake` **and** `5280 allocation attempts` — two independent gates, exit 1 |
 | warm-up bound cut to 5 frames | `error: SceneNeverConverged`, exit 1 — a scene that does not converge is refused, never measured |

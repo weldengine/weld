@@ -9,7 +9,13 @@
 //!
 //! **WHAT IS GATED, and what is only reported.**
 //!
-//!   - GATED: frame time `<= 16.6 ms` at 1 000 dynamic + 10 000 static bodies, 60 Hz.
+//!   - GATED: frame time `<= 16.6 ms` at 1 000 dynamic + 10 000 static bodies, 60 Hz, **on
+//!     the p99 and not on the median**. The brief says "frame time <= 16.6 ms" with no
+//!     statistic, and the first version of this bench settled that silently on the median —
+//!     the permissive reading. A 60 Hz frame budget is a REAL-TIME constraint: one frame in a
+//!     hundred at 20 ms is a visible hitch, and a median never sees it. The median and the
+//!     max are reported beside the gated figure, so the shape of the tail stays readable
+//!     rather than being reduced to the one number the gate stands on.
 //!   - GATED: **zero allocations in steady state**, under an instrumented allocator. This
 //!     one is DUE because `step` became `anyerror!void` at M1.1.15.1 over eight measured
 //!     allocation sites: a fallible signature with no such measurement would silently
@@ -266,6 +272,8 @@ const Run = struct {
     steady_resizes: usize,
     steady_remaps: usize,
     median_ns: i64,
+    /// **THE GATED STATISTIC.** See the file header on why it is not the median.
+    p99_ns: i64,
     max_ns: i64,
     /// A checksum over the poses, so the optimiser cannot elide the simulation.
     checksum: f64,
@@ -346,6 +354,12 @@ fn run(gpa: std.mem.Allocator, n_floor: usize, n_far: usize, allow_sleeping: boo
     std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
     var max_ns: i64 = 0;
     for (samples) |v| max_ns = @max(max_ns, v);
+    // Nearest-rank p99 on the sorted window: the smallest sample at or above the 99th
+    // percentile, `ceil(0.99 * n) - 1` zero-based. Over 240 frames that is index 237 — the
+    // third-worst frame. Stated rather than left to a library convention, because the several
+    // interpolating definitions disagree by a rank or two at this window size and the reader
+    // is entitled to know which frame the gate is standing on.
+    const rank: usize = (measure_frames * 99 + 99) / 100 - 1;
 
     return .{
         .n_bodies = n_bodies,
@@ -363,6 +377,7 @@ fn run(gpa: std.mem.Allocator, n_floor: usize, n_far: usize, allow_sleeping: boo
         .steady_resizes = counting.resizes - warm_resizes,
         .steady_remaps = counting.remaps - warm_remaps,
         .median_ns = samples[measure_frames / 2],
+        .p99_ns = samples[rank],
         .max_ns = max_ns,
         .checksum = checksum,
     };
@@ -432,8 +447,10 @@ pub fn main(init: std.process.Init) !void {
 
     // --- the two gates ---
     var failed = false;
-    if (gated.median_ns > frame_budget_ns) {
-        std.debug.print("\nGATE FAILED: median frame {d} ns exceeds the 60 Hz budget of {d} ns\n", .{ gated.median_ns, frame_budget_ns });
+    if (gated.p99_ns > frame_budget_ns) {
+        std.debug.print("\nGATE FAILED: p99 frame {d} ns exceeds the 60 Hz budget of {d} ns (median {d}, max {d})\n", .{
+            gated.p99_ns, frame_budget_ns, gated.median_ns, gated.max_ns,
+        });
         failed = true;
     }
     if (gated.allocs_steady != 0) {
@@ -451,22 +468,23 @@ pub fn main(init: std.process.Init) !void {
         failed = true;
     }
     if (failed) return error.BenchGateFailed;
-    std.debug.print("\n  both gates PASS, on {d} awake dynamic bodies of {d} total.\n", .{
-        gated.awake_min, gated.n_bodies,
+    std.debug.print("\n  both gates PASS (p99 {d} ns of a {d} ns budget), on {d} awake dynamic\n" ++
+        "  bodies of {d} total.\n", .{
+        gated.p99_ns, frame_budget_ns, gated.awake_min, gated.n_bodies,
     });
 }
 
 fn printRun(label: []const u8, r: Run) void {
     std.debug.print(
         "  {s}: N={d} (floor {d} + far {d}) steady_from=frame {d} P={d} constraints={d}\n" ++
-            "      awake dyn/frame {d}..{d} of {d}  median={d} ns max={d} ns\n" ++
+            "      awake dyn/frame {d}..{d} of {d}  median={d} ns p99={d} ns max={d} ns\n" ++
             "      allocs warmup={d} steady={d} (alloc {d} / resize {d} / remap {d})\n",
         .{
-            label,           r.n_bodies,        r.n_floor,       r.n_far,
-            r.steady_from,   r.pairs,           r.constraints,   r.awake_min,
-            r.awake_max,     r.n_dynamic_built, r.median_ns,     r.max_ns,
-            r.allocs_warmup, r.allocs_steady,   r.steady_allocs, r.steady_resizes,
-            r.steady_remaps,
+            label,            r.n_bodies,        r.n_floor,       r.n_far,
+            r.steady_from,    r.pairs,           r.constraints,   r.awake_min,
+            r.awake_max,      r.n_dynamic_built, r.median_ns,     r.p99_ns,
+            r.max_ns,         r.allocs_warmup,   r.allocs_steady, r.steady_allocs,
+            r.steady_resizes, r.steady_remaps,
         },
     );
 }
