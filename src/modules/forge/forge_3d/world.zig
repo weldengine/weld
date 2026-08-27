@@ -54,9 +54,9 @@
 //!
 //! **What this file does NOT own.** The ECS publication lives one tier up
 //! (`../sync.zig`) and runs after step 11, so what reaches an entity is the pose
-//! the tick resolved. The ECS → solver direction is M1.1.26's, with the Tier 1
+//! the tick resolved. The ECS → solver direction is M1.1.15.2's, with the Tier 1
 //! service; nothing here reads a component. The
-//! resolution is SINGLE-WORKER: per-island parallel solving is M1.1.25, and the
+//! resolution is SINGLE-WORKER: per-island parallel solving is M1.1.21.1, and the
 //! scratch buffers below are therefore unique rather than per-island (§1.8.8).
 
 const std = @import("std");

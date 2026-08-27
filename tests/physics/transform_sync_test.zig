@@ -2,7 +2,7 @@
 //!
 //! What this file measures is the SEAM: which body speaks for an entity, what is published per
 //! `BodyType`, and what the `Sleeping` marker does to publication. The ECS → solver direction
-//! is M1.1.26's, with the Tier 1 Etch service — the tests that measured it left with it, and
+//! is M1.1.15.2's, with the Tier 1 Etch service — the tests that measured it left with it, and
 //! two more kept only their publication half. The physics itself is measured by `forge_3d`'s
 //! own suite and is not re-measured here.
 //!
@@ -257,7 +257,7 @@ test "Sleeping tag tracks island state through both transitions" {
 
 test "publication authority per BodyType" {
     // The PUBLICATION half only. The reception half — a kinematic `Transform` written by
-    // gameplay reaching the solver — moved to M1.1.26 with `syncIn`; see Closing notes. Two
+    // gameplay reaching the solver — moved to M1.1.15.2 with `syncIn`; see Closing notes. Two
     // assertions that the SOLVER had not moved were dropped with it: with no inward direction
     // they held for every body and named nothing about authority.
     const gpa = testing.allocator;
@@ -340,7 +340,7 @@ test "publication does not mark a component whose value did not change" {
     try testing.expectEqualSlices(f32, &settled_pos, &ecs.get(Transform, b.entity).?.pos);
 
     // NON-VACUITY, and it is what separates this from a publication that writes NOTHING. The
-    // body is set moving through the INTERFACE — `syncIn` left for M1.1.26, so the ECS is no
+    // body is set moving through the INTERFACE — `syncIn` left for M1.1.15.2, so the ECS is no
     // longer a way in — and the marks must then FIRE.
     pw.setLinearVelocity(b.body, vr(3, 0, 0));
 
@@ -424,7 +424,7 @@ test "the registered system drives a real frame: the solver's pose reaches the E
 
     // ONE system: the publication rides the tick in `fixed_update`. Splitting it into a tick
     // and a `post_update` publication is what lost a gameplay `Velocity` write, and the
-    // inward direction left for M1.1.26 — see Closing notes.
+    // inward direction left for M1.1.15.2 — see Closing notes.
     try testing.expectEqual(@as(usize, 1), sched.systemCount());
 
     const start = ecs.get(Transform, faller.entity).?.pos[1];
@@ -444,7 +444,7 @@ test "a trigger sharing an entity with a solid body does not publish" {
     // reaching it, and the INTEGRATION SINGLETON it does enter — which is why a dynamic trigger
     // can ever stop being integrated. §1.13.1 makes two-bodies-one-entity the normal shape, and
     // the election settles which of the two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
-    // trigger — left for M1.1.26 with `syncIn`; see Closing notes.
+    // trigger — left for M1.1.15.2 with `syncIn`; see Closing notes.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -841,7 +841,7 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
     });
 }
 
-test "no component write reaches the solver: the inward direction is M1.1.26's" {
+test "no component write reaches the solver: the inward direction is M1.1.15.2's" {
     // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
     // shape as a second half — "the solver did not follow the ECS write" — and after the
     // re-scope each held for every body and discriminated nothing, which is a test counted and

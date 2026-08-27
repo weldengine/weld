@@ -188,7 +188,7 @@ pub fn build(b: *std.Build) void {
     forge_module.addImport("foundation", foundation_module);
 
     // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
-    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.26. It holds
+    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.15.2. It holds
     // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
     // `weld_forge` for `BodyId` and for the world-scalar aliases and nothing else.
     const interfaces_physics_module = b.createModule(.{
@@ -385,7 +385,7 @@ pub fn build(b: *std.Build) void {
     // M1.1.14 — `zig build forge-determinism`: the determinism instrument, run
     // at ONE worker over the canonical scenario. The step is deliberately an
     // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a test:
-    // M1.1.25 replays it at N workers and M1.A on a rebuilt scheduler DAG, and a
+    // M1.1.21.1 replays it at N workers and M1.A on a rebuilt scheduler DAG, and a
     // harness whose logic lived in its `main` would have to be re-entered through
     // a process to be replayed. Its self-reproducibility and its artifact
     // liveness are ALSO asserted inside `zig build test`, where the same library

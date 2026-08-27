@@ -881,7 +881,7 @@ jobs:
     # permanent, where a dispatch input leaves no trace in the repository at all.
     # Absent the trailer the job skips and costs nothing.
     #
-    # PERMANENT, not scaffolding. M1.1.25 replays the harness at N workers, M1.A on
+    # PERMANENT, not scaffolding. M1.1.21.1 replays the harness at N workers, M1.A on
     # a rebuilt scheduler DAG, and every shape added later moves the scenario —
     # each needs a regeneration with provenance.
     #

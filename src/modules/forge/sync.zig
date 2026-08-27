@@ -5,7 +5,7 @@
 //! resolved and never an intermediate one.
 //!
 //! **THE INWARD DIRECTION IS NOT HERE, and its absence is a decision.** ECS → solver — the
-//! `Transform` and `Velocity` a rule writes reaching the solver — belongs to **M1.1.26**, with
+//! `Transform` and `Velocity` a rule writes reaching the solver — belongs to **M1.1.15.2**, with
 //! the Tier 1 Etch service. The reason is a property of the ECS: the tick says WHEN a write
 //! happened and never WHO produced it, and no comparison of change stamps can manufacture
 //! that. A solver-side provenance does not close it either, since `moveKinematic` moves a
@@ -528,7 +528,7 @@ fn wouldConflict(
 /// `ARCH-031` names as inside the float discipline's perimeter, and where a fixed-timestep
 /// tick belongs. The publication rides the tick rather than sitting in a later phase, so
 /// `update` observes the poses of the tick that just ran instead of the previous one. The
-/// ECS → solver direction is M1.1.26's and registers nothing here.
+/// ECS → solver direction is M1.1.15.2's and registers nothing here.
 ///
 /// The declared accesses are exactly what the system does, which is what a future `ARCH-030`
 /// enforcement will check — `Transform`, `Velocity` and the `Sleeping` marker it migrates,

@@ -1,7 +1,7 @@
 //! `src/interfaces/PhysicsModule.zig` — the Tier 1 physics interface, and the first file of
 //! `src/interfaces/`.
 //!
-//! **THIS FILE IS NOT FROZEN.** The freeze is M1.1.26 and it is what brings
+//! **THIS FILE IS NOT FROZEN.** The freeze is M1.1.15.2 and it is what brings
 //! `WELD_PHYSICS_PROTOCOL_VERSION`, the comptime surface guards, and the normative update of
 //! `engine-tier-interfaces.md`. Until then this file may change freely, and the absence of
 //! the protocol constant is asserted below so that nobody reads its silence as a freeze
@@ -9,18 +9,29 @@
 //!
 //! **What it holds today, and why not more.** `engine-tier-interfaces.md` §1 declares the
 //! interface as `pub fn PhysicsModule(comptime Impl: type) type` whose comptime block
-//! `assertFn`s twenty-seven entries. That block is not written here, for two measured
-//! reasons:
+//! `assertFn`s thirty entries. That block is not written here, for ONE measured reason —
+//! and it carried a second until this milestone removed it:
 //!
-//!   - the assert block IS the surface guard, and surface guards are M1.1.26's by the
-//!     milestone's own scope. A guard that checked three of the twenty-seven entries would
-//!     be worse than no guard, because an implementation missing the other twenty-four would
-//!     pass it — a check that under-checks reads as a check.
-//!   - the first entry of that block is `init`, typed `fn (*core.ModuleContext) anyerror!Impl`,
-//!     and **`ModuleContext` does not exist in this repository**. Measured, not assumed: the
-//!     name appears in three comments and in no declaration. Minting it here would be
-//!     inventing a Tier 0 type that reaches the scheduler and the asset loader, which is a
-//!     project and not a line.
+//!   - the assert block IS the surface guard, and surface guards are M1.1.15.2's by the
+//!     milestone's own scope. A guard that checked three of the thirty entries would
+//!     be worse than no guard, because an implementation missing the other twenty-seven
+//!     would pass it — a check that under-checks reads as a check.
+//!
+//!     Thirty and not twenty-seven, and the two numbers are distinct rather than one of
+//!     them being wrong: `engine-tier-interfaces.md` §12 disambiguates them — the surface
+//!     carries **thirty** `assertFn`, of which **twenty-seven** exclude `init`, `deinit`
+//!     and `step`. The assert block guards the surface, so it is the thirty that bound
+//!     it; a guard built on twenty-seven would pass an implementation missing any of the
+//!     three lifecycle entries, which is the very failure mode this paragraph names.
+//!   - **the second reason is gone, and its removal is the point.** It read that the
+//!     block's first entry is `init`, typed `fn (*core.ModuleContext) anyerror!Impl`, and
+//!     that `ModuleContext` *"does not exist in this repository"* — a measurement that was
+//!     exact when it was written and that **M1.1.15.1 gate A obsoleted by minting the type**
+//!     (`src/core/module_context.zig`), the corpus having removed `asset_loader` from the
+//!     context before that. It is deleted rather than softened: a text that asserts more
+//!     than its oracle establishes is a defect, and this one asserted a measurement whose
+//!     object is gone. What remains true, and sufficient, is the clause above — the block is
+//!     absent because surface guards are M1.1.15.2's, never because the type was missing.
 //!
 //! What DOES land here is the thing the freeze cannot wait for: the contract of the three
 //! body pose and velocity entries, which lived in `forge/api/types.zig` as a day-1 mirror
@@ -130,7 +141,7 @@ const testing = std.testing;
 
 test "the interface is NOT frozen: no protocol version is declared here" {
     // An ATTESTATION OF ABSENCE, and the form matters. `WELD_PHYSICS_PROTOCOL_VERSION` is
-    // what M1.1.26 adds when the surface freezes; declaring it early would make the surface
+    // what M1.1.15.2 adds when the surface freezes; declaring it early would make the surface
     // irreversible a milestone ahead of the decision to make it so. `@hasDecl` on this
     // file's own namespace is what states that, and it is a claim that can FAIL — adding
     // the constant turns this test red, which is exactly the alarm it exists to raise.

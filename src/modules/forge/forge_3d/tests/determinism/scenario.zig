@@ -506,7 +506,7 @@ pub const Scenario = struct {
         // leg that ends 2.2 m short of its commanded 9 m is followed by a `−x` leg
         // that spends all 9, and the character drifts 2.2 m per cycle for ever. Over
         // 1000 frames that is cosmetic — it still meets the ramps every cycle — but
-        // this scenario is an INSTRUMENT that M1.1.25 and M1.A replay, possibly at
+        // this scenario is an INSTRUMENT that M1.1.21.1 and M1.A replay, possibly at
         // other frame counts, and at ten times the length the character is 55 m away
         // and the terrain is never touched again. An unbounded drift in a replayed
         // instrument is a latent vacuity, so the excursion is closed by geometry
@@ -1015,7 +1015,7 @@ test "scenario: the slope test DECIDES the character's trajectory, both ways" {
 
     // And the DEFAULT run stays inside the bowl the terrain forms — the property
     // that keeps the instrument from drifting off its own scene when replayed at a
-    // longer frame count (M1.1.25, M1.A).
+    // longer frame count (M1.1.21.1, M1.A).
     try testing.expect(actual.min_x > -68.5);
     try testing.expect(actual.max_x < -60.0);
 }
