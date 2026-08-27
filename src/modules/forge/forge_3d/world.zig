@@ -182,6 +182,17 @@ pub const BodyKind = enum {
 pub const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy, kind: BodyKind };
 
 /// One slot of the dense `BodyId.index` -> proxy table (`M1.D.13`, M1.1.15.1).
+///
+/// **AUTHORITY: `bodies[i].proxy` IS THE FACT. THIS TABLE IS DERIVED FROM IT.** The two are
+/// not two sources of truth and this is not pattern D11, which is about two INDEPENDENTLY
+/// AUTHORED facts: nothing writes a slot here except `indexBind`, and nothing calls
+/// `indexBind` except the two registration paths and `rebindProxy`. A derived copy behind a
+/// single derivation point is a CACHE — memoisation of a lookup — and it cannot diverge from
+/// its source without a bug, which is exactly the criterion.
+///
+/// The statement is written down because the duplication is visible and the deletion is not
+/// the fix: a reader who sees two holders and removes this one costs step 10 an indirection
+/// per body, at 11 000 bodies, in the loop this milestone exists to make cheaper.
 const IndexSlot = struct {
     /// Meaningful only while `live`.
     proxy: Bp.Proxy = undefined,
@@ -749,8 +760,10 @@ pub const PhysicsWorld = struct {
 
     /// Re-point a REGISTERED body at a new proxy, in both places that hold one.
     ///
-    /// **THE ONE WRITER OF A BODY'S PROXY AFTER REGISTRATION, and it exists because the
-    /// proxy became a fact held twice at M1.1.15.1.** The registration record carries it for
+    /// **THE SINGLE DERIVATION POINT, and the one writer of a body's proxy after
+    /// registration.** `bodies[i].proxy` is authoritative and `index` is derived from it (see
+    /// `IndexSlot`); this is where the derivation happens, so a caller cannot write the
+    /// authoritative half and leave the cache behind. The registration record carries it for
     /// step 10's sweep, which walks `bodies` in order; the dense index carries it so
     /// `proxyOf` is O(1). Two holders of one fact is a drift waiting to happen, and it
     /// happened immediately: a caller that re-inserted a body's proxy by writing the

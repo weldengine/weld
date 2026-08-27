@@ -818,12 +818,17 @@ test "proxyOf resolves through the index and rejects a stale generation" {
     _ = first_proxy;
 }
 
-test "the index and the registration list agree on every live body" {
-    // TWO SOURCES ANSWERING DIFFERENTLY ABOUT ONE FACT IS A DEFECT, NEVER AN ENVELOPE — and
-    // this one is not hypothetical: the moment the index landed, a caller that re-pointed a
-    // body's proxy by writing the registration record alone left `proxyOf` returning a freed
-    // node, and step 2 asserted inside `Bvh.proxyAabb`. `rebindProxy` is the single writer
-    // that closed it; this is the guard that would catch the next one.
+test "the derived index still agrees with its authoritative source on every live body" {
+    // **THIS IS A CACHE CONTROL, NOT A D11 SYMPTOM, and the name says so on purpose.**
+    // `bodies[i].proxy` is the fact; `index` is derived from it through the single
+    // derivation point `rebindProxy` (see `IndexSlot`). A test that read as "two sources
+    // must agree" would invite the deletion the derivation makes wrong — step 10 iterates
+    // `bodies` and would pay an indirection per body at 11 000 bodies.
+    //
+    // What it guards is a derivation that stops happening, and that is not hypothetical: the
+    // moment the index landed, a caller re-pointed a body's proxy by writing the
+    // authoritative record alone, `proxyOf` went on returning a freed node, and step 2
+    // asserted inside `Bvh.proxyAabb`.
     const gpa = testing.allocator;
     var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
     defer pw.deinit(gpa);

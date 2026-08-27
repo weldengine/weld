@@ -1186,6 +1186,34 @@ pub fn build(b: *std.Build) void {
     );
     forge_ray_bench_step.dependOn(&forge_ray_bench_run.step);
 
+    // --------------------------------- C1.1 physics integration bench --------
+    //
+    // The instrument `engine-phase-1-criteria.md` C1.1 names and which did not exist before
+    // M1.1.15.1: the FULL `step()` at 1 000 dynamic + 10 000 static bodies, 60 Hz. TWO GATED
+    // targets — frame time and zero allocation in steady state — so this step FAILS rather
+    // than reports. The retention shape of `M1.D.13` is reported beside them, at two sizes.
+    const forge_integration_module = b.createModule(.{
+        .root_source_file = b.path("bench/physics_forge_3d_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_integration_module.addImport("forge_3d", forge_3d_module);
+    forge_integration_module.addImport("weld_forge", forge_api_module);
+    const forge_integration_exe = b.addExecutable(.{
+        .name = "forge-integration-bench",
+        .root_module = forge_integration_module,
+    });
+    b.installArtifact(forge_integration_exe);
+    const forge_integration_run = b.addRunArtifact(forge_integration_exe);
+    forge_integration_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_integration_run.addArgs(args);
+    const forge_integration_step = b.step(
+        "bench-physics-integration",
+        "Run the C1.1 physics integration bench (full step() at 1k dynamic + 10k static, 60 Hz; frame time and steady-state zero-alloc are GATED)",
+    );
+    forge_integration_step.dependOn(&forge_integration_run.step);
+
     // ---------------------------------- M1.1.10 forge shapecast bench --------
     //
     // Sphere / box / capsule casts and shape overlaps over the SAME 10 000-body
