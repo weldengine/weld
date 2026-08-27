@@ -106,6 +106,12 @@ const frozen_entries = [_][]const u8{
 /// control that makes the walk non-vacuous.
 const void_pose_entries = [_][]const u8{ "setBodyTransform", "moveKinematic", "setCharacterPosition" };
 
+/// The four entries that fill a caller slice, and that `engine-tier-interfaces.md` §1 types
+/// `anyerror!u32` since M1.1.15.1. They share ONE staging path which allocates the moment the
+/// caller's slice exceeds the stack buffer, so an entry among them without a channel returns,
+/// under exhaustion, a truncated success indistinguishable from a complete answer.
+const fallible_query_entries = [_][]const u8{ "raycastAll", "overlapShape", "overlapAabb", "pointQuery" };
+
 test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
     // THE SIZE OF WHAT IS WALKED, first. A probe that finds zero offenders across zero
     // entries is a probe that measured nothing, and `engine-tier-interfaces.md` §12 gives
@@ -154,6 +160,25 @@ test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
         }
     }
     try testing.expectEqual(@as(usize, 4), core_entries_taking_an_allocator);
+}
+
+test "the four multi-result query entries carry an error channel" {
+    // THE STRONGEST FORM AVAILABLE, and it complements rather than repeats the runtime probe
+    // below: a starved-allocator test shows that an entry DID report on one call; this shows
+    // it CANNOT fail to. Three of these four were bare `u32` and survived two rounds of
+    // external review under the circular argument that the signature did not permit
+    // reporting — an argument the unfrozen interface refutes by existing.
+    inline for (fallible_query_entries) |name| {
+        const info = @typeInfo(@TypeOf(@field(Forge3DModule, name))).@"fn";
+        try testing.expect(@typeInfo(info.return_type.?) == .error_union);
+        try testing.expectEqual(u32, @typeInfo(info.return_type.?).error_union.payload);
+    }
+
+    // THE CONTROL, without which a walk that found four error unions among four entries could
+    // also be a walk that cannot tell one from anything: `raycast` and `raycastAny` are
+    // frozen NON-fallible, allocate on no path, and must stay that way.
+    try testing.expect(@typeInfo(@typeInfo(@TypeOf(Forge3DModule.raycast)).@"fn".return_type.?) != .error_union);
+    try testing.expect(@typeInfo(@typeInfo(@TypeOf(Forge3DModule.raycastAny)).@"fn".return_type.?) != .error_union);
 }
 
 test "the frozen void entries are void, and resizeCharacter is not" {
@@ -555,11 +580,11 @@ test "the three entity-projecting entries deduplicate: one entity, two bodies, o
     const solver_bodies = s.m.world.bodies.items.len;
     try testing.expectEqual(@as(usize, 2), solver_bodies);
 
-    const by_box = s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out);
+    const by_box = try s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out);
     try testing.expectEqual(@as(u32, 1), by_box);
     try testing.expectEqual(@as(u32, 7), out[0].index);
 
-    const by_point = s.m.pointQuery(av3(-0.2, 0, 0), .{}, &out);
+    const by_point = try s.m.pointQuery(av3(-0.2, 0, 0), .{}, &out);
     try testing.expectEqual(@as(u32, 1), by_point);
 
     const by_shape = try s.m.overlapShape(.{ .shape = s.unit_box, .position = av3(0, 0, 0) }, &out);
@@ -584,7 +609,7 @@ test "retention is on the deduplicated entity set, not on the bodies" {
     _ = try s.place(4, 6.0);
 
     var out: [4]EntityId = undefined;
-    const n = s.m.overlapAabb(av3(-10, -2, -2), av3(10, 2, 2), .{}, &out);
+    const n = try s.m.overlapAabb(av3(-10, -2, -2), av3(10, 2, 2), .{}, &out);
 
     // Four distinct entities exist inside the box and four slots were offered.
     try testing.expectEqual(@as(u32, 4), n);
@@ -607,7 +632,7 @@ test "no entry caps its answer below the caller's slice" {
     var out: [wide]EntityId = undefined;
     try testing.expect(out.len > n_bodies); // the slice must not be the limit either
 
-    const by_box = s.m.overlapAabb(av3(-2, -2, -2), av3(900, 2, 2), .{}, &out);
+    const by_box = try s.m.overlapAabb(av3(-2, -2, -2), av3(900, 2, 2), .{}, &out);
     try testing.expectEqual(n_bodies, by_box);
 
     // THE PROBE IS CUBIC ON PURPOSE, and the first version of this test was not.
@@ -624,7 +649,7 @@ test "no entry caps its answer below the caller's slice" {
     try testing.expectEqual(n_bodies, by_shape);
 
     var hits: [wide]api.RaycastHit = undefined;
-    const by_ray = s.m.raycastAll(.{
+    const by_ray = try s.m.raycastAll(.{
         .origin = av3(-10, 0, 0),
         .direction = av3(1, 0, 0),
         .max_distance = 2000,
@@ -685,9 +710,9 @@ test "the read-back mutators move what they claim to move" {
 
     // removeBody — called before and never observed. After it, no query finds the body.
     var out: [8]EntityId = undefined;
-    try testing.expect(s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out) >= 1);
+    try testing.expect(try s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out) >= 1);
     s.m.removeBody(body);
-    try testing.expectEqual(@as(u32, 0), s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out));
+    try testing.expectEqual(@as(u32, 0), try s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out));
 }
 
 test "addForce is a force and not an impulse, and destroyShape really destroys" {
@@ -863,15 +888,16 @@ test "pointQuery does not cap either, and deduplicates at the same time" {
 
     var out: [wide]EntityId = undefined;
     try testing.expect(out.len > distinct);
-    try testing.expectEqual(distinct, s.m.pointQuery(av3(0, 0, 0), .{}, &out));
+    try testing.expectEqual(distinct, try s.m.pointQuery(av3(0, 0, 0), .{}, &out));
 }
 
-test "under an exhausted allocator overlapShape REPORTS and the three bare entries degrade" {
-    // G1. The staging has FOUR callers and the enumeration matters: `raycastAll`,
-    // `overlapAabb` and `pointQuery` are frozen bare `u32` and have nowhere to put an
-    // allocation failure, while `overlapShape` is frozen `anyerror!u32` and can report — so
-    // swallowing an OutOfMemory there was a defect and not an arbitration. This test is what
-    // makes the difference between the two groups observable rather than asserted in prose.
+test "under an exhausted allocator all four multi-result entries REPORT" {
+    // I2, and it replaces an oracle that pinned the wrong contract. Three of the four were
+    // frozen bare `u32`, so this test used to assert that they DEGRADED to a correct prefix
+    // while `overlapShape` alone reported — a difference of shape on one staging path, one
+    // failure, four entries. `engine-tier-interfaces.md` §1 now types all four
+    // `anyerror!u32`: §0's prohibition is the entry that ALLOCATES AND HAS NO CHANNEL, and a
+    // `u32` truncating in silence is that entry under a different return type.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
@@ -879,17 +905,16 @@ test "under an exhausted allocator overlapShape REPORTS and the three bare entri
     const distinct: u32 = 400;
     for (0..distinct) |i| _ = try s.place(@intCast(i + 1), 0);
 
-    // NON-VACUITY, on a healthy allocator first: all four entries really answer 400 here, so
-    // the degraded numbers below are a degradation and not the scene's own limit.
+    // NON-VACUITY, on a healthy allocator first: all four really answer here, so an error
+    // below is exhaustion and not the scene's own limit.
     var out: [wide]EntityId = undefined;
     try testing.expect(out.len > Forge3DModule.stack_hits);
-    try testing.expectEqual(distinct, s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out));
+    try testing.expectEqual(distinct, try s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out));
     try testing.expectEqual(distinct, try s.m.overlapShape(.{ .shape = s.unit_box, .position = av3(0, 0, 0) }, &out));
 
-    // Now starve it. The scene is already built, so nothing but the staging can fail — which
-    // is what makes this a probe of the staging and not of body creation. A FRESH module is
-    // used because `scratch_bodies` retains capacity, and a buffer that already grew would
-    // never call the allocator again.
+    // Now starve it. The scene is already built, so nothing but the staging can fail. A
+    // FRESH module, because `scratch_bodies` retains capacity and a buffer that already grew
+    // would never call the allocator again.
     var fx2 = try Fixture.init(gpa);
     defer fx2.deinit(gpa);
     var m2 = try Forge3DModule.init(&fx2.ctx);
@@ -906,28 +931,21 @@ test "under an exhausted allocator overlapShape REPORTS and the three bare entri
     const healthy = m2.gpa;
     m2.gpa = failing.allocator();
 
-    // THE ONE THAT REPORTS.
+    // ALL FOUR REPORT. Asserted one by one rather than in a loop, so a failure names the
+    // entry that swallowed instead of the position of a slot.
     try testing.expectError(error.OutOfMemory, m2.overlapShape(.{ .shape = shape, .position = av3(0, 0, 0) }, &out));
-
-    // THE THREE THAT DEGRADE — to the floor, which is a correct prefix and not zero, and
-    // strictly fewer than the healthy answer, which is what makes it a degradation.
-    const by_box = m2.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out);
-    const by_point = m2.pointQuery(av3(0, 0, 0), .{}, &out);
-    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_box);
-    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_point);
-    try testing.expect(by_box < distinct);
+    try testing.expectError(error.OutOfMemory, m2.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out));
+    try testing.expectError(error.OutOfMemory, m2.pointQuery(av3(0, 0, 0), .{}, &out));
 
     var hits: [wide]api.RaycastHit = undefined;
-    const by_ray = m2.raycastAll(.{
+    try testing.expectError(error.OutOfMemory, m2.raycastAll(.{
         .origin = av3(-10, 0, 0),
         .direction = av3(1, 0, 0),
         .max_distance = 100,
-    }, &hits);
-    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_ray);
+    }, &hits));
 
     m2.gpa = healthy; // teardown must not run against a refusing allocator
 }
-
 test "moveKinematic derives a velocity where setBodyTransform teleports" {
     // G2, and the oracle it replaces did NOT discriminate. `moveKinematic` DERIVES both
     // velocities from a target pose over `dt` while `setBodyTransform` teleports and derives
@@ -1049,12 +1067,12 @@ test "three more oracles that discriminate rather than merely observe" {
     var out: [8]EntityId = undefined;
     const head_low = av3(19.5, 1.0, -0.5);
     const head_high = av3(20.5, 1.4, 0.5);
-    try testing.expectEqual(@as(u32, 1), s.m.overlapAabb(head_low, head_high, .{}, &out));
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapAabb(head_low, head_high, .{}, &out));
     // 0.8 and not 0.5: a capsule's own domain requires `height >= 2 * radius`, and the
     // entry says so by typed error rather than by silently clamping. 0.8 still puts the top
     // well below the probe.
     try testing.expect(try s.m.resizeCharacter(hero, 0.3, 0.8));
-    try testing.expectEqual(@as(u32, 0), s.m.overlapAabb(head_low, head_high, .{}, &out));
+    try testing.expectEqual(@as(u32, 0), try s.m.overlapAabb(head_low, head_high, .{}, &out));
 }
 
 test "pointQuery tests the SOLID where overlapAabb tests the box" {
@@ -1080,11 +1098,11 @@ test "pointQuery tests the SOLID where overlapAabb tests the box" {
     var out: [8]EntityId = undefined;
     const corner_lo = av3(0.85, 0.85, -0.05);
     const corner_hi = av3(0.95, 0.95, 0.05);
-    try testing.expectEqual(@as(u32, 1), s.m.overlapAabb(corner_lo, corner_hi, .{}, &out));
-    try testing.expectEqual(@as(u32, 0), s.m.pointQuery(av3(0.9, 0.9, 0), .{}, &out));
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapAabb(corner_lo, corner_hi, .{}, &out));
+    try testing.expectEqual(@as(u32, 0), try s.m.pointQuery(av3(0.9, 0.9, 0), .{}, &out));
 
     // And it is not blind: a point genuinely inside the solid is found.
-    try testing.expectEqual(@as(u32, 1), s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
+    try testing.expectEqual(@as(u32, 1), try s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
 }
 
 test "the entity-major premise is guarded in every mode, and a breach yields no duplicate" {
@@ -1119,6 +1137,10 @@ test "the entity-major premise is guarded in every mode, and a breach yields no 
 
     // And the answer itself carries no duplicate — asserted on the SET, because a count of
     // two would also be produced by dropping a distinct entity.
-    try testing.expectEqual(@as(u32, 5), out[0].index);
-    try testing.expectEqual(@as(u32, 3), out[1].index);
+    // ...AND is CANONICALLY ORDERED — 3 then 5, not the order the broken run presented them
+    // in. §1.11.14 makes entity identity the key of ORDER as well as of retention, so an
+    // answer that is merely duplicate-free satisfies half the contract while reading like
+    // all of it. The sort runs only on this path.
+    try testing.expectEqual(@as(u32, 3), out[0].index);
+    try testing.expectEqual(@as(u32, 5), out[1].index);
 }

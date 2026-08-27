@@ -361,9 +361,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // H1 added one: the entity-major premise guarded in EVERY mode rather than by a
     // `std.debug.assert` that ReleaseFast compiles to nothing.
     // (1961 -> 1962, suite reported 1962 - 1943 passed + 19 skipped, macOS aarch64.)
+    // I2 added one: a signature walk over the four multi-result query entries, which now all
+    // carry an error channel. A starved-allocator probe shows an entry DID report on one
+    // call; the walk shows it CANNOT fail to.
+    // (1962 -> 1963, suite reported 1963 - 1944 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1960,
-        else => 1962,
+        .windows => 1961,
+        else => 1963,
     };
 }
 

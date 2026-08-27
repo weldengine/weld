@@ -266,16 +266,16 @@ pub const Forge3DModule = struct {
     /// §1.11.14's mandatory deduplication governs the tier that DISCARDS the body — the
     /// three `[]EntityId` entries — and this entry does not discard it.
     ///
-    /// Staging above `stack_hits` uses the reusable buffer; if it cannot grow, the answer
-    /// degrades to the largest correct prefix rather than panicking, this entry being frozen
-    /// as a bare `u32`.
-    pub fn raycastAll(self: *Forge3DModule, q: api.RaycastQuery, out: []api.RaycastHit) u32 {
+    /// **FALLIBLE since M1.1.15.1.** Staging above `stack_hits` allocates, and an entry that
+    /// allocates and cannot report returns, under exhaustion, a truncated success
+    /// indistinguishable from a complete answer — the §0 prohibition in its disguised form.
+    pub fn raycastAll(self: *Forge3DModule, q: api.RaycastQuery, out: []api.RaycastHit) anyerror!u32 {
         if (out.len == 0) return 0;
         var stack: [stack_hits]query.RayHit = undefined;
         const buf: []query.RayHit = if (out.len <= stack.len) blk: {
             break :blk stack[0..out.len];
         } else blk: {
-            self.scratch_hits.resize(self.gpa, out.len) catch break :blk stack[0..];
+            try self.scratch_hits.resize(self.gpa, out.len);
             break :blk self.scratch_hits.items[0..out.len];
         };
         const found = query.raycastAll(&self.world.bp, &self.world.bm, &self.world.store, rayQuery(q), buf);
@@ -290,9 +290,6 @@ pub const Forge3DModule = struct {
 
     pub fn overlapShape(self: *Forge3DModule, q: api.OverlapQuery, out: []EntityId) anyerror!u32 {
         const Filler = struct {
-            /// Frozen `anyerror!u32`: this entry CAN report, so it must.
-            const reports_allocation_failure = true;
-
             w: *PhysicsWorld,
             req: query.OverlapRequest,
             fn fill(f: @This(), buf: []BodyId) anyerror!u32 {
@@ -302,20 +299,13 @@ pub const Forge3DModule = struct {
         return self.collectEntities(out, Filler{ .w = &self.world, .req = overlapRequest(q) });
     }
 
-    pub fn overlapAabb(self: *Forge3DModule, min: Vec3, max: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
+    pub fn overlapAabb(self: *Forge3DModule, min: Vec3, max: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) anyerror!u32 {
         const Filler = struct {
-            /// Frozen bare `u32`: no channel, so an exhausted allocator degrades to a
-            /// correct prefix. See `stageBodies`.
-            const reports_allocation_failure = false;
-
             w: *PhysicsWorld,
             lo: Vec3r,
             hi: Vec3r,
             f: query.Filter,
-            /// `error{}` and not `anyerror`: this entry is frozen as a bare `u32`, and an
-            /// empty error set is what lets `collectEntities` be shared with the fallible
-            /// `overlapShape` without either of them lying about its channel.
-            fn fill(self_: @This(), buf: []BodyId) error{}!u32 {
+            fn fill(self_: @This(), buf: []BodyId) anyerror!u32 {
                 return query.overlapAabb(&self_.w.bp, &self_.w.bm, &self_.w.store, self_.lo, self_.hi, self_.f, buf);
             }
         };
@@ -324,19 +314,15 @@ pub const Forge3DModule = struct {
             .lo = cross.vec3ToSolver(min),
             .hi = cross.vec3ToSolver(max),
             .f = solverFilter(filter),
-        }) catch |e| switch (e) {};
+        });
     }
 
-    pub fn pointQuery(self: *Forge3DModule, point: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) u32 {
+    pub fn pointQuery(self: *Forge3DModule, point: Vec3, filter: api.PhysicsQueryFilter, out: []EntityId) anyerror!u32 {
         const Filler = struct {
-            /// Frozen bare `u32`: no channel, so an exhausted allocator degrades to a
-            /// correct prefix. See `stageBodies`.
-            const reports_allocation_failure = false;
-
             w: *PhysicsWorld,
             p: Vec3r,
             f: query.Filter,
-            fn fill(self_: @This(), buf: []BodyId) error{}!u32 {
+            fn fill(self_: @This(), buf: []BodyId) anyerror!u32 {
                 return query.pointQuery(&self_.w.bp, &self_.w.bm, &self_.w.store, self_.p, self_.f, buf);
             }
         };
@@ -344,7 +330,7 @@ pub const Forge3DModule = struct {
             .w = &self.world,
             .p = cross.vec3ToSolver(point),
             .f = solverFilter(filter),
-        }) catch |e| switch (e) {};
+        });
     }
 
     pub fn closestPoint(self: *Forge3DModule, point: Vec3, max_distance: f32, filter: api.PhysicsQueryFilter) ?api.ClosestPointResult {
@@ -464,9 +450,21 @@ pub const Forge3DModule = struct {
     /// a loop that already performs one; and O(n^2) only on a path that is by construction
     /// never taken.
     ///
-    /// The violation is COUNTED rather than swallowed. Two of the three callers are frozen
-    /// bare `u32` and have nowhere to report it, so a counter is what makes "detected" true
-    /// rather than a word.
+    /// **AND THE ANSWER IS ORDERED, not merely duplicate-free.** `engine-physics-queries.md`
+    /// §1.11.14 makes entity identity the key of ORDER as well as of retention, so a result
+    /// that carries no duplicate but comes out in the order it was met satisfies half the
+    /// contract while reading like all of it. On the violation path the written prefix is
+    /// therefore sorted on that key — entities being distinct by then, the `BodyId`
+    /// tie-break cannot apply and the entity half is already total. It uses
+    /// `query.entityKey`, the solver's own key, rather than a second derivation of it.
+    ///
+    /// The sort runs ONLY on the cold path, which never executes while the premise holds, so
+    /// it costs nothing in practice — and it makes the claim TRUE rather than narrowing it.
+    ///
+    /// The violation is COUNTED rather than swallowed: a counter is what makes "detected"
+    /// true rather than a word, and it survives the entries gaining their error channel
+    /// because a broken upstream order is not an allocation failure and must not be reported
+    /// as one.
     ///
     /// Public for the guard's own test: the counter-factual has to feed this function an
     /// order the solver will not produce, which no caller of the four entries can arrange.
@@ -492,6 +490,14 @@ pub const Forge3DModule = struct {
             last = e;
             have_last = true;
         }
+        if (!ordered) {
+            const Ctx = struct {
+                fn less(_: void, x: EntityId, y: EntityId) bool {
+                    return query.entityKey(x) < query.entityKey(y);
+                }
+            };
+            std.mem.sort(EntityId, out[0..n], {}, Ctx.less);
+        }
         return n;
     }
 
@@ -504,37 +510,23 @@ pub const Forge3DModule = struct {
         return false;
     }
 
-    /// A staging slice of `n` body handles, PROPAGATING an allocation failure.
+    /// A staging slice of `n` body handles: the stack below the floor, the reusable buffer
+    /// above it. Allocation failure PROPAGATES, and there is no longer a variant that does
+    /// not.
     ///
-    /// The stack below the floor, the reusable buffer above it.
+    /// **ALL FOUR CALLERS REPORT SINCE M1.1.15.1, and the absorbing twin is deleted rather
+    /// than left unused.** This path had one form that reported and one that returned a
+    /// shorter slice, because three of the four frozen entries were `u32` with nowhere to put
+    /// a failure. That was the §0 rule's own prohibition — an entry that ALLOCATES AND HAS NO
+    /// CHANNEL — wearing a different return type: `void` was its obvious shape, a `u32` that
+    /// truncates in silence is its disguised one, and a truncated success is indistinguishable
+    /// from a complete answer to a caller who sized the slice precisely to tell them apart.
+    /// `engine-tier-interfaces.md` §1 now types the three `anyerror!u32`, decided at
+    /// M1.1.15.1 and not at the freeze, whose exit criterion is that the surface be FINAL.
     fn stageBodiesFallible(self: *Forge3DModule, n: usize, stack: []BodyId) ![]BodyId {
         if (n <= stack.len) return stack[0..n];
         try self.scratch_bodies.resize(self.gpa, n);
         return self.scratch_bodies.items[0..n];
-    }
-
-    /// The same staging, ABSORBING an allocation failure into a shorter slice.
-    ///
-    /// **THE ENUMERATION IS FOUR CALLERS, THREE OF THEM BARE, and getting it wrong is what
-    /// made the earlier arbitration invalid.** This comment used to read "two of the three
-    /// callers are frozen as bare `u32`"; measured, the staging has FOUR callers —
-    /// `raycastAll`, `overlapAabb` and `pointQuery` are frozen `u32` with no channel, and
-    /// `overlapShape` is frozen `anyerror!u32` and therefore CAN report. An arbitration is
-    /// worth exactly what the enumeration of its scope is worth, and this one silently
-    /// swallowed an `OutOfMemory` on the one entry whose frozen signature declares it
-    /// transmissible.
-    ///
-    /// For the three bare entries the alternatives really are to panic on memory pressure or
-    /// to answer with the largest correct prefix the floor allows. The prefix IS correct —
-    /// any prefix of the solver's ordered answer is the right prefix — and this is a
-    /// DEGRADATION UNDER EXHAUSTION, not a designed cap: it cannot fire on a healthy
-    /// allocator, where the old 256 fired on every call. Whether three frozen signatures
-    /// SHOULD be unable to report an allocation failure is a contract decision that belongs
-    /// to M1.1.15.2, before its assert block, and is recorded there rather than settled here.
-    ///
-    /// `overlapShape` is the exception, and it reports.
-    fn stageBodies(self: *Forge3DModule, n: usize, stack: []BodyId) []BodyId {
-        return self.stageBodiesFallible(n, stack) catch stack;
     }
 
     /// Project bodies onto DEDUPLICATED entities, retaining under the §1.11.14 key.
@@ -555,19 +547,26 @@ pub const Forge3DModule = struct {
         var stack: [stack_hits]BodyId = undefined;
         var want: usize = out.len;
         while (true) {
-            // ROUTED BY THE FILLER'S DECLARED CHANNEL, and declared per call site rather
-            // than inferred here — a single enumeration written in one place is exactly what
-            // was wrong before, and a `const` on each filler cannot drift from the signature
-            // it sits next to.
-            const buf = if (@TypeOf(filler).reports_allocation_failure)
-                try self.stageBodiesFallible(want, &stack)
-            else
-                self.stageBodies(want, &stack);
+            // **TERMINATION RESTS ON THE STAGING PROPAGATING, and that is not a stylistic
+            // preference.** `want` doubles on every round, so the loop ends only when the
+            // solver returns fewer than it was offered. A staging that ABSORBED a failure
+            // would hand back a short buffer for ever: `found == buf.len` on a saturated
+            // solver, `want` doubling past a `buf` that never grows, and neither exit
+            // reached. Measured, not deduced — a counter-factual that restored the absorbing
+            // form HUNG here rather than failing an assertion. So the fallible staging is
+            // what makes this loop finite, and the pre-M1.1.15.1 form needed a third exit on
+            // `buf.len < want` for exactly that reason.
+            const buf = try self.stageBodiesFallible(want, &stack);
             const found = try filler.fill(buf);
             const n = self.dedupEntities(buf[0..found], out);
-            if (n == out.len) return n; // the slice is full: exact
+            // THE SLICE IS FULL. Exact only while the entity-major premise held: the retained
+            // set is then the smallest `out.len` entities under the §1.11.14 key. Under a
+            // BROKEN premise it is a subset chosen by a broken order — deduplicated and
+            // canonically sorted by `dedupEntities`, so no duplicate and no arbitrary
+            // ordering escapes, but not the canonical SELECTION. Saying "exact" here without
+            // that condition is the claim this milestone kept making too wide.
+            if (n == out.len) return n;
             if (found < buf.len) return n; // the solver was not saturated: exhaustive
-            if (buf.len < want) return n; // the staging could not grow: degraded prefix
             want = buf.len * 2;
         }
     }

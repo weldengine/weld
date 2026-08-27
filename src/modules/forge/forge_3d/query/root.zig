@@ -570,7 +570,10 @@ pub fn closestPoint(
 /// way entities are named.
 ///
 /// `EntityId.dead` (both fields `maxInt`) sorts last and needs no special case.
-fn entityKey(e: EntityId) u64 {
+/// The §1.11.14 entity half of the ordering key, exported so a caller that must order
+/// entities uses THIS key rather than re-deriving one. A second derivation of a normative
+/// order is a second source of truth for it.
+pub fn entityKey(e: EntityId) u64 {
     return (@as(u64, e.index) << 32) | @as(u64, e.generation);
 }
 
