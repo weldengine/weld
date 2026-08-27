@@ -683,25 +683,79 @@ test "the read-back mutators move what they claim to move" {
     const after_rot = s.m.getBodyTransform(body).rotation;
     try testing.expect(!std.meta.eql(before_rot, after_rot));
 
-    // moveKinematic — never called before. It DERIVES both velocities from a target pose
-    // over dt, where `setBodyTransform` teleports and derives nothing; the split is
-    // contractual, so the test drives a kinematic body to a target and checks it arrived.
-    const plate = try s.m.addBody(.{
-        .entity = .{ .index = 2, .generation = 0 },
-        .body_type = .kinematic,
-        .shape = s.unit_box,
-        .position = av3(0, -5, 0),
-    });
-    s.m.moveKinematic(plate, av3(0, -5, 4), foundation.math.Quatf.identity, fixed_dt);
-    try s.m.step(fixed_dt);
-    try testing.expect(s.m.getBodyTransform(plate).position.toArray()[2] > 0.01);
-
     // removeBody — called before and never observed. After it, no query finds the body.
     var out: [8]EntityId = undefined;
-    try testing.expect(s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out) >= 2);
-    s.m.removeBody(plate);
+    try testing.expect(s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out) >= 1);
     s.m.removeBody(body);
     try testing.expectEqual(@as(u32, 0), s.m.overlapAabb(av3(-20, -20, -20), av3(20, 20, 20), .{}, &out));
+}
+
+test "addForce is a force and not an impulse, and destroyShape really destroys" {
+    // G2. Both entries were CALLED by the lifecycle test and neither effect was ever
+    // observed. An oracle that only proves the call did not crash is a smoke test wearing a
+    // behaviour test's name.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // addForce — DISCRIMINATED FROM addImpulse, its plausible neighbour, and not merely
+    // shown to move something. A force gives `dv = F*h/m` per substep and an impulse gives
+    // `dv = F/m` once, so on identical bodies with identical vectors the impulse travels far
+    // further. A ratio near ONE would mean the entry is applying an impulse; a ratio near
+    // zero would mean it is applying nothing.
+    //
+    // **THE BAND IS DELIBERATE AND THE EXACT VALUE IS NOT ASSERTED.** A first version of this
+    // oracle predicted 1/dt = 60 from single-step Euler and MEASURED 95.99, because `step`
+    // runs four TGS Soft substeps: over `h = dt/4` the force accumulates
+    // `x = F*h^2/m * (1+2+3+4) = 0.625*F*dt^2/m` while the impulse gives `x = F*dt/m`, so the
+    // ratio is `1.6/dt = 96`. The derivation matches the measurement exactly — and pinning 96
+    // in an ADAPTER test would pin the solver's substep cadence, which is not this file's
+    // subject and would break it for a reason unrelated to the adapter. The band is what
+    // discriminates the two entries and nothing more, which is the right scope.
+    const forced = try s.m.addBody(.{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+    const impulsed = try s.m.addBody(.{
+        .entity = .{ .index = 11, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 10, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+    s.m.addForce(forced, av3(6, 0, 0));
+    s.m.addImpulse(impulsed, av3(6, 0, 0));
+    try s.m.step(fixed_dt);
+
+    const dx_force = s.m.getBodyTransform(forced).position.toArray()[0];
+    const dx_impulse = s.m.getBodyTransform(impulsed).position.toArray()[0];
+    try testing.expect(dx_force > 0); // it is not a no-op
+    const ratio = dx_impulse / dx_force;
+    try testing.expect(ratio > 10); // an impulse implementation would give ~1
+    try testing.expect(ratio < 1000); // and a no-op would send this to infinity
+
+    // destroyShape — DISCRIMINATED FROM A NO-OP. The handle is generational, so after the
+    // destruction it is stale and the store refuses it by name.
+    const doomed = try s.m.createShape(.{ .box = .{ .half_extents = av3(1, 1, 1) } });
+    const before = try s.m.addBody(.{
+        .entity = .{ .index = 12, .generation = 0 },
+        .body_type = .static,
+        .shape = doomed,
+        .position = av3(50, 0, 0),
+    });
+    s.m.removeBody(before); // nothing may still reference it
+    s.m.destroyShape(doomed);
+    try testing.expectError(error.InvalidShape, s.m.addBody(.{
+        .entity = .{ .index = 13, .generation = 0 },
+        .body_type = .static,
+        .shape = doomed,
+        .position = av3(60, 0, 0),
+    }));
 }
 
 test "the four single-result query entries answer about the scene" {
@@ -810,4 +864,225 @@ test "pointQuery does not cap either, and deduplicates at the same time" {
     var out: [wide]EntityId = undefined;
     try testing.expect(out.len > distinct);
     try testing.expectEqual(distinct, s.m.pointQuery(av3(0, 0, 0), .{}, &out));
+}
+
+test "under an exhausted allocator overlapShape REPORTS and the three bare entries degrade" {
+    // G1. The staging has FOUR callers and the enumeration matters: `raycastAll`,
+    // `overlapAabb` and `pointQuery` are frozen bare `u32` and have nowhere to put an
+    // allocation failure, while `overlapShape` is frozen `anyerror!u32` and can report — so
+    // swallowing an OutOfMemory there was a defect and not an arbitration. This test is what
+    // makes the difference between the two groups observable rather than asserted in prose.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const distinct: u32 = 400;
+    for (0..distinct) |i| _ = try s.place(@intCast(i + 1), 0);
+
+    // NON-VACUITY, on a healthy allocator first: all four entries really answer 400 here, so
+    // the degraded numbers below are a degradation and not the scene's own limit.
+    var out: [wide]EntityId = undefined;
+    try testing.expect(out.len > Forge3DModule.stack_hits);
+    try testing.expectEqual(distinct, s.m.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out));
+    try testing.expectEqual(distinct, try s.m.overlapShape(.{ .shape = s.unit_box, .position = av3(0, 0, 0) }, &out));
+
+    // Now starve it. The scene is already built, so nothing but the staging can fail — which
+    // is what makes this a probe of the staging and not of body creation. A FRESH module is
+    // used because `scratch_bodies` retains capacity, and a buffer that already grew would
+    // never call the allocator again.
+    var fx2 = try Fixture.init(gpa);
+    defer fx2.deinit(gpa);
+    var m2 = try Forge3DModule.init(&fx2.ctx);
+    defer m2.deinit();
+    const shape = try m2.createShape(.{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    for (0..distinct) |i| _ = try m2.addBody(.{
+        .entity = .{ .index = @intCast(i + 1), .generation = 0 },
+        .body_type = .static,
+        .shape = shape,
+        .position = av3(0, 0, 0),
+    });
+
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    const healthy = m2.gpa;
+    m2.gpa = failing.allocator();
+
+    // THE ONE THAT REPORTS.
+    try testing.expectError(error.OutOfMemory, m2.overlapShape(.{ .shape = shape, .position = av3(0, 0, 0) }, &out));
+
+    // THE THREE THAT DEGRADE — to the floor, which is a correct prefix and not zero, and
+    // strictly fewer than the healthy answer, which is what makes it a degradation.
+    const by_box = m2.overlapAabb(av3(-2, -2, -2), av3(2, 2, 2), .{}, &out);
+    const by_point = m2.pointQuery(av3(0, 0, 0), .{}, &out);
+    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_box);
+    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_point);
+    try testing.expect(by_box < distinct);
+
+    var hits: [wide]api.RaycastHit = undefined;
+    const by_ray = m2.raycastAll(.{
+        .origin = av3(-10, 0, 0),
+        .direction = av3(1, 0, 0),
+        .max_distance = 100,
+    }, &hits);
+    try testing.expectEqual(@as(u32, Forge3DModule.stack_hits), by_ray);
+
+    m2.gpa = healthy; // teardown must not run against a refusing allocator
+}
+
+test "moveKinematic derives a velocity where setBodyTransform teleports" {
+    // G2, and the oracle it replaces did NOT discriminate. `moveKinematic` DERIVES both
+    // velocities from a target pose over `dt` while `setBodyTransform` teleports and derives
+    // nothing — that split is the contract — and an implementation that quietly teleported
+    // reached the same pose and passed.
+    //
+    // MEASURED before this oracle was written: after one step both forms sit at 4.0000, and
+    // after a SECOND step both are STILL at 4.0000. So the derived velocity is not readable
+    // from the pose at all, and the overshoot oracle drafted for it discriminated nothing
+    // either. The frozen surface has no velocity getter — but it has ONE place where a
+    // kinematic body's velocity is observable: `moveCharacter` reports `ground_velocity` for
+    // the body a character stands on. That is what this test reads.
+    //
+    // The counter-factual is inside the oracle: a twin plate driven by `setBodyTransform`
+    // over the same displacement must report a ground velocity of zero.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const plate_shape = try s.m.createShape(.{ .box = .{ .half_extents = av3(4, 0.5, 4) } });
+
+    const driven = try s.m.addBody(.{
+        .entity = .{ .index = 20, .generation = 0 },
+        .body_type = .kinematic,
+        .shape = plate_shape,
+        .position = av3(0, -0.5, 0),
+    });
+    const teleported = try s.m.addBody(.{
+        .entity = .{ .index = 21, .generation = 0 },
+        .body_type = .kinematic,
+        .shape = plate_shape,
+        .position = av3(50, -0.5, 0),
+    });
+
+    const rider = try s.m.createCharacter(.{
+        .entity = .{ .index = 22, .generation = 0 },
+        .position = av3(0, 0, 0),
+        .radius = 0.3,
+        .height = 1.6,
+    });
+    const passenger = try s.m.createCharacter(.{
+        .entity = .{ .index = 23, .generation = 0 },
+        .position = av3(50, 0, 0),
+        .radius = 0.3,
+        .height = 1.6,
+    });
+
+    // Same displacement, two entries.
+    s.m.moveKinematic(driven, av3(0, -0.5, 0.05), foundation.math.Quatf.identity, fixed_dt);
+    s.m.setBodyTransform(teleported, av3(50, -0.5, 0.05), foundation.math.Quatf.identity);
+
+    const on_driven = try s.m.moveCharacter(rider, av3(0, 0, 0), fixed_dt);
+    const on_teleported = try s.m.moveCharacter(passenger, av3(0, 0, 0), fixed_dt);
+
+    // NON-VACUITY: both characters really are standing on their plate, so a zero below is a
+    // zero velocity and not a missing ground.
+    try testing.expectEqual(api.GroundState.grounded, on_driven.ground_state);
+    try testing.expectEqual(api.GroundState.grounded, on_teleported.ground_state);
+    try testing.expectEqual(@as(u32, 20), on_driven.ground_entity.index);
+    try testing.expectEqual(@as(u32, 21), on_teleported.ground_entity.index);
+
+    // THE ASSERTION THAT NAMES THE ENTRY: 0.05 m over one tick is 3 m/s derived, and a
+    // teleport derives nothing.
+    try testing.expectApproxEqAbs(@as(f32, 3), on_driven.ground_velocity.toArray()[2], 1e-2);
+    try testing.expectApproxEqAbs(@as(f32, 0), on_teleported.ground_velocity.toArray()[2], 1e-4);
+}
+
+test "three more oracles that discriminate rather than merely observe" {
+    // Found by re-counting the class with the RIGHT predicate — not "is the entry called"
+    // and not even "is its effect observed", but "does its oracle tell it apart from a
+    // plausible NEIGHBOURING entry". Three entries failed that predicate while passing the
+    // weaker one, which is the same shape as the F1/F2 family one level up.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // init — its allocator half is covered by the leak check, but nothing observed the WORLD
+    // it opens. An `init` that stored a zero gravity passed every other test in this file,
+    // because they either use static bodies or set `gravity_factor = 0`.
+    const falling = try s.m.addBody(.{
+        .entity = .{ .index = 30, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 100, 0),
+        .mass = 1,
+    });
+    try s.m.step(fixed_dt);
+    try testing.expect(s.m.getBodyTransform(falling).position.toArray()[1] < 100);
+
+    // setLinearVelocity — SETS, where addImpulse ADDS, and with unit mass the two were
+    // indistinguishable in the read-back test above: both leave the body at velocity v. The
+    // discriminating sequence is to impulse FIRST and then set: an entry that added would
+    // leave 11 m/s, one that sets leaves 1.
+    const rider = try s.m.addBody(.{
+        .entity = .{ .index = 31, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 50, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+    s.m.addImpulse(rider, av3(10, 0, 0));
+    s.m.setLinearVelocity(rider, av3(1, 0, 0));
+    try s.m.step(fixed_dt);
+    const travelled = s.m.getBodyTransform(rider).position.toArray()[0];
+    try testing.expect(travelled > 0); // not a no-op
+    try testing.expect(travelled < 10 * fixed_dt); // and it REPLACED rather than added
+
+    // resizeCharacter — its `true` was asserted and its EFFECT never was, so an entry that
+    // answered `true` and resized nothing passed. The presence body's world box is the
+    // observable: a probe at head height finds the tall character and must not find the
+    // short one.
+    const hero = try s.m.createCharacter(.{
+        .entity = .{ .index = 32, .generation = 0 },
+        .position = av3(20, 0, 0),
+        .radius = 0.3,
+        .height = 1.6,
+    });
+    var out: [8]EntityId = undefined;
+    const head_low = av3(19.5, 1.0, -0.5);
+    const head_high = av3(20.5, 1.4, 0.5);
+    try testing.expectEqual(@as(u32, 1), s.m.overlapAabb(head_low, head_high, .{}, &out));
+    // 0.8 and not 0.5: a capsule's own domain requires `height >= 2 * radius`, and the
+    // entry says so by typed error rather than by silently clamping. 0.8 still puts the top
+    // well below the probe.
+    try testing.expect(try s.m.resizeCharacter(hero, 0.3, 0.8));
+    try testing.expectEqual(@as(u32, 0), s.m.overlapAabb(head_low, head_high, .{}, &out));
+}
+
+test "pointQuery tests the SOLID where overlapAabb tests the box" {
+    // The last entry that failed the discrimination predicate. On a scene of co-located
+    // boxes, `pointQuery` and an `overlapAabb` of a degenerate box at the same point return
+    // the same answer, so the oracle above told the two entries apart from nothing. A SPHERE
+    // separates them: a point can sit inside the world AABB and outside the solid, and only
+    // one of the two entries is allowed to say so.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    const ball = try s.m.createShape(.{ .sphere = .{ .radius = 1 } });
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 40, .generation = 0 },
+        .body_type = .static,
+        .shape = ball,
+        .position = av3(0, 0, 0),
+    });
+
+    // (0.9, 0.9, 0) is inside the box [-1,1]^3 and 1.273 from the centre, so outside a unit
+    // sphere. NON-VACUITY first: the AABB query really does reach the body from there.
+    var out: [8]EntityId = undefined;
+    const corner_lo = av3(0.85, 0.85, -0.05);
+    const corner_hi = av3(0.95, 0.95, 0.05);
+    try testing.expectEqual(@as(u32, 1), s.m.overlapAabb(corner_lo, corner_hi, .{}, &out));
+    try testing.expectEqual(@as(u32, 0), s.m.pointQuery(av3(0.9, 0.9, 0), .{}, &out));
+
+    // And it is not blind: a point genuinely inside the solid is found.
+    try testing.expectEqual(@as(u32, 1), s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
 }

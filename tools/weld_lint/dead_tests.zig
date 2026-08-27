@@ -351,9 +351,16 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // four that take the rest of the adapter's surface from signature to behaviour, the
     // class sweep having measured 9 behaviour-asserted entries against 19 that were not.
     // (1949 -> 1956, suite reported 1956 - 1937 passed + 19 skipped, macOS aarch64.)
+    // THE SECOND REOPENING (G1/G2) added five more to the same file: the allocator-exhaustion
+    // pin that separates the one entry which CAN report from the three that cannot, and four
+    // that give a DISCRIMINATING oracle to entries whose previous one told them apart from
+    // nothing — `moveKinematic` against `setBodyTransform` (read through `ground_velocity`,
+    // the frozen surface having no velocity getter), `addForce` against `addImpulse`,
+    // `destroyShape` against a no-op, and `pointQuery` against `overlapAabb`.
+    // (1956 -> 1961, suite reported 1961 - 1942 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1954,
-        else => 1956,
+        .windows => 1959,
+        else => 1961,
     };
 }
 
