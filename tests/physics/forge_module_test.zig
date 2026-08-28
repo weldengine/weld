@@ -1175,7 +1175,8 @@ test "the guard refuses what it OBSERVES broken, and that detection is windowed"
     // ordered is accepted even when the owner's sequence had a smaller element after it:
     // `[3, 5]` is ordered, and the `1` that would have followed is invisible here. This is
     // the documented behaviour and not a defect — the proof of order over the WHOLE selection
-    // belongs to `OverlapCollector.finish`, which is the only function that observes it.
+    // belongs to `OverlapCollector`: `add` carries the replace-worst and decides what is
+    // RETAINED, `finish` orders the prefix already kept, and neither alone sees both.
     const before = s.m.unordered_projections;
     var two: [2]EntityId = undefined;
     try testing.expectEqual(@as(u32, 2), try s.m.dedupEntities(&.{ e3, e5 }, &two));
