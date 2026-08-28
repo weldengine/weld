@@ -427,64 +427,23 @@ pub const Forge3DModule = struct {
     /// **ADJACENT deduplication is exact here, and that is a property of the solver's key,
     /// not an approximation.** `query/overlap.zig`'s `OverlapCollector.finish` sorts on
     /// `root.keyLess`, which is ENTITY-MAJOR with `BodyId` only as the final tie-break, so
-    /// every body of one entity forms one contiguous run. The debug assertion below states
-    /// that dependency where it is relied on rather than in a comment far from it.
-    /// **THE PREMISE IS GUARDED IN EVERY MODE, and a `std.debug.assert` could not do it.**
-    /// This function used to assert the entity-major order and nothing more. That assert is
-    /// compiled to NOTHING in ReleaseFast — the mode the C1.1 bench runs in and the mode a
-    /// game ships — so the guard was live in exactly the two matrix cells where its breach
-    /// costs nothing and absent in the one where it silently reproduces the defect F1 closed:
-    /// an entity returned twice, damage applied twice.
+    /// every body of one entity forms one contiguous run. The ACTIVE check below states
+    /// that dependency where it is relied on: it runs in every mode and returns
+    /// `error.UnorderedProjection`, a `std.debug.assert` having been what the guard used to
+    /// be and what ReleaseFast compiled to nothing.
+    /// **THIS FUNCTION DOES NOT SEE THE RUN — it sees the window it is handed.** Adjacent
+    /// deduplication is exact only under entity-major order, and a first window can be
+    /// internally ordered, fill the slice and return before a smaller element ever reaches a
+    /// buffer. So the check below REFUSES what it observes broken and COUNTS it, in every
+    /// mode; that detection is bounded to the window and is therefore NOT a guarantee.
     ///
-    /// And the premise is NOT this file's to keep. Entity-major order is a property of
-    /// `query/overlap.zig`'s `OverlapCollector.finish`; it can stop being true through a
-    /// change in ITS owner with nothing here moving, which is precisely the case a guard
-    /// exists for. The repository already applies this doctrine next door — `query/root.zig`
-    /// replaces a release-stripped class assert with an ACTIVE `probeAdmissible` check for
-    /// the same reason, in the same words.
+    /// The proof of that order over the WHOLE selection belongs to `query/overlap.zig`'s
+    /// `OverlapCollector` — `add` decides what is RETAINED, `finish` orders what was kept —
+    /// and is recorded as a precondition at `engine-phase-1-plan.md`, not argued here.
     ///
-    /// **UNDER A VIOLATED PREMISE THIS FUNCTION GUARANTEES NOTHING, and that is the
-    /// conclusion of five successive attempts to promise something.** The claim was written
-    /// as "never wrong", then "no duplicate", then "duplicate-free AND ordered", then "true
-    /// unless the premise broke during the run" — each narrowed just enough to cover the
-    /// counter-example in front of it, and each still too wide. The cause is structural, not
-    /// editorial: **this function does not see the run.** It sees the window it is handed.
-    /// With `out.len == 2` and an owner sequence `[3, 5, 1]`, the first pass receives
-    /// `[3, 5]`, finds it ordered — because it IS ordered — fills the slice and returns
-    /// before `want` ever doubles. The `1` never enters an observed buffer. No wording makes
-    /// a windowed observation into a statement about what it never saw.
+    /// `error.UnorderedProjection` is distinct from `error.OutOfMemory`: a broken upstream
+    /// order is not an allocation failure.
     ///
-    /// So this function does exactly three things, and claims nothing beyond them:
-    ///
-    ///   1. it REFUSES what it observes broken — `error.UnorderedProjection`;
-    ///   2. it COUNTS — `unordered_projections`;
-    ///   3. and it says here that (1) is bounded to the window, therefore NOT a guarantee.
-    ///
-    /// Two weaker answers were tried on the refusal path and both are wrong, which is why the
-    /// refusal is a refusal. Returning a duplicate-free result satisfies half of §1.11.14,
-    /// entity identity being the key of ORDER as well as of retention. Sorting the written
-    /// prefix is the subtler failure: it reorders what has ALREADY been retained, and
-    /// retention itself ran on the broken order — with `out.len == 2` on a run yielding 5, 3
-    /// and then 1, the loop fills on `[5, 3]` and a sort answers `[3, 5]` where the canonical
-    /// subset is `[1, 3]`. No pass over what was KEPT recovers what was never COLLECTED. The
-    /// remaining alternative — collect exhaustively, then select on the key — needs an
-    /// UNBOUNDED collection to be correct and would reopen the unbounded allocation the error
-    /// channels closed; one defect is not closed by reopening another.
-    ///
-    /// **THE PROOF BELONGS TO THE OWNER OF THE ORDER, and it is recorded as a precondition
-    /// rather than attempted here.** Entity-major order is `OverlapCollector.finish`'s
-    /// property; only that function observes the whole selection, so only it can establish
-    /// the order over the whole selection. A violated premise means it is already broken, and
-    /// an adapter cannot prove a property of data it receives pre-truncated.
-    ///
-    /// The counter STAYS beside the error, and the two answer different questions: the error
-    /// tells this caller its answer is refused, the counter tells a later reader whether the
-    /// premise was ever broken at all — "never happened" and "happened and erred" are not
-    /// the same state. `error.UnorderedProjection` is distinct from `error.OutOfMemory` for
-    /// the same reason: a broken upstream order is not an allocation failure.
-    ///
-    /// Public for the guard's own test: the counter-factual has to feed this function an
-    /// order the solver will not produce, which no caller of the four entries can arrange.
     pub fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) error{UnorderedProjection}!u32 {
         var n: u32 = 0;
         var have_last = false;
@@ -557,15 +516,10 @@ pub const Forge3DModule = struct {
             // WHAT THE TWO EXITS SAY, and nothing about the run.
             //
             // Under a SOUND premise the first `out.len` distinct entities ARE the smallest
-            // under the §1.11.14 key, because entity-major order delivers them increasing;
-            // and a solver that returned fewer bodies than it was offered returned all of
-            // them. Both statements are exact and they are sufficient.
-            //
-            // What is NOT claimed, after five attempts to claim it: that these hold when the
-            // premise is broken. `dedupEntities` refuses what it OBSERVES broken, and its
-            // observation is the window it was handed — a first pass can be internally
-            // ordered, fill the slice and return before a later element ever reaches a
-            // buffer. The refusal is a detection, never a proof.
+            // under the §1.11.14 key, because entity-major order delivers them increasing,
+            // and a solver returning fewer bodies than it was offered returned all of them.
+            // Neither statement is claimed when the premise is broken: `dedupEntities`
+            // refuses what it OBSERVES, and its observation is the window it was handed.
             if (n == out.len) return n; // the slice is full: the canonical smallest `out.len`
             if (found < buf.len) return n; // the solver was not saturated: exhaustive
             want = buf.len * 2;
