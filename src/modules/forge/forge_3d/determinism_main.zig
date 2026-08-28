@@ -1,7 +1,7 @@
 //! `zig build forge-determinism` — the instrument's command-line shell.
 //!
 //! DELIBERATELY THIN. Everything it reports is computed by `run.zig`, which is a
-//! library precisely because two later milestones replay it (M1.1.25 at N
+//! library precisely because two later milestones replay it (M1.1.21.1 at N
 //! workers, M1.A on a rebuilt scheduler DAG). A harness whose logic lived in its
 //! `main` would have to be re-entered through a process to be replayed.
 //!

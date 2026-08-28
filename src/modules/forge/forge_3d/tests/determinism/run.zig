@@ -1,11 +1,11 @@
 //! The determinism harness AS AN INSTRUMENT — the entry two later milestones
-//! replay: M1.1.25 at N workers, M1.A on a rebuilt scheduler DAG
+//! replay: M1.1.21.1 at N workers, M1.A on a rebuilt scheduler DAG
 //! (`engine-phase-1-plan.md`). It is therefore written as a library with a
 //! stable entry, and `main.zig` is a thin shell over it rather than the other
 //! way round: a harness whose only caller is a `main` is not replayable.
 //!
 //! ONE WORKER, and that is not a limitation of this file. Resolution is
-//! sequential until M1.1.25 (`engine-physics-solver.md` §1.8.8), and the
+//! sequential until M1.1.21.1 (`engine-physics-solver.md` §1.8.8), and the
 //! invariance of the result to the worker count is STRUCTURAL — the resolution
 //! order is total, `(island rank, pair_key, subshape_id)`, with no hashed
 //! container anywhere — so the replay at N will VERIFY that invariance rather

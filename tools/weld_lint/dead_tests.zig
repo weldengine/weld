@@ -318,9 +318,60 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // 1931 - 1912 passed + 19 skipped, macOS aarch64).
     // The tenth pass closed the publication lifetime from both sides (1931 -> 1933, suite
     // reported 1933 - 1914 passed + 19 skipped, macOS aarch64).
+    // M1.1.15.1 gate A added three blocks for `core.ModuleContext`: one inline field-set pin
+    // in `src/core/module_context.zig` and the two named tests of
+    // `tests/core/module_context_test.zig` (1933 -> 1936, suite reported 1936 - 1917 passed +
+    // 19 skipped, macOS aarch64). The three carry no platform dispatch, so Windows moves by
+    // the same three; that step is arithmetic on this table, and the `-Dexpect-collected`
+    // layer fed by each cell's own total is what confronts it independently.
+    // M1.1.15.1 gate B is a net +3 over gate A, and it is a net of removals and additions
+    // rather than a bare addition — declared here because a floor that only ever grows
+    // hides what left. REMOVED, three tests whose object the infallible `Broadphase.update`
+    // deleted: `update is atomic under allocation failure` (broadphase_test), `a failed pose
+    // write leaves the store where the broadphase still says it is` and `a failed
+    // moveKinematic leaves a retry able to derive the same velocity` (world_test), plus `P1-1
+    // a publication that fails leaves every body velocity untouched` (character_test) —
+    // four. ADDED, seven: the four uniqueness-invariant tests in broadphase_test, two
+    // allocation-free/no-divergence tests in world_test, and the rewritten P1-1.
+    // (1936 -> 1939, suite reported 1939 - 1920 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.1 gate C adds seven: five in the new `tests/physics/forge_module_test.zig`
+    // (the surface's allocator/fallibility shape, the void/fallible split, the owned-allocator
+    // lifecycle, the `step` failure sweep with its no-failure counter-factual, and the ECS
+    // publication guard), and two in `src/interfaces/PhysicsModule.zig` — one extended, one
+    // new for the `Step` contract. (1939 -> 1946, suite reported 1946 - 1927 passed + 19
+    // skipped, macOS aarch64.)
+    // M1.1.15.1 gate D adds three for the dense `BodyId` index (`M1.D.13`): two in
+    // `forge_3d/tests/world_test.zig` — the stale-generation resolution and the two-way
+    // agreement between the index and the registration list — and one in
+    // `tests/physics/transform_sync_test.zig` for the publication order the index must not
+    // touch. (1946 -> 1949, suite reported 1949 - 1930 passed + 19 skipped, macOS aarch64.)
+    // THE M1.1.15.1 REOPENING (F1/F2/F3) added seven to `tests/physics/forge_module_test.zig`:
+    // three that pin the two defects the external review named — deduplication at the
+    // projecting tier, retention on the entity set, and the absence of a staging cap — and
+    // four that take the rest of the adapter's surface from signature to behaviour, the
+    // class sweep having measured 9 behaviour-asserted entries against 19 that were not.
+    // (1949 -> 1956, suite reported 1956 - 1937 passed + 19 skipped, macOS aarch64.)
+    // THE SECOND REOPENING (G1/G2) added five more to the same file: the allocator-exhaustion
+    // pin that separates the one entry which CAN report from the three that cannot, and four
+    // that give a DISCRIMINATING oracle to entries whose previous one told them apart from
+    // nothing — `moveKinematic` against `setBodyTransform` (read through `ground_velocity`,
+    // the frozen surface having no velocity getter), `addForce` against `addImpulse`,
+    // `destroyShape` against a no-op, and `pointQuery` against `overlapAabb`.
+    // (1956 -> 1961, suite reported 1961 - 1942 passed + 19 skipped, macOS aarch64.)
+    // K1 split the premise pin in two: one test drives the PUBLIC path under truncation and
+    // asserts what actually holds, the other asserts the refusal AND the windowed LIMIT of
+    // that detection. Two tests where there was one.
+    // (1963 -> 1964, suite reported 1964 - 1945 passed + 19 skipped, macOS aarch64.)
+    // H1 added one: the entity-major premise guarded in EVERY mode rather than by a
+    // `std.debug.assert` that ReleaseFast compiles to nothing.
+    // (1961 -> 1962, suite reported 1962 - 1943 passed + 19 skipped, macOS aarch64.)
+    // I2 added one: a signature walk over the four multi-result query entries, which now all
+    // carry an error channel. A starved-allocator probe shows an entry DID report on one
+    // call; the walk shows it CANNOT fail to.
+    // (1962 -> 1963, suite reported 1963 - 1944 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1931,
-        else => 1933,
+        .windows => 1962,
+        else => 1964,
     };
 }
 

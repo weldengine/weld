@@ -27,7 +27,7 @@
 //! **THE PERIMETER, and why it is two directories and not one.** The diagnostic this rule
 //! emits makes a statement about the ENGINE — that §1.11.8's boundary is unique — so a
 //! control that looked at one module would be claiming more than it checks. §1.11.8 places
-//! the boundary AT THE INTERFACE TIER, and `src/interfaces/` is where M1.1.26 writes the
+//! the boundary AT THE INTERFACE TIER, and `src/interfaces/` is where M1.1.15.2 writes the
 //! adapter, which is conversion code by definition. It is governed here from the day the
 //! directory exists rather than the day the freeze discovers the gap. The crossing POINT
 //! lives in `forge/api/` for a dependency reason — `forge_3d` cannot import the interface
@@ -99,7 +99,7 @@ const governed = [_]GovernedPrefix{
     .{
         .posix = "src/interfaces/",
         .win = "src\\interfaces\\",
-        .why = "where `engine-physics-queries.md` §1.11.8 places the boundary, and where M1.1.26 " ++
+        .why = "where `engine-physics-queries.md` §1.11.8 places the boundary, and where M1.1.15.2 " ++
             "writes the adapter — conversion code by definition",
     },
 };
@@ -375,7 +375,7 @@ test "a narrowing in a governed production file is flagged" {
 }
 
 test "the perimeter is the forge module AND the interface tier, and nothing else" {
-    // THE INTERFACE TIER, which §1.11.8 names as the boundary's home and where M1.1.26
+    // THE INTERFACE TIER, which §1.11.8 names as the boundary's home and where M1.1.15.2
     // writes the adapter. The rule ignored it until F-F1: the directory was one milestone
     // old and held declarations only, so the gap would have been found by the freeze.
     try std.testing.expectEqual(@as(usize, 1), try countOn(interface_prod, "const x: f32 = @floatCast(y);\n"));

@@ -162,6 +162,20 @@ pub fn Bvh(comptime T: type) type {
             return self.leaf_count;
         }
 
+        /// Length of the node POOL — live leaves, live internal nodes and free slots
+        /// alike. NOT the proxy count: `leafCount` is that, and the two differ by the
+        /// internal nodes plus whatever the free-list holds.
+        ///
+        /// It is the strict upper bound of every proxy id this tree can hand out, which
+        /// is what the aggregate above needs it for: the moved-log's mark array is
+        /// indexed by proxy id, so it must cover this length, and the log itself can hold
+        /// at most one entry per marked id. ONE bound serves both. A read-only datum that
+        /// existed from the first day and had simply never been reachable — the same
+        /// class as `BodyManager.entity()` at M1.1.10 and `proxyAabb` at M1.1.14.
+        pub fn poolLen(self: *const Self) u32 {
+            return @intCast(self.nodes.items.len);
+        }
+
         /// Height of the tree (`-1` when empty, `0` for a single proxy).
         pub fn height(self: *const Self) i32 {
             if (self.root == null_index) return -1;
@@ -910,6 +924,17 @@ pub fn Broadphase(comptime T: type) type {
             /// The caller's opaque payload while live; the next free slot index while dead.
             user_data: u32,
             live: bool,
+            /// THE DIRTY MARK of the uniqueness invariant, for this list. It means
+            /// **"this slot id carries an unconsumed entry in `moved_unbounded`"** — NOT
+            /// "this shape was inserted". The distinction is what survives slot recycling:
+            /// see `moved_mark`, whose contract this mirrors exactly.
+            ///
+            /// It is NOT reset by retirement, and it must not be: a retired slot whose
+            /// entry is still in the log, then handed back by the free-list to a new
+            /// shape, is served by that entry — which resolves through the slot id and so
+            /// names the NEW occupant. Resetting it there would append a second entry for
+            /// one id and break the bound the reserve rests on.
+            logged: bool = false,
         };
 
         /// A candidate overlap between two proxies, by `user_data`, canonical
@@ -921,10 +946,37 @@ pub fn Broadphase(comptime T: type) type {
 
         trees: [layer_count]BvhT,
         /// Per-layer log of proxy ids touched since the last `computePairs`
-        /// (inserted, or re-inserted by `update`). Consumed (cleared) by
-        /// `computePairs`; may hold duplicates or stale ids — both are handled
-        /// there (pair-set dedup; `isLiveLeaf` skip for a freed id).
+        /// (inserted, or re-inserted by `update`). Consumed (cleared) by `computePairs`.
+        ///
+        /// **AT MOST ONE ENTRY PER PROXY ID PER CONSUMPTION EPOCH** (M1.1.15.1), enforced
+        /// by `moved_mark`. Before that invariant the log grew with the number of MOVES
+        /// and its size was bounded by nothing: N moves of one proxy between two
+        /// `computePairs` calls produced N entries, so no capacity could be reserved in
+        /// advance and `update` had to be able to allocate — which is what forced an
+        /// error union onto every pose setter that refreshes a proxy
+        /// (`engine-tier-interfaces.md` §1). With the invariant the length is bounded by
+        /// the tree's pool length, capacity is reserved at `insert`, and `update` is
+        /// infallible.
+        ///
+        /// It may still hold STALE ids — a slot freed and not reused — which
+        /// `computePairs` skips via `isLiveLeaf`. It no longer holds duplicates.
         moved: [layer_count]std.ArrayListUnmanaged(u32),
+        /// THE DIRTY MARK backing the uniqueness invariant on `moved`, indexed by tree
+        /// proxy id, one entry per node-pool slot (internal nodes included, always false).
+        ///
+        /// **It means "this id carries an unconsumed entry in `moved`", and NOT "this
+        /// proxy has moved".** That reading is the one that survives slot recycling, and
+        /// the other one does not: `remove` deliberately leaves the mark set, so a freed
+        /// id whose entry is still in the log and which the pool then hands to a NEW leaf
+        /// is served by the entry already there — the entry names an id, and consumption
+        /// resolves that id to whoever occupies it then. Clearing it at `remove` would
+        /// append a second entry for one id; refusing to log at `insert` without clearing
+        /// it would be correct only under this reading, and is.
+        ///
+        /// Cleared by `computePairs` for every id it consumes, and only there. What breaks
+        /// if that clearing is dropped: a proxy that moves in a LATER epoch finds its mark
+        /// still set, is never logged again, and its pairs vanish silently.
+        moved_mark: [layer_count]std.ArrayListUnmanaged(bool),
         /// Per-layer flat list of UNBOUNDED shapes, outside the trees (§1.11.15). No hashed
         /// container, here as everywhere on this path (determinism by construction,
         /// M1.1.14).
@@ -972,6 +1024,11 @@ pub fn Broadphase(comptime T: type) type {
         /// Per-layer log of unbounded slots inserted since the last `computePairs` —
         /// the second pairing direction's driver. Consumed (cleared) there.
         ///
+        /// **The SAME uniqueness invariant as `moved`**, at most one entry per slot id per
+        /// consumption epoch, held by `UnboundedSlot.logged` instead of a side array
+        /// because this list owns its own records and the tree does not. Capacity is
+        /// reserved at `insertUnbounded` against the slot count, which bounds it.
+        ///
         /// A separate log from `moved`, and not merely for tidiness: the two are
         /// crossed against DIFFERENT structures. A moved bounded proxy is crossed with
         /// the unbounded LISTS; a newly inserted unbounded shape is crossed with the
@@ -980,9 +1037,10 @@ pub fn Broadphase(comptime T: type) type {
 
         /// A broadphase with the given tuning and no proxies.
         pub fn init(config: Config) Self {
-            var self: Self = .{ .trees = undefined, .moved = undefined, .unbounded = undefined, .unbounded_free = undefined, .moved_unbounded = undefined };
+            var self: Self = .{ .trees = undefined, .moved = undefined, .moved_mark = undefined, .unbounded = undefined, .unbounded_free = undefined, .moved_unbounded = undefined };
             for (&self.trees) |*t| t.* = BvhT.init(config);
             for (&self.moved) |*m| m.* = .empty;
+            for (&self.moved_mark) |*m| m.* = .empty;
             for (&self.unbounded) |*u| u.* = .empty;
             for (&self.unbounded_free) |*f| f.* = null_slot;
             for (&self.moved_unbounded) |*m| m.* = .empty;
@@ -993,6 +1051,7 @@ pub fn Broadphase(comptime T: type) type {
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             for (&self.trees) |*t| t.deinit(gpa);
             for (&self.moved) |*m| m.deinit(gpa);
+            for (&self.moved_mark) |*m| m.deinit(gpa);
             for (&self.unbounded) |*u| u.deinit(gpa);
             for (&self.moved_unbounded) |*m| m.deinit(gpa);
             self.* = undefined;
@@ -1006,19 +1065,55 @@ pub fn Broadphase(comptime T: type) type {
         /// self-matches, so a collision would silently drop a legitimate pair
         /// (forge_3d passes the packed `BodyId`, which is unique by construction).
         ///
-        /// Atomic: **on error (OOM), the broadphase is unchanged**. The
-        /// moved-log slot is reserved before the tree is touched, so a leaf can
-        /// never be inserted-but-unlogged (an orphan the caller has no `Proxy`
-        /// to remove).
+        /// Atomic: **on error (OOM), the broadphase is unchanged**. Every fallible step
+        /// precedes every mutation, so a leaf can never be inserted-but-unlogged (an
+        /// orphan the caller has no `Proxy` to remove) and a failed call is retryable.
+        ///
+        /// **THIS ENTRY IS WHERE THE MOVED LOG'S CAPACITY COMES FROM, and that is why
+        /// `update` can be infallible.** `Bvh.insert` appends at most two nodes, so
+        /// `poolLen() + 2` bounds the pool after it returns — hence the id it returns,
+        /// hence the mark array's index, hence the log's own length, the invariant
+        /// admitting at most one entry per marked id. ONE bound serves all three, and it
+        /// is a bound on the tree's pool rather than on its live leaves precisely so the
+        /// argument needs no reasoning about which slots the free-list hands back.
+        ///
+        /// What breaks if the reserve is dropped: `appendAssumeCapacity` in `logTree`
+        /// panics — loudly, in Debug and ReleaseSafe, which is the failure direction this
+        /// repository chooses.
         pub fn insert(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, tight_aabb: AabbT, user_data: u32) !Proxy {
             const li = @intFromEnum(layer);
-            // Reserve the moved-log slot BEFORE mutating the tree (`Bvh.insert`
-            // is itself atomic), so no allocation remains after the tree gains
-            // the leaf → insert is all-or-nothing.
-            try self.moved[li].ensureUnusedCapacity(gpa, 1);
+            const bound = self.trees[li].poolLen() + 2;
+            try self.moved[li].ensureTotalCapacity(gpa, bound);
+            try self.moved_mark[li].ensureTotalCapacity(gpa, bound);
+
             const id = try self.trees[li].insert(gpa, tight_aabb, user_data);
-            self.moved[li].appendAssumeCapacity(id);
+
+            // Infallible from here: the tree has the leaf and nothing left can fail.
+            self.coverMarkArray(li);
+            self.logTree(li, id);
             return .{ .layer = layer, .kind = .tree, .id = id };
+        }
+
+        /// Extend `moved_mark[li]` to cover the tree's current pool length. Assume-capacity:
+        /// the only caller reserved `poolLen() + 2` before the pool could grow, and
+        /// `Bvh.insert` is the ONLY operation that grows it — `Bvh.update` is documented
+        /// allocation-free and `Bvh.remove` only frees.
+        fn coverMarkArray(self: *Self, li: usize) void {
+            const want = self.trees[li].poolLen();
+            while (self.moved_mark[li].items.len < want) self.moved_mark[li].appendAssumeCapacity(false);
+        }
+
+        /// Log tree proxy `id` in layer `li`, AT MOST ONCE per consumption epoch.
+        ///
+        /// The early return is the invariant itself: a set mark means an entry naming this
+        /// id is already in the log, and that entry serves whoever occupies the id at
+        /// consumption time — which is why it is also correct for a recycled slot whose
+        /// predecessor was logged (see `moved_mark`).
+        fn logTree(self: *Self, li: usize, id: u32) void {
+            std.debug.assert(id < self.moved_mark[li].items.len);
+            if (self.moved_mark[li].items[id]) return;
+            self.moved_mark[li].items[id] = true;
+            self.moved[li].appendAssumeCapacity(id);
         }
 
         /// Insert an UNBOUNDED shape into `layer`'s flat list, outside the trees, and log
@@ -1049,28 +1144,50 @@ pub fn Broadphase(comptime T: type) type {
             // fail an insertion that already has every byte it needs. Reading the head
             // before the reserve mutates nothing, so the ordering guarantee is intact.
             const head = self.unbounded_free[li];
-            try self.moved_unbounded[li].ensureUnusedCapacity(gpa, 1);
+            // The log's capacity is reserved against the SLOT COUNT and not against one
+            // more entry, because the uniqueness invariant bounds its length by that count
+            // — at most one entry per slot id per epoch. `+ 1` covers the fresh slot this
+            // call may append.
+            try self.moved_unbounded[li].ensureTotalCapacity(gpa, self.unbounded[li].items.len + 1);
             if (head == null_slot) try self.unbounded[li].ensureUnusedCapacity(gpa, 1);
             const id = blk: {
                 // LIFO reuse first (the `Bvh.allocateNodeAssumeCapacity` shape): an
                 // identical op sequence therefore reuses indices identically, which is what
                 // keeps the whole path a pure function of that sequence (M1.1.14).
                 if (head != null_slot) {
+                    // `logged` is CARRIED ACROSS the reuse and not reset. A retired slot
+                    // may still own an unconsumed log entry, and that entry resolves
+                    // through the slot id, so it already names this new occupant. Writing
+                    // the record with a literal that defaults `logged` to false would
+                    // append a second entry for one id — the exact bound the reserve above
+                    // rests on.
+                    const carried = self.unbounded[li].items[head].logged;
                     self.unbounded_free[li] = self.unbounded[li].items[head].user_data; // next free
-                    self.unbounded[li].items[head] = .{ .shape = shape, .user_data = user_data, .live = true };
+                    self.unbounded[li].items[head] = .{ .shape = shape, .user_data = user_data, .live = true, .logged = carried };
                     break :blk head;
                 }
                 const fresh: u32 = @intCast(self.unbounded[li].items.len);
-                self.unbounded[li].appendAssumeCapacity(.{ .shape = shape, .user_data = user_data, .live = true });
+                self.unbounded[li].appendAssumeCapacity(.{ .shape = shape, .user_data = user_data, .live = true, .logged = false });
                 break :blk fresh;
             };
-            self.moved_unbounded[li].appendAssumeCapacity(id);
+            if (!self.unbounded[li].items[id].logged) {
+                self.unbounded[li].items[id].logged = true;
+                self.moved_unbounded[li].appendAssumeCapacity(id);
+            }
             return .{ .layer = layer, .kind = .unbounded, .id = id };
         }
 
         /// Remove a proxy. A lingering moved-log entry for it is harmless — a freed tree
         /// slot fails `isLiveLeaf` and a retired unbounded slot fails its `live` flag, and
         /// `computePairs` skips both.
+        ///
+        /// **THE DIRTY MARK IS DELIBERATELY LEFT SET**, on both structures. It records that
+        /// an entry naming this id is still in the log, which stays true after the removal
+        /// — and the entry resolves through the id, so if the free-list hands that id to a
+        /// new proxy before the next `computePairs`, that new proxy is the one the entry
+        /// serves. Clearing the mark here would let the new proxy append a SECOND entry
+        /// for one id, breaking the length bound the reserve at `insert` rests on. The
+        /// consumption is the only place a mark is cleared, and that is the whole rule.
         ///
         /// Exhaustive on `ProxyKind`, no `else`: a third structure would be a compile
         /// error here rather than a removal that silently indexes the wrong pool.
@@ -1096,14 +1213,24 @@ pub fn Broadphase(comptime T: type) type {
         /// actually re-inserted it (the fat AABB changed); an in-margin nudge is
         /// a no-op with no pair consequence (hysteresis).
         ///
-        /// Atomic: **on error (OOM), the broadphase is unchanged**. The
-        /// moved-log slot is reserved UP FRONT — before the hysteresis test and
-        /// the (allocation-free) tree re-insert — so a re-inserted proxy can
-        /// never go unlogged. Were it unlogged, a retry would find the box
-        /// already re-fattened, pass the hysteresis test, and the move would be
-        /// lost forever. The reserve is unconditional; `computePairs` retains
-        /// the log's capacity, so in steady state it is a no-op.
-        pub fn update(self: *Self, gpa: std.mem.Allocator, proxy: Proxy, tight_aabb: AabbT) !void {
+        /// **INFALLIBLE, and allocation-free (M1.1.15.1).** This is what makes the three
+        /// pose setters of `engine-tier-interfaces.md` §1 able to return `void` as the
+        /// interface declares them: every one of them refreshes a proxy, so an allocating
+        /// `update` forced an error union all the way up to a frozen surface that has none.
+        ///
+        /// **THE PROPERTY THAT SURVIVED THE ERROR CHANNEL, and the one to protect.** The
+        /// earlier form reserved the log slot UP FRONT — before the hysteresis test — and
+        /// argued it from the failure path: a re-inserted proxy left unlogged could never
+        /// be logged again, since a retry would find the box already re-fattened, pass the
+        /// hysteresis test, and lose the move forever. That argument is about a retry, and
+        /// it dies with the error it protected against. **The property it protected does
+        /// not**: a re-inserted proxy is still never unlogged, and it is now held by two
+        /// mechanisms working together rather than by an ordering — the capacity reserved
+        /// at `insert` guarantees the append cannot fail, and `moved_mark` guarantees the
+        /// entry exists exactly once. Neither is optional: without the reserve the append
+        /// panics, without the mark the log grows with the number of MOVES and no reserve
+        /// could bound it.
+        pub fn update(self: *Self, proxy: Proxy, tight_aabb: AabbT) void {
             // An UNBOUNDED shape has no box to move to, and it cannot move at all: a
             // half-space forces a STATIC body (`addBody` rejects any other with
             // `error.ShapeMustBeStatic`, §1.11.15), so it never re-enters a moved log and
@@ -1112,10 +1239,7 @@ pub fn Broadphase(comptime T: type) type {
             // than a no-op to absorb.
             std.debug.assert(proxy.kind == .tree);
             const li = @intFromEnum(proxy.layer);
-            try self.moved[li].ensureUnusedCapacity(gpa, 1);
-            if (self.trees[li].update(proxy.id, tight_aabb)) {
-                self.moved[li].appendAssumeCapacity(proxy.id);
-            }
+            if (self.trees[li].update(proxy.id, tight_aabb)) self.logTree(li, proxy.id);
         }
 
         /// The stored FAT AABB of a bounded proxy; `null` when `proxy` is unbounded.
@@ -1344,6 +1468,20 @@ pub fn Broadphase(comptime T: type) type {
             }
             if (sink.err) |e| return e;
 
+            // CONSUMPTION — the only place a dirty mark is cleared, on both structures.
+            //
+            // A mark and its log entry MOVE TOGETHER, and that is a STRUCTURAL invariant
+            // rather than a recovery property: the mark means "this id carries an
+            // unconsumed entry in the log", so a mark without an entry silences that
+            // proxy forever — it is never logged again and its pairs vanish — while an
+            // entry without a mark lets a second one be appended for one id and breaks
+            // the bound the reserve rests on. The OOM early return above leaves BOTH
+            // untouched, which is the same equivalence and not a retry guarantee: a
+            // failing tick is not replayable (`PhysicsWorld.step` failure contract).
+            for (0..layer_count) |li| {
+                for (self.moved[li].items) |proxy| self.moved_mark[li].items[proxy] = false;
+                for (self.moved_unbounded[li].items) |slot_id| self.unbounded[li].items[slot_id].logged = false;
+            }
             for (&self.moved) |*m| m.clearRetainingCapacity();
             for (&self.moved_unbounded) |*m| m.clearRetainingCapacity();
 

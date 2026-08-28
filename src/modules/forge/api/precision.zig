@@ -98,6 +98,21 @@ pub fn Crossing(comptime Solver: type) type {
             return WorldVec3.fromArray(.{ @floatCast(a[0]), @floatCast(a[1]), @floatCast(a[2]) });
         }
 
+        /// Solver → world, SCALAR. The vector and rotation helpers above cover the aggregates;
+        /// this covers the lone lengths that travel beside them — a hit distance, a
+        /// separation. Added at M1.1.15.1, when `Forge3DModule` became the first caller to
+        /// wrap the eight query entries and found that every one of them returns a `distance`
+        /// the aggregates do not carry.
+        ///
+        /// It exists so that those narrowings are AT the boundary rather than spelled at the
+        /// adapter, which is what `no_precision_crossing` enforces over
+        /// `src/modules/forge/` and `src/interfaces/`. A `@floatCast` written in the adapter
+        /// instead would be a rounding nobody counted, in the exact place §1.11.8 says the
+        /// boundary is.
+        pub fn realToWorld(v: Solver) WorldReal {
+            return @floatCast(v);
+        }
+
         /// Solver → world, rotation. A narrowed unit quaternion is unit only to the world
         /// scalar's resolution; every consumer that inverts by conjugation re-normalises on
         /// the way back in, which `vec3ToSolver`'s exactness then preserves.

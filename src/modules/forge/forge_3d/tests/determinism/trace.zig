@@ -422,7 +422,7 @@ test "the character IS in the continuous state, and the proof is a discriminatio
     // position and its presence body's pose; the presence is not in `mobile`, so no
     // rigid-body record can carry this change.
     const moved = a.chars.get(a.character).?.position.add(.{ .data = .{ 0.5, 0, 0 } });
-    try b.chars.setCharacterPosition(gpa, &b.world.bp, &b.world.bm, &b.world.store, b.character, moved);
+    b.chars.setCharacterPosition(&b.world.bp, &b.world.bm, &b.world.store, b.character, moved);
 
     db.clearRetainingCapacity();
     try dumpState(&b, gpa, &db);
@@ -433,7 +433,7 @@ test "the character IS in the continuous state, and the proof is a discriminatio
     // verdict to `.in_air` by contract (§1.12.8), so this second discrimination
     // isolates the verdict field: the position is restored to its original value,
     // leaving the verdict as the only difference left.
-    try b.chars.setCharacterPosition(gpa, &b.world.bp, &b.world.bm, &b.world.store, b.character, a.chars.get(a.character).?.position);
+    b.chars.setCharacterPosition(&b.world.bp, &b.world.bm, &b.world.store, b.character, a.chars.get(a.character).?.position);
     try testing.expectEqual(api.GroundState.in_air, b.chars.get(b.character).?.reported_ground);
     try testing.expectEqual(api.GroundState.grounded, a.chars.get(a.character).?.reported_ground);
 

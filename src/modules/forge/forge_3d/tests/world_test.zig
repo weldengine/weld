@@ -570,7 +570,7 @@ test "W4: static teleportation wakes the sleepers retained in pair with it" {
     // Teleporting the DISTANT ground wakes the body above IT and leaves the other
     // asleep — both halves in one scene, so "it wakes" and "it wakes only what it
     // should" are read from the same act.
-    try world.setBodyTransform(gpa, far_ground_id, vr(100, -0.2, 0), config.Quatr.identity);
+    world.setBodyTransform(far_ground_id, vr(100, -0.2, 0), config.Quatr.identity);
     try testing.expect(!world.bm.isSleeping(far_box).?);
     try testing.expect(world.bm.isSleeping(box).?);
 }
@@ -588,7 +588,7 @@ test "setBodyTransform derives no velocity" {
     // `moveKinematic` is required to, the linear column would read 60 m/s; it reads
     // zero, and that is the contract — the split between the two entries is what makes
     // `ground_velocity` truthful for one and silent for the other (§1.12.5).
-    try world.setBodyTransform(gpa, platform, vr(1, 0, 0), config.Quatr.identity);
+    world.setBodyTransform(platform, vr(1, 0, 0), config.Quatr.identity);
     try testing.expectEqual(vr(1, 0, 0), world.bm.position(platform).?);
     try testing.expectEqual(Vec3r.zero, world.bm.linearVelocity(platform).?);
     try testing.expectEqual(Vec3r.zero, world.bm.angularVelocity(platform).?);
@@ -650,7 +650,7 @@ test "W4: moveCharacter wakes the sleeping bodies retained in pair with the pres
     }
 
     // ONE ACT, TWO READINGS.
-    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    _ = try world.moveCharacter(hero, vr(0, 0, 0.01), fixed_dt);
     try testing.expect(!world.bm.isSleeping(box).?);
     try testing.expect(world.bm.isSleeping(far_box).?);
 }
@@ -675,7 +675,7 @@ test "W4: a character moving where it is retained with nobody wakes nobody" {
     try testing.expect(world.bm.isSleeping(box).?);
     try testing.expect(!retainsPair(&world, presence, box));
 
-    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    _ = try world.moveCharacter(hero, vr(0, 0, 0.01), fixed_dt);
     try testing.expect(world.bm.isSleeping(box).?);
 }
 
@@ -697,7 +697,7 @@ test "moveKinematic derives both velocities from the target pose over dt" {
     const s: Real = 0.6;
     const c: Real = 0.8;
     const target_rot = config.Quatr{ .x = 0, .y = s, .z = 0, .w = c };
-    try world.moveKinematic(gpa, platform, Vec3r.zero, target_rot, fixed_dt);
+    world.moveKinematic(platform, Vec3r.zero, target_rot, fixed_dt);
 
     const w1 = world.bm.angularVelocity(platform).?.toArray();
     const expected_wy = 2 * s / fixed_dt;
@@ -721,13 +721,13 @@ test "moveKinematic derives both velocities from the target pose over dt" {
     defer twin.deinit(gpa);
     const p2 = try addBoxBody(gpa, &twin, .kinematic, false, 1, .{ 0, 0, 0 });
     const negated = config.Quatr{ .x = 0, .y = -s, .z = 0, .w = -c };
-    try twin.moveKinematic(gpa, p2, Vec3r.zero, negated, fixed_dt);
+    twin.moveKinematic(p2, Vec3r.zero, negated, fixed_dt);
     const w2 = twin.bm.angularVelocity(p2).?.toArray();
     try testing.expect(std.math.approxEqAbs(Real, w1[1], w2[1], 1e-4));
 
     // THE LINEAR HALF, on a translation-only move of the same world.
     const before = world.bm.position(platform).?;
-    try world.moveKinematic(gpa, platform, vr(0.5, 0, 0), target_rot, fixed_dt);
+    world.moveKinematic(platform, vr(0.5, 0, 0), target_rot, fixed_dt);
     const lin = world.bm.linearVelocity(platform).?.toArray();
     try testing.expect(std.math.approxEqAbs(Real, 0.5 / fixed_dt, lin[0], 1e-3));
     try testing.expectEqual(@as(Real, 0), lin[1]);
@@ -784,79 +784,188 @@ test "addBody is transactional: no fail index leaves a body, a proxy or a regist
     }
 }
 
-test "a failed pose write leaves the store where the broadphase still says it is" {
-    // The proxy refresh reserves and can fail. Before the fix the pose was already committed
-    // when it did, so the broadphase described a body that had moved and nothing could
-    // notice. Asserted on the POSE BITS — the quantity that diverged — and not on the error,
-    // which was returned before the fix too.
+test "proxyOf resolves through the index and rejects a stale generation" {
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+    const first = try pw.addBody(gpa, dynamicAt(shape, 0, 5, 0));
+    const first_proxy = pw.proxyOf(first).?;
+
+    // A REMOVED HANDLE ANSWERS `null` even though its index is still in range and still
+    // carries the generation it was bound with. That is what `IndexSlot.live` is for: the
+    // slot allocator bumps the generation on FREE, so this table keeps the OLD one, and a
+    // comparison alone would match and answer with a node the broadphase has freed.
+    pw.removeBody(first);
+    try testing.expect(pw.proxyOf(first) == null);
+
+    // RECYCLED: the same index comes back with a different generation.
+    const second = try pw.addBody(gpa, dynamicAt(shape, 10, 5, 0));
+    try testing.expectEqual(
+        api.PackedId.unpack(first).index,
+        api.PackedId.unpack(second).index,
+    ); // the race this test exists for
+    try testing.expect(api.PackedId.unpack(first).generation != api.PackedId.unpack(second).generation);
+
+    // The STALE handle still answers `null` — never the new occupant's proxy, which is the
+    // failure a bare index lookup would produce.
+    try testing.expect(pw.proxyOf(first) == null);
+    const second_proxy = pw.proxyOf(second).?;
+    try testing.expect(second_proxy.id == pw.bodies.items[0].proxy.id);
+    // NON-VACUITY: the lookup really does find something, so the two `null`s above are the
+    // absence of a SECOND answer and not the absence of any.
+    _ = first_proxy;
+}
+
+test "the derived index still agrees with its authoritative source on every live body" {
+    // **THIS IS A CACHE CONTROL, NOT A D11 SYMPTOM, and the name says so on purpose.**
+    // `bodies[i].proxy` is the fact; `index` is derived from it through the single
+    // derivation point `rebindProxy` (see `IndexSlot`). A test that read as "two sources
+    // must agree" would invite the deletion the derivation makes wrong — step 10 iterates
+    // `bodies` and would pay an indirection per body at 11 000 bodies.
     //
-    // The failure is DRIVEN rather than assumed: `Broadphase.update` only allocates when the
-    // moved log has to grow, so one move is not enough to reach the error path. The loop
-    // keeps moving until an allocation is actually needed, and `failed` is what makes this a
-    // measurement instead of a test that never reached the branch it names.
+    // What it guards is a derivation that stops happening, and that is not hypothetical: the
+    // moment the index landed, a caller re-pointed a body's proxy by writing the
+    // authoritative record alone, `proxyOf` went on returning a freed node, and step 2
+    // asserted inside `Bvh.proxyAabb`.
+    const gpa = testing.allocator;
+    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer pw.deinit(gpa);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+    // A mixed population: rigid bodies, a removal that leaves a hole, and a character
+    // presence — which is registered by a different entry and is exactly the body the
+    // M1.1.15 gate C defect went missing on.
+    var ids: [6]api.BodyId = undefined;
+    for (&ids, 0..) |*slot, i| {
+        // `f32` and NOT `Real`: `BodyDescriptor` is the PUBLIC surface, which follows the
+        // world scalar and not the solver's (`engine-physics-queries.md` §1.11.8). The `f64`
+        // leg is what caught this — at the default precision the two coincide and the type
+        // system proves nothing.
+        const x: f32 = @floatFromInt(i * 3);
+        slot.* = try pw.addBody(gpa, dynamicAt(shape, x, 5, 0));
+    }
+    pw.removeBody(ids[2]);
+    const hero = try pw.createCharacter(gpa, .{ .entity = .{ .index = 77, .generation = 0 }, .position = av3(-5, 0, 0) });
+
+    // DIRECTION 1 — every registration resolves through the index, to the SAME proxy.
+    var walked: usize = 0;
+    for (pw.bodies.items) |entry| {
+        const viaIndex = pw.proxyOf(entry.id) orelse return error.RegisteredBodyMissingFromIndex;
+        try testing.expectEqual(entry.proxy.layer, viaIndex.layer);
+        try testing.expectEqual(entry.proxy.kind, viaIndex.kind);
+        try testing.expectEqual(entry.proxy.id, viaIndex.id);
+        walked += 1;
+    }
+    // The SIZE of what was walked: five surviving rigid bodies plus one presence.
+    try testing.expectEqual(@as(usize, 6), walked);
+    try testing.expectEqual(pw.bodies.items.len, walked);
+
+    // DIRECTION 2 — every LIVE index slot names a registration. Without this half, an index
+    // that kept a slot alive after a removal would pass direction 1 unnoticed.
+    var live_slots: usize = 0;
+    for (pw.index.items, 0..) |slot, idx| {
+        if (!slot.live) continue;
+        live_slots += 1;
+        var found = false;
+        for (pw.bodies.items) |entry| {
+            if (api.PackedId.unpack(entry.id).index == idx) found = true;
+        }
+        try testing.expect(found);
+    }
+    try testing.expectEqual(walked, live_slots);
+
+    pw.destroyCharacter(gpa, hero);
+    // And the presence leaves BOTH: a destroy that deregistered only the list would leave a
+    // live slot here.
+    var after: usize = 0;
+    for (pw.index.items) |slot| {
+        if (slot.live) after += 1;
+    }
+    try testing.expectEqual(pw.bodies.items.len, after);
+    try testing.expectEqual(@as(usize, 5), after);
+}
+
+test "the three pose setters are allocation-free and infallible" {
+    // REPLACES `test "a failed pose write leaves the store where the broadphase still says
+    // it is"` and `test "a failed moveKinematic leaves a retry able to derive the same
+    // velocity"`. Both drove a `FailingAllocator` until `Broadphase.update` had to grow its
+    // moved log, then asserted the rollback. Neither object exists any more: the log carries
+    // at most one entry per proxy per consumption epoch, its capacity is reserved at proxy
+    // insertion, and these three entries take no allocator at all — so there is no failure
+    // to inject and no rollback to observe.
+    //
+    // THE SIGNATURE IS THE PROPERTY, and it is a stronger claim than either removed test
+    // made: they showed the rollback was correct when the allocation failed, this shows the
+    // allocation cannot happen. It is also the exact shape `engine-tier-interfaces.md` §1
+    // declares for the three, under the condition it writes on them.
+    inline for (.{
+        @TypeOf(PhysicsWorld.setBodyTransform),
+        @TypeOf(PhysicsWorld.moveKinematic),
+        @TypeOf(PhysicsWorld.setCharacterPosition),
+    }) |Entry| {
+        const info = @typeInfo(Entry).@"fn";
+        try testing.expectEqual(void, info.return_type.?);
+        inline for (info.params) |param| try testing.expect(param.type.? != std.mem.Allocator);
+    }
+
+    // NON-VACUITY, in both directions. `addBody` legitimately keeps an allocator AND an
+    // error union, so the walk above is not a predicate that never finds anything; and
+    // `resizeCharacter` keeps both too, which is the entry the brief names as unable to join
+    // the three because it creates a shape.
+    inline for (.{ @TypeOf(PhysicsWorld.addBody), @TypeOf(PhysicsWorld.resizeCharacter) }) |Entry| {
+        const info = @typeInfo(Entry).@"fn";
+        try testing.expect(@typeInfo(info.return_type.?) == .error_union);
+        var takes_allocator = false;
+        inline for (info.params) |param| {
+            if (param.type.? == std.mem.Allocator) takes_allocator = true;
+        }
+        try testing.expect(takes_allocator);
+    }
+}
+
+test "repeated pose writes never grow the moved log, and the store never diverges" {
+    // The BEHAVIOURAL half of the property above, on the same scenario the two removed tests
+    // drove: escalating teleports, each one leaving the fat box so the tree really re-inserts.
+    // They looped until an allocation was needed; here the point is that no number of them
+    // needs one, because the log holds ONE entry for the proxy however many times it moves.
     const gpa = testing.allocator;
     var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
     defer pw.deinit(gpa);
     const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
     const id = try pw.addBody(gpa, dynamicAt(shape, 0, 5, 0));
 
-    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    var failed = false;
-    var attempt: u32 = 0;
-    while (attempt < 64 and !failed) : (attempt += 1) {
-        const before_pos = pw.bm.position(id).?.toArray();
-        const before_rot = pw.bm.rotation(id).?;
-        const target = vr(@as(Real, @floatFromInt(attempt)) * 100 + 100, 5, 0);
-        if (pw.setBodyTransform(fa.allocator(), id, target, before_rot)) {
-            continue; // this move needed no allocation
-        } else |_| {
-            failed = true;
-            try testing.expectEqual(before_pos, pw.bm.position(id).?.toArray());
-            try testing.expectEqual(before_rot.x, pw.bm.rotation(id).?.x);
-            try testing.expectEqual(before_rot.w, pw.bm.rotation(id).?.w);
-        }
-    }
-    try testing.expect(failed);
-}
+    const proxy = pw.proxyOf(id).?;
+    // The layer is read FROM THE PROXY rather than assumed: the class assignment is the
+    // orchestrator's (§1.13.3), and hard-coding `.dynamic` here would make this test agree
+    // with a wiring change instead of measuring it.
+    const layer: usize = @intFromEnum(proxy.layer);
 
-test "a failed moveKinematic leaves a retry able to derive the same velocity" {
-    // The velocities are derived FROM the current pose, so committing the pose before the
-    // fallible refresh made a retry compute `target - target` and publish ZERO for a move
-    // that had happened — the exact lie this entry exists to remove, arriving by the error
-    // path. What is asserted is the RETRY's answer, because that is where the lie appeared:
-    // asserting only the restored pose would pass against a fix that restored the pose and
-    // left the velocities at their derived values.
-    const gpa = testing.allocator;
-    var pw = PhysicsWorld.init(vr(0, -9.81, 0), 1.0 / 60.0);
-    defer pw.deinit(gpa);
-    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
-    var desc = dynamicAt(shape, 0, 5, 0);
-    desc.body_type = .kinematic;
-    desc.mass = 0;
-    const id = try pw.addBody(gpa, desc);
-
-    const dt: Real = 1.0 / 60.0;
-    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    var failed = false;
+    // 64 moves — the same count the removed loops used as their budget, so the range that
+    // used to cross an allocation boundary is the range asserted to cross none.
+    const moves: u32 = 64;
     var attempt: u32 = 0;
-    while (attempt < 64 and !failed) : (attempt += 1) {
-        const from = pw.bm.position(id).?.toArray();
+    while (attempt < moves) : (attempt += 1) {
         const rot = pw.bm.rotation(id).?;
         const target = vr(@as(Real, @floatFromInt(attempt)) * 100 + 100, 5, 0);
-        if (pw.moveKinematic(fa.allocator(), id, target, rot, dt)) {
-            continue;
-        } else |_| {
-            failed = true;
-            // The pose is back where it was, so the retry has a real distance to derive from.
-            try testing.expectEqual(from, pw.bm.position(id).?.toArray());
-            try pw.moveKinematic(gpa, id, target, rot, dt);
-            const v = pw.bm.linearVelocity(id).?.toArray();
-            const expected = (target.toArray()[0] - from[0]) / dt;
-            try testing.expectEqual(expected, v[0]);
-            try testing.expect(v[0] != 0);
-        }
+        pw.setBodyTransform(id, target, rot);
+        // THE STORE NEVER DIVERGES: the pose written is the pose stored, on every single
+        // move. The removed tests could only assert this on the failure they provoked.
+        try testing.expectEqual(target.toArray(), pw.bm.position(id).?.toArray());
     }
-    try testing.expect(failed);
+
+    // ONE entry after 64 moves. Pre-invariant this reads 64.
+    try testing.expectEqual(@as(usize, 1), pw.bp.moved[layer].items.len);
+    try testing.expectEqual(proxy.id, pw.bp.moved[layer].items[0]);
+
+    // And the broadphase agrees with the store — the fat box of the leaf contains the body's
+    // tight box at its final pose. Without this the "one entry" could be bought by not
+    // refitting at all.
+    const fat = pw.bp.proxyAabb(proxy).?;
+    const tight = pw.bm.bodyAabb(&pw.store, id).?;
+    try testing.expect(fat.contains(tight.min));
+    try testing.expect(fat.contains(tight.max));
 }
 
 test "W4: destroying a character wakes the sleepers retained in pair with its presence" {
@@ -944,7 +1053,7 @@ test "removeBody refuses a character presence, and refuses it before any mutatio
 
     // DISCRIMINATION, in the same scene: a legitimate W4 producer on the same presence DOES
     // wake it, so (b) is measuring a refused act and not a scene where nothing ever wakes.
-    _ = try world.moveCharacter(gpa, hero, vr(0, 0, 0.01), fixed_dt);
+    _ = try world.moveCharacter(hero, vr(0, 0, 0.01), fixed_dt);
     try testing.expect(!world.bm.isSleeping(box).?);
 
     // And the real release path still works, which is what makes the refusal a no-op and not a

@@ -555,11 +555,13 @@ const TouchedBodies = struct {
 
 /// The pushes one move owes, accumulated rather than applied on the spot.
 ///
-/// **Applied AFTER the publication, for the reason the wake already is.** `syncPresenceTo` can still
-/// fail after the slide loop has run, and a failure returns an error with the record deliberately
-/// intact — so a push applied inside the loop survived a call that reported having done nothing, and
-/// the caller's retry applied it a second time. Held here and drained beside the `wakeBody` loop,
-/// which sits post-publication for exactly that reason.
+/// **Applied AFTER the publication, and the ORIGINAL reason has expired.** It was transactional:
+/// `syncPresenceTo` could fail after the slide loop had run and returned with the record
+/// deliberately intact, so a push applied inside the loop survived a call that reported having done
+/// nothing and the caller's retry applied it twice. `syncPresenceTo` is infallible since M1.1.15.1,
+/// so no such retry exists and the placement is no longer a correctness requirement. It is KEPT
+/// unchanged — accumulate-then-drain is what makes the coalescing below possible at all, and that
+/// reason never depended on the error channel. What is gone is only the retry argument.
 ///
 /// The bound is `max_touched` and it is EXACT, not a guess: a push can only target a body the move
 /// TOUCHED, and only the dynamic ones that yield, so this set is a subset of one already bounded
@@ -1532,7 +1534,6 @@ pub const CharacterStore = struct {
     /// update allocates.
     pub fn moveCharacter(
         self: *CharacterStore,
-        gpa: std.mem.Allocator,
         bp: *Broadphase,
         bm: *BodyManager,
         store: *const ShapeStore,
@@ -1747,9 +1748,11 @@ pub const CharacterStore = struct {
         // 4 — publish. The record is AUTHORITATIVE and the presence mirrors it; the two are written
         // in one place so they cannot drift (see the Notes on this being the likeliest silent bug).
         const new_base = centre.sub(baseToCentre(Real, c.height));
-        // The presence FIRST, because its proxy update is the one step that can fail: on OOM the
-        // record must be left exactly as it was and the call retryable (see `syncPresenceTo`).
-        try self.syncPresenceTo(gpa, bp, bm, store, idx, new_base, c.shape, c.height);
+        // The presence and the record are written together, here, so the two cannot drift. The
+        // presence still goes first — an ordering that used to be a transactional requirement,
+        // `syncPresenceTo` being the one step that could fail, and that is now merely the order the
+        // two statements are written in, neither one being able to fail.
+        self.syncPresenceTo(bp, bm, store, idx, new_base, c.shape, c.height);
         self.characters.items[idx].position = new_base;
 
         // The wake this call owes. W4 and not W3: a presence moved by POSE WRITE keeps velocity
@@ -1807,6 +1810,15 @@ pub const CharacterStore = struct {
             .radius = radius,
             .half_height = capsuleHalfHeight(f32, radius, height),
         } });
+        // DORMANT SINCE M1.1.15.1, AND KEPT DELIBERATELY — do not read it as dead code.
+        // `createShape` above is now the LAST fallible step of this function:
+        // `syncPresenceTo` became infallible when `Broadphase.update` stopped allocating, so
+        // no `try` remains below and this `errdefer` can no longer fire. It stays because the
+        // deletion test says so — remove it, and a fallible step added underneath leaks the
+        // new capsule with no diagnostic. It is a structural pairing with an allocation, not
+        // a runtime check making a claim, so it costs nothing while it does not fire. The
+        // occupied-volume `return false` below is NOT an error path and destroys the shape
+        // explicitly, which is why that one cannot rely on this.
         errdefer store.destroyShape(gpa, new_shape);
         const new_record = store.get(new_shape) orelse unreachable;
         const new_probe = shape_mod.supportShape(new_record);
@@ -1832,12 +1844,14 @@ pub const CharacterStore = struct {
         }
 
         // The presence FIRST, with the NEW shape and height passed explicitly — so the proxy box
-        // reflects the new SIZE and not only the new centre, and so the one fallible step of the
-        // whole commit happens while the character is still entirely unchanged. A failure here
-        // reaches the `errdefer` above with nothing to undo but the new capsule itself.
-        try self.syncPresenceTo(gpa, bp, bm, store, idx, c.position, new_shape, height);
+        // reflects the new SIZE and not only the new centre. The second half of that sentence used
+        // to be "and so the one fallible step of the whole commit happens while the character is
+        // still entirely unchanged"; `syncPresenceTo` no longer has a failure, so what remains is
+        // the shape/height argument alone, which is a reason about WHAT is published and not about
+        // WHEN.
+        self.syncPresenceTo(bp, bm, store, idx, c.position, new_shape, height);
 
-        // Infallible commit.
+        // Commit.
         const old_shape = c.shape;
         self.characters.items[idx].radius = radius;
         self.characters.items[idx].height = height;
@@ -1870,27 +1884,28 @@ pub const CharacterStore = struct {
     /// Tier 0 surface and not about one entry. Whether setters should be fallible is recorded for
     /// M1.1.15, where the interface layer is built and the question covers all of it at once.
     ///
-    /// **The frozen signature is `void` and this one is `!void`, and the residual `!` is NOT a
-    /// semantic refusal — it is the broadphase's allocation.** Keeping the proxy fresh is part of this
-    /// entry's contract (§1.12.2), `Broadphase.update` reserves a slot on its layer's moved log, and a
-    /// `void` entry has nowhere to put that failure; making it truly `void` needs a reservation seam
-    /// in the broadphase, which this milestone does not own. So the gap is in the frozen surface
-    /// rather than a liberty taken here, it is disjoint from the stale-handle question settled above,
-    /// and §1.11.7 forbids the easy answer of converting an error into an absent result. Recorded so
-    /// the freeze meets it knowingly, alongside the setter-fallibility convention.
+    /// **`void`, matching the frozen signature — the gap this entry recorded is CLOSED.** It read
+    /// `!void` until M1.1.15.1, and the residual `!` was never a semantic refusal: keeping the proxy
+    /// fresh is part of this entry's contract (§1.12.2), `Broadphase.update` reserved a slot on its
+    /// layer's moved log, and a `void` entry had nowhere to put that failure. The note ended by
+    /// saying that making it truly `void` needed a reservation seam in the broadphase which that
+    /// milestone did not own. **M1.1.15.1 owns it and delivered it**: the moved log carries at most
+    /// one entry per proxy per consumption epoch, its capacity is reserved at proxy insertion, and
+    /// `Broadphase.update` is infallible. Kept as a record because the prediction is what the seam
+    /// was built against, and because the entry's OTHER property — no-op on a stale handle — was
+    /// always disjoint from it and is unchanged.
     pub fn setCharacterPosition(
         self: *CharacterStore,
-        gpa: std.mem.Allocator,
         bp: *Broadphase,
         bm: *BodyManager,
         store: *const ShapeStore,
         id: CharacterId,
         position: Vec3r,
-    ) !void {
+    ) void {
         const idx = self.alloc.validate(id) orelse return;
         const c = self.characters.items[idx];
-        // The presence FIRST — same reason as the other two write paths.
-        try self.syncPresenceTo(gpa, bp, bm, store, idx, position, c.shape, c.height);
+        // The presence FIRST — same order as the other two write paths.
+        self.syncPresenceTo(bp, bm, store, idx, position, c.shape, c.height);
         self.characters.items[idx].position = position;
         self.characters.items[idx].reported_ground = .in_air;
 
@@ -1917,32 +1932,28 @@ pub const CharacterStore = struct {
     /// the previous pose, which no test on a stationary character would find. So the three entries
     /// call this, and the freshness test is per write path rather than once on the move.
     ///
-    /// **It takes the target rather than reading the record, so that the ONE FALLIBLE STEP RUNS
-    /// BEFORE ANY MUTATION.** `Broadphase.update` allocates, and an earlier version called it AFTER
-    /// the commit. Two distinct consequences, both real:
-    ///
-    ///  - In `resizeCharacter` the record and the presence body already pointed at the new shape,
-    ///    which the `errdefer` then destroyed — the character was left holding a freed shape, a
-    ///    use-after-free on its next move.
-    ///  - On the two pose paths the record and the body had moved while the proxy had not, so the
-    ///    stored box no longer contained the body and pairs were silently lost.
+    /// **INFALLIBLE since M1.1.15.1, and it takes the target rather than reading the record.** The
+    /// parameter shape was chosen when this was the one fallible step of its three callers and had
+    /// to run BEFORE any mutation; `Broadphase.update` no longer allocates, so that ordering is no
+    /// longer load-bearing and the callers are simply infallible on this path. The parameter shape
+    /// is KEPT for the reason that outlived the failure: `resizeCharacter` must publish a box built
+    /// from the NEW shape and height, which the record does not yet carry at that point, so reading
+    /// the record instead would publish the old SIZE at the new centre.
     ///
     /// The box published is the NEW one alone. An interim form published the UNION of the old and the
     /// new, and it was wrong twice. `Bvh.update` returns WITHOUT refitting as soon as its stored fat
     /// box already contains the new tight one, so a teleport's leaf covered the whole trajectory and
     /// no later call ever shrank it — permanent false positives in queries and in pair generation all
     /// along the path, from a form whose own comment claimed the next call would refit it. And the
-    /// failure mode the union was guarding does not exist: `Broadphase.update` RESERVES its moved-log
-    /// slot before touching the node, so on OOM neither the node's box nor the log has moved. That
-    /// entry is already atomic and already satisfies the reserve-then-mutate invariant
-    /// (M1.1.1-HF1 D3/D4) this one leans on.
+    /// failure mode the union was guarding never existed: `Broadphase.update` was already atomic
+    /// then, by reserving its moved-log slot before touching the node, and is now atomic by having
+    /// no failure at all.
     ///
     /// The containment short-circuit is therefore not a hazard but the fat margin's normal regime: a
     /// small advance does not refit, and does not need to, because the stored box still contains the
     /// body.
     fn syncPresenceTo(
         self: *const CharacterStore,
-        gpa: std.mem.Allocator,
         bp: *Broadphase,
         bm: *BodyManager,
         store: *const ShapeStore,
@@ -1950,16 +1961,16 @@ pub const CharacterStore = struct {
         base: Vec3r,
         shape: api.ShapeId,
         height: Real,
-    ) !void {
+    ) void {
         const c = self.characters.items[idx];
         const body = c.inner_body orelse return;
         const record = store.get(shape) orelse unreachable;
         const centre = base.add(baseToCentre(Real, height));
         if (c.presence_proxy) |proxy| {
-            try bp.update(gpa, proxy, body_manager_mod.worldAabb(record, centre, Quatr.identity));
+            bp.update(proxy, body_manager_mod.worldAabb(record, centre, Quatr.identity));
         }
-        // Infallible from here. NON-ACTIVATING by contract (§1.8.4) — this is the controller's own
-        // write path, and the wake it owes is composed by the caller from the bodies it TOUCHED.
+        // NON-ACTIVATING by contract (§1.8.4) — this is the controller's own write path, and the
+        // wake it owes is composed by the caller from the bodies it TOUCHED.
         bm.setPosition(body, centre);
     }
 

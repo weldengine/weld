@@ -2,7 +2,7 @@
 //!
 //! What this file measures is the SEAM: which body speaks for an entity, what is published per
 //! `BodyType`, and what the `Sleeping` marker does to publication. The ECS → solver direction
-//! is M1.1.26's, with the Tier 1 Etch service — the tests that measured it left with it, and
+//! is M1.1.15.2's, with the Tier 1 Etch service — the tests that measured it left with it, and
 //! two more kept only their publication half. The physics itself is measured by `forge_3d`'s
 //! own suite and is not re-measured here.
 //!
@@ -257,7 +257,7 @@ test "Sleeping tag tracks island state through both transitions" {
 
 test "publication authority per BodyType" {
     // The PUBLICATION half only. The reception half — a kinematic `Transform` written by
-    // gameplay reaching the solver — moved to M1.1.26 with `syncIn`; see Closing notes. Two
+    // gameplay reaching the solver — moved to M1.1.15.2 with `syncIn`; see Closing notes. Two
     // assertions that the SOLVER had not moved were dropped with it: with no inward direction
     // they held for every body and named nothing about authority.
     const gpa = testing.allocator;
@@ -340,7 +340,7 @@ test "publication does not mark a component whose value did not change" {
     try testing.expectEqualSlices(f32, &settled_pos, &ecs.get(Transform, b.entity).?.pos);
 
     // NON-VACUITY, and it is what separates this from a publication that writes NOTHING. The
-    // body is set moving through the INTERFACE — `syncIn` left for M1.1.26, so the ECS is no
+    // body is set moving through the INTERFACE — `syncIn` left for M1.1.15.2, so the ECS is no
     // longer a way in — and the marks must then FIRE.
     pw.setLinearVelocity(b.body, vr(3, 0, 0));
 
@@ -424,7 +424,7 @@ test "the registered system drives a real frame: the solver's pose reaches the E
 
     // ONE system: the publication rides the tick in `fixed_update`. Splitting it into a tick
     // and a `post_update` publication is what lost a gameplay `Velocity` write, and the
-    // inward direction left for M1.1.26 — see Closing notes.
+    // inward direction left for M1.1.15.2 — see Closing notes.
     try testing.expectEqual(@as(usize, 1), sched.systemCount());
 
     const start = ecs.get(Transform, faller.entity).?.pos[1];
@@ -444,7 +444,7 @@ test "a trigger sharing an entity with a solid body does not publish" {
     // reaching it, and the INTEGRATION SINGLETON it does enter — which is why a dynamic trigger
     // can ever stop being integrated. §1.13.1 makes two-bodies-one-entity the normal shape, and
     // the election settles which of the two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
-    // trigger — left for M1.1.26 with `syncIn`; see Closing notes.
+    // trigger — left for M1.1.15.2 with `syncIn`; see Closing notes.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -661,6 +661,75 @@ fn addSibling(
     return try pw.addBody(gpa, desc);
 }
 
+test "publication order is unchanged by the index" {
+    // **THE DENSE `BodyId` INDEX OF M1.1.15.1 IS AN ACCELERATOR AND NOT AN ORDER**, and this
+    // is what says so. `proxyOf` became O(1) by reading a table keyed on the body index; the
+    // two orders that the publication actually depends on — the registration order of
+    // `bodies`, and the identity order the election sorts by — must be exactly what they
+    // were. The scene is built so REGISTRATION ORDER AND IDENTITY ORDER DISAGREE, because
+    // with them in step no assertion here could tell which one is being followed.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
+
+    const spare = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+    const entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+
+    // **THE CONSTRUCTION RESTS ON A LAYOUT FACT, and getting it backwards is how the first
+    // version of this test failed on its own premise.** `PackedId` is
+    // `index:24 | generation:8`, and a Zig packed struct puts its FIRST field in the LOW
+    // bits — so a handle's numeric value is GENERATION-MAJOR, and a recycled index carries a
+    // LARGER identity than a fresh one, not a smaller. The election compares the raw handle
+    // (`Candidate.lessThan`, `a.body < b.body`), so to make registration order and identity
+    // order disagree, the entity's FIRST body must be the recycled one.
+    const throwaway = try addSibling(gpa, &pw, spare, false, .{ 0, 0, 0 });
+    pw.removeBody(throwaway);
+    const registered_first = try addSibling(gpa, &pw, entity, false, .{ 0, 1, 0 }); // recycled: high identity
+    const registered_second = try addSibling(gpa, &pw, entity, false, .{ 0, 9, 0 }); // fresh: low identity
+
+    // THE PREMISE, asserted rather than assumed — the whole test is vacuous without it.
+    try testing.expect(registered_second < registered_first); // identity order is REVERSED
+    try testing.expectEqual(registered_first, pw.bodies.items[0].id); // registration order
+    try testing.expectEqual(registered_second, pw.bodies.items[1].id);
+
+    var k: u32 = 0;
+    while (k < 5) : (k += 1) try frame(gpa, &pw, &ecs);
+
+    // (1) THE ELECTION STILL FOLLOWS IDENTITY, not the registration list and not the index's
+    // own ascending order. The two candidates are eight metres apart, so an election that
+    // picked the other one cannot satisfy this.
+    const published = ecs.get(Transform, entity).?.pos[1];
+    try testing.expectEqual(
+        @as(f32, @floatCast(pw.bm.position(registered_second).?.toArray()[1])),
+        published,
+    );
+    try testing.expect(@abs(pw.bm.position(registered_first).?.toArray()[1] - published) > 7);
+
+    // (2) `bodies` KEPT ITS ORDER across the ticks. The index does not touch this list, and
+    // a future edit that made the list follow the table instead would reverse these two.
+    try testing.expectEqual(@as(usize, 2), pw.bodies.items.len);
+    try testing.expectEqual(registered_first, pw.bodies.items[0].id);
+    try testing.expectEqual(registered_second, pw.bodies.items[1].id);
+
+    // (3) STEP 10 REFRESHED EVERY REGISTERED PROXY, whatever order it walked them in: each
+    // body's stored fat box contains its tight box at the pose the tick ended on. A sweep
+    // that lost a body — the M1.1.15 gate C defect, where a registration gap made step 2
+    // prune every pair of one body — leaves that body's box stale and fails here.
+    var refreshed: usize = 0;
+    for (pw.bodies.items) |entry| {
+        const fat = pw.bp.proxyAabb(entry.proxy).?;
+        const tight = pw.bm.bodyAabb(&pw.store, entry.id).?;
+        try testing.expect(fat.contains(tight.min));
+        try testing.expect(fat.contains(tight.max));
+        refreshed += 1;
+    }
+    try testing.expectEqual(pw.bodies.items.len, refreshed);
+}
+
 test "two triggers on one entity elect the smaller identity, not the last writer" {
     // Exclusion by concurrency arbitrated solid-against-trigger and nothing else: two triggers
     // do not exclude each other, so both wrote and the entity kept whichever came last in the
@@ -772,7 +841,7 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
     });
 }
 
-test "no component write reaches the solver: the inward direction is M1.1.26's" {
+test "no component write reaches the solver: the inward direction is M1.1.15.2's" {
     // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
     // shape as a second half — "the solver did not follow the ECS write" — and after the
     // re-scope each held for every body and discriminated nothing, which is a test counted and

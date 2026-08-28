@@ -272,7 +272,6 @@ fn runBatch(gpa: std.mem.Allocator, scene: *Scene, mode: Mode, checksum: *f64) !
             },
             else => {
                 const r = try scene.chars.moveCharacter(
-                    gpa,
                     &scene.bp,
                     &scene.bm,
                     &scene.store,
