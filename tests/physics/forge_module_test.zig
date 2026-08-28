@@ -1105,17 +1105,48 @@ test "pointQuery tests the SOLID where overlapAabb tests the box" {
     try testing.expectEqual(@as(u32, 1), try s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
 }
 
-test "a violated entity-major premise is REFUSED, not repaired" {
-    // H1 established the guard; J1 establishes what it must answer. Two weaker answers were
-    // tried and both are wrong, and the second is the subtle one.
+test "the public path answers under truncation, and the guard stays silent" {
+    // K1, and this test exists to attest a LIMIT rather than a guarantee.
     //
-    // A duplicate-free result satisfies half of §1.11.14 — entity identity is the key of
-    // ORDER as well as of retention. Sorting the written prefix fixes that half and leaves
-    // the other broken: it reorders what was ALREADY retained, and retention itself ran on
-    // the broken order. THE DISCRIMINATING CASE is below — two slots, a run yielding 5 then
-    // 3 then 1: the loop fills on `[5, 3]`, a sort answers `[3, 5]`, and the canonical subset
-    // under the §1.11.14 key is `[1, 3]`. No pass over what was kept can recover what was
-    // never collected, so the answer is an error.
+    // Five successive formulations promised something about the run — never wrong, then no
+    // duplicate, then duplicate-free AND ordered, then true unless the premise broke during
+    // the run. All were too wide for one structural reason: `dedupEntities` does not see the
+    // run, it sees the window it is handed. With `out.len == 2` and an owner sequence
+    // `[3, 5, 1]`, the first pass receives `[3, 5]`, finds it ordered — because it IS — fills
+    // the slice and returns before `want` ever doubles. The `1` never enters an observed
+    // buffer, and no wording turns a windowed observation into a statement about what it
+    // never saw.
+    //
+    // So the public path is exercised WITH TRUNCATION and the assertion is what actually
+    // holds: the premise being sound in reality, the answer is the canonical smallest
+    // `out.len` entities and the guard never fires.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.place(5, 0);
+    _ = try s.place(3, 2);
+    _ = try s.place(1, 4);
+
+    var two: [2]EntityId = undefined;
+    const n = try s.m.overlapAabb(av3(-2, -2, -2), av3(10, 2, 2), .{}, &two);
+
+    // The canonical smallest two under the §1.11.14 key — the solver's collector really does
+    // deliver entity-major order, so 1 and 3 come back and 5 is the one truncated away.
+    try testing.expectEqual(@as(u32, 2), n);
+    try testing.expectEqual(@as(u32, 1), two[0].index);
+    try testing.expectEqual(@as(u32, 3), two[1].index);
+    try testing.expectEqual(@as(u32, 0), s.m.unordered_projections);
+
+    // NON-VACUITY: three entities really are present, so the two above are a TRUNCATION and
+    // not the whole scene answering.
+    var wide_out: [8]EntityId = undefined;
+    try testing.expectEqual(@as(u32, 3), try s.m.overlapAabb(av3(-2, -2, -2), av3(10, 2, 2), .{}, &wide_out));
+}
+
+test "the guard refuses what it OBSERVES broken, and that detection is windowed" {
+    // The other half, and the two together are the whole contract: a refusal on an observed
+    // breach, and NO claim about a breach the window does not contain.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
@@ -1126,29 +1157,27 @@ test "a violated entity-major premise is REFUSED, not repaired" {
 
     var out: [8]EntityId = undefined;
 
-    // NON-VACUITY, in the other direction first: an ORDERED run answers normally and leaves
-    // the counter at zero. Without this, an entry that refused everything would pass below.
+    // NON-VACUITY first: an ordered window answers normally and leaves the counter at zero.
     try testing.expectEqual(@as(u32, 3), try s.m.dedupEntities(&.{ e1, e3, e5 }, &out));
     try testing.expectEqual(@as(u32, 0), s.m.unordered_projections);
-    try testing.expectEqual(@as(u32, 1), out[0].index);
-    try testing.expectEqual(@as(u32, 3), out[1].index);
-    try testing.expectEqual(@as(u32, 5), out[2].index);
 
-    // THE REFUSAL, on Codex's own scenario and with the slice sized to two so the retention
-    // half is what is at stake rather than the ordering half.
-    var two: [2]EntityId = undefined;
-    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e3, e1 }, &two));
+    // THE REFUSAL, on a breach the window contains.
+    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e3 }, &out));
     try testing.expect(s.m.unordered_projections >= 1);
 
-    // The counter survives the error and answers a different question: the error tells THIS
-    // caller its answer is refused, the counter tells a later reader the premise was broken
-    // at all. "Never happened" and "happened and erred" are not the same state.
+    // The counter survives the error and answers a different question — the error tells THIS
+    // caller its answer is refused, the counter tells a later reader the premise broke at all.
     const after = s.m.unordered_projections;
-    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e3 }, &two));
+    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e1 }, &out));
     try testing.expectEqual(after + 1, s.m.unordered_projections);
 
-    // And it reaches the public entries: the three that project carry a channel since I2,
-    // which is what makes the refusal expressible at all.
-    const info = @typeInfo(@TypeOf(Forge3DModule.overlapAabb)).@"fn";
-    try testing.expect(@typeInfo(info.return_type.?) == .error_union);
+    // **THE LIMIT, ASSERTED RATHER THAN LEFT TO THE PROSE.** A window that is internally
+    // ordered is accepted even when the owner's sequence had a smaller element after it:
+    // `[3, 5]` is ordered, and the `1` that would have followed is invisible here. This is
+    // the documented behaviour and not a defect — the proof of order over the WHOLE selection
+    // belongs to `OverlapCollector.finish`, which is the only function that observes it.
+    const before = s.m.unordered_projections;
+    var two: [2]EntityId = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.dedupEntities(&.{ e3, e5 }, &two));
+    try testing.expectEqual(before, s.m.unordered_projections);
 }

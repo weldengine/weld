@@ -443,32 +443,39 @@ pub const Forge3DModule = struct {
     /// replaces a release-stripped class assert with an ACTIVE `probeAdmissible` check for
     /// the same reason, in the same words.
     ///
-    /// **The answer is never wrong, not even under a violated premise.** On detection the
-    /// function stops trusting adjacency and scans what it has already written — which is
-    /// exact, because everything written before the break was deduplicated adjacently over an
-    /// ordered run. Cost: one integer comparison per projected body on the fast path, inside
-    /// a loop that already performs one; and O(n^2) only on a path that is by construction
-    /// never taken.
+    /// **UNDER A VIOLATED PREMISE THIS FUNCTION GUARANTEES NOTHING, and that is the
+    /// conclusion of five successive attempts to promise something.** The claim was written
+    /// as "never wrong", then "no duplicate", then "duplicate-free AND ordered", then "true
+    /// unless the premise broke during the run" — each narrowed just enough to cover the
+    /// counter-example in front of it, and each still too wide. The cause is structural, not
+    /// editorial: **this function does not see the run.** It sees the window it is handed.
+    /// With `out.len == 2` and an owner sequence `[3, 5, 1]`, the first pass receives
+    /// `[3, 5]`, finds it ordered — because it IS ordered — fills the slice and returns
+    /// before `want` ever doubles. The `1` never enters an observed buffer. No wording makes
+    /// a windowed observation into a statement about what it never saw.
     ///
-    /// **UNDER A VIOLATED PREMISE THIS FUNCTION REFUSES, and two weaker answers were tried
-    /// and are both wrong.** Returning a duplicate-free result was the first: it satisfies
-    /// half of §1.11.14, entity identity being the key of ORDER as well as of retention.
-    /// Sorting the written prefix was the second, and it is the subtler failure — it
-    /// reorders what has ALREADY been retained, and retention itself ran on the broken
-    /// order. Concretely, with `out.len == 2` and a buffer yielding 5, 3 and then 1 further
-    /// on, the loop fills on `[5, 3]` and a sort answers `[3, 5]` where the canonical subset
-    /// is `[1, 3]`. Under a SOUND premise the first `out.len` distinct entities ARE the
-    /// canonical subset, because entity-major order delivers them increasing; under
-    /// violation they are not, and no post-hoc pass over what was kept can recover what was
-    /// never collected.
+    /// So this function does exactly three things, and claims nothing beyond them:
     ///
-    /// So the answer is an ERROR. The three callers each carry a channel since M1.1.15.1 —
-    /// which is exactly what that decision bought — and a subset chosen by a broken order is
-    /// worse than a refusal. The alternative, collecting exhaustively and then selecting on
-    /// the key, needs an UNBOUNDED collection to be correct and would reopen the unbounded
-    /// allocation that same decision closed; one defect is not closed by reopening another.
-    /// A violated premise means another module is broken, and this adapter cannot repair a
-    /// retention decision it did not take.
+    ///   1. it REFUSES what it observes broken — `error.UnorderedProjection`;
+    ///   2. it COUNTS — `unordered_projections`;
+    ///   3. and it says here that (1) is bounded to the window, therefore NOT a guarantee.
+    ///
+    /// Two weaker answers were tried on the refusal path and both are wrong, which is why the
+    /// refusal is a refusal. Returning a duplicate-free result satisfies half of §1.11.14,
+    /// entity identity being the key of ORDER as well as of retention. Sorting the written
+    /// prefix is the subtler failure: it reorders what has ALREADY been retained, and
+    /// retention itself ran on the broken order — with `out.len == 2` on a run yielding 5, 3
+    /// and then 1, the loop fills on `[5, 3]` and a sort answers `[3, 5]` where the canonical
+    /// subset is `[1, 3]`. No pass over what was KEPT recovers what was never COLLECTED. The
+    /// remaining alternative — collect exhaustively, then select on the key — needs an
+    /// UNBOUNDED collection to be correct and would reopen the unbounded allocation the error
+    /// channels closed; one defect is not closed by reopening another.
+    ///
+    /// **THE PROOF BELONGS TO THE OWNER OF THE ORDER, and it is recorded as a precondition
+    /// rather than attempted here.** Entity-major order is `OverlapCollector.finish`'s
+    /// property; only that function observes the whole selection, so only it can establish
+    /// the order over the whole selection. A violated premise means it is already broken, and
+    /// an adapter cannot prove a property of data it receives pre-truncated.
     ///
     /// The counter STAYS beside the error, and the two answer different questions: the error
     /// tells this caller its answer is refused, the counter tells a later reader whether the
@@ -547,16 +554,18 @@ pub const Forge3DModule = struct {
             const buf = try self.stageBodiesFallible(want, &stack);
             const found = try filler.fill(buf);
             const n = try self.dedupEntities(buf[0..found], out);
-            // BOTH EXITS ARE NOW UNCONDITIONALLY WHAT THEY SAY, and that is a consequence
-            // of the refusal above rather than a separate claim. `dedupEntities` returns an
-            // error the moment the entity-major premise breaks, so neither line below is
-            // reachable unless the premise held for the whole run — in which case the first
-            // `out.len` distinct entities ARE the smallest under the §1.11.14 key, and a
-            // solver that returned fewer bodies than it was offered returned all of them.
+            // WHAT THE TWO EXITS SAY, and nothing about the run.
             //
-            // The `found < buf.len` label was checked and not assumed: on its own it speaks
-            // only of the SOLVER's saturation, which says nothing about order; it is the
-            // refusal that makes it exhaustive here, not the comparison itself.
+            // Under a SOUND premise the first `out.len` distinct entities ARE the smallest
+            // under the §1.11.14 key, because entity-major order delivers them increasing;
+            // and a solver that returned fewer bodies than it was offered returned all of
+            // them. Both statements are exact and they are sufficient.
+            //
+            // What is NOT claimed, after five attempts to claim it: that these hold when the
+            // premise is broken. `dedupEntities` refuses what it OBSERVES broken, and its
+            // observation is the window it was handed — a first pass can be internally
+            // ordered, fill the slice and return before a later element ever reaches a
+            // buffer. The refusal is a detection, never a proof.
             if (n == out.len) return n; // the slice is full: the canonical smallest `out.len`
             if (found < buf.len) return n; // the solver was not saturated: exhaustive
             want = buf.len * 2;
