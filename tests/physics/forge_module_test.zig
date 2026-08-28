@@ -1105,42 +1105,50 @@ test "pointQuery tests the SOLID where overlapAabb tests the box" {
     try testing.expectEqual(@as(u32, 1), try s.m.pointQuery(av3(0.2, 0.2, 0), .{}, &out));
 }
 
-test "the entity-major premise is guarded in every mode, and a breach yields no duplicate" {
-    // H1. Adjacent deduplication is correct ONLY under an entity-major order, and that order
-    // belongs to `query/overlap.zig`'s collector, not to the adapter. The premise used to be
-    // held by a `std.debug.assert`, which is compiled to nothing in ReleaseFast — live in the
-    // two matrix cells where a breach costs nothing, absent in the mode a game ships.
+test "a violated entity-major premise is REFUSED, not repaired" {
+    // H1 established the guard; J1 establishes what it must answer. Two weaker answers were
+    // tried and both are wrong, and the second is the subtle one.
     //
-    // No caller of the four entries can arrange a non-entity-major order, which is why this
-    // test drives `dedupEntities` directly with one.
+    // A duplicate-free result satisfies half of §1.11.14 — entity identity is the key of
+    // ORDER as well as of retention. Sorting the written prefix fixes that half and leaves
+    // the other broken: it reorders what was ALREADY retained, and retention itself ran on
+    // the broken order. THE DISCRIMINATING CASE is below — two slots, a run yielding 5 then
+    // 3 then 1: the loop fills on `[5, 3]`, a sort answers `[3, 5]`, and the canonical subset
+    // under the §1.11.14 key is `[1, 3]`. No pass over what was kept can recover what was
+    // never collected, so the answer is an error.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
 
-    const high_a = try s.place(5, 0);
-    const low = try s.place(3, 2);
-    const high_b = try s.place(5, 4);
+    const e5 = try s.place(5, 0);
+    const e3 = try s.place(3, 2);
+    const e1 = try s.place(1, 4);
 
     var out: [8]EntityId = undefined;
 
-    // NON-VACUITY, in the other direction first: an ORDERED run must not trip the guard, or
-    // a counter that always fires would prove nothing below.
-    try testing.expectEqual(@as(u32, 2), s.m.dedupEntities(&.{ low, high_a }, &out));
+    // NON-VACUITY, in the other direction first: an ORDERED run answers normally and leaves
+    // the counter at zero. Without this, an entry that refused everything would pass below.
+    try testing.expectEqual(@as(u32, 3), try s.m.dedupEntities(&.{ e1, e3, e5 }, &out));
     try testing.expectEqual(@as(u32, 0), s.m.unordered_projections);
+    try testing.expectEqual(@as(u32, 1), out[0].index);
+    try testing.expectEqual(@as(u32, 3), out[1].index);
+    try testing.expectEqual(@as(u32, 5), out[2].index);
 
-    // THE BREACH: entity 5, then 3, then 5 again. Adjacent deduplication emits 5, 3, 5 —
-    // three entries, one of them a duplicate, which is the F1 defect reproduced through a
-    // premise rather than through the code.
-    const n = s.m.dedupEntities(&.{ high_a, low, high_b }, &out);
-    try testing.expectEqual(@as(u32, 2), n);
+    // THE REFUSAL, on Codex's own scenario and with the slice sized to two so the retention
+    // half is what is at stake rather than the ordering half.
+    var two: [2]EntityId = undefined;
+    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e3, e1 }, &two));
     try testing.expect(s.m.unordered_projections >= 1);
 
-    // And the answer itself carries no duplicate — asserted on the SET, because a count of
-    // two would also be produced by dropping a distinct entity.
-    // ...AND is CANONICALLY ORDERED — 3 then 5, not the order the broken run presented them
-    // in. §1.11.14 makes entity identity the key of ORDER as well as of retention, so an
-    // answer that is merely duplicate-free satisfies half the contract while reading like
-    // all of it. The sort runs only on this path.
-    try testing.expectEqual(@as(u32, 3), out[0].index);
-    try testing.expectEqual(@as(u32, 5), out[1].index);
+    // The counter survives the error and answers a different question: the error tells THIS
+    // caller its answer is refused, the counter tells a later reader the premise was broken
+    // at all. "Never happened" and "happened and erred" are not the same state.
+    const after = s.m.unordered_projections;
+    try testing.expectError(error.UnorderedProjection, s.m.dedupEntities(&.{ e5, e3 }, &two));
+    try testing.expectEqual(after + 1, s.m.unordered_projections);
+
+    // And it reaches the public entries: the three that project carry a channel since I2,
+    // which is what makes the refusal expressible at all.
+    const info = @typeInfo(@TypeOf(Forge3DModule.overlapAabb)).@"fn";
+    try testing.expect(@typeInfo(info.return_type.?) == .error_union);
 }

@@ -450,64 +450,52 @@ pub const Forge3DModule = struct {
     /// a loop that already performs one; and O(n^2) only on a path that is by construction
     /// never taken.
     ///
-    /// **AND THE ANSWER IS ORDERED, not merely duplicate-free.** `engine-physics-queries.md`
-    /// §1.11.14 makes entity identity the key of ORDER as well as of retention, so a result
-    /// that carries no duplicate but comes out in the order it was met satisfies half the
-    /// contract while reading like all of it. On the violation path the written prefix is
-    /// therefore sorted on that key — entities being distinct by then, the `BodyId`
-    /// tie-break cannot apply and the entity half is already total. It uses
-    /// `query.entityKey`, the solver's own key, rather than a second derivation of it.
+    /// **UNDER A VIOLATED PREMISE THIS FUNCTION REFUSES, and two weaker answers were tried
+    /// and are both wrong.** Returning a duplicate-free result was the first: it satisfies
+    /// half of §1.11.14, entity identity being the key of ORDER as well as of retention.
+    /// Sorting the written prefix was the second, and it is the subtler failure — it
+    /// reorders what has ALREADY been retained, and retention itself ran on the broken
+    /// order. Concretely, with `out.len == 2` and a buffer yielding 5, 3 and then 1 further
+    /// on, the loop fills on `[5, 3]` and a sort answers `[3, 5]` where the canonical subset
+    /// is `[1, 3]`. Under a SOUND premise the first `out.len` distinct entities ARE the
+    /// canonical subset, because entity-major order delivers them increasing; under
+    /// violation they are not, and no post-hoc pass over what was kept can recover what was
+    /// never collected.
     ///
-    /// The sort runs ONLY on the cold path, which never executes while the premise holds, so
-    /// it costs nothing in practice — and it makes the claim TRUE rather than narrowing it.
+    /// So the answer is an ERROR. The three callers each carry a channel since M1.1.15.1 —
+    /// which is exactly what that decision bought — and a subset chosen by a broken order is
+    /// worse than a refusal. The alternative, collecting exhaustively and then selecting on
+    /// the key, needs an UNBOUNDED collection to be correct and would reopen the unbounded
+    /// allocation that same decision closed; one defect is not closed by reopening another.
+    /// A violated premise means another module is broken, and this adapter cannot repair a
+    /// retention decision it did not take.
     ///
-    /// The violation is COUNTED rather than swallowed: a counter is what makes "detected"
-    /// true rather than a word, and it survives the entries gaining their error channel
-    /// because a broken upstream order is not an allocation failure and must not be reported
-    /// as one.
+    /// The counter STAYS beside the error, and the two answer different questions: the error
+    /// tells this caller its answer is refused, the counter tells a later reader whether the
+    /// premise was ever broken at all — "never happened" and "happened and erred" are not
+    /// the same state. `error.UnorderedProjection` is distinct from `error.OutOfMemory` for
+    /// the same reason: a broken upstream order is not an allocation failure.
     ///
     /// Public for the guard's own test: the counter-factual has to feed this function an
     /// order the solver will not produce, which no caller of the four entries can arrange.
-    pub fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) u32 {
+    pub fn dedupEntities(self: *Forge3DModule, bodies: []const BodyId, out: []EntityId) error{UnorderedProjection}!u32 {
         var n: u32 = 0;
-        var ordered = true;
         var have_last = false;
         var last: EntityId = undefined;
         for (bodies) |b| {
             const e = self.world.bm.entity(b) orelse continue;
-            if (have_last and ordered and query.keyLess(e, b, last, b)) {
-                ordered = false;
+            if (have_last and query.keyLess(e, b, last, b)) {
                 self.unordered_projections +|= 1;
+                return error.UnorderedProjection;
             }
-            const already = if (ordered)
-                have_last and std.meta.eql(e, last)
-            else
-                containsEntity(out[0..n], e);
-            if (already) continue;
+            if (have_last and std.meta.eql(e, last)) continue;
             if (n >= out.len) break;
             out[n] = e;
             n += 1;
             last = e;
             have_last = true;
         }
-        if (!ordered) {
-            const Ctx = struct {
-                fn less(_: void, x: EntityId, y: EntityId) bool {
-                    return query.entityKey(x) < query.entityKey(y);
-                }
-            };
-            std.mem.sort(EntityId, out[0..n], {}, Ctx.less);
-        }
         return n;
-    }
-
-    /// Linear membership, reached only once the entity-major premise has been observed
-    /// broken. Its cost is the reason the fast path exists, not a reason to skip the check.
-    fn containsEntity(written: []const EntityId, e: EntityId) bool {
-        for (written) |w| {
-            if (std.meta.eql(w, e)) return true;
-        }
-        return false;
     }
 
     /// A staging slice of `n` body handles: the stack below the floor, the reusable buffer
@@ -558,14 +546,18 @@ pub const Forge3DModule = struct {
             // `buf.len < want` for exactly that reason.
             const buf = try self.stageBodiesFallible(want, &stack);
             const found = try filler.fill(buf);
-            const n = self.dedupEntities(buf[0..found], out);
-            // THE SLICE IS FULL. Exact only while the entity-major premise held: the retained
-            // set is then the smallest `out.len` entities under the §1.11.14 key. Under a
-            // BROKEN premise it is a subset chosen by a broken order — deduplicated and
-            // canonically sorted by `dedupEntities`, so no duplicate and no arbitrary
-            // ordering escapes, but not the canonical SELECTION. Saying "exact" here without
-            // that condition is the claim this milestone kept making too wide.
-            if (n == out.len) return n;
+            const n = try self.dedupEntities(buf[0..found], out);
+            // BOTH EXITS ARE NOW UNCONDITIONALLY WHAT THEY SAY, and that is a consequence
+            // of the refusal above rather than a separate claim. `dedupEntities` returns an
+            // error the moment the entity-major premise breaks, so neither line below is
+            // reachable unless the premise held for the whole run — in which case the first
+            // `out.len` distinct entities ARE the smallest under the §1.11.14 key, and a
+            // solver that returned fewer bodies than it was offered returned all of them.
+            //
+            // The `found < buf.len` label was checked and not assumed: on its own it speaks
+            // only of the SOLVER's saturation, which says nothing about order; it is the
+            // refusal that makes it exhaustive here, not the comparison itself.
+            if (n == out.len) return n; // the slice is full: the canonical smallest `out.len`
             if (found < buf.len) return n; // the solver was not saturated: exhaustive
             want = buf.len * 2;
         }
