@@ -373,6 +373,24 @@ pub const DiagnosticCode = enum {
     ambiguous_event_entity_target, // M1.0.14 E2 — E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
     measure_outside_test, // M1.0.15 E4 — E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
 
+    // ── Declaration files `.d.etch` (E1900-E1919, M1.1.15.2 G1 —
+    //    `etch-validation-ecs.md` §28, `etch-grammar.md` §20). The E19xx block
+    //    was empty before this milestone. The two codes split by WHERE they are
+    //    decided, and the split is the settled arbitration of `etch-grammar.md`
+    //    §20.3 (whose wording said only "a parser mode"):
+    //      - E1900 bears on the FORM of a `fn`. The parser knows at the `{` that
+    //        a body follows, so it refuses there and constructs NO body node —
+    //        letting it build one to reject it afterwards manufactures an AST no
+    //        downstream stage may see.
+    //      - E1901 bears on the IDENTITY of an already-parsed top-level
+    //        construct, which is enumerable from the AST. Giving it a parser
+    //        path would duplicate a twenty-construct list; `scene_cook.zig` sets
+    //        the precedent of deciding this after the parse.
+    //    E1902 is NOT allocated here: it confronts a declared signature with its
+    //    Zig implementation, which nothing before G3 can do. ──
+    declaration_file_body_not_allowed, // M1.1.15.2 G1 — E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
+    construct_not_allowed_in_declaration_file, // M1.1.15.2 G1 — E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -569,6 +587,8 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "E0908",
             .ambiguous_event_entity_target => "E0909",
             .measure_outside_test => "E0910",
+            .declaration_file_body_not_allowed => "E1900",
+            .construct_not_allowed_in_declaration_file => "E1901",
         };
     }
 
@@ -768,6 +788,8 @@ pub const DiagnosticCode = enum {
             .event_not_entity_scoped => "EventNotEntityScoped",
             .ambiguous_event_entity_target => "AmbiguousEventEntityTarget",
             .measure_outside_test => "MeasureOutsideTest",
+            .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
+            .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
         };
     }
 };

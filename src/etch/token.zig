@@ -116,6 +116,19 @@ pub const TokenKind = enum {
     kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
     kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
     kw_measure, // `measure { block }` expression (M1.0.15 — §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
+    /// `service NAME { fn … }` — the `.d.etch`-only construct of
+    /// `etch-grammar.md` §20.4 (M1.1.15.2 G1).
+    ///
+    /// This is a keyword **ADDITION**, not a graduation: `service` has never
+    /// been a member of `non_s3_keywords` (that list is `{ override, quantize }`),
+    /// so before this milestone it lexed as an ordinary identifier. An `.etch`
+    /// file using `service` as an identifier therefore stops compiling. The cost
+    /// was **measured** and not assumed: zero occurrences of the bare word across
+    /// the 307 `.etch` files in the repository at `4869ef1`.
+    ///
+    /// Like `kw_measure`, it stays inside the [kw_let, kw_f64] range that
+    /// `isKeywordToken` pins with a comptime assert.
+    kw_service,
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -289,6 +302,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "every", .kind = .kw_every },
     .{ .lexeme = "after_unscaled", .kind = .kw_after_unscaled },
     .{ .lexeme = "measure", .kind = .kw_measure },
+    .{ .lexeme = "service", .kind = .kw_service },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },

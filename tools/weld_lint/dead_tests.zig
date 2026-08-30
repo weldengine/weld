@@ -369,9 +369,18 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // carry an error channel. A starved-allocator probe shows an entry DID report on one
     // call; the walk shows it CANNOT fail to.
     // (1962 -> 1963, suite reported 1963 - 1944 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.2 G1 adds four to `src/etch/parser.zig` for the `.d.etch` parse mode:
+    // the longest-match extension detection (with the §21 typed extensions pinned as NOT
+    // declaration files), the `service` construct parsing bodyless, the E1900 refusal with
+    // its `arena.stmts.len == 0` discriminator and its standard-mode reverse control, and
+    // the standard-mode refusal with the stop-set recovery guard.
+    // (1964 -> 1968, suite reported 1968 - 1949 passed + 19 skipped, macOS aarch64.)
+    // The four carry no platform dispatch, so Windows moves by the same four; that step is
+    // arithmetic on this table, and the `-Dexpect-collected` layer fed by each cell's own
+    // total is what confronts it independently.
     return switch (os) {
-        .windows => 1962,
-        else => 1964,
+        .windows => 1966,
+        else => 1968,
     };
 }
 

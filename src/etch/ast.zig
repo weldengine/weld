@@ -162,6 +162,9 @@ pub const ItemKind = enum {
     input_mapping_decl,
     test_decl,
     override_decl,
+    /// `.d.etch`-only (M1.1.15.2 G1, `etch-grammar.md` §20.4). Never produced
+    /// from a standard `.etch` — the parser refuses it there.
+    service_decl,
 };
 
 /// Top-level declaration visibility (M1.0.8, `etch-grammar.md` §5.1
@@ -1337,6 +1340,29 @@ pub const TraitDecl = struct {
     /// Generic type parameters (M0.8 E2 block 4) — run of `arena.generic_params`.
     generics_start: u32 = 0,
     generics_len: u32 = 0,
+};
+
+/// Side-slab entry for a `service` declaration (M1.1.15.2 G1,
+/// `etch-grammar.md` §20.4: `service_decl = "service" IDENT "{"
+/// { function_decl_no_body } "}"`).
+///
+/// **Structurally a `TraitDecl` minus generics**, and that is deliberate rather
+/// than convenient: a service body is a run of bodyless `fn` signatures, which
+/// is exactly what a trait body already is. The methods therefore live in the
+/// SAME `arena.impl_methods` slab, each an `FnDecl` with `has_body = false` —
+/// the field M0.8 minted for abstract trait methods. No new bodyless-fn
+/// mechanism is introduced by this milestone.
+///
+/// The name is an `IDENT` (lowercase), not a `TYPE_IDENT`: a service is called
+/// as `audio_player.play(...)`, so it occupies the value namespace, not the
+/// type namespace. Generics are absent because §20.4 has no production for
+/// them — the grammar shape wins.
+pub const ServiceDecl = struct {
+    name: StringId,
+    methods_start: u32, // index into `arena.impl_methods`
+    methods_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
 };
 
 /// One field initializer of a struct literal (`IDENT ":" expression`,
@@ -2537,6 +2563,9 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     const_decls: std.ArrayListUnmanaged(ConstDecl) = .empty,
     test_decls: std.ArrayListUnmanaged(TestDecl) = .empty,
+    /// `.d.etch` service declarations (M1.1.15.2 G1). Their method signatures
+    /// live in `impl_methods`, shared with traits and impls.
+    service_decls: std.ArrayListUnmanaged(ServiceDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
     theme_decls: std.ArrayListUnmanaged(ThemeDecl) = .empty,
@@ -2777,6 +2806,7 @@ pub const AstArena = struct {
         self.type_alias_decls.deinit(gpa);
         self.const_decls.deinit(gpa);
         self.test_decls.deinit(gpa);
+        self.service_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
         self.quest_decls.deinit(gpa);
@@ -3006,6 +3036,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.test_decls.items.len);
         try self.test_decls.append(gpa, decl);
         return try self.addItem(gpa, .test_decl, idx, span);
+    }
+
+    /// `service NAME { fn … }` (M1.1.15.2 G1, `.d.etch` only). The caller
+    /// appends the bodyless method `FnDecl`s to `arena.impl_methods` beforehand
+    /// and passes the run in `decl`, exactly as `addTraitDecl` expects.
+    pub fn addServiceDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ServiceDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.service_decls.items.len);
+        try self.service_decls.append(gpa, decl);
+        return try self.addItem(gpa, .service_decl, idx, span);
     }
 
     /// Resolve a type name through the top-level `type` alias chain to its
