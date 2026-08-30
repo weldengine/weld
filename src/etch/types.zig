@@ -647,17 +647,36 @@ pub const TypeChecker = struct {
     ///
     /// **The predicate is §20.1's ALLOW-LIST, not §20.2's forbidden list**, and
     /// the two are not the same set. §20.1 gives a closed grammar production —
-    /// `decl_file_item` admits exactly nine alternatives — while §20.2
-    /// enumerates twenty-one behavioural constructs under the heading "tout
-    /// construct comportemental est interdit". The complement of the allow-list
-    /// is twenty-six, so five constructs are refused here that §20.2 does not
-    /// name: `component`, `resource`, `event`, `tags` and `override`. The
-    /// grammar production is the stronger authority — a construct admissible in
-    /// a declaration file would appear in `decl_file_item` — and it is also the
-    /// reversible direction: widening an allow-list later is additive, whereas
-    /// narrowing an admitted construct is a breaking change. **The divergence
-    /// between §20.1 and §20.2 is a spec finding, recorded for reconciliation,
-    /// not resolved by this code.**
+    /// `decl_file_item` — while §20.2 enumerates twenty-one behavioural
+    /// constructs under the heading "tout construct comportemental est
+    /// interdit". Four constructs are refused here that §20.2 does not name:
+    /// `component`, `resource`, `tags` and `override`. The grammar production is
+    /// the stronger authority — a construct admissible in a declaration file
+    /// would appear in `decl_file_item` — and it is also the reversible
+    /// direction: widening an allow-list later is additive, whereas narrowing an
+    /// admitted construct is a breaking change. **The divergence between §20.1
+    /// and §20.2 is a spec finding, recorded for reconciliation, not resolved by
+    /// this code.**
+    ///
+    /// **`event_decl` is IN the allow-list, and it is the one place where the
+    /// reversible-direction argument was actually exercised** (M1.1.15.2, G1
+    /// amendment after a Claude.ai round-trip; `etch-grammar.md` §20.1 patched
+    /// to match). The gate's own finding contained the reason without naming it:
+    /// G4 has to make a Zig-emitted event observable from a rule, and a rule can
+    /// only observe an event whose type Etch knows. `TriggerEnter` appears zero
+    /// times in the `etch-*` corpus and in `engine-ecs-internals.md`, so the
+    /// corpus states nowhere how a Zig event type becomes visible to Etch —
+    /// and the only other candidate, a hand-written duplicate in a user `.etch`,
+    /// is a surface derived from a Zig shape with no drift guard, which is
+    /// exactly the class `bindgen-check` exists to close. The emitted `.d.etch`
+    /// is one artefact under one guard.
+    ///
+    /// An event needs no body rule of its own: `ast.EventDecl` is a name plus a
+    /// field run and has no statement run at all, so the "declaration files
+    /// carry no bodies" property holds by the construct's shape rather than by a
+    /// check. `component` and `resource` stay refused — they are ECS storage
+    /// declarations authored in scenes and prefabs, not a Tier 1 module's
+    /// emitted surface.
     ///
     /// The switch is EXHAUSTIVE with no `else`, so a future `ItemKind` variant
     /// is a compile error here and must state which side it falls on. That is
@@ -684,6 +703,8 @@ pub const TypeChecker = struct {
                 .type_alias,
                 .const_decl,
                 .service_decl,
+                // Admitted by the G1 amendment, see the note above.
+                .event_decl,
                 => true,
                 // §20.2's twenty-one behavioural constructs.
                 .rule_decl,
@@ -708,14 +729,13 @@ pub const TypeChecker = struct {
                 .input_mapping_decl,
                 .test_decl,
                 => false,
-                // The five §20.1 refuses and §20.2 does not name. `override` is
+                // The four §20.1 refuses and §20.2 does not name. `override` is
                 // unreachable today (the keyword is reserved with no parser
                 // path) and is named anyway: the switch's exhaustiveness is the
                 // guarantee, and it cannot have holes on the ground that one
                 // arm looks unreachable.
                 .component_decl,
                 .resource_decl,
-                .event_decl,
                 .tags_decl,
                 .override_decl,
                 => false,
@@ -11849,20 +11869,22 @@ test "E1901 on disallowed top-level construct in .d.etch" {
     }
     try std.testing.expectEqual(@as(usize, 2), n_e1901);
 
-    // The five constructs §20.1 refuses and §20.2 does not name are refused on
-    // the ALLOW-LIST. Asserted per construct: a count would pass if one of them
-    // were admitted and another double-reported.
+    // The constructs §20.1 refuses and §20.2 does not name are refused on the
+    // ALLOW-LIST. Asserted per construct: a count would pass if one of them were
+    // admitted and another double-reported. `event` was in this list until the
+    // G1 amendment moved it to the admitted side; `component` and `resource`
+    // stay, and the twin test below is what proves the amendment widened the
+    // list by exactly one and not by a family.
     for ([_][]const u8{
         "component Health { current: int = 100 }",
         "resource Score { n: int = 0 }",
-        "event Hit { damage: int = 0 }",
     }) |src| {
         var r = try parseAndCheckDetch(gpa, src);
         defer r.deinit(gpa);
         try expectAnyCode(r.diagnostics.items, .construct_not_allowed_in_declaration_file);
     }
 
-    // And the nine §20.1 admits are admitted — the other half of an allow-list,
+    // And the ten §20.1 admits are admitted — the other half of an allow-list,
     // without which a check that refused EVERYTHING would pass the tests above.
     var allowed = try parseAndCheckDetch(gpa,
         \\import gameplay.combat
@@ -11870,6 +11892,7 @@ test "E1901 on disallowed top-level construct in .d.etch" {
         \\struct Pair { a: int = 0, b: int = 0 }
         \\enum Mode { fast, slow }
         \\type Alias = int
+        \\event Hit { damage: int = 0 }
         \\fn ping(x: int) -> int
         \\service audio_player {
         \\  fn play(path: string) -> int
@@ -11967,4 +11990,70 @@ test "unknown service method resolves to a diagnostic" {
     defer no_service.deinit(gpa);
     try expectAnyCode(no_service.diagnostics.items, .undefined_symbol);
     try std.testing.expect(std.mem.indexOf(u8, no_service.diagnostics.items[0].primary_message, "unknown identifier") != null);
+}
+
+test "an event declared in a .d.etch parses and registers, a component still does not" {
+    const gpa = std.testing.allocator;
+
+    // G1 amendment (Claude.ai round-trip): `event_decl` joins §20.1's
+    // `decl_file_item`. G4 has to make a Zig-emitted event observable from a
+    // rule, and a rule can only observe an event whose type Etch knows.
+    //
+    // PARSES: no parse diagnostic, and no E1901.
+    var ok = try parseAndCheckDetch(gpa, "event Hit { damage: int = 0, critical: bool = false }");
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .construct_not_allowed_in_declaration_file);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // The declaration reached the AST with its payload intact — a construct
+    // admitted by the allow-list and then dropped would pass the assertions
+    // above and be useless to G4.
+    try std.testing.expectEqual(@as(usize, 1), ok.ast.event_decls.items.len);
+    try std.testing.expectEqualStrings("Hit", ok.ast.strings.slice(ok.ast.event_decls.items[0].name));
+    try std.testing.expectEqual(@as(u32, 2), ok.ast.event_decls.items[0].fields_len);
+
+    // REGISTERS: `pass1Collect` put it in the symbol table. Observed through the
+    // duplicate-symbol path rather than by reaching into `symbols`, which is
+    // private — a second declaration of the same name is E0101, and that answer
+    // is only reachable if the first one was recorded.
+    var dup = try parseAndCheckDetch(gpa,
+        \\event Hit { damage: int = 0 }
+        \\event Hit { damage: int = 1 }
+    );
+    defer dup.deinit(gpa);
+    try expectAnyCode(dup.diagnostics.items, .duplicate_symbol);
+
+    // COUNTERFACTUAL ON THE OBJECT: a `component` in the same position is still
+    // E1901. Without this, the amendment could have opened the whole ECS family
+    // and every assertion above would still pass.
+    var comp = try parseAndCheckDetch(gpa, "component Health { current: int = 100 }");
+    defer comp.deinit(gpa);
+    try expectAnyCode(comp.diagnostics.items, .construct_not_allowed_in_declaration_file);
+
+    // And a `resource`, the other member of the pair §20.2 does not name and
+    // §20.1 does not admit. Asserted separately: one construct standing for the
+    // family would prove only that the family is not entirely open.
+    var res = try parseAndCheckDetch(gpa, "resource Score { n: int = 0 }");
+    defer res.deinit(gpa);
+    try expectAnyCode(res.diagnostics.items, .construct_not_allowed_in_declaration_file);
+
+    // An event carries FIELDS and no statement run — `ast.EventDecl` has no
+    // `body_start` at all — so "a declaration file carries no bodies" holds by
+    // the construct's shape and needs no E1900 arm. Pinned structurally so a
+    // future body-bearing event form cannot land here unnoticed.
+    comptime {
+        for (@typeInfo(ast_mod.EventDecl).@"struct".fields) |f| {
+            if (std.mem.eql(u8, f.name, "body_start") or std.mem.eql(u8, f.name, "body_len")) {
+                @compileError("EventDecl gained a body: E1900 must grow an arm for it, and §20.1's admission of event_decl needs re-arguing");
+            }
+        }
+    }
+
+    // RESIDUAL, stated rather than implied: this establishes that the allow-list
+    // no longer BLOCKS the event, not that a `.d.etch`-declared event is visible
+    // to a user `.etch`. Cross-file visibility runs through the export index and
+    // `imported_symbols`, which a `.d.etch` does not participate in (it is loaded
+    // at compiler build, §20.5, never imported). Wiring that is G4's, and G4 is
+    // where it gets a test.
 }

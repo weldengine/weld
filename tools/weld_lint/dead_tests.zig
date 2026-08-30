@@ -384,9 +384,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `checkProject` (unknown method, arity, local shadowing, and the
     // no-declaration-file counter-factual).
     // (1968 -> 1970, suite reported 1970 - 1951 passed + 19 skipped, macOS aarch64.)
+    // The G1 AMENDMENT adds one to `src/etch/types.zig`: `event_decl` joins
+    // §20.1's allow-list after a Claude.ai round-trip, and the test pins that it
+    // parses, that it registers (observed through the duplicate-symbol path),
+    // and that `component` and `resource` in the same position are still E1901 —
+    // so the list widened by exactly one and not by a family.
+    // (1970 -> 1971, suite reported 1971 - 1952 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1968,
-        else => 1970,
+        .windows => 1969,
+        else => 1971,
     };
 }
 
