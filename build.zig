@@ -620,6 +620,9 @@ pub fn build(b: *std.Build) void {
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
+        /// M1.1.15.2 G4 — when set, imports the toy service module (which also
+        /// carries the toy EVENT and its emitted declaration).
+        etch_events: bool = false,
         /// M1.1.15.2 G3 — when set, imports the `.d.etch` emitter and the toy
         /// service, so a test exercises the SAME functions `bindgen-check` runs.
         bindgen_detch: bool = false,
@@ -736,6 +739,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch_services/service_call_test.zig", .scene = true },
         // M1.1.15.2 G3 — the emitter and the `bindgen-check` comparison.
         .{ .path = "tests/etch_bindgen/detch_emitter_test.zig", .bindgen_detch = true },
+        // M1.1.15.2 G4 — the Tier 0 → Etch event bridge and its tick ordering.
+        .{ .path = "tests/etch_events/event_bridge_test.zig", .etch_events = true },
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
@@ -893,6 +898,10 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.scene) {
             t_mod.addImport("weld_etch", etch_module);
+        }
+        if (spec.etch_events) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("toy_service", toy_service_module);
         }
         if (spec.bindgen_detch) {
             t_mod.addImport("weld_etch", etch_module);

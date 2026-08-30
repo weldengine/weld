@@ -414,6 +414,30 @@ const ClosureStore = struct {
 /// One field of a runtime `struct` value (M0.8 E2 block 3).
 const StructField = struct { name: StringId, value: Value };
 
+/// One value crossing INTO the interpreter from Zig (M1.1.15.2 G4). Deliberately
+/// a small POD union and not a `Value`: the bridge must not need to know how the
+/// interpreter represents a string, and this way it cannot.
+pub const ExternalValue = union(enum) {
+    int_: i64,
+    float_: f64,
+    bool_: bool,
+    string_: []const u8,
+    entity_: EntityId,
+};
+
+/// One field of an externally pushed event payload.
+pub const ExternalField = struct {
+    name: []const u8,
+    value: ExternalValue,
+};
+
+/// A registered producer of external events (M1.1.15.2 G4). `drain` is called
+/// once per tick, at a fixed point, and returns how many events it pushed.
+pub const ExternalEventSource = struct {
+    ctx: *anyopaque,
+    drain: *const fn (ctx: *anyopaque, interp: *Interpreter) anyerror!usize,
+};
+
 /// A runtime `struct` value: its type name plus an ordered set of field values
 /// (declaration order). Addressed by `Value.struct_ref`.
 const StructVal = struct {
@@ -1044,6 +1068,16 @@ pub const Interpreter = struct {
     /// through to ordinary method dispatch and fails there, as an unknown
     /// identifier would.
     services: ?*const services_mod.Registry = null,
+    /// External event sources drained at a FIXED point of the tick
+    /// (M1.1.15.2 G4). Borrowed records; each is a Tier 0 queue plus the erased
+    /// function that moves its payloads through `pushExternalEvent`.
+    ///
+    /// The list lives here, and the drain runs inside `stepOnce`, because the
+    /// ORDER is the deliverable: a source drained by a caller before `runFor`
+    /// would push on the wrong side of the per-tick `clear` and the events would
+    /// be wiped before any rule could see them — emitted, never observed, and no
+    /// red anywhere.
+    event_sources: std.ArrayListUnmanaged(ExternalEventSource) = .empty,
     pending_error: ?RuntimeError = null,
     /// Human-readable message accompanying the in-flight failure (M1.0.15): the
     /// `assert(cond, "msg")` literal, or an assertion-family builtin's formatted
@@ -1236,6 +1270,7 @@ pub const Interpreter = struct {
         // is decoupled from `bridge.deinit`.
         if (self.world) |w| w.releaseResourcePayloads(self.gpa);
         for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
+        self.event_sources.deinit(self.gpa);
         self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
@@ -2079,6 +2114,15 @@ pub const Interpreter = struct {
             self.suppress_event_clear = false;
         } else {
             self.events.clear(self.gpa);
+        }
+        // Drain the external event sources (M1.1.15.2 G4) — AFTER the clear and
+        // BEFORE rule dispatch, which is the whole deliverable of the bridge.
+        // On the wrong side of the clear the events are wiped before any rule
+        // runs: emitted, never observed, and no red anywhere. Placed ahead of
+        // the timers because Zig produced these before the tick began, so they
+        // are the tick's earliest producers.
+        for (self.event_sources.items) |src| {
+            _ = src.drain(src.ctx, self) catch return error.RuntimeFailure;
         }
         // Fire due timers (M1.0.13 E6) — after the clock advance and the
         // event-queue clear, before rule dispatch: a callback's `emit` lands
@@ -4121,6 +4165,52 @@ pub const Interpreter = struct {
     /// the registry must outlive this interpreter.
     pub fn setServiceRegistry(self: *Interpreter, reg: *const services_mod.Registry) void {
         self.services = reg;
+    }
+
+    /// Register an external event source (M1.1.15.2 G4). Borrowed: the source's
+    /// context must outlive this interpreter.
+    pub fn addEventSource(self: *Interpreter, source: ExternalEventSource) !void {
+        try self.event_sources.append(self.gpa, source);
+    }
+
+    /// THE CONTROLLED ENTRY POINT. A Tier 1 module hands over an event by TYPE
+    /// NAME and a flat field list; nothing about `EventStore`'s structure
+    /// crosses this boundary, and the bridge cannot reach it.
+    ///
+    /// Returns `false` when the type name is not interned in this program's
+    /// string pool — and that is a DECISION, not a failure. A name absent from
+    /// the pool is a name no rule of this program mentions, so the event has no
+    /// possible observer; dropping it is the correct answer and the count is
+    /// what makes the drop visible. It also means the bridge needs no
+    /// cross-arena machinery: the `.d.etch` declares the type for the CHECKER,
+    /// and the runtime matches on the bytes a rule actually wrote.
+    ///
+    /// A field whose name is likewise unknown is skipped, for the same reason:
+    /// nothing can read it.
+    pub fn pushExternalEvent(
+        self: *Interpreter,
+        type_name: []const u8,
+        payload: []const ExternalField,
+    ) !bool {
+        const type_id = self.ast.strings.find(type_name) orelse return false;
+        var fields: std.ArrayListUnmanaged(StructField) = .empty;
+        errdefer fields.deinit(self.gpa);
+        for (payload) |f| {
+            const fname = self.ast.strings.find(f.name) orelse continue;
+            const v: Value = switch (f.value) {
+                .int_ => |n| .{ .int_ = n },
+                .float_ => |x| .{ .float_ = x },
+                .bool_ => |b| .{ .bool_ = b },
+                .entity_ => |e| .{ .entity_id = e },
+                // Owned by the STORE for the tick, on the same escape gate an
+                // Etch `emit` uses: the module's bytes are borrowed and this
+                // interpreter must not hold them past the call.
+                .string_ => |bytes| try self.events.ownEscapingString(self.gpa, bytes),
+            };
+            try fields.append(self.gpa, .{ .name = fname, .value = v });
+        }
+        try self.events.enqueue(self.gpa, type_id, fields);
+        return true;
     }
 
     /// Invoke a Tier 1 service method (`etch-abi-zig.md` §8.7).

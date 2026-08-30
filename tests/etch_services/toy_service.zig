@@ -49,6 +49,27 @@ pub fn label(ctx: *Ctx, prefix: []const u8) []const u8 {
 /// The toy's `ServiceSpec` (`etch-abi-zig.md` §8.1). Parameter NAMES are
 /// declared because Zig carries none; every type and the `throws` flag are
 /// derived from the implementations above.
+/// Payload of the toy event a Tier 1 module publishes to Etch (M1.1.15.2 G4).
+/// `extern` because it crosses a module boundary; the emitter refuses a struct
+/// with no layout guarantee, and the layout is what makes the field ORDER a
+/// fact rather than a compiler choice.
+pub const Ping = extern struct {
+    value: i64 = 0,
+    loud: bool = false,
+};
+
+/// The toy event's declaration, derived from `Ping` — names, types and defaults
+/// all read off the Zig struct, so the Etch declaration cannot drift from the
+/// payload the bridge pushes.
+pub const ping_event = services.event("ToyPing", "A ping published from Zig.", Ping);
+
+/// The emitted `ToyPing.d.etch`, embedded exactly as the service's is. Nothing
+/// about this event's Etch surface is written by hand.
+pub const ping_declaration_source = @embedFile("ToyPing.d.etch");
+
+/// The toy's `ServiceSpec` (`etch-abi-zig.md` §8.1). Parameter NAMES are
+/// declared because Zig carries none; every type and the `throws` flag are
+/// derived from the implementations above.
 pub const spec = services.ServiceSpec{
     .name = "toy",
     .version = 1,

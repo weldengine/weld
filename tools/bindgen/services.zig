@@ -54,8 +54,23 @@ pub fn specsOf(comptime entry: Entry) []const services.ServiceSpec {
     }
 }
 
+/// Every `EventSpec` an entry's module declares, in declaration order
+/// (M1.1.15.2 G4). Same walk as `specsOf`, different type — an event a Tier 1
+/// module publishes is guarded exactly as its services are.
+pub fn eventsOf(comptime entry: Entry) []const services.EventSpec {
+    comptime {
+        var found: []const services.EventSpec = &.{};
+        for (@typeInfo(entry.module).@"struct".decls) |d| {
+            const T = @TypeOf(@field(entry.module, d.name));
+            if (T != services.EventSpec) continue;
+            found = found ++ [_]services.EventSpec{@field(entry.module, d.name)};
+        }
+        return found;
+    }
+}
+
 /// Repo-relative path of the artifact for one spec (§8.4.2:
 /// `<output_dir>/<spec.name>.d.etch`).
-pub fn artifactPath(gpa: std.mem.Allocator, entry: Entry, spec: services.ServiceSpec) ![]u8 {
-    return std.fmt.allocPrint(gpa, "{s}/{s}.d.etch", .{ entry.output_dir, spec.name });
+pub fn artifactPathNamed(gpa: std.mem.Allocator, entry: Entry, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "{s}/{s}.d.etch", .{ entry.output_dir, name });
 }

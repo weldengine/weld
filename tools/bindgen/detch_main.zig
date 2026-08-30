@@ -49,47 +49,19 @@ pub fn main(init: std.process.Init) !void {
     var emitted: usize = 0;
 
     inline for (manifest.entries) |entry| {
+        // Events first, then services — a service signature may name an event
+        // type, never the reverse, so this is the order a reader wants.
+        inline for (comptime manifest.eventsOf(entry)) |ev| {
+            const path = try manifest.artifactPathNamed(gpa, entry, ev.name);
+            const rendered = try emit_detch.emitEventAlloc(gpa, ev, entry.source_path, emitter_path);
+            emitted += 1;
+            try handleOne(gpa, io, dir, write, path, rendered, entry.source_path, &divergences);
+        }
         inline for (comptime manifest.specsOf(entry)) |spec| {
-            const path = try manifest.artifactPath(gpa, entry, spec);
+            const path = try manifest.artifactPathNamed(gpa, entry, spec.name);
             const rendered = try emit_detch.emitAlloc(gpa, spec, entry.source_path, emitter_path);
             emitted += 1;
-
-            if (write) {
-                var file = try dir.createFile(io, path, .{});
-                defer file.close(io);
-                var wbuf: [16 * 1024]u8 = undefined;
-                var fw = file.writer(io, &wbuf);
-                try fw.interface.writeAll(rendered);
-                try fw.interface.flush();
-                std.debug.print("bindgen-detch: wrote {s}\n", .{path});
-            } else if (readWholeFile(gpa, io, dir, path)) |committed| {
-                var lines: std.ArrayListUnmanaged(emit_detch.DiffLine) = .empty;
-                if (try emit_detch.diff(gpa, committed, rendered, &lines)) {
-                    divergences += 1;
-                    std.debug.print(
-                        "{s} {s}: '{s}' diverges from the emitter's output on '{s}'\n",
-                        .{ mismatch_code, mismatch_name, path, entry.source_path },
-                    );
-                    for (lines.items) |l| {
-                        switch (l.kind) {
-                            .same => {},
-                            .expected_only => std.debug.print("  {d:>4} - {s}\n", .{ l.line_no, l.text }),
-                            .actual_only => std.debug.print("  {d:>4} + {s}\n", .{ l.line_no, l.text }),
-                        }
-                    }
-                    std.debug.print("  (- committed, + emitted from the Zig ServiceSpec)\n", .{});
-                }
-            } else |e| {
-                // A missing artifact is a divergence and not a soft warning: an
-                // uncommitted `.d.etch` is exactly the state this guard exists to
-                // refuse, and treating it as "nothing to compare" would make the
-                // check pass on the one tree where it must not.
-                divergences += 1;
-                std.debug.print(
-                    "{s} {s}: cannot read the committed artifact '{s}' ({t}) — run `zig build bindgen-detch`\n",
-                    .{ mismatch_code, mismatch_name, path, e },
-                );
-            }
+            try handleOne(gpa, io, dir, write, path, rendered, entry.source_path, &divergences);
         }
     }
 
@@ -102,6 +74,58 @@ pub fn main(init: std.process.Init) !void {
     if (divergences != 0) return error.DeclarationFileMismatch;
     if (!write) {
         std.debug.print("bindgen-check: {d} .d.etch artifact(s) match their ServiceSpec\n", .{emitted});
+    }
+}
+
+/// Write or compare ONE artifact. Factored out so the event and the service
+/// paths cannot drift on what "divergence" means.
+fn handleOne(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    write: bool,
+    path: []const u8,
+    rendered: []const u8,
+    source_path: []const u8,
+    divergences: *usize,
+) !void {
+    if (write) {
+        var file = try dir.createFile(io, path, .{});
+        defer file.close(io);
+        var wbuf: [16 * 1024]u8 = undefined;
+        var fw = file.writer(io, &wbuf);
+        try fw.interface.writeAll(rendered);
+        try fw.interface.flush();
+        std.debug.print("bindgen-detch: wrote {s}\n", .{path});
+        return;
+    }
+    const committed = readWholeFile(gpa, io, dir, path) catch |e| {
+        // A missing artifact is a divergence and not a soft warning: an
+        // uncommitted `.d.etch` is exactly the state this guard exists to
+        // refuse, and treating it as "nothing to compare" would make the check
+        // pass on the one tree where it must not.
+        divergences.* += 1;
+        std.debug.print(
+            "{s} {s}: cannot read the committed artifact '{s}' ({t}) — run `zig build bindgen-detch`\n",
+            .{ mismatch_code, mismatch_name, path, e },
+        );
+        return;
+    };
+    var lines: std.ArrayListUnmanaged(emit_detch.DiffLine) = .empty;
+    if (try emit_detch.diff(gpa, committed, rendered, &lines)) {
+        divergences.* += 1;
+        std.debug.print(
+            "{s} {s}: '{s}' diverges from the emitter's output on '{s}'\n",
+            .{ mismatch_code, mismatch_name, path, source_path },
+        );
+        for (lines.items) |l| {
+            switch (l.kind) {
+                .same => {},
+                .expected_only => std.debug.print("  {d:>4} - {s}\n", .{ l.line_no, l.text }),
+                .actual_only => std.debug.print("  {d:>4} + {s}\n", .{ l.line_no, l.text }),
+            }
+        }
+        std.debug.print("  (- committed, + emitted from the Zig ServiceSpec)\n", .{});
     }
 }
 

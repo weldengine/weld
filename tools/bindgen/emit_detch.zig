@@ -70,6 +70,36 @@ pub fn emit(
     try w.writeAll("}\n");
 }
 
+/// Render one event's `.d.etch` (M1.1.15.2 G4). Its own artifact rather than a
+/// section of the service's, because §8.4.2 emits one file per SPEC and a module
+/// may publish events without publishing a service.
+pub fn emitEvent(
+    w: *std.Io.Writer,
+    spec: services.EventSpec,
+    source_path: []const u8,
+    emitter_path: []const u8,
+) !void {
+    try w.print("{s}\n", .{header_line});
+    try w.print("// Source: {s}\n", .{source_path});
+    try w.print("// Emitter: {s}\n\n", .{emitter_path});
+    if (spec.doc) |d| try w.print("/// {s}\n", .{d});
+    try w.print("event {s} {{\n", .{spec.name});
+    for (spec.fields) |f| {
+        try w.print("  {s}: {s} = ", .{ f.name, f.type.etchName() });
+        switch (f.default) {
+            .int_ => |v| try w.print("{d}", .{v}),
+            // Rendered through `{d}` so an integral float still carries a
+            // decimal point — `0` would parse as an `int` literal and the field
+            // would be typed against the wrong builtin.
+            .float_ => |v| try w.print("{d:.1}", .{v}),
+            .bool_ => |v| try w.print("{s}", .{if (v) "true" else "false"}),
+            .string_ => |v| try w.print("\"{s}\"", .{v}),
+        }
+        try w.writeAll("\n");
+    }
+    try w.writeAll("}\n");
+}
+
 /// Render into an owned buffer. The caller frees.
 pub fn emitAlloc(
     gpa: std.mem.Allocator,
@@ -80,6 +110,19 @@ pub fn emitAlloc(
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     try emit(&aw.writer, spec, source_path, emitter_path);
+    return aw.toOwnedSlice();
+}
+
+/// `emitEvent` into an owned buffer. The caller frees.
+pub fn emitEventAlloc(
+    gpa: std.mem.Allocator,
+    spec: services.EventSpec,
+    source_path: []const u8,
+    emitter_path: []const u8,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    try emitEvent(&aw.writer, spec, source_path, emitter_path);
     return aw.toOwnedSlice();
 }
 

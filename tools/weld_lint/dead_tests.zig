@@ -404,9 +404,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // divergence detected from BOTH sides with the line named, and the emitted
     // text parsing and resolving as a `.d.etch`.
     // (1981 -> 1984, suite reported 1984 - 1965 passed + 19 skipped, macOS aarch64.)
+    // G4 adds four in the new `tests/etch_events/event_bridge_test.zig`: the
+    // `.d.etch`-declared event resolving in a rule (with an undeclared-type and
+    // an unknown-field counter-factual), the three-tick observation, the
+    // ordering oracle that reddens if the drain moves before the per-tick
+    // `clear`, and the counted drop for a type the program never mentions.
+    // (1984 -> 1988, suite reported 1988 - 1969 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1982,
-        else => 1984,
+        .windows => 1986,
+        else => 1988,
     };
 }
 

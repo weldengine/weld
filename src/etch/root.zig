@@ -32,6 +32,9 @@ pub const diagnostics = @import("diagnostics.zig");
 /// because a Tier 1 module declares its `ServiceSpec` and registers it from
 /// outside `src/etch/`.
 pub const services = @import("services.zig");
+/// Typed bridge from a Tier 0 `EventQueue(T)` into the interpreter's per-tick
+/// event store (M1.1.15.2 G4). Exposed because a Tier 1 module owns the queue.
+pub const event_bridge = @import("event_bridge.zig");
 
 // S4 interpreter surface.
 const value = @import("value.zig");
@@ -59,6 +62,7 @@ comptime {
     // services` re-export above pulls its DECLARATIONS, not its `test` blocks
     // (§13, and the four-case experiment recorded below).
     _ = @import("services.zig");
+    _ = @import("event_bridge.zig");
     // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");

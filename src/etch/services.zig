@@ -133,6 +133,88 @@ pub const ServiceSpec = struct {
     methods: []const MethodSpec,
 };
 
+/// One field of an event payload. Like `ParamSpec`, the NAME is the only thing
+/// Zig cannot supply on its own — here it CAN (`@typeInfo` carries struct field
+/// names), so `event` derives everything.
+pub const FieldSpec = struct {
+    name: []const u8,
+    type: TypeRef,
+    /// Rendered as the field's Etch default. Taken from the Zig field's own
+    /// default when it has one, else the type's zero — both mechanical, neither
+    /// invented.
+    default: DefaultValue,
+};
+
+/// The Etch literal an emitted field default renders as.
+pub const DefaultValue = union(enum) {
+    int_: i64,
+    float_: f64,
+    bool_: bool,
+    string_: []const u8,
+};
+
+/// An event type a Tier 1 module publishes to Etch (M1.1.15.2 G4). Declared in
+/// a `.d.etch` — which `etch-grammar.md` §20.1 admits since this milestone's G1
+/// amendment, and for exactly this reason: a rule can only observe an event
+/// whose type Etch knows, and a hand-written duplicate of a Zig shape is a
+/// surface with no drift guard.
+pub const EventSpec = struct {
+    name: []const u8,
+    fields: []const FieldSpec,
+    doc: ?[]const u8 = null,
+};
+
+/// Build an `EventSpec` from an `extern struct`, deriving every field.
+///
+/// `extern` is REQUIRED and the requirement is not cosmetic: the payload crosses
+/// from a Tier 1 module into the interpreter, and a Zig struct with no layout
+/// guarantee has no business describing a published type. It is also what makes
+/// the field ORDER a fact rather than a compiler choice, and the emitted
+/// declaration renders fields in that order.
+pub fn event(comptime name: []const u8, comptime doc: ?[]const u8, comptime T: type) EventSpec {
+    const info = @typeInfo(T).@"struct";
+    if (info.layout != .@"extern") {
+        @compileError("event payload '" ++ @typeName(T) ++ "' must be an extern struct");
+    }
+    const fields = comptime blk: {
+        var out: [info.fields.len]FieldSpec = undefined;
+        for (info.fields, 0..) |f, i| {
+            const tr = typeRefOf(f.type);
+            out[i] = .{
+                .name = f.name,
+                .type = tr,
+                .default = if (f.default_value_ptr) |p|
+                    defaultOf(f.type, @as(*const f.type, @ptrCast(@alignCast(p))).*)
+                else
+                    zeroOf(f.type),
+            };
+        }
+        break :blk out;
+    };
+    return .{ .name = name, .fields = &fields, .doc = doc };
+}
+
+fn defaultOf(comptime T: type, v: T) DefaultValue {
+    return switch (T) {
+        i64 => .{ .int_ = v },
+        f64 => .{ .float_ = v },
+        bool => .{ .bool_ = v },
+        []const u8 => .{ .string_ = v },
+        u64 => .{ .int_ = @bitCast(v) },
+        else => @compileError("unreachable: typeRefOf refuses this type first"),
+    };
+}
+
+fn zeroOf(comptime T: type) DefaultValue {
+    return switch (T) {
+        i64, u64 => .{ .int_ = 0 },
+        f64 => .{ .float_ = 0 },
+        bool => .{ .bool_ = false },
+        []const u8 => .{ .string_ = "" },
+        else => @compileError("unreachable: typeRefOf refuses this type first"),
+    };
+}
+
 /// Map a Zig type onto the `TypeRef` a signature would name for it. `void` is
 /// `.void_`; everything else that is not in the scalar set is a compile error at
 /// the `method` call site, which is where an author can still fix it.

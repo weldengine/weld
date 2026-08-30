@@ -495,6 +495,9 @@ pub const TypeChecker = struct {
     /// M1.0.7 established for the exports index: a `StringId` is per-arena, and
     /// a service is declared in one arena and called from another.
     services: std.StringHashMapUnmanaged(ServiceEntry) = .empty,
+    /// Every `event` a `.d.etch` in this project declares, keyed by NAME BYTES
+    /// for the reason `services` is (M1.1.15.2 G4).
+    foreign_events: std.StringHashMapUnmanaged(ForeignEvent) = .empty,
 
     /// Byte-keyed cross-file indexes for project-level scene/prefab validation
     /// (M0.9 E2-B). StringIds are per-arena, so cross-file resolution keys on
@@ -554,6 +557,18 @@ pub const TypeChecker = struct {
         span: SourceSpan,
     };
 
+    /// One `event` declared in a `.d.etch` reachable from this check
+    /// (M1.1.15.2 G4). Same shape and same reason as `ServiceEntry`: the
+    /// declaration lives in a different arena than the rule observing it, so the
+    /// arena pointer is what makes the field run reachable.
+    ///
+    /// Declaration files ONLY. An `event` in an ordinary `.etch` keeps the
+    /// existing single-arena path through `symbols`, and nothing about it moves.
+    pub const ForeignEvent = struct {
+        arena: *const AstArena,
+        decl: ast_mod.EventDecl,
+    };
+
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
     /// `methods_start`/`methods_len` index `arena.impl_methods` (the
     /// impl-provided methods); `when_root` is `RuleDecl.none_when` for an
@@ -577,6 +592,7 @@ pub const TypeChecker = struct {
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
         self.services.deinit(self.gpa);
+        self.foreign_events.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -621,6 +637,7 @@ pub const TypeChecker = struct {
         // column, and an immediate return in `.standard` mode.
         try tc.checkDeclarationFileConstructs();
         try tc.collectServices();
+        try tc.collectDeclaredEvents();
         try tc.pass1Collect();
         try tc.bindImports();
         try tc.validateTypeAliases();
@@ -772,6 +789,39 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Index every `event` a project `.d.etch` declares (M1.1.15.2 G4). Runs
+    /// with `collectServices` and over the same arenas, bounded to declaration
+    /// files: an `event` in an ordinary `.etch` already resolves through
+    /// `symbols`, and shadowing that path would change behaviour no gate asked
+    /// to change.
+    fn collectDeclaredEvents(self: *TypeChecker) !void {
+        const proj = self.project orelse return;
+        for (proj.arenas) |*a| {
+            if (a.mode != .declaration_file) continue;
+            const kinds = a.items.items(.kind);
+            const datas = a.items.items(.data);
+            for (kinds, 0..) |k, i| {
+                if (k != .event_decl) continue;
+                const decl = a.event_decls.items[datas[i]];
+                const name = a.strings.slice(decl.name);
+                const gop = try self.foreign_events.getOrPut(self.gpa, name);
+                if (gop.found_existing) {
+                    const span = a.itemSpan(.{ .category = .item, .index = @intCast(i) });
+                    try self.emit(.duplicate_symbol, .error_, span, "duplicate declared event '{s}'", .{name});
+                    continue;
+                }
+                gop.value_ptr.* = .{ .arena = a, .decl = decl };
+            }
+        }
+    }
+
+    /// The `.d.etch`-declared event of that name, if any. Looked up by BYTES,
+    /// since the caller's `StringId` and the declaration's belong to different
+    /// pools.
+    fn declaredEvent(self: *const TypeChecker, name_id: StringId) ?ForeignEvent {
+        return self.foreign_events.get(self.arena.strings.slice(name_id));
+    }
+
     fn indexServicesOf(self: *TypeChecker, a: *const AstArena) !void {
         const kinds = a.items.items(.kind);
         const datas = a.items.items(.data);
@@ -877,6 +927,18 @@ pub const TypeChecker = struct {
     /// THIS arena's pool. A named return type therefore types as `unknown`,
     /// which is permissive and never wrong — it is the same value every
     /// unresolved expression carries.
+    /// A foreign arena's declared field type, resolved BY BYTES. Same bound and
+    /// same reason as `foreignReturnType`.
+    fn foreignFieldType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
+        _ = self;
+        if (a.typeNodeKind(type_node) != .named) return ResolvedType.unknown;
+        const named = a.named_types.items[a.typeNodeData(type_node)];
+        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
+        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
+        return ResolvedType.unknown;
+    }
+
     fn foreignReturnType(self: *TypeChecker, a: *const AstArena, method: ast_mod.FnDecl) ResolvedType {
         _ = self;
         // A void signature (`fn stop(h: AudioHandle)`) types as `unknown` —
@@ -4374,7 +4436,11 @@ pub const TypeChecker = struct {
         if (self.arena.onEventAnnotation(rule)) |annot| {
             if (self.arena.onEventTypeName(annot)) |event_type| {
                 const sym = self.symbols.get(event_type);
-                if (sym != null and sym.?.kind == .event_) {
+                const local_event = sym != null and sym.?.kind == .event_;
+                // A `.d.etch`-declared event resolves here too (M1.1.15.2 G4) —
+                // which is the whole point of admitting `event_decl` into §20.1
+                // at G1: a rule can only observe an event whose type Etch knows.
+                if (local_event or self.declaredEvent(event_type) != null) {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
                     try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
                 } else {
@@ -7488,12 +7554,25 @@ pub const TypeChecker = struct {
                 // Field of the implicit `event` binding inside an `@on_event(T)`
                 // observer (M0.8 E3) — e.g. `event.amount`. An event is a POD
                 // struct of fields, resolved against its declaration.
-                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
-                const decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)];
-                var i: u32 = 0;
-                while (i < decl.fields_len) : (i += 1) {
-                    const f = self.arena.fields.items[decl.fields_start + i];
-                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
+                if (self.symbols.get(name_id)) |sym| {
+                    const decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)];
+                    var i: u32 = 0;
+                    while (i < decl.fields_len) : (i += 1) {
+                        const f = self.arena.fields.items[decl.fields_start + i];
+                        if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
+                    }
+                } else if (self.declaredEvent(name_id)) |fe| {
+                    // Cross-arena field lookup, BY BYTES on both the field name
+                    // and the type — the discipline M1.0.7 settled for
+                    // `checkComponentInstance`, and bounded the same way:
+                    // builtins resolve, a named foreign type yields `unknown`.
+                    const want = self.arena.strings.slice(field_name);
+                    var i: u32 = 0;
+                    while (i < fe.decl.fields_len) : (i += 1) {
+                        const f = fe.arena.fields.items[fe.decl.fields_start + i];
+                        if (!std.mem.eql(u8, fe.arena.strings.slice(f.name), want)) continue;
+                        return self.foreignFieldType(fe.arena, f.type_node);
+                    }
                 }
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
