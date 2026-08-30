@@ -574,6 +574,25 @@ pub fn build(b: *std.Build) void {
     etch_interp_runner_module.addImport("weld_core", core_module);
     etch_interp_runner_module.addImport("weld_etch", etch_module);
 
+    // M1.1.15.2 G3 — the toy service and the `.d.etch` emitter, defined HERE
+    // rather than beside the bindgen steps below because the test-spec loop
+    // needs them too, and one module definition serving both is what keeps the
+    // tests exercising the very code the `bindgen-check` step runs.
+    // The toy is a PERMANENT manifest entry: `etch-abi-zig.md` §8.7 has the
+    // interop gates prove themselves on a toy and never on the physics.
+    const toy_service_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_services/toy_service.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    toy_service_module.addImport("weld_etch", etch_module);
+    const emit_detch_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/emit_detch.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    emit_detch_module.addImport("weld_etch", etch_module);
+
     const TestSpec = struct {
         path: []const u8,
         // M0.4 — `spike` field removed, no entry needs it anymore.
@@ -601,6 +620,9 @@ pub fn build(b: *std.Build) void {
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
+        /// M1.1.15.2 G3 — when set, imports the `.d.etch` emitter and the toy
+        /// service, so a test exercises the SAME functions `bindgen-check` runs.
+        bindgen_detch: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -712,6 +734,8 @@ pub fn build(b: *std.Build) void {
         // M1.1.15.2 G2 — the Tier 1 service path end to end: `.d.etch` declares,
         // the checker resolves, the tree-walker dispatches into a Zig function.
         .{ .path = "tests/etch_services/service_call_test.zig", .scene = true },
+        // M1.1.15.2 G3 — the emitter and the `bindgen-check` comparison.
+        .{ .path = "tests/etch_bindgen/detch_emitter_test.zig", .bindgen_detch = true },
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
@@ -869,6 +893,11 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.scene) {
             t_mod.addImport("weld_etch", etch_module);
+        }
+        if (spec.bindgen_detch) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("emit_detch", emit_detch_module);
+            t_mod.addImport("toy_service", toy_service_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
@@ -1994,6 +2023,52 @@ pub fn build(b: *std.Build) void {
     const bindgen_step = b.step("bindgen", "Regenerate every bindgen adapter (Vulkan + Wayland)");
     bindgen_step.dependOn(&vk_gen_fmt.step);
     bindgen_step.dependOn(&wayland_gen_fmt.step);
+
+    // ------------------------------- .d.etch service-spec emitter (M1.1.15.2 G3) --
+    //
+    // `engine-c-bindings.md` §8.4: the `bindgen.ServiceSpec` a Tier 1 module
+    // declares is the SOURCE OF TRUTH, and the committed `.d.etch` is a derived
+    // artifact. Two steps over ONE rendering, so the check cannot disagree with
+    // the regeneration:
+    //   - `zig build bindgen-detch` — regenerate in place (manual, §8.4.4)
+    //   - `zig build bindgen-check` — compare and fail with a line-by-line diff
+    //
+    // Distinct from `bindgen-verify` / `vk-gen-check`, which gate the Vulkan and
+    // Wayland `.api.zig` → Zig pipeline and have nothing to do with services.
+    const detch_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/detch_main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    detch_module.addImport("weld_etch", etch_module);
+    detch_module.addImport("toy_service", toy_service_module);
+
+    const detch_exe = b.addExecutable(.{
+        .name = "bindgen_detch",
+        .root_module = detch_module,
+    });
+    const detch_write_run = b.addRunArtifact(detch_exe);
+    detch_write_run.has_side_effects = true;
+    // `.inherit` and not the default capture, MEASURED: with the default the
+    // step failed with exit 1 and printed only the error trace — the
+    // line-by-line diff E1902 owes the reader went to a captured pipe and was
+    // discarded. A guard that fails without saying why is half a guard.
+    detch_write_run.stdio = .inherit;
+    detch_write_run.addArg("--write");
+    const detch_write_step = b.step(
+        "bindgen-detch",
+        "Regenerate the .d.etch service declarations from their Zig ServiceSpec",
+    );
+    detch_write_step.dependOn(&detch_write_run.step);
+
+    const detch_check_run = b.addRunArtifact(detch_exe);
+    detch_check_run.has_side_effects = true;
+    detch_check_run.stdio = .inherit; // see the note on `detch_write_run`
+    const detch_check_step = b.step(
+        "bindgen-check",
+        "Fail if a committed .d.etch diverges from its Zig ServiceSpec (E1902)",
+    );
+    detch_check_step.dependOn(&detch_check_run.step);
 
     // -------------------------------------------- bindgen-verify gate --
     //

@@ -1,0 +1,14 @@
+// AUTO-GENERATED — DO NOT EDIT
+// Source: tests/etch_services/toy_service.zig
+// Emitter: tools/bindgen/emit_detch.zig
+
+@version(1)
+service toy {
+  /// Add the service's base to n.
+  fn echo(n: int) -> int
+
+  /// Fail when n is greater than two.
+  fn risky(n: int) throws -> int
+
+  fn label(prefix: string) -> string
+}

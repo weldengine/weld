@@ -59,17 +59,9 @@ pub const spec = services.ServiceSpec{
     },
 };
 
-/// The `.d.etch` a G3 emitter would produce for `spec`. Hand-written HERE and
-/// only here, because G3 does not exist yet and the checker needs a declaration
-/// to resolve against. G3 replaces this constant with the emitted artifact and
-/// `bindgen-check` then guards it; until then the divergence between this text
-/// and `spec` is exactly what E1902 will confront, and it is unguarded.
-pub const declaration_source =
-    \\service toy {
-    \\  /// Add the service's base to n.
-    \\  fn echo(n: int) -> int
-    \\  /// Fail when n is greater than two.
-    \\  fn risky(n: int) throws -> int
-    \\  fn label(prefix: string) -> string
-    \\}
-;
+/// The toy's `.d.etch`, EMBEDDED from the emitted artifact rather than written
+/// here (M1.1.15.2 G3). At G2 this was a hand-written constant, and the file said
+/// so; the emitter now produces `toy.d.etch` from `spec` and `zig build
+/// bindgen-check` guards it, so the divergence E1902 names cannot survive a
+/// build. Nothing about this service's surface is written by hand any more.
+pub const declaration_source = @embedFile("toy.d.etch");

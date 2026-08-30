@@ -387,10 +387,17 @@ pub const DiagnosticCode = enum {
     //        construct, which is enumerable from the AST. Giving it a parser
     //        path would duplicate a twenty-construct list; `scene_cook.zig` sets
     //        the precedent of deciding this after the parse.
-    //    E1902 is NOT allocated here: it confronts a declared signature with its
-    //    Zig implementation, which nothing before G3 can do. ──
+    //    E1902 confronts a declared signature with its Zig implementation, so
+    //    it was allocated at G3, which is the first gate that HAS both. What
+    //    reports it is `zig build bindgen-check`, not the type-checker: a
+    //    `.d.etch` is a derived artifact (`engine-c-bindings.md` §8.4.1) and
+    //    the only confrontation Phase 1 can make is between the committed file
+    //    and what the emitter produces on the current Zig `ServiceSpec`. The
+    //    load-time signature check `etch-grammar.md` §20.3 describes keys on a
+    //    `.etchc`, which does not exist before Phase 2. ──
     declaration_file_body_not_allowed, // M1.1.15.2 G1 — E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // M1.1.15.2 G1 — E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
+    declaration_file_implementation_mismatch, // M1.1.15.2 G3 — E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
 
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -591,6 +598,7 @@ pub const DiagnosticCode = enum {
             .measure_outside_test => "E0910",
             .declaration_file_body_not_allowed => "E1900",
             .construct_not_allowed_in_declaration_file => "E1901",
+            .declaration_file_implementation_mismatch => "E1902",
         };
     }
 
@@ -793,6 +801,7 @@ pub const DiagnosticCode = enum {
             .measure_outside_test => "MeasureOutsideTest",
             .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
             .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
+            .declaration_file_implementation_mismatch => "DeclarationFileImplementationMismatch",
         };
     }
 };

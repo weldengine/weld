@@ -399,9 +399,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // and one in `src/etch/interp.zig` pinning the PRE-EXISTING assignment-RHS
     // throw defect this gate exposed and closed.
     // (1971 -> 1981, suite reported 1981 - 1962 passed + 19 skipped, macOS aarch64.)
+    // G3 adds three in the new `tests/etch_bindgen/detch_emitter_test.zig`: the
+    // committed artifact matching the emitter (with its non-vacuity checks), the
+    // divergence detected from BOTH sides with the line named, and the emitted
+    // text parsing and resolving as a `.d.etch`.
+    // (1981 -> 1984, suite reported 1984 - 1965 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1979,
-        else => 1981,
+        .windows => 1982,
+        else => 1984,
     };
 }
 
