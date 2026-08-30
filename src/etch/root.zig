@@ -240,10 +240,19 @@ pub const ProjectFile = struct {
 /// `etch-reference-part1.md` §1.1): strip an optional leading `src/`, strip the
 /// file extension (a typed compound `.scene.etch`/`.prefab.etch`/`.layer.etch`/
 /// `.manifest.etch`/`.d.etch` if present, else plain `.etch`), and map `/`→`.`.
-/// The returned slice is `gpa`-owned. Typed-extension files (scene/prefab/…) take
-/// their basename as the module label; they are never import *targets* (they
-/// declare no top-level types — only one scene/prefab + imports), so the label
-/// only identifies them as nodes in the dependency graph (M1.0.7 E4).
+/// The returned slice is `gpa`-owned. Typed-extension files take their basename
+/// as the module label, and the reason they are not import *targets* differs by
+/// extension — the single justification this comment used to give was true of
+/// only one family:
+///   - `.scene.etch` / `.prefab.etch` / `.layer.etch` / `.manifest.etch` declare
+///     no top-level types (§21.3 bounds them to one scene/prefab plus imports),
+///     so there is nothing to import FROM them.
+///   - `.d.etch` declares nothing BUT top-level constructs (§20.4). It is not an
+///     import target for the opposite reason: a `service` is resolved from the
+///     compiler's global declaration table (`etch-abi-zig.md` §8.3), never
+///     through the per-module export index, so it is never named in an `import`.
+/// Either way the label only identifies the file as a node in the dependency
+/// graph (M1.0.7 E4).
 fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
     var s = name;
     if (std.mem.startsWith(u8, s, "src/")) s = s["src/".len..];
@@ -354,7 +363,11 @@ pub fn validateProject(
     }
     try asts.ensureTotalCapacity(gpa, files.len);
     for (files) |f| {
-        const pr = try parser.parse(gpa, f.source);
+        // `ProjectFile.name` is the ONLY place in the tree that holds both the
+        // path and the source, which is why the mode is threaded here and
+        // nowhere else (`parser.parse` takes no filename, and of its call sites
+        // only this one and `scene_cook.zig` know a path at all).
+        const pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
         // Move each parse diagnostic into diags_out (its gpa-owned message
         // transfers), then free only the now-vacated backing slice — never
         // `pr.deinit`, which would double-free the arena we keep below.

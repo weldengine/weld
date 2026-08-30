@@ -34,28 +34,13 @@ const Lexer = lexer_mod.Lexer;
 pub const ParseError = error{ ParseError, OutOfMemory };
 
 /// Which grammatical subset the parser accepts (M1.1.15.2 G1,
-/// `etch-grammar.md` §20.3). The mode is a property of the FILE, detected from
-/// its extension by `modeForPath`, and it is the only thing that distinguishes
-/// a declaration file from a source file — `.d.etch` is not another language,
-/// it is a reduced view of the same EBNF (§20).
-pub const ParseMode = enum {
-    /// A standard `.etch` source file: the full grammar, every `fn` has a body.
-    standard,
-    /// A `.d.etch` declaration file: signatures and types with no bodies
-    /// (§20.1). Two things change, and only two. Every `fn` becomes
-    /// signature-only whatever its enclosing construct, and a `fn` that carries
-    /// a body is refused AT ITS OPENING BRACE with `E1900` — the parser knows at
-    /// the `{` that a body follows, and building one to reject it afterwards
-    /// would manufacture an AST no downstream stage may see. The `service`
-    /// construct becomes available here and here only (§20.4).
-    ///
-    /// What does NOT change here is `E1901`: the identity of a disallowed
-    /// top-level construct is decided AFTER the parse, from the AST, by the
-    /// type-checker (`etch-validation-ecs.md` §28, and the `scene_cook.zig`
-    /// precedent). Giving it a parser path would duplicate a twenty-construct
-    /// list that is already enumerable from `ItemKind`.
-    declaration_file,
-};
+/// `etch-grammar.md` §20.3). RE-EXPORT: the mode is a property of the parsed
+/// UNIT, not of the parser, so it is declared next to `AstArena` and travels
+/// with the arena into the type-checker, the interpreter and the cook — none of
+/// which would otherwise be able to tell a declaration file from a source file.
+/// Named here as well because every call site of `parseWithMode` reaches for it
+/// through this module.
+pub const ParseMode = ast_mod.ParseMode;
 
 /// Parse mode of a file from its path (`etch-grammar.md` §20.3 — mode detection
 /// by extension). Matching is longest-first, so `foo.d.etch` is a declaration
@@ -155,6 +140,9 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
         .next2_tok = c2,
         .mode = mode,
     };
+    // The arena carries the mode onward: `E1901` is decided from the AST, after
+    // this function has returned, by a checker that never sees the path.
+    arena.mode = mode;
     // `parser.diagnostics` is not covered by the arena/lexer errdefers above;
     // arm its own cleanup so an OOM anywhere below (parseFile or the final
     // `toOwnedSlice`) frees the diagnostics collected so far. On the success

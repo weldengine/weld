@@ -378,9 +378,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The four carry no platform dispatch, so Windows moves by the same four; that step is
     // arithmetic on this table, and the `-Dexpect-collected` layer fed by each cell's own
     // total is what confronts it independently.
+    // G1 adds two to `src/etch/types.zig`: the E1901 allow-list (with its
+    // standard-mode counter-factual, its every-occurrence check, and the nine
+    // admitted constructs) and the cross-file service resolution driven through
+    // `checkProject` (unknown method, arity, local shadowing, and the
+    // no-declaration-file counter-factual).
+    // (1968 -> 1970, suite reported 1970 - 1951 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1966,
-        else => 1968,
+        .windows => 1968,
+        else => 1970,
     };
 }
 

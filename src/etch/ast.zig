@@ -40,6 +40,34 @@ pub const NodeCategory = enum(u4) {
     _,
 };
 
+/// Which grammatical subset an arena was parsed under (M1.1.15.2 G1,
+/// `etch-grammar.md` §20.3). The mode is a property of the FILE, detected from
+/// its extension by `parser.modeForPath`, and it is the only thing that
+/// distinguishes a declaration file from a source file — `.d.etch` is not
+/// another language, it is a reduced view of the same EBNF (§20).
+///
+/// It lives HERE and not in `parser.zig` because the parse is not the only
+/// stage that needs it: `E1901` is decided after the parse, from the AST, and a
+/// checker handed a bare arena has no other way to know which file it came from.
+pub const ParseMode = enum {
+    /// A standard `.etch` source file: the full grammar, every `fn` has a body.
+    standard,
+    /// A `.d.etch` declaration file: signatures and types with no bodies
+    /// (§20.1). Two things change, and only two. Every `fn` becomes
+    /// signature-only whatever its enclosing construct, and a `fn` that carries
+    /// a body is refused AT ITS OPENING BRACE with `E1900` — the parser knows at
+    /// the `{` that a body follows, and building one to reject it afterwards
+    /// would manufacture an AST no downstream stage may see. The `service`
+    /// construct becomes available here and here only (§20.4).
+    ///
+    /// What does NOT change here is `E1901`: the identity of a disallowed
+    /// top-level construct is decided AFTER the parse, from the AST, by the
+    /// type-checker (`etch-validation-ecs.md` §28, and the `scene_cook.zig`
+    /// precedent). Giving it a parser path would duplicate a twenty-construct
+    /// list that is already enumerable from `ItemKind`.
+    declaration_file,
+};
+
 /// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
 /// 28-bit index. Used as the universal pointer between AST nodes.
 pub const NodeId = packed struct(u32) {
@@ -2508,6 +2536,15 @@ const TypeNode = struct {
 /// Allocated once per parse; freed via `deinit` after consumers have
 /// finished. All `NodeId`s in the API refer into this arena.
 pub const AstArena = struct {
+    /// Which grammatical subset produced this arena (M1.1.15.2 G1). Stamped by
+    /// `parser.parseWithMode`; every other arena constructor leaves the
+    /// `.standard` default, which is the right answer for a hook fragment or a
+    /// synthesised arena — neither is a declaration file.
+    ///
+    /// The type-checker reads it to decide `E1901`, which is a question about
+    /// the file's IDENTITY and cannot be answered from the node columns alone.
+    mode: ParseMode = .standard,
+
     items: std.MultiArrayList(Item) = .empty,
     stmts: std.MultiArrayList(Stmt) = .empty,
     exprs: std.MultiArrayList(Expr) = .empty,

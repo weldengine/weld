@@ -426,6 +426,12 @@ const Builder = struct {
                     if (found != null) return fail(diag_out, error.MultiplePrefabs, "more than one prefab construct in the source");
                     found = self.ast.prefab_decls.items[datas[i]];
                 },
+                // M1.1.15.2 G1 — `service_decl` reaches this `else` and that is
+                // the decision, not an oversight: a `service` exists only in a
+                // `.d.etch` (`etch-grammar.md` §20.4), which is never a scene or
+                // prefab source. The switch is `else`-terminated, so the
+                // compiler could not have raised the question; it is answered
+                // here instead.
                 else => {},
             }
         }

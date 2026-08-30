@@ -485,6 +485,11 @@ pub const TypeChecker = struct {
     /// local alias `StringId` → target file index. Qualified `m.Type` resolution
     /// is deferred; the binding is recorded so the later walk is purely additive.
     imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
+    /// Every `service` reachable from this check, keyed by NAME BYTES
+    /// (M1.1.15.2 G1). Byte-keyed and not `StringId`-keyed for the reason
+    /// M1.0.7 established for the exports index: a `StringId` is per-arena, and
+    /// a service is declared in one arena and called from another.
+    services: std.StringHashMapUnmanaged(ServiceEntry) = .empty,
 
     /// Byte-keyed cross-file indexes for project-level scene/prefab validation
     /// (M0.9 E2-B). StringIds are per-arena, so cross-file resolution keys on
@@ -531,6 +536,19 @@ pub const TypeChecker = struct {
         arenas: []AstArena,
     };
 
+    /// One `service` declaration reachable from this check (M1.1.15.2 G1,
+    /// `etch-grammar.md` §20.4). A service is declared in a `.d.etch` and CALLED
+    /// from a standard `.etch`, so the declaration almost always lives in a
+    /// different arena than the call site — hence the arena pointer, which is
+    /// what makes the method run reachable at all.
+    pub const ServiceEntry = struct {
+        /// The arena the declaration lives in. `decl.methods_start` indexes
+        /// THIS arena's `impl_methods`, never the caller's.
+        arena: *const AstArena,
+        decl: ast_mod.ServiceDecl,
+        span: SourceSpan,
+    };
+
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
     /// `methods_start`/`methods_len` index `arena.impl_methods` (the
     /// impl-provided methods); `when_root` is `RuleDecl.none_when` for an
@@ -553,6 +571,7 @@ pub const TypeChecker = struct {
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
+        self.services.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -590,6 +609,13 @@ pub const TypeChecker = struct {
             .project = project,
         };
         defer tc.deinit();
+        // E1901 runs FIRST: it decides whether the file is even allowed to
+        // contain what it contains, and a `.d.etch` carrying a `rule` would
+        // otherwise produce a cascade of resolution errors on a body that had
+        // no business being parsed. Cheap either way — one walk of the item
+        // column, and an immediate return in `.standard` mode.
+        try tc.checkDeclarationFileConstructs();
+        try tc.collectServices();
         try tc.pass1Collect();
         try tc.bindImports();
         try tc.validateTypeAliases();
@@ -614,6 +640,210 @@ pub const TypeChecker = struct {
         try tc.validateSceneDecls();
         try tc.validatePrefabDecls();
         try tc.pass2Resolve();
+    }
+
+    /// `E1901 ConstructNotAllowedInDeclarationFile` (M1.1.15.2 G1,
+    /// `etch-grammar.md` §20.1/§20.2). A no-op outside a declaration file.
+    ///
+    /// **The predicate is §20.1's ALLOW-LIST, not §20.2's forbidden list**, and
+    /// the two are not the same set. §20.1 gives a closed grammar production —
+    /// `decl_file_item` admits exactly nine alternatives — while §20.2
+    /// enumerates twenty-one behavioural constructs under the heading "tout
+    /// construct comportemental est interdit". The complement of the allow-list
+    /// is twenty-six, so five constructs are refused here that §20.2 does not
+    /// name: `component`, `resource`, `event`, `tags` and `override`. The
+    /// grammar production is the stronger authority — a construct admissible in
+    /// a declaration file would appear in `decl_file_item` — and it is also the
+    /// reversible direction: widening an allow-list later is additive, whereas
+    /// narrowing an admitted construct is a breaking change. **The divergence
+    /// between §20.1 and §20.2 is a spec finding, recorded for reconciliation,
+    /// not resolved by this code.**
+    ///
+    /// The switch is EXHAUSTIVE with no `else`, so a future `ItemKind` variant
+    /// is a compile error here and must state which side it falls on. That is
+    /// the whole point of an allow-list; an `else => {}` would silently admit
+    /// it, which is the failure mode this repository has named twice.
+    ///
+    /// Every occurrence is reported, not only the first. §20.2's "à la première
+    /// occurrence" reads as when the error is raised, not as a budget of one per
+    /// file, and every other pass in this checker reports all — a one-per-file
+    /// rule would cost the author a compile cycle per mistake.
+    fn checkDeclarationFileConstructs(self: *TypeChecker) !void {
+        if (self.arena.mode != .declaration_file) return;
+        const kinds = self.arena.items.items(.kind);
+        for (kinds, 0..) |k, i| {
+            const item_id = NodeId{ .category = .item, .index = @intCast(i) };
+            const allowed = switch (k) {
+                // §20.1 `decl_file_item` — the nine admissible alternatives.
+                .import_decl,
+                .fn_decl,
+                .struct_decl,
+                .enum_decl,
+                .trait_decl,
+                .impl_decl,
+                .type_alias,
+                .const_decl,
+                .service_decl,
+                => true,
+                // §20.2's twenty-one behavioural constructs.
+                .rule_decl,
+                .behavior_decl,
+                .routine_decl,
+                .quest_decl,
+                .dialogue_decl,
+                .ability_decl,
+                .effect_decl,
+                .shader_decl,
+                .widget_decl,
+                .theme_decl,
+                .motion_decl,
+                .locale_decl,
+                .anim_graph_decl,
+                .audio_graph_decl,
+                .audio_score_decl,
+                .sequence_decl,
+                .data_decl,
+                .scene_decl,
+                .prefab_decl,
+                .input_mapping_decl,
+                .test_decl,
+                => false,
+                // The five §20.1 refuses and §20.2 does not name. `override` is
+                // unreachable today (the keyword is reserved with no parser
+                // path) and is named anyway: the switch's exhaustiveness is the
+                // guarantee, and it cannot have holes on the ground that one
+                // arm looks unreachable.
+                .component_decl,
+                .resource_decl,
+                .event_decl,
+                .tags_decl,
+                .override_decl,
+                => false,
+            };
+            if (allowed) continue;
+            try self.emit(
+                .construct_not_allowed_in_declaration_file,
+                .error_,
+                self.arena.itemSpan(item_id),
+                "'{s}' is not allowed in a declaration file (.d.etch carries signatures and types only)",
+                .{@tagName(k)},
+            );
+        }
+    }
+
+    /// Index every `service` this check can see (M1.1.15.2 G1). With a
+    /// `ProjectContext` the index spans the whole project — which is the real
+    /// case, since a service is declared in a `.d.etch` and called from a
+    /// `.etch` — and `project.arenas` already contains this file, so the
+    /// single-arena fallback is for the standalone `check` entry point only.
+    ///
+    /// A duplicate service name keeps the FIRST and reports E0101, the same
+    /// arbitration `pass1Collect` applies to every other global symbol.
+    fn collectServices(self: *TypeChecker) !void {
+        if (self.project) |proj| {
+            for (proj.arenas) |*a| try self.indexServicesOf(a);
+        } else {
+            try self.indexServicesOf(self.arena);
+        }
+    }
+
+    fn indexServicesOf(self: *TypeChecker, a: *const AstArena) !void {
+        const kinds = a.items.items(.kind);
+        const datas = a.items.items(.data);
+        for (kinds, 0..) |k, i| {
+            if (k != .service_decl) continue;
+            const decl = a.service_decls.items[datas[i]];
+            const name = a.strings.slice(decl.name);
+            const span = a.itemSpan(.{ .category = .item, .index = @intCast(i) });
+            const gop = try self.services.getOrPut(self.gpa, name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_symbol, .error_, span, "duplicate service '{s}'", .{name});
+                continue;
+            }
+            gop.value_ptr.* = .{ .arena = a, .decl = decl, .span = span };
+        }
+    }
+
+    /// Resolve `svc.method(args)` against a declared `service` (M1.1.15.2 G1).
+    /// Names and arity only — this gate owns the RESOLUTION; the runtime
+    /// dispatch is G2's and the argument-type confrontation needs the foreign
+    /// arena's type nodes, bounded below.
+    fn checkServiceCall(
+        self: *TypeChecker,
+        id: NodeId,
+        mc: ast_mod.MethodCall,
+        svc: ServiceEntry,
+        ctx_opt: ?*RuleCtx,
+    ) TypeError!ResolvedType {
+        const method_slice = self.arena.strings.slice(mc.method_name);
+        const svc_slice = self.arena.strings.slice(self.arena.exprData(mc.receiver));
+
+        var found: ?ast_mod.FnDecl = null;
+        var mi: u32 = 0;
+        while (mi < svc.decl.methods_len) : (mi += 1) {
+            const m = svc.arena.impl_methods.items[svc.decl.methods_start + mi];
+            // Compared BY BYTES: the two `StringId`s belong to different pools.
+            if (std.mem.eql(u8, svc.arena.strings.slice(m.name), method_slice)) {
+                found = m;
+                break;
+            }
+        }
+
+        // Arguments are synthesised whatever the outcome, so an error inside an
+        // argument is reported even when the method name is wrong — the same
+        // discipline `checkMethodArgs` follows.
+        var ai: u32 = 0;
+        while (ai < mc.args_len) : (ai += 1) {
+            _ = try self.synthExprE(@bitCast(self.arena.extra.items[mc.args_start + ai]), ctx_opt);
+        }
+
+        const method = found orelse {
+            try self.emit(
+                .undefined_symbol,
+                .error_,
+                self.arena.exprSpan(id),
+                "service '{s}' declares no method '{s}'",
+                .{ svc_slice, method_slice },
+            );
+            return ResolvedType.unknown;
+        };
+
+        if (mc.args_len != method.params_len) {
+            try self.emit(
+                .arg_count_mismatch,
+                .error_,
+                self.arena.exprSpan(id),
+                "service method '{s}.{s}' takes {d} argument(s), {d} given",
+                .{ svc_slice, method_slice, method.params_len, mc.args_len },
+            );
+            return ResolvedType.unknown;
+        }
+
+        return self.foreignReturnType(svc.arena, method);
+    }
+
+    /// The return type of a foreign-arena signature, resolved BY BYTES.
+    ///
+    /// Bounded to builtins on purpose, and the bound is inherited rather than
+    /// invented: M1.0.7 settled the same question for cross-arena field types
+    /// and recorded "builtin-typed-only; named foreign field types are a
+    /// documented residual". Resolving a named foreign type here would mean
+    /// re-keying `symbols` and `generic_scope`, which are `StringId` maps over
+    /// THIS arena's pool. A named return type therefore types as `unknown`,
+    /// which is permissive and never wrong — it is the same value every
+    /// unresolved expression carries.
+    fn foreignReturnType(self: *TypeChecker, a: *const AstArena, method: ast_mod.FnDecl) ResolvedType {
+        _ = self;
+        // A void signature (`fn stop(h: AudioHandle)`) types as `unknown` —
+        // "`unknown` ≈ unit, the house convention" (this file, `synthCall`).
+        // `ResolvedType` has no unit variant to return instead.
+        if (method.return_type.isNone()) return ResolvedType.unknown;
+        if (a.typeNodeKind(method.return_type) != .named) return ResolvedType.unknown;
+        const named = a.named_types.items[a.typeNodeData(method.return_type)];
+        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
+        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
+        return ResolvedType.unknown;
     }
 
     /// Validate every `type Name = Type` alias once all symbols are known
@@ -6223,6 +6453,28 @@ pub const TypeChecker = struct {
             return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
 
+        // Service dispatch (M1.1.15.2 G1, `etch-grammar.md` §20.4): the
+        // receiver is a bare lowercase IDENT naming a declared `service`.
+        // Checked BEFORE `synthExprE`, which would otherwise report the
+        // receiver as an unknown identifier and never reach the method at all.
+        //
+        // A LOCAL SHADOWS a service: locals are the inner scope, and the
+        // alternative — a service silently winning over a variable the author
+        // just bound — would be a name capture with no diagnostic.
+        if (self.arena.exprKind(mc.receiver) == .ident) {
+            const recv_id: StringId = self.arena.exprData(mc.receiver);
+            const shadowed = if (ctx_opt) |ctx| ctx.locals.get(recv_id) != null else false;
+            if (!shadowed) {
+                if (self.services.get(self.arena.strings.slice(recv_id))) |svc| {
+                    if (mc.opt_chain) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' cannot target a service (a service is not a value)", .{});
+                        return ResolvedType.unknown;
+                    }
+                    return try self.checkServiceCall(id, mc, svc, ctx_opt);
+                }
+            }
+        }
+
         const raw_t = try self.synthExprE(mc.receiver, ctx_opt);
 
         // Named arguments bind against DECLARED signatures (M0.8 E4 item-16
@@ -11485,4 +11737,234 @@ test "conditional branch guards type-check as bool in the parent scope (M1.0.12 
     defer bad.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
     try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+}
+
+// ─── M1.1.15.2 G1 — declaration files, services, E1901 ──────────────────────
+
+/// `parseAndCheck` for a declaration file. The mode is a property of the
+/// arena, so the only difference from `parseAndCheck` is which parser entry
+/// point produced it.
+fn parseAndCheckDetch(gpa: std.mem.Allocator, source: []const u8) !CheckOutcome {
+    var pr = try parser_mod.parseWithMode(gpa, source, .declaration_file);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    try TypeChecker.check(gpa, &pr.ast, &diags);
+    return .{ .ast = pr.ast, .parse_diags = pr.diagnostics, .diagnostics = diags };
+}
+
+/// Two-file project check: `decl_src` parsed as a `.d.etch`, `caller_src` as a
+/// standard `.etch`, both handed to `checkProject` so `collectServices` walks
+/// the project's arenas. The arenas are MOVED out of the parse results and
+/// owned by the outcome — copying an `AstArena` while its `ParseResult` still
+/// owns the same buffers is a double free, and it segfaulted exactly that way
+/// when this helper was first written inline.
+fn checkServiceProject(gpa: std.mem.Allocator, decl_src: []const u8, caller_src: []const u8) !ServiceProjectOutcome {
+    var decl_pr = try parser_mod.parseWithMode(gpa, decl_src, .declaration_file);
+    errdefer decl_pr.deinit(gpa);
+    var caller_pr = try parser_mod.parse(gpa, caller_src);
+    errdefer caller_pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), decl_pr.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), caller_pr.diagnostics.len);
+    // The parse diagnostics are empty slices at this point; free them here so
+    // the arenas can be moved without `ParseResult.deinit` ever running.
+    gpa.free(decl_pr.diagnostics);
+    gpa.free(caller_pr.diagnostics);
+
+    var out: ServiceProjectOutcome = .{
+        .arenas = .{ decl_pr.ast, caller_pr.ast },
+        .diagnostics = .empty,
+    };
+    errdefer out.deinit(gpa);
+    const ctx: TypeChecker.ProjectContext = .{
+        .prefabs = &out.prefabs,
+        .uuids = &out.uuids,
+        .module_index = &out.module_index,
+        .exports = &out.exports,
+        .arenas = &out.arenas,
+    };
+    try TypeChecker.checkProject(gpa, &out.arenas[1], &out.diagnostics, &ctx);
+    return out;
+}
+
+const ServiceProjectOutcome = struct {
+    arenas: [2]AstArena,
+    diagnostics: std.ArrayListUnmanaged(Diagnostic),
+    prefabs: std.StringHashMapUnmanaged(void) = .empty,
+    uuids: std.StringHashMapUnmanaged(void) = .empty,
+    module_index: std.StringHashMapUnmanaged(usize) = .empty,
+    exports: [2]TypeChecker.ExportTable = .{ .empty, .empty },
+
+    fn deinit(self: *ServiceProjectOutcome, gpa: std.mem.Allocator) void {
+        for (self.diagnostics.items) |*d| d.deinit(gpa);
+        self.diagnostics.deinit(gpa);
+        for (&self.arenas) |*a| a.deinit(gpa);
+        for (&self.exports) |*e| e.deinit(gpa);
+        self.prefabs.deinit(gpa);
+        self.uuids.deinit(gpa);
+        self.module_index.deinit(gpa);
+    }
+};
+
+test "E1901 on disallowed top-level construct in .d.etch" {
+    const gpa = std.testing.allocator;
+
+    // A `rule` is §20.2's first forbidden construct. Its body parses normally —
+    // E1900 covers `fn` bodies, not rule bodies — so this is genuinely the
+    // post-parse identity check and not E1900 under another name.
+    var bad = try parseAndCheckDetch(gpa,
+        \\fn ping(x: int) -> int
+        \\rule r() {
+        \\  let n = 1
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    try expectAnyCode(bad.diagnostics.items, .construct_not_allowed_in_declaration_file);
+    try std.testing.expectEqual(@as(usize, 1), bad.diagnostics.items.len);
+    try std.testing.expectEqualStrings("E1901", bad.diagnostics.items[0].code.code());
+
+    // COUNTERFACTUAL ON THE OBJECT, not on the expected constant: the very same
+    // source in a standard `.etch` is clean. Were the check unconditional, or
+    // keyed on anything but the arena's mode, this would fail too.
+    var same_source_standard = try parseAndCheck(gpa,
+        \\fn ping(x: int) -> int { x }
+        \\rule r() {
+        \\  let n = 1
+        \\}
+    );
+    defer same_source_standard.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), same_source_standard.parse_diags.len);
+    try expectNoCode(same_source_standard.diagnostics.items, .construct_not_allowed_in_declaration_file);
+
+    // Every occurrence is reported, not just the first (§20.2's "à la première
+    // occurrence" read as WHEN the error is raised, not as a one-per-file
+    // budget). Two forbidden constructs, two diagnostics.
+    var two = try parseAndCheckDetch(gpa,
+        \\rule a() { let n = 1 }
+        \\rule b() { let n = 2 }
+    );
+    defer two.deinit(gpa);
+    var n_e1901: usize = 0;
+    for (two.diagnostics.items) |d| {
+        if (d.code == .construct_not_allowed_in_declaration_file) n_e1901 += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), n_e1901);
+
+    // The five constructs §20.1 refuses and §20.2 does not name are refused on
+    // the ALLOW-LIST. Asserted per construct: a count would pass if one of them
+    // were admitted and another double-reported.
+    for ([_][]const u8{
+        "component Health { current: int = 100 }",
+        "resource Score { n: int = 0 }",
+        "event Hit { damage: int = 0 }",
+    }) |src| {
+        var r = try parseAndCheckDetch(gpa, src);
+        defer r.deinit(gpa);
+        try expectAnyCode(r.diagnostics.items, .construct_not_allowed_in_declaration_file);
+    }
+
+    // And the nine §20.1 admits are admitted — the other half of an allow-list,
+    // without which a check that refused EVERYTHING would pass the tests above.
+    var allowed = try parseAndCheckDetch(gpa,
+        \\import gameplay.combat
+        \\const MAX: int = 10
+        \\struct Pair { a: int = 0, b: int = 0 }
+        \\enum Mode { fast, slow }
+        \\type Alias = int
+        \\fn ping(x: int) -> int
+        \\service audio_player {
+        \\  fn play(path: string) -> int
+        \\}
+    );
+    defer allowed.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), allowed.parse_diags.len);
+    try expectNoCode(allowed.diagnostics.items, .construct_not_allowed_in_declaration_file);
+}
+
+test "unknown service method resolves to a diagnostic" {
+    const gpa = std.testing.allocator;
+
+    // Single-arena form: the service and the caller in one declaration file is
+    // not the deployed shape (§20.5 puts callers in `.etch`), but it is what an
+    // inline test can build, and the resolution path is the same one — the
+    // index is keyed by name BYTES either way.
+    //
+    // A DECLARED method resolves and carries its return type through.
+    var ok = try parseAndCheckDetch(gpa,
+        \\service audio_player {
+        \\  fn play(path: string) -> int
+        \\  fn stop(handle: int)
+        \\}
+        \\fn caller() -> int
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // THE REAL SHAPE, and the only one that can carry a call: the service is
+    // declared in a `.d.etch` and called from a standard `.etch`. A single arena
+    // cannot hold both — a call needs a body, bodies are refused in a `.d.etch`,
+    // and `service` is refused in a `.etch` — so the two files go through
+    // `checkProject`, whose `ProjectContext.arenas` is what `collectServices`
+    // walks. Built by `checkServiceProject` rather than through
+    // `root.validateProject`, which this file cannot reach (tier-up).
+    const decl_src =
+        \\service audio_player {
+        \\  fn play(path: string) -> int
+        \\  fn stop(handle: int)
+        \\}
+    ;
+
+    // EXACTLY ONE diagnostic: `play` resolves, `rewind` does not. Both calls
+    // are made in the same body on purpose — a file containing only the failing
+    // call would pass against a checker that rejected every service method.
+    var unknown_method = try checkServiceProject(gpa, decl_src,
+        \\fn caller() -> int {
+        \\  let a = audio_player.play("x.wav")
+        \\  let b = audio_player.rewind("x.wav")
+        \\  a
+        \\}
+    );
+    defer unknown_method.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), unknown_method.diagnostics.items.len);
+    try std.testing.expectEqual(DiagnosticCode.undefined_symbol, unknown_method.diagnostics.items[0].code);
+    const msg = unknown_method.diagnostics.items[0].primary_message;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "audio_player") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "rewind") != null);
+
+    // ARITY is checked, and separately from the name.
+    var arity = try checkServiceProject(gpa, decl_src,
+        \\fn caller() -> int {
+        \\  audio_player.play("x.wav", 1)
+        \\}
+    );
+    defer arity.deinit(gpa);
+    try expectAnyCode(arity.diagnostics.items, .arg_count_mismatch);
+
+    // A LOCAL SHADOWS the service, and the shadow is observable: the same call
+    // spelling now reports the receiver as a plain value with no such method,
+    // never as a service. Without this, "check locals first" would be an
+    // untested comment.
+    var shadow = try checkServiceProject(gpa, decl_src,
+        \\fn caller() -> int {
+        \\  let audio_player = 1
+        \\  audio_player.play("x.wav")
+        \\}
+    );
+    defer shadow.deinit(gpa);
+    try std.testing.expect(shadow.diagnostics.items.len > 0);
+    for (shadow.diagnostics.items) |d| {
+        try std.testing.expect(std.mem.indexOf(u8, d.primary_message, "service") == null);
+    }
+
+    // COUNTERFACTUAL ON THE OBJECT: drop the declaration file and the same
+    // caller reports an unknown IDENTIFIER instead — proof the resolution above
+    // came from the service index and not from some other tolerance.
+    var no_service = try checkServiceProject(gpa, "const UNUSED: int = 0",
+        \\fn caller() -> int {
+        \\  audio_player.play("x.wav")
+        \\}
+    );
+    defer no_service.deinit(gpa);
+    try expectAnyCode(no_service.diagnostics.items, .undefined_symbol);
+    try std.testing.expect(std.mem.indexOf(u8, no_service.diagnostics.items[0].primary_message, "unknown identifier") != null);
 }
