@@ -421,6 +421,11 @@ pub const TypeChecker = struct {
     /// `async fn`/`async method`, in a NON-async context is E0901
     /// `AsyncCallInNonAsyncContext`. `false` outside any body.
     current_is_async: bool = false,
+    /// Whether a `throw` raised HERE has somewhere to go (M1.1.15.2 G2, E0902).
+    /// True inside a `try` body and inside a `throws` fn; false in a rule body,
+    /// which can never be `throws` (E0903), and false in a plain fn. Saved and
+    /// restored at every body boundary, exactly like `current_is_async`.
+    current_can_throw: bool = false,
     /// Whether the statements currently being checked are a `test` block body
     /// (M1.0.15). Test-scoped builtins (`test_world`, `tick_until`) and the
     /// `measure { }` expression resolve only when this is `true`; outside a test
@@ -828,6 +833,10 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         };
 
+        if (method.throws and !self.current_can_throw) {
+            try self.emitUnhandledThrows(id, method_slice);
+        }
+
         if (mc.args_len != method.params_len) {
             try self.emit(
                 .arg_count_mismatch,
@@ -840,6 +849,22 @@ pub const TypeChecker = struct {
         }
 
         return self.foreignReturnType(svc.arena, method);
+    }
+
+    /// One message for `E0902`, shared by the free-fn and the service call site
+    /// so the two cannot drift. A rule is named explicitly because it is the
+    /// case a user meets: `etch-abi-zig.md` §8.7 records that a rule cannot be
+    /// `throws` (E0903), so a fallible service call in a rule ALWAYS needs a
+    /// local `try`/`catch` — the assumed consequence of the rule forbidding an
+    /// entry to swallow a failure, not a defect of the path.
+    fn emitUnhandledThrows(self: *TypeChecker, id: NodeId, callee: []const u8) TypeError!void {
+        try self.emit(
+            .unhandled_throws_call,
+            .error_,
+            self.arena.exprSpan(id),
+            "'{s}' can throw — wrap the call in a `try`/`catch`, or declare the enclosing fn `throws` (a rule can never be `throws`)",
+            .{callee},
+        );
     }
 
     /// The return type of a foreign-arena signature, resolved BY BYTES.
@@ -4186,6 +4211,10 @@ pub const TypeChecker = struct {
         const saved_async = self.current_is_async;
         self.current_is_async = decl.is_async;
         defer self.current_is_async = saved_async;
+        // A `throws` fn may propagate a throw; a plain one may not (E0902).
+        const saved_throw = self.current_can_throw;
+        self.current_can_throw = decl.throws;
+        defer self.current_can_throw = saved_throw;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -4391,6 +4420,12 @@ pub const TypeChecker = struct {
         const saved_async = self.current_is_async;
         self.current_is_async = rule.is_async;
         defer self.current_is_async = saved_async;
+        // A rule can never be `throws` (E0903), so a `throws` call in a rule
+        // body needs a local `try`/`catch` — `etch-abi-zig.md` §8.7 states this
+        // as the assumed consequence for fallible services, not a defect.
+        const saved_rule_throw = self.current_can_throw;
+        self.current_can_throw = false;
+        defer self.current_can_throw = saved_rule_throw;
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
@@ -4525,6 +4560,10 @@ pub const TypeChecker = struct {
         const saved_async = self.current_is_async;
         self.current_is_async = decl.is_async;
         defer self.current_is_async = saved_async;
+        // A `throws` fn may propagate a throw; a plain one may not (E0902).
+        const saved_throw = self.current_can_throw;
+        self.current_can_throw = decl.throws;
+        defer self.current_can_throw = saved_throw;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -5028,10 +5067,17 @@ pub const TypeChecker = struct {
                 // every thrown value to `Error`), so `err.message` /
                 // `err.code` resolve through the ordinary struct machinery.
                 const tc = self.arena.try_catch_stmts.items[data];
+                // Inside the TRY body a throw has somewhere to go (E0902). The
+                // CATCH body is deliberately left at the enclosing value: a
+                // throw raised there re-propagates past this construct, so it
+                // needs whatever the surrounding context offers, not `true`.
+                const saved_try_throw = self.current_can_throw;
+                self.current_can_throw = true;
                 var i: u32 = 0;
                 while (i < tc.try_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.try_start + i]));
                 }
+                self.current_can_throw = saved_try_throw;
                 try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false });
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
@@ -6127,6 +6173,11 @@ pub const TypeChecker = struct {
             // (§9.2 revision 2) — the four constructs relocate the suspension,
             // they do not consume it.
             try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(decl.name)});
+        }
+        // E0902 (M1.1.15.2 G2): a `throws` callee needs somewhere for its throw
+        // to go — an enclosing `try`/`catch`, or a `throws` caller.
+        if (decl.throws and !self.current_can_throw) {
+            try self.emitUnhandledThrows(id, self.arena.strings.slice(decl.name));
         }
         const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;

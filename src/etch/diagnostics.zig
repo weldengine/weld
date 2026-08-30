@@ -365,6 +365,7 @@ pub const DiagnosticCode = enum {
 
     // ── async / effects (E09xx, M1.0.11 — etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // M1.0.11 E4 — E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)
+    unhandled_throws_call, // M1.1.15.2 G2 — E0902 UnhandledThrowsCall (a call to a `throws` fn or service method with no enclosing `try`/`catch` and no `throws` on the caller)
     await_not_statement_head, // M1.0.11 E3 — E0904 AwaitNotStatementHead (Phase-1 tree-walker: `await` must be a statement's full RHS)
     unconsumed_async_effect, // M1.0.12 E3 — E0905 UnconsumedAsyncEffect (bare async call in an async context: neither awaited nor launched via spawn/branch/race/sync)
     illegal_return_in_concurrency_branch, // M1.0.12 E3 — E0906 IllegalReturnInConcurrencyBranch (return in a sync branch or a branch/spawn body; legal only in a race branch)
@@ -580,6 +581,7 @@ pub const DiagnosticCode = enum {
             .prefab_remove_base_component => "W1790",
             .extension_additive_conflict => "E1797",
             .async_call_in_non_async_context => "E0901",
+            .unhandled_throws_call => "E0902",
             .await_not_statement_head => "E0904",
             .unconsumed_async_effect => "E0905",
             .illegal_return_in_concurrency_branch => "E0906",
@@ -781,6 +783,7 @@ pub const DiagnosticCode = enum {
             .prefab_remove_base_component => "PrefabRemoveBaseComponent",
             .extension_additive_conflict => "ExtensionAdditiveConflict",
             .async_call_in_non_async_context => "AsyncCallInNonAsyncContext",
+            .unhandled_throws_call => "UnhandledThrowsCall",
             .await_not_statement_head => "AwaitNotStatementHead",
             .unconsumed_async_effect => "UnconsumedAsyncEffect",
             .illegal_return_in_concurrency_branch => "IllegalReturnInConcurrencyBranch",

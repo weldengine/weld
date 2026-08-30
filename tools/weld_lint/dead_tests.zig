@@ -390,9 +390,18 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // and that `component` and `resource` in the same position are still E1901 —
     // so the list widened by exactly one and not by a family.
     // (1970 -> 1971, suite reported 1971 - 1952 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.2 G2 adds ten. Four in the new `src/etch/services.zig` (signature
+    // derivation, the call-through with its error union, the registration
+    // refusals, and the emitter's type names); five in the new
+    // `tests/etch_services/service_call_test.zig` (a value returned to a rule, a
+    // string crossing both ways, a Zig error union caught by `try`/`catch`,
+    // E0902 with its two counter-factuals, and the local shadowing a service);
+    // and one in `src/etch/interp.zig` pinning the PRE-EXISTING assignment-RHS
+    // throw defect this gate exposed and closed.
+    // (1971 -> 1981, suite reported 1981 - 1962 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1969,
-        else => 1971,
+        .windows => 1979,
+        else => 1981,
     };
 }
 

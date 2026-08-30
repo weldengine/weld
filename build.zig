@@ -709,6 +709,9 @@ pub fn build(b: *std.Build) void {
         // M1.0.4 / E2 — scene cook → writer → accessor round-trip (entities,
         // archetypes, UUIDs, names, parent links, content_version, resources,
         // mixed-alignment columns, byte-identical determinism).
+        // M1.1.15.2 G2 — the Tier 1 service path end to end: `.d.etch` declares,
+        // the checker resolves, the tree-walker dispatches into a Zig function.
+        .{ .path = "tests/etch_services/service_call_test.zig", .scene = true },
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },

@@ -27,6 +27,11 @@ pub const types = @import("types.zig");
 /// `Diagnostic` values (build a tooling test harness, assert
 /// `DiagnosticCode`s) without pulling the internals directly.
 pub const diagnostics = @import("diagnostics.zig");
+/// Tier 1 service registry and the Phase 1 tree-walker invocation path
+/// (M1.1.15.2 G2, `etch-abi-zig.md` §8.7). Exposed at the module surface
+/// because a Tier 1 module declares its `ServiceSpec` and registers it from
+/// outside `src/etch/`.
+pub const services = @import("services.zig");
 
 // S4 interpreter surface.
 const value = @import("value.zig");
@@ -50,6 +55,10 @@ comptime {
     // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
     // M1.0.4 — pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
+    // M1.1.15.2 G2 — the service registry's inline tests. The `pub const
+    // services` re-export above pulls its DECLARATIONS, not its `test` blocks
+    // (§13, and the four-case experiment recorded below).
+    _ = @import("services.zig");
     // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
