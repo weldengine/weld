@@ -227,6 +227,15 @@ pub const ShapeDescriptor = union(ShapeType) {
     empty: void,
 };
 
+/// The result of one trigger overlap — an ORIENTED pair of entity identities,
+/// never body handles (`engine-physics-solver.md` §1.13.8). A state expressed in
+/// bodies would produce two entries where one entity carries two colliders, for a
+/// single observable crossing.
+pub const TriggerOverlap = struct {
+    trigger_entity: EntityId,
+    other_entity: EntityId,
+};
+
 /// Everything needed to create one body (`engine-tier-interfaces.md` §1).
 /// `linear_damping` defaults to 0.05 to agree with the `RigidBody` component
 /// and Jolt (spec §1 says 0.01, §2 says 0.05 — Notes decision 3c).

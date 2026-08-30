@@ -84,21 +84,25 @@ const Fixture = struct {
 /// than derived from `@typeInfo`'s declaration list, so that an entry DISAPPEARING is a
 /// failure here instead of a silently shorter walk.
 ///
-/// **TWENTY-EIGHT, not thirty, and the two missing ones are accounted for below.**
-/// `engine-tier-interfaces.md` §12 puts the frozen total at 30 `assertFn`; `createJoint` and
-/// `destroyJoint` are absent because their parameter types are — see
-/// `module.joint_entries_absent`.
+/// **THIRTY-TWO, the whole frozen surface, since M1.1.15.2 G5a.**
+/// `engine-tier-interfaces.md` §12 puts the total at 32 `assertFn`, of which 29 exclude
+/// `init`, `deinit` and `step`. At M1.1.15.1 this list held twenty-eight and asserted the
+/// ABSENCE of `createJoint` and `destroyJoint`, whose parameter types no file declared;
+/// G5a mints those types, and `getTriggerOverlaps` and `setJointMotor` joined the frozen
+/// surface at §12 versions 0.12 and 0.14. The absence assertions are gone with the absence
+/// — see the milestone brief, where the removal is declared.
 const frozen_entries = [_][]const u8{
-    "init",                  "deinit",           "step",
-    "addBody",               "removeBody",       "setBodyTransform",
-    "moveKinematic",         "getBodyTransform", "setLinearVelocity",
-    "setAngularVelocity",    "addForce",         "addImpulse",
-    "createShape",           "destroyShape",     "raycast",
-    "raycastAny",            "raycastAll",       "shapeCast",
-    "overlapShape",          "overlapAabb",      "pointQuery",
-    "closestPoint",          "createCharacter",  "destroyCharacter",
-    "moveCharacter",         "resizeCharacter",  "setCharacterPosition",
-    "getCharacterInnerBody",
+    "init",                  "deinit",             "step",
+    "addBody",               "removeBody",         "setBodyTransform",
+    "moveKinematic",         "getBodyTransform",   "setLinearVelocity",
+    "setAngularVelocity",    "addForce",           "addImpulse",
+    "createShape",           "destroyShape",       "raycast",
+    "raycastAny",            "raycastAll",         "shapeCast",
+    "overlapShape",          "overlapAabb",        "pointQuery",
+    "closestPoint",          "createCharacter",    "destroyCharacter",
+    "moveCharacter",         "resizeCharacter",    "setCharacterPosition",
+    "getCharacterInnerBody", "getTriggerOverlaps", "createJoint",
+    "destroyJoint",          "setJointMotor",
 };
 
 /// The entries `engine-tier-interfaces.md` §1 declares `void` under the moved-log
@@ -117,21 +121,22 @@ test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
     // entries is a probe that measured nothing, and `engine-tier-interfaces.md` §12 gives
     // the number this has to be: THIRTY `assertFn`, of which 27 exclude the three
     // lifecycle entries. The count is asserted, not printed.
-    const frozen_total: usize = 30; // `engine-tier-interfaces.md` §12
-    const absent_for_want_of_a_type: usize = 2; // createJoint, destroyJoint
-    try testing.expectEqual(frozen_total - absent_for_want_of_a_type, frozen_entries.len);
+    const frozen_total: usize = 32; // `engine-tier-interfaces.md` §12
+    try testing.expectEqual(frozen_total, frozen_entries.len);
 
-    // THE ABSENCE IS ASSERTED, not left to the shorter list to imply. A walk that simply
-    // did not mention two entries is indistinguishable from one that forgot them.
-    try testing.expect(module.joint_entries_absent);
-    try testing.expect(!@hasDecl(Forge3DModule, "createJoint"));
-    try testing.expect(!@hasDecl(Forge3DModule, "destroyJoint"));
-    try testing.expect(!@hasDecl(api, "JointDescriptor"));
-    try testing.expect(!@hasDecl(api, "JointId"));
-    // NON-VACUITY for those four negatives: `@hasDecl` on these namespaces does find what
-    // is really there.
-    try testing.expect(@hasDecl(Forge3DModule, "addBody"));
-    try testing.expect(@hasDecl(api, "BodyDescriptor"));
+    // THE PRESENCE IS ASSERTED, and it replaces the absence M1.1.15.1 asserted here. The
+    // seven types are what make the three joint entries presentable at all, so they are
+    // checked alongside the entries rather than assumed by them.
+    try testing.expect(module.joint_entries_present);
+    inline for ([_][]const u8{
+        "JointId",     "JointType",  "JointLimits",     "JointMotorMode",
+        "JointTarget", "JointMotor", "JointDescriptor",
+    }) |t| {
+        try testing.expect(@hasDecl(api, t));
+    }
+    // NON-VACUITY: `@hasDecl` on this namespace does report a false for something that is
+    // really absent, so the seven positives above are not the answer it always gives.
+    try testing.expect(!@hasDecl(api, "JointNotAThing"));
 
     var walked: usize = 0;
     inline for (frozen_entries) |name| {
@@ -221,7 +226,7 @@ test "the adapter owns the allocator across a body lifecycle" {
 
     // Move it through the two frozen `void` entries.
     m.setBodyTransform(body, av3(1, 5, 0), foundation.math.Quatf.identity);
-    try testing.expectEqual(@as(f32, 1), m.getBodyTransform(body).position.toArray()[0]);
+    try testing.expectEqual(@as(f32, 1), (try m.getBodyTransform(body)).position.toArray()[0]);
     m.setLinearVelocity(body, av3(0, 0, 2));
     m.addForce(body, av3(0, 1, 0));
     m.addImpulse(body, av3(0, 0.1, 0));
@@ -689,7 +694,7 @@ test "the read-back mutators move what they claim to move" {
     // what discriminates: an entry that dropped the write leaves it at the origin.
     s.m.setLinearVelocity(body, av3(3, 0, 0));
     try s.m.step(fixed_dt);
-    const after_v = s.m.getBodyTransform(body).position.toArray()[0];
+    const after_v = (try s.m.getBodyTransform(body)).position.toArray()[0];
     try testing.expect(after_v > 0.01);
 
     // addImpulse — an immediate velocity change, so the NEXT tick must travel further than
@@ -697,15 +702,15 @@ test "the read-back mutators move what they claim to move" {
     // keeps the check independent of the timestep.
     s.m.addImpulse(body, av3(6, 0, 0));
     try s.m.step(fixed_dt);
-    const after_i = s.m.getBodyTransform(body).position.toArray()[0];
+    const after_i = (try s.m.getBodyTransform(body)).position.toArray()[0];
     try testing.expect(after_i - after_v > after_v);
 
     // setAngularVelocity — never called anywhere before this. There is no angular getter on
     // the frozen surface, so the observable is the ORIENTATION after a tick.
-    const before_rot = s.m.getBodyTransform(body).rotation;
+    const before_rot = (try s.m.getBodyTransform(body)).rotation;
     s.m.setAngularVelocity(body, av3(0, 8, 0));
     try s.m.step(fixed_dt);
-    const after_rot = s.m.getBodyTransform(body).rotation;
+    const after_rot = (try s.m.getBodyTransform(body)).rotation;
     try testing.expect(!std.meta.eql(before_rot, after_rot));
 
     // removeBody — called before and never observed. After it, no query finds the body.
@@ -757,8 +762,8 @@ test "addForce is a force and not an impulse, and destroyShape really destroys" 
     s.m.addImpulse(impulsed, av3(6, 0, 0));
     try s.m.step(fixed_dt);
 
-    const dx_force = s.m.getBodyTransform(forced).position.toArray()[0];
-    const dx_impulse = s.m.getBodyTransform(impulsed).position.toArray()[0];
+    const dx_force = (try s.m.getBodyTransform(forced)).position.toArray()[0];
+    const dx_impulse = (try s.m.getBodyTransform(impulsed)).position.toArray()[0];
     try testing.expect(dx_force > 0); // it is not a no-op
     const ratio = dx_impulse / dx_force;
     try testing.expect(ratio > 10); // an impulse implementation would give ~1
@@ -854,7 +859,7 @@ test "the character entries move and report a ground" {
     // body is the observable the frozen surface offers.
     s.m.setCharacterPosition(hero, av3(2, 0, 0));
     const inner = (try s.m.getCharacterInnerBody(hero)) orelse return error.ExpectedPresence;
-    try testing.expectApproxEqAbs(@as(f32, 2), s.m.getBodyTransform(inner).position.toArray()[0], 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 2), (try s.m.getBodyTransform(inner)).position.toArray()[0], 1e-3);
 
     // moveCharacter — never called before. Asserted on BOTH halves of its result: the
     // position advanced, and the ground was found. A stub returning a zeroed result passes
@@ -1033,7 +1038,7 @@ test "three more oracles that discriminate rather than merely observe" {
         .mass = 1,
     });
     try s.m.step(fixed_dt);
-    try testing.expect(s.m.getBodyTransform(falling).position.toArray()[1] < 100);
+    try testing.expect((try s.m.getBodyTransform(falling)).position.toArray()[1] < 100);
 
     // setLinearVelocity — SETS, where addImpulse ADDS, and with unit mass the two were
     // indistinguishable in the read-back test above: both leave the body at velocity v. The
@@ -1050,7 +1055,7 @@ test "three more oracles that discriminate rather than merely observe" {
     s.m.addImpulse(rider, av3(10, 0, 0));
     s.m.setLinearVelocity(rider, av3(1, 0, 0));
     try s.m.step(fixed_dt);
-    const travelled = s.m.getBodyTransform(rider).position.toArray()[0];
+    const travelled = (try s.m.getBodyTransform(rider)).position.toArray()[0];
     try testing.expect(travelled > 0); // not a no-op
     try testing.expect(travelled < 10 * fixed_dt); // and it REPLACED rather than added
 
@@ -1181,4 +1186,129 @@ test "the guard refuses what it OBSERVES broken, and that detection is windowed"
     var two: [2]EntityId = undefined;
     try testing.expectEqual(@as(u32, 2), try s.m.dedupEntities(&.{ e3, e5 }, &two));
     try testing.expectEqual(before, s.m.unordered_projections);
+}
+
+// --- M1.1.15.2 G5a — the entries this gate adds -------------------------------
+
+test "getBodyTransform separates a stale handle from a body at the origin" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE DEFECT THE ERROR CHANNEL CLOSES, made visible by the pair. A body AT the
+    // origin answers the identity pose; a body that was removed answers an error. Before
+    // M1.1.15.2 both answered the identity pose and the two were indistinguishable — which
+    // is why one body here sits exactly at the origin rather than somewhere convenient.
+    const at_origin = try s.place(1, 0);
+    const removed = try s.place(2, 5);
+
+    const pose = try s.m.getBodyTransform(at_origin);
+    try testing.expectEqual(@as(f32, 0), pose.position.toArray()[0]);
+
+    s.m.removeBody(removed);
+    try testing.expectError(error.StaleBodyHandle, s.m.getBodyTransform(removed));
+
+    // And the live one still answers, so the error above is the handle's state and not a
+    // world that stopped answering.
+    _ = try s.m.getBodyTransform(at_origin);
+}
+
+test "getTriggerOverlaps refuses to truncate a state" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // A trigger over two bodies of two distinct entities: two oriented pairs.
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .is_trigger = true,
+    });
+    _ = try s.place(11, 0.1);
+    _ = try s.place(12, -0.1);
+    try s.m.step(1.0 / 60.0);
+
+    var room: [8]api.TriggerOverlap = undefined;
+    const n = try s.m.getTriggerOverlaps(&room);
+    try testing.expectEqual(@as(u32, 2), n);
+    // Sorted on `(trigger_entity, other_entity)` — §1.13.11's key, and the trigger is the
+    // FIRST member of the pair, so the orientation is observable and not assumed.
+    try testing.expectEqual(@as(u32, 10), room[0].trigger_entity.index);
+    try testing.expectEqual(@as(u32, 11), room[0].other_entity.index);
+    try testing.expectEqual(@as(u32, 12), room[1].other_entity.index);
+
+    // THE ENTRY'S OWN CONTRACT, and where it parts from the query family: a slice too
+    // small is `error.BufferTooSmall` and NOT a truncated answer. A subset of a selection
+    // is still an answer; a subset of a STATE is a false state — a caller reading one
+    // would conclude that an entity left a trigger it never left.
+    var too_small: [1]api.TriggerOverlap = undefined;
+    try testing.expectError(error.BufferTooSmall, s.m.getTriggerOverlaps(&too_small));
+
+    // NON-VACUITY on that refusal: a slice of EXACTLY the right size is accepted, so the
+    // error above is about capacity and not about any slice shorter than the buffer.
+    var exact: [2]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&exact));
+}
+
+test "the three joint entries are presentable and fail loud" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+    const body = try s.place(1, 0);
+
+    // PRESENTABLE is the deliverable: this call site could not be WRITTEN without the
+    // seven types, so its mere compilation is half the proof. The other half is that the
+    // stubs fail loud rather than returning a plausible value — a `JointId` no solver
+    // knows would put a dead handle into a caller's state.
+    try testing.expectError(error.JointsNotImplemented, s.m.createJoint(.{
+        .joint_type = .hinge,
+        .body_a = body,
+        .body_b = api.PackedId.dead,
+        .limits = .{ .angle1d = .{ .min_radians = -1, .max_radians = 1 } },
+        .motor = .{
+            .target = .{ .scalar = .{ .mode = .velocity, .value = 2 } },
+            .max_force = 10,
+        },
+    }));
+    try testing.expectError(error.JointsNotImplemented, s.m.setJointMotor(0, null));
+    // `destroyJoint` is `void` by the frozen signature and cannot report; it is a no-op
+    // because no id can exist for it to destroy, every path that could mint one having
+    // failed first. Called so the entry is exercised rather than only declared.
+    s.m.destroyJoint(0);
+
+    // The descriptor's own defaults are the spec's, checked on the fields a caller is
+    // most likely to leave alone.
+    const d: api.JointDescriptor = .{ .joint_type = .fixed, .body_a = body, .body_b = body };
+    try testing.expectEqual(api.JointLimits.none, d.limits);
+    try testing.expect(d.motor == null);
+    try testing.expect(!d.collide_connected);
+    try testing.expectEqual(@as(f32, 0), d.break_force);
+    try testing.expectEqual(@as(f32, 0), d.break_torque);
+    try testing.expectEqual(@as(f32, 1), d.axis_a.toArray()[1]);
+
+    // `.off` IS NOT A MOTOR MODE, and the absence is asserted rather than left to the
+    // enum's shortness to imply. A motor that is off is `null`.
+    try testing.expectEqual(@as(usize, 2), @typeInfo(api.JointMotorMode).@"enum".fields.len);
+    inline for (@typeInfo(api.JointMotorMode).@"enum".fields) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "off"));
+    }
+
+    // ONE `(max_force, frequency_hz, damping_ratio)` triple per motor, never per axis —
+    // pinned structurally, so a per-axis refactor is a failure here and not a silent
+    // widening of a contract §1 excluded on a stated motive.
+    inline for ([_][]const u8{ "max_force", "frequency_hz", "damping_ratio" }) |name| {
+        try testing.expectEqual(f32, @FieldType(api.JointMotor, name));
+    }
+    // And the ceiling is on the MOTOR and not on the target: no variant of `JointTarget`
+    // carries one, which is what "never per axis" means in the type rather than in prose.
+    inline for (@typeInfo(api.JointTarget).@"union".fields) |variant| {
+        if (@typeInfo(variant.type) != .@"struct") continue;
+        inline for (@typeInfo(variant.type).@"struct".fields) |vf| {
+            try testing.expect(!std.mem.eql(u8, vf.name, "max_force"));
+            try testing.expect(!std.mem.eql(u8, vf.name, "frequency_hz"));
+            try testing.expect(!std.mem.eql(u8, vf.name, "damping_ratio"));
+        }
+    }
 }

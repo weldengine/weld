@@ -9,20 +9,27 @@
 //!
 //! **What it holds today, and why not more.** `engine-tier-interfaces.md` §1 declares the
 //! interface as `pub fn PhysicsModule(comptime Impl: type) type` whose comptime block
-//! `assertFn`s thirty entries. That block is not written here, for ONE measured reason —
+//! `assertFn`s thirty-two entries. That block is not written here, for ONE measured reason —
 //! and it carried a second until this milestone removed it:
 //!
 //!   - the assert block IS the surface guard, and surface guards are M1.1.15.2's by the
-//!     milestone's own scope. A guard that checked three of the thirty entries would
-//!     be worse than no guard, because an implementation missing the other twenty-seven
+//!     milestone's own scope. A guard that checked three of the thirty-two entries would
+//!     be worse than no guard, because an implementation missing the other twenty-nine
 //!     would pass it — a check that under-checks reads as a check.
 //!
-//!     Thirty and not twenty-seven, and the two numbers are distinct rather than one of
+//!     Thirty-two and not twenty-nine, and the two numbers are distinct rather than one of
 //!     them being wrong: `engine-tier-interfaces.md` §12 disambiguates them — the surface
-//!     carries **thirty** `assertFn`, of which **twenty-seven** exclude `init`, `deinit`
-//!     and `step`. The assert block guards the surface, so it is the thirty that bound
-//!     it; a guard built on twenty-seven would pass an implementation missing any of the
+//!     carries **thirty-two** `assertFn`, of which **twenty-nine** exclude `init`, `deinit`
+//!     and `step`. The assert block guards the surface, so it is the thirty-two that bound
+//!     it; a guard built on twenty-nine would pass an implementation missing any of the
 //!     three lifecycle entries, which is the very failure mode this paragraph names.
+//!
+//!     THE THREE NUMBERS MOVED TOGETHER AT M1.1.15.2 G5a, and they had already parted from
+//!     their source: this header read 30 / 27 while §12 had carried 32 / 29 since
+//!     2026-08-30 — `getTriggerOverlaps` entered at §12 version 0.12 and `setJointMotor` at
+//!     0.14. Corrected here rather than left for G7's rewrite to carry, because a number
+//!     that cites a document it no longer matches is the defect this file's own paragraph
+//!     is about.
 //!   - **the second reason is gone, and its removal is the point.** It read that the
 //!     block's first entry is `init`, typed `fn (*core.ModuleContext) anyerror!Impl`, and
 //!     that `ModuleContext` *"does not exist in this repository"* — a measurement that was

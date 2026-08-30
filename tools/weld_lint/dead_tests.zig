@@ -410,9 +410,17 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // ordering oracle that reddens if the drain moves before the per-tick
     // `clear`, and the counted drop for a type the program never mentions.
     // (1984 -> 1988, suite reported 1988 - 1969 passed + 19 skipped, macOS aarch64.)
+    // G5a adds five. Two in `src/modules/forge/forge_3d/query/overlap.zig` — the
+    // entity-major order asserted as CONTIGUITY, and the replace-worst retention that
+    // a proof written on `finish` alone would miss — and three in
+    // `tests/physics/forge_module_test.zig` for the entries this gate adds:
+    // `getBodyTransform`'s error channel against a body AT the origin,
+    // `getTriggerOverlaps` refusing to truncate a state, and the three joint stubs
+    // presentable and failing loud.
+    // (1988 -> 1993, suite reported 1993 - 1974 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1986,
-        else => 1988,
+        .windows => 1991,
+        else => 1993,
     };
 }
 

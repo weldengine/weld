@@ -192,3 +192,140 @@ pub fn closestPointCandidates(point: Vec3r, max_distance: Real) Aabbr {
 pub fn pointAabb(point: Vec3r) Aabbr {
     return Aabbr.fromMinMax(point, point);
 }
+
+// ─── M1.1.15.2 G5a — the entity-major ordering proof ────────────────────────
+
+const testing = std.testing;
+
+/// A `BodyManager` + `ShapeStore` holding `n` unit spheres, each on the entity
+/// index the caller names. No broadphase and no world: the subject is the
+/// COLLECTOR, so the instrument drives `add` directly and controls the order of
+/// arrival, which is the one thing a traversal would take away.
+const Fixture = struct {
+    bm: BodyManager = .{},
+    store: ShapeStore = .{},
+    bodies: [8]BodyId = undefined,
+    len: usize = 0,
+
+    fn deinit(self: *Fixture, gpa: std.mem.Allocator) void {
+        self.bm.deinit(gpa);
+        self.store.deinit(gpa);
+    }
+
+    fn addOn(self: *Fixture, gpa: std.mem.Allocator, entity_index: u32) !BodyId {
+        const shape = try self.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+        const id = try self.bm.addBody(gpa, &self.store, .{
+            .shape = shape,
+            .position = Vec3r.zero,
+            .body_type = .static,
+            .entity = .{ .index = entity_index, .generation = 0 },
+        });
+        self.bodies[self.len] = id;
+        self.len += 1;
+        return id;
+    }
+
+    /// A collector over an origin-containing point probe, so every body added is a
+    /// candidate and the ordering is the only thing under test.
+    fn collector(self: *Fixture, out: []BodyId) OverlapCollector {
+        return .{
+            .bm = &self.bm,
+            .store = &self.store,
+            .filter = .{},
+            .probe = .{ .point = Vec3r.zero },
+            .out = out,
+        };
+    }
+};
+
+test "OverlapCollector yields entity-major order" {
+    const gpa = testing.allocator;
+    var f: Fixture = .{};
+    defer f.deinit(gpa);
+
+    // FOUR bodies over THREE entities, with entity 1 carrying two — which is the
+    // shape that matters, since `Forge3DModule`'s adjacent deduplication is only
+    // correct if one entity's bodies come out CONTIGUOUS.
+    const e2 = try f.addOn(gpa, 2);
+    const e1a = try f.addOn(gpa, 1);
+    const e0 = try f.addOn(gpa, 0);
+    const e1b = try f.addOn(gpa, 1);
+
+    // Creation order is 2, 1, 0, 1 — adversarial on purpose: a collector that
+    // returned arrival order would pass an "is it sorted" check written on an
+    // already-sorted input.
+    var out: [8]BodyId = undefined;
+    var c = f.collector(&out);
+    for ([_]BodyId{ e2, e1a, e0, e1b }) |b| c.add(b);
+    const n = c.finish();
+    try testing.expectEqual(@as(u32, 4), n);
+
+    // Entity-major, and asserted as CONTIGUITY rather than as a sorted sequence:
+    // the property the deduplication depends on is that one entity's run is
+    // unbroken, which "non-decreasing" implies but does not name.
+    try testing.expectEqual(e0, out[0]);
+    try testing.expect((out[1] == e1a and out[2] == e1b) or (out[1] == e1b and out[2] == e1a));
+    try testing.expectEqual(e2, out[3]);
+
+    // The FULL key, not the entity alone: within one entity the two bodies are
+    // ordered by `BodyId`, which is what makes the answer a function of the set and
+    // not of the arrival order.
+    try testing.expectEqual(@min(e1a, e1b), out[1]);
+    try testing.expectEqual(@max(e1a, e1b), out[2]);
+
+    // INVARIANCE: the reverse arrival order gives the identical sequence. Without
+    // this the assertions above would also hold for a collector that happened to
+    // receive its candidates already sorted.
+    var out2: [8]BodyId = undefined;
+    var c2 = f.collector(&out2);
+    for ([_]BodyId{ e1b, e0, e1a, e2 }) |b| c2.add(b);
+    try testing.expectEqual(@as(u32, 4), c2.finish());
+    try testing.expectEqualSlices(BodyId, out[0..4], out2[0..4]);
+}
+
+test "OverlapCollector retains the best under the key when the buffer overflows" {
+    const gpa = testing.allocator;
+    var f: Fixture = .{};
+    defer f.deinit(gpa);
+
+    // THE OTHER HALF, and the one a proof written on `finish` alone would miss:
+    // `add` carries the replace-worst and decides what is RETAINED; `finish` only
+    // orders a prefix that was already chosen. A collector that kept the first two
+    // arrivals and sorted them would pass every assertion of the test above.
+    const e3 = try f.addOn(gpa, 3);
+    const e1 = try f.addOn(gpa, 1);
+    const e2 = try f.addOn(gpa, 2);
+    const e0 = try f.addOn(gpa, 0);
+
+    // The two WORST arrive first, so a first-come collector would keep exactly the
+    // wrong pair.
+    var out: [2]BodyId = undefined;
+    var c = f.collector(&out);
+    for ([_]BodyId{ e3, e2, e1, e0 }) |b| c.add(b);
+    try testing.expectEqual(@as(u32, 2), c.finish());
+    try testing.expectEqual(e0, out[0]);
+    try testing.expectEqual(e1, out[1]);
+
+    // And the retained set does not depend on the arrival order — the property that
+    // makes a TRUNCATED answer invariant under a permutation of creation order.
+    var out2: [2]BodyId = undefined;
+    var c2 = f.collector(&out2);
+    for ([_]BodyId{ e0, e1, e2, e3 }) |b| c2.add(b);
+    try testing.expectEqual(@as(u32, 2), c2.finish());
+    try testing.expectEqualSlices(BodyId, out[0..2], out2[0..2]);
+
+    // NON-VACUITY: with room for everything, all four come back — so the pair above
+    // is a retention decision and not a collector that only ever accepts two.
+    var big: [8]BodyId = undefined;
+    var c3 = f.collector(&big);
+    for ([_]BodyId{ e3, e2, e1, e0 }) |b| c3.add(b);
+    try testing.expectEqual(@as(u32, 4), c3.finish());
+    try testing.expectEqual(e0, big[0]);
+    try testing.expectEqual(e3, big[3]);
+
+    // A ZERO-length buffer accepts nothing and does not index out of bounds.
+    var none: [0]BodyId = undefined;
+    var c4 = f.collector(&none);
+    for ([_]BodyId{ e3, e2, e1, e0 }) |b| c4.add(b);
+    try testing.expectEqual(@as(u32, 0), c4.finish());
+}
