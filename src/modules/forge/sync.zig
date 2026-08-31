@@ -98,6 +98,7 @@ const EntityId = core.ecs.EntityId;
 const Transform = core.ecs.components.Transform;
 const Velocity = api.Velocity;
 const Sleeping = api.Sleeping;
+const RigidBody = api.RigidBody;
 const PhysicsWorld = forge_3d.PhysicsWorld;
 const CommandBuffer = core.ecs.CommandBuffer;
 const Vec3r = forge_3d.Vec3r;
@@ -105,6 +106,17 @@ const Vec3r = forge_3d.Vec3r;
 /// THE precision crossing — see `forge/api/precision.zig`. This file narrows solver values to
 /// the world scalar on every tick, so it is the seam most able to grow a second conversion; it
 /// spells none of its own, and `no_precision_crossing` is what enforces that.
+/// The INWARD half of this seam (M1.1.15.2 G5b). Re-exported here so `forge_sync`
+/// carries both directions through one module root — they share the election, and a
+/// caller reaching one must be able to reach the other.
+pub const in = @import("sync_in.zig");
+
+comptime {
+    // §13 wire-in guard: the `pub const` above pulls `sync_in.zig`'s DECLARATIONS,
+    // not its `test` blocks. Without this reference the suite silently skips them.
+    _ = @import("sync_in.zig");
+}
+
 const cross = forge_3d.cross;
 const WorldReal = api.precision.WorldReal;
 const WorldVec3 = api.precision.WorldVec3;
@@ -113,7 +125,7 @@ const WorldQuat = api.precision.WorldQuat;
 /// The solver pose of `body`, in the ECS `Transform`'s own layout, or null on a stale
 /// handle. One conversion site, so the two representations cannot drift apart in two
 /// places.
-fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]WorldReal, rot: [4]WorldReal } {
+pub fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]WorldReal, rot: [4]WorldReal } {
     const p = pw.bm.position(body) orelse return null;
     const r = pw.bm.rotation(body).?;
     return .{ .pos = cross.vec3ToWorld(p).toArray(), .rot = cross.quatToWorld(r).toArray() };
@@ -121,7 +133,7 @@ fn solverPose(pw: *const PhysicsWorld, body: api.BodyId) ?struct { pos: [3]World
 
 /// The solver's two velocity columns for `body`, in world-scalar array form — the shape the
 /// ECS `Velocity` carries, so the comparison and the write read the same bytes.
-fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3]WorldReal, angular: [3]WorldReal } {
+pub fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3]WorldReal, angular: [3]WorldReal } {
     return .{
         .linear = cross.vec3ToWorld(pw.bm.linearVelocity(body).?).toArray(),
         .angular = cross.vec3ToWorld(pw.bm.angularVelocity(body).?).toArray(),
@@ -144,11 +156,11 @@ fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear: [3
 /// otherwise. That is `electedPublisher`'s two-level criterion expressed as an ordering.
 /// §1.13.11's discipline governs anything that could become a compared path, and a sort
 /// answers it at no extra cost.
-const PublisherTable = struct {
+pub const PublisherTable = struct {
     /// One flag per registration, in registration order.
     publishes: []bool,
 
-    fn deinit(self: PublisherTable, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: PublisherTable, gpa: std.mem.Allocator) void {
         gpa.free(self.publishes);
     }
 };
@@ -170,7 +182,7 @@ const Candidate = struct {
 
 /// Build the table. A character presence is never a candidate — it is the controller's inner
 /// body and answers for nobody.
-fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !PublisherTable {
+pub fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !PublisherTable {
     const n = pw.bodies.items.len;
     const flags = try gpa.alloc(bool, n);
     errdefer gpa.free(flags);
@@ -207,6 +219,20 @@ fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !PublisherTa
     return .{ .publishes = flags };
 }
 
+/// Who owns a body's pose and velocity, read from the ECS (M1.1.15.2 G5b).
+///
+/// An entity without a `RigidBody` is `.solver`, which is the declared default and
+/// not a fallback invented here: the model's whole point is that `.gameplay` is
+/// explicit, so anything that has not said so is the solver's.
+///
+/// Shared by BOTH directions on purpose. `syncOut` publishes per
+/// `body_type × authority` and `syncIn` consumes per the same product; two
+/// readings of one field are two things that can disagree about the same body.
+pub fn authorityOf(ecs: *World, entity: EntityId) api.PhysicsAuthority {
+    const rb = ecs.get(RigidBody, entity) orelse return .solver;
+    return rb.authority;
+}
+
 /// Publish what the solver owns OUT to the ECS — after step 11 of the cycle.
 ///
 /// `cmd` is the per-system command buffer when this runs as a registered system, and `null`
@@ -241,6 +267,18 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         const entity = pw.bm.entity(body) orelse continue;
         const body_type = pw.bm.bodyType(body).?;
         if (body_type == .static) continue;
+        // AMENDED AT M1.1.15.2 G5b: the condition is `body_type × authority`, not
+        // `body_type` alone. A `.gameplay` body publishes NOTHING — neither pose nor
+        // velocity — because gameplay owns both and publishing either would be this
+        // seam overwriting the authority `syncIn` just read from the ECS. It is the
+        // same reason the pose was already withheld from a kinematic body, applied to
+        // the axis the old condition could not see.
+        //
+        // A `.gameplay` DYNAMIC body still steps: it keeps its mass, participates in
+        // manifolds and pushes other bodies, and its integration result is discarded
+        // here rather than at step 6 — removing it from integration would amount to
+        // changing its `BodyType` at runtime and would destroy its island.
+        if (authorityOf(ecs, entity) == .gameplay) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
         // systems landed, and it was correct only because pass (1) removed it immediately,
         // in this same call, before this loop read it. Inside a scheduler a structural change
@@ -343,6 +381,19 @@ pub const PhysicsWorldRef = extern struct {
     /// The two halves of a `std.mem.Allocator`, which is `{ ptr, vtable }`.
     alloc_ptr: usize = 0,
     alloc_vtable: usize = 0,
+    /// The inward pass's journal (M1.1.15.2 G5b), or `0` when no caller attached
+    /// one. A RAW POINTER for the same reason the two above are: this resource is
+    /// an `extern struct` of POD and cannot own anything, so the journal's
+    /// lifetime is the caller's.
+    ///
+    /// **The inward pass is OPT-IN, and that is a bound with a reason rather than
+    /// a hole.** `authority` defaults to `.solver` for every body, so a world in
+    /// which nothing declared `.gameplay` has nothing for `syncIn` to consume and
+    /// pays nothing for its absence. A world that DOES declare `.gameplay` and
+    /// attaches no journal has bodies nothing drives — `syncOut` withholds their
+    /// publication and no inward pass moves them — which is visible as a body
+    /// that does not move, and is what `attachSyncInJournal` exists to prevent.
+    journal: usize = 0,
 
     fn pack(world: *PhysicsWorld, gpa: std.mem.Allocator) PhysicsWorldRef {
         return .{
@@ -355,6 +406,11 @@ pub const PhysicsWorldRef = extern struct {
     fn worldPtr(self: PhysicsWorldRef) ?*PhysicsWorld {
         if (self.world == 0) return null;
         return @ptrFromInt(self.world);
+    }
+
+    fn journalPtr(self: PhysicsWorldRef) ?*in.Journal {
+        if (self.journal == 0) return null;
+        return @ptrFromInt(self.journal);
     }
 
     fn allocator(self: PhysicsWorldRef) std.mem.Allocator {
@@ -449,6 +505,22 @@ fn resolve(ecs: *World) ?PhysicsWorldRef {
     return ref;
 }
 
+/// Attach the inward pass's journal to the published world (M1.1.15.2 G5b), so
+/// the registered system runs `syncIn` before `step`.
+///
+/// Separate from `publishPhysicsWorld` rather than a parameter on it: that entry's
+/// signature is the M1.1.15 publication contract, and the inward pass is opt-in
+/// (see the field). BORROWED — the journal must outlive the publication.
+pub fn attachSyncInJournal(ecs: *World, journal: *in.Journal) !void {
+    const rid = ecs.registry.idOf(@typeName(PhysicsWorldRef)) orelse return error.PhysicsWorldNotPublished;
+    const slot = ecs.resources.getMutResource(rid) orelse return error.PhysicsWorldNotPublished;
+    var current: PhysicsWorldRef = undefined;
+    @memcpy(std.mem.asBytes(&current), slot);
+    if (current.world == 0) return error.PhysicsWorldNotPublished;
+    current.journal = @intFromPtr(journal);
+    @memcpy(slot, std.mem.asBytes(&current));
+}
+
 /// The world published into `ecs`, or null if none is.
 ///
 /// Answers with the IDENTITY and not a boolean, because a boolean cannot tell "B is still
@@ -461,6 +533,15 @@ pub fn publishedPhysicsWorld(ecs: *World) ?*PhysicsWorld {
 
 fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     const ref = resolve(ctx.world) orelse return;
+    // THE NORMATIVE ORDER, inside the registered system and not in a caller's
+    // discipline: gameplay rules and systems have already run in this phase's
+    // predecessors, `syncIn` consumes what they wrote, `step` simulates, `syncOut`
+    // publishes. A caller-side `syncIn` would put the order back into a discipline
+    // someone has to remember — the defect M1.1.15's closing pass fixed by
+    // registering the outward half at all.
+    if (ref.journalPtr()) |j| {
+        _ = try in.syncIn(ref.allocator(), ref.worldPtr().?, ctx.world, j);
+    }
     try ref.worldPtr().?.step(ref.allocator());
     try syncOut(ref.allocator(), ref.worldPtr().?, ctx.world, ctx.cmd);
 }

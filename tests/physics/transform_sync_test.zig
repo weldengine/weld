@@ -25,6 +25,7 @@ const PhysicsWorld = forge_3d.PhysicsWorld;
 const Vec3r = forge_3d.Vec3r;
 const Real = forge_3d.Real;
 const testing = std.testing;
+const WorldRealT = api.precision.WorldReal;
 
 const fixed_dt: Real = 1.0 / 60.0;
 const gravity_y: Real = -9.81;
@@ -1019,4 +1020,363 @@ test "publishing over a live publication is refused, and leaves the first in pla
     try sync.publishPhysicsWorld(gpa, &ecs, &b);
     try testing.expectEqual(@as(?*PhysicsWorld, &b), sync.publishedPhysicsWorld(&ecs));
     sync.unpublishPhysicsWorld(&ecs, &b);
+}
+
+// --- M1.1.15.2 G5b — the inward direction and the authority model -------------
+
+const sync_in = sync.in;
+const RigidBody = api.RigidBody;
+
+/// Give `entity` a `RigidBody` carrying `auth`. The component is what the model
+/// DECLARES authority through — there is nothing to detect and nothing to infer.
+fn declare(gpa: std.mem.Allocator, ecs: *World, entity: EntityId, auth: api.PhysicsAuthority) !void {
+    try ecs.addComponent(gpa, entity, RigidBody, .{ .authority = auth });
+}
+
+/// One inward pass at the top of a frame, in the normative order:
+/// gameplay writes → syncIn → step → syncOut.
+fn frameWithSyncIn(
+    gpa: std.mem.Allocator,
+    pw: *PhysicsWorld,
+    ecs: *World,
+    journal: *sync_in.Journal,
+) !sync_in.SyncInResult {
+    ecs.beginFrame();
+    const r = try sync_in.syncIn(gpa, pw, ecs, journal);
+    try sync.stepAndPublish(gpa, pw, ecs);
+    return r;
+}
+
+test "dynamic gameplay-authoritative body is not published" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // TWO dynamic bodies falling under identical gravity, differing ONLY in their
+    // declared authority — so the difference below is the authority and nothing else.
+    const solver_side = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 10, 0 });
+    const gameplay_side = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 5, 10, 0 });
+    try declare(gpa, &ecs, solver_side.entity, .solver);
+    try declare(gpa, &ecs, gameplay_side.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    for (0..4) |_| _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // The solver-authoritative one has been published: its ECS pose FELL.
+    const published = ecs.get(Transform, solver_side.entity).?.pos[1];
+    try testing.expect(published < 10);
+
+    // The gameplay-authoritative one publishes NOTHING: its ECS pose is exactly where
+    // gameplay left it, to the bit.
+    try testing.expectEqual(@as(WorldRealT, 10), ecs.get(Transform, gameplay_side.entity).?.pos[1]);
+
+    // AND IT STILL STEPPED — the half a "not published" assertion cannot carry on its
+    // own. The SOLVER's own position for that body has fallen, so the body kept its mass
+    // and its integration; only the publication was withheld. Removing it from
+    // integration would amount to changing its `BodyType` at runtime.
+    const solver_y = pw.bm.position(gameplay_side.body).?.toArray()[1];
+    try testing.expect(solver_y < 10);
+
+    // Its velocity is not published either — both channels, not just the pose.
+    try testing.expectEqual(@as(WorldRealT, 0), ecs.get(Velocity, gameplay_side.entity).?.linear[1]);
+}
+
+test "no wake on an unchanged gameplay body" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // THE LOAD-BEARING TEST OF THIS GATE. `setBodyTransform` composes the wake
+    // UNCONDITIONALLY — itself, W4 on retained partners, `refreshProxy` — and the
+    // velocity setters wake before writing. Without the change-driven guard every
+    // `.gameplay` entity stays awake and feeds the broadphase for nothing.
+    const g = try spawnLinked(gpa, &ecs, &pw, .static, .{ 5, 0.5, 5 }, .{ 0, 0, 0 });
+    _ = g;
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 1.0, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // First pass consumes nothing: the ECS pose was written at spawn to the same value
+    // the body was created with, so the VALUE predicate refuses it even though the tick
+    // predicate admits it. That conjunction is the subject.
+    const first = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), first.woke);
+
+    // Let it settle, then keep ticking with NOBODY touching the ECS.
+    for (0..200) |_| _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(pw.bm.isSleeping(b.body).?);
+
+    var total_woke: u32 = 0;
+    for (0..30) |_| {
+        const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+        total_woke += r.woke;
+    }
+    // ZERO wakes over thirty ticks, and the body is STILL asleep — the second half,
+    // because a count of zero would also hold for a pass that never ran.
+    try testing.expectEqual(@as(u32, 0), total_woke);
+    try testing.expect(pw.bm.isSleeping(b.body).?);
+
+    // NON-VACUITY, and it is what makes the zero above mean something: one real ECS
+    // write DOES wake it, on the very next pass. A guard that refused everything would
+    // pass every assertion so far.
+    const t = ecs.getMut(Transform, b.entity).?;
+    t.pos[0] += 1;
+    const after = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), after.woke);
+    try testing.expectEqual(@as(u32, 1), after.poses_applied);
+
+    // AND THE OTHER HALF OF THE CONJUNCTION: a `getMut` that changes NOTHING marks
+    // `changed_tick` all the same, so the tick predicate admits it — and the value
+    // predicate must still refuse. Without this the guard could be the tick alone.
+    _ = ecs.getMut(Transform, b.entity).?;
+    const touched = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), touched.woke);
+}
+
+test "wrapper application is not replayed by syncIn in the same tick" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    ecs.beginFrame();
+
+    // THE WRAPPER PATH: an explicit call applies to the solver AND mirrors into the ECS,
+    // then marks the journal. `physics_move_kinematic` is the real one; here the two
+    // halves are written out so the journal's job is visible.
+    pw.moveKinematic(b.body, vr(3, 0, 0), forge_3d.Quatr.identity, fixed_dt);
+    const t = ecs.getMut(Transform, b.entity).?;
+    t.pos[0] = 3;
+    try journal.markApplied(gpa, &pw, b.body, ecs.current_tick);
+
+    // syncIn must NOT apply it a second time. The difference is observable: the wrapper
+    // DERIVED a velocity, and a replay through `setBodyTransform` — a teleportation that
+    // derives nothing — would wipe it.
+    const derived_before = pw.bm.linearVelocity(b.body).?.toArray()[0];
+    try testing.expect(derived_before > 0);
+
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), r.poses_applied);
+    try testing.expectApproxEqAbs(derived_before, pw.bm.linearVelocity(b.body).?.toArray()[0], 1e-5);
+
+    // NON-VACUITY: without the mark, the same setup DOES get consumed — so the zero above
+    // is the journal's doing and not a pass that consumes nothing.
+    var naive: sync_in.Journal = .{};
+    defer naive.deinit(gpa);
+    const r2 = try sync_in.syncIn(gpa, &pw, &ecs, &naive);
+    try testing.expectEqual(@as(u32, 0), r2.poses_applied); // values already agree
+    // Make them disagree and the naive journal consumes what the marked one refused.
+    ecs.beginFrame();
+    ecs.getMut(Transform, b.entity).?.pos[0] = 9;
+    const r3 = try sync_in.syncIn(gpa, &pw, &ecs, &naive);
+    try testing.expectEqual(@as(u32, 1), r3.poses_applied);
+}
+
+test "authority transition solver→gameplay seeds from the published pose" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 10, 0 });
+    try declare(gpa, &ecs, b.entity, .solver);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    for (0..10) |_| _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // The body has fallen and its pose has been PUBLISHED, so the ECS already holds the
+    // seed. Handing authority to gameplay must therefore push NOTHING — the two sides
+    // already agree, which is the whole content of "seeds from the published pose".
+    const published = ecs.get(Transform, b.entity).?.pos;
+    try testing.expect(published[1] < 10);
+
+    ecs.getMut(RigidBody, b.entity).?.authority = .gameplay;
+    const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), r.transitions);
+    try testing.expectEqual(@as(u32, 0), r.poses_applied);
+    try testing.expectEqual(@as(u32, 0), r.woke);
+
+    // And from that tick on the pose is FROZEN in the ECS: gameplay owns it, so the
+    // publication stops. Without this the transition could be counted and ignored.
+    const held = ecs.get(Transform, b.entity).?.pos[1];
+    for (0..5) |_| _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(held, ecs.get(Transform, b.entity).?.pos[1]);
+}
+
+test "gameplay→solver pushes current ECS Transform and Velocity" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // Gameplay drives the body somewhere the solver has never been, and gives it a
+    // velocity the solver never computed.
+    ecs.beginFrame();
+    ecs.getMut(Transform, b.entity).?.pos[0] = 12;
+    ecs.getMut(Velocity, b.entity).?.linear[0] = 7;
+    _ = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // Hand authority back. The pose and the velocity the ECS holds are pushed AS THEY
+    // ARE — no derivation. Derivation stays the explicit operation of `moveKinematic`,
+    // and a derived velocity here would be `(12 - previous) / dt`, nothing like 7.
+    ecs.beginFrame();
+    ecs.getMut(RigidBody, b.entity).?.authority = .solver;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), r.transitions);
+
+    try testing.expectApproxEqAbs(@as(Real, 12), pw.bm.position(b.body).?.toArray()[0], 1e-5);
+    try testing.expectApproxEqAbs(@as(Real, 7), pw.bm.linearVelocity(b.body).?.toArray()[0], 1e-5);
+}
+
+test "syncIn pushes only the elected body" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // ONE entity, TWO bodies. Both directions must elect the SAME one, or `syncOut`
+    // publishes from a body `syncIn` does not drive — two sources answering differently
+    // about one geometric fact.
+    const a = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const second = try pw.addBody(gpa, blk: {
+        const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        var d = api.BodyDescriptor{ .entity = a.entity, .body_type = .kinematic, .shape = shape };
+        d.position = av3(0, 0, 0);
+        break :blk d;
+    });
+    try declare(gpa, &ecs, a.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    ecs.beginFrame();
+    ecs.getMut(Transform, a.entity).?.pos[0] = 4;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // EXACTLY ONE application, not two — the entity has two bodies and only the elected
+    // one is driven.
+    try testing.expectEqual(@as(u32, 1), r.poses_applied);
+
+    // And it is the SAME body `syncOut` elects. Asserted by identity rather than by
+    // count: a count of one would hold whichever of the two was driven.
+    const table = try sync.electPublishers(gpa, &pw);
+    defer table.deinit(gpa);
+    var elected: api.BodyId = 0;
+    for (pw.bodies.items, 0..) |entry, reg| {
+        if (table.publishes[reg]) elected = entry.id;
+    }
+    const moved = pw.bm.position(elected).?.toArray()[0];
+    const other = pw.bm.position(if (elected == a.body) second else a.body).?.toArray()[0];
+    try testing.expectApproxEqAbs(@as(Real, 4), moved, 1e-5);
+    try testing.expectApproxEqAbs(@as(Real, 0), other, 1e-5);
+}
+
+test "a gameplay-authoritative trigger follows before the sensor pass reads it" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // THE SENSOR FOLLOWS FROM THE ORDER AND FROM NOTHING ELSE — measured rather than
+    // assumed. `syncIn` runs before `step`, and the sensor pass is step 10 bis, so a
+    // gameplay-authored trigger is already at its new pose when the pass reads it.
+    const trigger_entity = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+    const trigger = try addTriggerBody(gpa, &pw, trigger_entity, .{ 0, 0, 0 });
+    _ = trigger;
+    try declare(gpa, &ecs, trigger_entity, .gameplay);
+    const occupant = try spawnLinked(gpa, &ecs, &pw, .static, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
+    _ = occupant;
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(usize, 0), pw.sensors.current.items.len);
+
+    // Gameplay teleports the trigger onto the occupant. The overlap must appear in the
+    // SAME tick — a tick later would mean the pose reached the solver after the pass.
+    ecs.beginFrame();
+    ecs.getMut(Transform, trigger_entity).?.pos[0] = 20;
+    _ = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try sync.stepAndPublish(gpa, &pw, &ecs);
+    try testing.expectEqual(@as(usize, 1), pw.sensors.current.items.len);
+    try testing.expectEqual(trigger_entity.index, pw.sensors.current.items[0].trigger.index);
+}
+
+test "the registered system runs syncIn before step when a journal is attached" {
+    // THE ORDER, THROUGH THE SCHEDULER and not through a test's own composition. Without
+    // this the inward direction would exist only where a test calls it — the very defect
+    // M1.1.15's closing pass fixed for the outward half, and the reason `syncIn` runs
+    // inside `stepAndPublishSystem` rather than in a caller's discipline.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
+    try sync.attachSyncInJournal(&ecs, &journal);
+    try sync.registerSystems(gpa, &sched, &ecs);
+
+    // Gameplay writes the ECS; the dispatched frame must carry it into the solver.
+    ecs.getMut(Transform, b.entity).?.pos[0] = 6;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectApproxEqAbs(@as(Real, 6), pw.bm.position(b.body).?.toArray()[0], 1e-5);
+
+    // NON-VACUITY on the attachment: a SECOND world with no journal does not consume,
+    // so the assertion above is the journal's doing and not something the frame would
+    // do anyway. Same shape, same write, one difference.
+    var ecs2 = World.init();
+    defer ecs2.deinit(gpa);
+    var pw2 = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw2.deinit(gpa);
+    const b2 = try spawnLinked(gpa, &ecs2, &pw2, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs2, b2.entity, .gameplay);
+    var sched2 = core.ecs.SystemScheduler.init();
+    defer sched2.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs2, &pw2);
+    defer sync.unpublishPhysicsWorld(&ecs2, &pw2);
+    try sync.registerSystems(gpa, &sched2, &ecs2);
+    ecs2.getMut(Transform, b2.entity).?.pos[0] = 6;
+    try sched2.dispatchFrame(&ecs2, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectApproxEqAbs(@as(Real, 0), pw2.bm.position(b2.body).?.toArray()[0], 1e-5);
 }

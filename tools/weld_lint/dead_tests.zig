@@ -418,9 +418,25 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `getTriggerOverlaps` refusing to truncate a state, and the three joint stubs
     // presentable and failing loud.
     // (1988 -> 1993, suite reported 1993 - 1974 passed + 19 skipped, macOS aarch64.)
+    // G5b adds seven to `tests/physics/transform_sync_test.zig`: the gameplay-
+    // authoritative dynamic body publishing nothing while still stepping, the
+    // load-bearing no-wake guard with both halves of the conjunction and its
+    // non-vacuity, the wrapper application not replayed, the two authority
+    // transitions, the single elected body, and the trigger following before the
+    // sensor pass reads it.
+    // (1993 -> 2000, suite reported 2000 - 1980 passed + 19 skipped, macOS aarch64.)
+    // Plus one in `forge/api/components.zig` pinning the `.sav` migration's third
+    // measurement: `.solver` is the ZERO value, so a zero-padded image loads correctly
+    // under the empty migration and nothing has to be written for it.
+    // (2000 -> 2001, suite reported 2001 - 1982 passed + 19 skipped, macOS aarch64.)
+    // Plus one more: the SCHEDULER path for `syncIn`, which found a real defect on its
+    // first run — a write made before the world's first `beginFrame` is stamped tick 0,
+    // so a `> 0` baseline filtered it out; the journal's "never consumed" is a sentinel
+    // now and not a zero.
+    // (2001 -> 2002, suite reported 2002 - 1983 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1991,
-        else => 1993,
+        .windows => 2000,
+        else => 2002,
     };
 }
 

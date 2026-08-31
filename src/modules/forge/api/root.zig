@@ -14,6 +14,11 @@ const types = @import("types.zig");
 /// one named crossing between it and a solver scalar (`engine-physics-queries.md` §1.11.8).
 pub const precision = @import("precision.zig");
 
+/// Who owns a body's pose and velocity (M1.1.15.2 G5b).
+pub const authority = @import("authority.zig");
+/// Who owns a body's pose and velocity: `.solver` by default, `.gameplay` declared.
+pub const PhysicsAuthority = authority.PhysicsAuthority;
+
 /// Joint type family (M1.1.15.2 G5a, `engine-tier-interfaces.md` §1). Its own
 /// file rather than more of `types.zig`: seven types with a correspondence table
 /// each, and the interface's three joint entries need all seven to be
