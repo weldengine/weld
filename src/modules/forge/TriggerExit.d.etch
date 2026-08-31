@@ -1,0 +1,9 @@
+// AUTO-GENERATED — DO NOT EDIT
+// Source: src/modules/forge/sensor_events.zig
+// Emitter: tools/bindgen/emit_detch.zig
+
+/// An entity left a trigger's volume.
+event TriggerExit {
+  trigger: Entity
+  other: Entity
+}

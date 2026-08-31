@@ -38,6 +38,22 @@ pub const entries = .{
         .source_path = "tests/etch_services/toy_service.zig",
         .output_dir = "tests/etch_services",
     },
+    // M1.1.15.2 G6 — the FIRST real Tier 1 module in the manifest, and the one
+    // whose entry expires the single-cell premise recorded in the milestone brief:
+    // `-Dphysics_f64` switches `forge_3d` to double precision, so a service whose
+    // emitted types followed `Real` would render differently per cell. This one's
+    // do not — every float it declares is `f64` and renders `float` at both
+    // settings — and the artifact is checked under both.
+    Entry{
+        .module = @import("forge_services"),
+        .source_path = "src/modules/forge/services/physics.zig",
+        .output_dir = "src/modules/forge/services",
+    },
+    Entry{
+        .module = @import("forge_sensor_events"),
+        .source_path = "src/modules/forge/sensor_events.zig",
+        .output_dir = "src/modules/forge",
+    },
 };
 
 /// Every `ServiceSpec` an entry's module declares, in declaration order.

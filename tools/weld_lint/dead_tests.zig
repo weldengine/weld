@@ -434,9 +434,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // so a `> 0` baseline filtered it out; the journal's "never consumed" is a sentinel
     // now and not a zero.
     // (2001 -> 2002, suite reported 2002 - 1983 passed + 19 skipped, macOS aarch64.)
+    // G6 adds five: three in `tests/etch_bindgen/detch_emitter_test.zig` (the physics
+    // artifact matching its spec, all three emitted declarations parsing and resolving,
+    // and the `Entity` field carrying no default) and two in the new
+    // `tests/physics/physics_service_test.zig` (a rule calling the service and receiving
+    // its result, and the two sensor deltas reaching the Tier 0 bus).
+    // (2002 -> 2007, suite reported 2007 - 1988 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2000,
-        else => 2002,
+        .windows => 2005,
+        else => 2007,
     };
 }
 

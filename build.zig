@@ -593,6 +593,31 @@ pub fn build(b: *std.Build) void {
     });
     emit_detch_module.addImport("weld_etch", etch_module);
 
+    // M1.1.15.2 G6 — the physics service and the sensor-event types enter the
+    // manifest. They import the forge module, so their modules are built here
+    // alongside the toy's.
+    const forge_services_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/services/physics.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    forge_services_module.addImport("weld_etch", etch_module);
+    forge_services_module.addImport("weld_forge", forge_api_module);
+    forge_services_module.addImport("forge_3d", forge_3d_module);
+    forge_services_module.addImport("weld_core", core_module);
+    forge_services_module.addImport("foundation", foundation_module);
+    forge_services_module.addImport("forge_module", forge_module);
+    const forge_sensor_events_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/sensor_events.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    forge_sensor_events_module.addImport("weld_etch", etch_module);
+    forge_sensor_events_module.addImport("weld_forge", forge_api_module);
+    forge_sensor_events_module.addImport("forge_3d", forge_3d_module);
+    forge_sensor_events_module.addImport("weld_core", core_module);
+    forge_sensor_events_module.addImport("foundation", foundation_module);
+
     const TestSpec = struct {
         path: []const u8,
         // M0.4 — `spike` field removed, no entry needs it anymore.
@@ -620,6 +645,9 @@ pub fn build(b: *std.Build) void {
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
+        /// M1.1.15.2 G6 — when set, imports the physics service, the sensor-event
+        /// types and `weld_etch`, so a test can drive a rule through the service.
+        physics_service: bool = false,
         /// M1.1.15.2 G4 — when set, imports the toy service module (which also
         /// carries the toy EVENT and its emitted declaration).
         etch_events: bool = false,
@@ -640,6 +668,9 @@ pub fn build(b: *std.Build) void {
         // M1.1.15.1 / gate C — `Forge3DModule`: the allocator/fallibility shape of the
         // frozen surface, and the `step` failure contract of RD-3.
         .{ .path = "tests/physics/forge_module_test.zig", .forge = true },
+        // M1.1.15.2 G6 — the Tier 1 physics service called from a rule, and the two
+        // sensor deltas translated onto the Tier 0 bus.
+        .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -903,10 +934,17 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("toy_service", toy_service_module);
         }
+        if (spec.physics_service) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("forge_services", forge_services_module);
+            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+        }
         if (spec.bindgen_detch) {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("emit_detch", emit_detch_module);
             t_mod.addImport("toy_service", toy_service_module);
+            t_mod.addImport("forge_services", forge_services_module);
+            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
@@ -2051,6 +2089,8 @@ pub fn build(b: *std.Build) void {
     });
     detch_module.addImport("weld_etch", etch_module);
     detch_module.addImport("toy_service", toy_service_module);
+    detch_module.addImport("forge_services", forge_services_module);
+    detch_module.addImport("forge_sensor_events", forge_sensor_events_module);
 
     const detch_exe = b.addExecutable(.{
         .name = "bindgen_detch",

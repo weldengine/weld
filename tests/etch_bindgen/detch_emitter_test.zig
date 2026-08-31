@@ -150,3 +150,68 @@ test "the emitted artifact is a .d.etch the compiler accepts" {
     // Non-vacuity on that last equality: the three are not all the same value.
     try std.testing.expect(toy.spec.methods[0].throws != toy.spec.methods[1].throws);
 }
+
+// ─── M1.1.15.2 G6 — the physics service and the sensor events ───────────────
+
+const physics = @import("forge_services");
+const sensor_events = @import("forge_sensor_events");
+
+test "the physics service's committed .d.etch matches its ServiceSpec" {
+    const gpa = std.testing.allocator;
+    const rendered = try emit_detch.emitAlloc(
+        gpa,
+        physics.spec,
+        "src/modules/forge/services/physics.zig",
+        emitter_path,
+    );
+    defer gpa.free(rendered);
+    var lines: std.ArrayListUnmanaged(emit_detch.DiffLine) = .empty;
+    defer lines.deinit(gpa);
+    try std.testing.expect(!try emit_detch.diff(gpa, physics.declaration_source, rendered, &lines));
+    try std.testing.expectEqual(@as(usize, 4), physics.spec.methods.len);
+}
+
+test "the emitted physics and trigger declarations parse and resolve" {
+    const gpa = std.testing.allocator;
+    // The guard protects artifacts; this is what makes them worth protecting. All
+    // three go through the SAME check, so a rendering rule that broke one and not
+    // the others is caught where it happens.
+    for ([_][]const u8{
+        physics.declaration_source,
+        sensor_events.enter_declaration_source,
+        sensor_events.exit_declaration_source,
+    }) |src| {
+        var pr = try weld_etch.parser.parseWithMode(gpa, src, .declaration_file);
+        defer pr.deinit(gpa);
+        for (pr.diagnostics) |d| std.debug.print("parse {s}: {s}\n", .{ d.code.code(), d.primary_message });
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+        var diags: std.ArrayListUnmanaged(weld_etch.diagnostics.Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try weld_etch.types.TypeChecker.check(gpa, &pr.ast, &diags);
+        for (diags.items) |d| std.debug.print("check {s}: {s}\n", .{ d.code.code(), d.primary_message });
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    }
+}
+
+test "an Entity field carries no default and never a live handle" {
+    // `0` IS A LIVE HANDLE to slot 0 generation 0 — the mistake
+    // `CharacterMoveResult.ground_body` made before M1.1.12 — and a raw all-ones
+    // pattern renders `-1`, which is not an entity in any reading. `Entity.null`,
+    // the corpus's own spelling, is refused by the type-checker as a field
+    // default. So the emitter writes NO default, which is the only thing that
+    // says nothing untrue.
+    try std.testing.expect(std.mem.indexOf(u8, sensor_events.enter_declaration_source, "trigger: Entity\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sensor_events.enter_declaration_source, "= 0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sensor_events.enter_declaration_source, "-1") == null);
+    // And not `Entity.null` either, which the CHECKER refuses as a field default
+    // — measured, `E1101`, on this very artifact.
+    try std.testing.expect(std.mem.indexOf(u8, sensor_events.enter_declaration_source, "Entity.null") == null);
+
+    // NON-VACUITY: a NON-entity default still renders as a literal, so the rule is
+    // about the `Entity` type and not about defaults in general.
+    try std.testing.expect(std.mem.indexOf(u8, toy.ping_declaration_source, "value: int = 0") != null);
+}

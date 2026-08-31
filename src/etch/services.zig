@@ -151,6 +151,15 @@ pub const DefaultValue = union(enum) {
     float_: f64,
     bool_: bool,
     string_: []const u8,
+    /// The ABSENT entity, rendered `Entity.null`.
+    ///
+    /// The only default an `Entity` field can carry, and the restriction is not a
+    /// simplification: no other entity value has an Etch spelling in a
+    /// declaration, and rendering the raw handle would put a bit pattern in the
+    /// artifact that means a LIVE entity — `0` most of all, which is slot 0
+    /// generation 0. An `Entity` field whose Zig default is anything else is a
+    /// compile error rather than a number nobody can read.
+    entity_null,
 };
 
 /// An event type a Tier 1 module publishes to Etch (M1.1.15.2 G4). Declared in
@@ -200,17 +209,24 @@ fn defaultOf(comptime T: type, v: T) DefaultValue {
         f64 => .{ .float_ = v },
         bool => .{ .bool_ = v },
         []const u8 => .{ .string_ = v },
-        u64 => .{ .int_ = @bitCast(v) },
+        u64 => if (v == std.math.maxInt(u64))
+            .entity_null
+        else
+            @compileError("an Entity field's default must be the absent handle (all ones); no other entity value can be written in a declaration"),
         else => @compileError("unreachable: typeRefOf refuses this type first"),
     };
 }
 
 fn zeroOf(comptime T: type) DefaultValue {
     return switch (T) {
-        i64, u64 => .{ .int_ = 0 },
+        i64 => .{ .int_ = 0 },
         f64 => .{ .float_ = 0 },
         bool => .{ .bool_ = false },
         []const u8 => .{ .string_ = "" },
+        // NOT zero: `0` is a LIVE handle to slot 0 generation 0. An `Entity` field
+        // with no declared default gets the absent one, which is the only value
+        // that means "none".
+        u64 => .entity_null,
         else => @compileError("unreachable: typeRefOf refuses this type first"),
     };
 }

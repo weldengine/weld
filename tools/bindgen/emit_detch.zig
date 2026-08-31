@@ -85,6 +85,19 @@ pub fn emitEvent(
     if (spec.doc) |d| try w.print("/// {s}\n", .{d});
     try w.print("event {s} {{\n", .{spec.name});
     for (spec.fields) |f| {
+        // An `Entity` field carries NO default, and that is measured rather than
+        // chosen. `engine-tier-interfaces.md` spells the absent entity
+        // `Entity.null`, and the type-checker refuses it as a field default —
+        // `E1101 field default value must be a constant expression`, observed on
+        // the emitted artifact. The two alternatives are worse and both put a
+        // false value in a committed file a reader trusts: `0` is a LIVE handle to
+        // slot 0 generation 0, and the raw pattern renders `-1`, which is not an
+        // entity in any reading. The grammar makes the default optional
+        // (`parser.parseField`), so omitting it says nothing untrue.
+        if (f.default == .entity_null) {
+            try w.print("  {s}: {s}\n", .{ f.name, f.type.etchName() });
+            continue;
+        }
         try w.print("  {s}: {s} = ", .{ f.name, f.type.etchName() });
         switch (f.default) {
             .int_ => |v| try w.print("{d}", .{v}),
@@ -94,6 +107,7 @@ pub fn emitEvent(
             .float_ => |v| try w.print("{d:.1}", .{v}),
             .bool_ => |v| try w.print("{s}", .{if (v) "true" else "false"}),
             .string_ => |v| try w.print("\"{s}\"", .{v}),
+            .entity_null => unreachable, // handled above
         }
         try w.writeAll("\n");
     }

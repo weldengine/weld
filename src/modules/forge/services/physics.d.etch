@@ -1,0 +1,18 @@
+// AUTO-GENERATED — DO NOT EDIT
+// Source: src/modules/forge/services/physics.zig
+// Emitter: tools/bindgen/emit_detch.zig
+
+@version(1)
+service physics {
+  /// Is anything on the ray? Stops at the first candidate.
+  fn raycast_any(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) -> bool
+
+  /// The entity of the nearest hit, or the dead handle on a miss.
+  fn raycast_entity(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) -> Entity
+
+  /// Distance to the nearest hit. Throws when the ray hits nothing.
+  fn raycast_distance(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) throws -> float
+
+  /// How many distinct entities contain the point.
+  fn point_query_count(x: float, y: float, z: float, layer_mask: int) throws -> int
+}
