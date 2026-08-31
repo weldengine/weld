@@ -1,0 +1,36 @@
+// examples/arena/gameplay.etch — the M1.1.15.2 bidirectional slice.
+//
+// Two directions in one file, which is what makes the slice bidirectional:
+//   Etch -> Zig   `physics.raycast_any(...)` reaches Forge through the Tier 1
+//                 service and comes back with an answer.
+//   Zig -> Etch   `@on_event(TriggerEnter)` observes an event Forge produced
+//                 from its own sensor pass, carried onto the Tier 0 bus.
+//
+// Neither direction is simulated: the ray is answered by the real broadphase and
+// the event is produced by the real sensor state.
+
+resource ArenaState {
+  wall_seen: int = 0
+  entered: int = 0
+  last_entity: int = 0
+}
+
+// Etch -> Zig. A ray down +X from the origin, over every object layer.
+rule scan()
+  when resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  if physics.raycast_any(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 100.0, 4294967295) {
+    s.wall_seen = 1
+  }
+}
+
+// Zig -> Etch. The trigger crossing Forge computed at step 10 bis, observed here.
+@on_event(TriggerEnter)
+rule on_enter()
+  when resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  s.entered = s.entered + 1
+  s.last_entity = 1
+}

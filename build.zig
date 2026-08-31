@@ -187,16 +187,19 @@ pub fn build(b: *std.Build) void {
     forge_module.addImport("forge_3d", forge_3d_module);
     forge_module.addImport("foundation", foundation_module);
 
-    // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
-    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.15.2. It holds
-    // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
-    // `weld_forge` for `BodyId` and for the world-scalar aliases and nothing else.
+    // `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface and the first file
+    // of `src/interfaces/`. FROZEN at M1.1.15.2 G7: it carries
+    // `WELD_PHYSICS_PROTOCOL_VERSION` and the comptime surface guard over the thirty-two
+    // entries, plus the three body pose/velocity contracts moved out of
+    // `forge/api/types.zig`. It needs `weld_forge` for the descriptor and query types and
+    // `weld_core` for `ModuleContext`, which the guard's first entry names.
     const interfaces_physics_module = b.createModule(.{
         .root_source_file = b.path("src/interfaces/PhysicsModule.zig"),
         .target = target,
         .optimize = optimize,
     });
     interfaces_physics_module.addImport("weld_forge", forge_api_module);
+    interfaces_physics_module.addImport("weld_core", core_module);
 
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
@@ -607,6 +610,15 @@ pub fn build(b: *std.Build) void {
     forge_services_module.addImport("weld_core", core_module);
     forge_services_module.addImport("foundation", foundation_module);
     forge_services_module.addImport("forge_module", forge_module);
+    // M1.1.15.2 G7 — the bidirectional Etch slice. It is DRIVEN by a test rather
+    // than left as a directory to read: a mechanism nothing executes is the defect
+    // M1.1.15 named and this milestone has closed twice.
+    const arena_slice_module = b.createModule(.{
+        .root_source_file = b.path("examples/arena/slice.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const forge_sensor_events_module = b.createModule(.{
         .root_source_file = b.path("src/modules/forge/sensor_events.zig"),
         .target = b.graph.host,
@@ -617,6 +629,14 @@ pub fn build(b: *std.Build) void {
     forge_sensor_events_module.addImport("forge_3d", forge_3d_module);
     forge_sensor_events_module.addImport("weld_core", core_module);
     forge_sensor_events_module.addImport("foundation", foundation_module);
+    arena_slice_module.addImport("weld_core", core_module);
+    arena_slice_module.addImport("weld_forge", forge_api_module);
+    arena_slice_module.addImport("forge_3d", forge_3d_module);
+    arena_slice_module.addImport("weld_etch", etch_module);
+    arena_slice_module.addImport("forge_module", forge_module);
+    arena_slice_module.addImport("forge_services", forge_services_module);
+    arena_slice_module.addImport("forge_sensor_events", forge_sensor_events_module);
+    arena_slice_module.addImport("foundation", foundation_module);
 
     const TestSpec = struct {
         path: []const u8,
@@ -645,6 +665,8 @@ pub fn build(b: *std.Build) void {
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
+        /// M1.1.15.2 G7 — when set, imports the bidirectional arena slice.
+        arena_slice: bool = false,
         /// M1.1.15.2 G6 — when set, imports the physics service, the sensor-event
         /// types and `weld_etch`, so a test can drive a rule through the service.
         physics_service: bool = false,
@@ -671,6 +693,8 @@ pub fn build(b: *std.Build) void {
         // M1.1.15.2 G6 — the Tier 1 physics service called from a rule, and the two
         // sensor deltas translated onto the Tier 0 bus.
         .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
+        // M1.1.15.2 G7 — the slice, run in both directions.
+        .{ .path = "tests/physics/arena_slice_test.zig", .arena_slice = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -923,6 +947,7 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("forge_sync", forge_sync_module);
             t_mod.addImport("forge_module", forge_module);
             t_mod.addImport("foundation", foundation_module);
+            t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
         }
         if (spec.foundation) {
             t_mod.addImport("foundation", foundation_module);
@@ -933,6 +958,9 @@ pub fn build(b: *std.Build) void {
         if (spec.etch_events) {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("toy_service", toy_service_module);
+        }
+        if (spec.arena_slice) {
+            t_mod.addImport("arena_slice", arena_slice_module);
         }
         if (spec.physics_service) {
             t_mod.addImport("weld_etch", etch_module);

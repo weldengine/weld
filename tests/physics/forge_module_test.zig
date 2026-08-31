@@ -1313,6 +1313,34 @@ test "the three joint entries are presentable and fail loud" {
     }
 }
 
+// --- M1.1.15.2 G7 — the freeze -----------------------------------------------
+
+const iface = @import("weld_interfaces_physics");
+
+test "Forge3DModule satisfies the frozen surface guard" {
+    // **THE GUARD INSTANTIATED AGAINST THE REAL ADAPTER**, which is the only thing
+    // that makes it a guard rather than a declaration. `PhysicsModule(Impl)` fails
+    // to COMPILE unless every one of the thirty-two entries is present with its
+    // exact signature, so the line below is the assertion and the ones after it are
+    // about what the guard covers.
+    const Wrapped = iface.PhysicsModule(Forge3DModule);
+    try testing.expect(@hasField(Wrapped, "impl"));
+
+    // THIRTY-TWO, and not twenty-nine. The block guards the SURFACE, so it is the
+    // 32 that bound it; a guard built on 29 passes an implementation missing any of
+    // `init`, `deinit` or `step` — the very failure mode a surface guard closes.
+    try testing.expectEqual(@as(usize, 32), iface.frozen_entry_count);
+    try testing.expectEqual(@as(usize, 29), iface.frozen_non_lifecycle_count);
+    // The same number this file's own walk uses, so the two cannot drift apart.
+    try testing.expectEqual(frozen_entries.len, iface.frozen_entry_count);
+    try testing.expectEqual(coverage.len, iface.frozen_non_lifecycle_count);
+
+    // THE SURFACE IS FROZEN, and the attestation of ABSENCE this file carried until
+    // G7 is now an attestation of PRESENCE.
+    try testing.expect(@hasDecl(iface, "WELD_PHYSICS_PROTOCOL_VERSION"));
+    try testing.expectEqual(@as(u32, 1), iface.WELD_PHYSICS_PROTOCOL_VERSION);
+}
+
 // --- M1.1.15.2 G6b — the coverage proof ---------------------------------------
 
 /// One row of the coverage map: an entry, the test that DISCRIMINATES it, and

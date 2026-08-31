@@ -53,6 +53,8 @@
 //! dimension — masses, coefficients, ratios, durations — stay `f32` under both settings and
 //! do not follow that scalar, which is why `dt` below is `f32` and the positions are not.
 
+const std = @import("std");
+const core = @import("weld_core");
 const api = @import("weld_forge");
 
 const BodyId = api.BodyId;
@@ -141,25 +143,204 @@ pub const SetAngularVelocity = fn (BodyId, WorldVec3) void;
 /// precaution, and what it leaves behind is specified.
 pub const Step = fn (f32) anyerror!void;
 
+// --- THE FREEZE (M1.1.15.2 G7) -----------------------------------------------
+
+/// **THE SURFACE IS FROZEN AT THIS VERSION.**
+///
+/// From here on, an entry may not be added, removed or re-typed without bumping
+/// this constant — which is what makes a substitutable `physics_3d` backend
+/// possible at all: a Tier 3 solver compiles against a surface, and a surface
+/// that can move under it is not one.
+///
+/// The freeze had already moved twice before landing here (M1.1.15, then
+/// M1.1.15.1), and it does not move a third time. Everything the freeze could
+/// not wait for landed in the gates before it: the joint type family without
+/// which three entries were unwritable, `getTriggerOverlaps`, the error channel
+/// on `getBodyTransform`, and the two preconditions M1.1.15.1 closed —
+/// `core.ModuleContext` and the `void`-vs-fallible arbitration on the pose
+/// setters.
+pub const WELD_PHYSICS_PROTOCOL_VERSION: u32 = 1;
+
+/// The comptime surface guard: `PhysicsModule(Impl)` fails to compile unless
+/// `Impl` presents all **thirty-two** entries with the exact declared signature.
+///
+/// **THIRTY-TWO AND NOT TWENTY-NINE, and confusing the two has already cost.**
+/// `engine-tier-interfaces.md` §12 carries both numbers: the surface has 32
+/// `assertFn` of which 29 exclude `init`, `deinit` and `step`. The block guards
+/// the SURFACE, so it is the 32 that bound it — a guard built on 29 passes an
+/// implementation missing any one of the three lifecycle entries, which is the
+/// very failure mode a surface guard exists to close.
+///
+/// **THE SIGNATURE IS COMPARED, not merely the name.** §1's own `assertFn` says
+/// "full signature checking omitted for brevity — in production, compare
+/// `@typeInfo` of the decl vs Expected", and this is production: a guard that
+/// checked `@hasDecl` alone would pass an implementation whose `raycastAll`
+/// returns `void`, which is precisely the class the multi-result entries' error
+/// channel was added to close.
+pub fn PhysicsModule(comptime Impl: type) type {
+    comptime {
+        // --- Lifecycle (3) ---
+        assertFn(Impl, "init", fn (*core.ModuleContext) anyerror!Impl);
+        assertFn(Impl, "deinit", fn (*Impl) void);
+        assertFn(Impl, "step", fn (*Impl, f32) anyerror!void);
+
+        // --- Bodies (9) ---
+        assertFn(Impl, "addBody", fn (*Impl, api.BodyDescriptor) anyerror!api.BodyId);
+        assertFn(Impl, "removeBody", fn (*Impl, api.BodyId) void);
+        assertFn(Impl, "setBodyTransform", fn (*Impl, api.BodyId, WorldVec3, WorldQuat) void);
+        assertFn(Impl, "moveKinematic", fn (*Impl, api.BodyId, WorldVec3, WorldQuat, f32) void);
+        assertFn(Impl, "getBodyTransform", fn (*Impl, api.BodyId) anyerror!api.Transform);
+        assertFn(Impl, "setLinearVelocity", fn (*Impl, api.BodyId, WorldVec3) void);
+        assertFn(Impl, "setAngularVelocity", fn (*Impl, api.BodyId, WorldVec3) void);
+        assertFn(Impl, "addForce", fn (*Impl, api.BodyId, WorldVec3) void);
+        assertFn(Impl, "addImpulse", fn (*Impl, api.BodyId, WorldVec3) void);
+
+        // --- Shapes (2) ---
+        assertFn(Impl, "createShape", fn (*Impl, api.ShapeDescriptor) anyerror!api.ShapeId);
+        assertFn(Impl, "destroyShape", fn (*Impl, api.ShapeId) void);
+
+        // --- Queries (8) ---
+        assertFn(Impl, "raycast", fn (*Impl, api.RaycastQuery) ?api.RaycastHit);
+        assertFn(Impl, "raycastAny", fn (*Impl, api.RaycastQuery) bool);
+        assertFn(Impl, "raycastAll", fn (*Impl, api.RaycastQuery, []api.RaycastHit) anyerror!u32);
+        assertFn(Impl, "shapeCast", fn (*Impl, api.ShapeCastQuery) anyerror!?api.ShapeCastHit);
+        assertFn(Impl, "overlapShape", fn (*Impl, api.OverlapQuery, []api.EntityId) anyerror!u32);
+        assertFn(Impl, "overlapAabb", fn (*Impl, WorldVec3, WorldVec3, api.PhysicsQueryFilter, []api.EntityId) anyerror!u32);
+        assertFn(Impl, "pointQuery", fn (*Impl, WorldVec3, api.PhysicsQueryFilter, []api.EntityId) anyerror!u32);
+        assertFn(Impl, "closestPoint", fn (*Impl, WorldVec3, f32, api.PhysicsQueryFilter) ?api.ClosestPointResult);
+
+        // --- Triggers (1) ---
+        assertFn(Impl, "getTriggerOverlaps", fn (*Impl, []api.TriggerOverlap) anyerror!u32);
+
+        // --- Joints (3) ---
+        assertFn(Impl, "createJoint", fn (*Impl, api.JointDescriptor) anyerror!api.JointId);
+        assertFn(Impl, "destroyJoint", fn (*Impl, api.JointId) void);
+        assertFn(Impl, "setJointMotor", fn (*Impl, api.JointId, ?api.JointMotor) anyerror!void);
+
+        // --- Character controller (6) ---
+        assertFn(Impl, "createCharacter", fn (*Impl, api.CharacterDescriptor) anyerror!api.CharacterId);
+        assertFn(Impl, "destroyCharacter", fn (*Impl, api.CharacterId) void);
+        assertFn(Impl, "moveCharacter", fn (*Impl, api.CharacterId, WorldVec3, f32) anyerror!api.CharacterMoveResult);
+        assertFn(Impl, "resizeCharacter", fn (*Impl, api.CharacterId, f32, f32) anyerror!bool);
+        assertFn(Impl, "setCharacterPosition", fn (*Impl, api.CharacterId, WorldVec3) void);
+        assertFn(Impl, "getCharacterInnerBody", fn (*Impl, api.CharacterId) anyerror!?api.BodyId);
+    }
+    return struct {
+        impl: Impl,
+    };
+}
+
+/// How many entries the block above guards. Read by the freeze test rather than
+/// recounted there — two numbers derived from one count that a reader has to
+/// keep in step is the defect §12 records having paid for.
+pub const frozen_entry_count: usize = 32;
+/// The same count without `init`, `deinit` and `step`.
+pub const frozen_non_lifecycle_count: usize = frozen_entry_count - 3;
+
+/// One entry of the surface guard.
+///
+/// **Two things are checked and the second is the one §1 left out.** The
+/// declaration must EXIST, and its type must MATCH — parameter for parameter and
+/// return type for return type, with one deliberate tolerance: where the expected
+/// return is `anyerror!T`, an implementation's INFERRED error set is accepted, its
+/// payload being what the contract is about. Zig gives an inferred error set no
+/// nameable type, so demanding `anyerror` literally would force every
+/// implementation to widen its errors for the guard's benefit — a guard that
+/// changes the code it guards.
+fn assertFn(comptime T: type, comptime name: []const u8, comptime Expected: type) void {
+    if (!@hasDecl(T, name)) {
+        @compileError("PhysicsModule implementation must declare '" ++ name ++ "'");
+    }
+    const Actual = @TypeOf(@field(T, name));
+    const a = @typeInfo(Actual).@"fn";
+    const e = @typeInfo(Expected).@"fn";
+    if (a.params.len != e.params.len) {
+        @compileError("PhysicsModule entry '" ++ name ++ "' has the wrong arity: expected " ++
+            std.fmt.comptimePrint("{d}", .{e.params.len}) ++ ", found " ++
+            std.fmt.comptimePrint("{d}", .{a.params.len}));
+    }
+    for (a.params, e.params, 0..) |ap, ep, i| {
+        if (ap.type.? != ep.type.?) {
+            @compileError("PhysicsModule entry '" ++ name ++ "' parameter " ++
+                std.fmt.comptimePrint("{d}", .{i}) ++ ": expected " ++ @typeName(ep.type.?) ++
+                ", found " ++ @typeName(ap.type.?));
+        }
+    }
+    const ar = a.return_type.?;
+    const er = e.return_type.?;
+    if (ar == er) return;
+    const ai = @typeInfo(ar);
+    const ei = @typeInfo(er);
+    if (ai == .error_union and ei == .error_union and
+        ai.error_union.payload == ei.error_union.payload) return;
+    @compileError("PhysicsModule entry '" ++ name ++ "' returns " ++ @typeName(ar) ++
+        ", expected " ++ @typeName(er));
+}
+
 // --- tests -------------------------------------------------------------------
 
-const std = @import("std");
 const testing = std.testing;
 
-test "the interface is NOT frozen: no protocol version is declared here" {
-    // An ATTESTATION OF ABSENCE, and the form matters. `WELD_PHYSICS_PROTOCOL_VERSION` is
-    // what M1.1.15.2 adds when the surface freezes; declaring it early would make the surface
-    // irreversible a milestone ahead of the decision to make it so. `@hasDecl` on this
-    // file's own namespace is what states that, and it is a claim that can FAIL — adding
-    // the constant turns this test red, which is exactly the alarm it exists to raise.
-    try testing.expect(!@hasDecl(@This(), "WELD_PHYSICS_PROTOCOL_VERSION"));
+test "the interface IS frozen, and the surface guard has the size of the surface" {
+    // **THIS TEST WAS AN ATTESTATION OF ABSENCE UNTIL G7, and its going red is what
+    // it existed for.** Until this gate it asserted `!@hasDecl(…,
+    // "WELD_PHYSICS_PROTOCOL_VERSION")`, with the reason written on it: declaring the
+    // constant early would make the surface irreversible a milestone ahead of the
+    // decision to make it so. The freeze is that decision, so the claim inverts —
+    // the test is CHANGED and not deleted, because a deleted attestation leaves no
+    // record that the state it described was left deliberately.
+    try testing.expect(@hasDecl(@This(), "WELD_PHYSICS_PROTOCOL_VERSION"));
+    try testing.expectEqual(@as(u32, 1), WELD_PHYSICS_PROTOCOL_VERSION);
 
-    // NON-VACUITY: `@hasDecl` on this namespace does find what is really here, so the
-    // expectation above is not the vacuous truth of a predicate that never finds anything.
+    // NON-VACUITY: `@hasDecl` on this namespace does report a false for something
+    // really absent, so the positive above is not the answer it always gives.
+    try testing.expect(!@hasDecl(@This(), "WELD_PHYSICS_PROTOCOL_VERSION_2"));
     try testing.expect(@hasDecl(@This(), "SetBodyTransform"));
-    try testing.expect(@hasDecl(@This(), "MoveKinematic"));
-    try testing.expect(@hasDecl(@This(), "SetAngularVelocity"));
     try testing.expect(@hasDecl(@This(), "Step"));
+
+    // THE TWO NUMBERS, and they are distinct rather than one of them being wrong.
+    // §12 carries 32 `assertFn` of which 29 exclude the three lifecycle entries; the
+    // block guards the SURFACE, so it has the size of the 32. Both are exported so a
+    // consumer reads them rather than recounting, which is the defect §12 records
+    // having paid for.
+    try testing.expectEqual(@as(usize, 32), frozen_entry_count);
+    try testing.expectEqual(@as(usize, 29), frozen_non_lifecycle_count);
+    try testing.expectEqual(frozen_entry_count - 3, frozen_non_lifecycle_count);
+}
+
+test "the surface guard compares signatures and not merely names" {
+    // §1's own `assertFn` says "full signature checking omitted for brevity — in
+    // production, compare `@typeInfo` of the decl vs Expected". This is production,
+    // and the difference is not academic: a guard checking `@hasDecl` alone passes an
+    // implementation whose `raycastAll` returns `void`, which is exactly the class
+    // the multi-result entries' error channel was added to close.
+    //
+    // The guard's own discrimination cannot be tested by instantiating it — a
+    // mismatch is a COMPILE error, not a runtime one — so what is asserted here is
+    // the shape of the comparison the guard performs, on the same three axes:
+    // arity, parameter types, and the return type up to an inferred error set.
+    const Expected = fn (*u8, api.BodyId, WorldVec3) void;
+    const e = @typeInfo(Expected).@"fn";
+    try testing.expectEqual(@as(usize, 3), e.params.len);
+    try testing.expectEqual(WorldVec3, e.params[2].type.?);
+    try testing.expectEqual(void, e.return_type.?);
+
+    // The ONE deliberate tolerance, stated as a property rather than left implicit:
+    // where the contract says `anyerror!T`, an inferred error set is accepted and its
+    // PAYLOAD is what is compared. Zig gives an inferred set no nameable type, so
+    // demanding `anyerror` literally would force every implementation to widen its
+    // errors for the guard's benefit — a guard that changes the code it guards.
+    const Contract = anyerror!u32;
+    const Inferred = @typeInfo(@TypeOf(inferredExample)).@"fn".return_type.?;
+    try testing.expect(Contract != Inferred);
+    try testing.expectEqual(
+        @typeInfo(Contract).error_union.payload,
+        @typeInfo(Inferred).error_union.payload,
+    );
+}
+
+fn inferredExample() !u32 {
+    return error.Whatever;
 }
 
 test "step declares an error channel, and the three pose setters do not" {

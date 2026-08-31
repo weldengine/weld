@@ -446,9 +446,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // (the gap M1.1.15.1 named and left) and `overlapShape` on the probe's geometry
     // rather than its box.
     // (2007 -> 2010, suite reported 2010 - 1991 passed + 19 skipped, macOS aarch64.)
+    // G7 — THE FREEZE — adds three: the guard instantiated against the real adapter in
+    // `tests/physics/forge_module_test.zig`, the shape of the signature comparison in
+    // `src/interfaces/PhysicsModule.zig` (whose attestation of ABSENCE became one of
+    // PRESENCE rather than being deleted), and the bidirectional slice run end to end in
+    // the new `tests/physics/arena_slice_test.zig`.
+    // (2010 -> 2013, suite reported 2013 - 1994 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2008,
-        else => 2010,
+        .windows => 2011,
+        else => 2013,
     };
 }
 
