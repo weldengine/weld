@@ -474,9 +474,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // seam — plus the slice commanding a physical state from a rule and observing it
     // from another.
     // (2022 -> 2029, suite reported 2029 - 2010 passed + 19 skipped, macOS aarch64.)
+    // G7 replayed adds ONE: the block's declared size, confronted with the block's own
+    // text. Deleting an `assertFn` line used to leave the tree green at 2029 of 2029 —
+    // the constant declared a size and nothing put it in front of the list it sized.
+    // (2029 -> 2030, suite reported 2030 - 2011 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2027,
-        else => 2029,
+        .windows => 2028,
+        else => 2030,
     };
 }
 

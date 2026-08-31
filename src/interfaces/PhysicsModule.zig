@@ -23,6 +23,13 @@
 //! surface guard exists to close. Both are exported below so a consumer reads them rather than
 //! recounting.
 //!
+//! **AND THE THIRTY-TWO IS NOW MEASURED, which it was not until G7 was replayed.** The
+//! constant declared a size and nothing put it in front of the block: deleting one
+//! `assertFn` line left the whole tree green at 2029 of 2029, the adapter still declaring
+//! the entry so every walk over its declarations passed. `guardedNames` reads the block's
+//! own text, so the size, the absence of a duplicate, and the agreement between what is
+//! GUARDED and what is DELEGATED are all confronted rather than declared.
+//!
 //! **The wrapper delegates, and it did not.** §1 declares one function per entry on the
 //! returned type; until G8 this returned `struct { impl: Impl }` and nothing else — a type that
 //! validated an implementation and exposed none of it. The freeze test could not see it,
@@ -349,6 +356,54 @@ pub fn PhysicsModule(comptime Impl: type) type {
     };
 }
 
+/// The entry names the assert block guards, READ FROM THE BLOCK'S OWN TEXT.
+///
+/// **A constant declaring a size, never confronted with the thing it sizes, is
+/// the defect class this milestone has closed at every gate — and it was sitting
+/// inside the freeze.** Measured at G7-replayed: deleting one `assertFn` line
+/// from the block left the whole tree green, 2029 of 2029, because
+/// `frozen_entry_count` is a number and the block is a list, and nothing put the
+/// two in front of each other. The adapter still declares the entry, so the
+/// delegation walk passes; the guard simply stops guarding it, in silence, which
+/// is exactly what a surface guard exists to make impossible.
+///
+/// The block's text is therefore the source and the constant is what it is
+/// confronted with. Nothing else in this file can substitute: the block runs at
+/// comptime and leaves no runtime trace, and a `@typeInfo` of the returned type
+/// sees the DELEGATIONS, which are a different list that happens to have the same
+/// names — as the test below then asserts, rather than assumes.
+///
+/// **THE NEEDLE IS CONCATENATED, and the reason is measured rather than
+/// theoretical.** This file embeds itself, so a literal needle would appear in
+/// the searched corpus by virtue of being written here — the count would be one
+/// too high, and a future reader would "fix" it by making the constant wrong. The
+/// split falls between `assert` and `Fn(`, so no contiguous match exists outside
+/// the block.
+fn guardedNames() []const []const u8 {
+    @setEvalBranchQuota(200_000);
+    const src = @embedFile("PhysicsModule.zig");
+    const needle = "assert" ++ "Fn(Impl, \"";
+    comptime var count: usize = 0;
+    comptime var scan: usize = 0;
+    inline while (std.mem.indexOfPos(u8, src, scan, needle)) |at| {
+        count += 1;
+        scan = at + needle.len;
+    }
+    comptime var names: [count][]const u8 = undefined;
+    comptime var i: usize = 0;
+    comptime var pos: usize = 0;
+    inline while (std.mem.indexOfPos(u8, src, pos, needle)) |at| {
+        const start = at + needle.len;
+        const end = start + (std.mem.indexOfScalarPos(u8, src, start, '"') orelse
+            @compileError("unterminated entry name in the surface guard")) - start;
+        names[i] = src[start..end];
+        i += 1;
+        pos = end;
+    }
+    const frozen = names;
+    return &frozen;
+}
+
 /// How many entries the block above guards. Read by the freeze test rather than
 /// recounted there — two numbers derived from one count that a reader has to
 /// keep in step is the defect §12 records having paid for.
@@ -537,4 +592,56 @@ test "the header's claim and this test are one thing, checked against the file" 
     const absent = "THIS FILE IS " ++ "MADE OF CHEESE";
     try testing.expect(std.mem.indexOf(u8, header, absent) == null);
     try testing.expect(std.mem.indexOf(u8, header, "the Tier 1 physics interface") != null);
+
+    // **THE HEADER'S NUMBER, confronted with the constant rather than left as prose.**
+    // It is the second thing that drifted in this file and it drifted first: the header
+    // carried THIRTY `assertFn` of which twenty-seven were non-lifecycle — the count
+    // before `getTriggerOverlaps` and `setJointMotor` — and G5a corrected it. So the
+    // wrong values are known, and they are what is excluded, because a stale count is a
+    // claim a reader acts on rather than a typo.
+    try testing.expect(std.mem.indexOf(u8, header, "thirty" ++ "-two") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "thirty " ++ "`assertFn`") == null);
+    try testing.expect(std.mem.indexOf(u8, header, "thirty" ++ "-three") == null);
+    try testing.expectEqual(@as(usize, 32), frozen_entry_count);
+}
+
+test "the guard block has the size it declares, and every entry it guards is delegated" {
+    // **THE HOLE THIS CLOSES WAS MEASURED, not suspected.** Deleting one `assertFn`
+    // line from the block left the tree green at 2029 of 2029: `frozen_entry_count`
+    // declared a size and nothing ever put it in front of the block. Every other
+    // assertion in this file and in `forge_module_test.zig` reads the CONSTANT or the
+    // adapter's own declarations, both of which survive an entry silently leaving the
+    // guard.
+    const names = comptime guardedNames();
+    try testing.expectEqual(frozen_entry_count, names.len);
+
+    // NO DUPLICATE, which is the other way a count of 32 can be reached by 31 entries.
+    inline for (names, 0..) |a, i| {
+        inline for (names, 0..) |b, j| {
+            if (i < j) try testing.expect(!std.mem.eql(u8, a, b));
+        }
+    }
+
+    // AND WHAT IS GUARDED IS WHAT IS DELEGATED. The two lists have the same names by
+    // intention and not by construction — the block is a comptime predicate and the
+    // wrapper is a set of functions — so a `pub fn` removed from one or an `assertFn`
+    // from the other would leave them disagreeing about what the surface is.
+    const src = @embedFile("PhysicsModule.zig");
+    inline for (names) |name| {
+        const decl = "pub" ++ " fn " ++ name ++ "(";
+        if (std.mem.indexOf(u8, src, decl) == null) std.debug.print("NOT DELEGATED: {s}\n", .{name});
+        try testing.expect(std.mem.indexOf(u8, src, decl) != null);
+    }
+
+    // NON-VACUITY on the walk, and it is not the trivial one: the search really does
+    // report an absence for a plausible name that is NOT an entry — `hasCapability` is
+    // delegated but never guarded, so it must be absent from `names` while present in
+    // the source. That is the exact asymmetry the header claims for it.
+    comptime var saw_capability = false;
+    inline for (names) |name| {
+        if (comptime std.mem.eql(u8, name, "hasCapability")) saw_capability = true;
+    }
+    try testing.expect(!saw_capability);
+    try testing.expect(std.mem.indexOf(u8, src, "pub" ++ " fn " ++ "hasCapability(") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "pub" ++ " fn " ++ "notAnEntry(") == null);
 }

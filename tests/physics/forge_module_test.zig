@@ -1351,6 +1351,27 @@ test "Forge3DModule satisfies the frozen surface guard" {
     // G7 is now an attestation of PRESENCE.
     try testing.expect(@hasDecl(iface, "WELD_PHYSICS_PROTOCOL_VERSION"));
     try testing.expectEqual(@as(u32, 1), iface.WELD_PHYSICS_PROTOCOL_VERSION);
+
+    // **WHAT VERSION 1 FREEZES IS THE CORRECTED SURFACE, and the three corrections are
+    // confronted with the version HERE rather than only where each was made.** G7 ran
+    // once before the external review and froze a surface carrying three defects: a
+    // wrapper that delegated nothing, `getTriggerOverlaps` refusing the empty slice a
+    // caller uses to ask for the count, and a `JointMotor` whose single `max_force`
+    // could not be both newtons and newton-metres for `six_dof`. Each is now pinned by
+    // its own test — but a pin that lives only beside its correction says nothing about
+    // the VERSION, and the version is the promise: undoing one of the three without
+    // bumping the constant is precisely the move the freeze exists to forbid.
+    //
+    // Restated at their smallest here, so the freeze itself reddens.
+    try testing.expectEqual(@as(usize, 5), @typeInfo(api.JointMotor).@"struct".fields.len);
+    try testing.expect(@hasField(api.JointMotor, "max_linear_force"));
+    try testing.expect(@hasField(api.JointMotor, "max_angular_torque"));
+    try testing.expect(!@hasField(api.JointMotor, "max_force"));
+    try testing.expect(@hasDecl(iface.PhysicsModule(Forge3DModule), "addImpulse"));
+    try testing.expectEqual(
+        @typeInfo(@TypeOf(Forge3DModule.getTriggerOverlaps)).@"fn".return_type.?,
+        @typeInfo(@TypeOf(iface.PhysicsModule(Forge3DModule).getTriggerOverlaps)).@"fn".return_type.?,
+    );
 }
 
 // --- M1.1.15.2 G8 — the corrections of the external review ---------------------
