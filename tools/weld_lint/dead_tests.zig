@@ -457,9 +457,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // query on `getTriggerOverlaps`, `point_query_count` signalling its truncation, the change
     // baseline advancing on examination, and the header confronted with its own bytes.
     // (2013 -> 2018, suite reported 2018 - 1999 passed + 19 skipped, macOS aarch64.)
+    // G9 adds one: the removal oracle for the journal keyed by `BodyId`. Silent
+    // corruption — the counter-factual restoring the positional key reddens THIS test
+    // and nothing else in the suite, which is what "no red signalled it" measures.
+    // (2018 -> 2019, suite reported 2019 - 2000 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2016,
-        else => 2018,
+        .windows => 2017,
+        else => 2019,
     };
 }
 

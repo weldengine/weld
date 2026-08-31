@@ -1160,7 +1160,7 @@ test "wrapper application is not replayed by syncIn in the same tick" {
     pw.moveKinematic(b.body, vr(3, 0, 0), forge_3d.Quatr.identity, fixed_dt);
     const t = ecs.getMut(Transform, b.entity).?;
     t.pos[0] = 3;
-    try journal.markApplied(gpa, &pw, b.body, ecs.current_tick);
+    try journal.markApplied(gpa, b.body, ecs.current_tick);
 
     // syncIn must NOT apply it a second time. The difference is observable: the wrapper
     // DERIVED a velocity, and a replay through `setBodyTransform` — a teleportation that
@@ -1408,14 +1408,14 @@ test "the change baseline advances on a comparison without difference" {
     // THE ASSERTION: the baseline moved anyway. Read through the journal itself, which
     // is what distinguishes "examined and found equal" from "never looked at" — the two
     // are indistinguishable from the outside, and that is why the defect was silent.
-    try testing.expect(journal.entries.items[0].consumed_tick != null);
-    const baseline = journal.entries.items[0].consumed_tick.?;
+    try testing.expect(journal.entryOf(b.body).?.consumed_tick != null);
+    const baseline = journal.entryOf(b.body).?.consumed_tick.?;
 
     // Tick 2 — nobody touched the ECS, so the TICK predicate now refuses and the
     // baseline does NOT move. Under the defect it stayed `null` here and the value
     // comparison ran again.
     _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
-    try testing.expectEqual(baseline, journal.entries.items[0].consumed_tick.?);
+    try testing.expectEqual(baseline, journal.entryOf(b.body).?.consumed_tick.?);
 
     // A REAL write moves it again and is applied — so the advance above is a filter and
     // not a journal that stopped recording.
@@ -1423,15 +1423,106 @@ test "the change baseline advances on a comparison without difference" {
     ecs.getMut(Transform, b.entity).?.pos[0] = 3;
     const applied = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
     try testing.expectEqual(@as(u32, 1), applied.poses_applied);
-    try testing.expect(journal.entries.items[0].consumed_tick.? > baseline);
+    try testing.expect(journal.entryOf(b.body).?.consumed_tick.? > baseline);
 
     // And a `getMut` that changes NOTHING advances the baseline without applying —
     // the exact case the fix is about, asserted on both halves at once.
-    const after_real = journal.entries.items[0].consumed_tick.?;
+    const after_real = journal.entryOf(b.body).?.consumed_tick.?;
     ecs.beginFrame();
     _ = ecs.getMut(Transform, b.entity).?;
     const touched = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
     try testing.expectEqual(@as(u32, 0), touched.poses_applied);
     try testing.expectEqual(@as(u32, 0), touched.woke);
-    try testing.expect(journal.entries.items[0].consumed_tick.? > after_real);
+    try testing.expect(journal.entryOf(b.body).?.consumed_tick.? > after_real);
+}
+
+test "removing a body leaves its neighbour's journal entry untouched" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // **G9, and the oracle has to be built so that INHERITANCE IS VISIBLE.** The
+    // journal was keyed by registration position and `removeBody` uses
+    // `orderedRemove` — its own comment says "ordered: the sweep order stays stable"
+    // — so the body after the removed one moved into its slot and took its entry.
+    //
+    // Asserting that the neighbour "still works" is weaker than the claim. What has
+    // to be shown is that it does NOT take the removed body's state, so the removed
+    // body is given a state that is DISTINCT and RECOGNISABLE first: `.gameplay`
+    // authority and a baseline advanced by a real application. The neighbour has
+    // neither. Under the defect it acquires both, and each produces its own
+    // observable corruption.
+    const doomed = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const neighbour = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 50, 0, 0 });
+    try declare(gpa, &ecs, doomed.entity, .gameplay);
+    try declare(gpa, &ecs, neighbour.entity, .solver);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // Give the doomed body its recognisable state: a real application, so `seen` is
+    // true, `last_authority` is `.gameplay` and `consumed_tick` is advanced.
+    ecs.beginFrame();
+    ecs.getMut(Transform, doomed.entity).?.pos[0] = 4;
+    const seeded = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), seeded.poses_applied);
+    const doomed_entry = journal.entryOf(doomed.body).?;
+    try testing.expect(doomed_entry.seen);
+    try testing.expectEqual(api.PhysicsAuthority.gameplay, doomed_entry.last_authority);
+    try testing.expect(doomed_entry.consumed_tick != null);
+    // The neighbour HAS an entry, and a first version of this test asserted it did
+    // not — measured wrong: `syncIn` takes the slot for every ELECTED body, before
+    // the authority check, because the transition detection needs the authority it
+    // observed whether or not it consumed anything. What matters is that the entry is
+    // DISTINCT: `.solver`, never consumed, against the doomed body's `.gameplay` with
+    // an advanced baseline. Inheritance is visible precisely because the two differ
+    // on both fields.
+    const before = journal.entryOf(neighbour.body).?;
+    try testing.expectEqual(api.PhysicsAuthority.solver, before.last_authority);
+    try testing.expect(before.consumed_tick == null);
+
+    // THE REMOVAL. `doomed` was registered first, so the neighbour shifts into its
+    // position — which is what the old key was.
+    pw.removeBody(doomed.body);
+
+    // (1) NO FABRICATED TRANSITION. Under the defect the neighbour inherits
+    // `seen = true` and `last_authority = .gameplay`, so `syncIn` reads its real
+    // `.solver` as a CHANGE of the field and performs a `gameplay → solver`
+    // transition that never happened — pushing its ECS pose into the solver.
+    ecs.beginFrame();
+    const after = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), after.transitions);
+    try testing.expectEqual(@as(u32, 0), after.poses_applied);
+    // Its solver pose is where it was created, not where the ECS holds it — the two
+    // agree here, so the assertion above is the discriminating one and this is the
+    // corroboration that nothing moved.
+    try testing.expectApproxEqAbs(@as(Real, 50), pw.bm.position(neighbour.body).?.toArray()[0], 1e-5);
+
+    // (2) NO INHERITED BASELINE. Hand the neighbour to gameplay and move it: the
+    // change must be APPLIED. Under the defect it inherited the doomed body's
+    // advanced `consumed_tick`, so the tick predicate filtered its write out and a
+    // legitimate modification was ignored — the other direction of the same
+    // corruption, and the one an "it still works" assertion would miss entirely.
+    ecs.beginFrame();
+    ecs.getMut(RigidBody, neighbour.entity).?.authority = .gameplay;
+    ecs.getMut(Transform, neighbour.entity).?.pos[0] = 77;
+    const moved = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), moved.poses_applied);
+    try testing.expectApproxEqAbs(@as(Real, 77), pw.bm.position(neighbour.body).?.toArray()[0], 1e-5);
+
+    // (3) THE GENERATION IS PART OF THE KEY. A recycled slot names a different body,
+    // so keying on the index alone would reintroduce the inheritance through the
+    // recycling path rather than through the shift. The doomed slot is free now; a
+    // fresh body takes it and must start with no entry.
+    const reused = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ -30, 0, 0 });
+    try testing.expect(journal.entryOf(reused.body) == null);
+    // Same slot index, different generation — the premise of (3), asserted rather
+    // than assumed, since without slot reuse the check above is about a new key and
+    // proves nothing about generations.
+    const doomed_packed: api.PackedId = @bitCast(doomed.body);
+    const reused_packed: api.PackedId = @bitCast(reused.body);
+    try testing.expectEqual(doomed_packed.index, reused_packed.index);
+    try testing.expect(doomed_packed.generation != reused_packed.generation);
 }

@@ -72,7 +72,30 @@ const WorldQuat = api.precision.WorldQuat;
 /// from being replayed by `syncIn` in the same tick as a second, derived-free
 /// application.
 pub const Journal = struct {
-    entries: std.ArrayListUnmanaged(Entry) = .empty,
+    /// Keyed by the COMPLETE `BodyId` — index AND generation — and never by a
+    /// position (M1.1.15.2 G9).
+    ///
+    /// **It was keyed by registration position, and `removeBody` shifts.**
+    /// `PhysicsWorld.removeBody` uses `orderedRemove` deliberately — its own
+    /// comment says "ordered: the sweep order stays stable" — so every body after
+    /// the removed one moves down one slot and INHERITS the removed body's
+    /// `consumed_tick`, `last_authority` and `seen`. Two observable corruptions
+    /// follow: a FABRICATED authority transition, when the neighbour inherits a
+    /// `.gameplay` that was never its own and `syncIn` reads a change of field
+    /// that never happened; and a LEGITIMATE CHANGE IGNORED, when it inherits a
+    /// baseline later than its own write. Silent in both directions — no assertion
+    /// in the tree could see it, and none did.
+    ///
+    /// The generation is part of the key and not decoration: a slot is recycled
+    /// LIFO, so a reissued index names a different body, and keying on the index
+    /// alone would reintroduce the same inheritance through the recycling path
+    /// rather than through the shift.
+    ///
+    /// A HASH MAP, and the determinism rule is untouched: it is only ever LOOKED
+    /// UP, never iterated, so no observable order is derived from it. The iteration
+    /// stays `pw.bodies.items` in registration order, which is where the order the
+    /// tick depends on lives.
+    entries: std.AutoHashMapUnmanaged(api.BodyId, Entry) = .empty,
 
     pub const Entry = struct {
         /// Tick at which an inbound change for this body was last consumed —
@@ -101,25 +124,25 @@ pub const Journal = struct {
         self.entries.deinit(gpa);
     }
 
-    fn slot(self: *Journal, gpa: std.mem.Allocator, reg: usize) !*Entry {
-        if (self.entries.items.len <= reg) {
-            try self.entries.ensureTotalCapacity(gpa, reg + 1);
-            while (self.entries.items.len <= reg) self.entries.appendAssumeCapacity(.{});
-        }
-        return &self.entries.items[reg];
+    fn slot(self: *Journal, gpa: std.mem.Allocator, body: api.BodyId) !*Entry {
+        const gop = try self.entries.getOrPut(gpa, body);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        return gop.value_ptr;
+    }
+
+    /// The entry for `body`, or null when the journal has never seen it. Exposed
+    /// for the guard that proves a neighbour inherits nothing.
+    pub fn entryOf(self: *const Journal, body: api.BodyId) ?Entry {
+        return self.entries.get(body);
     }
 
     /// Record that an inbound change for `body` was applied OUTSIDE `syncIn`, so
     /// the same tick's pass does not apply it again. The explicit call path —
     /// `physics_move_kinematic` and its siblings — calls this after mirroring
     /// into the ECS.
-    pub fn markApplied(self: *Journal, gpa: std.mem.Allocator, pw: *const PhysicsWorld, body: api.BodyId, tick: Tick) !void {
-        for (pw.bodies.items, 0..) |entry, reg| {
-            if (entry.id != body) continue;
-            const e = try self.slot(gpa, reg);
-            e.consumed_tick = tick;
-            return;
-        }
+    pub fn markApplied(self: *Journal, gpa: std.mem.Allocator, body: api.BodyId, tick: Tick) !void {
+        const e = try self.slot(gpa, body);
+        e.consumed_tick = tick;
     }
 };
 
@@ -176,7 +199,7 @@ pub fn syncIn(
         const entity = pw.bm.entity(body) orelse continue;
         const body_type = pw.bm.bodyType(body) orelse continue;
         const auth = sync.authorityOf(ecs, entity);
-        const e = try journal.slot(gpa, reg);
+        const e = try journal.slot(gpa, body);
 
         // TRANSITION, detected here because `authority` is a PUBLIC field: a rule
         // writes it directly, so no wrapper can be the guardian of the invariant.
