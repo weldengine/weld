@@ -440,9 +440,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `tests/physics/physics_service_test.zig` (a rule calling the service and receiving
     // its result, and the two sensor deltas reaching the Tier 0 bus).
     // (2002 -> 2007, suite reported 2007 - 1988 passed + 19 skipped, macOS aarch64.)
+    // G6b adds three to `tests/physics/forge_module_test.zig`: the coverage map that
+    // confronts the 29 non-lifecycle entries with their discriminating oracle, and the
+    // two oracles the audit found MISSING — `setAngularVelocity` about its own axis
+    // (the gap M1.1.15.1 named and left) and `overlapShape` on the probe's geometry
+    // rather than its box.
+    // (2007 -> 2010, suite reported 2010 - 1991 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2005,
-        else => 2007,
+        .windows => 2008,
+        else => 2010,
     };
 }
 

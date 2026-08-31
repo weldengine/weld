@@ -1312,3 +1312,210 @@ test "the three joint entries are presentable and fail loud" {
         }
     }
 }
+
+// --- M1.1.15.2 G6b — the coverage proof ---------------------------------------
+
+/// One row of the coverage map: an entry, the test that DISCRIMINATES it, and
+/// the NEIGHBOUR it is told apart from.
+///
+/// **The predicate, stated before anything is counted.** For entry `E` there is a
+/// test `T` and a neighbour `N` — another entry a plausible implementation could
+/// be confused with, or a no-op, or a plausible constant — such that `T` FAILS
+/// when `E`'s implementation is replaced by `N`'s. "Called by a test" is not the
+/// predicate and never was: `addBody` is called by ten tests and none of that
+/// tells it apart from anything.
+///
+/// The trap this table exists against is the one twenty-nine written oracles do
+/// not close: two entries sharing one predicate are one entry covered and one
+/// entry accompanied. So `neighbour` is written per row and the pairs are checked
+/// for duplication below.
+const Coverage = struct {
+    entry: []const u8,
+    /// The test whose name contains this, verbatim.
+    test_name: []const u8,
+    /// What the entry is discriminated FROM.
+    neighbour: []const u8,
+};
+
+const coverage = [_]Coverage{
+    .{ .entry = "addBody", .test_name = "getBodyTransform separates a stale handle from a body at the origin", .neighbour = "a no-op that returns a handle registering nothing" },
+    .{ .entry = "removeBody", .test_name = "the read-back mutators move what they claim to move", .neighbour = "a no-op removal, after which a query still finds the body" },
+    .{ .entry = "setBodyTransform", .test_name = "moveKinematic derives a velocity where setBodyTransform teleports", .neighbour = "moveKinematic, which derives both velocities" },
+    .{ .entry = "moveKinematic", .test_name = "moveKinematic derives a velocity where setBodyTransform teleports", .neighbour = "setBodyTransform, which derives nothing" },
+    .{ .entry = "getBodyTransform", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "an entry answering the identity pose whatever the body did" },
+    .{ .entry = "setLinearVelocity", .test_name = "three more oracles that discriminate rather than merely observe", .neighbour = "addImpulse, which at unit mass moves a body the same way" },
+    .{ .entry = "setAngularVelocity", .test_name = "setAngularVelocity turns about the axis it was given", .neighbour = "an entry that spins about a fixed axis whatever it was asked" },
+    .{ .entry = "addForce", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "addImpulse, an immediate velocity change" },
+    .{ .entry = "addImpulse", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "addForce, an accumulated one" },
+    .{ .entry = "createShape", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "a handle allocator that ignores the descriptor's geometry" },
+    .{ .entry = "destroyShape", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "a no-op destruction" },
+    .{ .entry = "raycast", .test_name = "the four single-result query entries answer about the scene", .neighbour = "raycastAny, which answers whether and not where" },
+    .{ .entry = "raycastAny", .test_name = "the four single-result query entries answer about the scene", .neighbour = "a constant verdict — both are asserted" },
+    .{ .entry = "raycastAll", .test_name = "no entry caps its answer below the caller's slice", .neighbour = "raycast, which answers one hit" },
+    .{ .entry = "shapeCast", .test_name = "the four single-result query entries answer about the scene", .neighbour = "raycast wearing its name — the swept extent moves the impact by half a box" },
+    .{ .entry = "overlapShape", .test_name = "overlapShape tests the SHAPE where overlapAabb tests its box", .neighbour = "overlapAabb over the probe's own bounding box" },
+    .{ .entry = "overlapAabb", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "pointQuery, which tests membership of the solid" },
+    .{ .entry = "pointQuery", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "overlapAabb, which tests a box" },
+    .{ .entry = "closestPoint", .test_name = "the four single-result query entries answer about the scene", .neighbour = "an entry answering the distance to the CENTRE rather than to the surface" },
+    .{ .entry = "createCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a handle allocator creating no presence" },
+    .{ .entry = "destroyCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a no-op, after which the inner body still answers" },
+    .{ .entry = "moveCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a stub returning a zeroed result" },
+    .{ .entry = "resizeCharacter", .test_name = "three more oracles that discriminate rather than merely observe", .neighbour = "an entry returning true and resizing nothing" },
+    .{ .entry = "setCharacterPosition", .test_name = "the character entries move and report a ground", .neighbour = "a no-op, read through the presence body" },
+    .{ .entry = "getCharacterInnerBody", .test_name = "the character entries move and report a ground", .neighbour = "an entry answering a stale presence after destruction" },
+    .{ .entry = "getTriggerOverlaps", .test_name = "getTriggerOverlaps refuses to truncate a state", .neighbour = "a query-family entry, which truncates instead of refusing" },
+    .{ .entry = "createJoint", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "a stub returning a plausible handle no solver knows" },
+    .{ .entry = "destroyJoint", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "an entry that cannot be called at all — the type family is what makes it presentable" },
+    .{ .entry = "setJointMotor", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "a void stub reporting a write that never happened" },
+};
+
+/// This file, read at compile time, so the table's `test_name`s are confronted
+/// with the tests that actually exist rather than with a reader's memory.
+const this_file = @embedFile("forge_module_test.zig");
+
+test "every non-lifecycle entry carries a discriminating oracle" {
+    // (1) THE SET, both directions. Every non-lifecycle frozen entry appears in the
+    // table, and the table names no entry the surface does not have. A one-sided
+    // check would pass a table that covered twenty-nine of thirty, or one that
+    // covered twenty-nine phantoms.
+    const lifecycle = [_][]const u8{ "init", "deinit", "step" };
+    var expected: usize = 0;
+    for (frozen_entries) |name| {
+        var is_lifecycle = false;
+        for (lifecycle) |l| {
+            if (std.mem.eql(u8, name, l)) is_lifecycle = true;
+        }
+        if (is_lifecycle) continue;
+        expected += 1;
+        var found = false;
+        for (coverage) |c| {
+            if (std.mem.eql(u8, c.entry, name)) found = true;
+        }
+        if (!found) std.debug.print("UNCOVERED ENTRY: {s}\n", .{name});
+        try testing.expect(found);
+    }
+    try testing.expectEqual(expected, coverage.len);
+    // §12's number, minus the three lifecycle entries. Written out so the table's
+    // length is confronted with the SPEC and not only with `frozen_entries`.
+    try testing.expectEqual(@as(usize, 32 - 3), coverage.len);
+
+    for (coverage) |c| {
+        var in_surface = false;
+        for (frozen_entries) |name| {
+            if (std.mem.eql(u8, c.entry, name)) in_surface = true;
+        }
+        try testing.expect(in_surface);
+    }
+
+    // (2) EVERY NAMED TEST EXISTS, confronted with this file's own bytes. A row
+    // naming a test that was renamed or deleted is a row that guards nothing, and
+    // nothing else in the build would say so.
+    for (coverage) |c| {
+        var needle_buf: [256]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&needle_buf, "test \"{s}\" {{", .{c.test_name});
+        if (std.mem.indexOf(u8, this_file, needle) == null) {
+            std.debug.print("MISSING TEST for {s}: {s}\n", .{ c.entry, c.test_name });
+        }
+        try testing.expect(std.mem.indexOf(u8, this_file, needle) != null);
+    }
+    // NON-VACUITY on that search: a name that is NOT a test in this file is not
+    // found, so the twenty-nine hits above are not what the search always answers.
+    try testing.expect(std.mem.indexOf(u8, this_file, "test \"a test that does not exist\" {") == null);
+
+    // (3) NO TWO ENTRIES SHARE ONE PREDICATE. Rows may share a TEST — several
+    // entries are discriminated inside one scene — but never a `(test, neighbour)`
+    // pair, which would mean one assertion doing duty for two entries and one of
+    // them merely accompanied.
+    for (coverage, 0..) |a, i| {
+        for (coverage[i + 1 ..]) |b| {
+            const same = std.mem.eql(u8, a.test_name, b.test_name) and
+                std.mem.eql(u8, a.neighbour, b.neighbour);
+            if (same) std.debug.print("SHARED PREDICATE: {s} and {s}\n", .{ a.entry, b.entry });
+            try testing.expect(!same);
+        }
+    }
+}
+
+test "setAngularVelocity turns about the axis it was given" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE GAP M1.1.15.1 NAMED AND LEFT: its oracle asserted that the orientation
+    // CHANGED, not which axis — so an entry spinning about a fixed axis whatever it
+    // was asked passed it. Two bodies, same everything, different axis, is what
+    // tells them apart.
+    const about_y = try s.m.addBody(.{
+        .entity = .{ .index = 1, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+    const about_x = try s.m.addBody(.{
+        .entity = .{ .index = 2, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(10, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+
+    s.m.setAngularVelocity(about_y, av3(0, 8, 0));
+    s.m.setAngularVelocity(about_x, av3(8, 0, 0));
+    try s.m.step(fixed_dt);
+
+    const ry = (try s.m.getBodyTransform(about_y)).rotation.toArray();
+    const rx = (try s.m.getBodyTransform(about_x)).rotation.toArray();
+
+    // Each turned, which is what the old oracle asserted...
+    try testing.expect(!std.mem.eql(f32, &ry, &[_]f32{ 0, 0, 0, 1 }));
+    try testing.expect(!std.mem.eql(f32, &rx, &[_]f32{ 0, 0, 0, 1 }));
+    // ...and they turned DIFFERENTLY, which is what it could not. An entry ignoring
+    // the axis produces the same quaternion for both.
+    try testing.expect(!std.mem.eql(f32, &ry, &rx));
+
+    // And each about ITS OWN axis, componentwise: the vector part of a rotation about
+    // +Y is `(0, sin(θ/2), 0)`. Asserting only "different" would pass an entry that
+    // permuted the axes.
+    try testing.expect(@abs(ry[1]) > 1e-4);
+    try testing.expect(@abs(ry[0]) < 1e-6 and @abs(ry[2]) < 1e-6);
+    try testing.expect(@abs(rx[0]) > 1e-4);
+    try testing.expect(@abs(rx[1]) < 1e-6 and @abs(rx[2]) < 1e-6);
+}
+
+test "overlapShape tests the SHAPE where overlapAabb tests its box" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE SECOND GAP THE AUDIT FOUND. `overlapShape` was asserted for deduplication
+    // and for the absence of a cap, and never for the probe's GEOMETRY mattering —
+    // so an implementation testing the probe's bounding box would have passed every
+    // assertion the file carried.
+    //
+    // A unit box at the origin spans [-0.5, 0.5]. A radius-0.5 sphere centred at
+    // (0.9, 0.9, 0) has a bounding box of [0.4, 1.4] on both axes, which OVERLAPS
+    // the box's — but the sphere's surface is 0.566 from the box's nearest corner,
+    // which is beyond its radius. Box says yes, shape says no.
+    _ = try s.place(1, 0);
+    const probe = try s.m.createShape(.{ .sphere = .{ .radius = 0.5 } });
+
+    var out: [8]EntityId = undefined;
+    // The bounding boxes DO overlap — the non-vacuity of the whole test, and what
+    // makes the zero below a geometric answer rather than a probe that missed.
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapAabb(av3(0.4, 0.4, -0.5), av3(1.4, 1.4, 0.5), .{}, &out));
+    // The SHAPES do not.
+    try testing.expectEqual(@as(u32, 0), try s.m.overlapShape(.{
+        .shape = probe,
+        .position = av3(0.9, 0.9, 0),
+    }, &out));
+
+    // And the same probe moved onto the box DOES answer, so the zero above is a
+    // refusal and not an entry that never accepts.
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapShape(.{
+        .shape = probe,
+        .position = av3(0.2, 0, 0),
+    }, &out));
+}
