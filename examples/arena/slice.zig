@@ -26,6 +26,7 @@ const weld_etch = @import("weld_etch");
 const module = @import("forge_module");
 const physics = @import("forge_services");
 const sensor_events = @import("forge_sensor_events");
+const sync = @import("forge_sync");
 
 const World = core.ecs.World;
 const EventQueue = core.events.EventQueue;
@@ -37,12 +38,27 @@ const Diagnostic = weld_etch.diagnostics.Diagnostic;
 /// The rules, compiled into the slice so the example is one artefact.
 pub const gameplay_source = @embedFile("gameplay.etch");
 
-/// What the rules observed, read back from the resource they write.
+/// What the rules observed, read back from the resource they write — plus the
+/// PHYSICAL state a rule commanded, read back from the solver and from the ECS.
 pub const Observed = struct {
     /// Etch → Zig: the service answered that something is on the ray.
     wall_seen: i64,
     /// Zig → Etch: how many `TriggerEnter` events a rule saw.
     entered: i64,
+    /// Etch → Zig, MUTATION: `1` when the rule's `move_kinematic` returned, `-1` when
+    /// it threw and the rule's own `catch` ran. Zero means the rule never fired.
+    lift_driven: i64,
+    /// Etch → Zig, the CLOSED LOOP: a rule's query found the lift where a sibling rule
+    /// commanded it to be.
+    lift_seen: i64,
+    /// The lift's pose IN THE SOLVER, after the run.
+    lift_solver_y: f32,
+    /// The lift's pose in the ECS `Transform` — written by the wrapper's atomic mirror,
+    /// never by `syncOut`, which withholds from a `.gameplay` body.
+    lift_ecs_y: f32,
+    /// The lift's derived linear velocity in the ECS `Velocity`, mirrored in the same
+    /// call. It is what tells `move_kinematic` apart from a teleportation.
+    lift_ecs_vy: f32,
     /// Checker diagnostics. Zero, or the slice does not compile.
     diagnostics: usize,
 };
@@ -136,7 +152,9 @@ pub fn run(gpa: std.mem.Allocator, ticks: u32) !Observed {
         .position = av3(0, 20, 0),
     });
 
-    var svc_ctx: physics.Ctx = .{ .m = &m };
+    var journal: sync.in.Journal = .{};
+    defer journal.deinit(gpa);
+    var svc_ctx: physics.Ctx = .{ .m = &m, .ecs = &ecs, .journal = &journal };
     var registry: services.Registry = .{};
     defer registry.deinit(gpa);
     try registry.register(gpa, &physics.spec, &svc_ctx);
@@ -151,6 +169,27 @@ pub fn run(gpa: std.mem.Allocator, ticks: u32) !Observed {
     defer interp.deinit();
     interp.setServiceRegistry(&registry);
 
+    // --- the LIFT, and why it is spawned AFTER the interpreter compiles ---
+    // `Lift` is declared in `gameplay.etch`, so its `ComponentId` exists only once the
+    // interpreter has compiled the type declarations. The entity carries `Transform`
+    // and `Velocity` from `World.spawn` — the two the wrapper's atomic mirror writes —
+    // and it starts FIFTY METRES BELOW the probe ray, so nothing is on that ray until a
+    // rule moves it.
+    const lift_entity = try ecs.spawn(gpa, .{ .pos = .{ 30, -50, 0 } }, .{});
+    const lift_cid = ecs.registry.idOf("Lift") orelse return error.LiftComponentNotRegistered;
+    try ecs.addComponentDynamic(gpa, lift_entity, lift_cid, &[_]u8{0} ** 8);
+    const lift_body = try m.addBody(.{
+        .entity = lift_entity,
+        .body_type = .kinematic,
+        .shape = box,
+        .position = av3(30, -50, 0),
+    });
+    // GAMEPLAY authority, declared: the lift's pose is commanded by a rule, so `syncOut`
+    // must not publish over it and `syncIn` must not push the ECS back into the solver
+    // behind the wrapper's back. Both follow from the field, and the wrapper's journal
+    // mark is what settles the tick they share.
+    try ecs.addComponent(gpa, lift_entity, api.RigidBody, .{ .authority = .gameplay });
+
     var enter_bridge = weld_etch.event_bridge.Bridge(sensor_events.TriggerPair).init(enter_q, .{
         .type_id = core.rtti.computeTypeId(sensor_events.TriggerPair),
         .last_read = enter_q.currentHead(),
@@ -159,18 +198,43 @@ pub fn run(gpa: std.mem.Allocator, ticks: u32) !Observed {
     try interp.addEventSource(enter_bridge.source());
 
     // --- the frames ---
+    // THE NORMATIVE TICK ORDER, and the slice runs it whole since G11 — gameplay rules
+    // first, then the inbound seam, then the step, then the outbound seam
+    // (`engine-physics-forge.md` § *Autorite d'ecriture*). Before G11 the slice ran
+    // `step` and `syncOut` only, because no rule mutated anything; a rule that commands
+    // a pose makes `syncIn` part of what the slice must exercise.
     var t: u32 = 0;
     while (t < ticks) : (t += 1) {
-        try m.step(1.0 / 60.0);
-        _ = sensor_events.publish(&m.world, enter_q, exit_q);
+        ecs.beginFrame();
+        // The rules. They drain the event sources at the tick head, so what they see of
+        // Forge is the PREVIOUS tick's deltas — the one tick of latency this file's
+        // header states.
         _ = try interp.runFor(&ecs, 1);
+        _ = try sync.in.syncIn(gpa, &m.world, &ecs, &journal);
+        try m.step(1.0 / 60.0);
+        try sync.syncOut(gpa, &m.world, &ecs, null);
+        _ = sensor_events.publish(&m.world, enter_q, exit_q);
     }
 
     const rid = ecs.registry.idOf("ArenaState").?;
     const bytes = ecs.resources.getResource(rid).?;
     var wall: i64 = 0;
     var entered: i64 = 0;
+    var driven: i64 = 0;
+    var lift_seen: i64 = 0;
     @memcpy(std.mem.asBytes(&wall), bytes[0..8]);
     @memcpy(std.mem.asBytes(&entered), bytes[8..16]);
-    return .{ .wall_seen = wall, .entered = entered, .diagnostics = diags.items.len };
+    @memcpy(std.mem.asBytes(&driven), bytes[24..32]);
+    @memcpy(std.mem.asBytes(&lift_seen), bytes[32..40]);
+    const pose = sync.solverPose(&m.world, lift_body).?;
+    return .{
+        .wall_seen = wall,
+        .entered = entered,
+        .lift_driven = driven,
+        .lift_seen = lift_seen,
+        .lift_solver_y = pose.pos[1],
+        .lift_ecs_y = ecs.get(core.ecs.components.Transform, lift_entity).?.pos[1],
+        .lift_ecs_vy = ecs.get(api.Velocity, lift_entity).?.linear[1],
+        .diagnostics = diags.items.len,
+    };
 }

@@ -467,9 +467,16 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // on a body left asleep for many ticks, and the authority mirror reaching every body
     // of the entity rather than the elected one alone.
     // (2019 -> 2022, suite reported 2022 - 2003 passed + 19 skipped, macOS aarch64.)
+    // G11 adds seven: six oracles for the five mutation wrappers — `move_kinematic`'s
+    // derivation and atomic mirror, the journal mark's production path, `set_authority`,
+    // the sweep-versus-teleport contrast that separates the two character movers,
+    // `resize_character`'s three outcomes, and the election the wrappers share with the
+    // seam — plus the slice commanding a physical state from a rule and observing it
+    // from another.
+    // (2022 -> 2029, suite reported 2029 - 2010 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2020,
-        else => 2022,
+        .windows => 2027,
+        else => 2029,
     };
 }
 

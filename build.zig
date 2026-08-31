@@ -610,6 +610,11 @@ pub fn build(b: *std.Build) void {
     forge_services_module.addImport("weld_core", core_module);
     forge_services_module.addImport("foundation", foundation_module);
     forge_services_module.addImport("forge_module", forge_module);
+    // M1.1.15.2 G11 — the MUTATION half of the service resolves an entity to the body the
+    // seam drives and marks the seam's own journal, so it needs the seam. `forge_sync` is
+    // the only module that sees both the ECS and `PhysicsWorld`, which is exactly what a
+    // wrapper writing an ECS mirror needs.
+    forge_services_module.addImport("forge_sync", forge_sync_module);
     // M1.1.15.2 G7 — the bidirectional Etch slice. It is DRIVEN by a test rather
     // than left as a directory to read: a mechanism nothing executes is the defect
     // M1.1.15 named and this milestone has closed twice.
@@ -636,6 +641,7 @@ pub fn build(b: *std.Build) void {
     arena_slice_module.addImport("forge_module", forge_module);
     arena_slice_module.addImport("forge_services", forge_services_module);
     arena_slice_module.addImport("forge_sensor_events", forge_sensor_events_module);
+    arena_slice_module.addImport("forge_sync", forge_sync_module);
     arena_slice_module.addImport("foundation", foundation_module);
 
     const TestSpec = struct {
@@ -966,6 +972,7 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("forge_services", forge_services_module);
             t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+            t_mod.addImport("forge_sync", forge_sync_module);
         }
         if (spec.bindgen_detch) {
             t_mod.addImport("weld_etch", etch_module);

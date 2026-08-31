@@ -167,6 +167,11 @@ pub const SyncInResult = struct {
     /// transition. Counted apart from `poses_applied`, which counts the opposite
     /// direction — merging them would make the guard blind to which way the tick went.
     seeded: u32 = 0,
+    /// Bodies whose ECS state was RESTORED from the solver because an explicit
+    /// wrapper had already applied this tick. Counted apart from `seeded` for the
+    /// same reason: same direction, different cause, and a test that could not tell
+    /// them apart would pass on either.
+    restored: u32 = 0,
     /// Bodies this pass touched with a waking setter. The number that must stay
     /// at zero when nothing changed.
     woke: u32 = 0,
@@ -253,38 +258,42 @@ pub fn syncIn(
         // gameplay is entitled to start from.
         if (to_gameplay) {
             result.seeded += 1;
-            // READ FIRST, `getMut` ONLY ON A REAL DIFFERENCE — `sync.zig` carries the
-            // motive in full: `getMut` marks `changed_tick` unconditionally and
-            // `Changed<T>` is built on that mark, so publishing a bit-identical value
-            // would report a change that did not happen.
-            if (ecs.get(Transform, entity)) |t| {
-                const pose = sync.solverPose(pw, body).?;
-                if (!std.mem.eql(WorldReal, &t.pos, &pose.pos) or
-                    !std.mem.eql(WorldReal, &t.rot, &pose.rot))
-                {
-                    const w = ecs.getMut(Transform, entity).?;
-                    w.pos = pose.pos;
-                    w.rot = pose.rot;
-                }
-            }
-            if (body_type != .static) {
-                if (ecs.get(Velocity, entity)) |v| {
-                    const out = sync.solverVelocity(pw, body);
-                    if (!std.mem.eql(WorldReal, &v.linear, &out.linear) or
-                        !std.mem.eql(WorldReal, &v.angular, &out.angular))
-                    {
-                        const w = ecs.getMut(Velocity, entity).?;
-                        w.linear = out.linear;
-                        w.angular = out.angular;
-                    }
-                }
-            }
+            _ = sync.mirrorSolverState(ecs, entity, pw, body, body_type != .static);
             // The baseline advances, and it must: the values now in the ECS ARE the
             // solver's, so the marks this publication just left are not gameplay's
             // writes and consuming them next tick would be `syncIn` answering its own
             // publication.
             e.consumed_tick = now;
             continue;
+        }
+
+        // **AN EXPLICIT WRAPPER ALREADY APPLIED THIS TICK — the pass restores the
+        // mirror and consumes nothing** (M1.1.15.2 G11). `consumed_tick == now` at the
+        // HEAD of this pass can have exactly one cause: `Journal.markApplied`, called
+        // by a Tier 1 mutation wrapper during the gameplay phase. This pass is the only
+        // other writer and it stamps at its END, so the predicate is precise.
+        //
+        // **The restore is what keeps the mark from creating the very defect it
+        // prevents.** Skipping alone would be wrong: a rule that calls
+        // `physics.move_kinematic` and then writes `Transform` in the same tick leaves
+        // a value the tick predicate can never see again — `changedTick > baseline` is
+        // false when both are `now`, and it stays false forever after — so the ECS
+        // would hold one pose and the solver another, permanently and silently. Two
+        // sources answering differently about the same geometric fact are a defect,
+        // never an envelope.
+        //
+        // And PUSHING it instead is what the mark exists to prevent: the wrapper
+        // DERIVED both velocities from a target pose, while `setBodyTransform` is a
+        // teleportation that derives nothing — so the replay would leave the body at
+        // the raw pose carrying a velocity that describes a motion toward a target it
+        // is no longer heading to. The explicit operation wins the tick, and the ECS is
+        // brought back to what it did.
+        if (e.consumed_tick) |ct| {
+            if (ct == now) {
+                if (sync.mirrorSolverState(ecs, entity, pw, body, body_type != .static))
+                    result.restored += 1;
+                continue;
+            }
         }
 
         // `.gameplay → .solver` DOES push once, so the solver resumes from where
