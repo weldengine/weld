@@ -1380,3 +1380,58 @@ test "the registered system runs syncIn before step when a journal is attached" 
     try sched2.dispatchFrame(&ecs2, gpa, io, &jobs, fixed_dt_f32, null);
     try testing.expectApproxEqAbs(@as(Real, 0), pw2.bm.position(b2.body).?.toArray()[0], 1e-5);
 }
+
+test "the change baseline advances on a comparison without difference" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // **F8.** The baseline used to advance only when a value was APPLIED, so a body
+    // whose ECS and solver agree — which is every `.gameplay` body from creation until
+    // gameplay first moves it — kept `consumed_tick` at `null` FOREVER and was
+    // re-compared every tick. The tick predicate then filtered nothing, and the guard
+    // the two-predicate design exists for was carried entirely by the value comparison
+    // it was supposed to spare.
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // Tick 1 — the spawn stamped `Transform`, so the TICK predicate admits, the VALUE
+    // predicate refuses (ECS and solver agree), and nothing is applied.
+    const first = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), first.poses_applied);
+
+    // THE ASSERTION: the baseline moved anyway. Read through the journal itself, which
+    // is what distinguishes "examined and found equal" from "never looked at" — the two
+    // are indistinguishable from the outside, and that is why the defect was silent.
+    try testing.expect(journal.entries.items[0].consumed_tick != null);
+    const baseline = journal.entries.items[0].consumed_tick.?;
+
+    // Tick 2 — nobody touched the ECS, so the TICK predicate now refuses and the
+    // baseline does NOT move. Under the defect it stayed `null` here and the value
+    // comparison ran again.
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(baseline, journal.entries.items[0].consumed_tick.?);
+
+    // A REAL write moves it again and is applied — so the advance above is a filter and
+    // not a journal that stopped recording.
+    ecs.beginFrame();
+    ecs.getMut(Transform, b.entity).?.pos[0] = 3;
+    const applied = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), applied.poses_applied);
+    try testing.expect(journal.entries.items[0].consumed_tick.? > baseline);
+
+    // And a `getMut` that changes NOTHING advances the baseline without applying —
+    // the exact case the fix is about, asserted on both halves at once.
+    const after_real = journal.entries.items[0].consumed_tick.?;
+    ecs.beginFrame();
+    _ = ecs.getMut(Transform, b.entity).?;
+    const touched = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), touched.poses_applied);
+    try testing.expectEqual(@as(u32, 0), touched.woke);
+    try testing.expect(journal.entries.items[0].consumed_tick.? > after_real);
+}

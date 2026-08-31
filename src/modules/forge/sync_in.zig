@@ -200,12 +200,25 @@ pub fn syncIn(
         const takes_velocity = body_type != .static;
 
         var applied_here = false;
+        // **F8 — THE BASELINE ADVANCES ON A COMPARISON WITHOUT DIFFERENCE.** It used
+        // to advance only when a value was APPLIED, so a body whose ECS and solver
+        // agree — which is every `.gameplay` body from its creation until gameplay
+        // first moves it — kept `consumed_tick` at `null` forever and was RE-COMPARED
+        // on every tick. The tick predicate then filtered nothing at all, and the
+        // guard the two-predicate design exists for was carried entirely by the value
+        // comparison it was supposed to spare.
+        //
+        // What is recorded is that the change was CONSUMED, which examining it and
+        // finding no difference is: the write that stamped `changed_tick` has been
+        // looked at and answered.
+        var examined = false;
 
         if (ecs.get(Transform, entity)) |t| {
             // PREDICATE 1 — the tick, which filters the bulk without reading a
             // value. A transition forces the read regardless: the authority
             // changed, not the pose, so nothing stamped the component.
             if (to_solver or changedSince(ecs, Transform, entity, e.consumed_tick)) {
+                examined = true;
                 const pose = sync.solverPose(pw, body).?;
                 // PREDICATE 2 — the value, because `getMut` marks unconditionally
                 // and a system that took one and changed nothing would otherwise
@@ -227,6 +240,7 @@ pub fn syncIn(
         if (takes_velocity) {
             if (ecs.get(Velocity, entity)) |v| {
                 if (to_solver or changedSince(ecs, Velocity, entity, e.consumed_tick)) {
+                    examined = true;
                     const out = sync.solverVelocity(pw, body);
                     if (!std.mem.eql(WorldReal, &v.linear, &out.linear)) {
                         pw.setLinearVelocity(body, cross.vec3ToSolver(WorldVec3.fromArray(v.linear)));
@@ -247,8 +261,11 @@ pub fn syncIn(
             // unconditionally, the velocity setters before writing — so ONE
             // count covers them and it is the number the guard watches.
             result.woke += 1;
-            e.consumed_tick = now;
         }
+        // The baseline moves on EXAMINATION, not on application. `woke` stays on
+        // application, which is what the no-wake guard reads — the two counters
+        // answer different questions and are deliberately not merged.
+        if (examined) e.consumed_tick = now;
     }
 
     return result;

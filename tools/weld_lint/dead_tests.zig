@@ -452,9 +452,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // PRESENCE rather than being deleted), and the bidirectional slice run end to end in
     // the new `tests/physics/arena_slice_test.zig`.
     // (2010 -> 2013, suite reported 2013 - 1994 passed + 19 skipped, macOS aarch64.)
+    // THE REPRISE. G8 adds five, one per external-review finding in the perimeter plus the
+    // header: the delegated wrapper with its effect asserted through it, the empty-slice size
+    // query on `getTriggerOverlaps`, `point_query_count` signalling its truncation, the change
+    // baseline advancing on examination, and the header confronted with its own bytes.
+    // (2013 -> 2018, suite reported 2018 - 1999 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2011,
-        else => 2013,
+        .windows => 2016,
+        else => 2018,
     };
 }
 

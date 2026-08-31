@@ -79,6 +79,8 @@ pub const ShapeDescriptor = types.ShapeDescriptor;
 pub const BodyDescriptor = types.BodyDescriptor;
 /// One oriented trigger overlap, in ENTITY identities and never body handles.
 pub const TriggerOverlap = types.TriggerOverlap;
+/// Optional backend extensions, consulted through the wrapper's `hasCapability`.
+pub const Capability = types.Capability;
 /// Physics pose (position + rotation, no scale).
 pub const Transform = types.Transform;
 

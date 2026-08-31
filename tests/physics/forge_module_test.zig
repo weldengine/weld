@@ -1341,6 +1341,96 @@ test "Forge3DModule satisfies the frozen surface guard" {
     try testing.expectEqual(@as(u32, 1), iface.WELD_PHYSICS_PROTOCOL_VERSION);
 }
 
+// --- M1.1.15.2 G8 — the corrections of the external review ---------------------
+
+test "the wrapper DELEGATES every entry, and delegation reaches the implementation" {
+    // **F1.** `engine-tier-interfaces.md` §1 declares one function per entry on the
+    // returned type; until G8 it returned `struct { impl: Impl }` and nothing else — a
+    // type that validated an implementation and exposed none of it. The G7 test could
+    // not see that, having asserted only that the field exists, which is why the
+    // assertion below is on the DECLARATIONS and the one after it on the EFFECT.
+    const Wrapped = iface.PhysicsModule(Forge3DModule);
+    inline for (frozen_entries) |name| {
+        if (!@hasDecl(Wrapped, name)) std.debug.print("NOT DELEGATED: {s}\n", .{name});
+        try testing.expect(@hasDecl(Wrapped, name));
+    }
+    // `hasCapability` rides along and is NOT a thirty-third entry: it answers `false`
+    // for an implementation declaring none, which is why the assert block omits it.
+    // Asserted so its presence is a decision rather than an accident of the count.
+    try testing.expect(@hasDecl(Wrapped, "hasCapability"));
+    try testing.expectEqual(@as(usize, 32), iface.frozen_entry_count);
+
+    // NON-VACUITY: `@hasDecl` on this type reports a false for something really absent,
+    // so the thirty-two positives are not the answer it always gives.
+    try testing.expect(!@hasDecl(Wrapped, "notAnEntry"));
+
+    // THE DELEGATION REACHES THE IMPLEMENTATION. A wrapper carrying thirty-two
+    // signatures that returned defaults would pass every assertion above.
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+    var w = try Wrapped.init(&fx.ctx);
+    defer w.deinit();
+
+    const shape = try w.createShape(.{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const body = try w.addBody(.{
+        .entity = .{ .index = 3, .generation = 0 },
+        .body_type = .static,
+        .shape = shape,
+        .position = av3(7, 0, 0),
+    });
+    // Read back THROUGH the wrapper: the pose is the one addBody was given, so the two
+    // calls reached the same impl and neither invented anything.
+    try testing.expectApproxEqAbs(@as(f32, 7), (try w.getBodyTransform(body)).position.toArray()[0], 1e-4);
+    // And a query through the wrapper answers about that body.
+    try testing.expect(w.raycastAny(.{ .origin = av3(0, 0, 0), .direction = av3(1, 0, 0), .max_distance = 100 }));
+    // `hasCapability` is the one non-delegation: this impl declares none, so it is false
+    // rather than a compile error.
+    try testing.expect(!w.hasCapability(.advanced_joints));
+}
+
+test "getTriggerOverlaps answers the required count on an empty slice" {
+    // **F6.** §12: "`error.BufferTooSmall` quand l'ensemble ne tient pas, avec le compte
+    // requis obtenable en passant une tranche vide". The first half was transcribed at
+    // G5a and the second was not, so an empty slice — a caller ASKING how big a buffer
+    // must be — got the refusal instead of the answer, leaving it with the question it
+    // came with.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .is_trigger = true,
+    });
+    _ = try s.place(11, 0.1);
+    _ = try s.place(12, -0.1);
+    try s.m.step(1.0 / 60.0);
+
+    // THE SIZE QUERY. Zero-length slice, no error, the required count.
+    var none: [0]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&none));
+
+    // The refusal is UNCHANGED for a slice that is present and too small — the two
+    // cases are distinct and the fix must not have collapsed them.
+    var one: [1]api.TriggerOverlap = undefined;
+    try testing.expectError(error.BufferTooSmall, s.m.getTriggerOverlaps(&one));
+
+    // The count the size query gave is the one that fits, which is what makes it usable
+    // rather than merely non-erroring.
+    var exact: [2]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&exact));
+
+    // An empty state answers 0 through the same path, and not an error.
+    var empty_scene = try Scene.init(gpa);
+    defer empty_scene.deinit(gpa);
+    try empty_scene.m.step(1.0 / 60.0);
+    try testing.expectEqual(@as(u32, 0), try empty_scene.m.getTriggerOverlaps(&none));
+}
+
 // --- M1.1.15.2 G6b — the coverage proof ---------------------------------------
 
 /// One row of the coverage map: an entry, the test that DISCRIMINATES it, and

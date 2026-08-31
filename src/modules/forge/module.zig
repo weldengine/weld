@@ -231,6 +231,16 @@ pub const Forge3DModule = struct {
     /// deduplicated at step 10 bis, and this copies it.
     pub fn getTriggerOverlaps(self: *Forge3DModule, out: []api.TriggerOverlap) anyerror!u32 {
         const pairs = self.world.sensors.current.items;
+        // THE SECOND HALF OF §12's CONTRACT, and G8 is where it lands: "le compte
+        // requis obtenable en passant une tranche vide". An EMPTY slice is a SIZE
+        // QUERY and not a failed read — a caller that has no buffer yet is asking
+        // how big one must be, and answering `BufferTooSmall` to that leaves it with
+        // the same question it came with. The first half — refusal rather than
+        // truncation — was transcribed at G5a and this was not.
+        //
+        // Placed BEFORE the fit test, or an empty slice against a non-empty state
+        // would take the refusal branch, which is exactly the defect.
+        if (out.len == 0) return @intCast(pairs.len);
         if (pairs.len > out.len) return error.BufferTooSmall;
         for (pairs, 0..) |p, i| {
             out[i] = .{ .trigger_entity = p.trigger, .other_entity = p.other };

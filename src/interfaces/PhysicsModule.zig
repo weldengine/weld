@@ -1,44 +1,34 @@
 //! `src/interfaces/PhysicsModule.zig` — the Tier 1 physics interface, and the first file of
 //! `src/interfaces/`.
 //!
-//! **THIS FILE IS NOT FROZEN.** The freeze is M1.1.15.2 and it is what brings
-//! `WELD_PHYSICS_PROTOCOL_VERSION`, the comptime surface guards, and the normative update of
-//! `engine-tier-interfaces.md`. Until then this file may change freely, and the absence of
-//! the protocol constant is asserted below so that nobody reads its silence as a freeze
-//! already taken.
+//! **THIS FILE IS FROZEN.** `WELD_PHYSICS_PROTOCOL_VERSION` is declared below and the
+//! comptime surface guard covers all thirty-two entries; no entry may be added, removed or
+//! re-typed without bumping the constant. The freeze had already moved twice before landing
+//! here — M1.1.15, then M1.1.15.1 — and it does not move a third time.
 //!
-//! **What it holds today, and why not more.** `engine-tier-interfaces.md` §1 declares the
-//! interface as `pub fn PhysicsModule(comptime Impl: type) type` whose comptime block
-//! `assertFn`s thirty-two entries. That block is not written here, for ONE measured reason —
-//! and it carried a second until this milestone removed it:
+//! **THIS PARAGRAPH AND THE TEST BELOW MOVE TOGETHER, and it is written here because they did
+//! not.** Until M1.1.15.2 G7 this header said the file was NOT frozen and that the protocol
+//! constant was absent, with a test asserting exactly that absence — a claim built to go red
+//! the day the constant appeared. At G7 the constant landed and the TEST was inverted, in the
+//! same file and the same commit, while this prose was not re-read. The guard moved and the
+//! declaration it guarded stayed: "a correction added without deleting what it replaces",
+//! and the fact that both halves were open in one editor at one moment is the datum —
+//! proximity does not help, it masks. Corrected at G8 on the external review's finding.
 //!
-//!   - the assert block IS the surface guard, and surface guards are M1.1.15.2's by the
-//!     milestone's own scope. A guard that checked three of the thirty-two entries would
-//!     be worse than no guard, because an implementation missing the other twenty-nine
-//!     would pass it — a check that under-checks reads as a check.
+//! **The count, and the two numbers are distinct rather than one of them being wrong.**
+//! `engine-tier-interfaces.md` §12 disambiguates them: the surface carries **thirty-two**
+//! `assertFn`, of which **twenty-nine** exclude `init`, `deinit` and `step`. The block guards
+//! the SURFACE, so it is the thirty-two that bound it; a guard built on twenty-nine passes an
+//! implementation missing any of the three lifecycle entries, which is the very failure mode a
+//! surface guard exists to close. Both are exported below so a consumer reads them rather than
+//! recounting.
 //!
-//!     Thirty-two and not twenty-nine, and the two numbers are distinct rather than one of
-//!     them being wrong: `engine-tier-interfaces.md` §12 disambiguates them — the surface
-//!     carries **thirty-two** `assertFn`, of which **twenty-nine** exclude `init`, `deinit`
-//!     and `step`. The assert block guards the surface, so it is the thirty-two that bound
-//!     it; a guard built on twenty-nine would pass an implementation missing any of the
-//!     three lifecycle entries, which is the very failure mode this paragraph names.
-//!
-//!     THE THREE NUMBERS MOVED TOGETHER AT M1.1.15.2 G5a, and they had already parted from
-//!     their source: this header read 30 / 27 while §12 had carried 32 / 29 since
-//!     2026-08-30 — `getTriggerOverlaps` entered at §12 version 0.12 and `setJointMotor` at
-//!     0.14. Corrected here rather than left for G7's rewrite to carry, because a number
-//!     that cites a document it no longer matches is the defect this file's own paragraph
-//!     is about.
-//!   - **the second reason is gone, and its removal is the point.** It read that the
-//!     block's first entry is `init`, typed `fn (*core.ModuleContext) anyerror!Impl`, and
-//!     that `ModuleContext` *"does not exist in this repository"* — a measurement that was
-//!     exact when it was written and that **M1.1.15.1 gate A obsoleted by minting the type**
-//!     (`src/core/module_context.zig`), the corpus having removed `asset_loader` from the
-//!     context before that. It is deleted rather than softened: a text that asserts more
-//!     than its oracle establishes is a defect, and this one asserted a measurement whose
-//!     object is gone. What remains true, and sufficient, is the clause above — the block is
-//!     absent because surface guards are M1.1.15.2's, never because the type was missing.
+//! **The wrapper delegates, and it did not.** §1 declares one function per entry on the
+//! returned type; until G8 this returned `struct { impl: Impl }` and nothing else — a type that
+//! validated an implementation and exposed none of it. The freeze test could not see it,
+//! having asserted only that the field exists. `hasCapability` rides along and is NOT a
+//! thirty-third entry: it answers `false` for an implementation declaring none, which is why it
+//! is absent from the assert block.
 //!
 //! What DOES land here is the thing the freeze cannot wait for: the contract of the three
 //! body pose and velocity entries, which lived in `forge/api/types.zig` as a day-1 mirror
@@ -227,6 +217,135 @@ pub fn PhysicsModule(comptime Impl: type) type {
     }
     return struct {
         impl: Impl,
+
+        // --- The delegated surface (M1.1.15.2 G8) --------------------------------
+        //
+        // **§1 declares ONE function per entry, and this returned nothing but the
+        // field.** A type that validates an implementation and exposes none of it is
+        // half the interface: the assert block is the CONTRACT, and these are the
+        // SURFACE a caller holds. Without them `PhysicsModule(Impl)` is a compile-time
+        // predicate wearing the name of a type, and no caller can use the thing it
+        // guards — which the freeze test could not see, having asserted only that the
+        // field exists.
+        //
+        // Each body is the delegation and nothing else: no defaulting, no logging, no
+        // conversion. A wrapper that did anything of its own would be a second place
+        // where the interface's semantics live.
+
+        pub fn init(ctx: *core.ModuleContext) anyerror!@This() {
+            return .{ .impl = try Impl.init(ctx) };
+        }
+        pub fn deinit(self: *@This()) void {
+            self.impl.deinit();
+        }
+        pub fn step(self: *@This(), dt: f32) anyerror!void {
+            return self.impl.step(dt);
+        }
+
+        pub fn addBody(self: *@This(), desc: api.BodyDescriptor) anyerror!api.BodyId {
+            return self.impl.addBody(desc);
+        }
+        pub fn removeBody(self: *@This(), id: api.BodyId) void {
+            self.impl.removeBody(id);
+        }
+        pub fn setBodyTransform(self: *@This(), id: api.BodyId, pos: WorldVec3, rot: WorldQuat) void {
+            self.impl.setBodyTransform(id, pos, rot);
+        }
+        pub fn moveKinematic(self: *@This(), id: api.BodyId, pos: WorldVec3, rot: WorldQuat, dt: f32) void {
+            self.impl.moveKinematic(id, pos, rot, dt);
+        }
+        pub fn getBodyTransform(self: *@This(), id: api.BodyId) anyerror!api.Transform {
+            return self.impl.getBodyTransform(id);
+        }
+        pub fn setLinearVelocity(self: *@This(), id: api.BodyId, vel: WorldVec3) void {
+            self.impl.setLinearVelocity(id, vel);
+        }
+        pub fn setAngularVelocity(self: *@This(), id: api.BodyId, vel: WorldVec3) void {
+            self.impl.setAngularVelocity(id, vel);
+        }
+        pub fn addForce(self: *@This(), id: api.BodyId, force: WorldVec3) void {
+            self.impl.addForce(id, force);
+        }
+        pub fn addImpulse(self: *@This(), id: api.BodyId, impulse: WorldVec3) void {
+            self.impl.addImpulse(id, impulse);
+        }
+
+        pub fn createShape(self: *@This(), desc: api.ShapeDescriptor) anyerror!api.ShapeId {
+            return self.impl.createShape(desc);
+        }
+        pub fn destroyShape(self: *@This(), id: api.ShapeId) void {
+            self.impl.destroyShape(id);
+        }
+
+        pub fn raycast(self: *@This(), q: api.RaycastQuery) ?api.RaycastHit {
+            return self.impl.raycast(q);
+        }
+        pub fn raycastAny(self: *@This(), q: api.RaycastQuery) bool {
+            return self.impl.raycastAny(q);
+        }
+        pub fn raycastAll(self: *@This(), q: api.RaycastQuery, out: []api.RaycastHit) anyerror!u32 {
+            return self.impl.raycastAll(q, out);
+        }
+        pub fn shapeCast(self: *@This(), q: api.ShapeCastQuery) anyerror!?api.ShapeCastHit {
+            return self.impl.shapeCast(q);
+        }
+        pub fn overlapShape(self: *@This(), q: api.OverlapQuery, out: []api.EntityId) anyerror!u32 {
+            return self.impl.overlapShape(q, out);
+        }
+        pub fn overlapAabb(self: *@This(), min: WorldVec3, max: WorldVec3, filter: api.PhysicsQueryFilter, out: []api.EntityId) anyerror!u32 {
+            return self.impl.overlapAabb(min, max, filter, out);
+        }
+        pub fn pointQuery(self: *@This(), point: WorldVec3, filter: api.PhysicsQueryFilter, out: []api.EntityId) anyerror!u32 {
+            return self.impl.pointQuery(point, filter, out);
+        }
+        pub fn closestPoint(self: *@This(), point: WorldVec3, max_distance: f32, filter: api.PhysicsQueryFilter) ?api.ClosestPointResult {
+            return self.impl.closestPoint(point, max_distance, filter);
+        }
+
+        pub fn getTriggerOverlaps(self: *@This(), out: []api.TriggerOverlap) anyerror!u32 {
+            return self.impl.getTriggerOverlaps(out);
+        }
+
+        pub fn createJoint(self: *@This(), desc: api.JointDescriptor) anyerror!api.JointId {
+            return self.impl.createJoint(desc);
+        }
+        pub fn destroyJoint(self: *@This(), id: api.JointId) void {
+            self.impl.destroyJoint(id);
+        }
+        pub fn setJointMotor(self: *@This(), id: api.JointId, motor: ?api.JointMotor) anyerror!void {
+            return self.impl.setJointMotor(id, motor);
+        }
+
+        pub fn createCharacter(self: *@This(), desc: api.CharacterDescriptor) anyerror!api.CharacterId {
+            return self.impl.createCharacter(desc);
+        }
+        pub fn destroyCharacter(self: *@This(), id: api.CharacterId) void {
+            self.impl.destroyCharacter(id);
+        }
+        pub fn moveCharacter(self: *@This(), id: api.CharacterId, displacement: WorldVec3, dt: f32) anyerror!api.CharacterMoveResult {
+            return self.impl.moveCharacter(id, displacement, dt);
+        }
+        pub fn resizeCharacter(self: *@This(), id: api.CharacterId, radius: f32, height: f32) anyerror!bool {
+            return self.impl.resizeCharacter(id, radius, height);
+        }
+        pub fn setCharacterPosition(self: *@This(), id: api.CharacterId, pos: WorldVec3) void {
+            self.impl.setCharacterPosition(id, pos);
+        }
+        pub fn getCharacterInnerBody(self: *@This(), id: api.CharacterId) anyerror!?api.BodyId {
+            return self.impl.getCharacterInnerBody(id);
+        }
+
+        /// Optional extensions — the caller checks before calling.
+        ///
+        /// NOT a thirty-third entry, and it is the one function here that is not a
+        /// bare delegation: it answers `false` for an implementation that declares
+        /// none, which is why it is absent from the assert block. Counting it among
+        /// the entries would make the block's size 33 and every number derived from
+        /// it wrong.
+        pub fn hasCapability(self: *@This(), cap: api.Capability) bool {
+            if (@hasDecl(Impl, "hasCapability")) return self.impl.hasCapability(cap);
+            return false;
+        }
     };
 }
 
@@ -382,4 +501,40 @@ test "the three signatures are written at the world scalar, not at a literal f32
 
     const a = @typeInfo(SetAngularVelocity).@"fn";
     try testing.expectEqual(WorldVec3, a.params[1].type.?);
+}
+
+test "the header's claim and this test are one thing, checked against the file" {
+    // **THE ORACLE FOR THE DRIFT THAT PRODUCED G8.** At G7 this test was inverted and
+    // the header prose it guarded was not, in the same file and the same commit. A test
+    // asserting a fact ABOUT the file, while the file states the opposite in prose, is
+    // a guard that cannot see the thing it guards.
+    //
+    // So the claim is confronted with the header's own bytes. A future edit that says
+    // "NOT FROZEN" again, or that removes the frozen statement, reddens here — which
+    // the previous shape could not do at any price.
+    // **BOTH NEEDLES ARE BUILT BY CONCATENATION, and that is not a style choice.**
+    // This file embeds ITSELF, so a literal needle appears in the searched corpus by
+    // virtue of being written here: the negative would fire on its own text — it did,
+    // on the first run — and, worse, the POSITIVE would pass on its own text even if
+    // the header had lost the claim entirely. A tautology and a false alarm from the
+    // same cause. Concatenated at comptime, neither string exists contiguously in the
+    // source, so the only matches are the header's.
+    const header = @embedFile("PhysicsModule.zig");
+    const frozen_claim = "**THIS FILE IS " ++ "FROZEN.**";
+    const stale_claim = "THIS FILE IS " ++ "NOT FROZEN";
+    try testing.expect(std.mem.indexOf(u8, header, frozen_claim) != null);
+    try testing.expect(std.mem.indexOf(u8, header, stale_claim) == null);
+    // And the constant the header claims is really there — the two halves asserted
+    // against each other, which is what "move together" means mechanically.
+    try testing.expect(@hasDecl(@This(), "WELD_PHYSICS_PROTOCOL_VERSION"));
+    try testing.expectEqual(@as(u32, 1), WELD_PHYSICS_PROTOCOL_VERSION);
+
+    // NON-VACUITY, and its needle is CONCATENATED TOO — which is the point rather than
+    // a repetition. The first version of this control was a literal, and it failed:
+    // written here, it was in the file. Every needle over a self-embedded corpus has
+    // the same hazard, the control included, and patching only the two that carry the
+    // claim would have left the control the one thing that could not fail honestly.
+    const absent = "THIS FILE IS " ++ "MADE OF CHEESE";
+    try testing.expect(std.mem.indexOf(u8, header, absent) == null);
+    try testing.expect(std.mem.indexOf(u8, header, "the Tier 1 physics interface") != null);
 }

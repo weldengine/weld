@@ -125,8 +125,20 @@ pub fn raycastDistance(
     return api.precision.worldToEtch(hit.distance);
 }
 
-/// How many entities the point lies inside. Distinct entities, the adapter
-/// having already deduplicated bodies onto entities (§1.11.14).
+/// The service's fixed staging for the count entry. Named rather than inlined so
+/// the bound the caller meets and the bound the code enforces are one thing.
+pub const point_query_capacity: usize = 64;
+
+/// How many entities the point lies inside. Distinct entities, the adapter having
+/// already deduplicated bodies onto entities (§1.11.14).
+///
+/// **SIGNALS its truncation instead of returning `min(total, capacity)` under a
+/// doc comment that says "total".** The service surface carries no slice, so this
+/// entry stages into a fixed buffer; a count equal to the capacity CANNOT be told
+/// from a larger one, so both are refused. Refusing a legitimate exactly-`capacity`
+/// answer is the safe direction: a caller that receives an error learns there is a
+/// bound, where one that receives `64` for a set of two hundred learns nothing and
+/// acts on it.
 pub fn pointQueryCount(
     ctx: *Ctx,
     x: f64,
@@ -134,8 +146,9 @@ pub fn pointQueryCount(
     z: f64,
     layer_mask: i64,
 ) !i64 {
-    var buf: [64]api.EntityId = undefined;
+    var buf: [point_query_capacity]api.EntityId = undefined;
     const n = try ctx.m.pointQuery(vec(x, y, z), .{ .layer_mask = @truncate(@as(u64, @bitCast(layer_mask))) }, &buf);
+    if (n >= point_query_capacity) return error.TooManyResults;
     return @intCast(n);
 }
 

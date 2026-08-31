@@ -227,6 +227,26 @@ pub const ShapeDescriptor = union(ShapeType) {
     empty: void,
 };
 
+/// Optional extensions a physics backend may declare
+/// (`engine-tier-interfaces.md` §1). The CORE joints are always supported;
+/// `advanced_joints` gates the three extension types of `JointType`.
+///
+/// Minted at M1.1.15.2 G8 with the delegated wrapper, which is the first thing
+/// that needs it: `hasCapability` is the one wrapper function that is not a bare
+/// delegation — it answers `false` for an implementation declaring none, which is
+/// why it is absent from the assert block and does not move the count of 32.
+pub const Capability = enum {
+    destruction,
+    soft_bodies,
+    cloth,
+    hair,
+    vehicles,
+    fluid,
+    physics_fields,
+    /// pulley, gear, rack_and_pinion.
+    advanced_joints,
+};
+
 /// The result of one trigger overlap — an ORIENTED pair of entity identities,
 /// never body handles (`engine-physics-solver.md` §1.13.8). A state expressed in
 /// bodies would produce two entries where one entity carries two colliders, for a

@@ -206,3 +206,65 @@ test "the two sensor deltas reach the Tier 0 bus as TriggerEnter and TriggerExit
     try testing.expectEqual(@as(u32, 0), r3.entered);
     try testing.expectEqual(@as(u32, 1), r3.exited);
 }
+
+// --- M1.1.15.2 G8 — F7 --------------------------------------------------------
+
+test "point_query_count signals its truncation instead of returning a capped total" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var scheduler = core.ecs.SystemScheduler.init();
+    defer scheduler.deinit(gpa);
+    var mod_ctx = core.ModuleContext{
+        .world = &ecs,
+        .persistent_allocator = gpa,
+        .system_scheduler = &scheduler,
+        .job_scheduler = @ptrFromInt(@alignOf(core.jobs.scheduler.Scheduler)),
+    };
+    var m = try module.Forge3DModule.init(&mod_ctx);
+    defer m.deinit();
+    var ctx: physics.Ctx = .{ .m = &m };
+
+    const box = try m.createShape(.{ .box = .{ .half_extents = av3(1, 1, 1) } });
+    const cap = physics.point_query_capacity;
+
+    // BELOW the capacity: a real count, and it is the count of ENTITIES.
+    for (0..cap - 1) |i| {
+        _ = try m.addBody(.{
+            .entity = .{ .index = @intCast(i + 1), .generation = 0 },
+            .body_type = .static,
+            .shape = box,
+            .position = av3(0, 0, 0),
+        });
+    }
+    try testing.expectEqual(@as(i64, @intCast(cap - 1)), try physics.pointQueryCount(&ctx, 0, 0, 0, -1));
+
+    // AT the capacity: refused. A count equal to the capacity cannot be told from a
+    // larger one, so both are refused — refusing a legitimate exactly-`cap` answer is
+    // the safe direction, where returning it would be indistinguishable from a set of
+    // two hundred reported as `cap`.
+    _ = try m.addBody(.{
+        .entity = .{ .index = @intCast(cap), .generation = 0 },
+        .body_type = .static,
+        .shape = box,
+        .position = av3(0, 0, 0),
+    });
+    try testing.expectError(error.TooManyResults, physics.pointQueryCount(&ctx, 0, 0, 0, -1));
+
+    // BEYOND it: still refused, and the point of asserting both is that the entry does
+    // not start answering again once the set grows past the buffer.
+    for (0..20) |i| {
+        _ = try m.addBody(.{
+            .entity = .{ .index = @intCast(cap + i + 1), .generation = 0 },
+            .body_type = .static,
+            .shape = box,
+            .position = av3(0, 0, 0),
+        });
+    }
+    try testing.expectError(error.TooManyResults, physics.pointQueryCount(&ctx, 0, 0, 0, -1));
+
+    // NON-VACUITY: a point OUTSIDE everything still answers zero rather than erroring,
+    // so the refusals above are about the bound and not about the entry having stopped
+    // working.
+    try testing.expectEqual(@as(i64, 0), try physics.pointQueryCount(&ctx, 500, 0, 0, -1));
+}
