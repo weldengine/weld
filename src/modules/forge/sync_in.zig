@@ -8,13 +8,24 @@
 //!
 //! **The matrix this file implements** (`body_type × authority`):
 //!
-//! | `body_type` | `authority` | `syncIn`                 | `syncOut`        | integrated |
-//! |-------------|-------------|--------------------------|------------------|------------|
-//! | `dynamic`   | `.solver`   | nothing                  | pose + velocity  | yes        |
-//! | `dynamic`   | `.gameplay` | pose + velocity, on change | NOTHING        | yes, discarded |
-//! | `kinematic` | `.solver`   | nothing                  | velocity only    | no         |
-//! | `kinematic` | `.gameplay` | pose + velocity, on change | NOTHING        | no         |
-//! | `static`    | either      | pose only, on change     | nothing          | no         |
+//! | `body_type` | `authority` | `syncIn`                   | `syncOut`       | during `step` |
+//! |-------------|-------------|----------------------------|-----------------|---------------|
+//! | `dynamic`   | `.solver`   | nothing                    | pose + velocity | integrated normally |
+//! | `dynamic`   | `.gameplay` | pose + velocity, on change | NOTHING         | **integrated, inverse mass set to zero** |
+//! | `kinematic` | `.solver`   | nothing                    | velocity only   | pose imposed |
+//! | `kinematic` | `.gameplay` | pose + velocity, on change | NOTHING         | pose imposed |
+//! | `static`    | either      | pose only, on change       | nothing         | not integrated |
+//!
+//! **The zeroed inverse mass is this pass's doing**, and the flag it writes is the
+//! only way the declaration reaches the solver: `RigidBody.authority` is a Tier 1
+//! component and `forge_3d` imports no ECS. The regime and what it repairs are on
+//! `api/authority.zig` and on `forge_3d/body.zig`'s `BodyFlags`.
+//!
+//! **The two transitions are not symmetric.** `gameplay → solver` pushes the ECS
+//! state into the solver; `solver → gameplay` PUBLISHES the solver's state into the
+//! ECS and consumes nothing that tick. Reversing the second one teleports a body whose
+//! ECS pose `syncOut` had not been keeping current — a sleeper, or a body previously
+//! withheld — backward to that stale pose, permanently.
 //!
 //! **TWO CONJOINT PREDICATES, and the conjunction is the point.** `changed_tick`
 //! filters the bulk without reading any value — the question the tick answers
@@ -152,6 +163,10 @@ pub const SyncInResult = struct {
     poses_applied: u32 = 0,
     velocities_applied: u32 = 0,
     transitions: u32 = 0,
+    /// Bodies whose ECS state was SEEDED FROM THE SOLVER at a `.solver → .gameplay`
+    /// transition. Counted apart from `poses_applied`, which counts the opposite
+    /// direction — merging them would make the guard blind to which way the tick went.
+    seeded: u32 = 0,
     /// Bodies this pass touched with a waking setter. The number that must stay
     /// at zero when nothing changed.
     woke: u32 = 0,
@@ -194,11 +209,25 @@ pub fn syncIn(
     const now = ecs.current_tick;
 
     for (pw.bodies.items, 0..) |entry, reg| {
-        if (!table.publishes[reg]) continue;
         const body = entry.id;
         const entity = pw.bm.entity(body) orelse continue;
-        const body_type = pw.bm.bodyType(body) orelse continue;
         const auth = sync.authorityOf(ecs, entity);
+
+        // MIRROR THE DECLARATION INTO THE SOLVER, for EVERY registration and not only
+        // for the elected one. The election governs which body is POSE-DRIVEN — one
+        // entity, one collider answering for it — and it says nothing about mass: every
+        // collider of a gameplay-driven entity must push as an infinite mass, or the
+        // same entity would answer with two different regimes depending on which of its
+        // bodies a contact touched. That is the "two sources answering differently
+        // about the same fact" this seam refuses elsewhere.
+        //
+        // Written UNCONDITIONALLY rather than on a transition: the flag is a mirror,
+        // and a mirror that is only refreshed on an event is a mirror that drifts. It
+        // composes no wake, which is why writing it every tick costs nothing.
+        pw.setBodyAuthorityIsGameplay(body, auth == .gameplay);
+
+        if (!table.publishes[reg]) continue;
+        const body_type = pw.bm.bodyType(body) orelse continue;
         const e = try journal.slot(gpa, body);
 
         // TRANSITION, detected here because `authority` is a PUBLIC field: a rule
@@ -206,12 +235,58 @@ pub fn syncIn(
         const transitioned = e.seen and e.last_authority != auth;
         if (transitioned) result.transitions += 1;
         const to_solver = transitioned and auth == .solver;
+        const to_gameplay = transitioned and auth == .gameplay;
         e.last_authority = auth;
         e.seen = true;
 
-        // `.solver → .gameplay` SEEDS FROM THE PUBLISHED POSE and pushes nothing:
-        // the ECS `Transform` already holds what `syncOut` last published, so the
-        // seed is already correct and a push would be a write with no difference.
+        // **`.solver → .gameplay` PUBLISHES FIRST, then flips**, and the direction of
+        // information flow on this one tick is the OPPOSITE of every other `.gameplay`
+        // tick. G5b instead SEEDED FROM THE ECS on the reasoning that `syncOut` had
+        // already published, which is a claim about `syncOut` having run for this body
+        // — and `syncOut` skips a SLEEPING body and withholds from a `.gameplay` one.
+        // Where it has not run, the ECS `Transform` is the pose of the last published
+        // tick, and consuming it teleports the body BACKWARD to it, permanently: the
+        // push makes solver and ECS agree at the stale value and nothing ever corrects
+        // it afterwards, since a `.gameplay` body is never published again.
+        //
+        // What is published is the SOLVER's current state, which is the control base
+        // gameplay is entitled to start from.
+        if (to_gameplay) {
+            result.seeded += 1;
+            // READ FIRST, `getMut` ONLY ON A REAL DIFFERENCE — `sync.zig` carries the
+            // motive in full: `getMut` marks `changed_tick` unconditionally and
+            // `Changed<T>` is built on that mark, so publishing a bit-identical value
+            // would report a change that did not happen.
+            if (ecs.get(Transform, entity)) |t| {
+                const pose = sync.solverPose(pw, body).?;
+                if (!std.mem.eql(WorldReal, &t.pos, &pose.pos) or
+                    !std.mem.eql(WorldReal, &t.rot, &pose.rot))
+                {
+                    const w = ecs.getMut(Transform, entity).?;
+                    w.pos = pose.pos;
+                    w.rot = pose.rot;
+                }
+            }
+            if (body_type != .static) {
+                if (ecs.get(Velocity, entity)) |v| {
+                    const out = sync.solverVelocity(pw, body);
+                    if (!std.mem.eql(WorldReal, &v.linear, &out.linear) or
+                        !std.mem.eql(WorldReal, &v.angular, &out.angular))
+                    {
+                        const w = ecs.getMut(Velocity, entity).?;
+                        w.linear = out.linear;
+                        w.angular = out.angular;
+                    }
+                }
+            }
+            // The baseline advances, and it must: the values now in the ECS ARE the
+            // solver's, so the marks this publication just left are not gameplay's
+            // writes and consuming them next tick would be `syncIn` answering its own
+            // publication.
+            e.consumed_tick = now;
+            continue;
+        }
+
         // `.gameplay → .solver` DOES push once, so the solver resumes from where
         // gameplay left the body rather than from the state it last computed for
         // itself and had discarded ever since.

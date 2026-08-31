@@ -274,10 +274,13 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         // same reason the pose was already withheld from a kinematic body, applied to
         // the axis the old condition could not see.
         //
-        // A `.gameplay` DYNAMIC body still steps: it keeps its mass, participates in
-        // manifolds and pushes other bodies, and its integration result is discarded
-        // here rather than at step 6 — removing it from integration would amount to
-        // changing its `BodyType` at runtime and would destroy its island.
+        // A `.gameplay` DYNAMIC body still steps: it is integrated normally and its
+        // result is discarded here rather than at step 6 — removing it from integration
+        // would amount to changing its `BodyType` at runtime and would destroy its
+        // island. It participates in manifolds and pushes other bodies, but it resolves
+        // with an INVERSE MASS OF ZERO (`api/authority.zig`): the earlier wording here
+        // said it "keeps its mass" AND behaved as infinitely heavy, which cannot both
+        // be true and cost the other body a share of every impulse.
         if (authorityOf(ecs, entity) == .gameplay) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
         // systems landed, and it was correct only because pass (1) removed it immediately,

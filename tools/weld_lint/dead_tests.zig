@@ -461,9 +461,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // corruption — the counter-factual restoring the positional key reddens THIS test
     // and nothing else in the suite, which is what "no red signalled it" measures.
     // (2018 -> 2019, suite reported 2019 - 2000 passed + 19 skipped, macOS aarch64.)
+    // G10 adds three, one per object of the gate: the conservation oracle for a
+    // `.gameplay` dynamic body against an infinite mass with the finite-mass control that
+    // makes it non-vacuous, the direction of the `solver -> gameplay` transition measured
+    // on a body left asleep for many ticks, and the authority mirror reaching every body
+    // of the entity rather than the elected one alone.
+    // (2019 -> 2022, suite reported 2022 - 2003 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2017,
-        else => 2019,
+        .windows => 2020,
+        else => 2022,
     };
 }
 

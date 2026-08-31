@@ -19,12 +19,36 @@ pub const PhysicsAuthority = enum(u8) {
     /// Gameplay owns them. `syncIn` pushes the ECS values on change; `syncOut`
     /// publishes NOTHING, or it would overwrite the authority it just read.
     ///
-    /// A gameplay-authoritative DYNAMIC body stays integrated and resolved — it
-    /// keeps its mass, participates in manifolds and pushes other bodies — and
-    /// its result is discarded, `syncIn` reposing it next tick. It behaves as an
-    /// infinitely heavy externally driven body, which is the expected semantics
-    /// of a scripted move on an object that must stay collidable. Removing it
-    /// from integration would amount to changing its `BodyType` at runtime,
-    /// which the solver does not support and which would destroy its island.
+    /// **A gameplay-authoritative DYNAMIC body resolves with an inverse mass of
+    /// ZERO, and the formulation this replaces was self-contradictory.** The
+    /// text carried at G5b said the body *"keeps its mass, participates in
+    /// manifolds"* AND that it *"behaves as an infinitely heavy body"*. The two
+    /// cannot both be true, and the solver followed the first: it kept the
+    /// body's inverse mass in the contact's effective mass and applied it a
+    /// share of the impulse — a share `syncIn` then discarded by reposing the
+    /// body. The other body therefore received LESS impulse than it would
+    /// against an infinite mass, and momentum vanished at every contact.
+    ///
+    /// The normative regime is the inverse mass set to zero DURING RESOLUTION.
+    /// The body stays dynamic in every other respect — same `BodyId`, same
+    /// island, same shapes, no runtime `BodyType` change, which the solver does
+    /// not support and which would destroy its island — and it is still
+    /// integrated, its result discarded. It pushes other bodies exactly as an
+    /// infinite mass would, and nothing is lost.
+    ///
+    /// **The TRANSITIONS are `syncIn`'s and not a wrapper's**, because
+    /// `authority` is a PUBLIC field: a rule writes
+    /// `entity.get_mut(RigidBody).authority = .gameplay` directly, so no wrapper
+    /// can be the guardian of the invariant and a convenience wrapper writes the
+    /// field and nothing else.
+    ///
+    /// - `solver` -> `gameplay`: the solver's pose and velocity are PUBLISHED
+    ///   into the ECS first, then the authority flips. Without that publication
+    ///   the control base would be the `Transform` of the last published tick,
+    ///   and the object would jump backward at the first `syncIn`.
+    /// - `gameplay` -> `solver`: the CURRENT ECS pose and `Velocity` are pushed
+    ///   as they stand. No derived velocity — it would turn a teleport into an
+    ///   arbitrarily large speed and would ignore that `Velocity` exists exactly
+    ///   as authorable state. Derivation stays `moveKinematic`'s explicit job.
     gameplay = 1,
 };

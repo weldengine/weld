@@ -12,8 +12,11 @@
 //!     world" rather than a dedicated pattern.
 //!   - `JointTarget` is TAGGED BY `joint_type`, on the same shape and the same
 //!     correspondence table as `JointLimits`.
-//!   - ONE `(max_force, frequency_hz, damping_ratio)` triple per motor, never
-//!     per axis — excluded on a structural motive and not deferred.
+//!   - FOUR scalars per MOTOR, never per axis. `max_linear_force` (N) and
+//!     `max_angular_torque` (N·m) are two ceilings by axis NATURE, which is not
+//!     two ceilings per axis: `six_dof` carries two and not six, and no variant
+//!     of `JointTarget` carries a ceiling or a gain. That absence is what puts
+//!     "never per axis" in the TYPE rather than in prose.
 //!
 //! **The types are minted BEFORE the assert block, and that ordering is the
 //! deliverable rather than a convenience.** A typed stub needs its parameter
@@ -207,13 +210,26 @@ pub const JointTarget = union(enum) {
 pub const JointMotor = struct {
     target: JointTarget,
 
-    /// Force ceiling (linear axes) or torque ceiling (angular axes) — the unit
-    /// follows the driven axis. **`0` does NOT switch the motor off**: `null`
-    /// does. Zero is a motor that is present and without authority, which the
-    /// `.powered` ragdoll at `strength = 0` requires, the classic slack having
-    /// to appear as a limit case of the same mechanism and not as a separate
-    /// path.
-    max_force: f32,
+    /// **Two ceilings and not one, because one could not be both.**
+    /// `max_linear_force` is in newtons and governs the linear axes;
+    /// `max_angular_torque` is in newton-metres and governs the angular ones.
+    ///
+    /// Revision 0.14 carried a single `max_force` justified by "the unit follows
+    /// the driven axis". That "or" holds for a single-axis joint — `hinge`,
+    /// `prismatic`, `distance` — and is FALSE for `six_dof`, which drives three
+    /// linear and three angular axes SIMULTANEOUSLY: a scalar cannot be in
+    /// newtons and in newton-metres at once. The variant the exclusion mattered
+    /// for is precisely the one where it did not hold.
+    ///
+    /// A single-axis joint reads only the ceiling of its own nature and ignores
+    /// the other. `swing_twist` reads `max_angular_torque` on both its axes.
+    ///
+    /// **`0` does NOT switch the motor off**: `null` does. Zero is a motor that
+    /// is present and without authority, which the `.powered` ragdoll at
+    /// `strength = 0` requires, the classic slack having to appear as a limit
+    /// case of the same mechanism and not as a separate path.
+    max_linear_force: f32 = 0,
+    max_angular_torque: f32 = 0,
 
     /// `.position` mode only, ignored in `.velocity`. Soft servo, the same
     /// parametrisation as the solver's `contact_hertz` / `contact_damping_ratio`
@@ -221,11 +237,13 @@ pub const JointMotor = struct {
     /// and by `setJointMotor`: `frequency_hz > 0`, `damping_ratio >= 0`, both
     /// finite.
     ///
-    /// **One `(max_force, frequency_hz, damping_ratio)` triple per motor, never
-    /// per axis** — excluded on a structural motive and not deferred: per-axis
-    /// gains under a single force ceiling would be an asymmetry with no
-    /// consumer, and the powered ragdoll's force profile is indexed by
-    /// `BoneRole` (`ARCH-033`), not by axis.
+    /// **The four scalars are per MOTOR, never per axis**, and that property
+    /// survives the correction above: naming two ceilings by axis NATURE is not
+    /// naming them per axis. `six_dof` carries two ceilings and not six, and no
+    /// variant of `JointTarget` carries a ceiling or a gain — which is what puts
+    /// "never per axis" in the TYPE rather than in prose. Excluded on a
+    /// structural motive and not deferred: the powered ragdoll's force profile is
+    /// indexed by `BoneRole` (`ARCH-033`), not by axis.
     frequency_hz: f32 = 20,
     damping_ratio: f32 = 1,
 };

@@ -1505,8 +1505,19 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     // advanced `consumed_tick`, so the tick predicate filtered its write out and a
     // legitimate modification was ignored — the other direction of the same
     // corruption, and the one an "it still works" assertion would miss entirely.
+    //
+    // TWO TICKS AND NOT ONE, SINCE G10: the `solver → gameplay` tick SEEDS the ECS from
+    // the solver and consumes nothing, so a write made in the same tick as the flip is
+    // overwritten by the solver's own state — by design, that state being the control
+    // base gameplay is entitled to start from. Gameplay drives from the NEXT tick, and
+    // it is that tick the inherited baseline would filter out.
     ecs.beginFrame();
     ecs.getMut(RigidBody, neighbour.entity).?.authority = .gameplay;
+    const flip = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), flip.seeded);
+    try testing.expectEqual(@as(u32, 0), flip.poses_applied);
+
+    ecs.beginFrame();
     ecs.getMut(Transform, neighbour.entity).?.pos[0] = 77;
     const moved = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
     try testing.expectEqual(@as(u32, 1), moved.poses_applied);
@@ -1525,4 +1536,196 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     const reused_packed: api.PackedId = @bitCast(reused.body);
     try testing.expectEqual(doomed_packed.index, reused_packed.index);
     try testing.expect(doomed_packed.generation != reused_packed.generation);
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.15.2 G10 — the resolution regime of a `.gameplay` DYNAMIC body, and the
+// direction of the `solver → gameplay` transition.
+// ---------------------------------------------------------------------------
+
+/// A platform of unit mass at `centre`, immobile under gravity so that the only thing
+/// separating the three configurations below is its INVERSE MASS during resolution.
+fn spawnPlatform(
+    gpa: std.mem.Allocator,
+    ecs: *World,
+    pw: *PhysicsWorld,
+    body_type: api.BodyType,
+) !struct { entity: EntityId, body: api.BodyId } {
+    const centre = [3]f32{ 0, 0, 0 };
+    const entity = try ecs.spawn(gpa, .{ .pos = centre }, .{});
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 0.5, 2) } });
+    var desc = api.BodyDescriptor{ .entity = entity, .body_type = body_type, .shape = shape };
+    desc.position = av3(centre[0], centre[1], centre[2]);
+    desc.restitution = 0;
+    desc.can_sleep = false;
+    if (body_type == .dynamic) {
+        desc.mass = 1;
+        // Held against gravity WITHOUT being made infinitely heavy: the finite-mass
+        // control has to fall under the contact and only under the contact, or the
+        // comparison would measure free fall instead of the impulse split.
+        desc.gravity_factor = 0;
+    }
+    return .{ .entity = entity, .body = try pw.addBody(gpa, desc) };
+}
+
+/// Drop a unit ball on a platform of the given nature and return the ball's linear
+/// velocity along Y after `ticks` frames of the normative order.
+fn ballVelocityAfterImpact(
+    gpa: std.mem.Allocator,
+    platform_type: api.BodyType,
+    platform_authority: api.PhysicsAuthority,
+    ticks: usize,
+) !struct { vy: f32, contacts: u32 } {
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const platform = try spawnPlatform(gpa, &ecs, &pw, platform_type);
+    try declare(gpa, &ecs, platform.entity, platform_authority);
+    const ball = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 2.0, 0 });
+    try declare(gpa, &ecs, ball.entity, .solver);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    var contacts: u32 = 0;
+    var i: usize = 0;
+    while (i < ticks) : (i += 1) {
+        _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+        if (pw.constraints.items.len > 0) contacts += 1;
+    }
+    return .{ .vy = sync.solverVelocity(&pw, ball.body).linear[1], .contacts = contacts };
+}
+
+test "a gameplay dynamic body pushes exactly as an infinite mass, and a finite one pushes less" {
+    const gpa = testing.allocator;
+
+    // The number of ticks is the SAME for the three, and it is the only thing they share
+    // besides the geometry: the ball is dropped from the same height onto a platform of
+    // the same size at the same place, so the pre-impact velocity is identical by
+    // construction and the post-impact one measures the impulse it received.
+    const ticks = 40;
+
+    // (1) REFERENCE — a KINEMATIC platform. Infinite mass, and ORDINARY softness:
+    // `usesStaticSoftness` keys on `.static` alone, deliberately, so a kinematic partner
+    // and a dynamic one select the same coefficients and the comparison below isolates
+    // the inverse mass rather than the stiffening.
+    const reference = try ballVelocityAfterImpact(gpa, .kinematic, .solver, ticks);
+
+    // (2) UNDER TEST — a DYNAMIC platform under `.gameplay` authority. Same `BodyType`
+    // as (3), same mass, same island, same shapes; only the declared authority differs.
+    const gameplay = try ballVelocityAfterImpact(gpa, .dynamic, .gameplay, ticks);
+
+    // (3) THE COUNTER-FACTUAL, MATERIALISED IN TREE rather than left to a code edit: the
+    // same dynamic platform with its inverse mass RESTORED, which is what `.solver`
+    // authority means for the resolution. It is the regime the normative text names as
+    // the defect, and this row is what makes the equality above non-vacuous.
+    const finite = try ballVelocityAfterImpact(gpa, .dynamic, .solver, ticks);
+
+    // NON-VACUITY FIRST: all three must actually have resolved contacts, or the three
+    // velocities would agree because nothing ever touched.
+    try testing.expect(reference.contacts > 0);
+    try testing.expect(gameplay.contacts > 0);
+    try testing.expect(finite.contacts > 0);
+
+    // CONSERVATION. The gameplay-authoritative body pushes the ball EXACTLY as the
+    // infinite mass does — bit for bit, because `resolutionMotion` substitutes the same
+    // values `body.zig` writes for a kinematic body and every other input is equal.
+    try testing.expectEqual(reference.vy, gameplay.vy);
+
+    // AND THE COUNTER-FACTUAL GOES THE WAY THE DEFECT PREDICTS: with the inverse mass
+    // restored, the platform absorbs a share of the impulse, so the ball receives LESS
+    // and retains more of its downward velocity. Strictly less, not merely different —
+    // the direction is the whole content of the finding.
+    try testing.expect(finite.vy < reference.vy);
+}
+
+test "solver to gameplay publishes the solver state into the ECS before the flip" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const s = try restingScene(gpa, &ecs, &pw);
+    try declare(gpa, &ecs, s.box_entity, .solver);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // SLEEP IT, AND LEAVE IT ASLEEP FOR MANY TICKS. An awake body publishes every tick,
+    // so its ECS pose is never more than the current one and the two implementations
+    // agree — this test would separate nothing. A SLEEPER is skipped by `syncOut`
+    // entirely, so nothing refreshes its `Transform` for as long as it sleeps.
+    var i: usize = 0;
+    while (i < 120) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(pw.bm.isSleeping(s.box).?);
+    try testing.expect(ecs.get(api.Sleeping, s.box_entity) != null);
+
+    // MOVE THE SOLVER BODY THROUGH THE PHYSICS API — `setBodyTransform`, a frozen entry
+    // of §1 and the path a level script takes. The ECS `Transform` is NOT mirrored by
+    // it, and `syncOut` has not run since, so from here the ECS holds the pose of the
+    // last published tick and the solver holds another. That divergence is the whole
+    // premise, so it is ASSERTED and not assumed.
+    const before = sync.solverPose(&pw, s.box).?;
+    const moved_x: f32 = 3.0;
+    pw.setBodyTransform(s.box, vr(moved_x, before.pos[1], 0), pw.bm.rotation(s.box).?);
+    const stale = ecs.get(Transform, s.box_entity).?.pos;
+    try testing.expect(@abs(stale[0] - moved_x) > 1.0);
+    try testing.expectApproxEqAbs(@as(f32, 0), stale[0], 1e-3);
+
+    // NOW FLIP, in the same tick and with no other gameplay write.
+    ecs.getMut(RigidBody, s.box_entity).?.authority = .gameplay;
+    const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // THE PHYSICAL CLAIM FIRST, so a counter-factual reddens this test on the BODY and
+    // not on a counter. THE BODY DID NOT JUMP BACKWARD: under the seed-from-the-ECS rule
+    // this pass used to apply, the stale `Transform` at x = 0 was pushed into the solver
+    // and the body teleported back three metres — permanently, since a `.gameplay` body
+    // is never published again and nothing would ever correct it.
+    const after = sync.solverPose(&pw, s.box).?;
+    try testing.expectApproxEqAbs(moved_x, after.pos[0], 1e-3);
+
+    // And the ECS now agrees with the solver, which is the control base gameplay is
+    // entitled to start from.
+    try testing.expectApproxEqAbs(moved_x, ecs.get(Transform, s.box_entity).?.pos[0], 1e-3);
+
+    // The counters CORROBORATE: the transition was seen, and it SEEDED rather than
+    // consumed — the pass published the solver's state into the ECS and pushed nothing
+    // back. They are asserted after the pose deliberately; a pass could in principle
+    // reach the right pose by another route, and the direction of the tick is what the
+    // normative text names.
+    try testing.expectEqual(@as(u32, 1), r.transitions);
+    try testing.expectEqual(@as(u32, 1), r.seeded);
+    try testing.expectEqual(@as(u32, 0), r.poses_applied);
+}
+
+test "the gameplay authority flag reaches every body of the entity, not only the elected one" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // Two bodies on ONE entity — the shape §1.13.1 makes normal. Exactly one of them is
+    // elected to carry the pose; the mass regime is not the election's business, and an
+    // entity answering with two different regimes depending on which collider a contact
+    // touched is the "two sources, one fact" defect this seam refuses elsewhere.
+    const first = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 5, 0 });
+    const second = try addTriggerBody(gpa, &pw, first.entity, .{ 0, 5, 0 });
+    try declare(gpa, &ecs, first.entity, .gameplay);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    try testing.expect(pw.bm.hasGameplayAuthority(first.body).?);
+    try testing.expect(pw.bm.hasGameplayAuthority(second).?);
+
+    // And it is a MIRROR, so it follows the declaration back down rather than latching.
+    ecs.getMut(RigidBody, first.entity).?.authority = .solver;
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(!pw.bm.hasGameplayAuthority(first.body).?);
+    try testing.expect(!pw.bm.hasGameplayAuthority(second).?);
 }

@@ -216,7 +216,12 @@ const Fixture = struct {
         const shape = try self.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
         const id = try self.bm.addBody(gpa, &self.store, .{
             .shape = shape,
-            .position = Vec3r.zero,
+            // `WorldVec3` and NOT `Vec3r`: `BodyDescriptor` is the FROZEN public surface and
+            // its pose is the world scalar, which is `f32` until `large_world`. Spelling it
+            // `Vec3r` compiled at the default precision and broke the build under
+            // `-Dphysics_f64` — the half of the precision guard the type system carries
+            // (M1.1.15), and the reason the six f64 cells exist.
+            .position = api.precision.WorldVec3.zero,
             .body_type = .static,
             .entity = .{ .index = entity_index, .generation = 0 },
         });

@@ -622,6 +622,28 @@ pub const BodyManager = struct {
         self.wakeIndex(idx);
     }
 
+    /// Declare whether GAMEPLAY writes this body's pose instead of the solver
+    /// (`engine-physics-forge.md` § *Autorite d'ecriture*). Mirrors the Tier 1 ECS
+    /// field `RigidBody.authority`, which this tier cannot read; `Body.flags`
+    /// documents the single effect — the inverse mass is zero during resolution.
+    ///
+    /// **NON-ACTIVATING by contract**, like the other write-intent-separated setters
+    /// of §1.8.4: it declares a regime, it moves nothing. A sleeping body under either
+    /// authority is at rest and its resolution regime is unobservable until something
+    /// wakes it, and the wake is composed by the pose and velocity setters that
+    /// actually move it. No-op on a stale/invalid handle.
+    pub fn setGameplayAuthority(self: *BodyManager, id: BodyId, value: bool) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.flags)[idx].gameplay_authority = value;
+    }
+
+    /// Safe getter: whether gameplay is the write authority on this body, or null if
+    /// `id` is stale/invalid.
+    pub fn hasGameplayAuthority(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].gameplay_authority;
+    }
+
     /// Allow or forbid this body falling asleep. Forbidding it also WAKES it
     /// (`engine-physics-forge.md` §1.8.5, wake cause W1): a body that may no longer
     /// sleep must not stay asleep. Allowing it does not put it to sleep — that is

@@ -40,6 +40,7 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
+const body_mod = @import("../body.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const cache_mod = @import("contact_cache.zig");
 const sleep = @import("../pipeline/sleep.zig");
@@ -55,6 +56,7 @@ const ShapeStore = bm_mod.ShapeStore;
 const BodyId = api.BodyId;
 const ContactManifold = narrowphase.ContactManifold(Real);
 const ContactCache = cache_mod.ContactCache;
+const MotionProperties = body_mod.MotionProperties;
 
 // --- Material combine rules (Box2D/Jolt convention) --------------------------
 
@@ -365,6 +367,36 @@ pub const ContactConstraint = struct {
     count: u8,
 };
 
+/// The motion properties a CONTACT RESOLUTION reads for `id`, which are not
+/// unconditionally the stored ones: a body under GAMEPLAY authority resolves with an
+/// inverse mass and an inverse inertia of ZERO
+/// (`engine-physics-forge.md` § *Autorite d'ecriture*).
+///
+/// **The body stays dynamic in every other respect** — same `BodyId`, same island,
+/// same shapes, integrated normally at steps 6 and 7. Only the resolution sees the
+/// infinite mass, which is why this is a read-time substitution and not a column the
+/// integrator would also read. Changing its `BodyType` instead is what the normative
+/// text refuses: the solver does not support a runtime type change and it would destroy
+/// the body's island.
+///
+/// **What it repairs.** The regime before it kept the body's inverse mass in the
+/// contact's effective mass and applied it a share of the impulse; `syncIn` then
+/// re-posed the body from the ECS and that share was discarded. The other body received
+/// LESS than it would against an infinite mass and momentum vanished at every contact.
+///
+/// The DAMPING and GRAVITY fields are returned untouched: they belong to integration,
+/// which this body still undergoes.
+fn resolutionMotion(bm: *const BodyManager, id: BodyId) MotionProperties {
+    var mp = bm.motionProperties(id).?;
+    if (bm.hasGameplayAuthority(id).?) {
+        mp.inv_mass = 0;
+        // Spelled exactly as `body.zig` spells it for a static or kinematic body, so
+        // the two are bit-identical rather than merely equivalent.
+        mp.local_inv_inertia = Mat3r.fromDiagonal(Vec3r.zero);
+    }
+    return mp;
+}
+
 /// Effective mass along a unit direction `d` at a contact with lever arms `r_a`,
 /// `r_b`: `1 / (invMassA + invMassB + (r_a×d)ᵀ Iₐ⁻¹ (r_a×d) + (r_b×d)ᵀ I_b⁻¹ (r_b×d))`.
 /// The denominator is strictly positive for any constraint that survives the
@@ -398,8 +430,8 @@ fn prepare(
     manifold: ContactManifold,
     ctx: PrepareContext,
 ) ?ContactConstraint {
-    const mp_a = bm.motionProperties(a).?;
-    const mp_b = bm.motionProperties(b).?;
+    const mp_a = resolutionMotion(bm, a);
+    const mp_b = resolutionMotion(bm, b);
 
     // True-zero skip: both bodies have infinite mass (static/kinematic ⇒ inv_mass
     // and inv_inertia both zero), so the total inverse mass along the normal is

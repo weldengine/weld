@@ -49,7 +49,27 @@ pub const BodyFlags = packed struct(u8) {
     /// A FLAG and not a column because it is one bit that costs nothing here; the
     /// detection MASK is a separate column, being 32 bits wide.
     is_trigger: bool = false,
-    _reserved: u4 = 0,
+    /// Whether gameplay, and not the solver, is the WRITE AUTHORITY on this body's
+    /// pose (`engine-physics-forge.md` § *Autorite d'ecriture*, ASCII-folded here for
+    /// the same reason every other citation in this tree is). It mirrors the ECS
+    /// `RigidBody.authority` field, which is Tier 1 and which the solver cannot read.
+    ///
+    /// **Its ONE effect inside the solver is that the inverse mass is set to zero
+    /// during resolution.** The body stays dynamic in every other respect — same
+    /// `BodyId`, same island, same shapes, integrated normally, no runtime `BodyType`
+    /// change, which the solver does not support and which would destroy its island.
+    /// It pushes other bodies EXACTLY as an infinite mass would.
+    ///
+    /// **The regime it replaces lost momentum at every contact**, which is why this
+    /// bit exists rather than nothing: the solver kept the body's inverse mass in the
+    /// contact's effective mass and gave it a share of the impulse, and `syncIn` then
+    /// re-posed the body and threw that share away. The other body therefore received
+    /// LESS than it would against an infinite mass, and the difference vanished.
+    ///
+    /// A FLAG and not a column, on the `is_trigger` precedent: one bit mirroring a
+    /// Tier 1 instance role, in a byte that already had room.
+    gameplay_authority: bool = false,
+    _reserved: u3 = 0,
 };
 
 /// The inverse quantities the integrator/solver act on. Static and kinematic

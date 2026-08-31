@@ -1269,7 +1269,8 @@ test "the three joint entries are presentable and fail loud" {
         .limits = .{ .angle1d = .{ .min_radians = -1, .max_radians = 1 } },
         .motor = .{
             .target = .{ .scalar = .{ .mode = .velocity, .value = 2 } },
-            .max_force = 10,
+            .max_linear_force = 10,
+            .max_angular_torque = 4,
         },
     }));
     try testing.expectError(error.JointsNotImplemented, s.m.setJointMotor(0, null));
@@ -1295,22 +1296,33 @@ test "the three joint entries are presentable and fail loud" {
         try testing.expect(!std.mem.eql(u8, f.name, "off"));
     }
 
-    // ONE `(max_force, frequency_hz, damping_ratio)` triple per motor, never per axis —
-    // pinned structurally, so a per-axis refactor is a failure here and not a silent
-    // widening of a contract §1 excluded on a stated motive.
-    inline for ([_][]const u8{ "max_force", "frequency_hz", "damping_ratio" }) |name| {
+    // FOUR scalars per MOTOR, never per axis. **TWO ceilings since 0.15, and the
+    // structural pin survives the correction rather than being replaced by it**: naming
+    // two ceilings by axis NATURE is not naming them per axis. A single `max_force`
+    // could not govern `six_dof`, which drives three linear and three angular axes at
+    // once — a scalar cannot be in newtons and in newton-metres together — and that is
+    // the variant the exclusion mattered for.
+    inline for ([_][]const u8{ "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" }) |name| {
         try testing.expectEqual(f32, @FieldType(api.JointMotor, name));
     }
-    // And the ceiling is on the MOTOR and not on the target: no variant of `JointTarget`
-    // carries one, which is what "never per axis" means in the type rather than in prose.
+    // `six_dof` carries TWO ceilings and not six: the count is on the motor and does not
+    // follow the number of axes the target names.
+    try testing.expectEqual(@as(usize, 5), @typeInfo(api.JointMotor).@"struct".fields.len);
+
+    // And no variant of `JointTarget` carries a ceiling OR a gain — which is what puts
+    // "never per axis" in the type rather than in prose, and what makes this pin the
+    // thing that survives a corpus correction unchanged.
     inline for (@typeInfo(api.JointTarget).@"union".fields) |variant| {
         if (@typeInfo(variant.type) != .@"struct") continue;
         inline for (@typeInfo(variant.type).@"struct".fields) |vf| {
-            try testing.expect(!std.mem.eql(u8, vf.name, "max_force"));
-            try testing.expect(!std.mem.eql(u8, vf.name, "frequency_hz"));
-            try testing.expect(!std.mem.eql(u8, vf.name, "damping_ratio"));
+            inline for ([_][]const u8{ "max_force", "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" }) |forbidden| {
+                try testing.expect(!std.mem.eql(u8, vf.name, forbidden));
+            }
         }
     }
+    // NON-VACUITY on that walk: the variants DO carry fields, so the absences above are
+    // measured over a non-empty set.
+    try testing.expect(@typeInfo(@FieldType(api.JointTarget, "six_dof")).@"struct".fields.len > 0);
 }
 
 // --- M1.1.15.2 G7 — the freeze -----------------------------------------------
