@@ -492,9 +492,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // through the public interface, the three-support differential, the flip on an
     // already-sleeping body, and `applied_tick` distinct from `consumed_tick`.
     // (2038 -> 2043, suite reported 2043 - 2024 passed + 19 skipped, macOS aarch64.)
+    // Reprise 3 adds four: the FIRST forbidden mutation of a body's life (G17), and the
+    // three sleep-regime properties of G18 — `putToSleep` refusing before writing, the
+    // window not ageing while piloted, and the transition reaching every body of the
+    // entity.
+    // (2043 -> 2047, suite reported 2047 - 2028 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2041,
-        else => 2043,
+        .windows => 2045,
+        else => 2047,
     };
 }
 

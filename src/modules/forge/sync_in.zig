@@ -244,6 +244,33 @@ pub const SyncInResult = struct {
     first_forbidden: ?api.BodyId = null,
 };
 
+/// Was `T`'s slot for `entity` stamped AT `tick` exactly?
+///
+/// **The question the diagnostic needs, and the one a baseline cannot answer on a
+/// body's first pass** (M1.1.15.2 G17). `changedSince` takes `?Tick` and returns TRUE
+/// unconditionally when it is null, because "never consumed" gives it nothing to filter
+/// by — so the diagnostic had to suppress its first observation, and the FIRST forbidden
+/// mutation of every body was lost: the baseline advanced, `syncOut` repaired the
+/// divergence, and nothing was ever reported.
+///
+/// This asks the decidable question instead. The normative tick order puts gameplay
+/// writes before `syncIn` in the SAME tick, so a forbidden mutation is stamped at
+/// exactly `now` — no baseline required, and the third instance of the G5b sentinel
+/// (`null` conflating "never consumed" with "no change") stops mattering here.
+///
+/// It is not weaker than `changedSince` for this use: for a `.solver` body the pass
+/// advances the baseline every tick, so `changedTick > now - 1` and `changedTick == now`
+/// are the same predicate everywhere except on the first pass, which is the case that
+/// was wrong.
+fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
+    const loc = ecs.dynamicLocation(entity) orelse return false;
+    const arch = ecs.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cid = ecs.componentId(@typeName(T)) orelse return false;
+    const col = arch.componentIndex(cid) orelse return false;
+    return arch.changedTick(chunk, col, loc.slot) == tick;
+}
+
 /// Was `T`'s slot for `entity` stamped after `since`?
 ///
 /// Reads the SIGNAL `Changed<T>` is built on (`world.getMut` → `markChanged`)
@@ -298,18 +325,34 @@ pub fn syncIn(
         // composes no wake, which is why writing it every tick costs nothing.
         pw.setBodyAuthorityIsGameplay(body, auth == .gameplay);
 
-        if (!table.publishes[reg]) continue;
-        const body_type = pw.bm.bodyType(body) orelse continue;
-        const e = try journal.slot(gpa, body);
-
         // TRANSITION, detected here because `authority` is a PUBLIC field: a rule
         // writes it directly, so no wrapper can be the guardian of the invariant.
+        //
+        // **REALISED PER REGISTRATION AND NOT PER ELECTION** (M1.1.15.2 G18). Same
+        // reasoning as the authority mirror above, applied to the other thing the flip
+        // must do: the election governs which body carries the POSE, and sleep governs
+        // the pose and not the regime. A multi-body entity flipped to `.gameplay` while
+        // asleep had only its ELECTED body woken; the others kept `flags.sleeping` under
+        // gameplay authority, where `isAwake` rejects them before it ever consults the
+        // authority — a body left in a state its own regime forbids.
+        const e = try journal.slot(gpa, body);
         const transitioned = e.seen and e.last_authority != auth;
         if (transitioned) result.transitions += 1;
         const to_solver = transitioned and auth == .solver;
         const to_gameplay = transitioned and auth == .gameplay;
         e.last_authority = auth;
         e.seen = true;
+
+        // **A BODY ALREADY ASLEEP WHEN THE AUTHORITY FLIPS IS WOKEN**, and it is done
+        // here — above the election gate — so that every collider of the entity leaves
+        // the state, not the one that answers for its pose. The regime gives a piloted
+        // body the KINEMATIC one: it is a member of no island, so nothing would ever
+        // decide about it again and the flag would outlive the flip for the rest of its
+        // piloted life. `wakeBody` also resets the sleep window and its reference pose.
+        if (to_gameplay) pw.bm.wakeBody(body);
+
+        if (!table.publishes[reg]) continue;
+        const body_type = pw.bm.bodyType(body) orelse continue;
 
         // **`.solver → .gameplay` PUBLISHES FIRST, then flips**, and the direction of
         // information flow on this one tick is the OPPOSITE of every other `.gameplay`
@@ -325,21 +368,6 @@ pub fn syncIn(
         // gameplay is entitled to start from.
         if (to_gameplay) {
             result.seeded += 1;
-            // **A BODY ALREADY ASLEEP WHEN THE AUTHORITY FLIPS IS WOKEN, and the case is
-            // treated rather than left to chance** (M1.1.15.2 G15). The corrected regime
-            // gives a piloted body the KINEMATIC sleep regime — no island, no sleep — and
-            // `island_manager` now excludes it from the collection, so nothing would ever
-            // decide about it again: a body that was asleep at the moment of the flip
-            // would carry the flag for the rest of its piloted life, and the flag is
-            // read by the integration passes and by the proxy update.
-            //
-            // CLEARED and not ignored, because the two are not equivalent: ignoring it
-            // would leave a state the regime says the body does not have, observable by
-            // every reader of `flags.sleeping`. `wakeBody` also resets the sleep window
-            // and its reference pose, which is what the reverse flip needs — a body
-            // returning to `.solver` re-enters the collection with a window that starts
-            // now rather than one frozen at the moment it was piloted.
-            pw.bm.wakeBody(body);
             _ = sync.mirrorSolverState(ecs, entity, pw, body, body_type != .static);
             // The baseline advances, and it must: the values now in the ECS ARE the
             // solver's, so the marks this publication just left are not gameplay's
@@ -420,10 +448,9 @@ pub fn syncIn(
         // rather than a second rule: the matrix consumes a static's pose under EITHER
         // authority, so an ECS write to one is the authored path and not a defect.
         if (auth == .solver and body_type != .static) {
-            const stale_baseline = e.consumed_tick == null;
             var forbidden = false;
             if (ecs.get(Transform, entity)) |t| {
-                if (changedSince(ecs, Transform, entity, e.consumed_tick)) {
+                if (changedAt(ecs, Transform, entity, now)) {
                     const pose = sync.solverPose(pw, body).?;
                     const differs = !std.mem.eql(WorldReal, &t.pos, &pose.pos) or
                         !std.mem.eql(WorldReal, &t.rot, &pose.rot);
@@ -431,21 +458,31 @@ pub fn syncIn(
                 }
             }
             if (ecs.get(Velocity, entity)) |v| {
-                if (changedSince(ecs, Velocity, entity, e.consumed_tick)) {
+                if (changedAt(ecs, Velocity, entity, now)) {
                     const out = sync.solverVelocity(pw, body);
                     if (!std.mem.eql(WorldReal, &v.linear, &out.linear) or
                         !std.mem.eql(WorldReal, &v.angular, &out.angular)) forbidden = true;
                 }
             }
-            // **THE TRAP, named before it was hit and closed here.** With no baseline
-            // `changedSince` returns TRUE unconditionally — its own comment says so,
-            // "never consumed: no baseline to filter by" — so a naive detection would
-            // report every `.solver` body carrying a `Transform`, on the first pass,
-            // forever, since nothing advanced a `.solver` baseline either. A change is
-            // not reportable against an absent baseline: the first observation
-            // ESTABLISHES one and reports nothing. It is the same sentinel subtlety
-            // that produced a zero-versus-null defect at G5b.
-            if (forbidden and !stale_baseline) {
+            // **THE FIRST OBSERVATION IS REPORTED, and suppressing it lost every
+            // body's FIRST forbidden mutation** (M1.1.15.2 G17). The trap was real —
+            // with a null baseline `changedSince` returns true unconditionally — but the
+            // treatment was wrong twice: it suppressed the report, and then the baseline
+            // advanced and `syncOut` repaired the divergence, so that first mutation was
+            // lost DEFINITIVELY. Nothing would ever report it again.
+            //
+            // The repair is not to establish the baseline earlier but to stop needing
+            // one: `changedAt(..., now)` asks whether the component was stamped in THIS
+            // tick, which is decidable with no history at all. "Never consumed" and "not
+            // changed" are two different facts and the `?Tick` conflated them — the G5b
+            // sentinel, third instance.
+            //
+            // **The residual is named**: an entity spawned and its body created in the
+            // SAME tick as this pass, at disagreeing poses, is reported. That is not a
+            // mutation, but the seam cannot tell it from one — something wrote the ECS
+            // this tick and it disagrees with the solver, which is the whole of what the
+            // diagnostic claims to observe.
+            if (forbidden) {
                 result.forbidden_mutations += 1;
                 if (result.first_forbidden == null) result.first_forbidden = body;
                 // AND ON THE JOURNAL, which is what makes it observable from the

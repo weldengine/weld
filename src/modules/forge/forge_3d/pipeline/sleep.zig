@@ -126,6 +126,18 @@ pub fn updateWindows(bm: *BodyManager, dt: Real, cfg: SleepConfig) void {
         if (!bm.alloc.isAliveIndex(i)) continue;
         if (body_types[i] != .dynamic) continue;
         if (flags[i].sleeping) continue;
+        // **A PILOTED BODY'S WINDOW DOES NOT ADVANCE** (M1.1.15.2 G18). It follows the
+        // KINEMATIC regime, and a kinematic never reaches this sweep at all — the
+        // `body_type` filter above excludes it.
+        //
+        // **Without this the window AGED during piloting**, and the consequence was in
+        // the reverse direction: a piloted body held still saturates `sleep_time`, and
+        // on the flip back to `.solver` — pose and velocity unchanged, so no setter
+        // wakes it — it rejoined its island with a FULL window and could sleep on the
+        // first tick. A comment at the transition site asserted the window restarts at
+        // the flip; the code did not produce it. *Making every declarant refer is not
+        // enough if the one that states says something false.*
+        if (flags[i].gameplay_authority) continue;
 
         // How far the body has moved since its window opened. The rotational term
         // is the exact displacement of a point at `sleep_radius` from the centre,
@@ -224,27 +236,19 @@ pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
 /// body does not resume with a stale velocity.
 pub fn putToSleep(bm: *BodyManager, id: BodyId) void {
     const idx = bm.alloc.validate(id) orelse return;
-    bm.bodies.items(.flags)[idx].sleeping = true;
-    // **A PILOTED BODY'S VELOCITY IS NOT THE SOLVER'S TO DISCARD** (M1.1.15.2 G13,
-    // `engine-physics-forge.md` § *Autorité d'écriture* clause 1: "sa pose et sa vitesse
-    // sont celles que `syncIn` a posées, et rien d'autre ne les fait évoluer"). The
-    // residue this zeroing discards is bounded by the sleep criterion for a SIMULATED
-    // body, which is the argument above; for a piloted one the velocity is not a
-    // residue, it is authored state.
+    // **THE PRIMITIVE REFUSES, AND THE REFUSAL PRECEDES EVERY WRITE** (M1.1.15.2 G18).
+    // The guard added at G13 sat BELOW the flag, so a piloted body kept its velocity and
+    // was marked `sleeping` anyway — after which `isAwake` returns false on the flag and
+    // the primitive contradicts the regime it implements. **The order IS the correction**,
+    // the same shape `move_kinematic` took at G14: what a caller must be able to rely on
+    // is the STATE AFTER the refusal, not the refusal.
     //
-    // **MEASURED, and this comment is itself an example of what G16 swept.** The
-    // sentence that stood here said "a piloted body is still by construction and sleeps
-    // at tick 29" — written at G13, true then, and made FALSE by G15, which gave a
-    // piloted body the kinematic regime: it is a member of no island, so nothing ever
-    // decides to put it to sleep. A comment stating a regime is a declarant of it, and
-    // this one was falsified two gates after it was written.
-    //
-    // What the measurement established SURVIVES that reversal and is why this branch
-    // stays: with the zeroing, a posed 4 m/s went to zero at the sleep window and was
-    // NEVER restored over 120 further ticks, because the tick
-    // predicate of `syncIn` had long consumed that `Velocity` write and never looks at
-    // the value again: the ECS said 4, the solver said 0, permanently and in silence.
+    // A total refusal and not a partial one, because a piloted body follows the KINEMATIC
+    // regime: it is a member of no island, so no decision of the cycle reaches this
+    // function for it. The refusal is what keeps a DIRECT caller — a future island
+    // policy, a debug tool — from creating the state the regime forbids.
     if (bm.bodies.items(.flags)[idx].gameplay_authority) return;
+    bm.bodies.items(.flags)[idx].sleeping = true;
     bm.bodies.items(.linear_velocity)[idx] = Vec3r.zero;
     bm.bodies.items(.angular_velocity)[idx] = Vec3r.zero;
 }

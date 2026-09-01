@@ -1842,15 +1842,18 @@ test "an ECS write under solver authority is reported, and a non-write is not" {
     var journal: sync_in.Journal = .{};
     defer journal.deinit(gpa);
 
-    // **THE TRAP, and the scene that reaches it is not the ordinary one.** A body whose
-    // ECS `Transform` already agrees with its solver pose is silenced by the VALUE
-    // predicate on the first pass, guard or no guard — measured: removing the
-    // null-baseline guard left the whole tree green. What reaches the trap is a body
-    // whose ECS and solver DISAGREE before anything has been published, which
+    // **A BODY WHOSE ECS AND SOLVER DISAGREE BEFORE ANYTHING IS PUBLISHED**, which
     // `addBody` allows outright since the descriptor's position is independent of the
-    // entity's `Transform`. `syncIn` runs before `step` and before `syncOut`, so the
-    // very first pass of a scene sees that disagreement — and it is not a mutation, it
-    // is a state that has never been reconciled.
+    // entity's `Transform`. It is not a mutation, it is a state that has never been
+    // reconciled, and the pass must not report it.
+    //
+    // **What silences it changed at G17 and the assertion is now right for a different
+    // reason.** It used to be the null-baseline suppression — which also swallowed every
+    // body's FIRST real mutation. What silences it now is that its `Transform` was
+    // stamped at SPAWN, in an earlier tick, so `changedAt(..., now)` is false: nothing
+    // wrote it during this tick. A body written during the tick IS reported, first pass
+    // or not, which is what "the FIRST forbidden mutation of a body's life is reported"
+    // pins.
     const unpublished = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
     const far_shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
     _ = try pw.addBody(gpa, .{
@@ -2472,4 +2475,216 @@ test "a second syncIn in one tick is not mistaken for an explicit wrapper" {
     const third = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
     try testing.expectEqual(@as(u32, 1), third.restored);
     try testing.expectEqual(@as(WorldRealT, 5), ecs.get(Transform, plat.entity).?.pos[0]);
+}
+
+test "the FIRST forbidden mutation of a body's life is reported" {
+    // **P1 of the fourth review, and the defect was in the ORACLE as much as in the
+    // code.** `stale_baseline` suppressed the report on a body's first pass; the
+    // baseline then advanced and `syncOut` repaired the divergence, so that first
+    // mutation was lost DEFINITIVELY — nothing would ever report it. And the test
+    // written for the diagnostic began with a QUIET FRAME, which established the
+    // baseline and stepped over exactly the case the guard has to catch.
+    //
+    // So this scene has NO first frame. The body is created, and the very next thing
+    // that happens is the frame in which it is mutated.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, b.entity, .solver);
+
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
+    try sync.attachSyncInJournal(&ecs, &journal);
+    try sync.registerSystems(gpa, &sched, &ecs);
+    try sched.registerSystem(gpa, &ecs, .{
+        .phase = .pre_update,
+        .name = "test_first_tick_writer",
+        .run = forbiddenWriterSystem,
+        .accesses = &forbidden_writer_accesses,
+    });
+
+    // ARMED BEFORE THE FIRST FRAME. The journal has never seen this body: `syncIn`
+    // creates its entry in the same pass that must report.
+    forbidden_writer_armed = true;
+    forbidden_writer_target = b.entity;
+    forbidden_writer_x = 4;
+    try testing.expect(journal.entryOf(b.body) == null);
+
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+
+    try testing.expectEqual(@as(u64, 1), journal.diagnostics.forbidden_mutations);
+    try testing.expectEqual(b.body, journal.diagnostics.last_body.?);
+
+    // **AND IT IS UNRECOVERABLE AFTERWARDS, which is why the first observation is the
+    // only one there is.** `syncOut` republishes a dynamic `.solver` body's pose at the
+    // end of that very frame, so by the time anyone could look the ECS and the solver
+    // agree again — a report deferred to the second pass is a report that never comes.
+    forbidden_writer_armed = false;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(@as(u64, 1), journal.diagnostics.forbidden_mutations);
+    try testing.expectEqual(@as(WorldRealT, 0), ecs.get(Transform, b.entity).?.pos[0]);
+
+    // NON-VACUITY on the whole scene: a body whose ECS nobody writes is silent through
+    // the same frames, so the report above follows the mutation and not the creation.
+    const quiet = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 9, 0, 0 });
+    try declare(gpa, &ecs, quiet.entity, .solver);
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(@as(u64, 1), journal.diagnostics.forbidden_mutations);
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.15.2 G18 — the three P2, which share one subject: the sleep regime.
+// ---------------------------------------------------------------------------
+
+test "putToSleep refuses a piloted body before writing anything" {
+    // **P2-D, and the property is the FLAG as much as the velocity.** The guard added at
+    // G13 sat BELOW `sleeping = true`, so a piloted body kept its velocity and was marked
+    // asleep anyway — after which `isAwake` returns false on the flag and the primitive
+    // contradicts the regime it implements. The test written then read the velocity only,
+    // so it passed over exactly half of what it claimed.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const piloted = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const control = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 9, 0, 0 });
+    pw.bm.setGameplayAuthority(piloted.body, true);
+    pw.bm.setLinearVelocity(piloted.body, vr(4, 0, 0));
+    pw.bm.setLinearVelocity(control.body, vr(4, 0, 0));
+
+    forge_3d.sleep.putToSleep(&pw.bm, piloted.body);
+    // NEITHER of the two mutations happened.
+    try testing.expectEqual(@as(Real, 4), pw.bm.linearVelocity(piloted.body).?.toArray()[0]);
+    try testing.expect(!pw.bm.isSleeping(piloted.body).?);
+    // AND THE PREDICATE THAT READS THE FLAG AGREES — which is the consequence the old
+    // shape broke while the velocity assertion still passed.
+    try testing.expect(forge_3d.sleep.isAwake(&pw.bm, piloted.body));
+
+    // NON-VACUITY: the same call on the control does BOTH.
+    forge_3d.sleep.putToSleep(&pw.bm, control.body);
+    try testing.expectEqual(@as(Real, 0), pw.bm.linearVelocity(control.body).?.toArray()[0]);
+    try testing.expect(pw.bm.isSleeping(control.body).?);
+    try testing.expect(!forge_3d.sleep.isAwake(&pw.bm, control.body));
+}
+
+test "the sleep window does not age while a body is piloted" {
+    // **P2-B, and the defect was a DECLARANT that said what the code did not do.** A
+    // comment at the transition site asserted the window restarts at the flip. It did
+    // not: `updateWindows` filtered on `body_type` and `sleeping` only, so a piloted body
+    // held still saturated `sleep_time`, and on the flip back to `.solver` — pose and
+    // velocity unchanged, so no setter wakes it — it rejoined its island with a FULL
+    // window and could sleep on the first tick.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+    _ = floor;
+    const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+    try declare(gpa, &ecs, b.entity, .gameplay);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // PILOTED AND STILL, far longer than the window. Under the defect this is what
+    // saturates `sleep_time`.
+    var i: usize = 0;
+    while (i < 300) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(!pw.bm.isSleeping(b.body).?);
+
+    // BACK TO `.solver`, writing nothing else — so nothing wakes it and nothing moves it.
+    ecs.beginFrame();
+    ecs.getMut(RigidBody, b.entity).?.authority = .solver;
+    _ = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // **IT MUST TAKE THE WHOLE WINDOW, not one tick.** Ten ticks is a third of it.
+    i = 0;
+    while (i < 10) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(!pw.bm.isSleeping(b.body).?);
+
+    // AND IT DOES SLEEP once the window has really elapsed — without this the assertion
+    // above is satisfied by a body that can no longer sleep at all.
+    i = 0;
+    while (i < 60) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expect(pw.bm.isSleeping(b.body).?);
+}
+
+test "flipping a MULTI-BODY entity to gameplay wakes every one of its bodies" {
+    // **P2-C.** The transition ran below the election gate, so only the body that carries
+    // the entity's pose left the sleep; the others kept `flags.sleeping` under gameplay
+    // authority, where `isAwake` rejects them before it ever consults the authority.
+    //
+    // The reasoning is the one already established for the authority MIRROR: the election
+    // governs which body is pose-driven, and sleep governs the pose and not the regime.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+    _ = floor;
+    // ONE ENTITY, TWO BODIES. `spawnLinked` makes one; the second is added by hand to the
+    // SAME entity, which is what makes an election necessary at all.
+    const first = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+    try declare(gpa, &ecs, first.entity, .solver);
+    const shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var desc = api.BodyDescriptor{ .entity = first.entity, .body_type = .dynamic, .shape = shape };
+    desc.position = av3(3, 0.5, 0);
+    desc.mass = 1;
+    desc.restitution = 0;
+    const second = try pw.addBody(gpa, desc);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    var i: usize = 0;
+    while (i < 300) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // BOTH ASLEEP, which is what makes the flip's job visible: a scene where the
+    // non-elected body was awake would pass under either implementation.
+    try testing.expect(pw.bm.isSleeping(first.body).?);
+    try testing.expect(pw.bm.isSleeping(second).?);
+    // And they really are two bodies of ONE entity, elected apart.
+    try testing.expectEqual(first.entity, pw.bm.entity(second).?);
+    try testing.expect(sync.electedBodyOf(&pw, first.entity).? != second);
+
+    ecs.beginFrame();
+    ecs.getMut(RigidBody, first.entity).?.authority = .gameplay;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // EVERY BODY OF THE ENTITY LEFT THE SLEEP, the non-elected one included.
+    try testing.expect(!pw.bm.isSleeping(first.body).?);
+    try testing.expect(!pw.bm.isSleeping(second).?);
+
+    // **AND `isAwake` STILL ANSWERS FALSE, which is correct and is not the sleep.** The
+    // first version of this line asserted the opposite and the test said so. `isAwake`
+    // is "is this a MOTION SOURCE this tick", not "is this not asleep" — and a piloted
+    // body is judged on its motion, exactly as a stationary kinematic is. Both bodies
+    // are at rest, so both answer false, and the difference from the defect is WHY:
+    // under it the answer was false because the flag was set, which the regime forbids,
+    // and here it is false because nothing is moving, which the regime requires.
+    try testing.expect(!forge_3d.sleep.isAwake(&pw.bm, second));
+    pw.bm.setLinearVelocity(second, vr(1, 0, 0));
+    try testing.expect(forge_3d.sleep.isAwake(&pw.bm, second));
+
+    // AND THE TRANSITION REPORTED NOTHING: extending the per-registration walk must not
+    // make the non-elected body produce a spurious diagnostic of its own.
+    try testing.expectEqual(@as(u32, 0), r.forbidden_mutations);
 }
