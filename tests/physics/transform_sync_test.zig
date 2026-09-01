@@ -1481,7 +1481,18 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     // on both fields.
     const before = journal.entryOf(neighbour.body).?;
     try testing.expectEqual(api.PhysicsAuthority.solver, before.last_authority);
-    try testing.expect(before.consumed_tick == null);
+    // **ASSERTION WEAKENED AT G12, DELIBERATELY, AND THE LOSS IS NAMED.** This line read
+    // `try testing.expect(before.consumed_tick == null);` and it was true because nothing
+    // advanced a `.solver` baseline. G12 advances it for every `.solver` body, which is
+    // what closes the null-baseline trap of the forbidden-mutation diagnostic — so the
+    // two entries no longer differ on that field and inheriting it is no longer
+    // observable. It is also no longer harmful: both carry the same tick.
+    //
+    // What still discriminates is `last_authority`, and it is the half that carried the
+    // defect — the fabricated transition below comes from inheriting `.gameplay`, never
+    // from inheriting a tick. The load-bearing assertion of this test is unchanged.
+    try testing.expect(before.consumed_tick != null);
+    try testing.expect(before.last_authority != doomed_entry.last_authority);
 
     // THE REMOVAL. `doomed` was registered first, so the neighbour shifts into its
     // position — which is what the old key was.
@@ -1728,4 +1739,202 @@ test "the gameplay authority flag reaches every body of the entity, not only the
     _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
     try testing.expect(!pw.bm.hasGameplayAuthority(first.body).?);
     try testing.expect(!pw.bm.hasGameplayAuthority(second).?);
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.15.2 G12 — the consumption predicate: F1 and F2, which are one predicate.
+//
+// They are in one gate because they COUPLE: admitting statics advances their
+// `consumed_tick`, which moves the baseline the diagnostic detects against, and
+// closing the diagnostic's null-baseline trap advances every `.solver` baseline,
+// which changes what admitting statics observes. Fixed apart, each reopens the
+// other.
+// ---------------------------------------------------------------------------
+
+test "a static under solver authority takes its pose, and a QUERY sees it move" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // A STATIC under the DEFAULT authority, which is the whole point of F2: `.solver`
+    // is the default for every body type, so the excluded case was not an exotic
+    // corner — it was every static in every scene.
+    const wall = try spawnLinked(gpa, &ecs, &pw, .static, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, wall.entity, .solver);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // Settle, so the first pass establishes a baseline and the move below is a real
+    // change rather than the first observation.
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // TWO rays: one along x = 6, where the wall is NOT, and one along x = 0, where it
+    // is. The pair is what makes the observation below a movement rather than a hit.
+    const probe: forge_3d.query.RayQuery = .{
+        .origin = vr(6, 0, -10),
+        .direction = vr(0, 0, 1),
+        .max_distance = 100,
+    };
+    const here: forge_3d.query.RayQuery = .{
+        .origin = vr(0, 0, -10),
+        .direction = vr(0, 0, 1),
+        .max_distance = 100,
+    };
+    try testing.expect(!forge_3d.query.raycastAny(&pw.bp, &pw.bm, &pw.store, probe));
+    try testing.expect(forge_3d.query.raycastAny(&pw.bp, &pw.bm, &pw.store, here));
+
+    // GAMEPLAY MOVES THE STATIC through the ECS, which is the authored path the matrix
+    // declares: `static | l'un ou l'autre | pose seule, sur changement`.
+    ecs.beginFrame();
+    ecs.getMut(Transform, wall.entity).?.pos[0] = 6;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), r.poses_applied);
+    // A static has no velocity columns the solver would read, so nothing else moved.
+    try testing.expectEqual(@as(u32, 0), r.velocities_applied);
+
+    // **OBSERVED BY A QUERY AND NOT BY RE-READING THE COMPONENT**, which is the only
+    // oracle that separates the two implementations: re-reading `Transform` returns the
+    // value the test just wrote, so it would pass with the body and its broadphase
+    // proxy still at the origin. The query goes through the proxy.
+    try testing.expect(forge_3d.query.raycastAny(&pw.bp, &pw.bm, &pw.store, probe));
+    try testing.expect(!forge_3d.query.raycastAny(&pw.bp, &pw.bm, &pw.store, here));
+
+    // AND IT IS NOT A FORBIDDEN MUTATION. The matrix consumes a static's pose under
+    // EITHER authority, so the authored path must not also be reported as a defect —
+    // the two halves of this gate meet here rather than in two files.
+    try testing.expectEqual(@as(u32, 0), r.forbidden_mutations);
+}
+
+test "an ECS write under solver authority is reported, and a non-write is not" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const body = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try declare(gpa, &ecs, body.entity, .solver);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // **THE TRAP, and the scene that reaches it is not the ordinary one.** A body whose
+    // ECS `Transform` already agrees with its solver pose is silenced by the VALUE
+    // predicate on the first pass, guard or no guard — measured: removing the
+    // null-baseline guard left the whole tree green. What reaches the trap is a body
+    // whose ECS and solver DISAGREE before anything has been published, which
+    // `addBody` allows outright since the descriptor's position is independent of the
+    // entity's `Transform`. `syncIn` runs before `step` and before `syncOut`, so the
+    // very first pass of a scene sees that disagreement — and it is not a mutation, it
+    // is a state that has never been reconciled.
+    const unpublished = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
+    const far_shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    _ = try pw.addBody(gpa, .{
+        .entity = unpublished,
+        .body_type = .dynamic,
+        .shape = far_shape,
+        .position = av3(50, 0, 0),
+        .mass = 1,
+    });
+    try declare(gpa, &ecs, unpublished, .solver);
+
+    // **THE TRAP FIRST, because it is what a naive detection fails.** With no baseline
+    // `changedSince` returns true unconditionally, so a detection that reported on the
+    // tick alone would fire here — on a body nobody has written, on the first pass,
+    // and on every `.solver` body in every scene. A change is not reportable against an
+    // absent baseline.
+    const first = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), first.forbidden_mutations);
+    try testing.expect(first.first_forbidden == null);
+
+    // A NON-WRITE. The tick advances, the pass runs, nothing wrote the component.
+    const quiet = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 0), quiet.forbidden_mutations);
+
+    // A WRITE. Under `.solver` the solver owns the pose and republishes it, so this
+    // goes nowhere and is exactly the state the owner declares forbidden.
+    ecs.beginFrame();
+    ecs.getMut(Transform, body.entity).?.pos[0] = 3;
+    const caught = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), caught.forbidden_mutations);
+    try testing.expectEqual(body.body, caught.first_forbidden.?);
+    // AND IT IS A DIAGNOSTIC AND NOT AN APPLICATION: the pass reports and consumes
+    // nothing, so the solver keeps the pose it owns.
+    try testing.expectEqual(@as(u32, 0), caught.poses_applied);
+    try testing.expectApproxEqAbs(@as(f32, 0), sync.solverPose(&pw, body.body).?.pos[0], 1e-6);
+
+    // THE VELOCITY HALF, which a pose-only detection would miss: `syncOut` republishes
+    // both for a dynamic body, so both are the solver's.
+    ecs.beginFrame();
+    ecs.getMut(Velocity, body.entity).?.linear[1] = 9;
+    const vel = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), vel.forbidden_mutations);
+
+    // A `getMut` THAT CHANGES NOTHING IS NOT REPORTED — the second predicate, and the
+    // reason it exists: `getMut` marks unconditionally, so the tick alone would report
+    // every system that took a handle and wrote the value back unchanged.
+    //
+    // **TWO BODIES IN ONE TICK, because that is the only shape that separates the two
+    // predicates.** Both are stamped; one agrees with the solver and one does not. A
+    // sequence of single-body ticks cannot do it — the first version of this case tried,
+    // and measured `expected 0, found 1`, because the body it used was still carrying an
+    // earlier reported-and-unapplied write.
+    //
+    // That failure taught the lifetime of a divergence, which is worth stating since it
+    // is NOT what the first correction assumed: it does not persist. `syncOut` publishes
+    // a dynamic `.solver` body's pose and velocity at the END of the same tick, so a
+    // forbidden write is reported once and then overwritten by the publication. It
+    // lingers only in a test that calls `syncIn` without a frame around it — which is
+    // exactly what the steps above do, deliberately, to keep the solver state readable.
+    const clean = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 20, 0, 0 });
+    try declare(gpa, &ecs, clean.entity, .solver);
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    ecs.beginFrame();
+    const c = ecs.get(Transform, clean.entity).?;
+    ecs.getMut(Transform, clean.entity).?.pos = c.pos; // stamped, identical
+    ecs.getMut(Transform, body.entity).?.pos[0] = 12; // stamped, different
+    const both = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), both.forbidden_mutations);
+    try testing.expectEqual(body.body, both.first_forbidden.?);
+}
+
+test "the diagnostic fires under solver authority and under no other" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // THREE BODIES, identical but for what the diagnostic is supposed to key on. Each
+    // gets the SAME ECS write, so the only thing that can separate the answers is the
+    // rule under test — a scene where only one body is written would pass under a
+    // detection that reports everything it looks at.
+    const solver_side = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const gameplay_side = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 5, 0, 0 });
+    const static_side = try spawnLinked(gpa, &ecs, &pw, .static, .{ 0.5, 0.5, 0.5 }, .{ 10, 0, 0 });
+    try declare(gpa, &ecs, solver_side.entity, .solver);
+    try declare(gpa, &ecs, gameplay_side.entity, .gameplay);
+    try declare(gpa, &ecs, static_side.entity, .solver);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    ecs.beginFrame();
+    ecs.getMut(Transform, solver_side.entity).?.pos[2] = 1;
+    ecs.getMut(Transform, gameplay_side.entity).?.pos[2] = 1;
+    ecs.getMut(Transform, static_side.entity).?.pos[2] = 1;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // EXACTLY ONE of the three. The `.gameplay` write is the authored path and the
+    // static's is too, since the matrix consumes a static's pose under either
+    // authority — so a count of three would mean the rule keys on the write, a count
+    // of two would mean it keys on the authority alone and forgot F2, and a count of
+    // zero would mean it keys on nothing.
+    try testing.expectEqual(@as(u32, 1), r.forbidden_mutations);
+    try testing.expectEqual(solver_side.body, r.first_forbidden.?);
+    // The two authored writes really were applied, so their silence is a decision and
+    // not an oversight — a body the pass never reached would be silent too.
+    try testing.expectEqual(@as(u32, 2), r.poses_applied);
 }

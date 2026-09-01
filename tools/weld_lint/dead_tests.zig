@@ -478,9 +478,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // text. Deleting an `assertFn` line used to leave the tree green at 2029 of 2029 —
     // the constant declared a size and nothing put it in front of the list it sized.
     // (2029 -> 2030, suite reported 2030 - 2011 passed + 19 skipped, macOS aarch64.)
+    // G12 adds three: a static under the DEFAULT authority observed moving BY A QUERY,
+    // the forbidden-mutation diagnostic separating a write from a non-write, and the
+    // three-body scene where only the `.solver` write is reported.
+    // (2030 -> 2033, suite reported 2033 - 2014 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2028,
-        else => 2030,
+        .windows => 2031,
+        else => 2033,
     };
 }
 

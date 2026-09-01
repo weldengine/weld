@@ -175,6 +175,20 @@ pub const SyncInResult = struct {
     /// Bodies this pass touched with a waking setter. The number that must stay
     /// at zero when nothing changed.
     woke: u32 = 0,
+    /// **« Mutation ECS interdite sous autorité `.solver` »** — how many bodies this
+    /// pass caught in that state (M1.1.15.2 G12).
+    ///
+    /// **The wording is the owner's and the wording is the contract.** § *Autorité
+    /// d'écriture* formulates it as a property of the STATE and never as "a rule
+    /// wrote": the tick establishes that a component mutated since the last `syncIn`,
+    /// and a Zig system can have done it as readily as a rule. A diagnostic that named
+    /// an author would be naming something the ECS does not store.
+    forbidden_mutations: u32 = 0,
+    /// One offender, so the count is actionable. Registration order, so it is the same
+    /// body on every run of the same scene — a counter alone tells a developer that
+    /// something is wrong and not where, and a list would allocate on a path that does
+    /// not.
+    first_forbidden: ?api.BodyId = null,
 };
 
 /// Was `T`'s slot for `entity` stamped after `since`?
@@ -296,10 +310,89 @@ pub fn syncIn(
             }
         }
 
+        // **THE DIAGNOSTIC, and it is detected BEFORE the pass decides to consume
+        // anything** (M1.1.15.2 G12). § *Autorité d'écriture* declares it word for word
+        // — "mutation ECS interdite sous autorité `.solver`" — and nothing produced it:
+        // the `continue` below left before any tick was ever consulted for a `.solver`
+        // body, so the one authority under which an ECS write is a defect was the one
+        // authority the pass never looked at.
+        //
+        // **THE TICK IS THE SIGNAL, and the value comparison only removes a certain
+        // false positive.** `changed_tick` is stamped by `World.getMut` and by nothing
+        // else, so it answers exactly "was this ECS component written" — an API call
+        // moving the same body never touches it. What the tick cannot tell is a
+        // `getMut` that changed nothing, which is why the value is consulted wherever
+        // the solver's own value is authoritative.
+        //
+        // **WHERE IT IS AUTHORITATIVE IS DERIVED FROM THE MATRIX, per component**, and
+        // not chosen:
+        //
+        // | body_type   | component | solver value authoritative? | why                    |
+        // |-------------|-----------|-----------------------------|------------------------|
+        // | `dynamic`   | pose      | yes                         | `syncOut` republishes  |
+        // | `dynamic`   | velocity  | yes                         | `syncOut` republishes  |
+        // | `kinematic` | velocity  | yes                         | `syncOut` republishes  |
+        // | `kinematic` | pose      | NO                          | published by neither   |
+        //
+        // A kinematic pose under `.solver` is driven by the API — `moveKinematic`,
+        // `setBodyTransform` — which writes the solver and not the ECS, so the two
+        // legitimately differ and comparing them says nothing. There the tick stands
+        // alone. **The residual is named rather than hidden**: a `getMut(Transform)`
+        // that changes nothing, on a kinematic whose ECS is legitimately behind, is
+        // reported. It is a diagnostic and not a behaviour, so the direction is safe.
+        //
+        // **A STATIC IS NEVER REPORTED**, and that is F2's correction seen from here
+        // rather than a second rule: the matrix consumes a static's pose under EITHER
+        // authority, so an ECS write to one is the authored path and not a defect.
+        if (auth == .solver and body_type != .static) {
+            const stale_baseline = e.consumed_tick == null;
+            var forbidden = false;
+            if (ecs.get(Transform, entity)) |t| {
+                if (changedSince(ecs, Transform, entity, e.consumed_tick)) {
+                    const pose = sync.solverPose(pw, body).?;
+                    const differs = !std.mem.eql(WorldReal, &t.pos, &pose.pos) or
+                        !std.mem.eql(WorldReal, &t.rot, &pose.rot);
+                    if (body_type == .kinematic or differs) forbidden = true;
+                }
+            }
+            if (ecs.get(Velocity, entity)) |v| {
+                if (changedSince(ecs, Velocity, entity, e.consumed_tick)) {
+                    const out = sync.solverVelocity(pw, body);
+                    if (!std.mem.eql(WorldReal, &v.linear, &out.linear) or
+                        !std.mem.eql(WorldReal, &v.angular, &out.angular)) forbidden = true;
+                }
+            }
+            // **THE TRAP, named before it was hit and closed here.** With no baseline
+            // `changedSince` returns TRUE unconditionally — its own comment says so,
+            // "never consumed: no baseline to filter by" — so a naive detection would
+            // report every `.solver` body carrying a `Transform`, on the first pass,
+            // forever, since nothing advanced a `.solver` baseline either. A change is
+            // not reportable against an absent baseline: the first observation
+            // ESTABLISHES one and reports nothing. It is the same sentinel subtlety
+            // that produced a zero-versus-null defect at G5b.
+            if (forbidden and !stale_baseline) {
+                result.forbidden_mutations += 1;
+                if (result.first_forbidden == null) result.first_forbidden = body;
+            }
+            // And the baseline advances whether or not anything was reported, which is
+            // what turns the tick predicate into a ONE-TICK window: the next pass asks
+            // "was it written since the previous `syncIn`", which is the question the
+            // diagnostic is about.
+            e.consumed_tick = now;
+        }
+
+        // **A STATIC TAKES ITS POSE UNDER EITHER AUTHORITY** (M1.1.15.2 G12, F2). The
+        // matrix row is `static | l'un ou l'autre | pose seule, sur changement`, and the
+        // predicate excluded a static `.solver` — **the default case**, since `.solver`
+        // is the default for every body type. A static is skipped by `syncOut` too
+        // (`body_type == .static` → continue), so it left BOTH directions: a rule moving
+        // a static updated neither its body nor its broadphase proxy, and every query
+        // kept answering at the old pose.
+        //
         // `.gameplay → .solver` DOES push once, so the solver resumes from where
         // gameplay left the body rather than from the state it last computed for
         // itself and had discarded ever since.
-        const consume = auth == .gameplay or to_solver;
+        const consume = auth == .gameplay or to_solver or body_type == .static;
         if (!consume) continue;
 
         // A STATIC body takes its pose and nothing else — it has no velocity
