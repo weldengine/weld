@@ -643,3 +643,119 @@ test "electedBodyOf answers exactly what electPublishers elects" {
     try testing.expect(sync.characterOf(&r.m.world, hero) != null);
     try testing.expect(sync.characterOf(&r.m.world, a) == null);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.15.2 G14 — the two properties.
+// ---------------------------------------------------------------------------
+
+test "move_kinematic refused on a non-kinematic body leaves the state untouched" {
+    const gpa = testing.allocator;
+    var r: Rig = undefined;
+    try Rig.init(gpa, &r);
+    defer r.deinit();
+
+    // **THE PROPERTY IS THE STATE AFTER THE REFUSAL, NOT THE REFUSAL.** An
+    // `expectError` alone passes on an implementation that mutates and then returns the
+    // error — which is the shape that matters here, since the entry writes a pose, two
+    // derived velocities and a journal mark before it could ever have returned. So every
+    // one of the four is captured beforehand and confronted afterwards.
+    const dyn = try r.spawnLinked(.dynamic, .{ 0.5, 0.5, 0.5 }, .{ 1, 2, 3 });
+    const sta = try r.spawnLinked(.static, .{ 0.5, 0.5, 0.5 }, .{ 9, 0, 0 });
+    try r.ecs.addComponent(gpa, dyn.entity, RigidBody, .{ .authority = .solver });
+
+    // A KNOWN JOURNAL STATE, established by a real pass rather than by construction: a
+    // body with no entry at all would make "the mark did not move" true by absence.
+    r.ecs.beginFrame();
+    _ = try sync.in.syncIn(gpa, &r.m.world, &r.ecs, &r.journal);
+    const mark_before = r.journal.entryOf(dyn.body).?;
+    try testing.expect(mark_before.consumed_tick != null);
+
+    // A KNOWN VELOCITY too, so "the velocity did not move" is not the statement that
+    // zero stayed zero.
+    r.m.world.bm.setLinearVelocity(dyn.body, forge_3d.Vec3r.fromArray(.{ 5, 0, 0 }));
+    const pose_before = sync.solverPose(&r.m.world, dyn.body).?;
+    const vel_before = sync.solverVelocity(&r.m.world, dyn.body);
+
+    r.ecs.beginFrame();
+    try testing.expectError(error.NotKinematic, physics.moveKinematic(&r.ctx, r.bits(dyn.entity), 40, 40, 40, 0, 0, 0, 1, 1.0 / 60.0));
+
+    // NOTHING MOVED — pose, both velocities, and the journal mark.
+    const pose_after = sync.solverPose(&r.m.world, dyn.body).?;
+    try testing.expectEqualSlices(f32, &pose_before.pos, &pose_after.pos);
+    try testing.expectEqualSlices(f32, &pose_before.rot, &pose_after.rot);
+    const vel_after = sync.solverVelocity(&r.m.world, dyn.body);
+    try testing.expectEqualSlices(f32, &vel_before.linear, &vel_after.linear);
+    try testing.expectEqualSlices(f32, &vel_before.angular, &vel_after.angular);
+    const mark_after = r.journal.entryOf(dyn.body).?;
+    try testing.expectEqual(mark_before.consumed_tick.?, mark_after.consumed_tick.?);
+
+    // A STATIC IS REFUSED TOO — "non-kinematic" and not "not dynamic".
+    try testing.expectError(error.NotKinematic, physics.moveKinematic(&r.ctx, r.bits(sta.entity), 1, 1, 1, 0, 0, 0, 1, 1.0 / 60.0));
+
+    // NON-VACUITY: the same call on a KINEMATIC body succeeds and moves it, so the
+    // refusals above are the subject being refused and not the arguments being wrong.
+    const kin = try r.spawnLinked(.kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try physics.moveKinematic(&r.ctx, r.bits(kin.entity), 2, 0, 0, 0, 0, 0, 1, 1.0 / 60.0);
+    try testing.expectApproxEqAbs(@as(f32, 2), sync.solverPose(&r.m.world, kin.body).?.pos[0], 1e-5);
+    // And ITS journal mark DID move, which is what the dynamic body's must not have.
+    try testing.expect(r.journal.entryOf(kin.body).?.consumed_tick != null);
+}
+
+test "set_joint_motor resolves as §5 writes it, and fails loud" {
+    const gpa = testing.allocator;
+
+    // **THE RECEIVER FORM IS WHAT §5 FIXES**, and it is what this checks: a rule writes
+    // `physics.set_joint_motor(...)`, dispatched on the service, against the EMITTED
+    // declaration that `bindgen-check` guards — never a literal written here.
+    //
+    // The arguments take RD-2's scalar decomposition: §5 passes a `JointId` and an
+    // aggregate `?JointMotor`, and the Phase 1 tree-walker carries neither. The residual
+    // is named in the journal rather than papered over.
+    var h = try check(gpa,
+        \\component Door { open: int = 0 }
+        \\rule open_door(entity: Entity)
+        \\  when entity has Door
+        \\{
+        \\  try {
+        \\    physics.set_joint_motor(7, true, 1, 1.5707964, 100.0, 0.0, 20.0, 1.0)
+        \\    entity.get_mut(Door).open = 1
+        \\  } catch err {
+        \\    entity.get_mut(Door).open = 0 - 1
+        \\  }
+        \\}
+    );
+    defer h.deinit(gpa);
+    for (h.diagnostics.items) |d| std.debug.print("check {s}: {s}\n", .{ d.code.code(), d.primary_message });
+    try testing.expectEqual(@as(usize, 0), h.diagnostics.items.len);
+
+    // NON-VACUITY on the resolution: an entry the service does NOT declare is a
+    // diagnostic, so the clean run above is the checker finding this method and not the
+    // checker accepting anything spelled on `physics`.
+    var bad = try check(gpa,
+        \\component Door { open: int = 0 }
+        \\rule open_door(entity: Entity)
+        \\  when entity has Door
+        \\{
+        \\  try {
+        \\    physics.set_joint_torque(7, true, 1, 1.5707964, 100.0, 0.0, 20.0, 1.0)
+        \\  } catch err { }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try testing.expect(bad.diagnostics.items.len > 0);
+
+    // AND IT FAILS LOUD rather than answering success. `Forge3DModule` has no joints, so
+    // the wrapper propagates — a stub returning `void` would be the truncated-success
+    // class closed three times in this milestone.
+    var r: Rig = undefined;
+    try Rig.init(gpa, &r);
+    defer r.deinit();
+    try testing.expectError(error.JointsNotImplemented, physics.setJointMotor(&r.ctx, 7, true, 1, 1.5, 100, 0, 20, 1));
+    // The CLEARING form reaches the same entry — `enabled = false` is §5's "absent or
+    // null means no motor", and it must not short-circuit into a silent success.
+    try testing.expectError(error.JointsNotImplemented, physics.setJointMotor(&r.ctx, 7, false, 0, 0, 0, 0, 0, 0));
+    // Domain, refused before the entry: a handle out of `JointId`'s range and a mode
+    // outside the two the enum declares.
+    try testing.expectError(error.InvalidJointId, physics.setJointMotor(&r.ctx, -1, true, 0, 0, 0, 0, 0, 0));
+    try testing.expectError(error.InvalidMotorMode, physics.setJointMotor(&r.ctx, 7, true, 2, 0, 0, 0, 0, 0));
+}

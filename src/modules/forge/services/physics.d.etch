@@ -30,4 +30,7 @@ service physics {
 
   /// Teleport a character. Sweeps nothing, resolves nothing, and invalidates the ground verdict.
   fn set_character_position(entity: Entity, x: float, y: float, z: float) throws
+
+  /// Drive a joint's motor. `enabled` false clears it; the target is the scalar form.
+  fn set_joint_motor(joint: int, enabled: bool, mode: int, target: float, max_linear_force: float, max_angular_torque: float, frequency_hz: float, damping_ratio: float) throws
 }

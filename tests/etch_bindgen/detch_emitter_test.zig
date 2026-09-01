@@ -168,10 +168,10 @@ test "the physics service's committed .d.etch matches its ServiceSpec" {
     var lines: std.ArrayListUnmanaged(emit_detch.DiffLine) = .empty;
     defer lines.deinit(gpa);
     try std.testing.expect(!try emit_detch.diff(gpa, physics.declaration_source, rendered, &lines));
-    // FOUR queries plus the FIVE mutation wrappers of G11. Pinned, and the number is the
+    // FOUR queries, the FIVE mutation wrappers of G11, and `set_joint_motor` at G14. Pinned, and the number is the
     // point: a method added to the spec without regenerating the artifact is the drift
     // E1902 exists for, and this count is what makes the walk below non-vacuous.
-    try std.testing.expectEqual(@as(usize, 9), physics.spec.methods.len);
+    try std.testing.expectEqual(@as(usize, 10), physics.spec.methods.len);
 }
 
 test "the emitted physics and trigger declarations parse and resolve" {

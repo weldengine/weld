@@ -485,9 +485,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // G13 adds three: the gravity differential against a kinematic, the character-push
     // differential against a kinematic, and the sleep path measured rather than reasoned.
     // (2033 -> 2036, suite reported 2036 - 2017 passed + 19 skipped, macOS aarch64.)
+    // G14 adds two: `move_kinematic`'s refusal leaving pose, velocity and journal mark
+    // untouched, and `set_joint_motor` resolving on the receiver and failing loud.
+    // (2036 -> 2038, suite reported 2038 - 2019 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2034,
-        else => 2036,
+        .windows => 2036,
+        else => 2038,
     };
 }
 

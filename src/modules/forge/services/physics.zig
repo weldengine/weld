@@ -247,6 +247,21 @@ pub fn moveKinematic(
     dt: f64,
 ) !void {
     const body = try bodyOf(ctx, entity);
+    // **THE SUBJECT IS CHECKED BEFORE THE ARGUMENTS, AND BOTH BEFORE ANY MUTATION**
+    // (M1.1.15.2 G14). This entry DERIVES both velocities from a target pose, which is
+    // meaningful for a kinematic body and for no other: a static is not moved by the
+    // solver at all, and a dynamic one owns its velocities through integration or
+    // through the contact solver. Applying it to either would write a pose and a pair
+    // of derived velocities that nothing in the cycle would honour.
+    //
+    // **The order is the contract, not a style.** Mutating and then refusing would leave
+    // the body moved, its velocities derived, and — worse — the journal marked, so
+    // `syncIn` would restore the ECS mirror onto a body this entry should never have
+    // touched. What the caller must be able to rely on is the STATE AFTER the refusal,
+    // which is why the refusal sits above every write rather than merely before the
+    // return.
+    const kind = ctx.m.world.bm.bodyType(body) orelse return error.StaleBodyHandle;
+    if (kind != .kinematic) return error.NotKinematic;
     const rot = Quat.fromArray(.{
         api.precision.etchToWorld(rot_x),
         api.precision.etchToWorld(rot_y),
@@ -358,6 +373,61 @@ pub fn setCharacterPosition(ctx: *Ctx, entity: u64, x: f64, y: f64, z: f64) !voi
     ctx.m.setCharacterPosition(id, vec(x, y, z));
 }
 
+/// Drive a joint's motor from a rule — `engine-physics-forge.md` §5's `open_door`,
+/// which is the reason the thirty-second interface entry exists at all.
+///
+/// **COMPONENTWISE, and RD-2's scope reaches further here than anywhere else.** §5
+/// writes `physics.set_joint_motor(hinge.joint_id, hinge.joint.joint_type.motor)`
+/// — two arguments, of which the second is an aggregate. Neither crosses the
+/// Phase 1 tree-walker: `JointId` is a packed handle with no Etch scalar spelling,
+/// and `?JointMotor` is a struct whose `target` is itself a tagged union. So the
+/// RECEIVER FORM is what §5 fixes and what resolves — `physics.set_joint_motor`,
+/// dispatched on the service — while the arguments take the scalar decomposition
+/// RD-2 already imposes on the query half.
+///
+/// `enabled` carries the OPTIONAL: §5 says an absent or `null` motor means no
+/// motor, and a `bool` is the only way an optional crosses a surface whose scalar
+/// set has no null. It is the first parameter after the handle for that reason —
+/// the others are read only when it is true.
+///
+/// **The SCALAR target only, and the bound is named rather than silent.**
+/// `JointTarget` has a `scalar` variant — one mode, one value — and multi-axis
+/// variants carrying several modes and several values. §5's own example is the
+/// scalar one, and it is what `hinge`, `prismatic` and `distance` need. The
+/// multi-axis targets reach Etch when the tree-walker carries an aggregate, which
+/// is the same condition RD-2 already states.
+///
+/// **It fails loud, exactly as the three joint entries of G5a do.** `Forge3DModule`
+/// answers `error.JointsNotImplemented` and this wrapper propagates it; a stub
+/// that returned success would be the truncated-success class this milestone has
+/// closed three times.
+pub fn setJointMotor(
+    ctx: *Ctx,
+    joint: i64,
+    enabled: bool,
+    mode: i64,
+    target: f64,
+    max_linear_force: f64,
+    max_angular_torque: f64,
+    frequency_hz: f64,
+    damping_ratio: f64,
+) !void {
+    if (joint < 0 or joint > std.math.maxInt(api.JointId)) return error.InvalidJointId;
+    const id: api.JointId = @intCast(joint);
+    if (!enabled) return ctx.m.setJointMotor(id, null);
+    if (mode < 0 or mode > 1) return error.InvalidMotorMode;
+    return ctx.m.setJointMotor(id, .{
+        .target = .{ .scalar = .{
+            .mode = @enumFromInt(@as(u8, @intCast(mode))),
+            .value = api.precision.etchToWorld(target),
+        } },
+        .max_linear_force = api.precision.etchToWorld(max_linear_force),
+        .max_angular_torque = api.precision.etchToWorld(max_angular_torque),
+        .frequency_hz = api.precision.etchToWorld(frequency_hz),
+        .damping_ratio = api.precision.etchToWorld(damping_ratio),
+    });
+}
+
 /// The service's `ServiceSpec`. Parameter NAMES are declared because Zig
 /// carries none; every type and every `throws` flag is derived from the
 /// implementations above, so the emitted declaration cannot drift from them.
@@ -427,6 +497,13 @@ pub const spec = services.ServiceSpec{
             *Ctx,
             &.{ "entity", "x", "y", "z" },
             setCharacterPosition,
+        ),
+        services.method(
+            "set_joint_motor",
+            "Drive a joint's motor. `enabled` false clears it; the target is the scalar form.",
+            *Ctx,
+            &.{ "joint", "enabled", "mode", "target", "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" },
+            setJointMotor,
         ),
     },
 };
