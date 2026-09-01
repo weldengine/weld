@@ -2698,27 +2698,55 @@ var g19_gpa: ?std.mem.Allocator = null;
 var g19_shape: api.ShapeId = 0;
 var g19_target: EntityId = EntityId.dead;
 
-/// A gameplay system that creates a body IN FLIGHT — entity and body in the same
-/// frame, ahead of the physics phase — which is the only shape that reaches the case.
+/// A gameplay system that creates a body IN FLIGHT — entity and body in the same frame,
+/// ahead of the physics phase — which is the only shape that reaches the case.
+///
+/// **THROUGH THE COMMAND BUFFER, and that is a contract and not a preference.**
+/// `scheduler.zig` states that a direct structural mutation inside a dispatched system is
+/// "programmer error and breaks query / chunk pointer stability". The first version of
+/// this system called `World.spawn` directly: it exercised a spawn no production path
+/// performs AND stepped over the phase flush the scenario claims to exercise — the same
+/// "green because the scene avoids what it measures", this time on the entry mechanism
+/// rather than on the assertion.
+///
+/// The body is therefore created from the `on_spawned` observer, which is the path that
+/// RECEIVES the `EntityId` at the phase-boundary flush (`observers.flushWithObservers`,
+/// spawn arm). Both still land in the same tick, ahead of `fixed_update`.
 fn g19System(ctx: core.ecs.SystemContext) anyerror!void {
-    const gpa = g19_gpa orelse return;
-    const pw = g19_pw orelse return;
     switch (g19_mode) {
         .idle => {},
         .spawn_only, .spawn_then_mutate => {
-            const e = try ctx.world.spawn(gpa, .{ .pos = .{ 1, 2, 3 } }, .{});
-            var desc = api.BodyDescriptor{ .entity = e, .body_type = .kinematic, .shape = g19_shape };
-            desc.position = av3(1, 2, 3);
-            _ = try pw.addBody(gpa, desc);
-            g19_target = e;
-            // The mutation happens AFTER the spawn, in the same tick — which is what
-            // `added_tick` cannot tell from the spawn itself.
-            if (g19_mode == .spawn_then_mutate) ctx.world.getMut(Transform, e).?.pos[0] = 40;
+            try ctx.cmd.spawn(.{ Transform{ .pos = .{ 1, 2, 3 } }, Velocity{} });
         },
         .tier1_write => {
             const t = ctx.world.getMut(Transform, g19_target) orelse return;
             t.pos[0] = 77;
         },
+    }
+}
+
+/// The `on_spawned` observer: it receives the entity the flush created and gives it its
+/// body. The MUTATION, when the mode asks for one, happens here too — after the spawn and
+/// in the same tick, which is exactly what `added_tick` cannot tell from the spawn.
+fn g19OnSpawned(
+    _: ?*anyopaque,
+    world: *World,
+    entity: EntityId,
+    _: ?u32,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
+    _: *core.ecs.CommandBuffer,
+) anyerror!void {
+    if (g19_mode != .spawn_only and g19_mode != .spawn_then_mutate) return;
+    const gpa = g19_gpa orelse return;
+    const pw = g19_pw orelse return;
+    if (world.get(Transform, entity) == null) return;
+    var desc = api.BodyDescriptor{ .entity = entity, .body_type = .kinematic, .shape = g19_shape };
+    desc.position = av3(1, 2, 3);
+    _ = pw.addBody(gpa, desc) catch return;
+    g19_target = entity;
+    if (g19_mode == .spawn_then_mutate) {
+        if (world.getMut(Transform, entity)) |t| t.pos[0] = 40;
     }
 }
 
@@ -2765,6 +2793,9 @@ test "a spawn is not a mutation, and a mutation after a spawn in the same tick i
         .run = g19System,
         .accesses = &g19_accesses,
     });
+    // The observer is what receives the `EntityId` the flush creates — the production
+    // path for "act on an entity a deferred spawn just made".
+    try ecs.registerOnSpawned(gpa, null, g19OnSpawned);
     g19_pw = &pw;
     g19_gpa = gpa;
     g19_shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });

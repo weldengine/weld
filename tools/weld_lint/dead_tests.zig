@@ -500,9 +500,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // Reprise 4 adds two: a spawn is not a mutation (G19), and the gameplay/sleeping
     // invariant on all three paths (G20).
     // (2047 -> 2049, suite reported 2049 - 2030 passed + 19 skipped, macOS aarch64.)
+    // Reprise 5 adds two: `move_kinematic` refusing a subject that is not gameplay-
+    // authoritative (G21), and the bound of that guard — the four other wrappers must NOT
+    // demand it (G21). G22 is a test-shape correction and a brief reconciliation, which
+    // add none.
+    // (2049 -> 2051, suite reported 2051 - 2032 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2047,
-        else => 2049,
+        .windows => 2049,
+        else => 2051,
     };
 }
 

@@ -351,6 +351,12 @@ test "move_kinematic derives both velocities and mirrors them in the same call" 
     defer r.deinit();
 
     const p = try r.spawnLinked(.kinematic, .{ 1, 0.25, 1 }, .{ 0, 0, 0 });
+    // **DECLARED `.gameplay`, and G21 is what makes that necessary.** The entry now
+    // refuses a subject that is not under gameplay authority: the corpus states that a
+    // kinematic moved through the API IS `.gameplay`, and that is a guarantee only if
+    // something imposes it. This scene used to carry no `RigidBody` at all — hence the
+    // `.solver` default — and succeeded, which is the premise being unfounded.
+    try r.ecs.addComponent(gpa, p.entity, RigidBody, .{ .authority = .gameplay });
     const dt: f64 = 1.0 / 60.0;
 
     // A PURE ROTATION, and that choice is the discrimination. A linear-only
@@ -695,6 +701,7 @@ test "move_kinematic refused on a non-kinematic body leaves the state untouched"
     // NON-VACUITY: the same call on a KINEMATIC body succeeds and moves it, so the
     // refusals above are the subject being refused and not the arguments being wrong.
     const kin = try r.spawnLinked(.kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try r.ecs.addComponent(gpa, kin.entity, RigidBody, .{ .authority = .gameplay });
     try physics.moveKinematic(&r.ctx, r.bits(kin.entity), 2, 0, 0, 0, 0, 0, 1, 1.0 / 60.0);
     try testing.expectApproxEqAbs(@as(f32, 2), sync.solverPose(&r.m.world, kin.body).?.pos[0], 1e-5);
     // And ITS journal mark DID move, which is what the dynamic body's must not have.
@@ -758,4 +765,117 @@ test "set_joint_motor resolves as §5 writes it, and fails loud" {
     // outside the two the enum declares.
     try testing.expectError(error.InvalidJointId, physics.setJointMotor(&r.ctx, -1, true, 0, 0, 0, 0, 0, 0));
     try testing.expectError(error.InvalidMotorMode, physics.setJointMotor(&r.ctx, 7, true, 2, 0, 0, 0, 0, 0));
+}
+
+test "move_kinematic refuses a subject that is not gameplay-authoritative" {
+    // **P1 of the sixth review, and the fault was in the CONTRACT before the code.** The
+    // owner document says a kinematic body moved through the API is `.gameplay`. That is
+    // a guarantee only if something imposes it — and nothing did: this entry read neither
+    // `RigidBody.authority` nor wrote it, and succeeded on an entity carrying no
+    // `RigidBody` at all. G19's removal of the kinematic short-circuit rested on that
+    // premise.
+    //
+    // **The property is the STATE AFTER the refusal**, the same discipline as G14's
+    // body-type refusal: pose, both velocities, the journal mark and the ECS mirror are
+    // captured before and confronted after.
+    const gpa = testing.allocator;
+    var r: Rig = undefined;
+    try Rig.init(gpa, &r);
+    defer r.deinit();
+
+    // THREE SUBJECTS, differing only in what they declare. `bare` carries no `RigidBody`
+    // at all, which is the case the old code passed and the one the premise most needs:
+    // an absent component IS the `.solver` default.
+    const bare = try r.spawnLinked(.kinematic, .{ 1, 0.25, 1 }, .{ 1, 2, 3 });
+    const solver = try r.spawnLinked(.kinematic, .{ 1, 0.25, 1 }, .{ 9, 0, 0 });
+    const play = try r.spawnLinked(.kinematic, .{ 1, 0.25, 1 }, .{ 20, 0, 0 });
+    try r.ecs.addComponent(gpa, solver.entity, RigidBody, .{ .authority = .solver });
+    try r.ecs.addComponent(gpa, play.entity, RigidBody, .{ .authority = .gameplay });
+
+    // A KNOWN JOURNAL STATE and a KNOWN VELOCITY, so neither "the mark did not move" nor
+    // "the velocity did not move" is true by absence or by zero.
+    r.ecs.beginFrame();
+    _ = try sync.in.syncIn(gpa, &r.m.world, &r.ecs, &r.journal);
+    r.m.world.bm.setLinearVelocity(bare.body, forge_3d.Vec3r.fromArray(.{ 5, 0, 0 }));
+    const pose_before = sync.solverPose(&r.m.world, bare.body).?;
+    const vel_before = sync.solverVelocity(&r.m.world, bare.body);
+    const mirror_before = r.ecs.get(Transform, bare.entity).?.pos;
+    const mark_before = r.journal.entryOf(bare.body);
+
+    r.ecs.beginFrame();
+    try testing.expectError(
+        error.NotGameplayAuthoritative,
+        physics.moveKinematic(&r.ctx, r.bits(bare.entity), 40, 40, 40, 0, 0, 0, 1, 1.0 / 60.0),
+    );
+
+    // NOTHING MOVED — the four channels the entry would otherwise write.
+    const pose_after = sync.solverPose(&r.m.world, bare.body).?;
+    try testing.expectEqualSlices(f32, &pose_before.pos, &pose_after.pos);
+    try testing.expectEqualSlices(f32, &pose_before.rot, &pose_after.rot);
+    const vel_after = sync.solverVelocity(&r.m.world, bare.body);
+    try testing.expectEqualSlices(f32, &vel_before.linear, &vel_after.linear);
+    try testing.expectEqualSlices(f32, &vel_before.angular, &vel_after.angular);
+    try testing.expectEqualSlices(f32, &mirror_before, &r.ecs.get(Transform, bare.entity).?.pos);
+    const mark_after = r.journal.entryOf(bare.body);
+    try testing.expectEqual(mark_before.?.applied_tick, mark_after.?.applied_tick);
+
+    // AN EXPLICIT `.solver` IS REFUSED TOO — the guard reads the value and not the
+    // component's presence.
+    try testing.expectError(
+        error.NotGameplayAuthoritative,
+        physics.moveKinematic(&r.ctx, r.bits(solver.entity), 1, 0, 0, 0, 0, 0, 1, 1.0 / 60.0),
+    );
+
+    // NON-VACUITY: the same call on the `.gameplay` subject SUCCEEDS and moves it, so the
+    // two refusals are the authority being refused and not the arguments being wrong.
+    try physics.moveKinematic(&r.ctx, r.bits(play.entity), 25, 0, 0, 0, 0, 0, 1, 1.0 / 60.0);
+    try testing.expectApproxEqAbs(@as(f32, 25), sync.solverPose(&r.m.world, play.body).?.pos[0], 1e-5);
+    try testing.expect(r.journal.entryOf(play.body).?.applied_tick != null);
+}
+
+test "the four other mutation wrappers do NOT demand gameplay authority" {
+    // **THE BOUND OF THE GUARD, asserted so it is not extended by symmetry.** Authority
+    // governs who writes the POSE OR VELOCITY OF A BODY and says nothing of the rest.
+    // A measurement that four of the five wrappers never reference authority is exact,
+    // and the rule does not follow from it: for these four the absence is CORRECT.
+    //
+    // `move_character`, `resize_character` and `set_character_position` write the pose of
+    // a `character_presence` — a kind `BodyKind` distinguishes, which `syncIn` never
+    // drives and `syncOut` never elects — and a character entity need not carry a
+    // `RigidBody` at all, so demanding `.gameplay` would refuse every character movement
+    // and the demo falls. `set_joint_motor` writes a constraint parameter and not a pose;
+    // authority is a property of ONE body and a joint relates two, so the question has no
+    // subject.
+    const gpa = testing.allocator;
+    var r: Rig = undefined;
+    try Rig.init(gpa, &r);
+    defer r.deinit();
+
+    // A CHARACTER CARRYING NO `RigidBody` — the shape the corpus names, and the one an
+    // over-extended guard would refuse.
+    const floor = try r.m.createShape(.{ .box = .{ .half_extents = av3(20, 0.5, 20) } });
+    _ = try r.m.addBody(.{
+        .entity = .{ .index = 950, .generation = 0 },
+        .body_type = .static,
+        .shape = floor,
+        .position = av3(0, -0.5, 0),
+    });
+    const hero = try r.ecs.spawn(gpa, .{ .pos = .{ 0, 0.1, 0 } }, .{});
+    _ = try r.m.createCharacter(.{ .entity = hero, .position = av3(0, 0.1, 0) });
+    try testing.expect(r.ecs.get(RigidBody, hero) == null);
+    try testing.expectEqual(api.PhysicsAuthority.solver, sync.authorityOf(&r.ecs, hero));
+
+    // THE THREE CHARACTER ENTRIES ANSWER — none refuses on authority.
+    _ = try physics.moveCharacter(&r.ctx, r.bits(hero), 0.2, 0, 0, 1.0 / 60.0);
+    try testing.expect(try physics.resizeCharacter(&r.ctx, r.bits(hero), 0.3, 1.2));
+    try physics.setCharacterPosition(&r.ctx, r.bits(hero), 4, 0.1, 0);
+    try testing.expectApproxEqAbs(
+        @as(f32, 4),
+        r.m.world.chars.get(sync.characterOf(&r.m.world, hero).?).?.position.toArray()[0],
+        1e-4,
+    );
+
+    // AND `set_joint_motor` fails on the joints being unimplemented, never on authority —
+    // which is what says the guard was not extended there either.
+    try testing.expectError(error.JointsNotImplemented, physics.setJointMotor(&r.ctx, 7, true, 1, 1.5, 100, 0, 20, 1));
 }

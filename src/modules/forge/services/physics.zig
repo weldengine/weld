@@ -262,6 +262,35 @@ pub fn moveKinematic(
     // return.
     const kind = ctx.m.world.bm.bodyType(body) orelse return error.StaleBodyHandle;
     if (kind != .kinematic) return error.NotKinematic;
+    // **AND THE SUBJECT MUST BE UNDER GAMEPLAY AUTHORITY** (M1.1.15.2 G21,
+    // `engine-physics-forge.md` § *Autorite d'ecriture*). The document states that a
+    // kinematic body moved through the API is `.gameplay` — and **that is a guarantee
+    // only if something imposes it**. Until this gate nothing did: this entry read
+    // neither `RigidBody.authority` nor wrote it, and succeeded on an entity carrying no
+    // `RigidBody` at all. The sentence was an intention written in the grammar of a
+    // guarantee, and the reasoning that removed the kinematic short-circuit at G19 rested
+    // on it.
+    //
+    // **A MISSING COMPONENT IS A REFUSAL**, since its absence IS the `.solver` default —
+    // `sync.authorityOf` says so, and a guard that admitted the absence would leave open
+    // the exact path the premise claims does not exist.
+    //
+    // **THE GUARD IS ON THIS ENTRY AND ON NO OTHER, and the bound is the corpus's.**
+    // Authority governs who writes the POSE OR VELOCITY OF A BODY; it says nothing of the
+    // rest, and extending it by symmetry would break paths it never had to know:
+    // `move_character`, `resize_character` and `set_character_position` write the pose of
+    // a `character_presence` — a kind `BodyKind` distinguishes, which `syncIn` never
+    // drives and `syncOut` never elects — and a character entity need not carry a
+    // `RigidBody` at all, so demanding `.gameplay` there would refuse every character
+    // movement; `set_joint_motor` writes a constraint parameter and not a pose, and
+    // authority is a property of ONE body while a joint relates two, so the question has
+    // no subject.
+    //
+    // *A measurement that four of the five wrappers never reference authority is exact,
+    // and the rule does not follow from it: for four of them the absence is CORRECT. An
+    // enumeration that is right does not make a rule that is right.*
+    const owner: EntityId = @bitCast(entity);
+    if (sync.authorityOf(ctx.ecs, owner) != .gameplay) return error.NotGameplayAuthoritative;
     const rot = Quat.fromArray(.{
         api.precision.etchToWorld(rot_x),
         api.precision.etchToWorld(rot_y),
@@ -279,7 +308,6 @@ pub fn moveKinematic(
     if (!(dt > 0) or !std.math.isFinite(dt)) return error.NonPositiveDt;
 
     ctx.m.moveKinematic(body, vec(x, y, z), rot, api.precision.etchToWorld(dt));
-    const owner: EntityId = @bitCast(entity);
     // The SAME read-first mirror `syncIn` publishes with, so the wrapper's mirror and
     // the seam's cannot disagree about the state they describe or about when they mark.
     _ = sync.mirrorSolverState(ctx.ecs, owner, &ctx.m.world, body, true);
