@@ -223,8 +223,11 @@ pub const IslandManager = struct {
 
     // --- partition steps ------------------------------------------------------
 
-    /// Collect the awake dynamic bodies into `members`, ascending by `BodyId`, and
-    /// build the slot → dense reverse map.
+    /// Collect the awake, non-PILOTED dynamic bodies into `members`, ascending by
+    /// `BodyId`, and build the slot → dense reverse map.
+    ///
+    /// A piloted body is excluded for the reason statics and kinematics are: it
+    /// presents an infinite mass, and linking islands through one would fuse the scene.
     fn collectMembers(self: *IslandManager, gpa: std.mem.Allocator, bm: *const BodyManager) !void {
         self.members.clearRetainingCapacity();
 

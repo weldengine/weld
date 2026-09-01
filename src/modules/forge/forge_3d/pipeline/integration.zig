@@ -79,6 +79,15 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
 /// `integrateVelocities` WITHOUT the accumulator reset — the form the substepped
 /// solver calls once per substep (`engine-physics-solver.md` §1.7, step 6).
 ///
+/// Like the fused form, it advances every live dynamic body that is neither asleep nor
+/// PILOTED: gravity, force, damping and the two velocity integrations are all in this
+/// pass, so the one skip carries the whole of the regime's first clause.
+///
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+///
 /// **The split is a correctness requirement of substepping, not a refactor.** The
 /// fused form CONSUMES the accumulators: it reads `force`/`torque`, applies them,
 /// and clears them. Called `n` times with `h = dt/n` it would therefore apply an
@@ -173,7 +182,8 @@ pub fn resetForceAccumulators(bm: *BodyManager) void {
     }
 }
 
-/// Advance every live DYNAMIC body's position and orientation one fixed tick of
+/// Advance the position and orientation of every live DYNAMIC body that is neither
+/// asleep nor PILOTED, one fixed tick of
 /// `dt` seconds from its CURRENT velocity, in ascending slot-index order. Call
 /// this AFTER `integrateVelocities` (in the full pipeline, after the contact
 /// solver has corrected velocities).

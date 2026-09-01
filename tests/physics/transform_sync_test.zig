@@ -2688,3 +2688,250 @@ test "flipping a MULTI-BODY entity to gameplay wakes every one of its bodies" {
     // make the non-elected body produce a spurious diagnostic of its own.
     try testing.expectEqual(@as(u32, 0), r.forbidden_mutations);
 }
+
+// --- M1.1.15.2 G19 — a spawn is not a mutation ------------------------------
+
+const G19Mode = enum { idle, spawn_only, spawn_then_mutate, tier1_write };
+var g19_mode: G19Mode = .idle;
+var g19_pw: ?*PhysicsWorld = null;
+var g19_gpa: ?std.mem.Allocator = null;
+var g19_shape: api.ShapeId = 0;
+var g19_target: EntityId = EntityId.dead;
+
+/// A gameplay system that creates a body IN FLIGHT — entity and body in the same
+/// frame, ahead of the physics phase — which is the only shape that reaches the case.
+fn g19System(ctx: core.ecs.SystemContext) anyerror!void {
+    const gpa = g19_gpa orelse return;
+    const pw = g19_pw orelse return;
+    switch (g19_mode) {
+        .idle => {},
+        .spawn_only, .spawn_then_mutate => {
+            const e = try ctx.world.spawn(gpa, .{ .pos = .{ 1, 2, 3 } }, .{});
+            var desc = api.BodyDescriptor{ .entity = e, .body_type = .kinematic, .shape = g19_shape };
+            desc.position = av3(1, 2, 3);
+            _ = try pw.addBody(gpa, desc);
+            g19_target = e;
+            // The mutation happens AFTER the spawn, in the same tick — which is what
+            // `added_tick` cannot tell from the spawn itself.
+            if (g19_mode == .spawn_then_mutate) ctx.world.getMut(Transform, e).?.pos[0] = 40;
+        },
+        .tier1_write => {
+            const t = ctx.world.getMut(Transform, g19_target) orelse return;
+            t.pos[0] = 77;
+        },
+    }
+}
+
+const g19_accesses = [_]core.ecs.scheduler.AccessDescriptor{core.ecs.Writes(Transform)};
+
+test "a spawn is not a mutation, and a mutation after a spawn in the same tick is" {
+    // **P1 of the fifth review.** The value comparison was short-circuited on a kinematic
+    // body — derived from the exact fact that `syncOut` never publishes its pose, and
+    // from the WRONG one. A kinematic `.solver` body is piloted by NOBODY: one moved
+    // through the API is `.gameplay`, and the wrapper writes both sides in one breath. So
+    // under `.solver` the two agree permanently and the comparison is meaningful there as
+    // everywhere else.
+    //
+    // What the short-circuit cost: `World.spawn` stamps `changed_tick` AND `added_tick`
+    // at the current tick, so EVERY kinematic `.solver` created during a frame was
+    // reported, identical poses or not.
+    //
+    // **The three properties live in ONE scene**, or the correction breaks one to repair
+    // another — and `added_tick` cannot separate the first two, both columns holding
+    // `now` at spawn and a later `getMut` rewriting `changed`.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var sched = core.ecs.SystemScheduler.init();
+    defer sched.deinit(gpa);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    try sync.publishPhysicsWorld(gpa, &ecs, &pw);
+    defer sync.unpublishPhysicsWorld(&ecs, &pw);
+    try sync.attachSyncInJournal(&ecs, &journal);
+    try sync.registerSystems(gpa, &sched, &ecs);
+    try sched.registerSystem(gpa, &ecs, .{
+        .phase = .pre_update,
+        .name = "test_g19_writer",
+        .run = g19System,
+        .accesses = &g19_accesses,
+    });
+    g19_pw = &pw;
+    g19_gpa = gpa;
+    g19_shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    defer {
+        g19_pw = null;
+        g19_gpa = null;
+        g19_mode = .idle;
+    }
+
+    // (1) A SPAWN IS NOT A MUTATION. Entity and body created in this very frame, at the
+    // same pose, ahead of `syncIn`. Under the short-circuit this reported unconditionally.
+    g19_mode = .spawn_only;
+    var before = journal.diagnostics.forbidden_mutations;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(before, journal.diagnostics.forbidden_mutations);
+    // The body really was created in flight, so the silence is not the silence of an
+    // empty world.
+    try testing.expect(pw.bm.entity(sync.electedBodyOf(&pw, g19_target).?) != null);
+
+    // (2) A MUTATION AFTER A SPAWN IN THE SAME TICK IS ONE. Same frame, same tick, same
+    // component — only the write after it differs.
+    g19_mode = .spawn_then_mutate;
+    before = journal.diagnostics.forbidden_mutations;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(before + 1, journal.diagnostics.forbidden_mutations);
+    try testing.expectEqual(sync.electedBodyOf(&pw, g19_target).?, journal.diagnostics.last_body.?);
+
+    // (3) **AND THE RESIDUAL TURNS INTO COVERAGE.** A Tier 1 module writing the ECS
+    // `Transform` of a kinematic `.solver` directly — instead of calling the wrapper —
+    // bypasses the authority model, and it is inside the service's house but not above
+    // its rule. Reporting it is what the mechanism is for.
+    g19_mode = .tier1_write;
+    before = journal.diagnostics.forbidden_mutations;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(before + 1, journal.diagnostics.forbidden_mutations);
+
+    // (4) AND SILENCE RESUMES when nothing writes — the divergence persists in the solver
+    // (nothing republishes a kinematic's pose) yet nothing is reported, because the
+    // diagnostic follows the MUTATION and not the state.
+    g19_mode = .idle;
+    before = journal.diagnostics.forbidden_mutations;
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try sched.dispatchFrame(&ecs, gpa, io, &jobs, fixed_dt_f32, null);
+    try testing.expectEqual(before, journal.diagnostics.forbidden_mutations);
+}
+
+test "gameplay and sleeping are incompatible on all three paths, transition or not" {
+    // **P2-B of the fifth review, and the shape of the fix is the finding.** The wake was
+    // carried by the code that detects the TRANSITION to `.gameplay`, so it was lost
+    // exactly where the transition does not happen. A transition is an EVENT; "gameplay
+    // and sleeping are incompatible" is a PROPERTY of the regime, and an invariant is
+    // maintained rather than triggered.
+    //
+    // The three paths are the owner's and each is exercised below — none of them is a
+    // transition, which is why none of them was covered.
+    const gpa = testing.allocator;
+
+    // --- PATH 1: a NEW journal entry. `seen` is false, so no transition is ever
+    // detected on it, and the body is already asleep when the pass first sees it.
+    {
+        var ecs = World.init();
+        defer ecs.deinit(gpa);
+        var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+        defer pw.deinit(gpa);
+        const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+        _ = floor;
+        const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+        try declare(gpa, &ecs, b.entity, .solver);
+
+        // Let it sleep under `.solver`, with NO journal at all — so nothing has ever
+        // recorded an authority for this body.
+        var throwaway: sync_in.Journal = .{};
+        defer throwaway.deinit(gpa);
+        var i: usize = 0;
+        while (i < 200) : (i += 1) {
+            ecs.beginFrame();
+            try sync.stepAndPublish(gpa, &pw, &ecs);
+        }
+        try testing.expect(pw.bm.isSleeping(b.body).?);
+
+        // Declare `.gameplay` and run the FIRST pass a fresh journal ever makes on it.
+        ecs.beginFrame();
+        ecs.getMut(RigidBody, b.entity).?.authority = .gameplay;
+        var fresh: sync_in.Journal = .{};
+        defer fresh.deinit(gpa);
+        const r = try sync_in.syncIn(gpa, &pw, &ecs, &fresh);
+        // NO TRANSITION was detected — `seen` was false — and the body is awake anyway.
+        try testing.expectEqual(@as(u32, 0), r.transitions);
+        try testing.expectEqual(@as(u32, 1), r.woke_for_invariant);
+        try testing.expect(!pw.bm.isSleeping(b.body).?);
+    }
+
+    // --- PATH 2: the journal REPLACED on a running world. `attachSyncInJournal` has no
+    // precondition on the state of its bodies, so the new journal starts blind.
+    {
+        var ecs = World.init();
+        defer ecs.deinit(gpa);
+        var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+        defer pw.deinit(gpa);
+        const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+        _ = floor;
+        const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+        try declare(gpa, &ecs, b.entity, .gameplay);
+
+        var first: sync_in.Journal = .{};
+        defer first.deinit(gpa);
+        var i: usize = 0;
+        while (i < 40) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &first);
+        // Force the state the invariant forbids, by the one public door that can: the
+        // primitive refuses it, so the flag is set directly. That IS the point — the
+        // invariant must hold against a state however it arose.
+        pw.bm.bodies.items(.flags)[pw.bm.alloc.validate(b.body).?].sleeping = true;
+
+        var replaced: sync_in.Journal = .{};
+        defer replaced.deinit(gpa);
+        ecs.beginFrame();
+        const r = try sync_in.syncIn(gpa, &pw, &ecs, &replaced);
+        try testing.expectEqual(@as(u32, 0), r.transitions);
+        try testing.expectEqual(@as(u32, 1), r.woke_for_invariant);
+        try testing.expect(!pw.bm.isSleeping(b.body).?);
+    }
+
+    // --- PATH 3: the one G18 already covered, kept so the invariant is shown to subsume
+    // the transition rather than replace it. A body asleep at the moment of the flip.
+    {
+        var ecs = World.init();
+        defer ecs.deinit(gpa);
+        var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+        defer pw.deinit(gpa);
+        const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+        _ = floor;
+        const b = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+        try declare(gpa, &ecs, b.entity, .solver);
+        var journal: sync_in.Journal = .{};
+        defer journal.deinit(gpa);
+        var i: usize = 0;
+        while (i < 200) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+        try testing.expect(pw.bm.isSleeping(b.body).?);
+
+        ecs.beginFrame();
+        ecs.getMut(RigidBody, b.entity).?.authority = .gameplay;
+        const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+        try testing.expectEqual(@as(u32, 1), r.transitions);
+        try testing.expect(!pw.bm.isSleeping(b.body).?);
+    }
+
+    // --- NON-VACUITY: the invariant wakes NOTHING in steady state. A `.solver` body that
+    // sleeps legitimately keeps sleeping, and a `.gameplay` body that is awake is not
+    // counted — so `woke_for_invariant` follows the forbidden state and not the authority.
+    {
+        var ecs = World.init();
+        defer ecs.deinit(gpa);
+        var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+        defer pw.deinit(gpa);
+        const floor = try spawnLinked(gpa, &ecs, &pw, .static, .{ 20, 0.5, 20 }, .{ 0, -0.5, 0 });
+        _ = floor;
+        const sleeper = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.5, 0 });
+        const piloted = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 8, 0.5, 0 });
+        try declare(gpa, &ecs, sleeper.entity, .solver);
+        try declare(gpa, &ecs, piloted.entity, .gameplay);
+        var journal: sync_in.Journal = .{};
+        defer journal.deinit(gpa);
+        var total: u32 = 0;
+        var i: usize = 0;
+        while (i < 200) : (i += 1) total += (try frameWithSyncIn(gpa, &pw, &ecs, &journal)).woke_for_invariant;
+        try testing.expectEqual(@as(u32, 0), total);
+        try testing.expect(pw.bm.isSleeping(sleeper.body).?);
+        try testing.expect(!pw.bm.isSleeping(piloted.body).?);
+    }
+}

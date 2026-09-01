@@ -101,8 +101,16 @@ pub fn assertDomain(cfg: SleepConfig) void {
     std.debug.assert(std.math.isFinite(cfg.time_before_sleep) and cfg.time_before_sleep >= 0);
 }
 
-/// Advance every awake dynamic body's sleep window by `dt`, in ascending slot-index
-/// order (deterministic — the `BodyManager` sweep discipline, M1.1.14).
+/// Advance the sleep window of every live dynamic body that is neither asleep nor
+/// PILOTED, by `dt`, in ascending slot-index order (deterministic — the `BodyManager`
+/// sweep discipline, M1.1.14).
+///
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+/// A piloted body is excluded because it follows the KINEMATIC regime, and a kinematic
+/// never reaches this sweep at all — the `body_type` filter excludes it one line above.
 ///
 /// This is step 11 of the normative per-tick cycle (§1.7) and runs on the
 /// POST-SOLVE state. Static and kinematic bodies are skipped: they never join an
@@ -225,9 +233,18 @@ pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
 }
 
 /// Put `id` to sleep: raise the flag and zero BOTH velocities exactly. No-op on a
-/// stale/invalid handle.
+/// stale/invalid handle, and a REFUSAL — nothing at all is written — on a body under
+/// gameplay authority.
 ///
-/// The MECHANISM only — it asks no question and checks no eligibility. Whether a
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+///
+/// The mechanism, and ONE question: a piloted body is refused outright, because the
+/// regime it follows has no sleep at all and this primitive is public — a direct
+/// caller could otherwise create the state the regime forbids. Whether a SIMULATED
+/// body should sleep is not asked here. Whether a
 /// body should sleep is an island decision taken at step 11 of the cycle and
 /// nowhere else (§1.8.3); this is what that decision calls once taken.
 ///

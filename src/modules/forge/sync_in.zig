@@ -228,6 +228,11 @@ pub const SyncInResult = struct {
     /// Bodies this pass touched with a waking setter. The number that must stay
     /// at zero when nothing changed.
     woke: u32 = 0,
+    /// Bodies woken to RESTORE the invariant "gameplay and sleeping are incompatible",
+    /// as opposed to `woke`, which counts the wakes a value push composed. Counted apart
+    /// because they answer different questions: one says gameplay moved something, the
+    /// other says a body was found in a state its regime forbids.
+    woke_for_invariant: u32 = 0,
     /// **« Mutation ECS interdite sous autorité `.solver` »** — how many bodies this
     /// pass caught in that state (M1.1.15.2 G12).
     ///
@@ -325,6 +330,30 @@ pub fn syncIn(
         // composes no wake, which is why writing it every tick costs nothing.
         pw.setBodyAuthorityIsGameplay(body, auth == .gameplay);
 
+        // **AN INVARIANT IS MAINTAINED, IT IS NOT TRIGGERED** (M1.1.15.2 G20,
+        // `engine-physics-forge.md` § *Autorite d'ecriture*). `gameplay` and `sleeping`
+        // are incompatible: that is a PROPERTY of the regime, and it must not be carried
+        // by the code that detects the TRANSITION to `.gameplay`. The two are distinct —
+        // a transition is an event, an invariant holds whether or not one occurred — and
+        // making one piece of code carry both makes them inseparable, so the invariant is
+        // lost exactly where the transition does not happen.
+        //
+        // **Three paths, all named by the owner and all reachable**: a NEW journal entry,
+        // whose `seen` is false so no transition is ever detected on it; a journal
+        // REPLACED on a running world, since `attachSyncInJournal` has no precondition on
+        // the state of its bodies; and a body ALREADY ASLEEP at the moment the authority
+        // is declared. The G18 form — `if (to_gameplay) wakeBody` — covered the third and
+        // only when a previous pass had recorded the authority.
+        //
+        // It costs one flag read per registration and wakes nothing in steady state: a
+        // piloted body cannot fall asleep at all, being excluded from the island
+        // collection and refused by `putToSleep`. What this restores is the state left by
+        // a path that ran BEFORE the authority was known.
+        if (auth == .gameplay and (pw.bm.isSleeping(body) orelse false)) {
+            pw.bm.wakeBody(body);
+            result.woke_for_invariant += 1;
+        }
+
         // TRANSITION, detected here because `authority` is a PUBLIC field: a rule
         // writes it directly, so no wrapper can be the guardian of the invariant.
         //
@@ -342,14 +371,6 @@ pub fn syncIn(
         const to_gameplay = transitioned and auth == .gameplay;
         e.last_authority = auth;
         e.seen = true;
-
-        // **A BODY ALREADY ASLEEP WHEN THE AUTHORITY FLIPS IS WOKEN**, and it is done
-        // here — above the election gate — so that every collider of the entity leaves
-        // the state, not the one that answers for its pose. The regime gives a piloted
-        // body the KINEMATIC one: it is a member of no island, so nothing would ever
-        // decide about it again and the flag would outlive the flip for the rest of its
-        // piloted life. `wakeBody` also resets the sleep window and its reference pose.
-        if (to_gameplay) pw.bm.wakeBody(body);
 
         if (!table.publishes[reg]) continue;
         const body_type = pw.bm.bodyType(body) orelse continue;
@@ -427,23 +448,32 @@ pub fn syncIn(
         // `getMut` that changed nothing, which is why the value is consulted wherever
         // the solver's own value is authoritative.
         //
-        // **WHERE IT IS AUTHORITATIVE IS DERIVED FROM THE MATRIX, per component**, and
-        // not chosen:
+        // **THE VALUE COMPARISON IS SIGNIFICANT FOR EVERY BODY TYPE, and the exception
+        // that stood here was derived from the wrong fact** (M1.1.15.2 G19,
+        // `engine-physics-forge.md` § *Autorite d'ecriture*). G12 short-circuited it on a
+        // kinematic body, reasoning — correctly — that `syncOut` publishes a kinematic's
+        // velocity and never its pose, so the two sides may legitimately differ and
+        // comparing them says nothing.
         //
-        // | body_type   | component | solver value authoritative? | why                    |
-        // |-------------|-----------|-----------------------------|------------------------|
-        // | `dynamic`   | pose      | yes                         | `syncOut` republishes  |
-        // | `dynamic`   | velocity  | yes                         | `syncOut` republishes  |
-        // | `kinematic` | velocity  | yes                         | `syncOut` republishes  |
-        // | `kinematic` | pose      | NO                          | published by neither   |
+        // **The relevant fact was a different one: a kinematic `.solver` body is piloted
+        // by NOBODY.** A kinematic moved through the API is `.gameplay`, and it is the
+        // wrapper that writes both sides in the same breath. Under `.solver` its pose
+        // moves on neither side, so the two agree permanently and the comparison is as
+        // meaningful there as anywhere else.
         //
-        // A kinematic pose under `.solver` is driven by the API — `moveKinematic`,
-        // `setBodyTransform` — which writes the solver and not the ECS, so the two
-        // legitimately differ and comparing them says nothing. There the tick stands
-        // alone. **The residual is named rather than hidden**: a `getMut(Transform)`
-        // that changes nothing, on a kinematic whose ECS is legitimately behind, is
-        // reported. It is a diagnostic and not a behaviour, so the direction is safe.
+        // **The residual therefore turns into COVERAGE.** A kinematic `.solver` whose ECS
+        // and solver diverge is ALREADY a defect: something moved it through the
+        // interface without going through the wrapper, bypassing the authority model —
+        // a Tier 1 module included, which is inside the service's house but not above its
+        // rule. Reporting it is what the mechanism is for.
         //
+        // **What the short-circuit cost, measured**: `World.spawn` stamps `changed_tick`
+        // AND `added_tick` at the current tick (`archetype.zig`), so every kinematic
+        // `.solver` created during a frame produced a diagnostic, identical poses or not
+        // — a channel that drowns at the first scene creating one in flight. And
+        // `added_tick` cannot rescue it: both columns hold `now` at spawn and a later
+        // `getMut` rewrites `changed` to `now`, so they distinguish nothing.
+
         // **A STATIC IS NEVER REPORTED**, and that is F2's correction seen from here
         // rather than a second rule: the matrix consumes a static's pose under EITHER
         // authority, so an ECS write to one is the authored path and not a defect.
@@ -454,7 +484,7 @@ pub fn syncIn(
                     const pose = sync.solverPose(pw, body).?;
                     const differs = !std.mem.eql(WorldReal, &t.pos, &pose.pos) or
                         !std.mem.eql(WorldReal, &t.rot, &pose.rot);
-                    if (body_type == .kinematic or differs) forbidden = true;
+                    if (differs) forbidden = true;
                 }
             }
             if (ecs.get(Velocity, entity)) |v| {

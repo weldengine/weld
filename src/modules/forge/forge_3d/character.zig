@@ -1133,7 +1133,8 @@ fn stepDown(
     return centre.sub(up.scale(paddedAdvance(hit, c.step_height, standoffTarget(c.padding, probe, centre))));
 }
 
-/// Push a DYNAMIC body the character walked into, and take nothing in return.
+/// Push a DYNAMIC body the character walked into — unless it is PILOTED, which
+/// presents an infinite mass to every impulse path — and take nothing in return.
 ///
 /// **Unilateral by construction** (§1.12.9): the character is kinematic, so no impulse is ever
 /// applied to it and its own resolution is untouched — it stops `padding` short of the body whether

@@ -497,9 +497,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // window not ageing while piloted, and the transition reaching every body of the
     // entity.
     // (2043 -> 2047, suite reported 2047 - 2028 passed + 19 skipped, macOS aarch64.)
+    // Reprise 4 adds two: a spawn is not a mutation (G19), and the gameplay/sleeping
+    // invariant on all three paths (G20).
+    // (2047 -> 2049, suite reported 2049 - 2030 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2045,
-        else => 2047,
+        .windows => 2047,
+        else => 2049,
     };
 }
 

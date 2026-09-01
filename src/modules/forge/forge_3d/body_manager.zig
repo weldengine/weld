@@ -779,6 +779,11 @@ pub const BodyManager = struct {
     /// naturally a no-op on a static/kinematic body (`inv_mass == 0`) — no
     /// `body_type` branch needed.
     ///
+    /// **A REFUSAL, wake included, on a body under gameplay authority**, which is not
+    /// naturally a no-op: its stored inverse mass is finite, and this entry is the
+    /// THIRD impulse path of the regime. Read from the filter and not inherited — a
+    /// primitive's contract is part of the change to its behaviour.
+    ///
     /// ACTIVATING — see `addForce`. Note the asymmetry with `setLinearVelocity`,
     /// which writes the same column and does NOT wake: the difference is the
     /// INTENT, not the field touched. An impulse comes from outside the simulation;
