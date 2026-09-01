@@ -488,9 +488,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // G14 adds two: `move_kinematic`'s refusal leaving pose, velocity and journal mark
     // untouched, and `set_joint_motor` resolving on the receiver and failing loud.
     // (2036 -> 2038, suite reported 2038 - 2019 passed + 19 skipped, macOS aarch64.)
+    // Reprise 2 adds five: the diagnostic observed from the PRODUCTION path, `addImpulse`
+    // through the public interface, the three-support differential, the flip on an
+    // already-sleeping body, and `applied_tick` distinct from `consumed_tick`.
+    // (2038 -> 2043, suite reported 2043 - 2024 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2036,
-        else => 2038,
+        .windows => 2041,
+        else => 2043,
     };
 }
 

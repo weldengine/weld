@@ -192,6 +192,22 @@ pub fn isMoving(bm: *const BodyManager, id: BodyId) bool {
 pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
     const idx = bm.alloc.validate(id) orelse return false;
     if (bm.bodies.items(.flags)[idx].sleeping) return false;
+    // **A PILOTED BODY IS JUDGED ON MOTION, exactly as a kinematic is** (M1.1.15.2 G15,
+    // § *Autorité d'écriture* clause 3 corrected: it follows the kinematic regime).
+    //
+    // **MEASURED, and the island exclusion alone did not give it.** A box resting on a
+    // kinematic support sleeps and a box on a static support sleeps; on a piloted
+    // dynamic support it did NOT — because a piloted body is `.dynamic`, so the branch
+    // below made it a motion source unconditionally, even standing perfectly still. The
+    // pair was therefore never deferred, the narrowphase ran every tick, and the wake
+    // fixpoint woke the sleeping box on the manifold, every tick, forever.
+    //
+    // The paragraph above already gives the reason the kinematic branch is motion-based:
+    // a MOVING platform must count as awake so the fixpoint sees the manifold and wakes
+    // the box on the conveyor. A gameplay-piloted body IS such a platform — driven by
+    // pose writes, still while nothing drives it — so the motion test is what it wants,
+    // and being `.dynamic` is the one thing about it that no longer decides anything.
+    if (bm.bodies.items(.flags)[idx].gameplay_authority) return isMoving(bm, id);
     if (bm.bodies.items(.body_type)[idx] == .dynamic) return true;
     return isMoving(bm, id);
 }
@@ -216,12 +232,16 @@ pub fn putToSleep(bm: *BodyManager, id: BodyId) void {
     // body, which is the argument above; for a piloted one the velocity is not a
     // residue, it is authored state.
     //
-    // **MEASURED, and it is why this branch exists rather than being argued.** The sleep
-    // path is the third impulse-adjacent path of the contract's own named reserve, and
-    // G13 is what makes it reachable: before it, a piloted body integrated, so it moved,
-    // so it never slept. After it, a piloted body is still by construction and sleeps at
-    // tick 29 — `time_before_sleep` exactly. With the zeroing, a posed 4 m/s went to
-    // zero at tick 29 and was NEVER restored over 120 further ticks, because the tick
+    // **MEASURED, and this comment is itself an example of what G16 swept.** The
+    // sentence that stood here said "a piloted body is still by construction and sleeps
+    // at tick 29" — written at G13, true then, and made FALSE by G15, which gave a
+    // piloted body the kinematic regime: it is a member of no island, so nothing ever
+    // decides to put it to sleep. A comment stating a regime is a declarant of it, and
+    // this one was falsified two gates after it was written.
+    //
+    // What the measurement established SURVIVES that reversal and is why this branch
+    // stays: with the zeroing, a posed 4 m/s went to zero at the sleep window and was
+    // NEVER restored over 120 further ticks, because the tick
     // predicate of `syncIn` had long consumed that `Velocity` write and never looks at
     // the value again: the ECS said 4, the solver said 0, permanently and in silence.
     if (bm.bodies.items(.flags)[idx].gameplay_authority) return;

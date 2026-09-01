@@ -11,10 +11,18 @@
 //! | `body_type` | `authority` | `syncIn`                   | `syncOut`       | during `step` |
 //! |-------------|-------------|----------------------------|-----------------|---------------|
 //! | `dynamic`   | `.solver`   | nothing                    | pose + velocity | integrated normally |
-//! | `dynamic`   | `.gameplay` | pose + velocity, on change | NOTHING         | **integrated, inverse mass set to zero** |
+//! | `dynamic`   | `.gameplay` | pose + velocity, on change | NOTHING         | **piloted, never simulated** (see below) |
 //! | `kinematic` | `.solver`   | nothing                    | velocity only   | pose imposed |
 //! | `kinematic` | `.gameplay` | pose + velocity, on change | NOTHING         | pose imposed |
 //! | `static`    | either      | pose only, on change       | nothing         | not integrated |
+//!
+//! **The "during `step`" column REFERS and does not summarise**, which is the correction
+//! the owner document made to its own copy of this table and which this one had to make
+//! too. It read "integrated, inverse mass set to zero" — the superseded formulation,
+//! left standing after its replacement. A table cell that paraphrases a rule is a second
+//! declarant of it, and two declarants diverge. What a piloted body does is stated once,
+//! by `weld_forge`'s `PhysicsAuthority`: it does not integrate, it presents an infinite
+//! mass to every impulse path, and it keeps its identity while leaving its island.
 //!
 //! **The zeroed inverse mass is this pass's doing**, and the flag it writes is the
 //! only way the declaration reaches the solver: `RigidBody.authority` is a Tier 1
@@ -108,6 +116,20 @@ pub const Journal = struct {
     /// tick depends on lives.
     entries: std.AutoHashMapUnmanaged(api.BodyId, Entry) = .empty,
 
+    /// **THE DIAGNOSTIC'S DURABLE RECORD, and it is here because the production path
+    /// DISCARDS the pass's result** (M1.1.15.2 G15, P1-a). `stepAndPublishSystem` writes
+    /// `_ = try in.syncIn(...)`: the registered system has nowhere to return a
+    /// `SyncInResult` to, so until this gate the only reader of `forbidden_mutations`
+    /// was a test calling `syncIn` by hand. A diagnostic no production path can observe
+    /// is not a diagnostic — it is a counter with a doc comment.
+    ///
+    /// The journal is the one object that survives the tick AND is reachable from the
+    /// system: it is attached by `attachSyncInJournal` and resolved through
+    /// `PhysicsWorldRef.journalPtr`. So the record lives here, and any owner of the
+    /// journal — the application, a debug overlay, a test driving the SYSTEM — reads it
+    /// without a channel being invented for it.
+    diagnostics: Diagnostics = .{},
+
     pub const Entry = struct {
         /// Tick at which an inbound change for this body was last consumed —
         /// by `syncIn` or by a wrapper that applied it itself.
@@ -129,6 +151,34 @@ pub const Journal = struct {
         /// pass over a body already authored `.gameplay` would read a default
         /// `.solver` and manufacture a transition that never happened.
         seen: bool = false,
+        /// Tick at which an EXPLICIT WRAPPER applied an operation to this body.
+        ///
+        /// **DISTINCT FROM `consumed_tick`, and conflating them was a defect**
+        /// (M1.1.15.2 G16). The restore branch asks "does a wrapper own this tick",
+        /// and it read `consumed_tick == now` — a value `syncIn` ALSO writes, at the
+        /// end of its own pass. So a second `syncIn` call within one tick took the
+        /// first call's own bookkeeping for a wrapper's mark and restored the mirror:
+        /// on a KINEMATIC `.solver` body that publishes a pose `syncOut` deliberately
+        /// withholds, gameplay owning a kinematic pose.
+        ///
+        /// One field, one question. `consumed_tick` is the BASELINE the tick predicate
+        /// compares against; this is the OWNERSHIP of the tick. `markApplied` writes
+        /// both — the wrapper both applied and consumed — and the pass writes only the
+        /// first.
+        applied_tick: ?Tick = null,
+    };
+
+    /// What the pass has caught since the journal was created. Cumulative and never
+    /// reset by the pass: a per-tick number would be gone by the time anyone looked,
+    /// which is the defect this record exists to close.
+    pub const Diagnostics = struct {
+        /// Total « mutation ECS interdite sous autorité `.solver` » caught.
+        forbidden_mutations: u64 = 0,
+        /// The most recent offender and the tick it was caught on — a count says
+        /// something is wrong and not where, and a list would allocate on a path that
+        /// does not.
+        last_body: ?api.BodyId = null,
+        last_tick: ?Tick = null,
     };
 
     pub fn deinit(self: *Journal, gpa: std.mem.Allocator) void {
@@ -153,6 +203,9 @@ pub const Journal = struct {
     /// into the ECS.
     pub fn markApplied(self: *Journal, gpa: std.mem.Allocator, body: api.BodyId, tick: Tick) !void {
         const e = try self.slot(gpa, body);
+        // BOTH: the wrapper applied (ownership) and it consumed (baseline). They are
+        // two questions and this is the one caller that answers yes to each.
+        e.applied_tick = tick;
         e.consumed_tick = tick;
     }
 };
@@ -272,6 +325,21 @@ pub fn syncIn(
         // gameplay is entitled to start from.
         if (to_gameplay) {
             result.seeded += 1;
+            // **A BODY ALREADY ASLEEP WHEN THE AUTHORITY FLIPS IS WOKEN, and the case is
+            // treated rather than left to chance** (M1.1.15.2 G15). The corrected regime
+            // gives a piloted body the KINEMATIC sleep regime — no island, no sleep — and
+            // `island_manager` now excludes it from the collection, so nothing would ever
+            // decide about it again: a body that was asleep at the moment of the flip
+            // would carry the flag for the rest of its piloted life, and the flag is
+            // read by the integration passes and by the proxy update.
+            //
+            // CLEARED and not ignored, because the two are not equivalent: ignoring it
+            // would leave a state the regime says the body does not have, observable by
+            // every reader of `flags.sleeping`. `wakeBody` also resets the sleep window
+            // and its reference pose, which is what the reverse flip needs — a body
+            // returning to `.solver` re-enters the collection with a window that starts
+            // now rather than one frozen at the moment it was piloted.
+            pw.bm.wakeBody(body);
             _ = sync.mirrorSolverState(ecs, entity, pw, body, body_type != .static);
             // The baseline advances, and it must: the values now in the ECS ARE the
             // solver's, so the marks this publication just left are not gameplay's
@@ -282,10 +350,17 @@ pub fn syncIn(
         }
 
         // **AN EXPLICIT WRAPPER ALREADY APPLIED THIS TICK — the pass restores the
-        // mirror and consumes nothing** (M1.1.15.2 G11). `consumed_tick == now` at the
-        // HEAD of this pass can have exactly one cause: `Journal.markApplied`, called
-        // by a Tier 1 mutation wrapper during the gameplay phase. This pass is the only
-        // other writer and it stamps at its END, so the predicate is precise.
+        // mirror and consumes nothing** (M1.1.15.2 G11). `applied_tick` has exactly ONE
+        // writer, `Journal.markApplied`, called by a Tier 1 mutation wrapper during the
+        // gameplay phase.
+        //
+        // **It read `consumed_tick` until G16, and that was a second declarant of a
+        // different fact.** The pass writes `consumed_tick` itself, at its own end, so a
+        // second `syncIn` call within one tick read its own bookkeeping as a wrapper's
+        // mark and restored the mirror — publishing, on a KINEMATIC `.solver` body, a
+        // pose `syncOut` deliberately withholds because gameplay owns a kinematic pose.
+        // One field per question is what makes the predicate precise; a shared field
+        // made it merely plausible.
         //
         // **The restore is what keeps the mark from creating the very defect it
         // prevents.** Skipping alone would be wrong: a rule that calls
@@ -302,8 +377,8 @@ pub fn syncIn(
         // the raw pose carrying a velocity that describes a motion toward a target it
         // is no longer heading to. The explicit operation wins the tick, and the ECS is
         // brought back to what it did.
-        if (e.consumed_tick) |ct| {
-            if (ct == now) {
+        if (e.applied_tick) |at| {
+            if (at == now) {
                 if (sync.mirrorSolverState(ecs, entity, pw, body, body_type != .static))
                     result.restored += 1;
                 continue;
@@ -373,6 +448,12 @@ pub fn syncIn(
             if (forbidden and !stale_baseline) {
                 result.forbidden_mutations += 1;
                 if (result.first_forbidden == null) result.first_forbidden = body;
+                // AND ON THE JOURNAL, which is what makes it observable from the
+                // registered system — see `Journal.Diagnostics`. The pass's own result
+                // is discarded there.
+                journal.diagnostics.forbidden_mutations += 1;
+                journal.diagnostics.last_body = body;
+                journal.diagnostics.last_tick = now;
             }
             // And the baseline advances whether or not anything was reported, which is
             // what turns the tick predicate into a ONE-TICK window: the next pass asks
@@ -466,6 +547,21 @@ pub fn syncIn(
         // application, which is what the no-wake guard reads — the two counters
         // answer different questions and are deliberately not merged.
         if (examined) e.consumed_tick = now;
+    }
+
+    // **ONE LINE PER TICK AT MOST, and it is the human-observable half.** The record
+    // above serves a reader that holds the journal; a log line serves the developer who
+    // does not know to look. Bounded on purpose: per PASS and never per body, so a scene
+    // with a hundred offenders logs once and names the count.
+    //
+    // The wording is the owner's — `engine-physics-forge.md` § *Autorité d'écriture*
+    // formulates it as a property of the STATE and never as "a rule wrote", since a Zig
+    // system can have done it as readily as a rule.
+    if (result.forbidden_mutations > 0) {
+        std.log.warn(
+            "forge/syncIn: forbidden ECS mutation under `.solver` authority — {d} body(ies) this tick, first BodyId {d}",
+            .{ result.forbidden_mutations, result.first_forbidden.? },
+        );
     }
 
     return result;

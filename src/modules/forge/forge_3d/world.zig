@@ -703,8 +703,14 @@ pub const PhysicsWorld = struct {
     /// Declare the write authority on this body's pose
     /// (`engine-physics-forge.md` § *Autorite d'ecriture*). The ECS field
     /// `RigidBody.authority` is Tier 1 and the solver cannot read it, so the ECS seam
-    /// mirrors it here once per pass; the single effect inside the solver is that the
-    /// inverse mass is zero during resolution, documented on `Body.flags`.
+    /// mirrors it here once per pass. What the regime IS is declared once, by
+    /// `weld_forge`'s `PhysicsAuthority`, and this site refers to it.
+    ///
+    /// **This declarant was named by no review and found by sweeping the class.** It
+    /// said "the single effect inside the solver is that the inverse mass is zero during
+    /// resolution" — one clause of three, and the formulation the corpus had already
+    /// replaced. The enumeration a reader produces is what that reader saw; the class is
+    /// what exists.
     ///
     /// **NO WAKE, deliberately, and it is the one setter of this file that composes
     /// none.** The three above compose one because they MOVE the body. This one moves

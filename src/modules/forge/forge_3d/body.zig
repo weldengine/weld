@@ -54,20 +54,15 @@ pub const BodyFlags = packed struct(u8) {
     /// the same reason every other citation in this tree is). It mirrors the ECS
     /// `RigidBody.authority` field, which is Tier 1 and which the solver cannot read.
     ///
-    /// **Its ONE effect inside the solver is that the inverse mass is set to zero
-    /// during resolution.** The body stays dynamic in every other respect — same
-    /// `BodyId`, same island, same shapes, integrated normally, no runtime `BodyType`
-    /// change, which the solver does not support and which would destroy its island.
-    /// It pushes other bodies EXACTLY as an infinite mass would.
+    /// **What it means is declared in ONE place** — `weld_forge`'s
+    /// `PhysicsAuthority`, which transcribes the owner document's three clauses. This
+    /// field is the solver-side MIRROR of that declaration and states none of it.
     ///
-    /// **The regime it replaces lost momentum at every contact**, which is why this
-    /// bit exists rather than nothing: the solver kept the body's inverse mass in the
-    /// contact's effective mass and gave it a share of the impulse, and `syncIn` then
-    /// re-posed the body and threw that share away. The other body therefore received
-    /// LESS than it would against an infinite mass, and the difference vanished.
-    ///
-    /// A FLAG and not a column, on the `is_trigger` precedent: one bit mirroring a
-    /// Tier 1 instance role, in a byte that already had room.
+    /// The prose that stood here said the flag's "ONE effect inside the solver is that
+    /// the inverse mass is set to zero during resolution", and that the body was
+    /// "integrated normally" and kept "the same island". All three became false — the
+    /// first named one impulse path of three, and the other two were reversed when the
+    /// regime was corrected to follow the kinematic one.
     gameplay_authority: bool = false,
     _reserved: u3 = 0,
 };

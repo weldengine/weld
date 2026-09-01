@@ -384,13 +384,13 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         // same reason the pose was already withheld from a kinematic body, applied to
         // the axis the old condition could not see.
         //
-        // A `.gameplay` DYNAMIC body still steps: it is integrated normally and its
-        // result is discarded here rather than at step 6 — removing it from integration
-        // would amount to changing its `BodyType` at runtime and would destroy its
-        // island. It participates in manifolds and pushes other bodies, but it resolves
-        // with an INVERSE MASS OF ZERO (`api/authority.zig`): the earlier wording here
-        // said it "keeps its mass" AND behaved as infinitely heavy, which cannot both
-        // be true and cost the other body a share of every impulse.
+        // A `.gameplay` body publishes nothing, and what it DOES during `step` is
+        // declared in ONE place — `api/authority.zig`, which transcribes
+        // `engine-physics-forge.md` § *Autorite d'ecriture*. This site refers and does
+        // not restate: the prose that stood here said the body "is integrated normally
+        // and its result is discarded", which was the superseded regime and survived
+        // its correction by two gates. A comment that paraphrases a rule is a second
+        // declarant of it, and two declarants diverge.
         if (authorityOf(ecs, entity) == .gameplay) continue;
         // SKIP IFF TAGGED **AND** STILL ASLEEP. The tag alone was the predicate until the
         // systems landed, and it was correct only because pass (1) removed it immediately,

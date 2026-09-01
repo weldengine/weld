@@ -19,22 +19,34 @@ pub const PhysicsAuthority = enum(u8) {
     /// Gameplay owns them. `syncIn` pushes the ECS values on change; `syncOut`
     /// publishes NOTHING, or it would overwrite the authority it just read.
     ///
-    /// **A gameplay-authoritative DYNAMIC body resolves with an inverse mass of
-    /// ZERO, and the formulation this replaces was self-contradictory.** The
-    /// text carried at G5b said the body *"keeps its mass, participates in
-    /// manifolds"* AND that it *"behaves as an infinitely heavy body"*. The two
-    /// cannot both be true, and the solver followed the first: it kept the
-    /// body's inverse mass in the contact's effective mass and applied it a
-    /// share of the impulse — a share `syncIn` then discarded by reposing the
-    /// body. The other body therefore received LESS impulse than it would
-    /// against an infinite mass, and momentum vanished at every contact.
+    /// **THE REGIME: PILOTED, NEVER SIMULATED** — `engine-physics-forge.md`
+    /// § *Autorite d'ecriture*, three clauses, transcribed here because this type is
+    /// the one place in the tree that may state them. Every other site REFERS to this
+    /// declaration and never paraphrases it.
     ///
-    /// The normative regime is the inverse mass set to zero DURING RESOLUTION.
-    /// The body stays dynamic in every other respect — same `BodyId`, same
-    /// island, same shapes, no runtime `BodyType` change, which the solver does
-    /// not support and which would destroy its island — and it is still
-    /// integrated, its result discarded. It pushes other bodies exactly as an
-    /// infinite mass would, and nothing is lost.
+    ///   1. **It does not integrate** — no gravity, no velocity integration, no
+    ///      damping. Its pose and velocity are what `syncIn` posed, and nothing else
+    ///      makes them evolve.
+    ///   2. **It presents an infinite mass to EVERY impulse path** — rigid contact
+    ///      resolution, character-controller pushes, and `addImpulse`. "Every path" is
+    ///      NORMATIVE: a path added later that does not consult this flag is a defect
+    ///      of that path.
+    ///   3. **It keeps its identity** — same `BodyId`, same shapes, same contacts, no
+    ///      runtime `BodyType` change, reversible without reconstruction. **It leaves
+    ///      its island**, as a kinematic body has none, and follows the kinematic
+    ///      regime on every predicate that asks what kind of body this is: it is not a
+    ///      sleep candidate, and it counts as a motion source only when it is MOVING.
+    ///
+    /// **Two superseded formulations are recorded because each cost a defect.** The
+    /// text carried at G5b said the body *"keeps its mass, participates in manifolds"*
+    /// AND that it *"behaves as an infinitely heavy body"* — the two cannot both be
+    /// true, the solver followed the first, and momentum vanished at every contact.
+    /// The text that replaced it said the inverse mass is zero *"during resolution"*,
+    /// which was exact and named ONE path of three: measured, the flag had a single
+    /// reader in the whole repository, so the body fell under gravity while nothing
+    /// published its pose and the character controller pushed it with its stored
+    /// inverse mass. *A contradiction is visible on a re-read; an incompleteness only
+    /// on wiring.*
     ///
     /// **The TRANSITIONS are `syncIn`'s and not a wrapper's**, because
     /// `authority` is a PUBLIC field: a rule writes

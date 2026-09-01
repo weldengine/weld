@@ -369,23 +369,18 @@ pub const ContactConstraint = struct {
 
 /// The motion properties a CONTACT RESOLUTION reads for `id`, which are not
 /// unconditionally the stored ones: a body under GAMEPLAY authority resolves with an
-/// inverse mass and an inverse inertia of ZERO
-/// (`engine-physics-forge.md` § *Autorite d'ecriture*).
+/// inverse mass and an inverse inertia of ZERO.
 ///
-/// **The body stays dynamic in every other respect** — same `BodyId`, same island,
-/// same shapes, integrated normally at steps 6 and 7. Only the resolution sees the
-/// infinite mass, which is why this is a read-time substitution and not a column the
-/// integrator would also read. Changing its `BodyType` instead is what the normative
-/// text refuses: the solver does not support a runtime type change and it would destroy
-/// the body's island.
+/// **THIS SITE IMPLEMENTS ONE CLAUSE AND DECLARES NOTHING.** The regime is stated once,
+/// in `api/authority.zig`, which transcribes `engine-physics-forge.md`
+/// § *Autorite d'ecriture*; what belongs here is why the substitution is made at READ
+/// time rather than in a column — the stored inverse mass is what a body returning to
+/// `.solver` resumes with, so writing it would make the flip destructive and
+/// irreversible, and clause 3 requires reversibility without reconstruction.
 ///
-/// **What it repairs.** The regime before it kept the body's inverse mass in the
-/// contact's effective mass and applied it a share of the impulse; `syncIn` then
-/// re-posed the body from the ECS and that share was discarded. The other body received
-/// LESS than it would against an infinite mass and momentum vanished at every contact.
-///
-/// The DAMPING and GRAVITY fields are returned untouched: they belong to integration,
-/// which this body still undergoes.
+/// The prose that stood here restated the regime and said the body was "integrated
+/// normally at steps 6 and 7", which two gates later was false. A comment that
+/// paraphrases a rule is a second declarant of it.
 fn resolutionMotion(bm: *const BodyManager, id: BodyId) MotionProperties {
     var mp = bm.motionProperties(id).?;
     if (bm.hasGameplayAuthority(id).?) {
