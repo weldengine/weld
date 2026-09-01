@@ -1073,12 +1073,21 @@ test "dynamic gameplay-authoritative body is not published" {
     // gameplay left it, to the bit.
     try testing.expectEqual(@as(WorldRealT, 10), ecs.get(Transform, gameplay_side.entity).?.pos[1]);
 
-    // AND IT STILL STEPPED — the half a "not published" assertion cannot carry on its
-    // own. The SOLVER's own position for that body has fallen, so the body kept its mass
-    // and its integration; only the publication was withheld. Removing it from
-    // integration would amount to changing its `BodyType` at runtime.
+    // **ASSERTION REVERSED AT G13, BY THE CORPUS AND NOT BY A REFINEMENT.** It read
+    // `try testing.expect(solver_y < 10)` under a comment saying the body "kept its mass
+    // and its integration; only the publication was withheld" — transcribed at G5b from
+    // the contradictory prose `engine-corpus-map.md` anomaly 78 records. § *Autorité
+    // d'écriture* now says the opposite and says it as clause 1: a body under gameplay
+    // authority is **piloted, never simulated** — it does not integrate, no gravity, no
+    // velocity integration, no damping.
+    //
+    // So the solver's own pose must be EXACTLY where gameplay left it, which is a
+    // strictly stronger statement than the one it replaces. What carried the
+    // non-vacuity — "it still stepped" — is now carried by the `.solver` sibling above,
+    // which DOES fall under the same gravity in the same scene: the difference between
+    // the two is the authority and nothing else.
     const solver_y = pw.bm.position(gameplay_side.body).?.toArray()[1];
-    try testing.expect(solver_y < 10);
+    try testing.expectEqual(@as(Real, 10), solver_y);
 
     // Its velocity is not published either — both channels, not just the pose.
     try testing.expectEqual(@as(WorldRealT, 0), ecs.get(Velocity, gameplay_side.entity).?.linear[1]);
@@ -1937,4 +1946,216 @@ test "the diagnostic fires under solver authority and under no other" {
     // The two authored writes really were applied, so their silence is a decision and
     // not an oversight — a body the pass never reached would be silent too.
     try testing.expectEqual(@as(u32, 2), r.poses_applied);
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.15.2 G13 — piloted, never simulated.
+//
+// **THREE BODIES AND NOT TWO, and the reason is NOT the one first written here.**
+// The draft said a two-body differential would pass under the implementation this
+// gate replaces. Measured, it would not: with either path restored, the kinematic
+// reads 0 and the piloted one reads a real value, so the equality catches it — on
+// the push path `expected 0, found 6.666667`.
+//
+// What the third term actually buys is NON-VACUITY, which is a different claim and
+// an indispensable one: without a `.solver` dynamic that must fall and must be
+// pushed, `expectEqual(kinematic, piloted)` is `expectEqual(0, 0)` and passes on a
+// scene where no gravity reached anything and no character ever touched a body — a
+// lane mis-built, a character stopping short, a gravity left at zero. G12 taught
+// that a guard written from a correct prediction can still be measured on a scene
+// that cannot fail; this is the same lesson applied to a differential.
+// ---------------------------------------------------------------------------
+
+test "a piloted body does not integrate, exactly as a kinematic does not" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const kinematic = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 10, 0 });
+    const piloted = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 5, 10, 0 });
+    const simulated = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 10, 10, 0 });
+    try declare(gpa, &ecs, kinematic.entity, .solver);
+    try declare(gpa, &ecs, piloted.entity, .gameplay);
+    try declare(gpa, &ecs, simulated.entity, .solver);
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    var i: usize = 0;
+    while (i < 60) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    const y_kin = pw.bm.position(kinematic.body).?.toArray()[1];
+    const y_pil = pw.bm.position(piloted.body).?.toArray()[1];
+    const y_sim = pw.bm.position(simulated.body).?.toArray()[1];
+
+    // THE THIRD TERM FIRST, and it is a NON-VACUITY witness rather than the thing that
+    // discriminates: a second of gravity really does move a body meant to be moved, so
+    // the equality below is measured on a scene where falling was possible.
+    // One second of free fall at 60 Hz is 4.98675 m by the discrete oracle, never the
+    // continuous 4.905 — the bound is loose on purpose, since what it must establish is
+    // that the body MOVED and not by how much.
+    try testing.expect(y_sim < 10 - 4.0);
+
+    // AND THE PILOTED ONE IS EXACTLY WHERE THE KINEMATIC ONE IS — same height, to the
+    // bit, because neither integrates. `expectEqual` and not a tolerance: "does not
+    // integrate" is not "integrates a little".
+    try testing.expectEqual(y_kin, y_pil);
+    try testing.expectEqual(@as(Real, 10), y_pil);
+
+    // NO DAMPING EITHER, which the height alone does not show. A velocity posed by
+    // gameplay must survive untouched: `linear_damping` defaults to 0.05, so sixty
+    // ticks of the clamped-linear rule would take 3 m/s to 3·(1 − 0.05/60)^60 ≈ 2.85.
+    pw.bm.setLinearVelocity(piloted.body, vr(3, 0, 0));
+    pw.bm.setLinearVelocity(kinematic.body, vr(3, 0, 0));
+    i = 0;
+    while (i < 60) : (i += 1) _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(Real, 3), pw.bm.linearVelocity(piloted.body).?.toArray()[0]);
+    try testing.expectEqual(
+        pw.bm.linearVelocity(kinematic.body).?.toArray()[0],
+        pw.bm.linearVelocity(piloted.body).?.toArray()[0],
+    );
+    // AND THAT VELOCITY MOVED NOTHING — the position pass is skipped too, which the
+    // velocity pass alone would not give: a body carrying 3 m/s across sixty ticks
+    // would have travelled three metres.
+    try testing.expectEqual(@as(Real, 5), pw.bm.position(piloted.body).?.toArray()[0]);
+}
+
+test "a character pushes a simulated body and neither a kinematic nor a piloted one" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.initNoSleep(vr(0, 0, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // A FLOOR, so the character has ground to walk on and its verdict is not vacuously
+    // `.in_air`.
+    const floor = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(40, 0.5, 40) } });
+    _ = try pw.addBody(gpa, .{
+        .entity = .{ .index = 800, .generation = 0 },
+        .body_type = .static,
+        .shape = floor,
+        .position = av3(0, -0.5, 0),
+    });
+
+    // THREE TARGETS on three lanes, each with its own character, so the three pushes
+    // are independent and one lane cannot mask another.
+    const Lane = struct { z: f32, body: api.BodyId, character: api.CharacterId };
+    var lanes: [3]Lane = undefined;
+    const kinds = [3]api.BodyType{ .kinematic, .dynamic, .dynamic };
+    inline for (0..3) |k| {
+        const z: f32 = @floatFromInt(k * 10);
+        const target = try spawnLinked(gpa, &ecs, &pw, kinds[k], .{ 0.3, 0.3, 0.3 }, .{ 1.2, 0.3, z });
+        try declare(gpa, &ecs, target.entity, if (k == 1) .gameplay else .solver);
+        const hero = try ecs.spawn(gpa, .{ .pos = .{ 0, 0.1, z } }, .{});
+        const cid = try pw.createCharacter(gpa, .{ .entity = hero, .position = av3(0, 0.1, z) });
+        lanes[k] = .{ .z = z, .body = target.body, .character = cid };
+    }
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    // One pass so the authorities are observed and the flags reach the solver.
+    _ = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+
+    // WALK EACH CHARACTER INTO ITS TARGET.
+    var t: usize = 0;
+    while (t < 30) : (t += 1) {
+        for (lanes) |lane| _ = try pw.moveCharacter(lane.character, vr(0.1, 0, 0), fixed_dt);
+    }
+
+    const vx_kin = pw.bm.linearVelocity(lanes[0].body).?.toArray()[0];
+    const vx_pil = pw.bm.linearVelocity(lanes[1].body).?.toArray()[0];
+    const vx_sim = pw.bm.linearVelocity(lanes[2].body).?.toArray()[0];
+
+    // THE THIRD TERM, and its role is non-vacuity here too. The claim first written at
+    // this line — that a kinematic-versus-piloted comparison would pass under the old
+    // implementation — is FALSE and was refuted by running the counter-factual:
+    // `plannedPush` excludes the kinematic on body type, so with the push restored the
+    // kinematic reads 0 while the piloted one reads 6.666667 and the equality below
+    // catches it. What this assertion prevents is the other failure: three lanes where
+    // no character ever reached its target, on which `expectEqual(0, 0)` is green.
+    try testing.expect(vx_sim > 0.01);
+
+    // AND THE PILOTED ONE IS EXACTLY THE KINEMATIC ONE — no impulse reached either.
+    try testing.expectEqual(vx_kin, vx_pil);
+    try testing.expectEqual(@as(Real, 0), vx_pil);
+}
+
+test "the sleep path is measured, not reasoned: it fires and it must not erase a posed velocity" {
+    // **THE NAMED RESERVE OF § *Autorité d'écriture*, CLOSED BY MEASUREMENT.** The
+    // document leaves the third path open with its own warning: the available argument
+    // is that a piloted body does not fall asleep, its velocity being written rather
+    // than integrated, and that argument is NOT measured. It is also WRONG, and this
+    // test is what says so — the criterion is a displacement bound on the POSE
+    // (`sleep.zig`: `‖Δx‖ + 2·r·‖vec(Δq)‖`), it filters on `body_type` and `sleeping`
+    // and on nothing else, so a piloted body sleeps precisely BECAUSE it does not move.
+    //
+    // **And G13 is what makes that reachable**: before it, a piloted body integrated,
+    // so it fell, so it never slept.
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt); // sleeping ALLOWED
+    defer pw.deinit(gpa);
+
+    const piloted = try spawnLinked(gpa, &ecs, &pw, .dynamic, .{ 0.5, 0.5, 0.5 }, .{ 0, 10, 0 });
+    try declare(gpa, &ecs, piloted.entity, .gameplay);
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+
+    // (1) IT SLEEPS, and at `time_before_sleep` exactly — 0.5 s, thirty ticks — which
+    // is the window and not an accident of the scene.
+    var i: usize = 0;
+    var slept_at: ?usize = null;
+    while (i < 100) : (i += 1) {
+        _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+        if (pw.bm.isSleeping(piloted.body).? and slept_at == null) slept_at = i;
+    }
+    // **THE WINDOW, NOT THE TICK.** `time_before_sleep` is 0.5 s and `dt` is 1/60 s, so
+    // the thirtieth accumulation is where `sleep_time` meets the threshold — and
+    // whether it meets it before or after the island's decision depends on how
+    // `sleep_time += dt` rounds. MEASURED: 29 at f32, 30 at f64. Pinning 29 is pinning a
+    // measurement as a property, which is the class M1.1.12 named and paid for; what is
+    // asserted is the window with its one-tick float residue.
+    const window: usize = 30; // time_before_sleep / dt
+    try testing.expect(slept_at.? == window - 1 or slept_at.? == window);
+    // It did not move while doing so — the height is the one it was created at, so what
+    // put it to sleep is immobility and not a settling.
+    try testing.expectEqual(@as(Real, 10), pw.bm.position(piloted.body).?.toArray()[1]);
+
+    // (2) THE SLEEP IS BENIGN FOR THE POSE. A gameplay write wakes it and reaches the
+    // commanded pose, because `setBodyTransform` composes the wake unconditionally.
+    ecs.beginFrame();
+    ecs.getMut(Transform, piloted.entity).?.pos[0] = 7;
+    const r = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(u32, 1), r.poses_applied);
+    try testing.expect(!pw.bm.isSleeping(piloted.body).?);
+    try testing.expectEqual(@as(Real, 7), pw.bm.position(piloted.body).?.toArray()[0]);
+
+    // (3) **AND IT IS NOT BENIGN FOR THE VELOCITY, which is the finding.** Clause 1
+    // says the velocity is what `syncIn` posed and that nothing else makes it evolve;
+    // `putToSleep` zeroed it. Measured before the fix: a posed 4 m/s went to zero at
+    // tick 29 and was NEVER restored over 120 further ticks — `syncIn`'s tick predicate
+    // had long consumed that `Velocity` write and never looks at the value again, so
+    // the ECS said 4 and the solver said 0, permanently and in silence. A permanent
+    // divergence is the one thing this contract refuses everywhere else.
+    ecs.beginFrame();
+    ecs.getMut(Velocity, piloted.entity).?.linear[0] = 4;
+    _ = try sync_in.syncIn(gpa, &pw, &ecs, &journal);
+    try testing.expectEqual(@as(Real, 4), pw.bm.linearVelocity(piloted.body).?.toArray()[0]);
+
+    i = 0;
+    var wakes: usize = 0;
+    while (i < 120) : (i += 1) {
+        const rr = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+        wakes += rr.woke;
+    }
+    // The velocity SURVIVES, the body sleeps again, and nothing woke it in between —
+    // the last clause matters: a restoration through a wake would hide the defect
+    // behind a churn of sleep/wake cycles rather than remove it.
+    try testing.expectEqual(@as(Real, 4), pw.bm.linearVelocity(piloted.body).?.toArray()[0]);
+    try testing.expect(pw.bm.isSleeping(piloted.body).?);
+    try testing.expectEqual(@as(usize, 0), wakes);
+    // And the posed velocity moved NOTHING, which is clause 1 again: a piloted body
+    // does not integrate, asleep or awake.
+    try testing.expectEqual(@as(Real, 7), pw.bm.position(piloted.body).?.toArray()[0]);
 }

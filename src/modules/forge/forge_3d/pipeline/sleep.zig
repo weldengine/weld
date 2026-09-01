@@ -209,6 +209,22 @@ pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
 pub fn putToSleep(bm: *BodyManager, id: BodyId) void {
     const idx = bm.alloc.validate(id) orelse return;
     bm.bodies.items(.flags)[idx].sleeping = true;
+    // **A PILOTED BODY'S VELOCITY IS NOT THE SOLVER'S TO DISCARD** (M1.1.15.2 G13,
+    // `engine-physics-forge.md` § *Autorité d'écriture* clause 1: "sa pose et sa vitesse
+    // sont celles que `syncIn` a posées, et rien d'autre ne les fait évoluer"). The
+    // residue this zeroing discards is bounded by the sleep criterion for a SIMULATED
+    // body, which is the argument above; for a piloted one the velocity is not a
+    // residue, it is authored state.
+    //
+    // **MEASURED, and it is why this branch exists rather than being argued.** The sleep
+    // path is the third impulse-adjacent path of the contract's own named reserve, and
+    // G13 is what makes it reachable: before it, a piloted body integrated, so it moved,
+    // so it never slept. After it, a piloted body is still by construction and sleeps at
+    // tick 29 — `time_before_sleep` exactly. With the zeroing, a posed 4 m/s went to
+    // zero at tick 29 and was NEVER restored over 120 further ticks, because the tick
+    // predicate of `syncIn` had long consumed that `Velocity` write and never looks at
+    // the value again: the ECS said 4, the solver said 0, permanently and in silence.
+    if (bm.bodies.items(.flags)[idx].gameplay_authority) return;
     bm.bodies.items(.linear_velocity)[idx] = Vec3r.zero;
     bm.bodies.items(.angular_velocity)[idx] = Vec3r.zero;
 }

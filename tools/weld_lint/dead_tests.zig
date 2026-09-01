@@ -482,9 +482,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // the forbidden-mutation diagnostic separating a write from a non-write, and the
     // three-body scene where only the `.solver` write is reported.
     // (2030 -> 2033, suite reported 2033 - 2014 passed + 19 skipped, macOS aarch64.)
+    // G13 adds three: the gravity differential against a kinematic, the character-push
+    // differential against a kinematic, and the sleep path measured rather than reasoned.
+    // (2033 -> 2036, suite reported 2036 - 2017 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2031,
-        else => 2033,
+        .windows => 2034,
+        else => 2036,
     };
 }
 
