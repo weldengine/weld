@@ -2743,7 +2743,12 @@ fn g19OnSpawned(
     if (world.get(Transform, entity) == null) return;
     var desc = api.BodyDescriptor{ .entity = entity, .body_type = .kinematic, .shape = g19_shape };
     desc.position = av3(1, 2, 3);
-    _ = pw.addBody(gpa, desc) catch return;
+    // `try` and not `catch return`: the observer already returns `anyerror!void` and the
+    // scheduler propagates, so swallowing here would turn an `addBody` failure into a
+    // late assertion somewhere downstream — and leave the ECS entity created with no
+    // body. An instrument that hides a cause instead of surfacing it is the class this
+    // milestone chased throughout.
+    _ = try pw.addBody(gpa, desc);
     g19_target = entity;
     if (g19_mode == .spawn_then_mutate) {
         if (world.getMut(Transform, entity)) |t| t.pos[0] = 40;
