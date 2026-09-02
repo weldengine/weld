@@ -369,9 +369,145 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // carry an error channel. A starved-allocator probe shows an entry DID report on one
     // call; the walk shows it CANNOT fail to.
     // (1962 -> 1963, suite reported 1963 - 1944 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.2 G1 adds four to `src/etch/parser.zig` for the `.d.etch` parse mode:
+    // the longest-match extension detection (with the §21 typed extensions pinned as NOT
+    // declaration files), the `service` construct parsing bodyless, the E1900 refusal with
+    // its `arena.stmts.len == 0` discriminator and its standard-mode reverse control, and
+    // the standard-mode refusal with the stop-set recovery guard.
+    // (1964 -> 1968, suite reported 1968 - 1949 passed + 19 skipped, macOS aarch64.)
+    // The four carry no platform dispatch, so Windows moves by the same four; that step is
+    // arithmetic on this table, and the `-Dexpect-collected` layer fed by each cell's own
+    // total is what confronts it independently.
+    // G1 adds two to `src/etch/types.zig`: the E1901 allow-list (with its
+    // standard-mode counter-factual, its every-occurrence check, and the nine
+    // admitted constructs) and the cross-file service resolution driven through
+    // `checkProject` (unknown method, arity, local shadowing, and the
+    // no-declaration-file counter-factual).
+    // (1968 -> 1970, suite reported 1970 - 1951 passed + 19 skipped, macOS aarch64.)
+    // The G1 AMENDMENT adds one to `src/etch/types.zig`: `event_decl` joins
+    // §20.1's allow-list after a Claude.ai round-trip, and the test pins that it
+    // parses, that it registers (observed through the duplicate-symbol path),
+    // and that `component` and `resource` in the same position are still E1901 —
+    // so the list widened by exactly one and not by a family.
+    // (1970 -> 1971, suite reported 1971 - 1952 passed + 19 skipped, macOS aarch64.)
+    // M1.1.15.2 G2 adds ten. Four in the new `src/etch/services.zig` (signature
+    // derivation, the call-through with its error union, the registration
+    // refusals, and the emitter's type names); five in the new
+    // `tests/etch_services/service_call_test.zig` (a value returned to a rule, a
+    // string crossing both ways, a Zig error union caught by `try`/`catch`,
+    // E0902 with its two counter-factuals, and the local shadowing a service);
+    // and one in `src/etch/interp.zig` pinning the PRE-EXISTING assignment-RHS
+    // throw defect this gate exposed and closed.
+    // (1971 -> 1981, suite reported 1981 - 1962 passed + 19 skipped, macOS aarch64.)
+    // G3 adds three in the new `tests/etch_bindgen/detch_emitter_test.zig`: the
+    // committed artifact matching the emitter (with its non-vacuity checks), the
+    // divergence detected from BOTH sides with the line named, and the emitted
+    // text parsing and resolving as a `.d.etch`.
+    // (1981 -> 1984, suite reported 1984 - 1965 passed + 19 skipped, macOS aarch64.)
+    // G4 adds four in the new `tests/etch_events/event_bridge_test.zig`: the
+    // `.d.etch`-declared event resolving in a rule (with an undeclared-type and
+    // an unknown-field counter-factual), the three-tick observation, the
+    // ordering oracle that reddens if the drain moves before the per-tick
+    // `clear`, and the counted drop for a type the program never mentions.
+    // (1984 -> 1988, suite reported 1988 - 1969 passed + 19 skipped, macOS aarch64.)
+    // G5a adds five. Two in `src/modules/forge/forge_3d/query/overlap.zig` — the
+    // entity-major order asserted as CONTIGUITY, and the replace-worst retention that
+    // a proof written on `finish` alone would miss — and three in
+    // `tests/physics/forge_module_test.zig` for the entries this gate adds:
+    // `getBodyTransform`'s error channel against a body AT the origin,
+    // `getTriggerOverlaps` refusing to truncate a state, and the three joint stubs
+    // presentable and failing loud.
+    // (1988 -> 1993, suite reported 1993 - 1974 passed + 19 skipped, macOS aarch64.)
+    // G5b adds seven to `tests/physics/transform_sync_test.zig`: the gameplay-
+    // authoritative dynamic body publishing nothing while still stepping, the
+    // load-bearing no-wake guard with both halves of the conjunction and its
+    // non-vacuity, the wrapper application not replayed, the two authority
+    // transitions, the single elected body, and the trigger following before the
+    // sensor pass reads it.
+    // (1993 -> 2000, suite reported 2000 - 1980 passed + 19 skipped, macOS aarch64.)
+    // Plus one in `forge/api/components.zig` pinning the `.sav` migration's third
+    // measurement: `.solver` is the ZERO value, so a zero-padded image loads correctly
+    // under the empty migration and nothing has to be written for it.
+    // (2000 -> 2001, suite reported 2001 - 1982 passed + 19 skipped, macOS aarch64.)
+    // Plus one more: the SCHEDULER path for `syncIn`, which found a real defect on its
+    // first run — a write made before the world's first `beginFrame` is stamped tick 0,
+    // so a `> 0` baseline filtered it out; the journal's "never consumed" is a sentinel
+    // now and not a zero.
+    // (2001 -> 2002, suite reported 2002 - 1983 passed + 19 skipped, macOS aarch64.)
+    // G6 adds five: three in `tests/etch_bindgen/detch_emitter_test.zig` (the physics
+    // artifact matching its spec, all three emitted declarations parsing and resolving,
+    // and the `Entity` field carrying no default) and two in the new
+    // `tests/physics/physics_service_test.zig` (a rule calling the service and receiving
+    // its result, and the two sensor deltas reaching the Tier 0 bus).
+    // (2002 -> 2007, suite reported 2007 - 1988 passed + 19 skipped, macOS aarch64.)
+    // G6b adds three to `tests/physics/forge_module_test.zig`: the coverage map that
+    // confronts the 29 non-lifecycle entries with their discriminating oracle, and the
+    // two oracles the audit found MISSING — `setAngularVelocity` about its own axis
+    // (the gap M1.1.15.1 named and left) and `overlapShape` on the probe's geometry
+    // rather than its box.
+    // (2007 -> 2010, suite reported 2010 - 1991 passed + 19 skipped, macOS aarch64.)
+    // G7 — THE FREEZE — adds three: the guard instantiated against the real adapter in
+    // `tests/physics/forge_module_test.zig`, the shape of the signature comparison in
+    // `src/interfaces/PhysicsModule.zig` (whose attestation of ABSENCE became one of
+    // PRESENCE rather than being deleted), and the bidirectional slice run end to end in
+    // the new `tests/physics/arena_slice_test.zig`.
+    // (2010 -> 2013, suite reported 2013 - 1994 passed + 19 skipped, macOS aarch64.)
+    // THE REPRISE. G8 adds five, one per external-review finding in the perimeter plus the
+    // header: the delegated wrapper with its effect asserted through it, the empty-slice size
+    // query on `getTriggerOverlaps`, `point_query_count` signalling its truncation, the change
+    // baseline advancing on examination, and the header confronted with its own bytes.
+    // (2013 -> 2018, suite reported 2018 - 1999 passed + 19 skipped, macOS aarch64.)
+    // G9 adds one: the removal oracle for the journal keyed by `BodyId`. Silent
+    // corruption — the counter-factual restoring the positional key reddens THIS test
+    // and nothing else in the suite, which is what "no red signalled it" measures.
+    // (2018 -> 2019, suite reported 2019 - 2000 passed + 19 skipped, macOS aarch64.)
+    // G10 adds three, one per object of the gate: the conservation oracle for a
+    // `.gameplay` dynamic body against an infinite mass with the finite-mass control that
+    // makes it non-vacuous, the direction of the `solver -> gameplay` transition measured
+    // on a body left asleep for many ticks, and the authority mirror reaching every body
+    // of the entity rather than the elected one alone.
+    // (2019 -> 2022, suite reported 2022 - 2003 passed + 19 skipped, macOS aarch64.)
+    // G11 adds seven: six oracles for the five mutation wrappers — `move_kinematic`'s
+    // derivation and atomic mirror, the journal mark's production path, `set_authority`,
+    // the sweep-versus-teleport contrast that separates the two character movers,
+    // `resize_character`'s three outcomes, and the election the wrappers share with the
+    // seam — plus the slice commanding a physical state from a rule and observing it
+    // from another.
+    // (2022 -> 2029, suite reported 2029 - 2010 passed + 19 skipped, macOS aarch64.)
+    // G7 replayed adds ONE: the block's declared size, confronted with the block's own
+    // text. Deleting an `assertFn` line used to leave the tree green at 2029 of 2029 —
+    // the constant declared a size and nothing put it in front of the list it sized.
+    // (2029 -> 2030, suite reported 2030 - 2011 passed + 19 skipped, macOS aarch64.)
+    // G12 adds three: a static under the DEFAULT authority observed moving BY A QUERY,
+    // the forbidden-mutation diagnostic separating a write from a non-write, and the
+    // three-body scene where only the `.solver` write is reported.
+    // (2030 -> 2033, suite reported 2033 - 2014 passed + 19 skipped, macOS aarch64.)
+    // G13 adds three: the gravity differential against a kinematic, the character-push
+    // differential against a kinematic, and the sleep path measured rather than reasoned.
+    // (2033 -> 2036, suite reported 2036 - 2017 passed + 19 skipped, macOS aarch64.)
+    // G14 adds two: `move_kinematic`'s refusal leaving pose, velocity and journal mark
+    // untouched, and `set_joint_motor` resolving on the receiver and failing loud.
+    // (2036 -> 2038, suite reported 2038 - 2019 passed + 19 skipped, macOS aarch64.)
+    // Reprise 2 adds five: the diagnostic observed from the PRODUCTION path, `addImpulse`
+    // through the public interface, the three-support differential, the flip on an
+    // already-sleeping body, and `applied_tick` distinct from `consumed_tick`.
+    // (2038 -> 2043, suite reported 2043 - 2024 passed + 19 skipped, macOS aarch64.)
+    // Reprise 3 adds four: the FIRST forbidden mutation of a body's life (G17), and the
+    // three sleep-regime properties of G18 — `putToSleep` refusing before writing, the
+    // window not ageing while piloted, and the transition reaching every body of the
+    // entity.
+    // (2043 -> 2047, suite reported 2047 - 2028 passed + 19 skipped, macOS aarch64.)
+    // Reprise 4 adds two: a spawn is not a mutation (G19), and the gameplay/sleeping
+    // invariant on all three paths (G20).
+    // (2047 -> 2049, suite reported 2049 - 2030 passed + 19 skipped, macOS aarch64.)
+    // Reprise 5 adds two: `move_kinematic` refusing a subject that is not gameplay-
+    // authoritative (G21), and the bound of that guard — the four other wrappers must NOT
+    // demand it (G21). G22 is a test-shape correction and a brief reconciliation, which
+    // add none.
+    // (2049 -> 2051, suite reported 2051 - 2032 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 1962,
-        else => 1964,
+        .windows => 2049,
+        else => 2051,
     };
 }
 

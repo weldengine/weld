@@ -7,6 +7,8 @@
 //! Per `engine-physics-forge.md` §2.
 
 const std = @import("std");
+const authority_mod = @import("authority.zig");
+const api_authority = authority_mod;
 const core = @import("weld_core");
 const types = @import("types.zig");
 
@@ -55,6 +57,38 @@ pub const RigidBody = extern struct {
     continuous_collision: bool = false,
     /// Whether the body may go to sleep when at rest.
     can_sleep: bool = true,
+    /// Who owns this body's pose and velocity (M1.1.15.2 G5b). `.solver` for
+    /// EVERY `body_type` — no type-dependent default, because the point of the
+    /// model is that `.gameplay` is declared and visible rather than inferred.
+    ///
+    /// A PUBLIC field, so a rule can write it directly and the service wrapper
+    /// is NOT the guardian of the invariant: `syncIn` detects the change and
+    /// performs the transition itself.
+    ///
+    /// **SCHEMA MIGRATION, written and not assumed.** The `.scene.bin` / `.sav`
+    /// format embeds a Schema Registry of field descriptors and the loader
+    /// refuses a divergent schema, so a new field is a format question and not
+    /// only a Zig one. Three measurements decide the answer here:
+    ///
+    ///   1. **No image carries a `RigidBody` today.** Measured across the tree:
+    ///      zero `.etch` files name the type, nothing registers it with the ECS
+    ///      registry, and no cook path reaches it. So there is no stored
+    ///      instance to migrate, and the migration for existing images is EMPTY
+    ///      — which is a fact about the tree, not a hope about the field.
+    ///   2. **The size does not move**, 32 before and 32 after, because the
+    ///      field lands in trailing padding. That is a hazard rather than a
+    ///      convenience: `loader.buildSchemaRemap` compares SIZE and ALIGNMENT,
+    ///      so a size-preserving schema change is exactly the one it cannot see.
+    ///      It is harmless here only because of (1) and (3).
+    ///   3. **`.solver` is 0**, so a zeroed byte reads as the default. Any image
+    ///      whose padding is zero therefore loads correctly under a defaulted
+    ///      migration with no code at all. Pinned by a test rather than left to
+    ///      the enum's declaration order, since a later reordering would move it
+    ///      silently and (2) says nothing would notice.
+    ///
+    /// The day `RigidBody` becomes cookable, the field is in the schema from its
+    /// first image and none of this applies.
+    authority: authority_mod.PhysicsAuthority = .solver,
 };
 
 /// Per-shape parameters for a `CollisionShape`, an `extern` (untagged) union
@@ -111,6 +145,20 @@ comptime {
     // POD layout pins — any future field change must revisit these.
     std.debug.assert(@sizeOf(RigidBody) == 32);
     std.debug.assert(@alignOf(RigidBody) == 4);
+    // M1.1.15.2 G5b — `authority` lands in EXISTING TRAILING PADDING and the size
+    // does NOT move. MEASURED before the field was written, not computed after:
+    // `can_sleep` sat at 29 with `@sizeOf` already 32, so bytes 30 and 31 were
+    // padding in the old layout and byte 30 is the new field. This is the OPPOSITE
+    // of `CollisionShape` at M1.1.13, which gained four full bytes and reused
+    // nothing — and the comment there records that an earlier version of exactly
+    // this claim was false in two ways at once, which is why the three offsets are
+    // PINNED here rather than described.
+    //
+    // A size assertion alone cannot catch a different arrangement landing on the
+    // same size, and here the size does not move at all, so it would catch nothing.
+    std.debug.assert(@offsetOf(RigidBody, "continuous_collision") == 28);
+    std.debug.assert(@offsetOf(RigidBody, "can_sleep") == 29);
+    std.debug.assert(@offsetOf(RigidBody, "authority") == 30);
     // 48 -> 52 at M1.1.13. MEASURED, not reasoned: `collision_layer` sits at 44 and
     // `is_trigger` at 45, so the byte after them is 46; the `u32` needs 4-alignment
     // and therefore starts at 48, leaving bytes 46 and 47 as padding in BOTH layouts.
@@ -254,4 +302,26 @@ test "Sleeping survives registration, spawn, add and remove in a real World" {
     // cannot reach.
     try testing.expect(world.get(core.ecs.components.Transform, e) != null);
     try testing.expect(world.get(Velocity, e) != null);
+}
+
+test "RigidBody.authority defaults to solver and a zeroed image reads as one" {
+    // (3) of the migration record on the field. `.solver` must be the ZERO value, or a
+    // defaulted migration from a zero-padded image would install `.gameplay` on every
+    // body — and `buildSchemaRemap`'s size-and-alignment check cannot see a
+    // size-preserving schema change, so nothing else would catch it.
+    const default_rb: RigidBody = .{};
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(default_rb.authority));
+    try testing.expectEqual(api_authority.PhysicsAuthority.solver, default_rb.authority);
+
+    // A `RigidBody` whose bytes are all zero reads as `.solver` — which is what makes the
+    // empty migration correct for a zero-padded image.
+    var zeroed: RigidBody = undefined;
+    @memset(std.mem.asBytes(&zeroed), 0);
+    try testing.expectEqual(api_authority.PhysicsAuthority.solver, zeroed.authority);
+
+    // NON-VACUITY: the field CAN hold the other value, so the two assertions above are
+    // about the default and not about an enum with one reachable variant.
+    const driven = RigidBody{ .authority = .gameplay };
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(driven.authority));
+    try testing.expect(driven.authority != zeroed.authority);
 }

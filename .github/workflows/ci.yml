@@ -455,6 +455,33 @@ jobs:
       - name: zig build bindgen-verify
         run: zig build bindgen-verify -Dcpu=${{ env.ZIG_CPU }}
 
+      # M1.1.15.2 G3 — the `.d.etch` drift gate (`engine-c-bindings.md` §8.4.4).
+      # A committed `.d.etch` is a DERIVED artifact whose source of truth is a Zig
+      # `ServiceSpec`; this fails with a line-by-line diff and E1902 the moment the
+      # two part, from either side.
+      #
+      # ONE cell, and for the same arbitration as `zig build lint` below: the
+      # answer is a property of the SOURCE, not of the host. The emitter reads Zig
+      # declarations at comptime and writes text — no float, no platform API, no
+      # allocator behaviour that could differ by cell. Running it on thirteen would
+      # buy thirteen identical answers.
+      - name: zig build bindgen-check
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build bindgen-check -Dcpu=${{ env.ZIG_CPU }}
+
+      # M1.1.15.2 G6 — THE SAME CHECK UNDER `-Dphysics_f64=true`, and it is a step
+      # rather than a cell. The single-cell arbitration above rested on "no emitted
+      # type follows `Real`", which was true of the toy service and became a claim
+      # about the PHYSICS one the moment it entered the manifest. It was MEASURED at
+      # G6 — the emitter really does compile against `Real = f32` here and `f64`
+      # under the flag, proven by a probe, and the artifacts emitted at f32 match
+      # under f64 — so the premise holds today. This step is what keeps it from
+      # having to be re-argued at every future service: a `Real`-following type
+      # would move the artifact and this reddens.
+      - name: zig build bindgen-check (f64)
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build bindgen-check -Dphysics_f64=true -Dcpu=${{ env.ZIG_CPU }}
+
       # M0.8 / E3-D — D-S5-synth100-proper proof: the standalone
       # bench/fixtures/synth_100/ sub-project resolves the parent as a
       # path dependency, cooks the committed 100-file corpus through the

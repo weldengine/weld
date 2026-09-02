@@ -40,6 +40,7 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
+const body_mod = @import("../body.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const cache_mod = @import("contact_cache.zig");
 const sleep = @import("../pipeline/sleep.zig");
@@ -55,6 +56,7 @@ const ShapeStore = bm_mod.ShapeStore;
 const BodyId = api.BodyId;
 const ContactManifold = narrowphase.ContactManifold(Real);
 const ContactCache = cache_mod.ContactCache;
+const MotionProperties = body_mod.MotionProperties;
 
 // --- Material combine rules (Box2D/Jolt convention) --------------------------
 
@@ -365,6 +367,31 @@ pub const ContactConstraint = struct {
     count: u8,
 };
 
+/// The motion properties a CONTACT RESOLUTION reads for `id`, which are not
+/// unconditionally the stored ones: a body under GAMEPLAY authority resolves with an
+/// inverse mass and an inverse inertia of ZERO.
+///
+/// **THIS SITE IMPLEMENTS ONE CLAUSE AND DECLARES NOTHING.** The regime is stated once,
+/// in `api/authority.zig`, which transcribes `engine-physics-forge.md`
+/// § *Autorite d'ecriture*; what belongs here is why the substitution is made at READ
+/// time rather than in a column — the stored inverse mass is what a body returning to
+/// `.solver` resumes with, so writing it would make the flip destructive and
+/// irreversible, and clause 3 requires reversibility without reconstruction.
+///
+/// The prose that stood here restated the regime and said the body was "integrated
+/// normally at steps 6 and 7", which two gates later was false. A comment that
+/// paraphrases a rule is a second declarant of it.
+fn resolutionMotion(bm: *const BodyManager, id: BodyId) MotionProperties {
+    var mp = bm.motionProperties(id).?;
+    if (bm.hasGameplayAuthority(id).?) {
+        mp.inv_mass = 0;
+        // Spelled exactly as `body.zig` spells it for a static or kinematic body, so
+        // the two are bit-identical rather than merely equivalent.
+        mp.local_inv_inertia = Mat3r.fromDiagonal(Vec3r.zero);
+    }
+    return mp;
+}
+
 /// Effective mass along a unit direction `d` at a contact with lever arms `r_a`,
 /// `r_b`: `1 / (invMassA + invMassB + (r_a×d)ᵀ Iₐ⁻¹ (r_a×d) + (r_b×d)ᵀ I_b⁻¹ (r_b×d))`.
 /// The denominator is strictly positive for any constraint that survives the
@@ -398,8 +425,8 @@ fn prepare(
     manifold: ContactManifold,
     ctx: PrepareContext,
 ) ?ContactConstraint {
-    const mp_a = bm.motionProperties(a).?;
-    const mp_b = bm.motionProperties(b).?;
+    const mp_a = resolutionMotion(bm, a);
+    const mp_b = resolutionMotion(bm, b);
 
     // True-zero skip: both bodies have infinite mass (static/kinematic ⇒ inv_mass
     // and inv_inertia both zero), so the total inverse mass along the normal is

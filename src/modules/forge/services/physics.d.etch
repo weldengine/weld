@@ -1,0 +1,36 @@
+// AUTO-GENERATED — DO NOT EDIT
+// Source: src/modules/forge/services/physics.zig
+// Emitter: tools/bindgen/emit_detch.zig
+
+@version(1)
+service physics {
+  /// Is anything on the ray? Stops at the first candidate.
+  fn raycast_any(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) -> bool
+
+  /// The entity of the nearest hit, or the dead handle on a miss.
+  fn raycast_entity(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) -> Entity
+
+  /// Distance to the nearest hit. Throws when the ray hits nothing.
+  fn raycast_distance(origin_x: float, origin_y: float, origin_z: float, dir_x: float, dir_y: float, dir_z: float, max_distance: float, layer_mask: int) throws -> float
+
+  /// How many distinct entities contain the point.
+  fn point_query_count(x: float, y: float, z: float, layer_mask: int) throws -> int
+
+  /// Move a kinematic body to a target pose over dt, deriving both velocities and mirroring Transform and Velocity.
+  fn move_kinematic(entity: Entity, x: float, y: float, z: float, rot_x: float, rot_y: float, rot_z: float, rot_w: float, dt: float) throws
+
+  /// Declare who writes this entity's pose: 0 = solver, 1 = gameplay.
+  fn set_authority(entity: Entity, authority: int) throws
+
+  /// Sweep a character by a displacement in metres; returns the GroundState ordinal.
+  fn move_character(entity: Entity, dx: float, dy: float, dz: float, dt: float) throws -> int
+
+  /// Resize a character, anchored at its feet. False when the target volume is occupied.
+  fn resize_character(entity: Entity, radius: float, height: float) throws -> bool
+
+  /// Teleport a character. Sweeps nothing, resolves nothing, and invalidates the ground verdict.
+  fn set_character_position(entity: Entity, x: float, y: float, z: float) throws
+
+  /// Drive a joint's motor. `enabled` false clears it; the target is the scalar form.
+  fn set_joint_motor(joint: int, enabled: bool, mode: int, target: float, max_linear_force: float, max_angular_torque: float, frequency_hz: float, damping_ratio: float) throws
+}

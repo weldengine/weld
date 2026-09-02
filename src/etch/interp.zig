@@ -25,6 +25,7 @@ const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const tags_mod = @import("tags.zig");
 const descriptor_mod = @import("descriptor.zig");
+const services_mod = @import("services.zig");
 
 const weld_core = @import("weld_core");
 // M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
@@ -412,6 +413,30 @@ const ClosureStore = struct {
 
 /// One field of a runtime `struct` value (M0.8 E2 block 3).
 const StructField = struct { name: StringId, value: Value };
+
+/// One value crossing INTO the interpreter from Zig (M1.1.15.2 G4). Deliberately
+/// a small POD union and not a `Value`: the bridge must not need to know how the
+/// interpreter represents a string, and this way it cannot.
+pub const ExternalValue = union(enum) {
+    int_: i64,
+    float_: f64,
+    bool_: bool,
+    string_: []const u8,
+    entity_: EntityId,
+};
+
+/// One field of an externally pushed event payload.
+pub const ExternalField = struct {
+    name: []const u8,
+    value: ExternalValue,
+};
+
+/// A registered producer of external events (M1.1.15.2 G4). `drain` is called
+/// once per tick, at a fixed point, and returns how many events it pushed.
+pub const ExternalEventSource = struct {
+    ctx: *anyopaque,
+    drain: *const fn (ctx: *anyopaque, interp: *Interpreter) anyerror!usize,
+};
 
 /// A runtime `struct` value: its type name plus an ordered set of field values
 /// (declaration order). Addressed by `Value.struct_ref`.
@@ -1036,6 +1061,23 @@ pub const Interpreter = struct {
     /// `thrown_value` — set by `fail` at the raise site and harvested into
     /// `RuntimeReport.last_error` at the body choke points. Raise sites
     /// without a typed conversion leave it null (the report still counts).
+    /// Tier 1 service registry (`etch-abi-zig.md` §8.4, §8.7). Borrowed, never
+    /// owned: it is populated once at runtime startup and outlives every
+    /// interpreter. `null` means no service is reachable, which is the state of
+    /// every test and tool that does not need one — a service call then falls
+    /// through to ordinary method dispatch and fails there, as an unknown
+    /// identifier would.
+    services: ?*const services_mod.Registry = null,
+    /// External event sources drained at a FIXED point of the tick
+    /// (M1.1.15.2 G4). Borrowed records; each is a Tier 0 queue plus the erased
+    /// function that moves its payloads through `pushExternalEvent`.
+    ///
+    /// The list lives here, and the drain runs inside `stepOnce`, because the
+    /// ORDER is the deliverable: a source drained by a caller before `runFor`
+    /// would push on the wrong side of the per-tick `clear` and the events would
+    /// be wiped before any rule could see them — emitted, never observed, and no
+    /// red anywhere.
+    event_sources: std.ArrayListUnmanaged(ExternalEventSource) = .empty,
     pending_error: ?RuntimeError = null,
     /// Human-readable message accompanying the in-flight failure (M1.0.15): the
     /// `assert(cond, "msg")` literal, or an assertion-family builtin's formatted
@@ -1228,6 +1270,7 @@ pub const Interpreter = struct {
         // is decoupled from `bridge.deinit`.
         if (self.world) |w| w.releaseResourcePayloads(self.gpa);
         for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
+        self.event_sources.deinit(self.gpa);
         self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
@@ -2071,6 +2114,15 @@ pub const Interpreter = struct {
             self.suppress_event_clear = false;
         } else {
             self.events.clear(self.gpa);
+        }
+        // Drain the external event sources (M1.1.15.2 G4) — AFTER the clear and
+        // BEFORE rule dispatch, which is the whole deliverable of the bridge.
+        // On the wrong side of the clear the events are wiped before any rule
+        // runs: emitted, never observed, and no red anywhere. Placed ahead of
+        // the timers because Zig produced these before the tick began, so they
+        // are the tick's earliest producers.
+        for (self.event_sources.items) |src| {
+            _ = src.drain(src.ctx, self) catch return error.RuntimeFailure;
         }
         // Fire due timers (M1.0.13 E6) — after the clock advance and the
         // event-queue clear, before rule dispatch: a callback's `emit` lands
@@ -4109,6 +4161,165 @@ pub const Interpreter = struct {
     /// Raise a typed runtime failure (M0.8 E3-D, D-S4-runtime-report): record
     /// the `(kind, span)` payload on the sideband and return the unwinding
     /// error. Usage: `return self.fail(.DivisionByZero, self.ast.exprSpan(id))`.
+    /// Install the Tier 1 service registry (`etch-abi-zig.md` §8.4). Borrowed:
+    /// the registry must outlive this interpreter.
+    pub fn setServiceRegistry(self: *Interpreter, reg: *const services_mod.Registry) void {
+        self.services = reg;
+    }
+
+    /// Register an external event source (M1.1.15.2 G4). Borrowed: the source's
+    /// context must outlive this interpreter.
+    pub fn addEventSource(self: *Interpreter, source: ExternalEventSource) !void {
+        try self.event_sources.append(self.gpa, source);
+    }
+
+    /// THE CONTROLLED ENTRY POINT. A Tier 1 module hands over an event by TYPE
+    /// NAME and a flat field list; nothing about `EventStore`'s structure
+    /// crosses this boundary, and the bridge cannot reach it.
+    ///
+    /// Returns `false` when the type name is not interned in this program's
+    /// string pool — and that is a DECISION, not a failure. A name absent from
+    /// the pool is a name no rule of this program mentions, so the event has no
+    /// possible observer; dropping it is the correct answer and the count is
+    /// what makes the drop visible. It also means the bridge needs no
+    /// cross-arena machinery: the `.d.etch` declares the type for the CHECKER,
+    /// and the runtime matches on the bytes a rule actually wrote.
+    ///
+    /// A field whose name is likewise unknown is skipped, for the same reason:
+    /// nothing can read it.
+    pub fn pushExternalEvent(
+        self: *Interpreter,
+        type_name: []const u8,
+        payload: []const ExternalField,
+    ) !bool {
+        const type_id = self.ast.strings.find(type_name) orelse return false;
+        var fields: std.ArrayListUnmanaged(StructField) = .empty;
+        errdefer fields.deinit(self.gpa);
+        for (payload) |f| {
+            const fname = self.ast.strings.find(f.name) orelse continue;
+            const v: Value = switch (f.value) {
+                .int_ => |n| .{ .int_ = n },
+                .float_ => |x| .{ .float_ = x },
+                .bool_ => |b| .{ .bool_ = b },
+                .entity_ => |e| .{ .entity_id = e },
+                // Owned by the STORE for the tick, on the same escape gate an
+                // Etch `emit` uses: the module's bytes are borrowed and this
+                // interpreter must not hold them past the call.
+                .string_ => |bytes| try self.events.ownEscapingString(self.gpa, bytes),
+            };
+            try fields.append(self.gpa, .{ .name = fname, .value = v });
+        }
+        try self.events.enqueue(self.gpa, type_id, fields);
+        return true;
+    }
+
+    /// Invoke a Tier 1 service method (`etch-abi-zig.md` §8.7).
+    ///
+    /// Two failure channels, and the split is the design rather than a
+    /// convenience. A failure of the CALL MECHANISM — wrong arity, an argument
+    /// whose runtime type does not match the declared one — is a hard
+    /// `RuntimeFailure`: it is a defect the type-checker is meant to have caught,
+    /// and making it catchable would let a rule swallow a broken call site and
+    /// carry on. A failure returned BY the implementation is a domain error and
+    /// becomes an Etch `throw` the tree-walker's `try` / `catch` consumes.
+    fn callService(
+        self: *Interpreter,
+        world: *World,
+        locals: *Locals,
+        mc: ast_mod.MethodCall,
+        entry: services_mod.Entry,
+        spec: *const services_mod.MethodSpec,
+    ) StmtError!Value {
+        if (mc.args_len != spec.params.len) return error.RuntimeFailure;
+
+        var args: std.ArrayListUnmanaged(services_mod.Arg) = .empty;
+        defer args.deinit(self.gpa);
+        try args.ensureTotalCapacity(self.gpa, spec.params.len);
+        var i: u32 = 0;
+        while (i < mc.args_len) : (i += 1) {
+            const arg_id: NodeId = @bitCast(self.ast.extra.items[mc.args_start + i]);
+            const v = try self.evalExpr(world, locals, arg_id);
+            args.appendAssumeCapacity(try self.valueToArg(v, spec.params[i].type));
+        }
+
+        const ret = spec.call(entry.ctx, args.items) catch |err| {
+            try self.throwFromZigError(err, self.ast.exprSpan(mc.receiver));
+            return Value{ .unit = {} };
+        };
+        return try self.retToValue(ret);
+    }
+
+    /// Convert one evaluated `Value` to the `Arg` the declared parameter type
+    /// names. A mismatch is a hard failure — see `callService`.
+    fn valueToArg(self: *Interpreter, v: Value, want: services_mod.TypeRef) StmtError!services_mod.Arg {
+        return switch (want) {
+            .int_ => if (v == .int_) services_mod.Arg{ .int_ = v.int_ } else error.RuntimeFailure,
+            .float_ => switch (v) {
+                .float_ => |f| services_mod.Arg{ .float_ = f },
+                .int_ => |n| services_mod.Arg{ .float_ = @floatFromInt(n) },
+                else => error.RuntimeFailure,
+            },
+            .bool_ => if (v == .bool_) services_mod.Arg{ .bool_ = v.bool_ } else error.RuntimeFailure,
+            .string_ => services_mod.Arg{ .string_ = self.stringBytes(v) orelse return error.RuntimeFailure },
+            .entity_ => if (v == .entity_id) services_mod.Arg{ .entity_ = v.entity_id } else error.RuntimeFailure,
+            // Refused at registration (`services.Registry.register`), so a `ref`
+            // cannot reach a running rule. Kept exhaustive rather than
+            // `unreachable`: the day the set widens, this is a compile error.
+            .void_, .ref => error.RuntimeFailure,
+        };
+    }
+
+    /// Convert a service result back into an interpreter `Value`. A returned
+    /// string is COPIED into the per-body run-string store: the service owns its
+    /// bytes and this interpreter must not hold a borrow past the call.
+    fn retToValue(self: *Interpreter, ret: services_mod.Ret) StmtError!Value {
+        return switch (ret) {
+            .void_ => Value{ .unit = {} },
+            .int_ => |n| Value{ .int_ = n },
+            .float_ => |f| Value{ .float_ = f },
+            .bool_ => |b| Value{ .bool_ = b },
+            .entity_ => |e| Value{ .entity_id = e },
+            .string_ => |bytes| try self.newRunString(try self.gpa.dupe(u8, bytes)),
+        };
+    }
+
+    /// Turn a Zig error union into an in-flight Etch `throw` carrying the
+    /// builtin `Error` (`etch-abi-zig.md` §8.7).
+    ///
+    /// `message` carries `@errorName` and is the AUTHORITY: it is lossless and it
+    /// is what a rule reads. `code` is a coarse bucket, and it has to be — the
+    /// builtin `ErrorCode` set has no variant meaning "a Tier 1 service method
+    /// failed", and minting one is a change to a builtin surface no gate of this
+    /// milestone owns. Only `OutOfMemory` maps to something exact.
+    fn throwFromZigError(self: *Interpreter, err: anyerror, span: SourceSpan) StmtError!void {
+        const code_variant: []const u8 = if (err == error.OutOfMemory) "out_of_memory" else "io_fail";
+        const handle = try self.structs.newStruct(self.gpa, self.ast.error_type_name);
+
+        const msg = try self.newRunString(try self.gpa.dupe(u8, @errorName(err)));
+        const code = blk: {
+            const enum_name = self.ast.errorcode_type_name;
+            const edecl = self.enum_decls.get(enum_name) orelse return error.RuntimeFailure;
+            const variant_id = self.ast.strings.find(code_variant) orelse return error.RuntimeFailure;
+            const idx = self.enumVariantIndexOf(edecl, variant_id) orelse return error.RuntimeFailure;
+            break :blk Value{ .enum_value = .{ .type_name = enum_name, .variant = idx } };
+        };
+        const none_handle: u32 = @intCast(self.optionals.items.len);
+        try self.optionals.append(self.gpa, null);
+
+        // The three field names are LOOKED UP, never interned: `self.ast` is a
+        // `*const AstArena`, and `ensureErrorBuiltins` has already interned all
+        // three — so a miss here means the builtins were never installed, which
+        // is a defect and not a case to paper over.
+        const fields = &self.structs.list.items[handle].fields;
+        try fields.append(self.gpa, .{ .name = self.ast.strings.find("message") orelse return error.RuntimeFailure, .value = msg });
+        try fields.append(self.gpa, .{ .name = self.ast.strings.find("code") orelse return error.RuntimeFailure, .value = code });
+        try fields.append(self.gpa, .{ .name = self.ast.strings.find("source") orelse return error.RuntimeFailure, .value = .{ .optional = none_handle } });
+
+        self.thrown_value = Value{ .struct_ref = handle };
+        self.thrown = true;
+        self.thrown_span = span;
+    }
+
     fn fail(self: *Interpreter, kind: RuntimeErrorKind, span: SourceSpan) error{RuntimeFailure} {
         self.pending_error = .{ .kind = kind, .span = span };
         return error.RuntimeFailure;
@@ -4443,12 +4654,28 @@ pub const Interpreter = struct {
         }
     }
 
+    /// `target op= value` (M0.8).
+    ///
+    /// **`assignRhsThrew`** — after every evaluation of the right-hand side, an
+    /// in-flight `throw` abandons the write and lets `execStmtRun` unwind to the
+    /// enclosing `try`. Without it the assignment stores the placeholder a
+    /// throwing expression leaves behind, and a `unit` written into an `int`
+    /// field turns the throw into a bridge type error: the `catch` never runs
+    /// and the rule reports a runtime failure instead.
+    ///
+    /// PRE-EXISTING and MEASURED, not introduced by the service path: on the
+    /// tree before this milestone, `acc.out = risky(5)` with an ordinary user
+    /// `throws` fn already gave one runtime error with the catch body unrun. The
+    /// M0.8 error-handling fixture avoids it by binding through a `let` first,
+    /// which is why nothing caught it. Fixed here because G2's own deliverable —
+    /// a fallible service method — walks straight into it.
     fn execAssign(self: *Interpreter, world: *World, locals: *Locals, assign: ast_mod.AssignStmt) StmtError!void {
         const target_kind = self.ast.exprKind(assign.target);
         if (target_kind == .ident) {
             const name_id: StringId = self.ast.exprData(assign.target);
             const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const rhs = try self.evalExpr(world, locals, assign.value);
+            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
             const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
             ptr.* = new_v;
@@ -4464,6 +4691,7 @@ pub const Interpreter = struct {
                     const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
+                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -4487,6 +4715,7 @@ pub const Interpreter = struct {
                         if (field.kind == .string_) {
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
+                            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
                             const bytes = self.stringBytes(rhs) orelse return error.RuntimeFailure;
                             Bridge.promoteResourceString(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, bytes) catch |e|
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -4512,6 +4741,7 @@ pub const Interpreter = struct {
                             // Only `=`.
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
+                            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
                             const new_block = switch (field.kind) {
                                 .array_ => try self.buildPersistentArrayFrom(rhs),
                                 .map_ => try self.buildPersistentMapFrom(rhs),
@@ -4526,6 +4756,7 @@ pub const Interpreter = struct {
                     const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
+                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -4547,6 +4778,7 @@ pub const Interpreter = struct {
                     const k = fi orelse return error.RuntimeFailure;
                     const cur = self.structs.list.items[handle].fields.items[k].value;
                     const rhs = try self.evalExpr(world, locals, assign.value);
+                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     self.structs.list.items[handle].fields.items[k].value = new_v;
                     return;
@@ -6218,6 +6450,23 @@ pub const Interpreter = struct {
                     }
                     const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
                     return try self.callMethod(world, locals, method, mc, null);
+                }
+                // Tier 1 service call (`etch-abi-zig.md` §8.7): the receiver is
+                // a bare lowercase IDENT naming a registered service. Placed
+                // before `evalExpr` on the receiver, which would otherwise fail
+                // on an identifier that is not a local — the same position the
+                // type-checker's `synthMethodCall` uses, so the two agree on
+                // what a service call looks like. A LOCAL SHADOWS a service.
+                if (self.ast.exprKind(mc.receiver) == .ident and !mc.opt_chain) {
+                    const recv_name: StringId = self.ast.exprData(mc.receiver);
+                    if (locals.get(recv_name) == null) {
+                        if (self.services) |reg| {
+                            const svc_bytes = self.ast.strings.slice(recv_name);
+                            if (reg.lookupMethod(svc_bytes, self.ast.strings.slice(mc.method_name))) |found| {
+                                return try self.callService(world, locals, mc, found.entry, found.spec);
+                            }
+                        }
+                    }
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
                 // `recv?.method(args)` — optional chain (M0.8 E3-C tranche 4,
@@ -15081,4 +15330,71 @@ test "S4 structural-mutation boundary lifted — a body issuing all four ops run
     const report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
     try std.testing.expectEqual(@as(usize, 1), countEntitiesWith(&world, world.registry.idOf("Spawned").?));
+}
+
+test "runProgram a throw raised in an assignment's RHS unwinds to the catch (M1.1.15.2 G2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // PRE-EXISTING defect, closed by the `assignRhsThrew` guard in `execAssign`
+    // and pinned here on the ORDINARY user-fn path, which is where it lives —
+    // no service is involved. Before the guard this program reported one runtime
+    // error with `err_out` still 0: the throw's placeholder was written into an
+    // `int` field, the bridge type error replaced the throw, and the catch never
+    // ran. The M0.8 fixture binds through a `let` first, which is why nothing
+    // had caught it.
+    const source =
+        \\component Acc { out: int = 0, err_out: int = 0 }
+        \\fn risky(n: int) throws -> int {
+        \\  if n > 2 { throw Error { message: "boom", code: ErrorCode.invalid_arg } }
+        \\  return n * 10
+        \\}
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let acc = entity.get_mut(Acc)
+        \\  try {
+        \\    acc.out = risky(2)
+        \\    acc.out = risky(5)
+        \\    acc.out = 999
+        \\  } catch err {
+        \\    acc.err_out = 7
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    var err_out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    @memcpy(std.mem.asBytes(&err_out), slot[8..16]);
+
+    // A caught throw is not a runtime error.
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    // The catch ran.
+    try std.testing.expectEqual(@as(i64, 7), err_out);
+    // The FIRST assignment landed and the THIRD did not: the guard abandons the
+    // write for the throwing RHS only, and the run stops there. Asserting the
+    // catch alone would pass against a guard that abandoned every write.
+    try std.testing.expectEqual(@as(i64, 20), out);
 }

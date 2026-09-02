@@ -66,21 +66,19 @@ pub const default_gravity = Vec3r.fromArray(.{ 0, -9.81, 0 });
 /// `dt`, which is the frozen entry's parameter; this is only what the world opens with.
 pub const default_timestep: Real = 1.0 / 60.0;
 
-/// **THE TWO JOINT ENTRIES ARE ABSENT, and it is a finding rather than an omission.**
-/// `engine-tier-interfaces.md` §1 declares `createJoint: fn (*Impl, JointDescriptor)
-/// anyerror!JointId` and `destroyJoint: fn (*Impl, JointId) void`, and **not one of
-/// `JointId`, `JointDescriptor`, `JointType`, `JointLimits` or `JointMotor` is declared
-/// anywhere in this repository** — measured across `src/modules/forge/` at M1.1.15.1, zero
-/// occurrences. So the two entries cannot be presented here even as typed stubs: a stub
-/// needs its parameter type to exist.
+/// **THE JOINT ENTRIES ARE PRESENT SINCE M1.1.15.2 G5a, and the flag that recorded
+/// their absence is gone with the absence.**
 ///
-/// The same shape as `ModuleContext` at M1.1.15: a type the frozen interface names, that
-/// nothing declares. Minting the family is the joint milestone's work (M1.1.16-18) or the
-/// freeze's, not this one's — C1.1 authorises a typed `error.NotImplemented` BODY behind a
-/// frozen SIGNATURE, which presumes the signature is expressible. Recorded so the freeze
-/// meets it knowingly rather than discovering it while writing its assert block, which is
-/// exactly what this milestone exists to prevent.
-pub const joint_entries_absent = true;
+/// At M1.1.15.1 this file carried `joint_entries_absent = true` with the measurement
+/// behind it: not one of `JointId`, `JointDescriptor`, `JointType`, `JointLimits` or
+/// `JointMotor` was declared anywhere in the repository, so the entries could not be
+/// presented even as typed stubs — a stub needs its parameter type to exist. G5a mints
+/// the seven types at `forge/api/joint.zig`, which is what makes `createJoint`,
+/// `destroyJoint` and `setJointMotor` PRESENTABLE, and they are declared below as typed
+/// stubs. The flag is DELETED rather than flipped to `false`: a constant that records a
+/// state the tree left is a second declarant of something the declarations already say,
+/// and its only reader asserted the absence it no longer describes.
+pub const joint_entries_present = true;
 
 /// The Tier 1 physics module: `forge_3d` behind the frozen `PhysicsModule` shape.
 ///
@@ -202,15 +200,85 @@ pub const Forge3DModule = struct {
     /// because it has nowhere to put the distinction. Adding that channel is a change to the
     /// frozen surface and belongs to M1.1.15.2, which still has the window; it is recorded
     /// there rather than taken here.
-    pub fn getBodyTransform(self: *Forge3DModule, id: BodyId) api.Transform {
-        const p = self.world.bm.position(id) orelse return .{
-            .position = Vec3.zero,
-            .rotation = Quat.identity,
-        };
+    /// The body's pose, or `error.StaleBodyHandle` (M1.1.15.2 G5a).
+    ///
+    /// The error channel is `engine-tier-interfaces.md` 0.12's first decision, and
+    /// the defect it closes is precise: a stale handle used to answer the IDENTITY
+    /// pose, which is indistinguishable from a live body sitting at the origin, on
+    /// an interface where every other handle-taking entry already separates the
+    /// dead handle from the result. `anyerror!` and not `?`, on the
+    /// `getCharacterInnerBody` precedent — there the `null` carries a legitimate
+    /// absence, whereas a live body ALWAYS has a pose, so an optional would have
+    /// nothing to carry.
+    pub fn getBodyTransform(self: *Forge3DModule, id: BodyId) anyerror!api.Transform {
+        const p = self.world.bm.position(id) orelse return error.StaleBodyHandle;
         return .{
             .position = cross.vec3ToWorld(p),
             .rotation = cross.quatToWorld(self.world.bm.rotation(id).?),
         };
+    }
+
+    /// The current trigger overlap set, copied into `out` (M1.1.15.2 G5a,
+    /// `engine-physics-solver.md` §1.13.11).
+    ///
+    /// **Truncation is REFUSED, and that is where this entry parts from the query
+    /// family.** A query returns a SELECTION, and a subset of a selection is still
+    /// an answer; this returns a STATE, and a subset of a state is a false state —
+    /// a caller reading it would conclude that an entity left a trigger it never
+    /// left. So a slice too small is `error.BufferTooSmall` and nothing is written.
+    ///
+    /// Allocation-free by construction: the set is already built, sorted and
+    /// deduplicated at step 10 bis, and this copies it.
+    pub fn getTriggerOverlaps(self: *Forge3DModule, out: []api.TriggerOverlap) anyerror!u32 {
+        const pairs = self.world.sensors.current.items;
+        // THE SECOND HALF OF §12's CONTRACT, and G8 is where it lands: "le compte
+        // requis obtenable en passant une tranche vide". An EMPTY slice is a SIZE
+        // QUERY and not a failed read — a caller that has no buffer yet is asking
+        // how big one must be, and answering `BufferTooSmall` to that leaves it with
+        // the same question it came with. The first half — refusal rather than
+        // truncation — was transcribed at G5a and this was not.
+        //
+        // Placed BEFORE the fit test, or an empty slice against a non-empty state
+        // would take the refusal branch, which is exactly the defect.
+        if (out.len == 0) return @intCast(pairs.len);
+        if (pairs.len > out.len) return error.BufferTooSmall;
+        for (pairs, 0..) |p, i| {
+            out[i] = .{ .trigger_entity = p.trigger, .other_entity = p.other };
+        }
+        return @intCast(pairs.len);
+    }
+
+    // --- Joints (M1.1.15.2 G5a) — TYPED STUBS ---
+    //
+    // The seven types of `api.joint` are minted so these three are PRESENTABLE:
+    // a typed stub needs its parameter type to exist, so without them these
+    // entries could not be written at all, bodyless or otherwise. Constraint
+    // SOLVING is M1.1.16 through M1.1.18 (`engine-phase-1-plan.md`).
+    //
+    // They FAIL LOUD rather than returning a plausible value. `createJoint`
+    // returning a handle no solver knows would put a dead id into a caller's
+    // state, and `setJointMotor` returning `void` would report a write that never
+    // happened — the same class the multi-result query entries closed at
+    // M1.1.15.1. `destroyJoint` is `void` by the frozen signature and cannot
+    // report; it is a no-op because no id can exist for it to destroy, every path
+    // that could mint one having failed first.
+
+    pub fn createJoint(self: *Forge3DModule, desc: api.JointDescriptor) anyerror!api.JointId {
+        _ = self;
+        _ = desc;
+        return error.JointsNotImplemented;
+    }
+
+    pub fn destroyJoint(self: *Forge3DModule, id: api.JointId) void {
+        _ = self;
+        _ = id;
+    }
+
+    pub fn setJointMotor(self: *Forge3DModule, id: api.JointId, motor: ?api.JointMotor) anyerror!void {
+        _ = self;
+        _ = id;
+        _ = motor;
+        return error.JointsNotImplemented;
     }
 
     pub fn setLinearVelocity(self: *Forge3DModule, id: BodyId, velocity: Vec3) void {

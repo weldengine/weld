@@ -187,16 +187,19 @@ pub fn build(b: *std.Build) void {
     forge_module.addImport("forge_3d", forge_3d_module);
     forge_module.addImport("foundation", foundation_module);
 
-    // M1.1.15 / gate E — `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface
-    // and the first file of `src/interfaces/`. NOT frozen: the freeze is M1.1.15.2. It holds
-    // the three body pose/velocity contracts moved out of `forge/api/types.zig`, so it needs
-    // `weld_forge` for `BodyId` and for the world-scalar aliases and nothing else.
+    // `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface and the first file
+    // of `src/interfaces/`. FROZEN at M1.1.15.2 G7: it carries
+    // `WELD_PHYSICS_PROTOCOL_VERSION` and the comptime surface guard over the thirty-two
+    // entries, plus the three body pose/velocity contracts moved out of
+    // `forge/api/types.zig`. It needs `weld_forge` for the descriptor and query types and
+    // `weld_core` for `ModuleContext`, which the guard's first entry names.
     const interfaces_physics_module = b.createModule(.{
         .root_source_file = b.path("src/interfaces/PhysicsModule.zig"),
         .target = target,
         .optimize = optimize,
     });
     interfaces_physics_module.addImport("weld_forge", forge_api_module);
+    interfaces_physics_module.addImport("weld_core", core_module);
 
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
@@ -574,6 +577,73 @@ pub fn build(b: *std.Build) void {
     etch_interp_runner_module.addImport("weld_core", core_module);
     etch_interp_runner_module.addImport("weld_etch", etch_module);
 
+    // M1.1.15.2 G3 — the toy service and the `.d.etch` emitter, defined HERE
+    // rather than beside the bindgen steps below because the test-spec loop
+    // needs them too, and one module definition serving both is what keeps the
+    // tests exercising the very code the `bindgen-check` step runs.
+    // The toy is a PERMANENT manifest entry: `etch-abi-zig.md` §8.7 has the
+    // interop gates prove themselves on a toy and never on the physics.
+    const toy_service_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_services/toy_service.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    toy_service_module.addImport("weld_etch", etch_module);
+    const emit_detch_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/emit_detch.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    emit_detch_module.addImport("weld_etch", etch_module);
+
+    // M1.1.15.2 G6 — the physics service and the sensor-event types enter the
+    // manifest. They import the forge module, so their modules are built here
+    // alongside the toy's.
+    const forge_services_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/services/physics.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    forge_services_module.addImport("weld_etch", etch_module);
+    forge_services_module.addImport("weld_forge", forge_api_module);
+    forge_services_module.addImport("forge_3d", forge_3d_module);
+    forge_services_module.addImport("weld_core", core_module);
+    forge_services_module.addImport("foundation", foundation_module);
+    forge_services_module.addImport("forge_module", forge_module);
+    // M1.1.15.2 G11 — the MUTATION half of the service resolves an entity to the body the
+    // seam drives and marks the seam's own journal, so it needs the seam. `forge_sync` is
+    // the only module that sees both the ECS and `PhysicsWorld`, which is exactly what a
+    // wrapper writing an ECS mirror needs.
+    forge_services_module.addImport("forge_sync", forge_sync_module);
+    // M1.1.15.2 G7 — the bidirectional Etch slice. It is DRIVEN by a test rather
+    // than left as a directory to read: a mechanism nothing executes is the defect
+    // M1.1.15 named and this milestone has closed twice.
+    const arena_slice_module = b.createModule(.{
+        .root_source_file = b.path("examples/arena/slice.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const forge_sensor_events_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/sensor_events.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    forge_sensor_events_module.addImport("weld_etch", etch_module);
+    forge_sensor_events_module.addImport("weld_forge", forge_api_module);
+    forge_sensor_events_module.addImport("forge_3d", forge_3d_module);
+    forge_sensor_events_module.addImport("weld_core", core_module);
+    forge_sensor_events_module.addImport("foundation", foundation_module);
+    arena_slice_module.addImport("weld_core", core_module);
+    arena_slice_module.addImport("weld_forge", forge_api_module);
+    arena_slice_module.addImport("forge_3d", forge_3d_module);
+    arena_slice_module.addImport("weld_etch", etch_module);
+    arena_slice_module.addImport("forge_module", forge_module);
+    arena_slice_module.addImport("forge_services", forge_services_module);
+    arena_slice_module.addImport("forge_sensor_events", forge_sensor_events_module);
+    arena_slice_module.addImport("forge_sync", forge_sync_module);
+    arena_slice_module.addImport("foundation", foundation_module);
+
     const TestSpec = struct {
         path: []const u8,
         // M0.4 — `spike` field removed, no entry needs it anymore.
@@ -601,6 +671,17 @@ pub fn build(b: *std.Build) void {
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
+        /// M1.1.15.2 G7 — when set, imports the bidirectional arena slice.
+        arena_slice: bool = false,
+        /// M1.1.15.2 G6 — when set, imports the physics service, the sensor-event
+        /// types and `weld_etch`, so a test can drive a rule through the service.
+        physics_service: bool = false,
+        /// M1.1.15.2 G4 — when set, imports the toy service module (which also
+        /// carries the toy EVENT and its emitted declaration).
+        etch_events: bool = false,
+        /// M1.1.15.2 G3 — when set, imports the `.d.etch` emitter and the toy
+        /// service, so a test exercises the SAME functions `bindgen-check` runs.
+        bindgen_detch: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -615,6 +696,11 @@ pub fn build(b: *std.Build) void {
         // M1.1.15.1 / gate C — `Forge3DModule`: the allocator/fallibility shape of the
         // frozen surface, and the `step` failure contract of RD-3.
         .{ .path = "tests/physics/forge_module_test.zig", .forge = true },
+        // M1.1.15.2 G6 — the Tier 1 physics service called from a rule, and the two
+        // sensor deltas translated onto the Tier 0 bus.
+        .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
+        // M1.1.15.2 G7 — the slice, run in both directions.
+        .{ .path = "tests/physics/arena_slice_test.zig", .arena_slice = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -709,6 +795,13 @@ pub fn build(b: *std.Build) void {
         // M1.0.4 / E2 — scene cook → writer → accessor round-trip (entities,
         // archetypes, UUIDs, names, parent links, content_version, resources,
         // mixed-alignment columns, byte-identical determinism).
+        // M1.1.15.2 G2 — the Tier 1 service path end to end: `.d.etch` declares,
+        // the checker resolves, the tree-walker dispatches into a Zig function.
+        .{ .path = "tests/etch_services/service_call_test.zig", .scene = true },
+        // M1.1.15.2 G3 — the emitter and the `bindgen-check` comparison.
+        .{ .path = "tests/etch_bindgen/detch_emitter_test.zig", .bindgen_detch = true },
+        // M1.1.15.2 G4 — the Tier 0 → Etch event bridge and its tick ordering.
+        .{ .path = "tests/etch_events/event_bridge_test.zig", .etch_events = true },
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
@@ -860,12 +953,33 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("forge_sync", forge_sync_module);
             t_mod.addImport("forge_module", forge_module);
             t_mod.addImport("foundation", foundation_module);
+            t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
         }
         if (spec.foundation) {
             t_mod.addImport("foundation", foundation_module);
         }
         if (spec.scene) {
             t_mod.addImport("weld_etch", etch_module);
+        }
+        if (spec.etch_events) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("toy_service", toy_service_module);
+        }
+        if (spec.arena_slice) {
+            t_mod.addImport("arena_slice", arena_slice_module);
+        }
+        if (spec.physics_service) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("forge_services", forge_services_module);
+            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+            t_mod.addImport("forge_sync", forge_sync_module);
+        }
+        if (spec.bindgen_detch) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("emit_detch", emit_detch_module);
+            t_mod.addImport("toy_service", toy_service_module);
+            t_mod.addImport("forge_services", forge_services_module);
+            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
@@ -1991,6 +2105,54 @@ pub fn build(b: *std.Build) void {
     const bindgen_step = b.step("bindgen", "Regenerate every bindgen adapter (Vulkan + Wayland)");
     bindgen_step.dependOn(&vk_gen_fmt.step);
     bindgen_step.dependOn(&wayland_gen_fmt.step);
+
+    // ------------------------------- .d.etch service-spec emitter (M1.1.15.2 G3) --
+    //
+    // `engine-c-bindings.md` §8.4: the `bindgen.ServiceSpec` a Tier 1 module
+    // declares is the SOURCE OF TRUTH, and the committed `.d.etch` is a derived
+    // artifact. Two steps over ONE rendering, so the check cannot disagree with
+    // the regeneration:
+    //   - `zig build bindgen-detch` — regenerate in place (manual, §8.4.4)
+    //   - `zig build bindgen-check` — compare and fail with a line-by-line diff
+    //
+    // Distinct from `bindgen-verify` / `vk-gen-check`, which gate the Vulkan and
+    // Wayland `.api.zig` → Zig pipeline and have nothing to do with services.
+    const detch_module = b.createModule(.{
+        .root_source_file = b.path("tools/bindgen/detch_main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    detch_module.addImport("weld_etch", etch_module);
+    detch_module.addImport("toy_service", toy_service_module);
+    detch_module.addImport("forge_services", forge_services_module);
+    detch_module.addImport("forge_sensor_events", forge_sensor_events_module);
+
+    const detch_exe = b.addExecutable(.{
+        .name = "bindgen_detch",
+        .root_module = detch_module,
+    });
+    const detch_write_run = b.addRunArtifact(detch_exe);
+    detch_write_run.has_side_effects = true;
+    // `.inherit` and not the default capture, MEASURED: with the default the
+    // step failed with exit 1 and printed only the error trace — the
+    // line-by-line diff E1902 owes the reader went to a captured pipe and was
+    // discarded. A guard that fails without saying why is half a guard.
+    detch_write_run.stdio = .inherit;
+    detch_write_run.addArg("--write");
+    const detch_write_step = b.step(
+        "bindgen-detch",
+        "Regenerate the .d.etch service declarations from their Zig ServiceSpec",
+    );
+    detch_write_step.dependOn(&detch_write_run.step);
+
+    const detch_check_run = b.addRunArtifact(detch_exe);
+    detch_check_run.has_side_effects = true;
+    detch_check_run.stdio = .inherit; // see the note on `detch_write_run`
+    const detch_check_step = b.step(
+        "bindgen-check",
+        "Fail if a committed .d.etch diverges from its Zig ServiceSpec (E1902)",
+    );
+    detch_check_step.dependOn(&detch_check_run.step);
 
     // -------------------------------------------- bindgen-verify gate --
     //

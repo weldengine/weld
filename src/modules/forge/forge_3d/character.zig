@@ -1133,7 +1133,8 @@ fn stepDown(
     return centre.sub(up.scale(paddedAdvance(hit, c.step_height, standoffTarget(c.padding, probe, centre))));
 }
 
-/// Push a DYNAMIC body the character walked into, and take nothing in return.
+/// Push a DYNAMIC body the character walked into — unless it is PILOTED, which
+/// presents an infinite mass to every impulse path — and take nothing in return.
 ///
 /// **Unilateral by construction** (§1.12.9): the character is kinematic, so no impulse is ever
 /// applied to it and its own resolution is untouched — it stops `padding` short of the body whether
@@ -1167,6 +1168,19 @@ fn plannedPush(
 ) ?Vec3r {
     if (c.max_push_force <= 0 or dt <= 0) return null;
     if (bm.bodyType(body) != .dynamic) return null;
+    // **A PILOTED BODY PRESENTS AN INFINITE MASS TO EVERY IMPULSE PATH, and this is the
+    // second of them** (M1.1.15.2 G13, `engine-physics-forge.md` § *Autorité
+    // d'écriture* clause 2). "Every path" is normative there: a path added later that
+    // does not consult this flag is a defect OF THAT PATH, not a new incompleteness of
+    // the contract.
+    //
+    // Refused here rather than scaled to zero, and the two are not the same: the
+    // impulse below is `min(c.mass · closing, max_push_force · dt)`, built from the
+    // CHARACTER's mass and never from the body's, so no factor of this expression
+    // becomes zero on its own. Consulting the stored inverse mass would not help
+    // either — it is finite, which is exactly the defect: the body answered in infinite
+    // mass to contacts and in finite mass to the character.
+    if (bm.hasGameplayAuthority(body) orelse false) return null;
     // `normal` runs surface → character, so the character pushes along its negation.
     const direction = normal.neg();
     const body_velocity = bm.linearVelocity(body) orelse return null;

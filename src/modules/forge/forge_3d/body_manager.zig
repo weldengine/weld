@@ -622,6 +622,31 @@ pub const BodyManager = struct {
         self.wakeIndex(idx);
     }
 
+    /// Declare whether GAMEPLAY writes this body's pose instead of the solver
+    /// (`engine-physics-forge.md` § *Autorite d'ecriture*). Mirrors the Tier 1 ECS
+    /// field `RigidBody.authority`, which this tier cannot read. What the regime IS
+    /// is declared once, by `weld_forge`'s `PhysicsAuthority`; this setter carries the
+    /// declaration and never its content. The prose here named "the single effect —
+    /// the inverse mass is zero during resolution", which was one clause of three.
+    ///
+    /// **NON-ACTIVATING by contract**, like the other write-intent-separated setters
+    /// of §1.8.4: it declares a regime, it moves nothing. The one case where that
+    /// leaves a state the regime forbids — a body ALREADY ASLEEP when the flag is
+    /// raised, which no island would ever decide about again — is handled where the
+    /// transition is realised, in `forge/sync_in.zig`, and not by making this primitive
+    /// activating. No-op on a stale/invalid handle.
+    pub fn setGameplayAuthority(self: *BodyManager, id: BodyId, value: bool) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.flags)[idx].gameplay_authority = value;
+    }
+
+    /// Safe getter: whether gameplay is the write authority on this body, or null if
+    /// `id` is stale/invalid.
+    pub fn hasGameplayAuthority(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].gameplay_authority;
+    }
+
     /// Allow or forbid this body falling asleep. Forbidding it also WAKES it
     /// (`engine-physics-forge.md` §1.8.5, wake cause W1): a body that may no longer
     /// sleep must not stay asleep. Allowing it does not put it to sleep — that is
@@ -754,12 +779,35 @@ pub const BodyManager = struct {
     /// naturally a no-op on a static/kinematic body (`inv_mass == 0`) — no
     /// `body_type` branch needed.
     ///
+    /// **A REFUSAL, wake included, on a body under gameplay authority**, which is not
+    /// naturally a no-op: its stored inverse mass is finite, and this entry is the
+    /// THIRD impulse path of the regime. Read from the filter and not inherited — a
+    /// primitive's contract is part of the change to its behaviour.
+    ///
     /// ACTIVATING — see `addForce`. Note the asymmetry with `setLinearVelocity`,
     /// which writes the same column and does NOT wake: the difference is the
     /// INTENT, not the field touched. An impulse comes from outside the simulation;
     /// a solver velocity write is the simulation itself.
     pub fn addImpulse(self: *BodyManager, id: BodyId, impulse: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
+        // **THE THIRD IMPULSE PATH, and the guard lives HERE rather than at the
+        // interface** (M1.1.15.2 G15, `engine-physics-forge.md` § *Autorité
+        // d'écriture* clause 2). "Every impulse path" is normative there: a path that
+        // does not consult the flag is a defect OF THAT PATH. Contacts consult it in
+        // `contact_constraint.resolutionMotion` and the character controller in
+        // `plannedPush`; this is the one that reached a piloted body's velocity through
+        // the public surface, applying the STORED inverse mass.
+        //
+        // **And nothing repaired it**, which is what made it a permanent divergence
+        // rather than a transient: `syncOut` withholds publication from a `.gameplay`
+        // body, and `syncIn` does not push an ECS `Velocity` nobody wrote — so the ECS
+        // said one thing and the solver another, for good.
+        //
+        // In the PRIMITIVE and not in `PhysicsWorld` or in the adapter, because those
+        // are two of the three call paths and a guard at one of them leaves the others.
+        // The wake is skipped too: waking a body to apply nothing is a broadphase cost
+        // for no effect.
+        if (self.bodies.items(.flags)[idx].gameplay_authority) return;
         const inv_mass = self.bodies.items(.motion)[idx].inv_mass;
         const vel = self.bodies.items(.linear_velocity);
         vel[idx] = vel[idx].add(impulse.scale(inv_mass));

@@ -4946,6 +4946,11 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .shader_decl => try emitShaderDescriptor(w, gpa, ast, ast.shader_decls.items[datas[i]]),
             .scene_decl => try emitSceneDescriptor(w, gpa, ast, ast.scene_decls.items[datas[i]]),
             .prefab_decl => try emitPrefabDescriptor(w, gpa, ast, ast.prefab_decls.items[datas[i]]),
+            // M1.1.15.2 G1 — `service_decl` reaches this `else` and that is the
+            // decision, not an oversight: a `service` exists only in a `.d.etch`
+            // (`etch-grammar.md` §20.4), and a declaration file is never lowered to Zig.
+            // The switch is `else`-terminated, so the compiler could not have
+            // raised the question; it is answered here instead.
             else => {},
         }
     }

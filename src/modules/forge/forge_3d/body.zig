@@ -49,7 +49,22 @@ pub const BodyFlags = packed struct(u8) {
     /// A FLAG and not a column because it is one bit that costs nothing here; the
     /// detection MASK is a separate column, being 32 bits wide.
     is_trigger: bool = false,
-    _reserved: u4 = 0,
+    /// Whether gameplay, and not the solver, is the WRITE AUTHORITY on this body's
+    /// pose (`engine-physics-forge.md` § *Autorite d'ecriture*, ASCII-folded here for
+    /// the same reason every other citation in this tree is). It mirrors the ECS
+    /// `RigidBody.authority` field, which is Tier 1 and which the solver cannot read.
+    ///
+    /// **What it means is declared in ONE place** — `weld_forge`'s
+    /// `PhysicsAuthority`, which transcribes the owner document's three clauses. This
+    /// field is the solver-side MIRROR of that declaration and states none of it.
+    ///
+    /// The prose that stood here said the flag's "ONE effect inside the solver is that
+    /// the inverse mass is set to zero during resolution", and that the body was
+    /// "integrated normally" and kept "the same island". All three became false — the
+    /// first named one impulse path of three, and the other two were reversed when the
+    /// regime was corrected to follow the kinematic one.
+    gameplay_authority: bool = false,
+    _reserved: u3 = 0,
 };
 
 /// The inverse quantities the integrator/solver act on. Static and kinematic

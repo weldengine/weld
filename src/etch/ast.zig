@@ -40,6 +40,34 @@ pub const NodeCategory = enum(u4) {
     _,
 };
 
+/// Which grammatical subset an arena was parsed under (M1.1.15.2 G1,
+/// `etch-grammar.md` §20.3). The mode is a property of the FILE, detected from
+/// its extension by `parser.modeForPath`, and it is the only thing that
+/// distinguishes a declaration file from a source file — `.d.etch` is not
+/// another language, it is a reduced view of the same EBNF (§20).
+///
+/// It lives HERE and not in `parser.zig` because the parse is not the only
+/// stage that needs it: `E1901` is decided after the parse, from the AST, and a
+/// checker handed a bare arena has no other way to know which file it came from.
+pub const ParseMode = enum {
+    /// A standard `.etch` source file: the full grammar, every `fn` has a body.
+    standard,
+    /// A `.d.etch` declaration file: signatures and types with no bodies
+    /// (§20.1). Two things change, and only two. Every `fn` becomes
+    /// signature-only whatever its enclosing construct, and a `fn` that carries
+    /// a body is refused AT ITS OPENING BRACE with `E1900` — the parser knows at
+    /// the `{` that a body follows, and building one to reject it afterwards
+    /// would manufacture an AST no downstream stage may see. The `service`
+    /// construct becomes available here and here only (§20.4).
+    ///
+    /// What does NOT change here is `E1901`: the identity of a disallowed
+    /// top-level construct is decided AFTER the parse, from the AST, by the
+    /// type-checker (`etch-validation-ecs.md` §28, and the `scene_cook.zig`
+    /// precedent). Giving it a parser path would duplicate a twenty-construct
+    /// list that is already enumerable from `ItemKind`.
+    declaration_file,
+};
+
 /// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
 /// 28-bit index. Used as the universal pointer between AST nodes.
 pub const NodeId = packed struct(u32) {
@@ -162,6 +190,9 @@ pub const ItemKind = enum {
     input_mapping_decl,
     test_decl,
     override_decl,
+    /// `.d.etch`-only (M1.1.15.2 G1, `etch-grammar.md` §20.4). Never produced
+    /// from a standard `.etch` — the parser refuses it there.
+    service_decl,
 };
 
 /// Top-level declaration visibility (M1.0.8, `etch-grammar.md` §5.1
@@ -1339,6 +1370,29 @@ pub const TraitDecl = struct {
     generics_len: u32 = 0,
 };
 
+/// Side-slab entry for a `service` declaration (M1.1.15.2 G1,
+/// `etch-grammar.md` §20.4: `service_decl = "service" IDENT "{"
+/// { function_decl_no_body } "}"`).
+///
+/// **Structurally a `TraitDecl` minus generics**, and that is deliberate rather
+/// than convenient: a service body is a run of bodyless `fn` signatures, which
+/// is exactly what a trait body already is. The methods therefore live in the
+/// SAME `arena.impl_methods` slab, each an `FnDecl` with `has_body = false` —
+/// the field M0.8 minted for abstract trait methods. No new bodyless-fn
+/// mechanism is introduced by this milestone.
+///
+/// The name is an `IDENT` (lowercase), not a `TYPE_IDENT`: a service is called
+/// as `audio_player.play(...)`, so it occupies the value namespace, not the
+/// type namespace. Generics are absent because §20.4 has no production for
+/// them — the grammar shape wins.
+pub const ServiceDecl = struct {
+    name: StringId,
+    methods_start: u32, // index into `arena.impl_methods`
+    methods_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// One field initializer of a struct literal (`IDENT ":" expression`,
 /// `etch-grammar.md` §3.2 l.490). The spread form `".." expression` (§3.2
 /// l.491, data-table inheritance) lands with E4 and is encoded as
@@ -2482,6 +2536,15 @@ const TypeNode = struct {
 /// Allocated once per parse; freed via `deinit` after consumers have
 /// finished. All `NodeId`s in the API refer into this arena.
 pub const AstArena = struct {
+    /// Which grammatical subset produced this arena (M1.1.15.2 G1). Stamped by
+    /// `parser.parseWithMode`; every other arena constructor leaves the
+    /// `.standard` default, which is the right answer for a hook fragment or a
+    /// synthesised arena — neither is a declaration file.
+    ///
+    /// The type-checker reads it to decide `E1901`, which is a question about
+    /// the file's IDENTITY and cannot be answered from the node columns alone.
+    mode: ParseMode = .standard,
+
     items: std.MultiArrayList(Item) = .empty,
     stmts: std.MultiArrayList(Stmt) = .empty,
     exprs: std.MultiArrayList(Expr) = .empty,
@@ -2537,6 +2600,9 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     const_decls: std.ArrayListUnmanaged(ConstDecl) = .empty,
     test_decls: std.ArrayListUnmanaged(TestDecl) = .empty,
+    /// `.d.etch` service declarations (M1.1.15.2 G1). Their method signatures
+    /// live in `impl_methods`, shared with traits and impls.
+    service_decls: std.ArrayListUnmanaged(ServiceDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
     theme_decls: std.ArrayListUnmanaged(ThemeDecl) = .empty,
@@ -2777,6 +2843,7 @@ pub const AstArena = struct {
         self.type_alias_decls.deinit(gpa);
         self.const_decls.deinit(gpa);
         self.test_decls.deinit(gpa);
+        self.service_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
         self.quest_decls.deinit(gpa);
@@ -3006,6 +3073,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.test_decls.items.len);
         try self.test_decls.append(gpa, decl);
         return try self.addItem(gpa, .test_decl, idx, span);
+    }
+
+    /// `service NAME { fn … }` (M1.1.15.2 G1, `.d.etch` only). The caller
+    /// appends the bodyless method `FnDecl`s to `arena.impl_methods` beforehand
+    /// and passes the run in `decl`, exactly as `addTraitDecl` expects.
+    pub fn addServiceDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ServiceDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.service_decls.items.len);
+        try self.service_decls.append(gpa, decl);
+        return try self.addItem(gpa, .service_decl, idx, span);
     }
 
     /// Resolve a type name through the top-level `type` alias chain to its

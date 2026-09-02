@@ -79,6 +79,15 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
 /// `integrateVelocities` WITHOUT the accumulator reset — the form the substepped
 /// solver calls once per substep (`engine-physics-solver.md` §1.7, step 6).
 ///
+/// Like the fused form, it advances every live dynamic body that is neither asleep nor
+/// PILOTED: gravity, force, damping and the two velocity integrations are all in this
+/// pass, so the one skip carries the whole of the regime's first clause.
+///
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+///
 /// **The split is a correctness requirement of substepping, not a refactor.** The
 /// fused form CONSUMES the accumulators: it reads `force`/`torque`, applies them,
 /// and clears them. Called `n` times with `h = dt/n` it would therefore apply an
@@ -116,7 +125,20 @@ pub fn integrateVelocitiesNoReset(bm: *BodyManager, dt: Real, gravity: Vec3r) vo
         if (!bm.alloc.isAliveIndex(i)) continue;
 
         // A sleeper is not simulated (§1.8.6).
-        if (body_types[i] != .dynamic or flags[i].sleeping) continue;
+        //
+        // **AND NEITHER IS A PILOTED BODY** (M1.1.15.2 G13, § *Autorité d'écriture*
+        // clause 1). A body under gameplay authority does not integrate — no gravity,
+        // no velocity integration, no damping — because its velocity is what `syncIn`
+        // posed and nothing else may make it evolve. All three live in this pass, so
+        // one skip carries the whole clause.
+        //
+        // **Measured at the opening of G13, and it is why this line exists**: the
+        // authority flag had exactly ONE reader in the repository, the contact
+        // resolution's, so a `.gameplay` dynamic body fell under gravity while
+        // `syncOut` published nothing — the solver collided at a pose gameplay could
+        // not see. The contract named one impulse path out of three; this is the
+        // second.
+        if (body_types[i] != .dynamic or flags[i].sleeping or flags[i].gameplay_authority) continue;
         const mp = motions[i];
 
         // --- Linear ---
@@ -160,7 +182,8 @@ pub fn resetForceAccumulators(bm: *BodyManager) void {
     }
 }
 
-/// Advance every live DYNAMIC body's position and orientation one fixed tick of
+/// Advance the position and orientation of every live DYNAMIC body that is neither
+/// asleep nor PILOTED, one fixed tick of
 /// `dt` seconds from its CURRENT velocity, in ascending slot-index order. Call
 /// this AFTER `integrateVelocities` (in the full pipeline, after the contact
 /// solver has corrected velocities).
@@ -182,6 +205,10 @@ pub fn integratePositions(bm: *BodyManager, dt: Real) void {
         if (!bm.alloc.isAliveIndex(i)) continue;
         if (body_types[i] != .dynamic) continue;
         if (flags[i].sleeping) continue; // a sleeper's pose is frozen (§1.8.6)
+        // A PILOTED body's pose is gameplay's (M1.1.15.2 G13). Skipping the velocity
+        // pass alone would not be enough: a body that had a velocity when the authority
+        // flipped would keep advancing on it forever, since nothing damps it either.
+        if (flags[i].gameplay_authority) continue;
 
         // Position from the current (post-solve) velocity.
         positions[i] = positions[i].add(linear_velocities[i].scale(dt));

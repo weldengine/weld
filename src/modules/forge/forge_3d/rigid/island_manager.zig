@@ -223,8 +223,11 @@ pub const IslandManager = struct {
 
     // --- partition steps ------------------------------------------------------
 
-    /// Collect the awake dynamic bodies into `members`, ascending by `BodyId`, and
-    /// build the slot → dense reverse map.
+    /// Collect the awake, non-PILOTED dynamic bodies into `members`, ascending by
+    /// `BodyId`, and build the slot → dense reverse map.
+    ///
+    /// A piloted body is excluded for the reason statics and kinematics are: it
+    /// presents an infinite mass, and linking islands through one would fuse the scene.
     fn collectMembers(self: *IslandManager, gpa: std.mem.Allocator, bm: *const BodyManager) !void {
         self.members.clearRetainingCapacity();
 
@@ -236,6 +239,24 @@ pub const IslandManager = struct {
         while (slot < slot_count) : (slot += 1) {
             if (body_types[slot] != .dynamic) continue;
             if (flags[slot].sleeping) continue;
+            // **A PILOTED BODY LEAVES ITS ISLAND** (M1.1.15.2 G15,
+            // `engine-physics-forge.md` § *Autorité d'écriture* clause 3, corrected).
+            // It follows the KINEMATIC regime, and a kinematic is a member of no island
+            // — this collection excludes it on `body_type` two lines above, for the
+            // reason M1.1.8 wrote down: a constraint cannot affect an infinite-mass
+            // body's velocity, and linking through one would fuse the scene. A piloted
+            // body presents exactly that infinite mass (clause 2), so admitting it would
+            // link islands that are otherwise independent.
+            //
+            // Two consequences follow from the exclusion and are the whole of it: it is
+            // no longer a sleep CANDIDATE — the island decision is what puts a body to
+            // sleep, and a non-member is never decided about — and it can no longer hold
+            // an island awake through the per-island AND.
+            //
+            // It keeps its CONTACTS, and that is not a tension: a manifold is generated
+            // per candidate pair and never per island, so the body still collides and
+            // still pushes as an infinite mass.
+            if (flags[slot].gameplay_authority) continue;
             // `idAtIndex` filters dead columns and rebuilds the generation the bare
             // column index does not carry.
             const id = bm.alloc.idAtIndex(slot) orelse continue;

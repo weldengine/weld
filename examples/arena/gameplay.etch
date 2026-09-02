@@ -1,0 +1,78 @@
+// examples/arena/gameplay.etch — the M1.1.15.2 bidirectional slice.
+//
+// Two directions in one file, which is what makes the slice bidirectional:
+//   Etch -> Zig   `physics.raycast_any(...)` reaches Forge through the Tier 1
+//                 service and comes back with an answer.
+//   Zig -> Etch   `@on_event(TriggerEnter)` observes an event Forge produced
+//                 from its own sensor pass, carried onto the Tier 0 bus.
+//
+// Neither direction is simulated: the ray is answered by the real broadphase and
+// the event is produced by the real sensor state.
+
+resource ArenaState {
+  wall_seen: int = 0
+  entered: int = 0
+  last_entity: int = 0
+  // What a later query sees of the lift the rules DRIVE.
+  lift_driven: int = 0
+  lift_seen: int = 0
+}
+
+// The tag carried by the kinematic lift. An ENTITY-PARAMETERISED rule is how a rule
+// names the subject of a mutation: a `resource` cannot carry an `Entity` field —
+// `FieldKind.entity_` is component-only since M1.0.6, and `Entity.null` is refused as a
+// field default (E1101) — so the entity reaches the wrapper as the rule's own parameter,
+// which is also the shape `engine-movement.md` §10 writes.
+component Lift {
+  driven: int = 0
+}
+
+// Etch -> Zig. A ray down +X from the origin, over every object layer.
+rule scan()
+  when resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  if physics.raycast_any(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 100.0, 4294967295) {
+    s.wall_seen = 1
+  }
+}
+
+// Etch -> Zig, the MUTATION direction (M1.1.15.2 G11). The rule COMMANDS a physical
+// state: a kinematic lift is moved from far below onto the probe ray of `probe_lift`.
+// `move_kinematic` throws, and a rule can never be `throws` (E0903), so the call is
+// wrapped in a local `try` / `catch` — the ergonomic cost the plan accepted so that an
+// allocation failure can never reach a caller as a truncated success.
+rule drive_lift(entity: Entity)
+  when entity has Lift
+  and  resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  try {
+    physics.move_kinematic(entity, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.016666667)
+    s.lift_driven = 1
+  } catch err {
+    s.lift_driven = 0 - 1
+  }
+}
+
+// Etch -> Zig again, and this is the ORACLE for the rule above: a ray fired UPWARD from
+// below only meets the lift once the lift has been moved onto it. The answer comes from
+// the real broadphase, so the rule observes a physical state its sibling commanded.
+rule probe_lift()
+  when resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  if physics.raycast_any(30.0, -20.0, 0.0, 0.0, 1.0, 0.0, 30.0, 4294967295) {
+    s.lift_seen = 1
+  }
+}
+
+// Zig -> Etch. The trigger crossing Forge computed at step 10 bis, observed here.
+@on_event(TriggerEnter)
+rule on_enter()
+  when resource ArenaState
+{
+  let s = get_mut(ArenaState)
+  s.entered = s.entered + 1
+  s.last_entity = 1
+}

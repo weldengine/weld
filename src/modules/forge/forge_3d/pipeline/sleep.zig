@@ -101,8 +101,16 @@ pub fn assertDomain(cfg: SleepConfig) void {
     std.debug.assert(std.math.isFinite(cfg.time_before_sleep) and cfg.time_before_sleep >= 0);
 }
 
-/// Advance every awake dynamic body's sleep window by `dt`, in ascending slot-index
-/// order (deterministic — the `BodyManager` sweep discipline, M1.1.14).
+/// Advance the sleep window of every live dynamic body that is neither asleep nor
+/// PILOTED, by `dt`, in ascending slot-index order (deterministic — the `BodyManager`
+/// sweep discipline, M1.1.14).
+///
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+/// A piloted body is excluded because it follows the KINEMATIC regime, and a kinematic
+/// never reaches this sweep at all — the `body_type` filter excludes it one line above.
 ///
 /// This is step 11 of the normative per-tick cycle (§1.7) and runs on the
 /// POST-SOLVE state. Static and kinematic bodies are skipped: they never join an
@@ -126,6 +134,18 @@ pub fn updateWindows(bm: *BodyManager, dt: Real, cfg: SleepConfig) void {
         if (!bm.alloc.isAliveIndex(i)) continue;
         if (body_types[i] != .dynamic) continue;
         if (flags[i].sleeping) continue;
+        // **A PILOTED BODY'S WINDOW DOES NOT ADVANCE** (M1.1.15.2 G18). It follows the
+        // KINEMATIC regime, and a kinematic never reaches this sweep at all — the
+        // `body_type` filter above excludes it.
+        //
+        // **Without this the window AGED during piloting**, and the consequence was in
+        // the reverse direction: a piloted body held still saturates `sleep_time`, and
+        // on the flip back to `.solver` — pose and velocity unchanged, so no setter
+        // wakes it — it rejoined its island with a FULL window and could sleep on the
+        // first tick. A comment at the transition site asserted the window restarts at
+        // the flip; the code did not produce it. *Making every declarant refer is not
+        // enough if the one that states says something false.*
+        if (flags[i].gameplay_authority) continue;
 
         // How far the body has moved since its window opened. The rotational term
         // is the exact displacement of a point at `sleep_radius` from the centre,
@@ -192,14 +212,39 @@ pub fn isMoving(bm: *const BodyManager, id: BodyId) bool {
 pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
     const idx = bm.alloc.validate(id) orelse return false;
     if (bm.bodies.items(.flags)[idx].sleeping) return false;
+    // **A PILOTED BODY IS JUDGED ON MOTION, exactly as a kinematic is** (M1.1.15.2 G15,
+    // § *Autorité d'écriture* clause 3 corrected: it follows the kinematic regime).
+    //
+    // **MEASURED, and the island exclusion alone did not give it.** A box resting on a
+    // kinematic support sleeps and a box on a static support sleeps; on a piloted
+    // dynamic support it did NOT — because a piloted body is `.dynamic`, so the branch
+    // below made it a motion source unconditionally, even standing perfectly still. The
+    // pair was therefore never deferred, the narrowphase ran every tick, and the wake
+    // fixpoint woke the sleeping box on the manifold, every tick, forever.
+    //
+    // The paragraph above already gives the reason the kinematic branch is motion-based:
+    // a MOVING platform must count as awake so the fixpoint sees the manifold and wakes
+    // the box on the conveyor. A gameplay-piloted body IS such a platform — driven by
+    // pose writes, still while nothing drives it — so the motion test is what it wants,
+    // and being `.dynamic` is the one thing about it that no longer decides anything.
+    if (bm.bodies.items(.flags)[idx].gameplay_authority) return isMoving(bm, id);
     if (bm.bodies.items(.body_type)[idx] == .dynamic) return true;
     return isMoving(bm, id);
 }
 
 /// Put `id` to sleep: raise the flag and zero BOTH velocities exactly. No-op on a
-/// stale/invalid handle.
+/// stale/invalid handle, and a REFUSAL — nothing at all is written — on a body under
+/// gameplay authority.
 ///
-/// The MECHANISM only — it asks no question and checks no eligibility. Whether a
+/// **The scope below is READ FROM THE FILTERS, not inherited.** A primitive's
+/// contract is part of the change to its behaviour and not a follow-up: the wording
+/// that stood here described what the function did before this milestone's reprises,
+/// and a correction that leaves its contract standing is a correction half made.
+///
+/// The mechanism, and ONE question: a piloted body is refused outright, because the
+/// regime it follows has no sleep at all and this primitive is public — a direct
+/// caller could otherwise create the state the regime forbids. Whether a SIMULATED
+/// body should sleep is not asked here. Whether a
 /// body should sleep is an island decision taken at step 11 of the cycle and
 /// nowhere else (§1.8.3); this is what that decision calls once taken.
 ///
@@ -208,6 +253,18 @@ pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
 /// body does not resume with a stale velocity.
 pub fn putToSleep(bm: *BodyManager, id: BodyId) void {
     const idx = bm.alloc.validate(id) orelse return;
+    // **THE PRIMITIVE REFUSES, AND THE REFUSAL PRECEDES EVERY WRITE** (M1.1.15.2 G18).
+    // The guard added at G13 sat BELOW the flag, so a piloted body kept its velocity and
+    // was marked `sleeping` anyway — after which `isAwake` returns false on the flag and
+    // the primitive contradicts the regime it implements. **The order IS the correction**,
+    // the same shape `move_kinematic` took at G14: what a caller must be able to rely on
+    // is the STATE AFTER the refusal, not the refusal.
+    //
+    // A total refusal and not a partial one, because a piloted body follows the KINEMATIC
+    // regime: it is a member of no island, so no decision of the cycle reaches this
+    // function for it. The refusal is what keeps a DIRECT caller — a future island
+    // policy, a debug tool — from creating the state the regime forbids.
+    if (bm.bodies.items(.flags)[idx].gameplay_authority) return;
     bm.bodies.items(.flags)[idx].sleeping = true;
     bm.bodies.items(.linear_velocity)[idx] = Vec3r.zero;
     bm.bodies.items(.angular_velocity)[idx] = Vec3r.zero;

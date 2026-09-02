@@ -60,6 +60,35 @@ pub const WorldVec3 = math.Vec(3, WorldReal);
 /// A world-space rotation.
 pub const WorldQuat = math.Quat(WorldReal);
 
+/// **THE ETCH SCALAR.** Etch's `float` is `f64` (`etch-grammar.md` §2.2), and it
+/// is a THIRD scalar next to the world's and the solver's — a script writes a
+/// literal, not a build configuration, so it cannot follow either.
+///
+/// The two crossings below are named here for the same reason every other one is:
+/// this file is the ONE place that knows more than one scalar, and a `@floatCast`
+/// spelled at a service entry would be a second boundary. `no_precision_crossing`
+/// is what enforces that, and it is what sent these here — the first version of
+/// the physics service spelled its own casts and the guard refused them.
+pub const EtchReal = f64;
+
+/// An Etch `float` arriving at the world. Narrowing when the world is `f32`, exact
+/// when it is `f64`.
+pub fn etchToWorld(v: EtchReal) WorldReal {
+    return @floatCast(v);
+}
+
+/// A world value leaving for Etch. Widening at `f32`, exact at `f64`, and never
+/// lossy in either direction.
+pub fn worldToEtch(v: WorldReal) EtchReal {
+    return @floatCast(v);
+}
+
+/// An Etch `float` triple arriving at the world.
+pub fn etchVec3ToWorld(x: EtchReal, y: EtchReal, z: EtchReal) WorldVec3 {
+    return WorldVec3.fromArray(.{ etchToWorld(x), etchToWorld(y), etchToWorld(z) });
+}
+
+/// A world-space rotation.
 /// **The precision boundary, instantiated at a solver scalar.** `forge_3d/root.zig` holds
 /// the single instantiation as `cross`; nothing else should instantiate it, since a second
 /// instantiation is a second place to look when the world scalar moves.

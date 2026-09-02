@@ -84,21 +84,25 @@ const Fixture = struct {
 /// than derived from `@typeInfo`'s declaration list, so that an entry DISAPPEARING is a
 /// failure here instead of a silently shorter walk.
 ///
-/// **TWENTY-EIGHT, not thirty, and the two missing ones are accounted for below.**
-/// `engine-tier-interfaces.md` §12 puts the frozen total at 30 `assertFn`; `createJoint` and
-/// `destroyJoint` are absent because their parameter types are — see
-/// `module.joint_entries_absent`.
+/// **THIRTY-TWO, the whole frozen surface, since M1.1.15.2 G5a.**
+/// `engine-tier-interfaces.md` §12 puts the total at 32 `assertFn`, of which 29 exclude
+/// `init`, `deinit` and `step`. At M1.1.15.1 this list held twenty-eight and asserted the
+/// ABSENCE of `createJoint` and `destroyJoint`, whose parameter types no file declared;
+/// G5a mints those types, and `getTriggerOverlaps` and `setJointMotor` joined the frozen
+/// surface at §12 versions 0.12 and 0.14. The absence assertions are gone with the absence
+/// — see the milestone brief, where the removal is declared.
 const frozen_entries = [_][]const u8{
-    "init",                  "deinit",           "step",
-    "addBody",               "removeBody",       "setBodyTransform",
-    "moveKinematic",         "getBodyTransform", "setLinearVelocity",
-    "setAngularVelocity",    "addForce",         "addImpulse",
-    "createShape",           "destroyShape",     "raycast",
-    "raycastAny",            "raycastAll",       "shapeCast",
-    "overlapShape",          "overlapAabb",      "pointQuery",
-    "closestPoint",          "createCharacter",  "destroyCharacter",
-    "moveCharacter",         "resizeCharacter",  "setCharacterPosition",
-    "getCharacterInnerBody",
+    "init",                  "deinit",             "step",
+    "addBody",               "removeBody",         "setBodyTransform",
+    "moveKinematic",         "getBodyTransform",   "setLinearVelocity",
+    "setAngularVelocity",    "addForce",           "addImpulse",
+    "createShape",           "destroyShape",       "raycast",
+    "raycastAny",            "raycastAll",         "shapeCast",
+    "overlapShape",          "overlapAabb",        "pointQuery",
+    "closestPoint",          "createCharacter",    "destroyCharacter",
+    "moveCharacter",         "resizeCharacter",    "setCharacterPosition",
+    "getCharacterInnerBody", "getTriggerOverlaps", "createJoint",
+    "destroyJoint",          "setJointMotor",
 };
 
 /// The entries `engine-tier-interfaces.md` §1 declares `void` under the moved-log
@@ -117,21 +121,22 @@ test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
     // entries is a probe that measured nothing, and `engine-tier-interfaces.md` §12 gives
     // the number this has to be: THIRTY `assertFn`, of which 27 exclude the three
     // lifecycle entries. The count is asserted, not printed.
-    const frozen_total: usize = 30; // `engine-tier-interfaces.md` §12
-    const absent_for_want_of_a_type: usize = 2; // createJoint, destroyJoint
-    try testing.expectEqual(frozen_total - absent_for_want_of_a_type, frozen_entries.len);
+    const frozen_total: usize = 32; // `engine-tier-interfaces.md` §12
+    try testing.expectEqual(frozen_total, frozen_entries.len);
 
-    // THE ABSENCE IS ASSERTED, not left to the shorter list to imply. A walk that simply
-    // did not mention two entries is indistinguishable from one that forgot them.
-    try testing.expect(module.joint_entries_absent);
-    try testing.expect(!@hasDecl(Forge3DModule, "createJoint"));
-    try testing.expect(!@hasDecl(Forge3DModule, "destroyJoint"));
-    try testing.expect(!@hasDecl(api, "JointDescriptor"));
-    try testing.expect(!@hasDecl(api, "JointId"));
-    // NON-VACUITY for those four negatives: `@hasDecl` on these namespaces does find what
-    // is really there.
-    try testing.expect(@hasDecl(Forge3DModule, "addBody"));
-    try testing.expect(@hasDecl(api, "BodyDescriptor"));
+    // THE PRESENCE IS ASSERTED, and it replaces the absence M1.1.15.1 asserted here. The
+    // seven types are what make the three joint entries presentable at all, so they are
+    // checked alongside the entries rather than assumed by them.
+    try testing.expect(module.joint_entries_present);
+    inline for ([_][]const u8{
+        "JointId",     "JointType",  "JointLimits",     "JointMotorMode",
+        "JointTarget", "JointMotor", "JointDescriptor",
+    }) |t| {
+        try testing.expect(@hasDecl(api, t));
+    }
+    // NON-VACUITY: `@hasDecl` on this namespace does report a false for something that is
+    // really absent, so the seven positives above are not the answer it always gives.
+    try testing.expect(!@hasDecl(api, "JointNotAThing"));
 
     var walked: usize = 0;
     inline for (frozen_entries) |name| {
@@ -221,7 +226,7 @@ test "the adapter owns the allocator across a body lifecycle" {
 
     // Move it through the two frozen `void` entries.
     m.setBodyTransform(body, av3(1, 5, 0), foundation.math.Quatf.identity);
-    try testing.expectEqual(@as(f32, 1), m.getBodyTransform(body).position.toArray()[0]);
+    try testing.expectEqual(@as(f32, 1), (try m.getBodyTransform(body)).position.toArray()[0]);
     m.setLinearVelocity(body, av3(0, 0, 2));
     m.addForce(body, av3(0, 1, 0));
     m.addImpulse(body, av3(0, 0.1, 0));
@@ -689,7 +694,7 @@ test "the read-back mutators move what they claim to move" {
     // what discriminates: an entry that dropped the write leaves it at the origin.
     s.m.setLinearVelocity(body, av3(3, 0, 0));
     try s.m.step(fixed_dt);
-    const after_v = s.m.getBodyTransform(body).position.toArray()[0];
+    const after_v = (try s.m.getBodyTransform(body)).position.toArray()[0];
     try testing.expect(after_v > 0.01);
 
     // addImpulse — an immediate velocity change, so the NEXT tick must travel further than
@@ -697,15 +702,15 @@ test "the read-back mutators move what they claim to move" {
     // keeps the check independent of the timestep.
     s.m.addImpulse(body, av3(6, 0, 0));
     try s.m.step(fixed_dt);
-    const after_i = s.m.getBodyTransform(body).position.toArray()[0];
+    const after_i = (try s.m.getBodyTransform(body)).position.toArray()[0];
     try testing.expect(after_i - after_v > after_v);
 
     // setAngularVelocity — never called anywhere before this. There is no angular getter on
     // the frozen surface, so the observable is the ORIENTATION after a tick.
-    const before_rot = s.m.getBodyTransform(body).rotation;
+    const before_rot = (try s.m.getBodyTransform(body)).rotation;
     s.m.setAngularVelocity(body, av3(0, 8, 0));
     try s.m.step(fixed_dt);
-    const after_rot = s.m.getBodyTransform(body).rotation;
+    const after_rot = (try s.m.getBodyTransform(body)).rotation;
     try testing.expect(!std.meta.eql(before_rot, after_rot));
 
     // removeBody — called before and never observed. After it, no query finds the body.
@@ -757,8 +762,8 @@ test "addForce is a force and not an impulse, and destroyShape really destroys" 
     s.m.addImpulse(impulsed, av3(6, 0, 0));
     try s.m.step(fixed_dt);
 
-    const dx_force = s.m.getBodyTransform(forced).position.toArray()[0];
-    const dx_impulse = s.m.getBodyTransform(impulsed).position.toArray()[0];
+    const dx_force = (try s.m.getBodyTransform(forced)).position.toArray()[0];
+    const dx_impulse = (try s.m.getBodyTransform(impulsed)).position.toArray()[0];
     try testing.expect(dx_force > 0); // it is not a no-op
     const ratio = dx_impulse / dx_force;
     try testing.expect(ratio > 10); // an impulse implementation would give ~1
@@ -854,7 +859,7 @@ test "the character entries move and report a ground" {
     // body is the observable the frozen surface offers.
     s.m.setCharacterPosition(hero, av3(2, 0, 0));
     const inner = (try s.m.getCharacterInnerBody(hero)) orelse return error.ExpectedPresence;
-    try testing.expectApproxEqAbs(@as(f32, 2), s.m.getBodyTransform(inner).position.toArray()[0], 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 2), (try s.m.getBodyTransform(inner)).position.toArray()[0], 1e-3);
 
     // moveCharacter — never called before. Asserted on BOTH halves of its result: the
     // position advanced, and the ground was found. A stub returning a zeroed result passes
@@ -1033,7 +1038,7 @@ test "three more oracles that discriminate rather than merely observe" {
         .mass = 1,
     });
     try s.m.step(fixed_dt);
-    try testing.expect(s.m.getBodyTransform(falling).position.toArray()[1] < 100);
+    try testing.expect((try s.m.getBodyTransform(falling)).position.toArray()[1] < 100);
 
     // setLinearVelocity — SETS, where addImpulse ADDS, and with unit mass the two were
     // indistinguishable in the read-back test above: both leave the body at velocity v. The
@@ -1050,7 +1055,7 @@ test "three more oracles that discriminate rather than merely observe" {
     s.m.addImpulse(rider, av3(10, 0, 0));
     s.m.setLinearVelocity(rider, av3(1, 0, 0));
     try s.m.step(fixed_dt);
-    const travelled = s.m.getBodyTransform(rider).position.toArray()[0];
+    const travelled = (try s.m.getBodyTransform(rider)).position.toArray()[0];
     try testing.expect(travelled > 0); // not a no-op
     try testing.expect(travelled < 10 * fixed_dt); // and it REPLACED rather than added
 
@@ -1181,4 +1186,487 @@ test "the guard refuses what it OBSERVES broken, and that detection is windowed"
     var two: [2]EntityId = undefined;
     try testing.expectEqual(@as(u32, 2), try s.m.dedupEntities(&.{ e3, e5 }, &two));
     try testing.expectEqual(before, s.m.unordered_projections);
+}
+
+// --- M1.1.15.2 G5a — the entries this gate adds -------------------------------
+
+test "getBodyTransform separates a stale handle from a body at the origin" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE DEFECT THE ERROR CHANNEL CLOSES, made visible by the pair. A body AT the
+    // origin answers the identity pose; a body that was removed answers an error. Before
+    // M1.1.15.2 both answered the identity pose and the two were indistinguishable — which
+    // is why one body here sits exactly at the origin rather than somewhere convenient.
+    const at_origin = try s.place(1, 0);
+    const removed = try s.place(2, 5);
+
+    const pose = try s.m.getBodyTransform(at_origin);
+    try testing.expectEqual(@as(f32, 0), pose.position.toArray()[0]);
+
+    s.m.removeBody(removed);
+    try testing.expectError(error.StaleBodyHandle, s.m.getBodyTransform(removed));
+
+    // And the live one still answers, so the error above is the handle's state and not a
+    // world that stopped answering.
+    _ = try s.m.getBodyTransform(at_origin);
+}
+
+test "getTriggerOverlaps refuses to truncate a state" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // A trigger over two bodies of two distinct entities: two oriented pairs.
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .is_trigger = true,
+    });
+    _ = try s.place(11, 0.1);
+    _ = try s.place(12, -0.1);
+    try s.m.step(1.0 / 60.0);
+
+    var room: [8]api.TriggerOverlap = undefined;
+    const n = try s.m.getTriggerOverlaps(&room);
+    try testing.expectEqual(@as(u32, 2), n);
+    // Sorted on `(trigger_entity, other_entity)` — §1.13.11's key, and the trigger is the
+    // FIRST member of the pair, so the orientation is observable and not assumed.
+    try testing.expectEqual(@as(u32, 10), room[0].trigger_entity.index);
+    try testing.expectEqual(@as(u32, 11), room[0].other_entity.index);
+    try testing.expectEqual(@as(u32, 12), room[1].other_entity.index);
+
+    // THE ENTRY'S OWN CONTRACT, and where it parts from the query family: a slice too
+    // small is `error.BufferTooSmall` and NOT a truncated answer. A subset of a selection
+    // is still an answer; a subset of a STATE is a false state — a caller reading one
+    // would conclude that an entity left a trigger it never left.
+    var too_small: [1]api.TriggerOverlap = undefined;
+    try testing.expectError(error.BufferTooSmall, s.m.getTriggerOverlaps(&too_small));
+
+    // NON-VACUITY on that refusal: a slice of EXACTLY the right size is accepted, so the
+    // error above is about capacity and not about any slice shorter than the buffer.
+    var exact: [2]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&exact));
+}
+
+test "the three joint entries are presentable and fail loud" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+    const body = try s.place(1, 0);
+
+    // PRESENTABLE is the deliverable: this call site could not be WRITTEN without the
+    // seven types, so its mere compilation is half the proof. The other half is that the
+    // stubs fail loud rather than returning a plausible value — a `JointId` no solver
+    // knows would put a dead handle into a caller's state.
+    try testing.expectError(error.JointsNotImplemented, s.m.createJoint(.{
+        .joint_type = .hinge,
+        .body_a = body,
+        .body_b = api.PackedId.dead,
+        .limits = .{ .angle1d = .{ .min_radians = -1, .max_radians = 1 } },
+        .motor = .{
+            .target = .{ .scalar = .{ .mode = .velocity, .value = 2 } },
+            .max_linear_force = 10,
+            .max_angular_torque = 4,
+        },
+    }));
+    try testing.expectError(error.JointsNotImplemented, s.m.setJointMotor(0, null));
+    // `destroyJoint` is `void` by the frozen signature and cannot report; it is a no-op
+    // because no id can exist for it to destroy, every path that could mint one having
+    // failed first. Called so the entry is exercised rather than only declared.
+    s.m.destroyJoint(0);
+
+    // The descriptor's own defaults are the spec's, checked on the fields a caller is
+    // most likely to leave alone.
+    const d: api.JointDescriptor = .{ .joint_type = .fixed, .body_a = body, .body_b = body };
+    try testing.expectEqual(api.JointLimits.none, d.limits);
+    try testing.expect(d.motor == null);
+    try testing.expect(!d.collide_connected);
+    try testing.expectEqual(@as(f32, 0), d.break_force);
+    try testing.expectEqual(@as(f32, 0), d.break_torque);
+    try testing.expectEqual(@as(f32, 1), d.axis_a.toArray()[1]);
+
+    // `.off` IS NOT A MOTOR MODE, and the absence is asserted rather than left to the
+    // enum's shortness to imply. A motor that is off is `null`.
+    try testing.expectEqual(@as(usize, 2), @typeInfo(api.JointMotorMode).@"enum".fields.len);
+    inline for (@typeInfo(api.JointMotorMode).@"enum".fields) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "off"));
+    }
+
+    // FOUR scalars per MOTOR, never per axis. **TWO ceilings since 0.15, and the
+    // structural pin survives the correction rather than being replaced by it**: naming
+    // two ceilings by axis NATURE is not naming them per axis. A single `max_force`
+    // could not govern `six_dof`, which drives three linear and three angular axes at
+    // once — a scalar cannot be in newtons and in newton-metres together — and that is
+    // the variant the exclusion mattered for.
+    inline for ([_][]const u8{ "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" }) |name| {
+        try testing.expectEqual(f32, @FieldType(api.JointMotor, name));
+    }
+    // `six_dof` carries TWO ceilings and not six: the count is on the motor and does not
+    // follow the number of axes the target names.
+    try testing.expectEqual(@as(usize, 5), @typeInfo(api.JointMotor).@"struct".fields.len);
+
+    // And no variant of `JointTarget` carries a ceiling OR a gain — which is what puts
+    // "never per axis" in the type rather than in prose, and what makes this pin the
+    // thing that survives a corpus correction unchanged.
+    inline for (@typeInfo(api.JointTarget).@"union".fields) |variant| {
+        if (@typeInfo(variant.type) != .@"struct") continue;
+        inline for (@typeInfo(variant.type).@"struct".fields) |vf| {
+            inline for ([_][]const u8{ "max_force", "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" }) |forbidden| {
+                try testing.expect(!std.mem.eql(u8, vf.name, forbidden));
+            }
+        }
+    }
+    // NON-VACUITY on that walk: the variants DO carry fields, so the absences above are
+    // measured over a non-empty set.
+    try testing.expect(@typeInfo(@FieldType(api.JointTarget, "six_dof")).@"struct".fields.len > 0);
+}
+
+// --- M1.1.15.2 G7 — the freeze -----------------------------------------------
+
+const iface = @import("weld_interfaces_physics");
+
+test "Forge3DModule satisfies the frozen surface guard" {
+    // **THE GUARD INSTANTIATED AGAINST THE REAL ADAPTER**, which is the only thing
+    // that makes it a guard rather than a declaration. `PhysicsModule(Impl)` fails
+    // to COMPILE unless every one of the thirty-two entries is present with its
+    // exact signature, so the line below is the assertion and the ones after it are
+    // about what the guard covers.
+    const Wrapped = iface.PhysicsModule(Forge3DModule);
+    try testing.expect(@hasField(Wrapped, "impl"));
+
+    // THIRTY-TWO, and not twenty-nine. The block guards the SURFACE, so it is the
+    // 32 that bound it; a guard built on 29 passes an implementation missing any of
+    // `init`, `deinit` or `step` — the very failure mode a surface guard closes.
+    try testing.expectEqual(@as(usize, 32), iface.frozen_entry_count);
+    try testing.expectEqual(@as(usize, 29), iface.frozen_non_lifecycle_count);
+    // The same number this file's own walk uses, so the two cannot drift apart.
+    try testing.expectEqual(frozen_entries.len, iface.frozen_entry_count);
+    try testing.expectEqual(coverage.len, iface.frozen_non_lifecycle_count);
+
+    // THE SURFACE IS FROZEN, and the attestation of ABSENCE this file carried until
+    // G7 is now an attestation of PRESENCE.
+    try testing.expect(@hasDecl(iface, "WELD_PHYSICS_PROTOCOL_VERSION"));
+    try testing.expectEqual(@as(u32, 1), iface.WELD_PHYSICS_PROTOCOL_VERSION);
+
+    // **WHAT VERSION 1 FREEZES IS THE CORRECTED SURFACE, and the three corrections are
+    // confronted with the version HERE rather than only where each was made.** G7 ran
+    // once before the external review and froze a surface carrying three defects: a
+    // wrapper that delegated nothing, `getTriggerOverlaps` refusing the empty slice a
+    // caller uses to ask for the count, and a `JointMotor` whose single `max_force`
+    // could not be both newtons and newton-metres for `six_dof`. Each is now pinned by
+    // its own test — but a pin that lives only beside its correction says nothing about
+    // the VERSION, and the version is the promise: undoing one of the three without
+    // bumping the constant is precisely the move the freeze exists to forbid.
+    //
+    // Restated at their smallest here, so the freeze itself reddens.
+    try testing.expectEqual(@as(usize, 5), @typeInfo(api.JointMotor).@"struct".fields.len);
+    try testing.expect(@hasField(api.JointMotor, "max_linear_force"));
+    try testing.expect(@hasField(api.JointMotor, "max_angular_torque"));
+    try testing.expect(!@hasField(api.JointMotor, "max_force"));
+    try testing.expect(@hasDecl(iface.PhysicsModule(Forge3DModule), "addImpulse"));
+    try testing.expectEqual(
+        @typeInfo(@TypeOf(Forge3DModule.getTriggerOverlaps)).@"fn".return_type.?,
+        @typeInfo(@TypeOf(iface.PhysicsModule(Forge3DModule).getTriggerOverlaps)).@"fn".return_type.?,
+    );
+}
+
+// --- M1.1.15.2 G8 — the corrections of the external review ---------------------
+
+test "the wrapper DELEGATES every entry, and delegation reaches the implementation" {
+    // **F1.** `engine-tier-interfaces.md` §1 declares one function per entry on the
+    // returned type; until G8 it returned `struct { impl: Impl }` and nothing else — a
+    // type that validated an implementation and exposed none of it. The G7 test could
+    // not see that, having asserted only that the field exists, which is why the
+    // assertion below is on the DECLARATIONS and the one after it on the EFFECT.
+    const Wrapped = iface.PhysicsModule(Forge3DModule);
+    inline for (frozen_entries) |name| {
+        if (!@hasDecl(Wrapped, name)) std.debug.print("NOT DELEGATED: {s}\n", .{name});
+        try testing.expect(@hasDecl(Wrapped, name));
+    }
+    // `hasCapability` rides along and is NOT a thirty-third entry: it answers `false`
+    // for an implementation declaring none, which is why the assert block omits it.
+    // Asserted so its presence is a decision rather than an accident of the count.
+    try testing.expect(@hasDecl(Wrapped, "hasCapability"));
+    try testing.expectEqual(@as(usize, 32), iface.frozen_entry_count);
+
+    // NON-VACUITY: `@hasDecl` on this type reports a false for something really absent,
+    // so the thirty-two positives are not the answer it always gives.
+    try testing.expect(!@hasDecl(Wrapped, "notAnEntry"));
+
+    // THE DELEGATION REACHES THE IMPLEMENTATION. A wrapper carrying thirty-two
+    // signatures that returned defaults would pass every assertion above.
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+    var w = try Wrapped.init(&fx.ctx);
+    defer w.deinit();
+
+    const shape = try w.createShape(.{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const body = try w.addBody(.{
+        .entity = .{ .index = 3, .generation = 0 },
+        .body_type = .static,
+        .shape = shape,
+        .position = av3(7, 0, 0),
+    });
+    // Read back THROUGH the wrapper: the pose is the one addBody was given, so the two
+    // calls reached the same impl and neither invented anything.
+    try testing.expectApproxEqAbs(@as(f32, 7), (try w.getBodyTransform(body)).position.toArray()[0], 1e-4);
+    // And a query through the wrapper answers about that body.
+    try testing.expect(w.raycastAny(.{ .origin = av3(0, 0, 0), .direction = av3(1, 0, 0), .max_distance = 100 }));
+    // `hasCapability` is the one non-delegation: this impl declares none, so it is false
+    // rather than a compile error.
+    try testing.expect(!w.hasCapability(.advanced_joints));
+}
+
+test "getTriggerOverlaps answers the required count on an empty slice" {
+    // **F6.** §12: "`error.BufferTooSmall` quand l'ensemble ne tient pas, avec le compte
+    // requis obtenable en passant une tranche vide". The first half was transcribed at
+    // G5a and the second was not, so an empty slice — a caller ASKING how big a buffer
+    // must be — got the refusal instead of the answer, leaving it with the question it
+    // came with.
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.m.addBody(.{
+        .entity = .{ .index = 10, .generation = 0 },
+        .body_type = .static,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .is_trigger = true,
+    });
+    _ = try s.place(11, 0.1);
+    _ = try s.place(12, -0.1);
+    try s.m.step(1.0 / 60.0);
+
+    // THE SIZE QUERY. Zero-length slice, no error, the required count.
+    var none: [0]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&none));
+
+    // The refusal is UNCHANGED for a slice that is present and too small — the two
+    // cases are distinct and the fix must not have collapsed them.
+    var one: [1]api.TriggerOverlap = undefined;
+    try testing.expectError(error.BufferTooSmall, s.m.getTriggerOverlaps(&one));
+
+    // The count the size query gave is the one that fits, which is what makes it usable
+    // rather than merely non-erroring.
+    var exact: [2]api.TriggerOverlap = undefined;
+    try testing.expectEqual(@as(u32, 2), try s.m.getTriggerOverlaps(&exact));
+
+    // An empty state answers 0 through the same path, and not an error.
+    var empty_scene = try Scene.init(gpa);
+    defer empty_scene.deinit(gpa);
+    try empty_scene.m.step(1.0 / 60.0);
+    try testing.expectEqual(@as(u32, 0), try empty_scene.m.getTriggerOverlaps(&none));
+}
+
+// --- M1.1.15.2 G6b — the coverage proof ---------------------------------------
+
+/// One row of the coverage map: an entry, the test that DISCRIMINATES it, and
+/// the NEIGHBOUR it is told apart from.
+///
+/// **The predicate, stated before anything is counted.** For entry `E` there is a
+/// test `T` and a neighbour `N` — another entry a plausible implementation could
+/// be confused with, or a no-op, or a plausible constant — such that `T` FAILS
+/// when `E`'s implementation is replaced by `N`'s. "Called by a test" is not the
+/// predicate and never was: `addBody` is called by ten tests and none of that
+/// tells it apart from anything.
+///
+/// The trap this table exists against is the one twenty-nine written oracles do
+/// not close: two entries sharing one predicate are one entry covered and one
+/// entry accompanied. So `neighbour` is written per row and the pairs are checked
+/// for duplication below.
+const Coverage = struct {
+    entry: []const u8,
+    /// The test whose name contains this, verbatim.
+    test_name: []const u8,
+    /// What the entry is discriminated FROM.
+    neighbour: []const u8,
+};
+
+const coverage = [_]Coverage{
+    .{ .entry = "addBody", .test_name = "getBodyTransform separates a stale handle from a body at the origin", .neighbour = "a no-op that returns a handle registering nothing" },
+    .{ .entry = "removeBody", .test_name = "the read-back mutators move what they claim to move", .neighbour = "a no-op removal, after which a query still finds the body" },
+    .{ .entry = "setBodyTransform", .test_name = "moveKinematic derives a velocity where setBodyTransform teleports", .neighbour = "moveKinematic, which derives both velocities" },
+    .{ .entry = "moveKinematic", .test_name = "moveKinematic derives a velocity where setBodyTransform teleports", .neighbour = "setBodyTransform, which derives nothing" },
+    .{ .entry = "getBodyTransform", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "an entry answering the identity pose whatever the body did" },
+    .{ .entry = "setLinearVelocity", .test_name = "three more oracles that discriminate rather than merely observe", .neighbour = "addImpulse, which at unit mass moves a body the same way" },
+    .{ .entry = "setAngularVelocity", .test_name = "setAngularVelocity turns about the axis it was given", .neighbour = "an entry that spins about a fixed axis whatever it was asked" },
+    .{ .entry = "addForce", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "addImpulse, an immediate velocity change" },
+    .{ .entry = "addImpulse", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "addForce, an accumulated one" },
+    .{ .entry = "createShape", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "a handle allocator that ignores the descriptor's geometry" },
+    .{ .entry = "destroyShape", .test_name = "addForce is a force and not an impulse, and destroyShape really destroys", .neighbour = "a no-op destruction" },
+    .{ .entry = "raycast", .test_name = "the four single-result query entries answer about the scene", .neighbour = "raycastAny, which answers whether and not where" },
+    .{ .entry = "raycastAny", .test_name = "the four single-result query entries answer about the scene", .neighbour = "a constant verdict — both are asserted" },
+    .{ .entry = "raycastAll", .test_name = "no entry caps its answer below the caller's slice", .neighbour = "raycast, which answers one hit" },
+    .{ .entry = "shapeCast", .test_name = "the four single-result query entries answer about the scene", .neighbour = "raycast wearing its name — the swept extent moves the impact by half a box" },
+    .{ .entry = "overlapShape", .test_name = "overlapShape tests the SHAPE where overlapAabb tests its box", .neighbour = "overlapAabb over the probe's own bounding box" },
+    .{ .entry = "overlapAabb", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "pointQuery, which tests membership of the solid" },
+    .{ .entry = "pointQuery", .test_name = "pointQuery tests the SOLID where overlapAabb tests the box", .neighbour = "overlapAabb, which tests a box" },
+    .{ .entry = "closestPoint", .test_name = "the four single-result query entries answer about the scene", .neighbour = "an entry answering the distance to the CENTRE rather than to the surface" },
+    .{ .entry = "createCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a handle allocator creating no presence" },
+    .{ .entry = "destroyCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a no-op, after which the inner body still answers" },
+    .{ .entry = "moveCharacter", .test_name = "the character entries move and report a ground", .neighbour = "a stub returning a zeroed result" },
+    .{ .entry = "resizeCharacter", .test_name = "three more oracles that discriminate rather than merely observe", .neighbour = "an entry returning true and resizing nothing" },
+    .{ .entry = "setCharacterPosition", .test_name = "the character entries move and report a ground", .neighbour = "a no-op, read through the presence body" },
+    .{ .entry = "getCharacterInnerBody", .test_name = "the character entries move and report a ground", .neighbour = "an entry answering a stale presence after destruction" },
+    .{ .entry = "getTriggerOverlaps", .test_name = "getTriggerOverlaps refuses to truncate a state", .neighbour = "a query-family entry, which truncates instead of refusing" },
+    .{ .entry = "createJoint", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "a stub returning a plausible handle no solver knows" },
+    .{ .entry = "destroyJoint", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "an entry that cannot be called at all — the type family is what makes it presentable" },
+    .{ .entry = "setJointMotor", .test_name = "the three joint entries are presentable and fail loud", .neighbour = "a void stub reporting a write that never happened" },
+};
+
+/// This file, read at compile time, so the table's `test_name`s are confronted
+/// with the tests that actually exist rather than with a reader's memory.
+const this_file = @embedFile("forge_module_test.zig");
+
+test "every non-lifecycle entry carries a discriminating oracle" {
+    // (1) THE SET, both directions. Every non-lifecycle frozen entry appears in the
+    // table, and the table names no entry the surface does not have. A one-sided
+    // check would pass a table that covered twenty-nine of thirty, or one that
+    // covered twenty-nine phantoms.
+    const lifecycle = [_][]const u8{ "init", "deinit", "step" };
+    var expected: usize = 0;
+    for (frozen_entries) |name| {
+        var is_lifecycle = false;
+        for (lifecycle) |l| {
+            if (std.mem.eql(u8, name, l)) is_lifecycle = true;
+        }
+        if (is_lifecycle) continue;
+        expected += 1;
+        var found = false;
+        for (coverage) |c| {
+            if (std.mem.eql(u8, c.entry, name)) found = true;
+        }
+        if (!found) std.debug.print("UNCOVERED ENTRY: {s}\n", .{name});
+        try testing.expect(found);
+    }
+    try testing.expectEqual(expected, coverage.len);
+    // §12's number, minus the three lifecycle entries. Written out so the table's
+    // length is confronted with the SPEC and not only with `frozen_entries`.
+    try testing.expectEqual(@as(usize, 32 - 3), coverage.len);
+
+    for (coverage) |c| {
+        var in_surface = false;
+        for (frozen_entries) |name| {
+            if (std.mem.eql(u8, c.entry, name)) in_surface = true;
+        }
+        try testing.expect(in_surface);
+    }
+
+    // (2) EVERY NAMED TEST EXISTS, confronted with this file's own bytes. A row
+    // naming a test that was renamed or deleted is a row that guards nothing, and
+    // nothing else in the build would say so.
+    for (coverage) |c| {
+        var needle_buf: [256]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&needle_buf, "test \"{s}\" {{", .{c.test_name});
+        if (std.mem.indexOf(u8, this_file, needle) == null) {
+            std.debug.print("MISSING TEST for {s}: {s}\n", .{ c.entry, c.test_name });
+        }
+        try testing.expect(std.mem.indexOf(u8, this_file, needle) != null);
+    }
+    // NON-VACUITY on that search: a name that is NOT a test in this file is not
+    // found, so the twenty-nine hits above are not what the search always answers.
+    try testing.expect(std.mem.indexOf(u8, this_file, "test \"a test that does not exist\" {") == null);
+
+    // (3) NO TWO ENTRIES SHARE ONE PREDICATE. Rows may share a TEST — several
+    // entries are discriminated inside one scene — but never a `(test, neighbour)`
+    // pair, which would mean one assertion doing duty for two entries and one of
+    // them merely accompanied.
+    for (coverage, 0..) |a, i| {
+        for (coverage[i + 1 ..]) |b| {
+            const same = std.mem.eql(u8, a.test_name, b.test_name) and
+                std.mem.eql(u8, a.neighbour, b.neighbour);
+            if (same) std.debug.print("SHARED PREDICATE: {s} and {s}\n", .{ a.entry, b.entry });
+            try testing.expect(!same);
+        }
+    }
+}
+
+test "setAngularVelocity turns about the axis it was given" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE GAP M1.1.15.1 NAMED AND LEFT: its oracle asserted that the orientation
+    // CHANGED, not which axis — so an entry spinning about a fixed axis whatever it
+    // was asked passed it. Two bodies, same everything, different axis, is what
+    // tells them apart.
+    const about_y = try s.m.addBody(.{
+        .entity = .{ .index = 1, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(0, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+    const about_x = try s.m.addBody(.{
+        .entity = .{ .index = 2, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = s.unit_box,
+        .position = av3(10, 0, 0),
+        .mass = 1,
+        .gravity_factor = 0,
+    });
+
+    s.m.setAngularVelocity(about_y, av3(0, 8, 0));
+    s.m.setAngularVelocity(about_x, av3(8, 0, 0));
+    try s.m.step(fixed_dt);
+
+    const ry = (try s.m.getBodyTransform(about_y)).rotation.toArray();
+    const rx = (try s.m.getBodyTransform(about_x)).rotation.toArray();
+
+    // Each turned, which is what the old oracle asserted...
+    try testing.expect(!std.mem.eql(f32, &ry, &[_]f32{ 0, 0, 0, 1 }));
+    try testing.expect(!std.mem.eql(f32, &rx, &[_]f32{ 0, 0, 0, 1 }));
+    // ...and they turned DIFFERENTLY, which is what it could not. An entry ignoring
+    // the axis produces the same quaternion for both.
+    try testing.expect(!std.mem.eql(f32, &ry, &rx));
+
+    // And each about ITS OWN axis, componentwise: the vector part of a rotation about
+    // +Y is `(0, sin(θ/2), 0)`. Asserting only "different" would pass an entry that
+    // permuted the axes.
+    try testing.expect(@abs(ry[1]) > 1e-4);
+    try testing.expect(@abs(ry[0]) < 1e-6 and @abs(ry[2]) < 1e-6);
+    try testing.expect(@abs(rx[0]) > 1e-4);
+    try testing.expect(@abs(rx[1]) < 1e-6 and @abs(rx[2]) < 1e-6);
+}
+
+test "overlapShape tests the SHAPE where overlapAabb tests its box" {
+    const gpa = testing.allocator;
+    var s = try Scene.init(gpa);
+    defer s.deinit(gpa);
+
+    // THE SECOND GAP THE AUDIT FOUND. `overlapShape` was asserted for deduplication
+    // and for the absence of a cap, and never for the probe's GEOMETRY mattering —
+    // so an implementation testing the probe's bounding box would have passed every
+    // assertion the file carried.
+    //
+    // A unit box at the origin spans [-0.5, 0.5]. A radius-0.5 sphere centred at
+    // (0.9, 0.9, 0) has a bounding box of [0.4, 1.4] on both axes, which OVERLAPS
+    // the box's — but the sphere's surface is 0.566 from the box's nearest corner,
+    // which is beyond its radius. Box says yes, shape says no.
+    _ = try s.place(1, 0);
+    const probe = try s.m.createShape(.{ .sphere = .{ .radius = 0.5 } });
+
+    var out: [8]EntityId = undefined;
+    // The bounding boxes DO overlap — the non-vacuity of the whole test, and what
+    // makes the zero below a geometric answer rather than a probe that missed.
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapAabb(av3(0.4, 0.4, -0.5), av3(1.4, 1.4, 0.5), .{}, &out));
+    // The SHAPES do not.
+    try testing.expectEqual(@as(u32, 0), try s.m.overlapShape(.{
+        .shape = probe,
+        .position = av3(0.9, 0.9, 0),
+    }, &out));
+
+    // And the same probe moved onto the box DOES answer, so the zero above is a
+    // refusal and not an entry that never accepts.
+    try testing.expectEqual(@as(u32, 1), try s.m.overlapShape(.{
+        .shape = probe,
+        .position = av3(0.2, 0, 0),
+    }, &out));
 }

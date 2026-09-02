@@ -304,6 +304,11 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .shader_decl => try list.append(gpa, .{ .shader = try buildShader(gpa, arena, arena.shader_decls.items[datas[i]]) }),
             .scene_decl => try list.append(gpa, .{ .scene = try buildScene(gpa, arena, arena.scene_decls.items[datas[i]]) }),
             .prefab_decl => try list.append(gpa, .{ .prefab = try buildPrefab(gpa, arena, arena.prefab_decls.items[datas[i]]) }),
+            // M1.1.15.2 G1 — `service_decl` reaches this `else` and that is the
+            // decision, not an oversight: a `service` exists only in a `.d.etch`
+            // (`etch-grammar.md` §20.4), and a declaration file is never cooked into a descriptor.
+            // The switch is `else`-terminated, so the compiler could not have
+            // raised the question; it is answered here instead.
             else => {},
         }
     }

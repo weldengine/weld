@@ -14,6 +14,31 @@ const types = @import("types.zig");
 /// one named crossing between it and a solver scalar (`engine-physics-queries.md` §1.11.8).
 pub const precision = @import("precision.zig");
 
+/// Who owns a body's pose and velocity (M1.1.15.2 G5b).
+pub const authority = @import("authority.zig");
+/// Who owns a body's pose and velocity: `.solver` by default, `.gameplay` declared.
+pub const PhysicsAuthority = authority.PhysicsAuthority;
+
+/// Joint type family (M1.1.15.2 G5a, `engine-tier-interfaces.md` §1). Its own
+/// file rather than more of `types.zig`: seven types with a correspondence table
+/// each, and the interface's three joint entries need all seven to be
+/// PRESENTABLE at all.
+pub const joint = @import("joint.zig");
+/// Opaque joint handle at the interface boundary.
+pub const JointId = joint.JointId;
+/// The ten joint types: seven core, three behind `Capability.advanced_joints`.
+pub const JointType = joint.JointType;
+/// A joint's limits, tagged by `joint_type`.
+pub const JointLimits = joint.JointLimits;
+/// A motor's mode. `.off` is not a variant — a motor that is off is `null`.
+pub const JointMotorMode = joint.JointMotorMode;
+/// A motor's target, tagged by `joint_type` on `JointLimits`' own table.
+pub const JointTarget = joint.JointTarget;
+/// A joint's optional motor: a target plus one force/frequency/damping triple.
+pub const JointMotor = joint.JointMotor;
+/// Everything `createJoint` needs. Flat, unlike the Etch authoring component.
+pub const JointDescriptor = joint.JointDescriptor;
+
 // --- ECS components (extern POD) ---
 
 /// Rigid-body material + simulation parameters.
@@ -52,6 +77,10 @@ pub const ShapeType = types.ShapeType;
 pub const ShapeDescriptor = types.ShapeDescriptor;
 /// Everything needed to create one body.
 pub const BodyDescriptor = types.BodyDescriptor;
+/// One oriented trigger overlap, in ENTITY identities and never body handles.
+pub const TriggerOverlap = types.TriggerOverlap;
+/// Optional backend extensions, consulted through the wrapper's `hasCapability`.
+pub const Capability = types.Capability;
 /// Physics pose (position + rotation, no scale).
 pub const Transform = types.Transform;
 

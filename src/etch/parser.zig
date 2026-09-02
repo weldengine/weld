@@ -33,6 +33,29 @@ const Lexer = lexer_mod.Lexer;
 /// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
+/// Which grammatical subset the parser accepts (M1.1.15.2 G1,
+/// `etch-grammar.md` §20.3). RE-EXPORT: the mode is a property of the parsed
+/// UNIT, not of the parser, so it is declared next to `AstArena` and travels
+/// with the arena into the type-checker, the interpreter and the cook — none of
+/// which would otherwise be able to tell a declaration file from a source file.
+/// Named here as well because every call site of `parseWithMode` reaches for it
+/// through this module.
+pub const ParseMode = ast_mod.ParseMode;
+
+/// Parse mode of a file from its path (`etch-grammar.md` §20.3 — mode detection
+/// by extension). Matching is longest-first, so `foo.d.etch` is a declaration
+/// file and not merely an `.etch`.
+///
+/// The other typed extensions of §21 (`.scene.etch`, `.prefab.etch`,
+/// `.layer.etch`, `.manifest.etch`) are deliberately NOT modes: §21.3 states
+/// that they use the FULL grammar under a cardinality constraint, whereas
+/// `.d.etch` is a grammatical subset. The two mechanisms are orthogonal, and
+/// collapsing them into one enum would claim a kinship the spec denies.
+pub fn modeForPath(path: []const u8) ParseMode {
+    if (std.mem.endsWith(u8, path, ".d.etch")) return .declaration_file;
+    return .standard;
+}
+
 /// Container returned by `parse` — the populated arena plus the list of
 /// diagnostics collected during the parse. With the M0.8 top-level
 /// recovery sync-point the parser no longer stops at the first error:
@@ -80,6 +103,20 @@ pub const StmtBlockResult = struct {
 /// first-error `Diagnostic`. Caller owns the arena and must call
 /// `result.ast.deinit(gpa)`.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
+    return parseWithMode(gpa, source, .standard);
+}
+
+/// `parse` with an explicit grammatical subset (M1.1.15.2 G1, `etch-grammar.md`
+/// §20.3). Callers that know the file's path pass `modeForPath(path)`; callers
+/// that hold only a buffer keep using `parse`, which is this function at
+/// `.standard`.
+///
+/// The mode is a parameter here rather than on `parse` for a measured reason:
+/// `parse` has about twenty call sites across `src/`, `tools/` and `tests/`,
+/// and only two of them — `root.zig`'s `validateProject` and `scene_cook.zig` —
+/// hold a filename at all. Threading a parameter through the other eighteen
+/// would buy nothing.
+pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or
     // `parser.parseFile` after the lexer has already appended a comment
@@ -101,7 +138,11 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
         .current = c0,
         .next_tok = c1,
         .next2_tok = c2,
+        .mode = mode,
     };
+    // The arena carries the mode onward: `E1901` is decided from the AST, after
+    // this function has returned, by a checker that never sees the path.
+    arena.mode = mode;
     // `parser.diagnostics` is not covered by the arena/lexer errdefers above;
     // arm its own cleanup so an OOM anywhere below (parseFile or the final
     // `toOwnedSlice`) frees the diagnostics collected so far. On the success
@@ -261,6 +302,11 @@ pub const Parser = struct {
     /// serves the braced positions (rules, behavior composites, quest
     /// branches), where the construct body follows the clause.
     when_brace_is_filter: bool = false,
+    /// Grammatical subset in force for this file (M1.1.15.2 G1). Set once by
+    /// `parseWithMode` from the file's extension and never mutated: a mode that
+    /// could change mid-file would make "no body node is constructed" a claim
+    /// about the parser's history rather than about the file.
+    mode: ParseMode = .standard,
 
     fn isActiveLabel(self: *const Parser, name: StringId) bool {
         for (self.active_labels.items) |l| {
@@ -325,8 +371,25 @@ pub const Parser = struct {
         const owned = self.gpa.dupe(u8, message) catch {
             return error.OutOfMemory;
         };
+        return self.recordOwnedDiag(span, .parse_error, owned);
+    }
+
+    /// Record a diagnostic under an explicit code and unwind (M1.1.15.2 G1).
+    /// Every parser diagnostic funnels through `recordOwnedDiag`, so a coded one
+    /// takes the same ownership and cleanup path as an `E0001` — there is one
+    /// emission site, not two.
+    fn parseErrCoded(self: *Parser, span: SourceSpan, code: DiagnosticCode, comptime fmt: []const u8, args: anytype) ParseError {
+        const owned = std.fmt.allocPrint(self.gpa, fmt, args) catch {
+            return error.OutOfMemory;
+        };
+        return self.recordOwnedDiag(span, code, owned);
+    }
+
+    /// Append an already-owned message under `code` and return `error.ParseError`.
+    /// Frees `owned` if the append itself fails.
+    fn recordOwnedDiag(self: *Parser, span: SourceSpan, code: DiagnosticCode, owned: []u8) ParseError {
         self.diagnostics.append(self.gpa, .{
-            .code = .parse_error,
+            .code = code,
             .severity = .error_,
             .primary_span = span,
             .primary_message = owned,
@@ -338,19 +401,7 @@ pub const Parser = struct {
     }
 
     fn parseErrFmt(self: *Parser, span: SourceSpan, comptime fmt: []const u8, args: anytype) ParseError {
-        const owned = std.fmt.allocPrint(self.gpa, fmt, args) catch {
-            return error.OutOfMemory;
-        };
-        self.diagnostics.append(self.gpa, .{
-            .code = .parse_error,
-            .severity = .error_,
-            .primary_span = span,
-            .primary_message = owned,
-        }) catch {
-            self.gpa.free(owned);
-            return error.OutOfMemory;
-        };
-        return error.ParseError;
+        return self.parseErrCoded(span, .parse_error, fmt, args);
     }
 
     // ─── Source slice helpers ────────────────────────────────────────────
@@ -715,12 +766,17 @@ pub const Parser = struct {
     /// `event` / `tags` (E3 ECS layer) + `import` (M1.0.7) + `const` / `test`
     /// (M1.0.8). `private` is NOT a stop-set member — it is a prefix consumed
     /// before dispatch, and the declaration_body it precedes already is one.
-    /// Later milestones extend both sites together.
+    /// M1.1.15.2 G1 adds `service`: it is a stop-set member in BOTH modes, not
+    /// only in `.d.etch`. A `service` in a standard `.etch` is refused by
+    /// `parseServiceDecl`, and if recovery did not resync on it the refusal
+    /// would be followed by every subsequent declaration of the file being
+    /// silently skipped — the exact failure this stop-set exists to prevent.
+    /// Later milestones extend all three sites together.
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_import, .kw_const, .kw_test, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
+                .eof, .kw_import, .kw_const, .kw_test, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab, .kw_service => return,
                 else => _ = try self.advance(),
             }
         }
@@ -780,6 +836,7 @@ pub const Parser = struct {
             .kw_shader => try self.parseShaderDecl(annotations),
             .kw_scene => try self.parseSceneDecl(annotations),
             .kw_prefab => try self.parsePrefabDecl(annotations),
+            .kw_service => try self.parseServiceDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -793,7 +850,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (import | const | test | component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (import | const | test | component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab | service), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1498,9 +1555,14 @@ pub const Parser = struct {
     /// expression is the implicit return (`etch-grammar.md` §4.1 l.645).
     /// `allow_self` lets the first parameter be a `self` / `mut self` receiver
     /// (M0.8 E2 block 3 `impl` methods); a top-level `fn` passes `false`.
-    /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected; the
-    /// bodyless `.d.etch` form is out of scope. `async` is parsed (interp E3,
-    /// codegen Phase 2); `throws` is parsed (codegen folds into the E3 gate).
+    /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected.
+    /// `async` is parsed (interp E3, codegen Phase 2); `throws` is parsed
+    /// (codegen folds into the E3 gate).
+    ///
+    /// M1.1.15.2 G1 — the bodyless `.d.etch` form is NO LONGER out of scope
+    /// (this sentence used to say it was). Under `ParseMode.declaration_file`
+    /// every `fn` is signature-only, and one that carries a body is refused with
+    /// `E1900` at its opening brace.
     fn parseFnLike(self: *Parser, is_async: bool, allow_self: bool, allow_signature_only: bool, annotations: AnnotationRange) ParseError!ParsedFn {
         _ = try self.advance(); // 'fn'
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
@@ -1562,7 +1624,14 @@ pub const Parser = struct {
         // An abstract trait member (`function_signature`, M0.8 E2 block 3
         // tranche C) ends without a body. Outside a trait, a missing body is the
         // existing "expected '{'" error.
-        if (allow_signature_only and self.peek() != .lbrace) {
+        //
+        // M1.1.15.2 G1 — in a `.d.etch` EVERY `fn` is signature-only, whatever
+        // the caller's own rule (`etch-grammar.md` §20.1: `function_decl_no_body`
+        // covers the top-level form, the `impl_member_no_body` form and the
+        // `service_decl` form alike). The mode widens the caller's permission; it
+        // never narrows it.
+        const signature_only = allow_signature_only or self.mode == .declaration_file;
+        if (signature_only and self.peek() != .lbrace) {
             return .{
                 .decl = .{
                     .name = name_id,
@@ -1583,6 +1652,24 @@ pub const Parser = struct {
                 },
                 .close_span = sig_end_span,
             };
+        }
+
+        // M1.1.15.2 G1 — `E1900 DeclarationFileBodyNotAllowed`. Reaching this
+        // line in `.d.etch` mode means a `{` follows the signature (the
+        // `signature_only` branch above already returned otherwise), so the body
+        // is refused HERE, at its opening brace, and NOTHING is built. This
+        // placement is the whole point of making E1900 a parser-mode check: the
+        // parser knows at the `{` that a body follows, and letting it construct
+        // one to reject it afterwards would manufacture an AST that no
+        // downstream stage may see. Verified by the companion test, which
+        // asserts `arena.stmts.len == 0` on a body that contains a statement.
+        if (self.mode == .declaration_file) {
+            return self.parseErrCoded(
+                self.peekSpan(),
+                .declaration_file_body_not_allowed,
+                "'{s}' declares a body, but a declaration file (.d.etch) carries signatures only — drop the block",
+                .{self.sliceOf(name_tok.span)},
+            );
         }
 
         _ = try self.expect(.lbrace, "expected '{' to start function body");
@@ -4788,6 +4875,63 @@ pub const Parser = struct {
             .annotations_len = annotations.len,
             .generics_start = generics.start,
             .generics_len = generics.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (M1.1.15.2 G1,
+    /// `etch-grammar.md` §20.4). A service declares the calling surface of a
+    /// Tier 1 module to Etch; its `.d.etch` is generated from the module's Zig
+    /// `bindgen.ServiceSpec` and is never hand-written (`engine-c-bindings.md`
+    /// §8.4).
+    ///
+    /// **Valid in a `.d.etch` and nowhere else** (§20.4, §20.5). In a standard
+    /// `.etch` the construct is refused with a plain parse error naming the
+    /// constraint — deliberately NOT `E1901`, whose canonical name is
+    /// `ConstructNotAllowedInDeclarationFile` and which says the opposite thing.
+    /// Minting a code for the reverse direction is not warranted: the `private
+    /// import` refusal (M1.0.8) set the precedent that a positional constraint
+    /// with one clear message needs no code of its own.
+    ///
+    /// The body is the trait body verbatim — a run of bodyless `FnDecl`s in
+    /// `arena.impl_methods` — because a service body IS a run of bodyless
+    /// signatures. `allow_self = false`: a service method has no receiver, it is
+    /// dispatched on the service name.
+    fn parseServiceDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        if (self.mode != .declaration_file) {
+            return self.parseErr(kw_span, "'service' declares a Tier 1 calling surface and is valid only in a declaration file (.d.etch)");
+        }
+        _ = try self.advance(); // 'service'
+        const name_tok = try self.expect(.ident, "expected service name (lowercase identifier) after 'service'");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start service body");
+        const methods_start: u32 = @intCast(self.arena.impl_methods.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const member_annotations = try self.parseAnnotations();
+            var is_async = false;
+            if (self.peek() == .kw_async) {
+                _ = try self.advance();
+                is_async = true;
+            }
+            if (self.peek() != .kw_fn) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'fn' to start a service method, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            // `allow_signature_only = true` is redundant under
+            // `.declaration_file` (the mode already forces it) and is passed
+            // anyway so this call site states its own contract instead of
+            // borrowing one from the mode.
+            const parsed = try self.parseFnLike(is_async, false, true, member_annotations);
+            try self.arena.impl_methods.append(self.gpa, parsed.decl);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close service body");
+        const methods_len: u32 = @as(u32, @intCast(self.arena.impl_methods.items.len)) - methods_start;
+        _ = try self.arena.addServiceDecl(self.gpa, .{
+            .name = name_id,
+            .methods_start = methods_start,
+            .methods_len = methods_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
@@ -10048,4 +10192,159 @@ test "parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)" {
     defer result.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 0), result.body_len);
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+}
+
+// ─── M1.1.15.2 G1 — `.d.etch` parse mode + the `service` construct ──────────
+
+test "modeForPath detects the declaration-file extension by longest match" {
+    // §20.3: matching runs from the most specific extension to the least, so a
+    // double extension resolves by longest match and never by `.etch` alone.
+    try std.testing.expectEqual(ParseMode.declaration_file, modeForPath("src/modules/forge/services/physics.d.etch"));
+    try std.testing.expectEqual(ParseMode.declaration_file, modeForPath("a.d.etch"));
+    try std.testing.expectEqual(ParseMode.standard, modeForPath("gameplay/combat.etch"));
+    // The §21 typed extensions are NOT declaration files: they use the full
+    // grammar under a cardinality constraint (§21.3). Asserting this keeps a
+    // future "unify the extension table" refactor from quietly widening the
+    // subset to files that must keep every construct.
+    try std.testing.expectEqual(ParseMode.standard, modeForPath("village.scene.etch"));
+    try std.testing.expectEqual(ParseMode.standard, modeForPath("torch.prefab.etch"));
+    // Not an Etch file at all, and not a declaration file either.
+    try std.testing.expectEqual(ParseMode.standard, modeForPath("notes.d.etch.bak"));
+}
+
+test "service decl parses in .d.etch mode" {
+    const gpa = std.testing.allocator;
+    var result = try parseWithMode(gpa,
+        \\service audio_player {
+        \\  /// Play a sound asset at a 3D position.
+        \\  fn play(path: string, position: Vec3, bus: int) -> AudioHandle
+        \\  fn stop(handle: AudioHandle)
+        \\  fn load(path: string) throws -> AssetHandle
+        \\}
+    , .declaration_file);
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.service_decl, result.ast.items.items(.kind)[0]);
+
+    const sd = result.ast.service_decls.items[0];
+    try std.testing.expectEqualStrings("audio_player", result.ast.strings.slice(sd.name));
+    try std.testing.expectEqual(@as(u32, 3), sd.methods_len);
+
+    // Every method is BODYLESS — the property that makes this a declaration
+    // file rather than a source file with empty functions. Asserted per method,
+    // not as a count: a count would pass if one of the three had a body and
+    // another were missing.
+    const m = result.ast.impl_methods.items;
+    for (m[sd.methods_start .. sd.methods_start + sd.methods_len]) |method| {
+        try std.testing.expect(!method.has_body);
+        try std.testing.expectEqual(@as(u32, 0), method.body_len);
+        try std.testing.expectEqual(ast_mod.SelfKind.none, method.self_kind);
+    }
+    try std.testing.expectEqualStrings("play", result.ast.strings.slice(m[sd.methods_start].name));
+    try std.testing.expectEqualStrings("stop", result.ast.strings.slice(m[sd.methods_start + 1].name));
+    try std.testing.expectEqualStrings("load", result.ast.strings.slice(m[sd.methods_start + 2].name));
+    // Signature detail survives: `stop` returns void, `load` throws.
+    try std.testing.expect(!m[sd.methods_start].return_type.isNone());
+    try std.testing.expect(m[sd.methods_start + 1].return_type.isNone());
+    try std.testing.expect(m[sd.methods_start + 2].throws);
+    // No statement was ever built: a declaration file has no executable code.
+    try std.testing.expectEqual(@as(usize, 0), result.ast.stmts.len);
+}
+
+test "fn body in .d.etch emits E1900" {
+    const gpa = std.testing.allocator;
+    // The body carries a statement ON PURPOSE. If the parser built the body and
+    // rejected it afterwards, that statement would be in `arena.stmts` — so the
+    // `stmts.len == 0` assertion below is what discriminates "refused AT the
+    // brace" from "parsed then rejected". Asserting only the diagnostic would
+    // pass under both, and the difference is the deliverable.
+    var result = try parseWithMode(gpa,
+        \\service audio_player {
+        \\  fn play(path: string) {
+        \\    let volume = 1
+        \\  }
+        \\}
+    , .declaration_file);
+    defer result.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.declaration_file_body_not_allowed, result.diagnostics[0].code);
+    try std.testing.expectEqualStrings("E1900", result.diagnostics[0].code.code());
+    // NO body node is constructed.
+    try std.testing.expectEqual(@as(usize, 0), result.ast.stmts.len);
+
+    // Same refusal on a TOP-LEVEL `fn`, whose caller passes
+    // `allow_signature_only = false` — proving the mode widens the permission
+    // rather than the service body granting it.
+    var top = try parseWithMode(gpa,
+        \\fn helper(x: int) -> int {
+        \\  let y = x
+        \\  y
+        \\}
+    , .declaration_file);
+    defer top.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), top.diagnostics.len);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.declaration_file_body_not_allowed, top.diagnostics[0].code);
+    try std.testing.expectEqual(@as(usize, 0), top.ast.stmts.len);
+
+    // Counterfactual on the OBJECT, not on the expected constant: the same
+    // source with the body removed parses clean and yields a bodyless fn. Were
+    // the mode check unconditional, this would fail too.
+    var ok = try parseWithMode(gpa, "fn helper(x: int) -> int", .declaration_file);
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), ok.ast.fn_decls.items.len);
+    try std.testing.expect(!ok.ast.fn_decls.items[0].has_body);
+
+    // And the reverse control: the SAME bodied source is perfectly legal in a
+    // standard `.etch`. Without this, the test above would also pass on a
+    // parser that rejected every fn body everywhere.
+    var std_mode = try parse(gpa,
+        \\fn helper(x: int) -> int {
+        \\  let y = x
+        \\  y
+        \\}
+    );
+    defer std_mode.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), std_mode.diagnostics.len);
+    try std.testing.expect(std_mode.ast.stmts.len > 0);
+}
+
+test "service is refused in a standard .etch and recovery resyncs on it" {
+    const gpa = std.testing.allocator;
+    // Direction 1 — the construct is `.d.etch`-only (§20.4, §20.5).
+    var refused = try parse(gpa, "service audio_player {\n  fn play(path: string)\n}\n");
+    defer refused.deinit(gpa);
+    // Deliberately E0001 and not E1901: `ConstructNotAllowedInDeclarationFile`
+    // names the opposite direction, and inventing a code for this one is not
+    // warranted (the `private import` precedent).
+    try std.testing.expect(refused.diagnostics.len >= 1);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, refused.diagnostics[0].code);
+    try std.testing.expectEqual(@as(usize, 0), refused.ast.service_decls.items.len);
+    // A SECOND diagnostic follows, and that is the recovery contract rather
+    // than a defect: `recoverToTopLevel` advances one token and resyncs on the
+    // next stop-set member, which here is the service's own `fn`. In a standard
+    // `.etch` that bodyless signature is itself an error. Every block-carrying
+    // construct in this parser cascades the same way; teaching one of them to
+    // skip balanced braces would be new recovery mechanism, outside this gate.
+    // What matters is asserted above: the ACTIONABLE message comes first.
+    try std.testing.expectEqual(@as(usize, 2), refused.diagnostics.len);
+
+    // Direction 2 — the lockstep guard. `service` is in `recoverToTopLevel`'s
+    // stop-set, so the declaration AFTER a refused one still parses. Drop
+    // `.kw_service` from that stop-set and this assertion falls: recovery would
+    // run to EOF and the component would vanish with no diagnostic of its own.
+    var after = try parse(gpa,
+        \\service audio_player {
+        \\  fn play(path: string)
+        \\}
+        \\component Health { current: int = 100 }
+    );
+    defer after.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), after.ast.component_decls.items.len);
+    try std.testing.expectEqualStrings("Health", after.ast.strings.slice(after.ast.component_decls.items[0].name));
 }

@@ -27,6 +27,14 @@ pub const types = @import("types.zig");
 /// `Diagnostic` values (build a tooling test harness, assert
 /// `DiagnosticCode`s) without pulling the internals directly.
 pub const diagnostics = @import("diagnostics.zig");
+/// Tier 1 service registry and the Phase 1 tree-walker invocation path
+/// (M1.1.15.2 G2, `etch-abi-zig.md` §8.7). Exposed at the module surface
+/// because a Tier 1 module declares its `ServiceSpec` and registers it from
+/// outside `src/etch/`.
+pub const services = @import("services.zig");
+/// Typed bridge from a Tier 0 `EventQueue(T)` into the interpreter's per-tick
+/// event store (M1.1.15.2 G4). Exposed because a Tier 1 module owns the queue.
+pub const event_bridge = @import("event_bridge.zig");
 
 // S4 interpreter surface.
 const value = @import("value.zig");
@@ -50,6 +58,11 @@ comptime {
     // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
     // M1.0.4 — pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
+    // M1.1.15.2 G2 — the service registry's inline tests. The `pub const
+    // services` re-export above pulls its DECLARATIONS, not its `test` blocks
+    // (§13, and the four-case experiment recorded below).
+    _ = @import("services.zig");
+    _ = @import("event_bridge.zig");
     // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
@@ -240,10 +253,19 @@ pub const ProjectFile = struct {
 /// `etch-reference-part1.md` §1.1): strip an optional leading `src/`, strip the
 /// file extension (a typed compound `.scene.etch`/`.prefab.etch`/`.layer.etch`/
 /// `.manifest.etch`/`.d.etch` if present, else plain `.etch`), and map `/`→`.`.
-/// The returned slice is `gpa`-owned. Typed-extension files (scene/prefab/…) take
-/// their basename as the module label; they are never import *targets* (they
-/// declare no top-level types — only one scene/prefab + imports), so the label
-/// only identifies them as nodes in the dependency graph (M1.0.7 E4).
+/// The returned slice is `gpa`-owned. Typed-extension files take their basename
+/// as the module label, and the reason they are not import *targets* differs by
+/// extension — the single justification this comment used to give was true of
+/// only one family:
+///   - `.scene.etch` / `.prefab.etch` / `.layer.etch` / `.manifest.etch` declare
+///     no top-level types (§21.3 bounds them to one scene/prefab plus imports),
+///     so there is nothing to import FROM them.
+///   - `.d.etch` declares nothing BUT top-level constructs (§20.4). It is not an
+///     import target for the opposite reason: a `service` is resolved from the
+///     compiler's global declaration table (`etch-abi-zig.md` §8.3), never
+///     through the per-module export index, so it is never named in an `import`.
+/// Either way the label only identifies the file as a node in the dependency
+/// graph (M1.0.7 E4).
 fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
     var s = name;
     if (std.mem.startsWith(u8, s, "src/")) s = s["src/".len..];
@@ -354,7 +376,11 @@ pub fn validateProject(
     }
     try asts.ensureTotalCapacity(gpa, files.len);
     for (files) |f| {
-        const pr = try parser.parse(gpa, f.source);
+        // `ProjectFile.name` is the ONLY place in the tree that holds both the
+        // path and the source, which is why the mode is threaded here and
+        // nowhere else (`parser.parse` takes no filename, and of its call sites
+        // only this one and `scene_cook.zig` know a path at all).
+        const pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
         // Move each parse diagnostic into diags_out (its gpa-owned message
         // transfers), then free only the now-vacated backing slice — never
         // `pr.deinit`, which would double-free the arena we keep below.
