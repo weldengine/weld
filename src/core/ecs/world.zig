@@ -912,11 +912,16 @@ pub const World = struct {
             self.entity_locations.getPtr(swapped_id).?.* = location;
         }
         _ = self.entity_locations.remove(id);
-        // Sweep every sparse store BEFORE releasing the identity: `remove`
-        // finds its row through `positionOf`, which checks the GENERATION, and
-        // once the index is back on the free list a later spawn can reuse it —
-        // after which the same check would be answering about a different
-        // occupant. The order is the correctness condition, not a preference.
+        // Sweep every sparse store. Placed before `identity.release` for
+        // reading order and NOT as a correctness condition — a first version of
+        // this comment claimed otherwise and was refuted by its own
+        // counter-factual: moving the sweep after the release leaves the whole
+        // suite green. The reason is that `positionOf` compares the generation
+        // against the STORE's own copy of the handle (`dense.items[pos]`) and
+        // never consults the identity store, so releasing the index cannot
+        // change what `removeEntity(id)` finds. An order dependency would need
+        // a sweep keyed on something the identity store owns, and there is
+        // none.
         _ = self.sparse_stores.removeEntity(id);
         self.purgeEntityExtensions(gpa, id);
         self.identity.release(id);
@@ -1095,6 +1100,26 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_new = try self.ensureRegistered(gpa, T);
+        if (self.storageOf(cid_new) == .sparse) {
+            // NO archetype transition at all: a sparse component's presence is
+            // a row in its own store, so the entity's signature — and with it
+            // its location, its chunk, and every other component's address —
+            // is untouched. That ABSENCE of migration is the mode's whole
+            // reason to exist, not an optimisation on top of it.
+            const store = try self.sparse_stores.ensure(
+                gpa,
+                cid_new,
+                self.registry.componentSize(cid_new),
+                self.registry.componentAlignment(cid_new),
+            );
+            // Add-on-present is a programmer error on this entry, which is
+            // what the table arm's `assert(!hasComponent)` below says.
+            // `SparseSetStorage.add` asserts the same thing on its own data, so
+            // the contract is stated once and checked where the data is.
+            try store.add(gpa, entity, std.mem.asBytes(&value), self.current_tick);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(!src_arch.hasComponent(cid_new));
 
@@ -1186,6 +1211,26 @@ pub const World = struct {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
+        if (self.storageOf(cid_new) == .sparse) {
+            // NO archetype transition at all: a sparse component's presence is
+            // a row in its own store, so the entity's signature — and with it
+            // its location, its chunk, and every other component's address —
+            // is untouched. That ABSENCE of migration is the mode's whole
+            // reason to exist, not an optimisation on top of it.
+            const store = try self.sparse_stores.ensure(
+                gpa,
+                cid_new,
+                self.registry.componentSize(cid_new),
+                self.registry.componentAlignment(cid_new),
+            );
+            // Add-on-present is a programmer error on this entry, which is
+            // what the table arm's `assert(!hasComponent)` below says.
+            // `SparseSetStorage.add` asserts the same thing on its own data, so
+            // the contract is stated once and checked where the data is.
+            try store.add(gpa, entity, value_bytes, self.current_tick);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(!src_arch.hasComponent(cid_new));
 
@@ -1250,6 +1295,20 @@ pub const World = struct {
     ) !void {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        if (self.storageOf(cid_drop) == .sparse) {
+            // Mirrors the table arm's `assert(hasComponent)` below: removing an
+            // absent component is a programmer error on this entry. UNLIKE that
+            // arm, the release path is a no-op rather than undefined — the
+            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
+            // behind it would then be UB on the exact misuse the assert exists
+            // to name. Matching the table arm bit for bit would be matching a
+            // defect, so the absence is handled rather than assumed.
+            std.debug.assert(self.hasComponentDyn(entity, cid_drop));
+            const store = self.sparse_stores.get(cid_drop) orelse return;
+            _ = store.remove(entity);
+            return;
+        }
 
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(src_arch.hasComponent(cid_drop));
@@ -1339,9 +1398,17 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
         {
             // R11(c): real duplicate/present checks BEFORE any allocation.
-            const src_arch = self.archetypes.items[src_loc.archetype_idx];
+            //
+            // Routed through `hasComponentDyn` and NOT `src_arch.hasComponent`:
+            // the archetype answers `false` for a sparse component the entity
+            // actually carries, so the pre-M1.B form let a batched add of an
+            // already-present sparse component through, straight to
+            // `SparseSetStorage.add`'s own assert — live in Debug and compiled
+            // to nothing in ReleaseFast, i.e. a silent double insert in the
+            // mode a game ships. This is the check `hasComponentDyn` exists
+            // for, and the reason it is not a convenience wrapper.
             for (cids, 0..) |c, ci| {
-                if (src_arch.hasComponent(c)) return error.DuplicateComponent;
+                if (self.hasComponentDyn(entity, c)) return error.DuplicateComponent;
                 for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
             }
         }
@@ -1354,7 +1421,14 @@ pub const World = struct {
         defer gpa.free(target_ids);
         @memcpy(target_ids[0..src_len], self.archetypes.items[src_loc.archetype_idx].component_ids);
         @memcpy(target_ids[src_len..], cids);
+        // The funnel's own split does the filtering: `split.table` is
+        // src ∪ (table half of `cids`), sorted, and `split.sparse` is exactly
+        // the sparse half of `cids` — `src.component_ids` cannot contribute to
+        // it, every archetype signature being table-only by construction. So
+        // the signature needs no separate pre-pass; `target_ids` is merely
+        // over-allocated by the sparse count, which is harmless.
         const split = self.splitByStorage(target_ids);
+        try self.ensureSparseStores(gpa, split.sparse);
 
         const dst_arch = try self.getOrCreateArchetype(gpa, split.table);
         // `getOrCreateArchetype` may have grown `self.archetypes` — re-fetch the
@@ -1362,6 +1436,15 @@ pub const World = struct {
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        // Sparse rows BEFORE the reserved table slot, per the rule stated at
+        // `removeSparsePayloads`: the sparse undo is infallible, the table
+        // undo is not, so the step with the messier undo goes last and has
+        // nothing after it to unwind. `split.sparse` aliases `target_ids`,
+        // whose `defer` was declared earlier and therefore runs AFTER this
+        // `errdefer`.
+        try self.addSparsePayloads(gpa, entity, split.sparse, values, cids);
+        errdefer self.removeSparsePayloads(entity, split.sparse);
+
         const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
         // ── from here down: infallible (reserve-then-mutate boundary) ──
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
@@ -1410,6 +1493,23 @@ pub const World = struct {
         src_loc: Location,
         dst_arch: *Archetype,
         dst_r: archetype_mod.SpawnResult,
+        /// `prepare`'s OWNED copy of `cids`, partitioned in place: the first
+        /// `n_table` entries drop from the archetype signature, the rest are
+        /// sparse rows for `commit` to remove. Freed by `commit` or `abort`,
+        /// which is why both now take an allocator.
+        ///
+        /// Owned rather than a slice into the caller's `cids`: that would work
+        /// today — `loader.deactivateExtension` keeps its stack buffer alive
+        /// across the window — and it would make the trio's correctness depend
+        /// on a lifetime precondition no signature states. One allocation, on a
+        /// path that already makes one for `target_ids`.
+        cids_owned: []ComponentId,
+        n_table: usize,
+
+        /// The sparse ids this remove must drop.
+        pub fn sparseDrops(self: PreparedRemove) []const ComponentId {
+            return self.cids_owned[self.n_table..];
+        }
     };
 
     /// R12(a) — the fallible half of a grouped remove: validate, resolve the
@@ -1431,20 +1531,33 @@ pub const World = struct {
         const src_arch0 = self.archetypes.items[src_loc.archetype_idx];
         const src_len = src_arch0.component_ids.len;
 
-        // R11(c): present + distinct, checked before any allocation.
+        // R11(c): present + distinct, checked before any allocation. Routed
+        // through `hasComponentDyn` for the same reason as the batched add: the
+        // archetype answers `false` for a sparse component the entity carries,
+        // so `src_arch0.hasComponent` would reject a legitimate sparse drop
+        // with `UnknownComponent` — a refusal of the right shape for the wrong
+        // reason, and the harder kind to diagnose.
         for (cids, 0..) |c, ci| {
-            if (!src_arch0.hasComponent(c)) return error.UnknownComponent;
+            if (!self.hasComponentDyn(entity, c)) return error.UnknownComponent;
             for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
         }
-        std.debug.assert(src_len >= cids.len);
 
-        // Target archetype = source components \ `cids`.
-        const target_ids = try gpa.alloc(ComponentId, src_len - cids.len);
+        // Partition the drops: only the table half leaves the signature, and
+        // `src_len - cids.len` would UNDERFLOW the moment a sparse id is among
+        // them — `cids` is not a subset of the signature any more.
+        const cids_owned = try gpa.dupe(ComponentId, cids);
+        errdefer gpa.free(cids_owned);
+        const drop_split = self.splitByStorage(cids_owned);
+        const n_table = drop_split.table.sorted.len;
+        std.debug.assert(src_len >= n_table);
+
+        // Target archetype = source components \ the TABLE half of `cids`.
+        const target_ids = try gpa.alloc(ComponentId, src_len - n_table);
         defer gpa.free(target_ids);
         var di: usize = 0;
         for (src_arch0.component_ids) |cid| {
             var drop = false;
-            for (cids) |c| {
+            for (drop_split.table.sorted) |c| {
                 if (c == cid) {
                     drop = true;
                     break;
@@ -1462,13 +1575,30 @@ pub const World = struct {
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
         const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
-        return .{ .entity = entity, .src_arch = src_arch, .src_loc = src_loc, .dst_arch = dst_arch, .dst_r = dst_r };
+        return .{
+            .entity = entity,
+            .src_arch = src_arch,
+            .src_loc = src_loc,
+            .dst_arch = dst_arch,
+            .dst_r = dst_r,
+            .cids_owned = cids_owned,
+            .n_table = n_table,
+        };
     }
 
     /// R12(a) — the infallible half: copy the surviving columns into the reserved
     /// dst slot, swap-pop the source, and update `entity_locations` (capacity was
     /// reserved in `prepare`). After this the remove is observable.
-    pub fn commitRemoveComponentsDynamic(self: *World, prepared: PreparedRemove) void {
+    pub fn commitRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
+        defer gpa.free(prepared.cids_owned);
+        // The sparse rows go here and NOT in `prepare`, and the reason is
+        // semantic rather than structural: `loader.deactivateExtension` fires
+        // `on_detach` BETWEEN the two halves, and that hook may read the
+        // component being removed. The table columns are still in the source
+        // archetype at hook time, so the sparse row must still be in its store
+        // — dropping it in `prepare` would show the hook a half-removed
+        // component. Infallible either way, so atomicity does not decide it.
+        self.removeSparsePayloads(prepared.entity, prepared.sparseDrops());
         const dst_arch = prepared.dst_arch;
         const src_arch = prepared.src_arch;
         const dst_r = prepared.dst_r;
@@ -1503,8 +1633,11 @@ pub const World = struct {
     /// path is single-threaded — so `removeSwap` on it is a pure pop (no swap,
     /// returns null). The entity was never recorded in `entity_locations` for the
     /// dst slot, so no map fix-up is needed.
-    pub fn abortRemoveComponentsDynamic(self: *World, prepared: PreparedRemove) void {
+    pub fn abortRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
         _ = self;
+        defer gpa.free(prepared.cids_owned);
+        // Nothing to undo on the sparse side: `commit` is what removes those
+        // rows, so an aborted prepare never touched them.
         const swapped = prepared.dst_arch.removeSwap(prepared.dst_r.chunk_idx, prepared.dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
     }
@@ -1522,7 +1655,7 @@ pub const World = struct {
     ) !void {
         if (cids.len == 0) return;
         const prepared = try self.prepareRemoveComponentsDynamic(gpa, entity, cids);
-        self.commitRemoveComponentsDynamic(prepared);
+        self.commitRemoveComponentsDynamic(gpa, prepared);
     }
 
     /// M0.8 E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
@@ -1543,11 +1676,22 @@ pub const World = struct {
         bit_index: u32,
         set: bool,
     ) !void {
-        const loc = self.entity_locations.get(entity) orelse return;
-        const arch = self.archetypes.items[loc.archetype_idx];
-        if (arch.componentIndex(tagset_id)) |col| {
-            const chunk = arch.chunks.items[loc.chunk_idx];
-            const bytes = arch.componentSlot(chunk, col, loc.slot);
+        // Routed through `componentBytes` rather than reaching the archetype
+        // directly. This entry mutates IN PLACE and only reaches
+        // `getOrCreateArchetype` indirectly, through `addComponentDynamic`
+        // below — so an enumeration of the archetype funnel's callers does NOT
+        // find it, and the set of structural mutators is strictly larger than
+        // the set of signature builders. On a sparse `TagSet` the old body
+        // asked `arch.componentIndex`, got null, and fell into `else if (set)`:
+        // a `set` would have double-added an existing row and a `clear` would
+        // have been a SILENT no-op.
+        //
+        // `componentBytes` hands out mutable bytes without stamping a change,
+        // which is what the previous body did too (`setTagBit` on the slot, no
+        // `markChanged`) — the behaviour is preserved, not merely the shape.
+        // Its extra `isLive` check is not a behaviour change either: a stale
+        // handle has no `entity_locations` entry, so both forms answered null.
+        if (self.componentBytes(entity, tagset_id)) |bytes| {
             setTagBit(bytes, bit_index, set);
         } else if (set) {
             const size = self.registry.componentSize(tagset_id);
@@ -1573,6 +1717,20 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_drop = self.registry.idOf(@typeName(T)) orelse return error.StaleEntityHandle;
+        if (self.storageOf(cid_drop) == .sparse) {
+            // Mirrors the table arm's `assert(hasComponent)` below: removing an
+            // absent component is a programmer error on this entry. UNLIKE that
+            // arm, the release path is a no-op rather than undefined — the
+            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
+            // behind it would then be UB on the exact misuse the assert exists
+            // to name. Matching the table arm bit for bit would be matching a
+            // defect, so the absence is handled rather than assumed.
+            std.debug.assert(self.hasComponentDyn(entity, cid_drop));
+            const store = self.sparse_stores.get(cid_drop) orelse return;
+            _ = store.remove(entity);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(src_arch.hasComponent(cid_drop));
 

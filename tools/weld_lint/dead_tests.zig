@@ -545,9 +545,23 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // analysis, which is static — the pin `_ = ecs.sparse_storage;` in `src/core/root.zig`
     // is what the four M0.8/E3-D pins beside it already record.
     // (2062 -> 2072, suite reported 2072 - 2053 passed + 19 skipped, macOS aarch64.)
+    //
+    // M1.B / G3 adds SIXTEEN in `tests/ecs/sparse_routing_test.zig`, the Tier 0 routing
+    // acceptance file: the no-migration property of a sparse add and its table
+    // counter-factual, the no-migration property of a sparse remove, `hasComponentDyn`'s
+    // totality over the three ways of being absent, the batched add's refusal of an
+    // already-present sparse component and its mixed-set migration, four on the prepared
+    // remove trio (the hook window, abort, a sparse-only set that must build no new
+    // signature, and a refusal accompanied by its acceptance complement), the despawn
+    // sweep, the change mark, `componentBytes`'s non-stamping, the tag mutation's set AND
+    // clear, the World-level reserve-then-mutate sweep, and the all-negative query's
+    // permission over the empty archetype. No test is replaced this gate except the G1
+    // no-op pin in `tests/etch/storage_mode_test.zig`, swapped for its opposite — one for
+    // one, so it contributes none.
+    // (2072 -> 2088, suite reported 2088 - 2069 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2070,
-        else => 2072,
+        .windows => 2086,
+        else => 2088,
     };
 }
 

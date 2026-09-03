@@ -685,11 +685,11 @@ pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: Entity
     const prepared = try world.prepareRemoveComponentsDynamic(gpa, entity, cids_buf[0..n]);
     // Step 3 — `on_detach` FIRST; roll the prepared remove back if it fails. After
     // this `try`, only infallible steps remain, so the errdefer never fires past it.
-    errdefer world.abortRemoveComponentsDynamic(prepared);
+    errdefer world.abortRemoveComponentsDynamic(gpa, prepared);
     try world.dispatchOnDetach(entity, name, on_detach_text);
 
     // Step 4 — commit (infallible) + drop the record (infallible).
-    world.commitRemoveComponentsDynamic(prepared);
+    world.commitRemoveComponentsDynamic(gpa, prepared);
     world.removeEntityExtension(gpa, entity, name);
 }
 
