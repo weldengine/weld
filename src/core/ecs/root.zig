@@ -84,6 +84,12 @@ pub const EntityId = world.EntityId;
 /// Runtime component / resource id assigned by the registry.
 pub const ComponentId = registry.ComponentId;
 
+/// Storage backend of a component — `table | sparse`, default `table`
+/// (`engine-ecs-internals.md` §2). Re-exported so the Etch front-end can
+/// validate `@storage`'s argument against the domain's single declaration
+/// instead of re-listing its spellings (`etch-resolver-types.md` §13.3.1).
+pub const StorageKind = registry.StorageKind;
+
 /// Stable archetype handle (index into `World.archetypes`).
 pub const ArchetypeId = world.ArchetypeId;
 

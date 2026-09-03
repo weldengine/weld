@@ -32,6 +32,9 @@ const weld_core = @import("weld_core");
 const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
+/// Storage backend recorded per component at registration — `table | sparse`,
+/// default `table` (`engine-ecs-internals.md` §2).
+const StorageKind = weld_core.ecs.registry.StorageKind;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
@@ -6869,7 +6872,7 @@ fn compileComponent(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, literals);
+    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, types_mod.storageModeOf(ast, decl), literals);
 }
 
 fn compileResource(
@@ -6885,7 +6888,11 @@ fn compileResource(
     // AND already lives in the resource store with its current value — adding
     // it again would reset it to defaults. Seed the store only on first compile.
     const pre_existing = world.registry.idOf(name) != null;
-    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, literals);
+    // `.table` and not a resolved mode: `@storage` applies to `component` only
+    // (`annotationAppliesTo`, refused on a resource with `E0502`), so a resource
+    // has no mode to read. Passing the default here states that rather than
+    // leaving a reader to infer it from the absence of a call.
+    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, .table, literals);
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
@@ -7103,6 +7110,14 @@ pub fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
+    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
+    /// not as the annotation range, deliberately: this function receives no
+    /// declaration node — measured at M1.B/G0 §1.8, it takes `name`,
+    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
+    /// `annotations_extra` at all — and widening it to take the node would give
+    /// the registry seam a dependency on AST item shape that its three callers
+    /// do not share. `storageModeOf` is the single resolver they share instead.
+    storage: StorageKind,
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !ComponentId {
     var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
@@ -7235,6 +7250,7 @@ pub fn compileTypeDecl(
         .alignment = @intCast(max_align),
         .default_bytes = default_buf,
         .fields = fields.items,
+        .storage = storage,
     });
     switch (reg_kind) {
         .component => try bridge.mapComponent(gpa, name, id),

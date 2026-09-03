@@ -32,6 +32,31 @@ const EntityId = @import("entity.zig").EntityId;
 /// out-of-band scheme like StableId — Phase 2).
 pub const ComponentId = u32;
 
+/// Storage backend of a component — the closed two-variant domain owned by
+/// `engine-ecs-internals.md` §2 (*Table vs SparseSet*). `table` is the default
+/// and, before M1.B.0, the only backend implemented; `sparse` is the explicit
+/// opt-in a declaration carries through `@storage(sparse)`.
+///
+/// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
+/// §13.3.1 states the rule that makes this the right home: an annotation
+/// argument's type is either a language type or a domain defined and citable at
+/// the owner of the EFFECT — never a name introduced by the schema table. The
+/// Etch front-end therefore validates through `fromName` instead of re-listing
+/// the two spellings, so the domain has one text form in the tree.
+pub const StorageKind = enum {
+    table,
+    sparse,
+
+    /// Spelling → variant, and the single place the two names exist as text.
+    /// `null` for a value outside the domain, which the Etch front-end reports
+    /// as `E0503 AnnotationArgMismatch`.
+    pub fn fromName(name: []const u8) ?StorageKind {
+        if (std.mem.eql(u8, name, "table")) return .table;
+        if (std.mem.eql(u8, name, "sparse")) return .sparse;
+        return null;
+    }
+};
+
 /// Coarse-grained tag for primitive fields. The interpreter uses this to
 /// decide how to read or write raw bytes. The S3 subset only exercises
 /// `int_`, `float_`, `bool_`; the integer-family variants are reserved
@@ -158,6 +183,15 @@ pub const ComponentDesc = struct {
     alignment: u16,
     default_bytes: []const u8,
     fields: []const FieldDesc,
+    /// Storage backend. `table` unless the declaration carried
+    /// `@storage(sparse)`. **Never part of on-disk identity**: a
+    /// `SchemaEntry` carries name, size and alignment, and the mode comes from
+    /// this runtime registry at load (`engine-scene-serialization.md` §4), so a
+    /// component changing mode invalidates no cooked scene and demands no
+    /// re-cook. Defaulted, so every existing initializer of this struct stays
+    /// source-compatible and absence of the annotation yields `table` by
+    /// construction rather than by a branch somebody has to remember.
+    storage: StorageKind = .table,
 };
 
 /// Surfaced by `Registry.registerComponent`, `registerComponentRaw`,
@@ -246,6 +280,7 @@ pub const Registry = struct {
             .alignment = desc.alignment,
             .default_bytes = default_owned,
             .fields = fields_owned,
+            .storage = desc.storage,
         } });
         errdefer _ = self.entries.pop();
 
@@ -303,6 +338,14 @@ pub const Registry = struct {
 
     pub fn componentFields(self: *const Registry, id: ComponentId) []const FieldDesc {
         return self.entries.items[id].desc.fields;
+    }
+
+    /// Storage backend recorded for `id` at registration. `table` for every
+    /// component declared without `@storage`, and for every component
+    /// registered from Zig — `registerComponent(T)` reaches no annotation, so
+    /// the Etch annotation is the mode's only producer (M1.B/G0 §2.1).
+    pub fn componentStorage(self: *const Registry, id: ComponentId) StorageKind {
+        return self.entries.items[id].desc.storage;
     }
 
     /// Lookup a field on a component by name. Returns `null` if the name

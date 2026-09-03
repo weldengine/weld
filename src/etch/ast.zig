@@ -3887,6 +3887,48 @@ pub const AstArena = struct {
         return null;
     }
 
+    /// The `@storage` annotation on a `component` declaration (the first one
+    /// found), or null when the declaration carries none — in which case the
+    /// storage mode is `table` by the domain's default
+    /// (`engine-ecs-internals.md` §2). Mirror of `onEventAnnotation`: the
+    /// annotation range lives on the decl, so this is the accessor both the
+    /// type-checker and the codegen read instead of walking `annot_pool` by
+    /// hand at each site.
+    ///
+    /// Deliberately NOT a resolved mode: the AST does not know the domain, and
+    /// answering `?StorageKind` here would put a Tier-0 enum in the parser's
+    /// arena. This returns the annotation; the caller validates.
+    pub fn storageAnnotation(self: *const AstArena, decl: ComponentDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < decl.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[decl.annotations_extra + i];
+            if (annot.kind == .storage) return annot;
+        }
+        return null;
+    }
+
+    /// The spelling of `@storage`'s single argument when it is written as a
+    /// bare name — `@storage(sparse)`, the form the corpus's own valid fixture
+    /// uses (`tests/etch/corpus/valid/components/annotated.etch`) — or as the
+    /// dot-shorthand `@storage(.sparse)`. Returns null for any other argument
+    /// shape, including a wrong arity, which is what the type-checker turns
+    /// into `E0503` / `E0504` after deciding WHICH of the two applies.
+    ///
+    /// Both spellings are admitted because the corpus is not uniform: §6 of
+    /// `etch-reference-part3.md` writes `@storage(sparse)` bare while
+    /// `@phase(.update)` and `@tag(.unit)` take the dot. Accepting one and
+    /// refusing the other would make a documented example fail, and the
+    /// discrimination this gate owes is over the VALUE, not the sigil.
+    pub fn annotationBareOrDottedName(self: *const AstArena, annot: Annotation) ?StringId {
+        if (annot.args_len != 1) return null;
+        const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not a bare value
+        return switch (self.exprKind(arg.value)) {
+            .ident, .tag_path => self.exprData(arg.value),
+            else => null,
+        };
+    }
+
     /// The event type name `T` from an `@on_event(T)` annotation, or null when
     /// the annotation is malformed (no argument, or the argument is not a type
     /// path). The resolver reports E1203 for the null / non-event cases.

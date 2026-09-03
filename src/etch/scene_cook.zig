@@ -31,6 +31,7 @@ const std = @import("std");
 
 const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
+const types_mod = @import("types.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
 // M1.0.6 E5 — `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
@@ -371,11 +372,20 @@ const Builder = struct {
             switch (kinds[i]) {
                 .component_decl => {
                     const decl = self.ast.component_decls.items[datas[i]];
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, diag_out) catch |e| return e;
+                    // The cook resolves the mode through the SAME resolver the
+                    // interpreter uses (`interp.storageModeOf`). Its registry is
+                    // a throwaway used for layout and size, and the on-disk
+                    // format carries no mode (`engine-scene-serialization.md`
+                    // §4) — but two registries built from one declaration that
+                    // disagreed about it would be a divergence waiting for its
+                    // first reader, and resolving costs one accessor call.
+                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, types_mod.storageModeOf(self.ast, decl), diag_out) catch |e| return e;
                 },
                 .resource_decl => {
                     const decl = self.ast.resource_decls.items[datas[i]];
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, diag_out) catch |e| return e;
+                    // `.table`: `@storage` is component-only, so a resource has
+                    // no mode to read (mirror of `compileResource`).
+                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, .table, diag_out) catch |e| return e;
                 },
                 else => {},
             }
@@ -388,9 +398,10 @@ const Builder = struct {
         fields_start: u32,
         fields_len: u32,
         reg_kind: interp.RegKind,
+        storage: weld_core.ecs.registry.StorageKind,
         diag_out: ?*[]const u8,
     ) CookError!ComponentId {
-        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, &self.literals) catch |e| switch (e) {
+        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, storage, &self.literals) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
             error.DuplicateComponent => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
             else => error.OutOfMemory,

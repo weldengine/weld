@@ -65,6 +65,17 @@ pub const DiagnosticCode = enum {
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // M0.8 — E0502 AnnotationMisapplied
+    // M1.B/G1 — the two argument-schema codes `etch-resolver-types.md` §13.3
+    // steps 3 and 4 specify. NEITHER existed in the tree before this gate:
+    // the whole E05xx range held `annotation_misapplied` alone, and
+    // `types.zig`'s own doc comment declared argument validation out of the
+    // M0.8 debt's scope. `engine-phase-1-plan.md` row M1.B.0 says the check
+    // is "activated", which presupposed an existence it did not have — so
+    // these are MINTED here, not enabled. `E0501 UnknownAnnotation` stays
+    // out: its activation is gated on sorting the thirty-three corpus names
+    // that have no enum variant (§13.3.1, binding order of operations).
+    annotation_arg_mismatch, // M1.B/G1 — E0503 AnnotationArgMismatch (arity, name or value outside the declared domain)
+    annotation_arg_not_const, // M1.B/G1 — E0504 AnnotationArgNotConst (well-formed argument expression that is not const-evaluable)
 
     // ── Generics (E0600-E0699) ──
     bound_not_satisfied, // M0.8 — E0601 BoundNotSatisfied
@@ -431,6 +442,8 @@ pub const DiagnosticCode = enum {
             .structural_component_field_unknown => "E0306",
             .structural_component_field_type_invalid => "E0307",
             .annotation_misapplied => "E0502",
+            .annotation_arg_mismatch => "E0503",
+            .annotation_arg_not_const => "E0504",
             .bound_not_satisfied => "E0601",
             .generic_type_annotation_required => "E0603",
             .inconsistent_generic_inference => "E0604",
@@ -634,6 +647,8 @@ pub const DiagnosticCode = enum {
             .structural_component_field_unknown => "StructuralComponentFieldUnknown",
             .structural_component_field_type_invalid => "StructuralComponentFieldTypeInvalid",
             .annotation_misapplied => "AnnotationMisapplied",
+            .annotation_arg_mismatch => "AnnotationArgMismatch",
+            .annotation_arg_not_const => "AnnotationArgNotConst",
             .bound_not_satisfied => "BoundNotSatisfied",
             .generic_type_annotation_required => "GenericTypeAnnotationRequired",
             .inconsistent_generic_inference => "InconsistentGenericInference",
