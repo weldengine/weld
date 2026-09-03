@@ -29,9 +29,28 @@ pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 /// a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
     component_id: u32,
-    chunk_ptr: *anyopaque,
-    slot: u32,
     mutable: bool,
+    /// WHERE the bytes live — bimodal since M1.B/G5.
+    ///
+    /// The handle was chunk-anchored, and a sparse component has no chunk: a
+    /// `ComponentRef` simply could not describe one, so `entity.get(T)` on a
+    /// sparse component returned `UnknownComponent` — indistinguishable from
+    /// asking for a component the entity does not carry.
+    ///
+    /// The two arms are asymmetric ON PURPOSE. Table keeps the chunk pointer it
+    /// has always carried, so nothing on that path changes. Sparse keeps the
+    /// ENTITY and re-resolves per access, because a sparse store's lookup is an
+    /// array index into `sparse` plus a generation compare — cheaper than the
+    /// hash `componentRefOf` already pays to build a table ref — and because a
+    /// row POINTER would be invalidated by any swap-remove in that store, a
+    /// hazard the entity form does not have.
+    where: Where,
+
+    pub const Where = union(enum) {
+        table: struct { chunk_ptr: *anyopaque, slot: u32 },
+        /// The `u64` wire form, bitcast to the core packed handle at use.
+        sparse: EntityId,
+    };
 };
 
 /// A handle to a resource's backing bytes in the world `ResourceStore`.

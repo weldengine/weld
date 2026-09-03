@@ -1163,3 +1163,55 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
         }
     }
 }
+
+// ─── G5 — the public surface gains a tick reader ────────────────────────────
+
+test "changedTickOf answers for BOTH backends, and the modes are twins" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const t = try reg(&world, gpa, "T", .table);
+    const s = try reg(&world, gpa, "S", .sparse);
+    const e = try world.spawnDynamicWithValues(gpa, &.{ t, s }, &.{ &word(1), &word(2) });
+
+    const t0 = world.changedTickOf(e, t).?;
+    const s0 = world.changedTickOf(e, s).?;
+    // Both stamped at the same spawn, so the two backends agree at t=0 — which
+    // is what makes the divergence below attributable to the write and not to a
+    // difference in how the two record a spawn.
+    try testing.expectEqual(t0, s0);
+
+    world.beginFrame();
+    world.beginFrame();
+    world.markComponentChangedDyn(e, s);
+
+    // The sparse tick MOVED and the table one did not. Before G5 the public
+    // surface had no tick reader at all: every consumer reached the archetype
+    // through the two-call idiom, which answers for the table half only, so a
+    // sparse component read as NEVER CHANGED — a wrong answer with no
+    // diagnostic anywhere.
+    try testing.expectEqual(world.current_tick, world.changedTickOf(e, s).?);
+    try testing.expectEqual(t0, world.changedTickOf(e, t).?);
+
+    // And the table arm still moves when IT is marked, so the asymmetry above
+    // is the mark's and not the arm's.
+    world.markComponentChangedDyn(e, t);
+    try testing.expectEqual(world.current_tick, world.changedTickOf(e, t).?);
+}
+
+test "changedTickOf is total: stale handle, unknown id, absent component" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const s = try reg(&world, gpa, "S", .sparse);
+    const absent = try reg(&world, gpa, "Absent", .sparse);
+    const e = try world.spawnDynamicWithValues(gpa, &.{s}, &.{&word(1)});
+
+    try testing.expect(world.changedTickOf(e, s) != null);
+    try testing.expect(world.changedTickOf(e, absent) == null);
+    try testing.expect(world.changedTickOf(e, 9999) == null);
+    try world.despawn(gpa, e);
+    try testing.expect(world.changedTickOf(e, s) == null);
+}

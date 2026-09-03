@@ -576,11 +576,23 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // drives all six command kinds through each of the three apply switches and reports the
     // count PER PATH on its own line (a counter-factual removing the despawn sweep takes all
     // three to 5/6 and names the uncovered path, so the 6/6 is not vacuous).
-    // (2095 -> 2101, suite reported 2101 - 2082 passed + 19 skipped, macOS aarch64, in ALL
-    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
+    // M1.B / G5 adds EIGHT: four inline in `src/etch/ecs_bridge.zig` — the bimodal
+    // `ComponentRef` round-trip on the sparse arm, its TABLE twin as the mode-only
+    // counter-factual, the sparse change stamp, and the refusal surviving the widening —
+    // two in `tests/ecs/sparse_routing_test.zig` for the new `World.changedTickOf` (both
+    // arms as twins, and its totality), and two in `tests/etch/storage_mode_test.zig`: the
+    // all-negative rule VISITING a sparse-only entity (the other half of the empty-archetype
+    // permission G2 opened, which G3 pinned as MATCHING and not as iterating), and the
+    // boundary pin that a rule does not yet SELECT by a sparse component, which is G7's
+    // planner and whose arrival flips that assertion.
+    // (2101 -> 2109, suite reported 2109 - 2090 passed + 19 skipped, macOS aarch64, in ALL
+    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures. ReleaseFast is
+    // also green at 2089 + 20 skipped — ONE MORE skip than the other four, pre-existing and
+    // not investigated here: a test that stands down when `std.debug.assert` is compiled
+    // out. Recorded because the count differs, not because it moved.)
     return switch (os) {
-        .windows => 2099,
-        else => 2101,
+        .windows => 2107,
+        else => 2109,
     };
 }
 

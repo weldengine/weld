@@ -1,12 +1,13 @@
-//! M1.B / G1 — `@storage` consumed: the mode reaches the runtime registry, and
-//! nothing reads it yet.
+//! M1.B — `@storage` consumed, and the Etch-side boundary of the day.
 //!
-//! The gate's exit is deliberately a **declared no-op**. After G1 a component
-//! annotated `@storage(.sparse)` is recorded as `sparse` in the registry and is
-//! still stored exactly as a table component — there is no sparse backend
-//! before G2. This file is what makes that sentence observable instead of
-//! asserted: one test reads the recorded mode, the next shows the storage did
-//! not move.
+//! WRITTEN AT G1, when the gate's exit was a declared no-op: the mode reached
+//! the registry and nothing read it. That is no longer true — G2 delivered the
+//! backend and G3 the routing — so the no-op pin was REPLACED by its opposite
+//! rather than deleted, and this header is corrected rather than left standing
+//! beside its correction. What the file holds now: the recorded mode with its
+//! negative twin, the refusal diagnostics, an empty declaration, and the
+//! CURRENT limit — a rule does not yet select an entity by a sparse component,
+//! which is G7's planner and is pinned here so its arrival flips the assertion.
 //!
 //! Why the mode test matters more than its size suggests: `@storage` was
 //! recognised by the parser and validated for applicability since M0.8, and its
@@ -32,6 +33,12 @@ const src_mixed =
     \\component Burning { remaining: float = 3.0 }
     \\component Health { current: float = 100.0 }
 ;
+
+/// Read a component's first field as an Etch `float`, which is an f64.
+fn readF64(world: *World, entity: weld_core.ecs.EntityId, cid: ComponentId) f64 {
+    const b = world.componentBytes(entity, cid).?;
+    return @bitCast(std.mem.readInt(u64, b[0..8], .little));
+}
 
 fn typeCheckClean(gpa: std.mem.Allocator, arena: *weld_etch.Ast) !void {
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
@@ -188,4 +195,120 @@ test "counter-factual: the same program without @storage lowers" {
     const stats = try lower.generateFile(gpa, &pr.ast, "storage_mode_test.etch", &buf);
     try std.testing.expectEqual(@as(u32, 2), stats.components);
     try std.testing.expect(buf.items.len > 0);
+}
+
+/// A sparse component whose field a rule reads and writes. The whole Etch
+/// surface for a component is `get`/`get_mut` + a field path, so this is the
+/// smallest program that exercises the bridge's handle end to end.
+const src_rule =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\
+    \\rule tick_burn(entity: Entity)
+    \\    when entity has Burning
+    \\{
+    \\    let b = entity.get_mut(Burning)
+    \\    b.remaining -= 1.0
+    \\}
+;
+
+test "G5 boundary: a rule does NOT yet select an entity by a SPARSE component" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_rule);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    // Spawned from the REGISTRY DEFAULTS rather than a hand-built payload: the
+    // declaration says `remaining: float = 3.0`, so the default is the initial
+    // value, and a hand-built buffer would have to guess the layout the Etch
+    // front-end chose (a first version passed four bytes and tripped
+    // `assert(bytes.len == elem_size)` — my test, not the routing).
+    const e = try world.spawnDynamic(gpa, &.{burning});
+    try std.testing.expect(world.hasComponentDyn(e, burning));
+    // Etch's `float` is an f64 and the component is 8 bytes wide — measured, not
+    // assumed: a first version read an f32 at offset 0 and got 0, which is the
+    // low half of the f64. Three of this gate's failures were test premises
+    // about the Etch front-end and none was a routing defect.
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), readF64(&world, e, burning), 1e-9);
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+
+    // THE BOUNDARY, pinned rather than asserted in prose. `when entity has
+    // Burning` resolves through `World.queryDynamic`, which matches by
+    // ARCHETYPE SIGNATURE — and since G3 a sparse component is not in one, so
+    // the rule selects nothing and the body never runs. Measured, not
+    // predicted: the value is unchanged at 3.0 and the write never happened.
+    //
+    // That is **G7**'s planner, not G5's handle: G5 makes the bridge's
+    // `ComponentRef` bimodal, which is what the body needs ONCE it runs, and
+    // until selection is bimodal no Etch rule reaches a sparse component at
+    // all. So G5's own oracle lives at the bridge (inline in `ecs_bridge.zig`),
+    // and this test is the limit made observable.
+    //
+    // G7 REPLACES this assertion by its opposite — `2.0` — exactly as G3
+    // replaced G1's no-op pin. If it is still here at G11, the planner did not
+    // land.
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), readF64(&world, e, burning), 1e-9);
+}
+
+/// An all-negative rule plus a sparse component: the entity carrying only the
+/// sparse one lives in the EMPTY archetype, which an all-negative term matches.
+const src_all_negative =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Frozen { flag: bool = false }
+    \\
+    \\rule scan_unfrozen(entity: Entity)
+    \\    when not entity has Frozen
+    \\{
+    \\    let seen = 1
+    \\}
+;
+
+test "an all-negative rule VISITS an entity that carries only sparse components" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_all_negative);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    const frozen = world.registry.idOf("Frozen").?;
+
+    // Carries ONLY a sparse component, so its archetype signature is empty.
+    const bare = try world.spawnDynamic(gpa, &.{burning});
+    // And one the rule must exclude, so the count below is a discrimination.
+    _ = try world.spawnDynamic(gpa, &.{frozen});
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        world.dynamicArchetype(world.dynamicLocation(bare).?.archetype_idx).component_ids.len,
+    );
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+
+    // THE OTHER HALF of the empty-archetype permission G2 opened and G3's report
+    // did not mention: G3 pinned that an all-negative query MATCHES the empty
+    // archetype (`dq.matching`), which is not the same claim as ITERATING it —
+    // "iterating a zero-column archetype has never been exercised anywhere",
+    // in the brief's own words. Measured here: `per_slot` starts at
+    // `@sizeOf(EntityId)`, so a zero-column archetype gets a real finite
+    // capacity, and the walk yields the entity.
+    //
+    // EXACTLY ONE: the `Frozen` carrier is excluded, so this is not "the rule
+    // visits everything".
+    try std.testing.expectEqual(@as(u64, 1), report.entities_iterated);
 }

@@ -6648,11 +6648,11 @@ fn changedFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, slot: u32, cids: [
 /// `TagSet` component reads as all-zero.
 fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit: u32) bool {
     const core_id: CoreEntityId = @bitCast(entity);
-    const loc = world.dynamicLocation(core_id) orelse return false;
-    const arch = world.dynamicArchetype(loc.archetype_idx);
-    const col = arch.componentIndex(tagset_id) orelse return false;
-    const chunk = arch.chunks.items[loc.chunk_idx];
-    const bytes = arch.componentSlot(chunk, col, loc.slot);
+    // Routed through `World.componentBytes`, which G3 made bimodal. A `TagSet`
+    // registered sparse is reachable — G4 drives exactly that through all three
+    // apply paths — and the previous body asked `arch.componentIndex`, which
+    // answers null for a sparse id, so every tag test would have read FALSE.
+    const bytes = world.componentBytes(core_id, tagset_id) orelse return false;
     const off: usize = @as(usize, bit / 64) * 8;
     var word: u64 = 0;
     @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);

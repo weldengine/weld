@@ -654,7 +654,11 @@ pub const World = struct {
     /// index, so the bound is re-established here rather than inherited by
     /// assumption. `.table` is the answer that reproduces the old behaviour
     /// exactly: the archetype lookup then answers `null` as it always did.
-    fn storageOf(self: *const World, cid: ComponentId) registry_mod.StorageKind {
+    /// PUBLIC since M1.B/G5: the Etch bridge decides which arm of its bimodal
+    /// `ComponentRef` to build, and the mode authority must be the same one the
+    /// routing uses — a second reading of the registry beside this one is how
+    /// the two would come to disagree.
+    pub fn storageOf(self: *const World, cid: ComponentId) registry_mod.StorageKind {
         if (cid >= self.registry.componentCount()) return .table;
         return self.registry.componentStorage(cid);
     }
@@ -1033,6 +1037,32 @@ pub const World = struct {
     /// and reach `SparseSetStorage.add`'s own assert, live in Debug and
     /// compiled to nothing in ReleaseFast: a silent double insert in the mode a
     /// game ships. The routed presence question is what closes that.
+    /// `entity`'s `changed_tick` for `cid`, whichever backend holds it, or null
+    /// when the entity is stale or does not carry the component.
+    ///
+    /// The public surface had NO tick reader: every consumer reached the
+    /// archetype's `changedTick(chunk, col, slot)` through the
+    /// `dynamicLocation` + `dynamicArchetype` idiom, which answers for the
+    /// TABLE half only — so a sparse component read as "never changed", a wrong
+    /// answer with no diagnostic. Deriving the coverage from the public surface
+    /// rather than from the archetype funnel is what surfaced the absence.
+    ///
+    /// No `addedTickOf` twin: nothing consumes one outside the query paths,
+    /// which reach the archetype directly and are G7's. An accessor with no
+    /// caller is an unexercised entry, not symmetry.
+    pub fn changedTickOf(self: *const World, entity: EntityId, cid: ComponentId) ?tick_mod.Tick {
+        if (!self.identity.isLive(entity)) return null;
+        const loc = self.entity_locations.get(entity) orelse return null;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.getConst(cid) orelse return null;
+            return store.changedTick(entity);
+        }
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col = arch.componentIndex(cid) orelse return null;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        return arch.changedTick(chunk, col, loc.slot);
+    }
+
     pub fn hasComponentDyn(self: *const World, entity: EntityId, cid: ComponentId) bool {
         if (!self.identity.isLive(entity)) return false;
         const loc = self.entity_locations.get(entity) orelse return false;
