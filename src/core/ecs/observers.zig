@@ -333,8 +333,35 @@ pub fn applyWithObservers(
             // we drop into `world.despawn` below, so `old_value` points
             // at the live (pre-destruction) slot.
             if (world.entity_locations.get(d.entity)) |loc| {
+                // Ascending `ComponentId` over the UNION of both backends, by a
+                // two-pointer merge of two already-ascending sequences:
+                // `arch.component_ids` is sorted by `sortComponentIds`, and the
+                // sparse stores are INDEXED by `ComponentId` so
+                // `nextContaining` walks them in ascending order too. No sort,
+                // no allocation, and no ordering that depends on the caller's
+                // slice or on registration order.
+                //
+                // Before M1.B this walked the archetype signature alone, which
+                // since G3 is the TABLE half only — so a sparse component's
+                // `on_remove` never fired at despawn at all. An observer
+                // silently skipped is undetectable by any caller, which is why
+                // the order and the membership are asserted together.
                 const arch = world.archetypes.items[loc.archetype_idx];
-                for (arch.component_ids) |cid| {
+                var ti: usize = 0;
+                var s_from: ComponentId = 0;
+                var s_next = world.sparse_stores.nextContaining(s_from, d.entity);
+                while (ti < arch.component_ids.len or s_next != null) {
+                    const t_cid: ?ComponentId = if (ti < arch.component_ids.len) arch.component_ids[ti] else null;
+                    const take_table = if (t_cid) |t| (s_next == null or t < s_next.?) else false;
+                    const cid = if (take_table) blk: {
+                        ti += 1;
+                        break :blk t_cid.?;
+                    } else blk: {
+                        const sc = s_next.?;
+                        s_from = sc + 1;
+                        s_next = world.sparse_stores.nextContaining(s_from, d.entity);
+                        break :blk sc;
+                    };
                     if (reg.on_remove.get(cid)) |list| {
                         const old_ptr: ?*const anyopaque = if (world.componentBytes(d.entity, cid)) |b| @ptrCast(b.ptr) else null;
                         try reg.fireList(list, world, d.entity, cid, old_ptr, null);

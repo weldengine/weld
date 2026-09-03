@@ -615,6 +615,29 @@ pub const World = struct {
         };
     }
 
+    /// Refuse a caller-supplied id slice that names the same component twice.
+    ///
+    /// ACTIVE, not an assert. A repeated id makes `Archetype.init` build a
+    /// signature with a duplicate column, after which `componentIndex` answers
+    /// the FIRST and the second is written once and never read again — a
+    /// malformed archetype with no diagnostic. On the sparse side the same
+    /// input appended a second dense row (the G3 review's F4). Both halves were
+    /// carried by `std.debug.assert` alone, which ReleaseFast compiles to
+    /// nothing: the guard was absent in exactly the mode where its breach is
+    /// silent, which is the class `ci.yml`'s single ReleaseFast cell exists for.
+    ///
+    /// O(n²) over the slice, which is what `addComponentsDynamic`'s own
+    /// present-and-distinct pass already does: these slices hold a handful of
+    /// ids, and the alternative — a set — would allocate on a path whose whole
+    /// point is not to.
+    fn refuseDuplicateIds(ids: []const ComponentId) !void {
+        for (ids, 0..) |c, i| {
+            for (ids[i + 1 ..]) |other| {
+                if (other == c) return error.DuplicateComponent;
+            }
+        }
+    }
+
     /// Which backend owns `cid`.
     ///
     /// The REGISTRY is the authority on the mode; the existence of a sparse
@@ -872,6 +895,7 @@ pub const World = struct {
     /// component of the archetype. Identity and location go through the
     /// same shared paths as the typed `spawn` above.
     pub fn spawnDynamic(self: *World, gpa: std.mem.Allocator, component_ids: []const ComponentId) !EntityId {
+        try refuseDuplicateIds(component_ids);
         // Caller's ids may be unsorted, and may mix the two storage modes.
         // `splitByStorage` sorts the table half into signature order and names
         // the sparse half in one pass over the dup.
@@ -910,6 +934,7 @@ pub const World = struct {
         payloads: []const []const u8,
     ) !EntityId {
         std.debug.assert(component_ids.len == payloads.len);
+        try refuseDuplicateIds(component_ids);
 
         // `splitByStorage` permutes the scratch buffer, so the original
         // (id, payload) pairing survives only in the caller's `component_ids` —
@@ -1196,7 +1221,17 @@ pub const World = struct {
         }
 
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        std.debug.assert(!src_arch.hasComponent(cid_new));
+        // ACTIVE, mirroring the sparse arm above and for the same reason: the
+        // `std.debug.assert` this replaces was compiled to nothing in
+        // ReleaseFast, so the migration proceeded and built a signature with
+        // `cid_new` TWICE. Restores a precondition already written rather than
+        // inventing one, and `DuplicateComponent` is the error the batched path
+        // already returns for this condition.
+        //
+        // `applyWithObservers` is unaffected: it tests presence FIRST and only
+        // reaches here on the absent branch, where add-on-present is a
+        // replacement rather than an error.
+        if (src_arch.hasComponent(cid_new)) return error.DuplicateComponent;
 
         // Resolve the target archetype — cache hit first, full lookup +
         // create if cold.
@@ -1306,7 +1341,17 @@ pub const World = struct {
         }
 
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        std.debug.assert(!src_arch.hasComponent(cid_new));
+        // ACTIVE, mirroring the sparse arm above and for the same reason: the
+        // `std.debug.assert` this replaces was compiled to nothing in
+        // ReleaseFast, so the migration proceeded and built a signature with
+        // `cid_new` TWICE. Restores a precondition already written rather than
+        // inventing one, and `DuplicateComponent` is the error the batched path
+        // already returns for this condition.
+        //
+        // `applyWithObservers` is unaffected: it tests presence FIRST and only
+        // reaches here on the absent branch, where add-on-present is a
+        // replacement rather than an error.
+        if (src_arch.hasComponent(cid_new)) return error.DuplicateComponent;
 
         const dst_arch = blk: {
             if (src_arch.transitions.add.get(cid_new)) |target_idx| {

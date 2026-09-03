@@ -567,10 +567,20 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // TYPED arms, which had no coverage at all. Each was written RED first, and each fix has a
     // counter-factual that reddens exactly its own test. The comment that said SIXTEEN was
     // itself one of that review's findings.
-    // (2072 -> 2095, suite reported 2095 - 2076 passed + 19 skipped, macOS aarch64.)
+    // M1.B / G4 adds SIX more to the same file, taking it to TWENTY-NINE: the three TABLE
+    // twins of the G3 review's F4/F5, whose preconditions predate M1.B and were carried by
+    // `std.debug.assert` alone — their counter-factual runs in ReleaseFast, where the assert
+    // is stripped, so it distinguishes "the active check works" from "the assert works"; the
+    // `on_remove` firing order over the UNION at despawn; add-on-present on a sparse
+    // component firing the replacement rather than the add; and the THREE-PATH oracle, which
+    // drives all six command kinds through each of the three apply switches and reports the
+    // count PER PATH on its own line (a counter-factual removing the despawn sweep takes all
+    // three to 5/6 and names the uncovered path, so the 6/6 is not vacuous).
+    // (2095 -> 2101, suite reported 2101 - 2082 passed + 19 skipped, macOS aarch64, in ALL
+    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
     return switch (os) {
-        .windows => 2093,
-        else => 2095,
+        .windows => 2099,
+        else => 2101,
     };
 }
 

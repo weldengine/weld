@@ -449,6 +449,24 @@ pub const SparseStores = struct {
         return null;
     }
 
+    /// The smallest `ComponentId` at or above `from` whose storage holds
+    /// `entity`, or null when there is none.
+    ///
+    /// Ascending BY CONSTRUCTION: `slots` is indexed by `ComponentId`, so
+    /// walking it in index order walks the ids in ascending order — no sort and
+    /// no allocation. That is what lets the despawn path merge the two backends
+    /// into one ascending sequence with a two-pointer walk, which is the
+    /// normative firing order over the union.
+    pub fn nextContaining(self: *const SparseStores, from: ComponentId, entity: EntityId) ?ComponentId {
+        var cid: usize = from;
+        while (cid < self.slots.items.len) : (cid += 1) {
+            if (self.slots.items[cid]) |*store| {
+                if (store.contains(entity)) return @intCast(cid);
+            }
+        }
+        return null;
+    }
+
     /// Whether `component_id` is stored sparse.
     pub fn isSparse(self: *const SparseStores, component_id: ComponentId) bool {
         return self.getConst(component_id) != null;

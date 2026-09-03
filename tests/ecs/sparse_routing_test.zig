@@ -796,3 +796,370 @@ test "a duplicate sparse id in a spawn is refused, not written twice" {
     try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, s).?));
     try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, s2).?));
 }
+
+// ─── G4 — the TABLE twins of F4/F5 ──────────────────────────────────────────
+//
+// The G3 review closed the sparse halves and REPORTED these two, whose
+// preconditions predate M1.B and were carried by `std.debug.assert` alone —
+// compiled to nothing in ReleaseFast, which is the mode a game ships and the
+// one `ci.yml`'s single ReleaseFast cell exists to cover (its own comment names
+// this class: "the guard was absent precisely where its breach silently returns
+// an entity twice"). Converting them to active checks RESTORES a contract that
+// is already written; it does not invent one.
+//
+// They live in this file because the class was found through the sparse arm and
+// the two halves must not drift apart again.
+
+test "adding a TABLE component the entity already has is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try reg(&world, gpa, "Pos", .table);
+    const other = try reg(&world, gpa, "Other", .table);
+    const e = try world.spawnDynamicWithValues(gpa, &.{pos}, &.{&word(1)});
+
+    // Under the assert alone this is UB in ReleaseFast: the migration proceeds
+    // and `Archetype.init` builds a signature carrying `pos` TWICE.
+    try testing.expectError(
+        error.DuplicateComponent,
+        world.addComponentDynamic(gpa, e, pos, &word(2)),
+    );
+    // Refused without side effect: the original value stands and no archetype
+    // was minted for the malformed signature.
+    try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, pos).?));
+    const n_arch = world.archetypeCount();
+
+    // The complement, without which the test above would pass an implementation
+    // that refuses every table add: an ABSENT component still lands.
+    try world.addComponentDynamic(gpa, e, other, &word(3));
+    try testing.expectEqual(@as(u64, 3), readWord(world.componentBytes(e, other).?));
+    try testing.expectEqual(n_arch + 1, world.archetypeCount());
+}
+
+test "a duplicate TABLE id in a spawn is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try reg(&world, gpa, "Pos", .table);
+    const vel = try reg(&world, gpa, "Vel", .table);
+
+    // A repeated column is a malformed archetype: two entries of
+    // `component_ids` resolve to one `ComponentId`, so `componentIndex` answers
+    // the first and the second column is written but never read again.
+    try testing.expectError(
+        error.DuplicateComponent,
+        world.spawnDynamicWithValues(gpa, &.{ pos, pos }, &.{ &word(1), &word(2) }),
+    );
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
+
+    // Complement: the same arity with DISTINCT ids is accepted, so the refusal
+    // is about duplication and not about the count.
+    const e = try world.spawnDynamicWithValues(gpa, &.{ pos, vel }, &.{ &word(1), &word(2) });
+    try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, pos).?));
+    try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, vel).?));
+}
+
+test "a duplicate TABLE id in the default-payload spawn is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try reg(&world, gpa, "Pos", .table);
+
+    // `spawnDynamic` is the sibling entry and takes the same caller slice, so
+    // leaving it unguarded would reopen the hole through the other door — the
+    // "one path out of two" shape this milestone keeps meeting.
+    try testing.expectError(
+        error.DuplicateComponent,
+        world.spawnDynamic(gpa, &.{ pos, pos }),
+    );
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    _ = try world.spawnDynamic(gpa, &.{pos});
+    try testing.expectEqual(@as(usize, 1), world.entityCount());
+}
+
+// ─── G4 — the three apply switches, over the union ──────────────────────────
+
+const observers_mod = weld_core.ecs.observers;
+const EntityId = weld_core.ecs.EntityId;
+const Command = weld_core.ecs.Command;
+const CommandBuffer = weld_core.ecs.CommandBuffer;
+
+/// Records the `component_id` of every observer firing, in order.
+const FireLog = struct {
+    ids: std.ArrayListUnmanaged(ComponentId) = .empty,
+    fn note(
+        ctx: ?*anyopaque,
+        world: *World,
+        entity: EntityId,
+        component_id: ?ComponentId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
+        deferred: *CommandBuffer,
+    ) anyerror!void {
+        _ = world;
+        _ = entity;
+        _ = old_value;
+        _ = new_value;
+        _ = deferred;
+        const self: *FireLog = @ptrCast(@alignCast(ctx.?));
+        try self.ids.append(std.testing.allocator, component_id.?);
+    }
+};
+
+test "on_remove at despawn fires over the UNION, ascending by component id" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Registration order interleaves the two modes, so ascending id order is
+    // NOT "all table then all sparse" — an implementation that appended the
+    // sparse ids after the table ones would pass a same-mode scene.
+    const t0 = try reg(&world, gpa, "T0", .table);
+    const s1 = try reg(&world, gpa, "S1", .sparse);
+    const t2 = try reg(&world, gpa, "T2", .table);
+    const s3 = try reg(&world, gpa, "S3", .sparse);
+
+    var log: FireLog = .{};
+    defer log.ids.deinit(gpa);
+    for ([_]ComponentId{ t0, s1, t2, s3 }) |cid| {
+        try world.observer_registry.registerOnRemove(gpa, &world, cid, &log, &FireLog.note);
+    }
+
+    // The caller's slice order is DELIBERATELY not ascending: the firing order
+    // must come from the id, not from this list.
+    const e = try world.spawnDynamicWithValues(
+        gpa,
+        &.{ s3, t0, s1, t2 },
+        &.{ &word(4), &word(1), &word(2), &word(3) },
+    );
+
+    const c: Command = .{ .despawn = .{ .entity = e } };
+    try observers_mod.applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    // Four firings, ascending, sparse ones INCLUDED. Before G4 the arm walked
+    // `arch.component_ids` alone, so `s1` and `s3` never fired at all — an
+    // observer silently skipped, which no caller can detect.
+    try testing.expectEqualSlices(ComponentId, &.{ t0, s1, t2, s3 }, log.ids.items);
+}
+
+test "add-on-present on a SPARSE component fires the replacement, not the add" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const s = try reg(&world, gpa, "S", .sparse);
+    var adds: FireLog = .{};
+    var reps: FireLog = .{};
+    defer adds.ids.deinit(gpa);
+    defer reps.ids.deinit(gpa);
+    try world.observer_registry.registerOnAdd(gpa, &world, s, &adds, &FireLog.note);
+    try world.observer_registry.registerOnReplaced(gpa, &world, s, &reps, &FireLog.note);
+
+    // Through `spawnWithObservers` and NOT `spawnDynamicWithValues`: the direct
+    // entry fires no observer at all, which a first version of this test got
+    // wrong. Spawning here also checks that the spawn's own `on_add` reaches a
+    // SPARSE component — `spawnWithObservers` iterates the CALLER's id list
+    // rather than the archetype signature, so it covers the union already, and
+    // this is what establishes that rather than asserting it.
+    const e = try world.observer_registry.spawnWithObservers(gpa, &world, &.{s}, &.{&word(1)});
+    try testing.expectEqual(@as(usize, 1), adds.ids.items.len);
+    try testing.expectEqualSlices(ComponentId, &.{s}, adds.ids.items);
+
+    // Add-on-present through the observer-dispatching apply. The direct entry
+    // `addComponentDynamic` returns `DuplicateComponent` here — deliberately,
+    // it is not the command-buffer contract — and this path tests presence
+    // FIRST and overwrites in place, which G3 made work for the sparse row by
+    // routing `componentBytes` and `markComponentChangedDyn`.
+    const c: Command = .{ .add_component = .{
+        .entity = e,
+        .component_id = s,
+        .bytes = &word(9),
+    } };
+    try observers_mod.applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    try testing.expectEqual(@as(usize, 1), reps.ids.items.len);
+    try testing.expectEqual(@as(usize, 1), adds.ids.items.len); // NOT a second add
+    try testing.expectEqual(@as(u64, 9), readWord(world.componentBytes(e, s).?));
+}
+
+/// The six command kinds, named so the oracle below counts a SET and not a
+/// number it chose. Adding a seventh kind to `CommandKind` breaks the comptime
+/// check beside it rather than silently lowering the bar.
+const all_kinds = [_][]const u8{
+    "spawn", "despawn", "add_component", "remove_component", "set_tag", "clear_tag",
+};
+
+comptime {
+    const actual = std.meta.fieldNames(weld_core.ecs.command_buffer.CommandKind);
+    if (actual.len != all_kinds.len) @compileError(
+        "CommandKind's arity moved — the three-path oracle in sparse_routing_test.zig counts " ++
+            "against `all_kinds` and must be extended before this compiles again",
+    );
+    for (actual, all_kinds) |a, named| {
+        if (!std.mem.eql(u8, a, named)) @compileError(
+            "CommandKind's members moved at `" ++ a ++ "` — see `all_kinds`",
+        );
+    }
+}
+
+/// Queues one command into the observer-deferred buffer when it fires. This is
+/// the ONLY way to reach `applyRawCommand`, which is private and drains that
+/// buffer on the NEXT flush.
+const Queuer = struct {
+    cmd: Command,
+    fired: usize = 0,
+    fn note(
+        ctx: ?*anyopaque,
+        world: *World,
+        entity: EntityId,
+        component_id: ?ComponentId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
+        deferred: *CommandBuffer,
+    ) anyerror!void {
+        _ = world;
+        _ = entity;
+        _ = component_id;
+        _ = old_value;
+        _ = new_value;
+        const self: *Queuer = @ptrCast(@alignCast(ctx.?));
+        self.fired += 1;
+        try deferred.commands.append(deferred.gpa, self.cmd);
+    }
+};
+
+test "each of the THREE apply switches carries the routing on all six kinds" {
+    // The brief's own words: "A change landing in one and not the others is the
+    // dominant defect shape of this milestone." So the count is reported PER
+    // PATH, on its own line, and a path that covers five kinds is visible as
+    // five — not hidden inside a single aggregate that passes.
+    const gpa = testing.allocator;
+
+    var covered = [_]usize{ 0, 0, 0 };
+    const path_names = [_][]const u8{ "CommandBuffer.applyOne", "applyWithObservers", "applyRawCommand (deferred drain)" };
+
+    // ── path 0: CommandBuffer.applyOne ──────────────────────────────────
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const s = try reg(&world, gpa, "S", .sparse);
+        const tag = try reg(&world, gpa, "TagSet", .sparse);
+        var cmd = CommandBuffer.init(gpa, &world);
+        defer cmd.deinit();
+
+        // spawn
+        var e: EntityId = undefined;
+        try cmd.applyOne(.{ .spawn = .{ .component_ids = &.{s}, .payloads = &.{&word(1)} } });
+        e = blk: {
+            var it = world.entity_locations.keyIterator();
+            break :blk it.next().?.*;
+        };
+        if (readWord(world.componentBytes(e, s).?) == 1) covered[0] += 1;
+        // remove_component
+        try cmd.applyOne(.{ .remove_component = .{ .entity = e, .component_id = s } });
+        if (!world.hasComponentDyn(e, s)) covered[0] += 1;
+        // add_component (absent — the raw paths refuse add-on-present by design)
+        try cmd.applyOne(.{ .add_component = .{ .entity = e, .component_id = s, .bytes = &word(5) } });
+        if (readWord(world.componentBytes(e, s).?) == 5) covered[0] += 1;
+        // set_tag / clear_tag on a SPARSE TagSet
+        try cmd.applyOne(.{ .set_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
+        if (readWord(world.componentBytes(e, tag).?) == @as(u64, 1) << 2) covered[0] += 1;
+        try cmd.applyOne(.{ .clear_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
+        if (readWord(world.componentBytes(e, tag).?) == 0) covered[0] += 1;
+        // despawn
+        try cmd.applyOne(.{ .despawn = .{ .entity = e } });
+        if (world.sparse_stores.getConst(s).?.len() == 0 and !world.isLive(e)) covered[0] += 1;
+    }
+
+    // ── path 1: applyWithObservers ──────────────────────────────────────
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const s = try reg(&world, gpa, "S", .sparse);
+        const tag = try reg(&world, gpa, "TagSet", .sparse);
+
+        const eid = try world.observer_registry.spawnWithObservers(gpa, &world, &.{s}, &.{&word(1)});
+        if (readWord(world.componentBytes(eid, s).?) == 1) covered[1] += 1;
+
+        const R = &world.observer_registry;
+        try observers_mod.applyWithObservers(.{ .remove_component = .{ .entity = eid, .component_id = s } }, R, &world, gpa);
+        if (!world.hasComponentDyn(eid, s)) covered[1] += 1;
+        try observers_mod.applyWithObservers(.{ .add_component = .{ .entity = eid, .component_id = s, .bytes = &word(5) } }, R, &world, gpa);
+        if (readWord(world.componentBytes(eid, s).?) == 5) covered[1] += 1;
+        try observers_mod.applyWithObservers(.{ .set_tag = .{ .entity = eid, .tagset_id = tag, .bit_index = 2 } }, R, &world, gpa);
+        if (readWord(world.componentBytes(eid, tag).?) == @as(u64, 1) << 2) covered[1] += 1;
+        try observers_mod.applyWithObservers(.{ .clear_tag = .{ .entity = eid, .tagset_id = tag, .bit_index = 2 } }, R, &world, gpa);
+        if (readWord(world.componentBytes(eid, tag).?) == 0) covered[1] += 1;
+        try observers_mod.applyWithObservers(.{ .despawn = .{ .entity = eid } }, R, &world, gpa);
+        if (world.sparse_stores.getConst(s).?.len() == 0 and !world.isLive(eid)) covered[1] += 1;
+    }
+
+    // ── path 2: applyRawCommand, reached only through the deferred drain ─
+    for (all_kinds, 0..) |_, k| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const s = try reg(&world, gpa, "S", .sparse);
+        const tag = try reg(&world, gpa, "TagSet", .sparse);
+        const trigger = try reg(&world, gpa, "Trigger", .table);
+
+        // A subject entity carrying the sparse component the queued command
+        // will act on, plus a trigger whose `on_add` does the queueing.
+        const subject = try world.spawnDynamicWithValues(gpa, &.{s}, &.{&word(1)});
+
+        var q: Queuer = .{ .cmd = switch (k) {
+            0 => .{ .spawn = .{ .component_ids = &.{s}, .payloads = &.{&word(7)} } },
+            1 => .{ .despawn = .{ .entity = subject } },
+            2 => .{ .add_component = .{ .entity = subject, .component_id = tag, .bytes = &word(0) } },
+            3 => .{ .remove_component = .{ .entity = subject, .component_id = s } },
+            4 => .{ .set_tag = .{ .entity = subject, .tagset_id = tag, .bit_index = 2 } },
+            5 => .{ .clear_tag = .{ .entity = subject, .tagset_id = tag, .bit_index = 2 } },
+            else => unreachable,
+        } };
+        try world.observer_registry.registerOnAdd(gpa, &world, trigger, &q, &Queuer.note);
+
+        var cmd = CommandBuffer.init(gpa, &world);
+        defer cmd.deinit();
+        // Flush 1: the trigger's add fires the observer, which QUEUES.
+        // Appended raw rather than through `cmd.addComponent`, whose signature
+        // is typed (`comptime T: type`) and cannot name a runtime
+        // `ComponentId`. `trigger_bytes` is a named local so the slice outlives
+        // the flush rather than pointing at an expression temporary.
+        const trigger_bytes = word(0);
+        try cmd.commands.append(gpa, .{ .add_component = .{
+            .entity = subject,
+            .component_id = trigger,
+            .bytes = &trigger_bytes,
+        } });
+        try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+        try testing.expectEqual(@as(usize, 1), q.fired);
+        cmd.reset();
+        // Flush 2: the queued command drains through `applyRawCommand`.
+        try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+
+        const ok = switch (k) {
+            0 => world.sparse_stores.getConst(s).?.len() == 2, // subject + the spawned one
+            1 => !world.isLive(subject) and world.sparse_stores.getConst(s).?.len() == 0,
+            2 => world.hasComponentDyn(subject, tag),
+            3 => !world.hasComponentDyn(subject, s),
+            4 => readWord(world.componentBytes(subject, tag).?) == @as(u64, 1) << 2,
+            5 => world.componentBytes(subject, tag) == null, // clear on an absent TagSet is a no-op
+            else => unreachable,
+        };
+        if (ok) covered[2] += 1;
+    }
+
+    // THREE LINES, one per path — the report the gate owes, not an aggregate.
+    for (path_names, covered) |name, n| {
+        std.debug.print("[apply-routing] {s}: {d}/{d} kinds\n", .{ name, n, all_kinds.len });
+    }
+    for (path_names, covered) |name, n| {
+        if (n != all_kinds.len) {
+            std.debug.print("[apply-routing] UNCOVERED on {s}\n", .{name});
+            return error.ApplyPathDoesNotCoverAllKinds;
+        }
+    }
+}
