@@ -555,13 +555,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // signature, and a refusal accompanied by its acceptance complement), the despawn
     // sweep, the change mark, `componentBytes`'s non-stamping, the tag mutation's set AND
     // clear, the World-level reserve-then-mutate sweep, and the all-negative query's
-    // permission over the empty archetype. No test is replaced this gate except the G1
-    // no-op pin in `tests/etch/storage_mode_test.zig`, swapped for its opposite — one for
-    // one, so it contributes none.
-    // (2072 -> 2088, suite reported 2088 - 2069 passed + 19 skipped, macOS aarch64.)
+    // permission over the empty archetype, and the sparse-ONLY entity, which backs the
+    // contract written on `dynamicLocation` (never null for a live handle, because the
+    // table half of the split is empty and the empty archetype is legal since G2). No test
+    // is replaced this gate except the G1 no-op pin in `tests/etch/storage_mode_test.zig`,
+    // swapped for its opposite — one for one, so it contributes none.
+    // (2072 -> 2089, suite reported 2089 - 2070 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2086,
-        else => 2088,
+        .windows => 2087,
+        else => 2089,
     };
 }
 

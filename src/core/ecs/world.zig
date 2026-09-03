@@ -680,7 +680,18 @@ pub const World = struct {
                     for (order, 0..) |req, k| {
                         if (req == cid) break :blk ps[k];
                     }
-                    unreachable; // `ids` is a permutation of a subset of `order`
+                    // Proven, not assumed. `ids` is `split.sparse`, whose every
+                    // member `splitByStorage` CHECKED against the registry, and
+                    // on the batched-add path the buffer it split is
+                    // `src.component_ids ++ cids` — so a member could come from
+                    // the archetype rather than from `order` only if a
+                    // component's mode changed after its archetype was built.
+                    // It cannot: `registerComponentRaw` refuses an existing
+                    // name with `DuplicateComponent`, and every one of the six
+                    // accesses to `entries.items[id].desc` in `registry.zig` is
+                    // a READ — there is no write path to an existing
+                    // descriptor anywhere in the tree. One grep re-checks that.
+                    unreachable;
                 }
                 break :blk self.registry.componentDefaultBytes(cid);
             };
@@ -743,10 +754,31 @@ pub const World = struct {
         return self.archetypes.items.len;
     }
 
+    /// The archetype at `idx`. TABLE BACKEND ONLY, by nature and not by
+    /// omission: an archetype is the table storage, so there is no bimodal
+    /// version of this entry to write.
+    ///
+    /// Since M1.B it is therefore a BOUNDED primitive. Paired with
+    /// `dynamicLocation` it is the two-call idiom through which a caller
+    /// reaches a component's bytes itself — `componentIndex` then
+    /// `componentSlot` — and for a sparse component `componentIndex` answers
+    /// null, after which the caller's own `orelse` decides what happens and
+    /// each caller may decide differently. `World.componentBytes` is the entry
+    /// that answers for both backends; reach for this one only when the
+    /// archetype itself is the subject (its signature, its chunks, its
+    /// `is_singleton` flag), never as a way to read a component.
     pub fn dynamicArchetype(self: *World, idx: ArchetypeId) *Archetype {
         return self.archetypes.items[idx];
     }
 
+    /// Where `entity` lives in the TABLE storage — archetype, chunk, slot — or
+    /// null for a stale handle.
+    ///
+    /// Total and correct for every live entity, sparse-only ones included:
+    /// since M1.B an entity carrying no table component lives in the EMPTY
+    /// archetype rather than nowhere, so this never returns null for a live
+    /// handle. What it does not carry is any sparse-side information — see
+    /// `dynamicArchetype` for the bound the pair shares.
     pub fn dynamicLocation(self: *const World, id: EntityId) ?Location {
         return self.entity_locations.get(id);
     }

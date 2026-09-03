@@ -571,3 +571,34 @@ test "an all-negative dynamic query matches the empty archetype" {
         try testing.expect(arch.archetype_id != bare_arch);
     }
 }
+
+test "an entity carrying ONLY sparse components lives in the empty archetype" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const a = try reg(&world, gpa, "A", .sparse);
+    const b = try reg(&world, gpa, "B", .sparse);
+
+    const e = try world.spawnDynamicWithValues(gpa, &.{ a, b }, &.{ &word(1), &word(2) });
+
+    // Backs the contract written on `dynamicLocation`: it never returns null
+    // for a live handle, sparse-only entities included, because the table half
+    // of the split is EMPTY and the empty archetype is legal since G2. Before
+    // that, this spawn had no destination at all.
+    const loc = world.dynamicLocation(e) orelse return error.SparseOnlyEntityHasNoLocation;
+    try testing.expectEqual(@as(usize, 0), world.dynamicArchetype(loc.archetype_idx).component_ids.len);
+    try testing.expect(world.isLive(e));
+
+    // Both components are carried and readable, and both survive a despawn of
+    // a SECOND sparse-only entity sharing the same empty archetype — the swap
+    // in that archetype has no columns to move, which is the case a zero-column
+    // `removeSwap` could plausibly get wrong.
+    const e2 = try world.spawnDynamicWithValues(gpa, &.{a}, &.{&word(3)});
+    try testing.expectEqual(loc.archetype_idx, world.dynamicLocation(e2).?.archetype_idx);
+    try world.despawn(gpa, e2);
+
+    try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, a).?));
+    try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, b).?));
+    try testing.expect(world.dynamicLocation(e) != null);
+}
