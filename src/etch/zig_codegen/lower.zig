@@ -105,6 +105,16 @@ pub fn generateFile(
         const data = ast.items.items(.data)[i];
         switch (kind) {
             .component_decl => {
+                // M1.B/G1 — refuse a sparse component EXPLICITLY, before any
+                // byte of it is emitted. The refusal is at the DECLARATION and
+                // not at a use site, and that is the stronger of the two
+                // readings for a measured reason: the emitted `register()`
+                // carries no storage mode, so a declared-but-unused sparse
+                // component would still be registered as `table` in the cooked
+                // program — the silent fallback this gate exists to prevent.
+                if (types_mod.storageModeOf(ast, ast.component_decls.items[data]) != .table) {
+                    return CodegenError.SparseStorageUnsupported;
+                }
                 try emitComponentLikeStruct(&w, ast, data, .component);
                 stats.components += 1;
             },

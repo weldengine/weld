@@ -18,6 +18,21 @@ pub const CodegenError = error{
     /// reached the lowering pass. Should be impossible after S3 type-check,
     /// but reported here as a typed error rather than a panic.
     UnsupportedConstruct,
+    /// A `component` declaration carries `@storage(sparse)`. The Zig codegen
+    /// emits `comptime_query.query(...)` over archetype chunks
+    /// (`src/core/ecs/comptime_query.zig`), which resolves a component through
+    /// cached per-archetype column offsets and can therefore only ever see a
+    /// table-stored component; and its emitted `register()` records no storage
+    /// mode at all, so a sparse declaration reaching it would be registered as
+    /// `table`. That is the SILENT TABLE FALLBACK M1.B forbids — a program
+    /// whose ECS image contradicts its own source, with nothing to say so.
+    ///
+    /// A distinct variant and not `UnsupportedConstruct`, deliberately: the
+    /// generic one already covers generics, `async`, `throws` and optional
+    /// fields, so a test asserting it could not tell the sparse refusal from
+    /// any of them. Parity is Phase 2-3; until then the refusal is the
+    /// deliverable.
+    SparseStorageUnsupported,
     /// A component declaration contains a non-POD field type. The S3
     /// type-checker rejects these — the variant exists so a malformed AST
     /// (e.g. a future caller forgetting to type-check) surfaces a clean
