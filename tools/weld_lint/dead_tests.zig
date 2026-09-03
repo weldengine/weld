@@ -505,9 +505,22 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // demand it (G21). G22 is a test-shape correction and a brief reconciliation, which
     // add none.
     // (2049 -> 2051, suite reported 2051 - 2032 passed + 19 skipped, macOS aarch64.)
+    //
+    // ── M1.B ──
+    // G1 adds nine. Four are the `@storage` argument schema, and each asserts the
+    // ABSENCE of the other code as well as the presence of its own — E0503 on a value
+    // outside the domain, E0504 on a non-constant argument, E0503 on both arity
+    // failures, and the widening counter-factual over the four spellings a valid
+    // program may use. Five are the mode end to end: the registry records what the
+    // declaration said (the test that would have failed for the four months the
+    // annotation was a no-op), the mode is a DECLARED no-op so the storage has not
+    // moved, an Etch `component X {}` is legal and still records its mode, the codegen
+    // refuses a sparse program with its own typed error, and the same program without
+    // the annotation lowers.
+    // (2051 -> 2060, suite reported 2060 - 2041 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2049,
-        else => 2051,
+        .windows => 2058,
+        else => 2060,
     };
 }
 

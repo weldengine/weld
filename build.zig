@@ -762,6 +762,11 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E7 — full-grammar 500+ line integration reference: parse
         // < 50 ms + type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
+        // M1.B / G1 — `@storage` consumed end to end: the mode reaches the
+        // registry, the storage does not move yet, and the codegen refuses a
+        // sparse program. `.etch = true` for `weld_etch`; `weld_core` is
+        // unconditional in this loop.
+        .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
         // M0.8 / E7 — TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
