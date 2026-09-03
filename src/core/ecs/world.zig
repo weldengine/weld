@@ -664,9 +664,14 @@ pub const World = struct {
     /// is the LIFO order M1.1.1-HF1/D2 established after a forward undo was
     /// measured to corrupt a refcount on duplicate entries.
     ///
-    /// `payload_for` is a closure over the caller's own pairing: `spawnDynamic`
-    /// has registry defaults, `spawnDynamicWithValues` has caller bytes, and
-    /// neither should have to reshape its data to reach one writer.
+    /// `payloads` + `id_order` carry the caller's own pairing rather than a
+    /// reshaped copy: `spawnDynamic` passes null/null and gets registry
+    /// defaults, while `spawnDynamicWithValues` and `addComponentsDynamic` pass
+    /// their caller's bytes alongside the caller's ORIGINAL id order, which is
+    /// what the resolution below scans — `splitByStorage` permuted the buffer,
+    /// so positional pairing is gone by the time control reaches here. (An
+    /// earlier draft took a `payload_for` closure and this paragraph outlived
+    /// it by one revision.)
     fn addSparsePayloads(
         self: *World,
         gpa: std.mem.Allocator,
@@ -679,6 +684,19 @@ pub const World = struct {
         errdefer self.removeSparsePayloads(entity, ids[0..written]);
         for (ids) |cid| {
             const store = self.sparse_stores.get(cid).?;
+            // A DUPLICATE id in the caller's set would land here twice, and
+            // `SparseSetStorage.add`'s `assert(!contains)` is compiled to nothing
+            // in ReleaseFast — so the second call would append a SECOND dense
+            // row for this entity, after which `positionOf` answers the first,
+            // `remove` swaps one away and the other is unreachable for the
+            // world's lifetime (a leak that survives `despawn`, since
+            // `removeEntity` drops one row per store). Loud instead.
+            //
+            // The TABLE side has the same precondition and the same hole — a
+            // duplicate id makes `Archetype.init` build a signature with a
+            // repeated column — but that PREDATES M1.B, so it is reported
+            // rather than silently changed here.
+            if (store.contains(entity)) return error.DuplicateComponent;
             const bytes = blk: {
                 if (payloads) |ps| {
                     // Resolve this id to its payload through the caller's
@@ -810,6 +828,12 @@ pub const World = struct {
         // exempted because its ids look trustworthy is the path that breaks
         // the day one of them is registered differently.
         const split = self.splitByStorage(ids[0..]);
+        // Without this, `addSparsePayloads` below unwraps `sparse_stores.get(cid).?`
+        // on a store that was never declared and PANICS. The comment above says
+        // the split exists for "the day one of them is registered differently";
+        // that day it panicked, which is what makes this line the point rather
+        // than the comment.
+        try self.ensureSparseStores(gpa, split.sparse);
         const arch = try self.getOrCreateArchetype(gpa, split.table);
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
@@ -1152,10 +1176,21 @@ pub const World = struct {
                 self.registry.componentSize(cid_new),
                 self.registry.componentAlignment(cid_new),
             );
-            // Add-on-present is a programmer error on this entry, which is
-            // what the table arm's `assert(!hasComponent)` below says.
-            // `SparseSetStorage.add` asserts the same thing on its own data, so
-            // the contract is stated once and checked where the data is.
+            // ACTIVE check, not an assert. `SparseSetStorage.add` asserts
+            // `!contains(entity)`, and `std.debug.assert` is compiled to NOTHING
+            // in ReleaseFast — so in the mode a game ships, a double add would
+            // append a SECOND dense row for the same entity, after which
+            // `positionOf` answers the first and `remove` swaps one of the two
+            // away, leaving the other permanently unreachable. A wrong answer
+            // with no diagnostic (the H1 class, M1.1.15.1). `DuplicateComponent`
+            // is the error `addComponentsDynamic` already returns for exactly
+            // this condition, so nothing new is invented.
+            //
+            // Deliberately in the SPARSE arm only: the table arm's own
+            // `assert(!src_arch.hasComponent(cid_new))` is stripped identically
+            // and has the same hole, but that hole PREDATES M1.B and changing it
+            // would change an existing contract. Reported, not silently fixed.
+            if (store.contains(entity)) return error.DuplicateComponent;
             try store.add(gpa, entity, std.mem.asBytes(&value), self.current_tick);
             return;
         }
@@ -1263,10 +1298,9 @@ pub const World = struct {
                 self.registry.componentSize(cid_new),
                 self.registry.componentAlignment(cid_new),
             );
-            // Add-on-present is a programmer error on this entry, which is
-            // what the table arm's `assert(!hasComponent)` below says.
-            // `SparseSetStorage.add` asserts the same thing on its own data, so
-            // the contract is stated once and checked where the data is.
+            // ACTIVE check — see the twin in `addComponent` for why an assert
+            // will not do here and why the table arm is deliberately left alone.
+            if (store.contains(entity)) return error.DuplicateComponent;
             try store.add(gpa, entity, value_bytes, self.current_tick);
             return;
         }
@@ -1485,6 +1519,31 @@ pub const World = struct {
         try self.addSparsePayloads(gpa, entity, split.sparse, values, cids);
         errdefer self.removeSparsePayloads(entity, split.sparse);
 
+        // SELF-MIGRATION GUARD, and it sits HERE — after the sparse rows — for a
+        // reason its first version got wrong: placed above `addSparsePayloads`
+        // it returned before writing them, so the entity ended up carrying
+        // nothing while the comment claimed "the sparse rows are already
+        // written above". The test caught it; the comment had asserted an order
+        // the code did not have.
+        //
+        // What it guards: when every added id is sparse, the target signature
+        // EQUALS the source's, so the funnel hands back the SOURCE archetype.
+        // The migration below would then reserve a SECOND slot in it, copy the
+        // row into it, and swap-pop the original — and that swap brings the
+        // fresh copy back down from the tail and reports THIS entity as the
+        // relocated one, so the `getPtr(swapped_id)` line records the correct
+        // slot and the `putAssumeCapacity` two lines later overwrites it with
+        // the slot the swap just freed. The entity's location then designates a
+        // dead slot outside `[0, entity_count)`, and the next spawn into this
+        // archetype ALIASES it: reads answer the other entity's bytes and writes
+        // corrupt them, with no diagnostic anywhere.
+        //
+        // Unreachable before M1.B — a grouped add always added at least one
+        // signature member — and reachable from production at
+        // `loader.activateExtension` for an extension declaring only sparse
+        // components.
+        if (dst_arch == src_arch) return;
+
         const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
         // ── from here down: infallible (reserve-then-mutate boundary) ──
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
@@ -1532,7 +1591,13 @@ pub const World = struct {
         src_arch: *Archetype,
         src_loc: Location,
         dst_arch: *Archetype,
-        dst_r: archetype_mod.SpawnResult,
+        /// The reserved destination slot, or null when the drop set is
+        /// ENTIRELY sparse — in which case the target signature equals the
+        /// source's, the funnel returns the source archetype, and there is no
+        /// migration to perform. Null rather than a self-migration: see the
+        /// guard in `prepareRemoveComponentsDynamic` for what the self-migrating
+        /// form corrupts.
+        dst_r: ?archetype_mod.SpawnResult,
         /// `prepare`'s OWNED copy of `cids`, partitioned in place: the first
         /// `n_table` entries drop from the archetype signature, the rest are
         /// sparse rows for `commit` to remove. Freed by `commit` or `abort`,
@@ -1613,8 +1678,17 @@ pub const World = struct {
         const dst_arch = try self.getOrCreateArchetype(gpa, split.table);
         // `getOrCreateArchetype` may have grown `self.archetypes` — re-fetch src.
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
-        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
+        // SELF-MIGRATION GUARD, the twin of `addComponentsDynamic`'s: when every
+        // dropped id is sparse the funnel returns the SOURCE archetype, and
+        // reserving a slot in it would set up the copy-then-swap sequence that
+        // strands the entity's location on a freed slot. No slot is reserved, so
+        // `abort` has none to release and `commit` has none to fill.
+        const dst_r: ?archetype_mod.SpawnResult = if (dst_arch == src_arch)
+            null
+        else blk: {
+            try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+            break :blk try dst_arch.allocateSlot(gpa, self.current_tick);
+        };
         return .{
             .entity = entity,
             .src_arch = src_arch,
@@ -1639,9 +1713,12 @@ pub const World = struct {
         // — dropping it in `prepare` would show the hook a half-removed
         // component. Infallible either way, so atomicity does not decide it.
         self.removeSparsePayloads(prepared.entity, prepared.sparseDrops());
+        // Null `dst_r` means the drop set was entirely sparse: the rows above are
+        // the whole removal and the entity does not move. Returning here is what
+        // keeps the self-migration guard's decision from being undone.
+        const dst_r = prepared.dst_r orelse return;
         const dst_arch = prepared.dst_arch;
         const src_arch = prepared.src_arch;
-        const dst_r = prepared.dst_r;
         const src_loc = prepared.src_loc;
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
         const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
@@ -1678,7 +1755,12 @@ pub const World = struct {
         defer gpa.free(prepared.cids_owned);
         // Nothing to undo on the sparse side: `commit` is what removes those
         // rows, so an aborted prepare never touched them.
-        const swapped = prepared.dst_arch.removeSwap(prepared.dst_r.chunk_idx, prepared.dst_r.slot);
+        //
+        // And nothing to release when `dst_r` is null — an entirely sparse drop
+        // set reserved no slot, so a `removeSwap` here would pop a LIVE row
+        // belonging to some other entity.
+        const dst_r = prepared.dst_r orelse return;
+        const swapped = prepared.dst_arch.removeSwap(dst_r.chunk_idx, dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
     }
 
@@ -1731,6 +1813,18 @@ pub const World = struct {
         // `markChanged`) — the behaviour is preserved, not merely the shape.
         // Its extra `isLive` check is not a behaviour change either: a stale
         // handle has no `entity_locations` entry, so both forms answered null.
+        // Stale handles are SILENTLY IGNORED, and restoring that is the whole
+        // point of this line: the pre-M1.B body opened with
+        // `entity_locations.get(entity) orelse return`, and the command-buffer
+        // flush depends on it — a tag recorded for an entity despawned later in
+        // the same tick is ordinary, and must not abort the flush. G3 replaced
+        // that head with `componentBytes`, which also answers null for a stale
+        // handle but then falls into the `else if (set)` arm below, where
+        // `addComponentDynamic` validates the handle and returns
+        // `error.StaleEntityHandle` — propagated, aborting every remaining
+        // command. The comment that replaced the old head claimed the behaviour
+        // was preserved; it was not, and this is not a shape fix.
+        if (self.entity_locations.get(entity) == null) return;
         if (self.componentBytes(entity, tagset_id)) |bytes| {
             setTagBit(bytes, bit_index, set);
         } else if (set) {

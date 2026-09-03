@@ -7,13 +7,12 @@
 //! parallel to dense. Add and remove are O(1) by swap-remove, and neither
 //! migrates an archetype — which is the whole reason the mode exists.
 //!
-//! **Not wired to the `World` at this gate.** M1.B/G2 delivers the structure
-//! and its seven invariants, opposable one by one; the routing of the
-//! resolution funnel, the structural mutators and both command-buffer apply
-//! paths is G3. Nothing in this file reaches a `World`, an `Archetype`, or a
-//! `Chunk` INSTANCE, and that is deliberate: an invariant proven against the
-//! storage alone stays true whatever the caller, whereas one proven through the
-//! World would be measuring the caller.
+//! **Wired to the `World` since M1.B/G3.** G2 delivered the structure in
+//! isolation and this header said "not wired to the `World` at this gate" —
+//! true then, made false by G3, and left standing until an adversarial review
+//! of the G3 diff found it. `World` owns a `SparseStores` field, every
+//! resolution entry and every structural mutator routes through it, and
+//! `World.storageOf` is the mode authority.
 //!
 //! It does read exactly one thing from `chunk.zig`: `ChunkAlignment`, the
 //! engine's named bound on component alignment. That is a layout CONSTANT and

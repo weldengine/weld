@@ -546,7 +546,7 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // is what the four M0.8/E3-D pins beside it already record.
     // (2062 -> 2072, suite reported 2072 - 2053 passed + 19 skipped, macOS aarch64.)
     //
-    // M1.B / G3 adds SIXTEEN in `tests/ecs/sparse_routing_test.zig`, the Tier 0 routing
+    // M1.B / G3 adds TWENTY-THREE in `tests/ecs/sparse_routing_test.zig`, the Tier 0 routing
     // acceptance file: the no-migration property of a sparse add and its table
     // counter-factual, the no-migration property of a sparse remove, `hasComponentDyn`'s
     // totality over the three ways of being absent, the batched add's refusal of an
@@ -560,10 +560,17 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // table half of the split is empty and the empty archetype is legal since G2). No test
     // is replaced this gate except the G1 no-op pin in `tests/etch/storage_mode_test.zig`,
     // swapped for its opposite — one for one, so it contributes none.
-    // (2072 -> 2089, suite reported 2089 - 2070 passed + 19 skipped, macOS aarch64.)
+    // SEVENTEEN of those were the gate's first pass; SIX more came from an adversarial review
+    // that REFUSED it — five pinning defects (the sparse-only self-migration on each batched
+    // path, `applyTagMutation`'s lost stale-handle return, the typed `spawn`'s missing
+    // `ensureSparseStores`, and the duplicate-sparse-id double insert) plus one closing the
+    // TYPED arms, which had no coverage at all. Each was written RED first, and each fix has a
+    // counter-factual that reddens exactly its own test. The comment that said SIXTEEN was
+    // itself one of that review's findings.
+    // (2072 -> 2095, suite reported 2095 - 2076 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2087,
-        else => 2089,
+        .windows => 2093,
+        else => 2095,
     };
 }
 

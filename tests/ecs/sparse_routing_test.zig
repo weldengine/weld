@@ -449,13 +449,21 @@ test "a failed multi-sparse spawn leaves no half-populated entity" {
     // World-level unwind is what this sweeps.
     //
     // Apparatus: `std.testing.FailingAllocator`, the instrument `world.zig`
-    // already uses for the sibling "spawn OOM leaves no orphan identity" sweep
-    // — deliberately NOT `sparse_storage.zig`'s private `OneShotFail`, which
-    // fails only `alloc` because a storage-level sweep must not count the
-    // in-place `resize` a list retries around. Here a resize refusal the world
-    // recovers from is a legitimate outcome, so the assertions are conditional
-    // on an error actually surfacing, and `induced` is what keeps the sweep
-    // from passing by never entering that branch.
+    // already uses for the sibling "spawn OOM leaves no orphan identity" sweep.
+    //
+    // Its semantics are NOT one-shot: it does not advance its index on failure,
+    // so from `fail_index` onward EVERY allocation fails — the reason
+    // `sparse_storage.zig` wrote its own `OneShotFail` for the storage-level
+    // sweep. Here that is the right instrument anyway, because the property
+    // under test is "a failure leaves NOTHING behind", not "the world recovers
+    // and retries"; a permanent-failure allocator exercises it strictly harder.
+    //
+    // The consequence for the success branch: it is reached only when `fail_at`
+    // is past the count this particular run performs, NOT because "a resize the
+    // list recovered from" — an earlier version of this comment said the latter
+    // and named a recovery the allocator's own semantics exclude. It stays
+    // because a spawn that succeeded must still be WHOLE, and `induced` is what
+    // keeps the sweep from passing by never entering the failure branch.
     const gpa = testing.allocator;
 
     const pass1 = blk: {
@@ -497,8 +505,8 @@ test "a failed multi-sparse spawn leaves no half-populated entity" {
         );
 
         if (result) |e| {
-            // Succeeded despite the armed index — a resize the list recovered
-            // from. The entity must be WHOLE.
+            // Succeeded because this run never reached the armed index. The
+            // entity must nevertheless be WHOLE.
             try testing.expect(w.hasComponentDyn(e, t));
             try testing.expect(w.hasComponentDyn(e, a));
             try testing.expect(w.hasComponentDyn(e, b));
@@ -601,4 +609,190 @@ test "an entity carrying ONLY sparse components lives in the empty archetype" {
     try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, a).?));
     try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, b).?));
     try testing.expect(world.dynamicLocation(e) != null);
+}
+
+// ─── G3 review refusal — four defects, each pinned before its fix ───────────
+//
+// Raised by an adversarial review of the G3 diff and CONFIRMED at the code
+// before anything was written here. Three of the four are G3's own doing, and
+// in two of them the comment at the site asserted the opposite of what the code
+// did — the exact family this gate spent itself cataloguing.
+
+test "a batched remove of a SPARSE-ONLY set leaves the entity on a live slot" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try reg(&world, gpa, "Pos", .table);
+    const s_go = try reg(&world, gpa, "SGo", .sparse);
+
+    const e = try world.spawnDynamicWithValues(gpa, &.{ pos, s_go }, &.{ &word(7), &word(3) });
+
+    // When every dropped id is sparse, the target signature EQUALS the source's,
+    // so `getOrCreateArchetype` returns the SAME archetype. `prepare` then
+    // allocates a SECOND slot in it, `commit` copies old→new, and `removeSwap`
+    // on the old slot brings that very copy back from the tail and reports our
+    // own entity as the swapped one — which the `getPtr(swapped)` line records
+    // correctly, right before `putAssumeCapacity` overwrites it with the slot
+    // that swap just freed. The entity's recorded location then designates a
+    // dead slot.
+    try world.removeComponentsDynamic(gpa, e, &.{s_go});
+
+    const loc = world.dynamicLocation(e).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    // The decisive assertion, and the one the earlier sparse-only-remove test
+    // did NOT make: the slot the location points at must be the one holding
+    // this entity's id. That test asserted the archetype INDEX and the absence
+    // of the sparse component — both true under the corruption.
+    try testing.expectEqual(e, arch.entityIds(chunk)[loc.slot]);
+    try testing.expect(loc.slot < chunk.entityCount());
+    try testing.expectEqual(@as(u64, 7), readWord(world.componentBytes(e, pos).?));
+    try testing.expect(!world.hasComponentDyn(e, s_go));
+}
+
+test "a batched add of a SPARSE-ONLY set leaves the entity on a live slot" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try reg(&world, gpa, "Pos", .table);
+    const s_new = try reg(&world, gpa, "SNew", .sparse);
+
+    const e = try world.spawnDynamicWithValues(gpa, &.{pos}, &.{&word(7)});
+
+    // Same unguarded `dst_arch == src_arch` path, reached from the other side:
+    // adding only sparse ids leaves the signature unchanged.
+    try world.addComponentsDynamic(gpa, e, &.{s_new}, &.{&word(3)});
+
+    const loc = world.dynamicLocation(e).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    try testing.expectEqual(e, arch.entityIds(chunk)[loc.slot]);
+    try testing.expect(loc.slot < chunk.entityCount());
+    try testing.expectEqual(@as(u64, 7), readWord(world.componentBytes(e, pos).?));
+    try testing.expectEqual(@as(u64, 3), readWord(world.componentBytes(e, s_new).?));
+}
+
+test "a tag mutation on a stale handle is a silent no-op, not a propagated error" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const tagset = try reg(&world, gpa, "TagSet", .table);
+    const e = try world.spawnDynamic(gpa, &.{});
+    try world.despawn(gpa, e);
+
+    // The pre-G3 body opened with `entity_locations.get(entity) orelse return`,
+    // so a stale handle was silently ignored — which is what the command-buffer
+    // flush needs, a tag recorded for an entity despawned later in the same
+    // tick being ordinary. G3 replaced that head with `componentBytes`, which
+    // answers null for a stale handle and falls into the `else if (set)` arm,
+    // where `addComponentDynamic` validates the handle and returns
+    // `error.StaleEntityHandle` — aborting the whole flush. The comment at the
+    // site claimed the behaviour was preserved; it was not.
+    try world.applyTagMutation(gpa, e, tagset, 3, true);
+    try world.applyTagMutation(gpa, e, tagset, 3, false);
+    // Not merely "did not error": nothing was created for a dead entity.
+    try testing.expect(!world.hasComponentDyn(e, tagset));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "the TYPED arms carry a sparse component end to end" {
+    const gpa = testing.allocator;
+    const Mark = extern struct { v: u64 = 0 };
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The four comptime-`T` arms — `get`, `getMut`, `addComponent`,
+    // `removeComponent` — had NO coverage at all: every other test here goes
+    // through the dynamic entries. That hole is why the typed `spawn`'s missing
+    // `ensureSparseStores` went unseen.
+    const cid = try world.registry.registerComponentRaw(gpa, .{
+        .name = @typeName(Mark),
+        .size = @sizeOf(Mark),
+        .alignment = @alignOf(Mark),
+        .default_bytes = &[_]u8{0} ** @sizeOf(Mark),
+        .fields = &.{},
+        .storage = .sparse,
+    });
+    const pos = try reg(&world, gpa, "Pos", .table);
+    const e = try world.spawnDynamicWithValues(gpa, &.{pos}, &.{&word(1)});
+
+    try world.addComponent(gpa, e, Mark, .{ .v = 42 });
+    try testing.expect(world.hasComponentDyn(e, cid));
+    try testing.expectEqual(@as(u64, 42), world.get(Mark, e).?.v);
+    // The archetype must be untouched — the typed arm owes the same
+    // no-migration property as the dynamic one.
+    try testing.expect(!world.dynamicArchetype(world.dynamicLocation(e).?.archetype_idx).hasComponent(cid));
+
+    world.getMut(Mark, e).?.v = 43;
+    try testing.expectEqual(@as(u64, 43), world.get(Mark, e).?.v);
+
+    try world.removeComponent(gpa, e, Mark);
+    try testing.expect(world.get(Mark, e) == null);
+    try testing.expect(!world.hasComponentDyn(e, cid));
+    try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, pos).?));
+}
+
+test "the typed spawn path serves a sparse core component instead of panicking" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `spawn` resolves `Transform`/`Velocity` through `ensureRegistered`, so to
+    // reach its sparse arm one of them must be registered sparse FIRST. The
+    // typed spawn then calls `addSparsePayloads` — which unwraps
+    // `sparse_stores.get(cid).?` — without ever having called
+    // `ensureSparseStores`. Its own comment says the split exists for exactly
+    // "the day one of them is registered differently"; that day it panicked.
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = @typeName(world_mod.Velocity),
+        .size = @sizeOf(world_mod.Velocity),
+        .alignment = @alignOf(world_mod.Velocity),
+        .default_bytes = &[_]u8{0} ** @sizeOf(world_mod.Velocity),
+        .fields = &.{},
+        .storage = .sparse,
+    });
+
+    const e = try world.spawn(gpa, .{}, .{});
+    const vid = world.registry.idOf(@typeName(world_mod.Velocity)).?;
+    const tid = world.registry.idOf(@typeName(world_mod.Transform)).?;
+    try testing.expect(world.hasComponentDyn(e, vid));
+    try testing.expect(world.hasComponentDyn(e, tid));
+    const arch = world.dynamicArchetype(world.dynamicLocation(e).?.archetype_idx);
+    try testing.expect(arch.hasComponent(tid));
+    try testing.expect(!arch.hasComponent(vid));
+}
+
+test "a duplicate sparse id in a spawn is refused, not written twice" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const s = try reg(&world, gpa, "S", .sparse);
+
+    // Two dense rows for one entity would make `positionOf` answer the first,
+    // `remove` swap one away, and the other unreachable for the world's
+    // lifetime — `SparseStores.removeEntity` drops ONE row per store, so the
+    // leak survives despawn. `SparseSetStorage.add`'s own `assert(!contains)` is
+    // compiled to nothing in ReleaseFast, so the guard has to be active.
+    try testing.expectError(
+        error.DuplicateComponent,
+        world.spawnDynamicWithValues(gpa, &.{ s, s }, &.{ &word(1), &word(2) }),
+    );
+
+    // And the refusal is clean: no entity, no row, nothing to leak.
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
+    if (world.sparse_stores.getConst(s)) |store| {
+        try testing.expectEqual(@as(usize, 0), store.len());
+    }
+
+    // The complement: a NON-duplicated set of the same id count is accepted, so
+    // the refusal is about duplication and not about arity.
+    const s2 = try reg(&world, gpa, "S2", .sparse);
+    const e = try world.spawnDynamicWithValues(gpa, &.{ s, s2 }, &.{ &word(1), &word(2) });
+    try testing.expectEqual(@as(u64, 1), readWord(world.componentBytes(e, s).?));
+    try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, s2).?));
 }
