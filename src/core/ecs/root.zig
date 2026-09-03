@@ -57,6 +57,11 @@ pub const world = @import("world.zig");
 pub const scheduler = @import("scheduler.zig");
 /// S4 — runtime component registry (id assignment + per-type descriptor cache).
 pub const registry = @import("registry.zig");
+
+/// M1.B — sparse-set component storage, the second backend of `ARCH-005`.
+/// Opt-in per component through `@storage(.sparse)`; `table` remains the
+/// default and the only mode the resolution funnel routes before G3.
+pub const sparse_storage = @import("sparse_storage.zig");
 /// S4 — deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
 /// S4 — runtime, `ComponentId`-keyed byte resource store: the permanent Etch
