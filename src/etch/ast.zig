@@ -3907,26 +3907,33 @@ pub const AstArena = struct {
         return null;
     }
 
-    /// The spelling of `@storage`'s single argument when it is written as a
-    /// bare name — `@storage(sparse)`, the form the corpus's own valid fixture
-    /// uses (`tests/etch/corpus/valid/components/annotated.etch`) — or as the
-    /// dot-shorthand `@storage(.sparse)`. Returns null for any other argument
-    /// shape, including a wrong arity, which is what the type-checker turns
-    /// into `E0503` / `E0504` after deciding WHICH of the two applies.
+    /// The enum-variant name of an annotation's single positional argument when
+    /// it is written in the language's form for such a value — the **tag path**,
+    /// `@storage(.sparse)`. Returns null for every other shape, including the
+    /// bare `IDENT` alternative, a named argument and a wrong arity; the
+    /// type-checker turns each of those into its own diagnostic.
     ///
-    /// Both spellings are admitted because the corpus is not uniform: §6 of
-    /// `etch-reference-part3.md` writes `@storage(sparse)` bare while
-    /// `@phase(.update)` and `@tag(.unit)` take the dot. Accepting one and
-    /// refusing the other would make a documented example fail, and the
-    /// discrimination this gate owes is over the VALUE, not the sigil.
-    pub fn annotationBareOrDottedName(self: *const AstArena, annot: Annotation) ?StringId {
+    /// **Only the dotted form, and that is a decision, not an omission.**
+    /// `etch-grammar.md` §1.5 admits three alternatives for `annotation_arg` —
+    /// an expression, `IDENT ":" expression`, and a bare `IDENT` — so the bare
+    /// spelling is grammatical. It is refused here because this is a question of
+    /// SCHEMA, not of grammar: for an argument whose declared type is an
+    /// enumeration domain the language already has a form, and every sibling
+    /// annotation of that shape uses it (`@phase`, `@tag`, `@pause_group`, dotted
+    /// in every occurrence of the corpus).
+    ///
+    /// The load-bearing reason is not consistency, it is ambiguity: a bare
+    /// enumeration value is syntactically indistinguishable from an identifier
+    /// reference. `.sparse` cannot collide with a type or a variable named
+    /// `sparse`; `sparse` can, and nothing can remove that from the bare form.
+    /// The bare `IDENT` alternative of the grammar serves arguments whose type is
+    /// NOT an enumeration domain.
+    pub fn annotationTagPathName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len != 1) return null;
         const arg = self.annot_args.items[annot.args_start];
         if (arg.name != 0) return null; // a named argument is not a bare value
-        return switch (self.exprKind(arg.value)) {
-            .ident, .tag_path => self.exprData(arg.value),
-            else => null,
-        };
+        if (self.exprKind(arg.value) != .tag_path) return null;
+        return self.exprData(arg.value);
     }
 
     /// The event type name `T` from an `@on_event(T)` annotation, or null when

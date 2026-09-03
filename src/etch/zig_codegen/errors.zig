@@ -18,7 +18,7 @@ pub const CodegenError = error{
     /// reached the lowering pass. Should be impossible after S3 type-check,
     /// but reported here as a typed error rather than a panic.
     UnsupportedConstruct,
-    /// A `component` declaration carries `@storage(sparse)`. The Zig codegen
+    /// A `component` declaration carries `@storage(.sparse)`. The Zig codegen
     /// emits `comptime_query.query(...)` over archetype chunks
     /// (`src/core/ecs/comptime_query.zig`), which resolves a component through
     /// cached per-archetype column offsets and can therefore only ever see a

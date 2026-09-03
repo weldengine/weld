@@ -33,6 +33,18 @@ const storage_domain_list = blk: {
     break :blk out;
 };
 
+/// The same domain rendered in the ACCEPTED spelling — `.table | .sparse` — for
+/// every message that tells an author what to write. Derived from the enum for
+/// the same reason as its bare twin, and separate from it because the arity
+/// message names a count of arguments while the others name a spelling.
+const storage_domain_dotted = blk: {
+    var out: []const u8 = "";
+    for (@typeInfo(StorageKind).@"enum".fields, 0..) |f, i| {
+        out = out ++ (if (i == 0) "" else " | ") ++ "." ++ f.name;
+    }
+    break :blk out;
+};
+
 /// Resolve a `component` declaration's storage mode from its `@storage`
 /// annotation. **Total by construction**: no annotation, or a value the domain
 /// does not carry, yields `table`.
@@ -50,7 +62,7 @@ const storage_domain_list = blk: {
 /// moment either side resolved the annotation on its own.
 pub fn storageModeOf(ast: *const AstArena, decl: ast_mod.ComponentDecl) StorageKind {
     const annot = ast.storageAnnotation(decl) orelse return .table;
-    const name_id = ast.annotationBareOrDottedName(annot) orelse return .table;
+    const name_id = ast.annotationTagPathName(annot) orelse return .table;
     return StorageKind.fromName(ast.strings.slice(name_id)) orelse .table;
 }
 
@@ -4612,21 +4624,34 @@ pub const TypeChecker = struct {
     /// the argument, which nothing checked before M1.B/G1 — every value passed,
     /// including a value outside the domain.
     ///
-    /// **The order of the branches is the design, not a style choice.** Both
-    /// codes exist so that the two failures are told apart, and §13.3 assigns
-    /// them different questions: step 3 is arity, name and value; step 4 is
-    /// const-evaluability. `.tag_path` satisfies BOTH — `isConstEvaluable`
-    /// returns true for it — so the name form has to be resolved before the
-    /// const test runs, or `@storage(.archetype)` would be reported as a
-    /// wrong-typed constant instead of as a value outside the domain. The code
-    /// would be the same and the reason would be wrong, which is exactly what
-    /// makes two fixtures pinned on distinct codes worth having.
+    /// **The accepted spelling is the tag path, `@storage(.sparse)`, and only
+    /// that.** The bare `@storage(sparse)` is grammatical (`etch-grammar.md`
+    /// §1.5 admits a bare `IDENT` for `annotation_arg`) and is refused, because
+    /// the question is one of schema and not of grammar: an argument whose
+    /// declared type is an enumeration domain is written as a tag path, which is
+    /// what every sibling annotation of that shape already does. The decisive
+    /// reason is ambiguity rather than uniformity — a bare enumeration value is
+    /// syntactically indistinguishable from an identifier reference, so `sparse`
+    /// can collide with a type or a variable of that name and `.sparse` cannot.
+    /// The bare form was in the corpus for one reason only: `@storage` was a
+    /// no-op, so its spelling had never met an execution path.
     ///
-    /// Step 3 asks three questions and all three land on E0503, by its own
+    /// **The order of the branches is the design, not a style choice.** Both
+    /// codes exist so the failures are told apart, and §13.3 assigns them
+    /// different questions: step 3 is arity, name and value; step 4 is
+    /// const-evaluability. The two are written as disjoint and are not —
+    /// `.tag_path` satisfies BOTH, since `isConstEvaluable` returns true for it —
+    /// so the name form must be resolved before the const test runs, or
+    /// `@storage(.archetype)` would be reported as a wrong-typed constant instead
+    /// of as a value outside the domain. The code would be the same and the
+    /// REASON would be wrong.
+    ///
+    /// Step 3 asks four questions here and all four land on E0503, by its own
     /// wording (*number, name or type*): `@storage()` and `@storage(a, b)` fail
-    /// on number, `@storage(kind: sparse)` on name, `@storage(archetype)` and
-    /// `@storage(1)` on value. Only a well-formed positional argument that is
-    /// not a constant reaches step 4.
+    /// on number, `@storage(kind: .sparse)` on name, `@storage(sparse)` on
+    /// spelling, and `@storage(.archetype)` / `@storage(1)` on value. Only a
+    /// well-formed positional argument that is neither a tag path nor a constant
+    /// reaches step 4.
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.storageAnnotation(decl) orelse return;
 
@@ -4636,37 +4661,48 @@ pub const TypeChecker = struct {
             return;
         }
 
+        const arg = self.arena.annot_args.items[annot.args_start];
+
         // Step 3, NAME — and this branch is here because writing the comment
-        // and re-reading the code disagreed. `@storage(kind: sparse)` carries a
+        // and re-reading the code disagreed. `@storage(kind: .sparse)` carries a
         // value the domain does have and a name the schema does not declare, so
         // it is a step-3 failure; without this branch it fell through to the
-        // const test, where an `ident` is not const-evaluable and the answer was
-        // `E0504 — must be a CONSTANT storage mode`. That message is false about
-        // the value and silent about the actual fault.
-        if (self.arena.annot_args.items[annot.args_start].name != 0) {
-            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes a positional argument, not a named one; one of {s}", .{storage_domain_list});
+        // const test, where the answer was `E0504 — must be a CONSTANT storage
+        // mode`, false about the value and silent about the actual fault.
+        if (arg.name != 0) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes a positional argument, not a named one; write one of {s}", .{storage_domain_dotted});
             return;
         }
 
-        // Step 3, value — the name form, resolved against the domain's single
-        // declaration. Both `@storage(sparse)` and `@storage(.sparse)` reach
-        // here; see `annotationBareOrDottedName` for why both are admitted.
-        if (self.arena.annotationBareOrDottedName(annot)) |name_id| {
+        // Step 3, value — the tag path, resolved against the domain's single
+        // declaration.
+        if (self.arena.annotationTagPathName(annot)) |name_id| {
             const name = self.arena.strings.slice(name_id);
             if (StorageKind.fromName(name) == null) {
-                try self.emit(.annotation_arg_mismatch, .error_, annot.span, "'{s}' is not a storage mode; @storage takes one of {s}", .{ name, storage_domain_list });
+                try self.emit(.annotation_arg_mismatch, .error_, annot.span, "'.{s}' is not a storage mode; @storage takes one of {s}", .{ name, storage_domain_dotted });
             }
             return;
         }
 
-        // Not a name. A const-evaluable expression of the wrong shape is still
-        // a step-3 failure (a value outside the domain, e.g. `@storage(1)` or
-        // `@storage("sparse")`); anything else fails step 4.
-        const arg = self.arena.annot_args.items[annot.args_start];
+        // Step 3, SPELLING — a bare enumeration value. Its own branch and its own
+        // message, because the fault is the sigil and not the value: falling
+        // through would answer `E0504 — must be a constant`, which is false about
+        // `sparse` and says nothing about what to write instead. An `ident` is
+        // not const-evaluable, so without this branch that is exactly where it
+        // would land.
+        if (self.arena.exprKind(arg.value) == .ident) {
+            const name = self.arena.strings.slice(self.arena.exprData(arg.value));
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage's argument is an enum value: write '.{s}', not '{s}'", .{ name, name });
+            return;
+        }
+
+        // Neither a tag path nor a bare name. A const-evaluable expression is
+        // still a step-3 failure (a value outside the domain, e.g. `@storage(1)`
+        // or `@storage("sparse")`); anything else fails step 4.
         if (isConstEvaluable(self.arena, arg.value)) {
-            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage's argument must be a storage mode, one of {s}", .{storage_domain_list});
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage's argument must be a storage mode, one of {s}", .{storage_domain_dotted});
         } else {
-            try self.emit(.annotation_arg_not_const, .error_, annot.span, "@storage's argument must be a constant storage mode, one of {s}", .{storage_domain_list});
+            try self.emit(.annotation_arg_not_const, .error_, annot.span, "@storage's argument must be a constant storage mode, one of {s}", .{storage_domain_dotted});
         }
     }
 
@@ -7799,14 +7835,33 @@ test "type-checker emits E0101 on duplicate component declaration" {
 // The two codes exist so the two failures are TOLD APART, so each test below
 // asserts the presence of its own code AND the absence of the other. Asserting
 // presence alone would be satisfied by a checker that emitted both, and then
-// the two fixtures of `tests/etch/corpus/invalid/` would be distinguished by
+// the fixtures of `tests/etch/corpus/invalid/` would be distinguished by
 // nothing but the fact that both fail.
+//
+// The accepted spelling is the tag path. Every source below is written in it
+// except where the bare form is the subject.
 
 test "E0503: @storage with a value outside the StorageKind domain" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
-        \\@storage(archetype)
+        \\@storage(.archetype)
         \\component Burning { remaining: float = 3.0 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+}
+
+test "E0503 and not E0504: the BARE spelling of a domain value is refused" {
+    // The fault is the sigil, not the value: `sparse` is in the domain. Falling
+    // through to the const test would answer `E0504 — must be a constant`, which
+    // is false about the value and silent about what to write instead — and an
+    // `ident` is not const-evaluable, so that is exactly where it would land
+    // without its own branch. The absence assertion is what holds that line.
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(sparse)
+        \\component Chilled { stacks: int = 1 }
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
@@ -7836,7 +7891,7 @@ test "E0503: @storage arity — no argument, and more than one" {
     }
     {
         var result = try parseAndCheck(gpa,
-            \\@storage(sparse, table)
+            \\@storage(.sparse, .table)
             \\component B { x: int = 0 }
         );
         defer result.deinit(gpa);
@@ -7845,14 +7900,13 @@ test "E0503: @storage arity — no argument, and more than one" {
 }
 
 test "E0503 and not E0504: @storage with a NAMED argument" {
-    // The schema declares one POSITIONAL argument. `kind: sparse` carries a
+    // The schema declares one POSITIONAL argument. `kind: .sparse` carries a
     // value the domain does have, so the fault is the name — step 3, not step
     // 4. Before this case existed the checker answered `E0504 — must be a
-    // constant storage mode`, which is false about the value and silent about
-    // the fault; the absence assertion below is what holds that line.
+    // constant storage mode`, false about the value and silent about the fault.
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
-        \\@storage(kind: sparse)
+        \\@storage(kind: .sparse)
         \\component Chilled { stacks: int = 1 }
     );
     defer result.deinit(gpa);
@@ -7860,24 +7914,30 @@ test "E0503 and not E0504: @storage with a NAMED argument" {
     try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
 }
 
-test "counter-factual: both admitted spellings of a domain value are clean" {
+test "the guard's bound, tested in BOTH directions" {
     // A guard has two ways of being wrong — missing what it must catch, and
-    // catching what it must let through. Every test above exercises the first.
-    // This one exercises the second, and it is why `@storage(.sparse)` is
-    // admitted alongside the bare `@storage(sparse)` the corpus's own valid
-    // fixture uses: the corpus is not uniform on the sigil, and refusing
-    // either form would make a documented example fail.
+    // catching what it must let through. The tests above exercise the first.
+    // This one exercises both at once, which is what makes it a bound and not a
+    // second presence check: every accepted spelling must come out clean, and
+    // the refused one must come out refused, in the same test over the same
+    // shape of source. Under the earlier both-spellings rule the last row was
+    // clean, so this row is the reversal made observable.
     const gpa = std.testing.allocator;
-    for ([_][]const u8{
-        "@storage(sparse)\ncomponent A { x: int = 0 }",
-        "@storage(table)\ncomponent B { x: int = 0 }",
-        "@storage(.sparse)\ncomponent C { x: int = 0 }",
-        "component D { x: int = 0 }",
-    }) |src| {
-        var result = try parseAndCheck(gpa, src);
+    const Case = struct { src: []const u8, clean: bool };
+    for ([_]Case{
+        .{ .src = "@storage(.sparse)\ncomponent A { x: int = 0 }", .clean = true },
+        .{ .src = "@storage(.table)\ncomponent B { x: int = 0 }", .clean = true },
+        .{ .src = "component C { x: int = 0 }", .clean = true },
+        .{ .src = "@storage(sparse)\ncomponent D { x: int = 0 }", .clean = false },
+    }) |case| {
+        var result = try parseAndCheck(gpa, case.src);
         defer result.deinit(gpa);
-        try expectNoCode(result.diagnostics.items, .annotation_arg_mismatch);
         try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+        if (case.clean) {
+            try expectNoCode(result.diagnostics.items, .annotation_arg_mismatch);
+        } else {
+            try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+        }
     }
 }
 

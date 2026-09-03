@@ -35,7 +35,7 @@ pub const ComponentId = u32;
 /// Storage backend of a component — the closed two-variant domain owned by
 /// `engine-ecs-internals.md` §2 (*Table vs SparseSet*). `table` is the default
 /// and, before M1.B.0, the only backend implemented; `sparse` is the explicit
-/// opt-in a declaration carries through `@storage(sparse)`.
+/// opt-in a declaration carries through `@storage(.sparse)`.
 ///
 /// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
 /// §13.3.1 states the rule that makes this the right home: an annotation
@@ -184,7 +184,7 @@ pub const ComponentDesc = struct {
     default_bytes: []const u8,
     fields: []const FieldDesc,
     /// Storage backend. `table` unless the declaration carried
-    /// `@storage(sparse)`. **Never part of on-disk identity**: a
+    /// `@storage(.sparse)`. **Never part of on-disk identity**: a
     /// `SchemaEntry` carries name, size and alignment, and the mode comes from
     /// this runtime registry at load (`engine-scene-serialization.md` §4), so a
     /// component changing mode invalidates no cooked scene and demands no

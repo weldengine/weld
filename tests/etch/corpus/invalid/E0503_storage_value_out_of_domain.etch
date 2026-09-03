@@ -5,9 +5,14 @@
 // names the storage MODEL, not a mode of the domain, and is the kind of
 // near-miss that passed silently before M1.B/G1 — every value did.
 //
+// Written in the ACCEPTED spelling on purpose. With the bare `archetype`
+// this file would exercise the sigil rule and not the domain, and its own
+// name would be a lie; `E0503_storage_bare_value.etch` is the fixture that
+// owns the spelling.
+//
 // Expected: E0503 AnnotationArgMismatch (§13.3 step 3 — value).
 
-@storage(archetype)
+@storage(.archetype)
 component Burning {
     remaining: float = 3.0
 }

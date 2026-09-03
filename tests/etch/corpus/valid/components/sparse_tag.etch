@@ -1,12 +1,12 @@
 // The spec's own example of a sparse marker, and the first Etch-declared
 // EMPTY component anywhere in the corpora.
 //
-// `engine-ecs-internals.md` §2 (*Table vs SparseSet*) gives
-// `@storage(sparse) component InCombat {}` as the canonical tag shape, and
-// `etch-reference-part3.md` §6 writes the annotation with a BARE value — the
-// form `components/annotated.etch` already uses — while `@phase(.update)` and
-// `@tag(.unit)` take the dot. Both spellings are admitted; the discrimination
-// M1.B/G1 owes is over the VALUE, never the sigil.
+// `engine-ecs-internals.md` §2 (*Table vs SparseSet*) gives the canonical tag
+// shape. The spelling here is the TAG PATH, `@storage(.sparse)`: an argument
+// whose declared type is an enumeration domain is written that way, as every
+// sibling annotation of that shape already is, and a bare enumeration value
+// would be syntactically indistinguishable from an identifier reference.
+// `E0503_storage_bare_value.etch` is its refused twin.
 //
 // The empty body is the part that had no witness before this file. M1.B/G0
 // established the zero-SIZE case has a table-side twin in production already
@@ -16,13 +16,13 @@
 // `while (peek() != .rbrace)` — an immediate `}` yields zero fields — and the
 // type-checker carries no field-count floor.
 
-@storage(sparse)
+@storage(.sparse)
 component InCombat {}
 
 @storage(.sparse)
 component Stunned {}
 
-@storage(table)
+@storage(.table)
 component Health {
     current: float = 100.0
 }

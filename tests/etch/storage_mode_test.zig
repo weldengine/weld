@@ -2,7 +2,7 @@
 //! nothing reads it yet.
 //!
 //! The gate's exit is deliberately a **declared no-op**. After G1 a component
-//! annotated `@storage(sparse)` is recorded as `sparse` in the registry and is
+//! annotated `@storage(.sparse)` is recorded as `sparse` in the registry and is
 //! still stored exactly as a table component — there is no sparse backend
 //! before G2. This file is what makes that sentence observable instead of
 //! asserted: one test reads the recorded mode, the next shows the storage did
@@ -28,7 +28,7 @@ const lower = weld_etch.codegen_zig.lower;
 /// One sparse component, one plain one, so every assertion below has its
 /// negative twin in the same program rather than in a second scene.
 const src_mixed =
-    \\@storage(sparse)
+    \\@storage(.sparse)
     \\component Burning { remaining: float = 3.0 }
     \\component Health { current: float = 100.0 }
 ;
@@ -101,7 +101,7 @@ test "G1 leaves the mode a declared no-op: a sparse component still stores as ta
 
 test "an empty component declaration is legal, and its declared mode records" {
     // The probe M1.B/G0 could not settle without compiling: the spec's own
-    // example of a sparse tag is `@storage(sparse) component InCombat {}`, and
+    // example of a sparse tag is `@storage(.sparse) component InCombat {}`, and
     // NO Etch-declared empty component exists anywhere in the corpora. Reading
     // the wiring said it should pass — `parseComponentDecl` loops
     // `while (peek() != .rbrace)`, so an immediate `}` yields zero fields, and
@@ -115,7 +115,7 @@ test "an empty component declaration is legal, and its declared mode records" {
     defer world.deinit(gpa);
 
     var pr = try weld_etch.parseSource(gpa,
-        \\@storage(sparse)
+        \\@storage(.sparse)
         \\component InCombat {}
     );
     defer pr.deinit(gpa);

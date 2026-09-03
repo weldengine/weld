@@ -526,9 +526,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // ABSENCE of E0504. The valid-corpus `sparse_tag.etch` fixture adds NO block: the
     // corpus driver is one test iterating a table.
     // (2060 -> 2061, suite reported 2061 - 2042 passed + 19 skipped, macOS aarch64.)
+    // G1 reversal adds one: the BARE spelling of a domain value is refused, asserted with
+    // the ABSENCE of E0504 — an `ident` is not const-evaluable, so without its own branch
+    // it answered "must be a constant", false about a value the domain HAS. The widening
+    // counter-factual was rewritten rather than added to: it now carries the refused row
+    // beside the accepted ones, so it tests the bound in both directions in one block.
+    // (2061 -> 2062, suite reported 2062 - 2043 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2059,
-        else => 2061,
+        .windows => 2060,
+        else => 2062,
     };
 }
 

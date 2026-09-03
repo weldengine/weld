@@ -27,7 +27,7 @@ component Predicted {
     flag: bool = false
 }
 
-@storage(sparse)
+@storage(.sparse)
 component Damaged {
     amount_this_frame: float = 0.0
 }
