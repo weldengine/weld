@@ -99,12 +99,18 @@ pub const SparseSetStorage = struct {
     /// Entity INDEX → position in `dense`, or `absent`. Grown to cover the
     /// largest index ever inserted; never indexed by a full handle.
     ///
-    /// **Its size follows the largest entity INDEX, not the entry count**, which
-    /// is the sparse set's known trade-off and worth stating rather than
-    /// discovering: one entry on an entity at index 10^6 costs 4 MB here. That
-    /// is the price of O(1) membership without a hash container — which the
-    /// determinism discipline wants anyway — and it is bounded by the identity
-    /// store's index space, not by this component's popularity.
+    /// **Its size follows the largest entity INDEX, not the entry count** — and
+    /// the index space is bounded by the PEAK of CONCURRENTLY LIVE entities,
+    /// not by the total number ever spawned: `EntityIdentityStore.allocate`
+    /// recycles from `free_indices` before appending a slot, so reaching index
+    /// 10^6 takes 10^6 entities coexisting, which is a very different statement
+    /// from "one entry on an entity at index 10^6".
+    ///
+    /// The real residual is that this array **never shrinks back** after such a
+    /// peak. That is the sparse set's accepted trade-off and not a defect to
+    /// fix: shrinking on despawn would thrash the allocation against the very
+    /// churn the mode exists to serve. It is the price of O(1) membership with
+    /// no hash container, which the determinism discipline wants anyway.
     sparse: std.ArrayListUnmanaged(u32) = .empty,
 
     /// Component rows, `elem_size` bytes each, parallel to `dense`.
