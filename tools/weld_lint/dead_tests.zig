@@ -532,9 +532,22 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // counter-factual was rewritten rather than added to: it now carries the refused row
     // beside the accepted ones, so it tests the bound in both directions in one block.
     // (2061 -> 2062, suite reported 2062 - 2043 passed + 19 skipped, macOS aarch64.)
+    // G2 adds ten. Nine are the sparse backend's invariants, one per invariant plus the
+    // two discriminating halves the gate demands — the swap-remove counter-factual on the
+    // LAST entry, and the recycled-generation case. The tenth is the EMPTY archetype,
+    // legal since this gate: an entity spawns into it, resolves, shares it with a second
+    // such entity, and despawns. `chunk.zig`'s "rejects empty component list" test is
+    // REPLACED by its opposite rather than added to, so it contributes none.
+    //
+    // These nine were SILENTLY UNCOLLECTED first: `pub const sparse_storage = @import(…)`
+    // at the ECS root is two hops from the module root, and the suite reported the same
+    // total with them present as without. What caught it is this guard's own closure
+    // analysis, which is static — the pin `_ = ecs.sparse_storage;` in `src/core/root.zig`
+    // is what the four M0.8/E3-D pins beside it already record.
+    // (2062 -> 2072, suite reported 2072 - 2053 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2060,
-        else => 2062,
+        .windows => 2070,
+        else => 2072,
     };
 }
 
