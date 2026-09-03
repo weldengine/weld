@@ -69,7 +69,7 @@ test "the registry records the storage mode a component declared" {
     try std.testing.expectEqual(StorageKind.table, world.registry.componentStorage(health));
 }
 
-test "G1 leaves the mode a declared no-op: a sparse component still stores as table" {
+test "a sparse component leaves the archetype signature and lives in its own store" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -85,17 +85,39 @@ test "G1 leaves the mode a declared no-op: a sparse component still stores as ta
 
     const e = try world.spawnDynamic(gpa, &[_]ComponentId{ burning, health });
 
-    // The entity resolves through the ordinary table funnel, and its archetype
-    // carries BOTH components — the sparse one included. That is the whole
-    // content of "nothing reads the mode yet": G2 is what makes this
-    // assertion change, and it is written down so the change is visible.
+    // REPLACES the G1 pin `G1 leaves the mode a declared no-op: a sparse
+    // component still stores as table`, whose assertions were
+    // `expect(arch.hasComponent(burning))` and
+    // `expect(arch.hasComponent(health))` — both true then, because nothing
+    // read the mode. G3 is what ends that no-op, so the pin is replaced by its
+    // OPPOSITE rather than deleted: `burning` must now be ABSENT from the
+    // signature. (The G1 comment said G2 would change it; G2 delivered the
+    // backend and G3 the routing.)
     const loc = world.dynamicLocation(e).?;
     const arch = world.dynamicArchetype(loc.archetype_idx);
-    try std.testing.expect(arch.hasComponent(burning));
+    try std.testing.expect(!arch.hasComponent(burning));
+    // …while the table component stays exactly where it was, which is what
+    // makes the line above a discrimination and not a constant: an
+    // implementation that dropped every component from every signature would
+    // pass the first assertion and fail this one.
     try std.testing.expect(arch.hasComponent(health));
 
-    // And the recorded mode survived the spawn — the registry is the mode's
-    // home, not the archetype.
+    // The entity nevertheless CARRIES the sparse component, answered through
+    // the routed World-level entries. Asserting only the archetype's absence
+    // would be an absence witness with no presence witness beside it — the
+    // shape that lets "routed" and "silently dropped" pass the same test.
+    try std.testing.expect(world.hasComponentDyn(e, burning));
+    try std.testing.expect(world.hasComponentDyn(e, health));
+    try std.testing.expect(world.componentBytes(e, burning) != null);
+
+    // And the row really is in the sparse store, read from the backend rather
+    // than through the entry under test.
+    const store = world.sparse_stores.getConst(burning).?;
+    try std.testing.expect(store.contains(e));
+    try std.testing.expectEqual(@as(usize, 1), store.len());
+
+    // The recorded mode survived the spawn — the registry is the mode's home,
+    // not the archetype and not the store.
     try std.testing.expectEqual(StorageKind.sparse, world.registry.componentStorage(burning));
 }
 

@@ -130,6 +130,46 @@ pub const SparseSetStorage = struct {
     /// Rows the `rows` buffer can hold. Meaningless when `rows == null`.
     rows_capacity: usize = 0,
 
+    /// The exact field set, pinned.
+    ///
+    /// `World.beginFrame` clears every archetype's dirty bitset and has NO
+    /// sparse arm, because a sparse store carries per-row `added`/`changed`
+    /// ticks and no chunk-granular bitset — a granularity a sparse set does not
+    /// have, so there would be nothing to clear (invariant 2). A comment saying
+    /// so is a claim; the block below is the guard. Add or reorder a field and
+    /// it breaks, which is the moment to go re-read the frame boundary and
+    /// decide whether it now owes the new field something.
+    ///
+    /// Pinned as the field SET and not the count: swapping two fields for a
+    /// different pair leaves the count untouched, and the message names the
+    /// field where the sets diverge.
+    ///
+    /// Here, beside the fields, because here is where a field gets added. It
+    /// spent one round at file scope on a FALSE diagnosis — both
+    /// counter-factuals had compiled clean and I read that as a struct-body
+    /// `comptime` block not being analysed, when in fact my two mutation
+    /// patterns omitted the fields' `= 0` / `= .empty` defaults and had
+    /// silently matched nothing. A struct-body block IS analysed, measured with
+    /// an always-false probe; the move is undone rather than re-justified.
+    const field_set_pin = [_][]const u8{
+        "component_id", "elem_size",   "elem_align",
+        "dense",        "added_ticks", "changed_ticks",
+        "sparse",       "rows",        "rows_capacity",
+    };
+
+    comptime {
+        const actual = std.meta.fieldNames(SparseSetStorage);
+        if (actual.len != field_set_pin.len) @compileError(
+            "SparseSetStorage's field set moved — see `field_set_pin` and `World.beginFrame`",
+        );
+        for (actual, field_set_pin) |a, pinned| {
+            if (!std.mem.eql(u8, a, pinned)) @compileError(
+                "SparseSetStorage's field set moved at `" ++ a ++
+                    "` — see `field_set_pin` and `World.beginFrame`",
+            );
+        }
+    }
+
     /// Create an empty storage for `component_id`.
     pub fn init(component_id: ComponentId, elem_size: u16, elem_align: u16) SparseSetStorage {
         // A component past the engine's own alignment bound would be stored
@@ -202,6 +242,22 @@ pub const SparseSetStorage = struct {
     pub fn getMut(self: *SparseSetStorage, entity: EntityId, tick: Tick) ?[]u8 {
         const pos = self.positionOf(entity) orelse return null;
         self.changed_ticks.items[pos] = tick;
+        return self.row(pos);
+    }
+
+    /// Mutable bytes of `entity`'s row WITHOUT the change stamp, or null when
+    /// absent.
+    ///
+    /// The distinction from `getMut` is not a convenience: `World.componentBytes`
+    /// is the byte-level surface `observers.zig` reads through to build its
+    /// `old_ptr` / `new_ptr` payloads, it hands out mutable bytes, and its table
+    /// arm does NOT stamp. Serving it from `getMut` would make every observer
+    /// dispatch register as a mutation of the component it is reporting on,
+    /// which a `Changed<T>` filter would then see one tick later — a change
+    /// nobody made, with no diagnostic. `markChanged` remains the entry whose
+    /// job the stamp is.
+    pub fn bytesMut(self: *SparseSetStorage, entity: EntityId) ?[]u8 {
+        const pos = self.positionOf(entity) orelse return null;
         return self.row(pos);
     }
 
