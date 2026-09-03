@@ -595,7 +595,15 @@ pub const World = struct {
     fn splitByStorage(self: *const World, buf: []ComponentId) StorageSplit {
         var n_table: usize = 0;
         for (0..buf.len) |i| {
-            if (self.registry.componentStorage(buf[i]) == .table) {
+            // `storageOf` and not `registry.componentStorage`: this is the
+            // FIRST thing to touch a caller-supplied id, so an unregistered one
+            // would index the registry out of range here rather than downstream
+            // in `Archetype.init` as it always did. `storageOf` answers
+            // `.table` past the registry's end, which sends the id into the
+            // signature and lets `Archetype.init` fail exactly as before —
+            // the precondition is pre-existing and this keeps it unmoved
+            // instead of relocating its breach into the partition.
+            if (self.storageOf(buf[i]) == .table) {
                 std.mem.swap(ComponentId, &buf[n_table], &buf[i]);
                 n_table += 1;
             }
