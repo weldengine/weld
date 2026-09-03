@@ -1,0 +1,28 @@
+// The spec's own example of a sparse marker, and the first Etch-declared
+// EMPTY component anywhere in the corpora.
+//
+// `engine-ecs-internals.md` §2 (*Table vs SparseSet*) gives
+// `@storage(sparse) component InCombat {}` as the canonical tag shape, and
+// `etch-reference-part3.md` §6 writes the annotation with a BARE value — the
+// form `components/annotated.etch` already uses — while `@phase(.update)` and
+// `@tag(.unit)` take the dot. Both spellings are admitted; the discrimination
+// M1.B/G1 owes is over the VALUE, never the sigil.
+//
+// The empty body is the part that had no witness before this file. M1.B/G0
+// established the zero-SIZE case has a table-side twin in production already
+// (`Sleeping = extern struct {}`, `src/modules/forge/api/components.zig`), but
+// no Etch source in the tree declared a fieldless component, so the spelling
+// itself was unexercised. It parses because `parseComponentDecl` loops
+// `while (peek() != .rbrace)` — an immediate `}` yields zero fields — and the
+// type-checker carries no field-count floor.
+
+@storage(sparse)
+component InCombat {}
+
+@storage(.sparse)
+component Stunned {}
+
+@storage(table)
+component Health {
+    current: float = 100.0
+}

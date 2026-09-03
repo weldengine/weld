@@ -37,6 +37,7 @@ pub const valid = [_]Entry{
     .{ .name = "components/minimal.etch", .source = @embedFile("corpus/valid/components/minimal.etch") },
     .{ .name = "components/multi_decl.etch", .source = @embedFile("corpus/valid/components/multi_decl.etch") },
     .{ .name = "components/annotated.etch", .source = @embedFile("corpus/valid/components/annotated.etch") },
+    .{ .name = "components/sparse_tag.etch", .source = @embedFile("corpus/valid/components/sparse_tag.etch") },
 
     .{ .name = "resources/game_mode.etch", .source = @embedFile("corpus/valid/resources/game_mode.etch") },
     .{ .name = "resources/physics_config.etch", .source = @embedFile("corpus/valid/resources/physics_config.etch") },

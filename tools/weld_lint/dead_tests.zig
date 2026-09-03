@@ -518,9 +518,17 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // refuses a sparse program with its own typed error, and the same program without
     // the annotation lowers.
     // (2051 -> 2060, suite reported 2060 - 2041 passed + 19 skipped, macOS aarch64.)
+    // G1 adds a tenth, found by re-reading the doc comment against the code rather than
+    // by a failing test: `@storage(kind: sparse)` carries a value the domain HAS and a
+    // name the schema does not declare, so it is a step-3 failure — and it was falling
+    // through to the const test, answering `E0504 — must be a constant storage mode`,
+    // false about the value and silent about the fault. The test asserts E0503 and the
+    // ABSENCE of E0504. The valid-corpus `sparse_tag.etch` fixture adds NO block: the
+    // corpus driver is one test iterating a table.
+    // (2060 -> 2061, suite reported 2061 - 2042 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2058,
-        else => 2060,
+        .windows => 2059,
+        else => 2061,
     };
 }
 

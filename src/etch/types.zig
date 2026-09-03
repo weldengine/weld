@@ -4622,17 +4622,29 @@ pub const TypeChecker = struct {
     /// would be the same and the reason would be wrong, which is exactly what
     /// makes two fixtures pinned on distinct codes worth having.
     ///
-    /// `@storage()` and `@storage(a, b)` are arity failures, not domain
-    /// failures, and both land on E0503 by step 3's own wording (*number, name
-    /// or type*).
+    /// Step 3 asks three questions and all three land on E0503, by its own
+    /// wording (*number, name or type*): `@storage()` and `@storage(a, b)` fail
+    /// on number, `@storage(kind: sparse)` on name, `@storage(archetype)` and
+    /// `@storage(1)` on value. Only a well-formed positional argument that is
+    /// not a constant reaches step 4.
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.storageAnnotation(decl) orelse return;
 
-        // Step 3, arity and naming. A named argument is refused because the
-        // schema declares one POSITIONAL argument; accepting `kind: sparse`
-        // would invent a spelling no document carries.
+        // Step 3, arity.
         if (annot.args_len != 1) {
             try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes exactly one argument, one of {s}", .{storage_domain_list});
+            return;
+        }
+
+        // Step 3, NAME — and this branch is here because writing the comment
+        // and re-reading the code disagreed. `@storage(kind: sparse)` carries a
+        // value the domain does have and a name the schema does not declare, so
+        // it is a step-3 failure; without this branch it fell through to the
+        // const test, where an `ident` is not const-evaluable and the answer was
+        // `E0504 — must be a CONSTANT storage mode`. That message is false about
+        // the value and silent about the actual fault.
+        if (self.arena.annot_args.items[annot.args_start].name != 0) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes a positional argument, not a named one; one of {s}", .{storage_domain_list});
             return;
         }
 
@@ -7830,6 +7842,22 @@ test "E0503: @storage arity — no argument, and more than one" {
         defer result.deinit(gpa);
         try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
     }
+}
+
+test "E0503 and not E0504: @storage with a NAMED argument" {
+    // The schema declares one POSITIONAL argument. `kind: sparse` carries a
+    // value the domain does have, so the fault is the name — step 3, not step
+    // 4. Before this case existed the checker answered `E0504 — must be a
+    // constant storage mode`, which is false about the value and silent about
+    // the fault; the absence assertion below is what holds that line.
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(kind: sparse)
+        \\component Chilled { stacks: int = 1 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
 }
 
 test "counter-factual: both admitted spellings of a domain value are clean" {
