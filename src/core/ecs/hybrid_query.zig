@@ -191,6 +191,60 @@ pub const SparseDrivenQuery = struct {
         }
     };
 
+    /// How many dense ranges the driver's population splits into, for a target
+    /// of `target` ranges. Never zero, and never more than the population: a
+    /// range is a unit of work, and an empty one is not one.
+    pub fn rangeCount(self: *const SparseDrivenQuery, world: *World, target: usize) usize {
+        const store = world.sparse_stores.getConst(self.driver) orelse return 0;
+        const n = store.len();
+        if (n == 0) return 0;
+        const t = @max(target, 1);
+        return @min(t, n);
+    }
+
+    /// The `i`-th of `rangeCount(target)` ranges.
+    ///
+    /// The split is EVEN with the remainder spread over the leading ranges, so
+    /// every range differs from every other by at most one — the property that
+    /// keeps a work-stealing scheduler from starving on a tail.
+    pub fn rangeAt(self: *const SparseDrivenQuery, world: *World, i: usize, target: usize) DenseRange {
+        const total = blk: {
+            const store = world.sparse_stores.getConst(self.driver) orelse break :blk 0;
+            break :blk store.len();
+        };
+        const n = self.rangeCount(world, target);
+        std.debug.assert(i < n);
+        const base = total / n;
+        const extra = total % n;
+        const from = i * base + @min(i, extra);
+        const size = base + (if (i < extra) @as(usize, 1) else 0);
+        return .{ .from = from, .to = from + size };
+    }
+
+    /// Dispatch `Body` over each dense range, passing `(range, ...args)`.
+    ///
+    /// The command-buffer bound is enforced HERE, at comptime, on this entry's
+    /// own `args` — see `refuseCommandBufferInArgs`.
+    pub fn forEachDenseRange(
+        self: *const SparseDrivenQuery,
+        world: *World,
+        target: usize,
+        comptime Body: anytype,
+        args: anytype,
+    ) void {
+        refuseCommandBufferInArgs(@TypeOf(args));
+        const n = self.rangeCount(world, target);
+        for (0..n) |i| {
+            @call(.auto, Body, .{self.rangeAt(world, i, target)} ++ args);
+        }
+    }
+
+    /// The driver's dense array, for a body that took a range.
+    pub fn dense(self: *const SparseDrivenQuery, world: *World) []const EntityId {
+        const store = world.sparse_stores.getConst(self.driver) orelse return &.{};
+        return store.entities();
+    }
+
     /// Whether `e` satisfies every member other than the driver.
     ///
     /// `not has T` on a sparse `T` is a PER-ENTITY membership test here, not an
@@ -206,6 +260,75 @@ pub const SparseDrivenQuery = struct {
         return true;
     }
 };
+
+/// A half-open range of the driver's dense array — the sparse-driven
+/// equivalent of a chunk, and the unit a worker takes.
+///
+/// A chunk is a unit because it is a contiguous allocation; a dense range is a
+/// unit for the same reason and nothing else. Both are index intervals over
+/// storage that no other worker touches, which is what makes the split safe
+/// WITHOUT a merge step.
+pub const DenseRange = struct {
+    from: usize,
+    to: usize,
+
+    pub fn len(self: DenseRange) usize {
+        return self.to - self.from;
+    }
+};
+
+/// Refuse, AT COMPTIME, an argument tuple that carries a command buffer into a
+/// job body.
+///
+/// **The bound, and why it is a type-level refusal rather than a lint rule.**
+/// `engine-ecs-internals.md` §7 and this milestone's brief both state it as an
+/// absolute: no job body receives a command buffer. A tokenizer cannot see a
+/// type — it would flag a NAME — so a lint rule would carry a heuristic's false
+/// positives and, worse, its false negatives. Here the check is exact: the
+/// dispatch entry inspects its own `ArgsType` and fails to compile.
+///
+/// It is a BOUND and not a merge mechanism. A worker owns its range's storage
+/// and nothing else, so two workers recording structural changes would need a
+/// deterministic merge that has no producer anywhere in the repository —
+/// measured at G8: zero call sites pass a command buffer into a dispatch entry,
+/// and nothing in the types forbade it, which is exactly what makes a bound
+/// worth establishing rather than noting.
+///
+/// The walk is one level deep by design: a command buffer reaches a body either
+/// directly or behind a pointer, and both are caught. A buffer buried inside a
+/// caller's own struct is NOT caught, and that is stated rather than implied —
+/// closing it would need a recursive type walk whose cost is a comptime
+/// traversal of every field of every argument, for a shape no call site has.
+pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
+    comptime {
+        const info = @typeInfo(ArgsType);
+        const fields = switch (info) {
+            .@"struct" => |st| st.fields,
+            else => return,
+        };
+        for (fields) |f| {
+            if (carriesCommandBuffer(f.type)) @compileError(
+                "no job body receives a command buffer (M1.B/G8): argument of type `" ++
+                    @typeName(f.type) ++ "` reaches a dispatched body. A worker owns its " ++
+                    "range and nothing else; two workers recording structural changes would " ++
+                    "need a deterministic merge, which has no producer. Record the change " ++
+                    "outside the dispatch, or dispatch a body that does not record.",
+            );
+        }
+    }
+}
+
+fn carriesCommandBuffer(comptime T: type) bool {
+    comptime {
+        const CommandBuffer = @import("command_buffer.zig").CommandBuffer;
+        if (T == CommandBuffer or T == *CommandBuffer or T == *const CommandBuffer) return true;
+        return switch (@typeInfo(T)) {
+            .pointer => |p| p.child == CommandBuffer,
+            .optional => |o| carriesCommandBuffer(o.child),
+            else => false,
+        };
+    }
+}
 
 /// Build the sparse-driven query for `driver` out of a with/without set.
 pub fn planSparseDriven(

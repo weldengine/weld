@@ -604,10 +604,19 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `tests/etch/storage_mode_test.zig` (a disjunctive rule with a sparse term visiting a
     // both-matching entity ONCE, and a change filter on a table member while the driver is
     // sparse) and one replacement that adds none: the G5 boundary pin, flipped to its opposite.
-    // (2116 -> 2128, suite reported 2128 - 2109 passed + 19 skipped, macOS aarch64.)
+    // M1.B / G8 adds FOUR: three in `hybrid_query_test.zig` — the dense split covering the
+    // population exactly once and evenly (checked as an interval COVER, not inferred from the
+    // sum: a split double-counting one index and skipping another passes a sum), a target
+    // above the population yielding one range per entity and never an empty one, and the
+    // report NAMING the two dispatch entries — plus one in `storage_mode_test.zig` for the
+    // structural effect under a sparse driver, which carries a DISCRIMINATING half asserted
+    // on the elected plan because the correctness half alone does not distinguish the driver
+    // (measured: forcing `.table` leaves the correctness assertions green).
+    // (2128 -> 2132, suite reported 2132 - 2113 passed + 19 skipped, macOS aarch64, in ALL
+    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
     return switch (os) {
-        .windows => 2126,
-        else => 2128,
+        .windows => 2130,
+        else => 2132,
     };
 }
 

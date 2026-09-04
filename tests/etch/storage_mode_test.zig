@@ -431,3 +431,119 @@ test "a change filter on a TABLE member holds when the driver is SPARSE" {
     // distinguish "the driver bounds the rule" from "the filter always passes".
     try std.testing.expectEqual(@as(i64, 0), readI64(&world, cold, hits));
 }
+
+// ─── M1.B / G8 — structural effects and observers under a SPARSE driver ─────
+
+const src_sparse_driven_add =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Scorched { n: i32 = 0 }
+    \\
+    \\rule mark_scorched(entity: Entity)
+    \\    when entity has Burning
+    \\{
+    \\    entity.add(Scorched { n: 1 })
+    \\}
+;
+
+const AddSpy = struct {
+    var fired: u32 = 0;
+    var entities: [16]weld_core.ecs.EntityId = undefined;
+    fn reset() void {
+        fired = 0;
+    }
+    fn cb(
+        ctx: ?*anyopaque,
+        w: *World,
+        entity: weld_core.ecs.EntityId,
+        component_id: ?ComponentId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
+        deferred: *weld_core.ecs.CommandBuffer,
+    ) anyerror!void {
+        _ = ctx;
+        _ = w;
+        _ = component_id;
+        _ = old_value;
+        _ = new_value;
+        _ = deferred;
+        if (fired < entities.len) entities[fired] = entity;
+        fired += 1;
+    }
+};
+
+test "G8: the planner elects SPARSE, and the effect applies exactly once per matching entity" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_sparse_driven_add);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const burning = world.registry.idOf("Burning").?;
+    const scorched = world.registry.idOf("Scorched").?;
+
+    // Five matching entities plus one that does NOT carry the driver, so the
+    // counts below are a discrimination and not a population.
+    var matching: [5]weld_core.ecs.EntityId = undefined;
+    for (&matching) |*e| e.* = try world.spawnDynamic(gpa, &.{burning});
+    const bystander = try world.spawnDynamic(gpa, &.{});
+
+    AddSpy.reset();
+    try world.observer_registry.registerOnAdd(gpa, &world, scorched, null, &AddSpy.cb);
+
+    // THE DISCRIMINATING HALF, and it exists because the correctness half below
+    // does NOT discriminate. Measured: forcing `electDriver` to return `.table`
+    // leaves every assertion below GREEN — with an all-sparse with-set the
+    // table-driven arm's archetype filter is empty, matches every archetype,
+    // and the per-entity membership test selects the same five. The answer is
+    // driver-independent BY DESIGN; the cost is not. So the election is asserted
+    // where it is decided, or this test's name would be a claim it cannot back.
+    {
+        try std.testing.expectEqual(@as(usize, 1), interp.rule_descs.len);
+        const sel = interp.rule_descs[0].selection;
+        try std.testing.expectEqual(@as(usize, 1), sel.len);
+        try std.testing.expect(!sel[0].isTableDriven());
+        try std.testing.expectEqual(burning, sel[0].sparse.driver);
+    }
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+
+    // THE CORRECTNESS HALF — a multiplicity, never an order. The contract
+    // makes the visit order deterministic, non-invariant and OUT OF CONTRACT,
+    // so an oracle on the sequence would pin what the corpus refuses to
+    // promise. What it does promise is EXACTLY ONCE per matching entity per
+    // tick, and that survives the driver being a dense array.
+    try std.testing.expectEqual(@as(u64, 5), report.entities_iterated);
+    for (matching) |e| try std.testing.expect(world.hasComponentDyn(e, scorched));
+    try std.testing.expect(!world.hasComponentDyn(bystander, scorched));
+
+    // The observers fired once per applied command — five, not ten, and not
+    // five-plus-the-bystander. `on_added` fires at the flush, so this is the
+    // apply order following the RECORDING order, which follows the visit order.
+    try std.testing.expectEqual(@as(u32, 5), AddSpy.fired);
+
+    // Each observed entity is distinct and is one of the matching five: a
+    // recording that emitted one entity twice would keep the count at five
+    // while being wrong, so the SET is checked and not only its size.
+    for (0..AddSpy.fired) |i| {
+        const seen = AddSpy.entities[i];
+        try std.testing.expect(std.mem.indexOfScalar(weld_core.ecs.EntityId, &matching, seen) != null);
+        for (0..i) |j| try std.testing.expect(@as(u64, @bitCast(AddSpy.entities[j])) != @as(u64, @bitCast(seen)));
+    }
+
+    // A SECOND tick must not re-add: `Scorched` is now present, and the rule's
+    // `when` still matches, so this is the add-on-present path reached from a
+    // sparse-driven walk. It must not double the count.
+    AddSpy.reset();
+    var report2: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report2);
+    try std.testing.expectEqual(@as(u64, 5), report2.entities_iterated);
+    for (matching) |e| try std.testing.expect(world.hasComponentDyn(e, scorched));
+}
