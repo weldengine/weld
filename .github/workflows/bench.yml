@@ -94,3 +94,29 @@ jobs:
       # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+
+      # M1.B: the crossover bench RUNS here and its measurement is archived,
+      # which the milestone's acceptance criteria require and which this
+      # workflow could not do before — it carried no `upload-artifact` step at
+      # all, and the crossover bench was compiled by the step above without
+      # ever being executed.
+      #
+      # The FULL sweep, not `--smoke`: measured at 15 s in ReleaseSafe on the
+      # M4 Pro reference (against 1 s for the smoke), so even several times
+      # slower on a runner it is negligible against the 20-minute budget — and
+      # a one-cell-per-configuration sample archived as "the measurement" would
+      # be a thinner artifact for no saving worth having. The bench has NO pass
+      # threshold, permanently: `engine-ecs-internals.md` §2 refuses to engrave
+      # a crossover threshold and names this bench as what produces one, so its
+      # output is the deliverable and a red here would mean the bench crashed,
+      # never that a number moved.
+      - name: zig build bench-ecs-hybrid (crossover sweep)
+        run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe
+
+      - name: Archive the crossover measurement
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecs-hybrid-crossover-${{ matrix.os }}
+          path: bench/results/ecs_hybrid_crossover.md
+          if-no-files-found: error
+          retention-days: 90
