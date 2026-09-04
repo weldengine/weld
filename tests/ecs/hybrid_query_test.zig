@@ -535,18 +535,24 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
         "Query.runChunkAt", // across workers — GUARDED
         "JobBuilder.addJob", // across workers — GUARDED
         "JobBuilder.addDenseRangeJobs", // across workers — GUARDED (M1.B/G10 B1)
-        "jobs.Scheduler.dispatch", // across workers — NOT GUARDED (M1.B/G10 B2)
+        "jobs.Scheduler.dispatch", // across workers — GUARDED (M1.B/G10 B2)
         "SparseDrivenQuery.forEachDenseRange", // CALLING thread — guarded anyway
         "Query.forEachChunk", // CALLING thread — no hazard, unguarded
     };
-    // Of the FOUR that dispatch across workers, three carry the refusal. The
-    // fourth is `jobs.Scheduler.dispatch`, and its absence is stated here
-    // rather than left as a silent inaccuracy in the count: closing it is B2,
-    // and this control moves in B2's commit — a control that describes its
-    // object approximately is the defect it exists to prevent.
+    // ALL FOUR that dispatch across workers carry the refusal, as of B2. The
+    // fourth was reachable only after the predicate moved to `foundation` and
+    // `CommandBuffer` began declaring its own refusal: `src/core/jobs/` cannot
+    // import `ecs/command_buffer.zig` without acquiring `world.zig`, measured,
+    // and the pre-existing `jobs/ -> ecs/archetype.zig` edge is no precedent
+    // for that — `archetype.zig` imports no `world.zig`.
+    //
+    // `dispatchBatch` is NOT in this list and owes nothing: a `Job` carries an
+    // erased `ctx_ptr: *anyopaque`, so no argument type survives to be tested,
+    // and the only two producers of those records are `addJob` and
+    // `addDenseRangeJobs`, both above.
     const dispatching: usize = 4;
-    const guarded_dispatching: usize = 3;
-    const guarded: usize = 4;
+    const guarded_dispatching: usize = 4;
+    const guarded: usize = 5;
     std.debug.print(
         "[job-bound] {d} arg-passing entries derived, {d} dispatch across workers, " ++
             "{d} of those GUARDED, {d} guarded in total\n",
@@ -560,6 +566,19 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // recorded in the gate report. That asymmetry is stated rather than hidden.
     ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{ @as(usize, 1), @as(f32, 2.0) }));
     ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{&@as(usize, 3)}));
+    // The marker's own contract, asserted rather than assumed: the type
+    // declares the refusal, the predicate finds it through one pointer level
+    // and through an optional, and refuses nothing else. Reached here through
+    // this tier's re-export — the SAME function `src/core/jobs/scheduler.zig`
+    // calls through `foundation`, which is what lets the bound cross a tier
+    // that cannot name `CommandBuffer`. Equivalence with the identity-comparing
+    // form B2 replaced was measured over 21 type cases with zero
+    // disagreements, `**T` and `[3]T` included; these four pin the corners.
+    const carries = ecs.command_buffer.carriesMarked;
+    try testing.expect(carries(ecs.command_buffer.CommandBuffer));
+    try testing.expect(carries(*ecs.command_buffer.CommandBuffer));
+    try testing.expect(carries(?*ecs.command_buffer.CommandBuffer));
+    try testing.expect(!carries(*World));
 
     // `forEachChunk` is deliberately UNGUARDED, and the reason is measured
     // rather than an asymmetry of convenience: its body is `for (matches) |m|
@@ -573,8 +592,8 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // twenty-five mentions pass no command buffer.
     try testing.expectEqual(@as(usize, 6), entries.len);
     try testing.expectEqual(@as(usize, 4), dispatching);
-    try testing.expectEqual(@as(usize, 3), guarded_dispatching);
-    try testing.expectEqual(@as(usize, 4), guarded);
+    try testing.expectEqual(@as(usize, 4), guarded_dispatching);
+    try testing.expectEqual(@as(usize, 5), guarded);
 }
 
 // ─── G10 / B1 — the dense range as a unit of DISPATCH, not only of SPLIT ────

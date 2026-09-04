@@ -42,6 +42,7 @@ const worker_mod = @import("worker.zig");
 // thread (`ARCH-031` rule 5). Imported from its single definition rather than
 // through a Tier 0 facade; the tier rule lives at that definition.
 const float_env = @import("foundation").math.float_env;
+const job_bound = @import("foundation").job_bound;
 
 const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;
@@ -240,6 +241,17 @@ pub const Scheduler = struct {
     pub fn dispatch(self: *Scheduler, query: anytype, comptime Body: anytype, args: anytype) SchedulerError!void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
+        // M1.B/G10 — this entry hands `args` to a body `publishWaveAndWait`
+        // gives to the worker pool, so it is one of the FOUR that dispatch
+        // across workers, and until G10 it was the one carrying no bound.
+        // M1.B/G8 had placed the refusal on the type and concluded that every
+        // entry therefore reached it; placement makes a guard available, not
+        // called, and G8's enumeration was over `src/core/ecs/` while this file
+        // is in `src/core/jobs/`. The predicate lives in `foundation`
+        // precisely so this tier can reach it without importing the ECS: it
+        // interrogates the type it is handed, and the type declares its own
+        // refusal (`CommandBuffer.weld_no_job_body`).
+        job_bound.refuseMarkedArgs(ArgsType);
 
         const Trampoline = struct {
             fn call(chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void {
@@ -287,6 +299,11 @@ pub const Scheduler = struct {
     /// `incoming.len > workers.len * per_worker_capacity` (same
     /// build-mode-independent bound as `dispatch`).
     pub fn dispatchBatch(self: *Scheduler, incoming: []const Job) SchedulerError!void {
+        // No comptime bound is possible HERE and none is owed: a `Job` carries
+        // an already-erased `ctx_ptr: *anyopaque`, so there is no argument type
+        // left to interrogate. The bound is owed by the entries that BUILD
+        // those records — `JobBuilder.addJob` and `JobBuilder.addDenseRangeJobs`
+        // are the only two producers in the repository, and both carry it.
         if (incoming.len > self.jobs.len) return error.TooManyChunks;
         @memcpy(self.jobs[0..incoming.len], incoming);
         self.publishWaveAndWait(@intCast(incoming.len));
