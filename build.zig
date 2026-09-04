@@ -1254,6 +1254,38 @@ pub fn build(b: *std.Build) void {
     );
     bench_step.dependOn(&bench_run.step);
 
+    // ------------------------- M1.B / G10 ECS hybrid-storage crossover bench --
+    //
+    // Table vs SparseSet per-tick cost over (population fraction, churn rate),
+    // swept one parameter at a time from a declared base over payload size,
+    // query member count, archetype spread and worker count. TWO COLUMNS per
+    // cell — first occurrence and steady state, never averaged — each with its
+    // allocation count. REPORTED, NOT GATED, and permanently: the owning spec
+    // (`engine-ecs-internals.md` §2) refuses to engrave a threshold and names
+    // this bench as what produces one instead, so a pass threshold here would
+    // grade an implementation against a number the bench exists to produce.
+    // Writes `bench/results/ecs_hybrid_crossover.md`. Pass `-- --smoke` for a
+    // one-cell-per-configuration CI run.
+    const hybrid_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/ecs_hybrid_crossover.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hybrid_bench_module.addImport("weld_core", core_module);
+    const hybrid_bench_exe = b.addExecutable(.{
+        .name = "ecs-hybrid-crossover-bench",
+        .root_module = hybrid_bench_module,
+    });
+    b.installArtifact(hybrid_bench_exe);
+    const hybrid_bench_run = b.addRunArtifact(hybrid_bench_exe);
+    hybrid_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| hybrid_bench_run.addArgs(args);
+    const hybrid_bench_step = b.step(
+        "bench-ecs-hybrid",
+        "Run the M1.B ECS hybrid-storage crossover bench (reported, not gated; writes bench/results/ecs_hybrid_crossover.md)",
+    );
+    hybrid_bench_step.dependOn(&hybrid_bench_run.step);
+
     // ------------------------------ M1.1.4 forge narrowphase fast-path bench --
     //
     // Per-pair dispatched `collideOrdered` vs the generic GJK/EPA oracle
