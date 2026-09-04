@@ -2434,12 +2434,18 @@ pub const Interpreter = struct {
         // is ascending by `archetype_id`, and a sparse-driven term keeps no
         // cache and has no archetype to order by. One such term and the whole
         // union must de-duplicate by ENTITY instead.
-        var all_table = true;
+        // The merge below de-duplicates by ARCHETYPE, which is only sound when
+        // every term of the union admits the same entities within an archetype.
+        // A term whose admission is PER ENTITY breaks that premise — and
+        // `isTableDriven` answers the DRIVER, not the admission, which is the
+        // gap P1-2 named: a table-driven term carrying sparse members took the
+        // merge, where a single `owner` decides for all of them.
+        var merge_by_archetype = true;
         for (sel) |q| {
-            if (!q.isTableDriven()) all_table = false;
+            if (q.needsEntityDedup()) merge_by_archetype = false;
         }
 
-        if (!all_table) {
+        if (!merge_by_archetype) {
             // Entity-level dedup, over the reusable `merge_seen` set so the
             // steady state allocates nothing. The visit order here is the
             // terms' own order, which the contract permits: deterministic (a
@@ -2485,10 +2491,17 @@ pub const Interpreter = struct {
             return;
         }
 
-        // Every term is table-driven: the k-way merge is UNCHANGED from M1.0.0,
+        // NO term admits per entity: the k-way merge is UNCHANGED from M1.0.0,
         // and it stays because it de-duplicates for free — no set, no
         // allocation — by advancing every cursor that sits on the smallest
         // archetype id.
+        //
+        // *Its premise is that every term matching an archetype admits the same
+        // entities within it, which was true when a term could only test at
+        // archetype grain. `sparse_with` broke it, and the condition above is
+        // what restores it: `owner` below is overwritten by each matching term,
+        // so a single one decides for the whole archetype — sound only when they
+        // all decide alike, which is now guaranteed rather than assumed.*
         self.merge_cursors.clearRetainingCapacity();
         try self.merge_cursors.appendNTimes(self.gpa, 0, sel.len);
         const cursors = self.merge_cursors.items;

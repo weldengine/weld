@@ -632,9 +632,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // reaching a WORKER through `JobBuilder.addDenseRangeJobs`, differential
     // against the same body on the calling thread, plus the staging edge cases
     // (2143 -> 2145, suite closure reports 2145).
+    // The external-review reprise adds one block per corrected P1, each RED
+    // before its fix. P1-2 (the union applying every term's sparse filter) is
+    // the first (2145 -> 2146, suite closure reports 2146).
     return switch (os) {
-        .windows => 2143,
-        else => 2145,
+        .windows => 2144,
+        else => 2146,
     };
 }
 

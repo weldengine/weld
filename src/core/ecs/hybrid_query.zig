@@ -439,6 +439,23 @@ pub const QueryPlan = union(enum) {
     /// keeps its ascending-archetype-id merge only while EVERY term answers
     /// true — one sparse-driven term and the whole union de-duplicates by
     /// entity instead.
+    /// Whether this term's admission is decided PER ENTITY, so a union
+    /// containing it cannot de-duplicate by archetype.
+    ///
+    /// True for a sparse-driven term, which has no archetype list at all — and
+    /// ALSO for a table-driven term that CARRIES sparse members, which is the
+    /// case M1.B/G7 left in the gap: `isTableDriven` answers the DRIVER and
+    /// says nothing about what the term tests per entity. The k-way merge runs
+    /// `iterateArchetype` once per archetype under a SINGLE owner, so every
+    /// other term's `admits` is skipped, and the entity a non-last term would
+    /// have admitted is silently lost.
+    pub fn needsEntityDedup(self: QueryPlan) bool {
+        return switch (self) {
+            .sparse => true,
+            .table => |t| t.sparse_with.len != 0 or t.sparse_without.len != 0,
+        };
+    }
+
     pub fn isTableDriven(self: QueryPlan) bool {
         return self == .table;
     }

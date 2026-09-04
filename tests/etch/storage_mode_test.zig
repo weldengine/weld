@@ -617,3 +617,72 @@ test "G9: the skip counter resets per tick even with NO `changed` filter" {
     try std.testing.expect(world.hasComponentDyn(e, mesh));
     try std.testing.expect(world.hasComponentDyn(e, transform));
 }
+
+// ─── P1-2 — the union must apply EVERY term's per-entity filter ─────────────
+
+const src_union_two_sparse =
+    \\component A { v: i32 = 0 }
+    \\component B { v: i32 = 0 }
+    \\component Hit { n: i32 = 0 }
+    \\
+    \\@storage(.sparse)
+    \\component S1 { v: i32 = 0 }
+    \\
+    \\@storage(.sparse)
+    \\component S2 { v: i32 = 0 }
+    \\
+    \\rule mark(entity: Entity)
+    \\    when entity has A and entity has S1 and entity has Hit
+    \\      or entity has B and entity has S2 and entity has Hit
+    \\{
+    \\    entity.get_mut(Hit).n = 1
+    \\}
+;
+
+test "P1-2: a union of two table-driven terms applies BOTH sparse filters" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_union_two_sparse);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const a = world.registry.idOf("A").?;
+    const b = world.registry.idOf("B").?;
+    const hit = world.registry.idOf("Hit").?;
+    const s1 = world.registry.idOf("S1").?;
+    const s2 = world.registry.idOf("S2").?;
+    // NON-VACUITY: the two filters must really be sparse, or this scene tests
+    // nothing about per-entity admission.
+    try std.testing.expectEqual(StorageKind.sparse, world.registry.componentStorage(s1));
+    try std.testing.expectEqual(StorageKind.sparse, world.registry.componentStorage(s2));
+
+    // THREE entities in ONE archetype — all carry A, B and Hit, so both terms
+    // match the same archetype and the k-way merge visits it once. What
+    // separates them is the SPARSE member, which no archetype can answer for.
+    const zero4 = [_]u8{0} ** 4;
+    const e1 = try world.spawnDynamic(gpa, &[_]ComponentId{ a, b, hit });
+    const e2 = try world.spawnDynamic(gpa, &[_]ComponentId{ a, b, hit });
+    const e3 = try world.spawnDynamic(gpa, &[_]ComponentId{ a, b, hit });
+    try world.addComponentDynamic(gpa, e1, s1, &zero4);
+    try world.addComponentDynamic(gpa, e2, s2, &zero4);
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+    world.tickBoundary();
+
+    // The oracle is the SET, not the count: a count says how many were missed
+    // and never WHICH, and the defect drops exactly the entity admitted by the
+    // term that is not the last.
+    const n1 = std.mem.readInt(i32, world.componentBytes(e1, hit).?[0..4], .little);
+    const n2 = std.mem.readInt(i32, world.componentBytes(e2, hit).?[0..4], .little);
+    const n3 = std.mem.readInt(i32, world.componentBytes(e3, hit).?[0..4], .little);
+    try std.testing.expectEqual(@as(i32, 1), n1); // admitted by term 1 — {A, S1}
+    try std.testing.expectEqual(@as(i32, 1), n2); // admitted by term 2 — {B, S2}
+    try std.testing.expectEqual(@as(i32, 0), n3); // admitted by neither
+}
