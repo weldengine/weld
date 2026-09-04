@@ -6,8 +6,8 @@
 //! rather than deleted, and this header is corrected rather than left standing
 //! beside its correction. What the file holds now: the recorded mode with its
 //! negative twin, the refusal diagnostics, an empty declaration, and the
-//! CURRENT limit — a rule does not yet select an entity by a sparse component,
-//! which is G7's planner and is pinned here so its arrival flips the assertion.
+//! and — since G7 — a rule SELECTING an entity by a sparse component and
+//! writing its row, which is the G5 boundary pin replaced by its opposite.
 //!
 //! Why the mode test matters more than its size suggests: `@storage` was
 //! recognised by the parser and validated for applicability since M0.8, and its
@@ -33,6 +33,12 @@ const src_mixed =
     \\component Burning { remaining: float = 3.0 }
     \\component Health { current: float = 100.0 }
 ;
+
+/// Read a component's first field as an Etch `int`, which is an i64.
+fn readI64(world: *World, entity: weld_core.ecs.EntityId, cid: ComponentId) i64 {
+    const b = world.componentBytes(entity, cid).?;
+    return std.mem.readInt(i64, b[0..8], .little);
+}
 
 /// Read a component's first field as an Etch `float`, which is an f64.
 fn readF64(world: *World, entity: weld_core.ecs.EntityId, cid: ComponentId) f64 {
@@ -212,7 +218,7 @@ const src_rule =
     \\}
 ;
 
-test "G5 boundary: a rule does NOT yet select an entity by a SPARSE component" {
+test "a rule SELECTS an entity by a sparse component, and its body writes the row" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -241,22 +247,23 @@ test "G5 boundary: a rule does NOT yet select an entity by a SPARSE component" {
     var report: weld_etch.RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
 
-    // THE BOUNDARY, pinned rather than asserted in prose. `when entity has
-    // Burning` resolves through `World.queryDynamic`, which matches by
-    // ARCHETYPE SIGNATURE — and since G3 a sparse component is not in one, so
-    // the rule selects nothing and the body never runs. Measured, not
-    // predicted: the value is unchanged at 3.0 and the write never happened.
+    // THE G5 BOUNDARY PIN, REPLACED BY ITS OPPOSITE — the third time this
+    // milestone flips a pinned limit rather than deleting it, after
+    // `chunk.zig`'s "rejects empty component list" at G2 and G1's `@storage`
+    // no-op at G3.
     //
-    // That is **G7**'s planner, not G5's handle: G5 makes the bridge's
-    // `ComponentRef` bimodal, which is what the body needs ONCE it runs, and
-    // until selection is bimodal no Etch rule reaches a sparse component at
-    // all. So G5's own oracle lives at the bridge (inline in `ecs_bridge.zig`),
-    // and this test is the limit made observable.
+    // What it asserted at G5: `3.0`, unchanged, because `when entity has
+    // Burning` resolved through `World.queryDynamic`, which matches by
+    // ARCHETYPE SIGNATURE — and since G3 a sparse component is in none, so the
+    // rule selected nothing and its body never ran. Measured, not predicted.
     //
-    // G7 REPLACES this assertion by its opposite — `2.0` — exactly as G3
-    // replaced G1's no-op pin. If it is still here at G11, the planner did not
-    // land.
-    try std.testing.expectApproxEqAbs(@as(f64, 3.0), readF64(&world, e, burning), 1e-9);
+    // What it asserts now: `2.0`. The selection goes through the mixed planner,
+    // which elects `Burning` as the driver — the only member, so smallest by
+    // default — walks its dense array, and hands each position to the shared
+    // per-entity body whose four guards take a storage-agnostic locator. The
+    // write `b.remaining -= 1.0` then lands in the sparse ROW through the
+    // bimodal `ComponentRef` G5 built.
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), readF64(&world, e, burning), 1e-9);
 }
 
 /// An all-negative rule plus a sparse component: the entity carrying only the
@@ -311,4 +318,116 @@ test "an all-negative rule VISITS an entity that carries only sparse components"
     // EXACTLY ONE: the `Frozen` carrier is excluded, so this is not "the rule
     // visits everything".
     try std.testing.expectEqual(@as(u64, 1), report.entities_iterated);
+}
+
+/// A disjunctive rule with a SPARSE term. The union must visit an entity
+/// matching BOTH disjuncts exactly once — and the archetype-id merge cannot
+/// provide that here, because a sparse-driven term has no archetype to order by.
+const src_disjunct =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Wet { amount: float = 0.0 }
+    \\
+    \\rule douse(entity: Entity)
+    \\    when entity has Burning or entity has Wet
+    \\{
+    \\    let seen = 1
+    \\}
+;
+
+test "a disjunctive rule with a sparse term visits a both-matching entity ONCE" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_disjunct);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    const wet = world.registry.idOf("Wet").?;
+
+    _ = try world.spawnDynamic(gpa, &.{burning}); // first disjunct only
+    _ = try world.spawnDynamic(gpa, &.{wet}); // second only
+    _ = try world.spawnDynamic(gpa, &.{ burning, wet }); // BOTH — the dedup case
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+
+    // THREE, not four. The both-matching entity is the whole point: the
+    // ascending-`archetype_id` merge de-duplicates by archetype, and one of
+    // these terms is sparse-driven and keeps no archetype cache — so the union
+    // switches to an ENTITY key. Without that switch the entity would be
+    // visited twice and this would read 4.
+    try std.testing.expectEqual(@as(u64, 3), report.entities_iterated);
+}
+
+/// `Changed<T>` on a TABLE member while the driver is SPARSE — the first of the
+/// four paths the contract names as *"à vérifier et pas supposer"*: "le filtre
+/// `Changed<T>` sur un membre table quand le driver est sparse (le tick se lit
+/// par lookup, pas par scan)".
+///
+/// Shaped after the established table-only test (`query_filters_test.zig`,
+/// "changed fires per-slot intra-archetype"): the change is produced INSIDE the
+/// tick by another rule and counted in a field, rather than stamped from
+/// outside before the first advance. A first version did the latter and failed
+/// on tick 1 — `initial_tick` is 0 and a `changed` filter tests
+/// `changedTick > last_run_tick`, so a stamp made before the clock moves is not
+/// a change. My premise, not the code.
+const src_changed_mixed =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Health { current: float = 100.0 }
+    \\component Hits { n: int = 0 }
+    \\
+    \\rule touch(entity: Entity)
+    \\    when entity has Health
+    \\{
+    \\    let h = entity.get_mut(Health)
+    \\    h.current += 1.0
+    \\}
+    \\
+    \\rule react(entity: Entity)
+    \\    when entity has Burning and entity has Health changed and entity has Hits
+    \\{
+    \\    let c = entity.get_mut(Hits)
+    \\    c.n += 1
+    \\}
+;
+
+test "a change filter on a TABLE member holds when the driver is SPARSE" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_changed_mixed);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    const health = world.registry.idOf("Health").?;
+    const hits = world.registry.idOf("Hits").?;
+
+    // `lit` carries the sparse driver; `cold` does not, so it is the negative
+    // twin that shows the driver actually bounds the reacting rule.
+    const lit = try world.spawnDynamic(gpa, &.{ burning, health, hits });
+    const cold = try world.spawnDynamic(gpa, &.{ health, hits });
+
+    _ = try interp.runFor(&world, 3);
+
+    // `Burning` is sparse and the smallest member of `react`'s with-set, so it
+    // DRIVES — and `Health`'s change tick is then read by lookup rather than by
+    // a chunk scan, which is the path the contract says to verify. Three ticks,
+    // three writes by `touch`, three reactions.
+    try std.testing.expectEqual(@as(i64, 3), readI64(&world, lit, hits));
+    // And the entity without the driver reacts NEVER, though `touch` changed
+    // its `Health` on every tick — without this the count above would not
+    // distinguish "the driver bounds the rule" from "the filter always passes".
+    try std.testing.expectEqual(@as(i64, 0), readI64(&world, cold, hits));
 }

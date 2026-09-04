@@ -594,11 +594,20 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // and three in `crossref_test.zig` (a cross-ref resolving INTO a sparse row, plus the two
     // Etch-cook seam tests: `@storage(.sparse)` changes NOTHING in the cooked bytes, and the
     // same bytes load under either host registration).
-    // (2109 -> 2116, suite reported 2116 - 2097 passed + 19 skipped, macOS aarch64, in ALL
-    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
+    // M1.B / G7 adds TWELVE: nine in `tests/ecs/hybrid_query_test.zig` — two sparse members of
+    // OPPOSITE cardinality (the driver follows, and the visited SET is identical whichever one
+    // is smaller), equal cardinality decided by declaration order and re-elected to show it is
+    // stable, a TABLE member winning the election, an all-table query electing `.table`,
+    // `not has T` on a sparse T as a per-entity test, the locator reaching either backend, the
+    // frozen-surface control, an all-negative query whose exclusion is sparse, and a
+    // table-driven query reaching a sparse with-member — plus two in
+    // `tests/etch/storage_mode_test.zig` (a disjunctive rule with a sparse term visiting a
+    // both-matching entity ONCE, and a change filter on a table member while the driver is
+    // sparse) and one replacement that adds none: the G5 boundary pin, flipped to its opposite.
+    // (2116 -> 2128, suite reported 2128 - 2109 passed + 19 skipped, macOS aarch64.)
     return switch (os) {
-        .windows => 2114,
-        else => 2116,
+        .windows => 2126,
+        else => 2128,
     };
 }
 

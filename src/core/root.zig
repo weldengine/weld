@@ -207,6 +207,7 @@ comptime {
     // record, and the suite's own total does not reveal it — it just does not
     // grow.
     _ = ecs.sparse_storage;
+    _ = ecs.hybrid_query;
     // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
     _ = rtti.type_info;
     _ = rtti.hash;

@@ -62,6 +62,13 @@ pub const registry = @import("registry.zig");
 /// Opt-in per component through `@storage(.sparse)`; `table` remains the
 /// default and the only mode the resolution funnel routes before G3.
 pub const sparse_storage = @import("sparse_storage.zig");
+/// M1.B/G7 — the mixed-query planner and its DISTINCT iteration type. Additive
+/// to the ECS surface on the precedent written at `world.zig`'s `queryDynamic`:
+/// the C0.5 freeze covers the Tier-0 ↔ Tier-1 module interfaces, not internal
+/// `World` methods. `WELD_ECS_PROTOCOL_VERSION` stays at 1, and
+/// `tests/ecs/hybrid_query_test.zig` proves it by ENUMERATING this surface and
+/// reporting its size rather than by declaring the version unchanged.
+pub const hybrid_query = @import("hybrid_query.zig");
 /// S4 — deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
 /// S4 — runtime, `ComponentId`-keyed byte resource store: the permanent Etch
