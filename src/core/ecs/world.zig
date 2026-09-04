@@ -708,9 +708,16 @@ pub const World = struct {
     /// program reaches only `tickBoundary`. Extracted rather than written twice,
     /// so the two sites cannot drift into resetting different sets.
     ///
-    /// Resetting twice within one tick is harmless: these are counts of what
-    /// happened SINCE the last boundary, read during the tick by a caller that
-    /// holds the world, and clearing an already-zero counter is a no-op.
+    /// The two boundaries CAN both fire in one tick — `stepOnce` opens with
+    /// `beginFrame` when the program carries a `changed` filter, and all three
+    /// of its drivers close with `tickBoundary` (`interp.zig:1738`, `5231`,
+    /// `5327`). That is harmless, but NOT because the second clear finds a zero:
+    /// it finds whatever the tick counted and erases it. What makes it harmless
+    /// is the READ WINDOW — the count is "since the last boundary", read during
+    /// the tick by a caller holding the world, so by the time a boundary closes
+    /// the tick the observation has already been available for its whole window.
+    /// An earlier version of this comment claimed the no-op instead; that clause
+    /// was false and looked like the one that concluded.
     fn resetTickObservations(self: *World) void {
         self.requires_removals_skipped = 0;
         self.first_requires_skip = null;
