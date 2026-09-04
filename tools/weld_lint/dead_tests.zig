@@ -624,9 +624,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // corpus test and add no block.
     // (2132 -> 2142, suite reported 2142 - 2123 passed + 19 skipped, macOS aarch64, in ALL
     // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
+    // G9's re-render added ONE block to `tests/etch/storage_mode_test.zig` — the
+    // per-tick semantics of `requires_removals_skipped` proven on an Etch program
+    // carrying NO `changed` filter, which is the regime where `stepOnce` skips
+    // `beginFrame` entirely (2142 -> 2143, suite closure reports 2143).
     return switch (os) {
-        .windows => 2140,
-        else => 2142,
+        .windows => 2141,
+        else => 2143,
     };
 }
 

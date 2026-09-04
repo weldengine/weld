@@ -254,6 +254,12 @@ pub const World = struct {
     /// command turned into an unobservable tick failure": the removal here is
     /// skipped, the invariant holds, the deviation is counted and logged, and
     /// the tick survives.
+    ///
+    /// **Per TICK, and cleared at BOTH boundaries** — see
+    /// `resetTickObservations` for why one is not enough. A first version reset
+    /// it in `beginFrame` alone, whose tree-walker call site is conditional on
+    /// `has_changed`, so the field meant "per tick" or "per run" depending on
+    /// whether the program used a `changed` filter somewhere else entirely.
     requires_removals_skipped: u32 = 0,
     /// The first component id whose removal was skipped this tick, so the log
     /// line names one rather than only counting.
@@ -692,6 +698,22 @@ pub const World = struct {
         // REMOVED — both arms called the same thing, so it was a branch that
         // could not change behaviour carrying a comment that implied it could.
         return self.addComponentsDynamic(gpa, entity, ids.items, vals.items);
+    }
+
+    /// Clear the per-tick observation counters.
+    ///
+    /// Called from BOTH frame boundaries — `beginFrame` and `tickBoundary` —
+    /// because each is reached by a population the other is not: the scheduler
+    /// and the codegen reach `beginFrame`, and a `changed`-free tree-walker
+    /// program reaches only `tickBoundary`. Extracted rather than written twice,
+    /// so the two sites cannot drift into resetting different sets.
+    ///
+    /// Resetting twice within one tick is harmless: these are counts of what
+    /// happened SINCE the last boundary, read during the tick by a caller that
+    /// holds the world, and clearing an already-zero counter is a no-op.
+    fn resetTickObservations(self: *World) void {
+        self.requires_removals_skipped = 0;
+        self.first_requires_skip = null;
     }
 
     /// Whether removing `cid` from `entity` is refused because something the
@@ -1193,11 +1215,7 @@ pub const World = struct {
     pub fn beginFrame(self: *World) void {
         self.current_tick +%= 1;
         for (self.archetypes.items) |arch| arch.clearAllDirtyBitsets();
-        // Per-TICK, beside the dirty bitsets and for the same reason: both are
-        // observations of what happened during one tick, and a counter that
-        // never reset would report a run instead of a tick.
-        self.requires_removals_skipped = 0;
-        self.first_requires_skip = null;
+        self.resetTickObservations();
         // No sparse arm, and the absence is an INVARIANT rather than an
         // omission: a sparse store carries per-row `added`/`changed` ticks and
         // NO dirty bitset (M1.B/G2 invariant 2), because the bitset exists to
@@ -2288,6 +2306,18 @@ pub const World = struct {
     /// by the interpreter after every rule has run.
     pub fn tickBoundary(self: *World) void {
         self.resources.tickBoundary();
+        // M1.B/G9 — the SECOND reset site, and both are required because neither
+        // covers the other's population. Measured rather than assumed:
+        // `beginFrame` is called unconditionally by the ECS scheduler's frame
+        // dispatch (`scheduler.zig`) and by the emitted codegen tick, so it is
+        // the boundary a Zig host reaches — but the TREE-WALKER gates it on
+        // `if (self.has_changed)`, by design and with its own comment saying "a
+        // `changed`-free program never advances the tick". With the reset in
+        // `beginFrame` alone, an Etch program carrying no `changed` filter never
+        // reset the counter at all: it accumulated over the whole run and the
+        // once-per-tick log fired once per PROGRAM. The field's meaning would
+        // have depended on whether the program used an unrelated feature.
+        self.resetTickObservations();
     }
 
     /// Decref and zero every resource's persistent-heap payload slot

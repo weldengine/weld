@@ -547,3 +547,73 @@ test "G8: the planner elects SPARSE, and the effect applies exactly once per mat
     try std.testing.expectEqual(@as(u64, 5), report2.entities_iterated);
     for (matching) |e| try std.testing.expect(world.hasComponentDyn(e, scorched));
 }
+
+// ─── M1.B / G9 — the counter is per TICK, on a `changed`-free program ───────
+
+const src_requires_strip =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "G9: the skip counter resets per tick even with NO `changed` filter" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_requires_strip);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    // THE PREMISE, ASSERTED AND NOT ASSUMED. This program carries no `changed`
+    // filter, so `stepOnce`'s `if (self.has_changed) world.beginFrame()` never
+    // fires — which is exactly the regime the first version of the counter got
+    // wrong. Without this assertion the test would pass on a program that DID
+    // carry one, and would not distinguish the two regimes at all: the defect
+    // caught in G8 by forcing `electDriver`, applied here before it can repeat.
+    try std.testing.expect(!interp.has_changed);
+
+    const transform = world.registry.idOf("Transform").?;
+    const mesh = world.registry.idOf("Mesh").?;
+
+    const e = try world.spawnDynamic(gpa, &.{});
+    try world.addComponentDynamic(gpa, e, mesh, &[_]u8{0} ** 4);
+    try std.testing.expect(world.hasComponentDyn(e, transform)); // the closure
+
+    // Tick 1 — the rule asks to remove a still-required `Transform`.
+    var r1: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r1);
+    world.tickBoundary();
+    // The skip HAPPENED during the tick; the boundary above cleared the count,
+    // which is the contract `resources`' dirty flags already carry — read
+    // during the tick, cleared at the boundary.
+    try std.testing.expect(world.hasComponentDyn(e, transform));
+    try std.testing.expectEqual(@as(u32, 0), world.requires_removals_skipped);
+
+    // Tick 2 — and the count must be ONE again mid-tick, not two. Under the
+    // defect nothing reset between the ticks, so this read returned 2 and the
+    // field meant "since the run started".
+    var r2: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r2);
+    try std.testing.expectEqual(@as(u32, 1), world.requires_removals_skipped);
+    try std.testing.expectEqual(transform, world.first_requires_skip.?);
+    world.tickBoundary();
+    try std.testing.expectEqual(@as(u32, 0), world.requires_removals_skipped);
+    try std.testing.expect(world.first_requires_skip == null);
+
+    // And the invariant held throughout: `Mesh` is present and so is its
+    // closure, which is what "skipped" buys over "tolerated".
+    try std.testing.expect(world.hasComponentDyn(e, mesh));
+    try std.testing.expect(world.hasComponentDyn(e, transform));
+}
