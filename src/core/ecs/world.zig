@@ -237,6 +237,28 @@ pub const World = struct {
     /// loads unchanged and the mode is decided at registration time.
     sparse_stores: sparse_mod.SparseStores = .{},
 
+    /// M1.B/G9 — how many `@requires` removals were SKIPPED this tick.
+    ///
+    /// The refusal channel, and its shape is the `syncIn` precedent read at
+    /// `src/modules/forge/sync_in.zig`: a COUNTED FIELD a caller can read plus a
+    /// `std.log.warn` bounded to one line per tick. That comment states the
+    /// division and it holds here — the count serves a reader that holds the
+    /// journal, the log line serves the developer who does not know to look.
+    ///
+    /// On `World` and NOT on `RuntimeReport`, for the reason the same precedent
+    /// gives about its own counter: *a Zig system can have done it as readily as
+    /// a rule*. A counter on the Etch report would count only what a rule did,
+    /// and a removal refused for a Zig system would be invisible.
+    ///
+    /// This is NOT the channel the brief forbids. That one is "a deferred
+    /// command turned into an unobservable tick failure": the removal here is
+    /// skipped, the invariant holds, the deviation is counted and logged, and
+    /// the tick survives.
+    requires_removals_skipped: u32 = 0,
+    /// The first component id whose removal was skipped this tick, so the log
+    /// line names one rather than only counting.
+    first_requires_skip: ?ComponentId = null,
+
     pub fn init() World {
         return .{
             .identity = EntityIdentityStore.init(),
@@ -636,6 +658,85 @@ pub const World = struct {
                 if (other == c) return error.DuplicateComponent;
             }
         }
+    }
+
+    /// Add `cid_new` together with its `@requires` closure, in one transaction.
+    ///
+    /// Members already carried are skipped — the closure is a floor and not a
+    /// reset, so an entity that already has `Transform` keeps ITS `Transform`
+    /// with its current values rather than having it overwritten by a default.
+    /// Missing members get their REGISTRY DEFAULTS, which is what
+    /// `etch-reference-part3.md` §6 specifies ("et l'ajoute avec ses defaults").
+    fn addWithClosure(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cid_new: ComponentId,
+        value_bytes: []const u8,
+        closure: []const ComponentId,
+    ) !void {
+        var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ids.deinit(gpa);
+        var vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer vals.deinit(gpa);
+        try ids.append(gpa, cid_new);
+        try vals.append(gpa, value_bytes);
+        for (closure) |c| {
+            if (self.hasComponentDyn(entity, c)) continue;
+            try ids.append(gpa, c);
+            try vals.append(gpa, self.registry.componentDefaultBytes(c));
+        }
+        // One entry point whatever the closure contributed: when every requisite
+        // is already present `ids` holds one id and the batched entry handles
+        // that correctly. A branch on `ids.items.len == 1` was written here and
+        // REMOVED — both arms called the same thing, so it was a branch that
+        // could not change behaviour carrying a comment that implied it could.
+        return self.addComponentsDynamic(gpa, entity, ids.items, vals.items);
+    }
+
+    /// Whether removing `cid` from `entity` is refused because something the
+    /// entity CARRIES still requires it, and record the refusal if so.
+    ///
+    /// `exempt` names the ids being dropped in the SAME command: a grouped
+    /// removal of a requisite together with all its dependents is ALLOWED
+    /// (`engine-ecs-internals.md` §3), so a requirer that is itself leaving
+    /// does not hold its requisite back. Without that exception a legitimate
+    /// teardown would be refused forever, which is the guard's other way of
+    /// being wrong.
+    fn requiresRefusesRemoval(
+        self: *World,
+        entity: EntityId,
+        cid: ComponentId,
+        exempt: []const ComponentId,
+    ) bool {
+        var i: ComponentId = 0;
+        const n: ComponentId = @intCast(self.registry.componentCount());
+        while (i < n) : (i += 1) {
+            if (i == cid) continue;
+            var is_exempt = false;
+            for (exempt) |x| if (x == i) {
+                is_exempt = true;
+                break;
+            };
+            if (is_exempt) continue;
+            if (!self.registry.isRequiredBy(cid, i)) continue;
+            if (!self.hasComponentDyn(entity, i)) continue;
+            // ONE LINE PER TICK AT MOST — the first skip logs and names itself,
+            // the counter carries the rest. Bounded on purpose: a scene with a
+            // hundred offenders logs once, exactly as the `syncIn` precedent
+            // logs per pass and never per body.
+            if (self.requires_removals_skipped == 0) {
+                std.log.warn(
+                    "ecs/@requires: removal SKIPPED — component {d} is still required by {d} on this entity; " ++
+                        "drop them in one command to remove both",
+                    .{ cid, i },
+                );
+                self.first_requires_skip = cid;
+            }
+            self.requires_removals_skipped += 1;
+            return true;
+        }
+        return false;
     }
 
     /// Which backend owns `cid`.
@@ -1092,6 +1193,11 @@ pub const World = struct {
     pub fn beginFrame(self: *World) void {
         self.current_tick +%= 1;
         for (self.archetypes.items) |arch| arch.clearAllDirtyBitsets();
+        // Per-TICK, beside the dirty bitsets and for the same reason: both are
+        // observations of what happened during one tick, and a counter that
+        // never reset would report a run instead of a tick.
+        self.requires_removals_skipped = 0;
+        self.first_requires_skip = null;
         // No sparse arm, and the absence is an INVARIANT rather than an
         // omission: a sparse store carries per-row `added`/`changed` ticks and
         // NO dirty bitset (M1.B/G2 invariant 2), because the bitset exists to
@@ -1348,6 +1454,18 @@ pub const World = struct {
         cid_new: ComponentId,
         value_bytes: []const u8,
     ) !void {
+        // M1.B/G9 — `@requires`: the closure is added with the component, in ONE
+        // transaction. Delegated to `addComponentsDynamic` rather than
+        // reimplemented, because that entry ALREADY is the transaction — all
+        // fallible work before the first observable mutation — and a second
+        // implementation of the same atomicity is a second thing to keep true.
+        //
+        // The closure is read, never walked: `requiresClosure` returns the
+        // flattened array `finalizeRequires` computed once, which is what
+        // `engine-ecs-internals.md` §3 means by "jamais reparcouru à chaque
+        // ajout".
+        const closure = self.registry.requiresClosure(cid_new);
+        if (closure.len != 0) return self.addWithClosure(gpa, entity, cid_new, value_bytes, closure);
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
@@ -1444,6 +1562,14 @@ pub const World = struct {
     ) !void {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // the invariant "if A is present, its closure is present" holds, the
+        // deviation is counted on `World` and logged once per tick, and the
+        // tick survives. An error here would be the channel
+        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
+        // a deferred command turned into an unobservable tick failure.
+        if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
 
         if (self.storageOf(cid_drop) == .sparse) {
             // Mirrors the table arm's `assert(hasComponent)` below: removing an
@@ -1721,6 +1847,25 @@ pub const World = struct {
             if (!self.hasComponentDyn(entity, c)) return error.UnknownComponent;
             for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
         }
+        // M1.B/G9 — `exempt = cids`: a grouped removal of a requisite TOGETHER
+        // with its dependents is ALLOWED, so a requirer that is itself leaving
+        // does not hold its requisite back. Without that exception a legitimate
+        // teardown would be refused forever, which is the guard's other way of
+        // being wrong.
+        //
+        // **This path ERRORS where the single paths SKIP, and the asymmetry is
+        // the channel each path can afford — measured, not chosen.** All three
+        // flush paths (`CommandBuffer.applyOne`, `applyWithObservers`,
+        // `applyRawCommand`) call the SINGLE `removeComponentDynamic`, so an
+        // error there would abort the tick — the channel §3 and the brief both
+        // refuse. This grouped entry has exactly ONE caller in the repository,
+        // `loader.deactivateExtension`, a scene-load path that already returns
+        // typed errors and no tick depends on. And a grouped remove is ONE
+        // migration: dropping the subset the guard admits would be a silent
+        // partial answer, so the whole command is refused rather than trimmed.
+        for (cids) |c| {
+            if (self.requiresRefusesRemoval(entity, c, cids)) return error.RequiredComponent;
+        }
 
         // Partition the drops: only the table half leaves the signature, and
         // `src_len - cids.len` would UNDERFLOW the moment a sparse id is among
@@ -1926,6 +2071,14 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_drop = self.registry.idOf(@typeName(T)) orelse return error.StaleEntityHandle;
+        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // the invariant "if A is present, its closure is present" holds, the
+        // deviation is counted on `World` and logged once per tick, and the
+        // tick survives. An error here would be the channel
+        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
+        // a deferred command turned into an unobservable tick failure.
+        if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
+
         if (self.storageOf(cid_drop) == .sparse) {
             // Mirrors the table arm's `assert(hasComponent)` below: removing an
             // absent component is a programmer error on this entry. UNLIKE that

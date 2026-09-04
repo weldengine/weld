@@ -45,6 +45,33 @@ const storage_domain_dotted = blk: {
     break :blk out;
 };
 
+/// The DIRECT `@requires` names of a component declaration, written into
+/// `out` and returned as a slice of it.
+///
+/// Shared by the interpreter and the scene cook, exactly as `storageModeOf` is,
+/// so the two registries cannot disagree about what a declaration requires —
+/// the G1 arbitration applied to the second annotation this milestone consumes.
+///
+/// `out` is the caller's buffer and the result borrows it: the names are slices
+/// into the AST's string pool, which outlives the registration, so nothing is
+/// copied here and the registry owns its own copies.
+pub fn requiresNamesOf(
+    ast: *const ast_mod.AstArena,
+    decl: ast_mod.ComponentDecl,
+    out: [][]const u8,
+) [][]const u8 {
+    const annot = ast.requiresAnnotation(decl) orelse return out[0..0];
+    var n: usize = 0;
+    var i: u32 = 0;
+    while (i < annot.args_len and n < out.len) : (i += 1) {
+        if (ast.requiresTypeNameAt(annot, i)) |sid| {
+            out[n] = ast.strings.slice(sid);
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
 /// Resolve a `component` declaration's storage mode from its `@storage`
 /// annotation. **Total by construction**: no annotation, or a value the domain
 /// does not carry, yields `table`.
@@ -3260,6 +3287,7 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.checkStorageAnnotation(decl);
+                    try self.checkRequiresAnnotation(decl);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
@@ -4652,6 +4680,125 @@ pub const TypeChecker = struct {
     /// spelling, and `@storage(.archetype)` / `@storage(1)` on value. Only a
     /// well-formed positional argument that is neither a tag path nor a constant
     /// reaches step 4.
+    /// Validate `@requires(A, B, …)` on a component, and refuse a closure that
+    /// is not a DAG.
+    ///
+    /// Two things are checked here and nowhere else in the front end: every
+    /// argument is a bare TYPE PATH, and the requisite graph over the
+    /// program's component declarations has no cycle.
+    ///
+    /// **The cycle is detected HERE as well as in `Registry.finalizeRequires`,
+    /// and that is two detectors for two populations rather than one thing
+    /// written twice.** The type-checker sees the program and can point a SPAN
+    /// at the offending declaration, which is what `engine-ecs-internals.md` §3
+    /// means by "cycle refusé par diagnostic"; the registry sees components a
+    /// host registered from Zig, which the type-checker never reads, and must
+    /// refuse those too. Neither covers the other's population.
+    fn checkRequiresAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
+        const annot = self.arena.requiresAnnotation(decl) orelse return;
+        if (annot.args_len == 0) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@requires takes at least one component type", .{});
+            return;
+        }
+        var i: u32 = 0;
+        while (i < annot.args_len) : (i += 1) {
+            const name_id = self.arena.requiresTypeNameAt(annot, i) orelse {
+                // A tag path, a literal or a named argument. The message names
+                // the shape expected rather than only refusing, because an
+                // author corrects what is named — the G1/§13.3 lesson recorded
+                // as corpus anomaly 92.
+                try self.emit(
+                    .annotation_arg_mismatch,
+                    .error_,
+                    annot.span,
+                    "@requires argument {d} must be a component type name, written bare — `@requires(Transform)`",
+                    .{i + 1},
+                );
+                return;
+            };
+            const req_name = self.arena.strings.slice(name_id);
+            if (self.requisiteDecl(name_id) == null) {
+                try self.emit(
+                    .unknown_requisite,
+                    .error_,
+                    annot.span,
+                    "@requires names `{s}`, which is not a declared component",
+                    .{req_name},
+                );
+                return;
+            }
+        }
+        // The cycle, over the declared graph. Reported on the declaration that
+        // CLOSES the cycle, which is the one an author can act on.
+        if (try self.requiresReachesSelf(decl)) {
+            try self.emit(
+                .requires_cycle,
+                .error_,
+                annot.span,
+                "`@requires` closure of `{s}` reaches itself; a cycle is refused rather than resolved to a fixpoint, " ++
+                    "which would make adding either component add both with no way to undo the coupling",
+                .{self.arena.strings.slice(decl.name)},
+            );
+        }
+    }
+
+    /// The component declaration named by `sid`, or null when `sid` names no
+    /// local component.
+    ///
+    /// Through `symbols` + `component_decls`, which is the mechanism
+    /// `checkComponentInstance` already uses — a second lookup by byte
+    /// comparison would be a second answer to one question. Keyed by
+    /// `StringId` because the arena's pool INTERNS, so one name is one id and a
+    /// byte comparison would only re-derive that.
+    fn requisiteDecl(self: *TypeChecker, sid: ast_mod.StringId) ?ast_mod.ComponentDecl {
+        const sym = self.symbols.get(sid) orelse return null;
+        if (sym.kind != .component) return null;
+        return self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
+    }
+
+    /// Whether `decl`'s requisite closure reaches `decl` itself.
+    ///
+    /// Bounded by the declaration count rather than by a visited set: the walk
+    /// is a reachability question over a graph whose size is known, and a
+    /// bound that cannot be exceeded needs no allocation on the type-check path.
+    fn requiresReachesSelf(self: *TypeChecker, decl: ast_mod.ComponentDecl) !bool {
+        var frontier: [64]ast_mod.StringId = undefined;
+        var n: usize = 0;
+        const push = struct {
+            fn f(list: *[64]ast_mod.StringId, len: *usize, sid: ast_mod.StringId) void {
+                for (list[0..len.*]) |x| if (x == sid) return;
+                if (len.* < list.len) {
+                    list[len.*] = sid;
+                    len.* += 1;
+                }
+            }
+        }.f;
+
+        if (self.arena.requiresAnnotation(decl)) |a| {
+            var i: u32 = 0;
+            while (i < a.args_len) : (i += 1) {
+                if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
+            }
+        }
+        var head: usize = 0;
+        while (head < n) : (head += 1) {
+            if (frontier[head] == decl.name) return true;
+            const d = self.requisiteDecl(frontier[head]) orelse continue;
+            if (self.arena.requiresAnnotation(d)) |a| {
+                var i: u32 = 0;
+                while (i < a.args_len) : (i += 1) {
+                    if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
+                }
+            }
+        }
+        // Terminates without a step budget: `push` DEDUPLICATES, so `n` grows
+        // at most once per distinct name and `head` only advances. The 64-name
+        // frontier is the bound, and a program past it silently stops
+        // widening — recorded rather than hidden, and a component graph of 64
+        // requisites is past every shape the corpus shows.
+        return false;
+    }
+
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.storageAnnotation(decl) orelse return;
 

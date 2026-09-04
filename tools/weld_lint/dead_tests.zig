@@ -612,11 +612,21 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // structural effect under a sparse driver, which carries a DISCRIMINATING half asserted
     // on the elected plan because the correctness half alone does not distinguish the driver
     // (measured: forcing `.table` leaves the correctness assertions green).
-    // (2128 -> 2132, suite reported 2132 - 2113 passed + 19 skipped, macOS aarch64, in ALL
+    // M1.B / G9 adds TEN in `tests/ecs/requires_test.zig`, written at Tier 0 through
+    // `registerComponentRaw`'s `.requires` name list so a front-end regression cannot read as a
+    // `@requires` regression: the cycle refusal with its DIAMOND complement (a visited-set
+    // implementation reports a cycle on a diamond and would pass the refusals while being
+    // wrong), the unknown requisite, the FORWARD reference, the transitive closure in one
+    // migration, the closure as a FLOOR rather than a reset, the failing-allocator sweep, the
+    // sparse member, the requirer's removal cascading nothing, the skipped-and-signalled
+    // refusal with its frame-boundary reset, and the grouped removal with its refusal
+    // complement. Two invalid corpus fixtures (E0505, E0506) are data rows in the existing
+    // corpus test and add no block.
+    // (2132 -> 2142, suite reported 2142 - 2123 passed + 19 skipped, macOS aarch64, in ALL
     // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
     return switch (os) {
-        .windows => 2130,
-        else => 2132,
+        .windows => 2140,
+        else => 2142,
     };
 }
 

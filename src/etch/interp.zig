@@ -1419,6 +1419,20 @@ pub const Interpreter = struct {
             }
         }
 
+        // M1.B/G9 — after Pass A, resolve every `@requires` closure ONCE.
+        //
+        // At the END of the pass and not per declaration: a declaration may name
+        // a component registered later, Etch admitting forward references, which
+        // is why the descriptor carries NAMES rather than ids.
+        //
+        // A cycle or an unknown requisite here is a PROGRAM error the
+        // type-checker already reports with a span (E0505 / E0506). This arm is
+        // the registry's own refusal for the population the type-checker never
+        // sees — components a host registered from Zig — so reaching it from an
+        // Etch program means the type-check was skipped, and surfacing it as an
+        // ordinary error is the honest answer rather than a second diagnostic.
+        try world.registry.finalizeRequires(gpa);
+
         // Register the builtin `TagSet` component (M0.8 E3) when the program
         // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
         // carrying tags. It has no named scalar fields; the runtime reads/writes
@@ -7008,7 +7022,9 @@ fn compileComponent(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, types_mod.storageModeOf(ast, decl), literals);
+    var req_buf: [16][]const u8 = undefined;
+    const req = types_mod.requiresNamesOf(ast, decl, &req_buf);
+    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(ast, decl), literals);
 }
 
 fn compileResource(
@@ -7028,7 +7044,10 @@ fn compileResource(
     // (`annotationAppliesTo`, refused on a resource with `E0502`), so a resource
     // has no mode to read. Passing the default here states that rather than
     // leaving a reader to infer it from the absence of a call.
-    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, .table, literals);
+    // A resource carries no `@requires`: the annotation's applicability is
+    // validated to `component` only (`types.zig`), so an empty list here is the
+    // domain's answer and not a shortcut.
+    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, &.{}, .table, literals);
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
@@ -7246,6 +7265,11 @@ pub fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
+    /// DIRECT `@requires` names, already read from the declaration. Passed
+    /// RESOLVED for the same reason `storage` is: this function receives no
+    /// declaration node, so it cannot read an annotation itself, and handing it
+    /// the names keeps the reading in ONE place shared by both callers.
+    requires: []const []const u8,
     /// Storage backend to record in the registry. Passed as a RESOLVED mode and
     /// not as the annotation range, deliberately: this function receives no
     /// declaration node — measured at M1.B/G0 §1.8, it takes `name`,
@@ -7387,6 +7411,7 @@ pub fn compileTypeDecl(
         .default_bytes = default_buf,
         .fields = fields.items,
         .storage = storage,
+        .requires = requires,
     });
     switch (reg_kind) {
         .component => try bridge.mapComponent(gpa, name, id),

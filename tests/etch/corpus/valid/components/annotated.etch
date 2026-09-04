@@ -4,6 +4,16 @@
 // `@requires`/`@storage`/`@save` sit on the component itself while
 // `@hidden`/`@range`/`@readonly`/`@replicated` sit on fields.
 
+// M1.B/G9 — `Transform` is DECLARED here now. Before this milestone the file
+// carried `@requires(Transform)` with no such component in scope, and was
+// classified VALID only because nothing read the annotation's argument: the
+// same shape as the `@storage(sparse)` spelling this file also carried, and
+// the same repair. `E0506` fires on the old text, which is why it changed.
+component Transform {
+    x: float = 0.0
+    y: float = 0.0
+}
+
 @requires(Transform)
 component Light {
     @hidden

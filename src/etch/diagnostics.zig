@@ -76,6 +76,8 @@ pub const DiagnosticCode = enum {
     // that have no enum variant (§13.3.1, binding order of operations).
     annotation_arg_mismatch, // M1.B/G1 — E0503 AnnotationArgMismatch (arity, name or value outside the declared domain)
     annotation_arg_not_const, // M1.B/G1 — E0504 AnnotationArgNotConst (well-formed argument expression that is not const-evaluable)
+    requires_cycle, // M1.B/G9 — E0505 RequiresCycle (`@requires` closure is not a DAG)
+    unknown_requisite, // M1.B/G9 — E0506 UnknownRequisite (`@requires` names a component that does not exist)
 
     // ── Generics (E0600-E0699) ──
     bound_not_satisfied, // M0.8 — E0601 BoundNotSatisfied
@@ -443,6 +445,8 @@ pub const DiagnosticCode = enum {
             .structural_component_field_type_invalid => "E0307",
             .annotation_misapplied => "E0502",
             .annotation_arg_mismatch => "E0503",
+            .requires_cycle => "E0505",
+            .unknown_requisite => "E0506",
             .annotation_arg_not_const => "E0504",
             .bound_not_satisfied => "E0601",
             .generic_type_annotation_required => "E0603",
@@ -648,6 +652,8 @@ pub const DiagnosticCode = enum {
             .structural_component_field_type_invalid => "StructuralComponentFieldTypeInvalid",
             .annotation_misapplied => "AnnotationMisapplied",
             .annotation_arg_mismatch => "AnnotationArgMismatch",
+            .requires_cycle => "RequiresCycle",
+            .unknown_requisite => "UnknownRequisite",
             .annotation_arg_not_const => "AnnotationArgNotConst",
             .bound_not_satisfied => "BoundNotSatisfied",
             .generic_type_annotation_required => "GenericTypeAnnotationRequired",

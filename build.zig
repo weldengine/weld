@@ -718,6 +718,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/integration_scenario.zig" },
         .{ .path = "tests/ecs/sparse_routing_test.zig" },
         .{ .path = "tests/ecs/hybrid_query_test.zig" },
+        .{ .path = "tests/ecs/requires_test.zig" },
         .{ .path = "tests/core/rtti/comptime_builder_test.zig" },
         .{ .path = "tests/core/rtti/hash_test.zig" },
         .{ .path = "tests/core/rtti/registry_test.zig" },

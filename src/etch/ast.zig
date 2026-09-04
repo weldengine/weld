@@ -3936,6 +3936,37 @@ pub const AstArena = struct {
         return self.exprData(arg.value);
     }
 
+    /// The `@requires(...)` annotation on a component declaration, or null.
+    pub fn requiresAnnotation(self: *const AstArena, decl: ComponentDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < decl.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[decl.annotations_extra + i];
+            if (annot.kind == .requires) return annot;
+        }
+        return null;
+    }
+
+    /// The `i`-th requisite type name of a `@requires(A, B, …)` annotation, or
+    /// null when that argument is not a bare type path.
+    ///
+    /// The annotation is VARIADIC (`etch-reference-part3.md` §6's normative
+    /// example is `@requires(Transform, RigidBody)`), so this reads one
+    /// argument by index rather than assuming an arity — the shape three of the
+    /// four corpus documents had reduced to a single positional before
+    /// 2026-09-03.
+    ///
+    /// A requisite is a TYPE NAME, so the accepted expression kind is `.path` —
+    /// the same shape `onEventTypeName` reads for `@on_event(T)`, and NOT the
+    /// `.tag_path` that `@storage(.sparse)` uses: a type is named, an
+    /// enumeration value is dotted.
+    pub fn requiresTypeNameAt(self: *const AstArena, annot: Annotation, i: u32) ?StringId {
+        if (i >= annot.args_len) return null;
+        const arg = self.annot_args.items[annot.args_start + i];
+        if (arg.name != 0) return null; // a named argument is not a requisite
+        if (self.exprKind(arg.value) != .path) return null;
+        return self.exprData(arg.value);
+    }
+
     /// The event type name `T` from an `@on_event(T)` annotation, or null when
     /// the annotation is malformed (no argument, or the argument is not a type
     /// path). The resolver reports E1203 for the null / non-event cases.
