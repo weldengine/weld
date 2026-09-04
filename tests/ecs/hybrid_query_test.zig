@@ -515,25 +515,40 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // — exact, where a lint rule would flag a NAME and carry a tokenizer's false
     // negatives. This test is the REPORT: it names the two dispatch entries and
     // asserts each carries the refusal.
+    // The FOUR entries that hand an argument tuple to a body, and which of them
+    // dispatches ACROSS WORKERS — the distinction a first version of this gate
+    // got wrong by comparing its own new path against the one that never
+    // carried the hazard.
     const entries = [_][]const u8{
-        "query.Query(...).forEachChunk", // comptime query, chunk unit
-        "hybrid_query.SparseDrivenQuery.forEachDenseRange", // sparse driver, dense-range unit
+        "Query.runChunkAt", // across workers — GUARDED
+        "JobBuilder.addJob", // across workers — GUARDED
+        "SparseDrivenQuery.forEachDenseRange", // dense-range unit — GUARDED
+        "Query.forEachChunk", // CALLING thread — no hazard, unguarded
     };
-    std.debug.print("[job-bound] {d} dispatch entries inspected\n", .{entries.len});
+    const guarded: usize = 3;
+    std.debug.print(
+        "[job-bound] {d} arg-passing entries inspected, {d} dispatch across workers and are GUARDED\n",
+        .{ entries.len, guarded },
+    );
 
     // The sparse-driven entry carries the refusal — asserted by the fact that a
     // legitimate arg tuple compiles, which is the only half a passing test can
     // show. The REFUSING half cannot be a test: `@compileError` fires at compile
     // time, so it is a counter-factual run by hand and its exact message is
     // recorded in the gate report. That asymmetry is stated rather than hidden.
-    hybrid.refuseCommandBufferInArgs(@TypeOf(.{ @as(usize, 1), @as(f32, 2.0) }));
-    hybrid.refuseCommandBufferInArgs(@TypeOf(.{&@as(usize, 3)}));
+    ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{ @as(usize, 1), @as(f32, 2.0) }));
+    ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{&@as(usize, 3)}));
 
-    // `forEachChunk` is the OTHER entry and it does NOT carry the refusal today.
-    // Measured at G8 rather than assumed: seven call sites, all in `tests/ecs/`,
-    // and ZERO passes a command buffer — so the bound HOLDS there by fact and
-    // not by construction. Adding the refusal to a frozen file's existing method
-    // would change what compiles for every caller, and no caller needs it; the
-    // asymmetry is recorded in the gate report as a named residual.
-    try testing.expectEqual(@as(usize, 2), entries.len);
+    // `forEachChunk` is deliberately UNGUARDED, and the reason is measured
+    // rather than an asymmetry of convenience: its body is `for (matches) |m|
+    // for (m.archetype.chunks.items) |chunk| @call(...)` — a double loop on the
+    // CALLING thread. No second worker, so a command buffer in its args is not
+    // a hazard. What WAS a defect is that the two entries which do dispatch
+    // across workers — `runChunkAt`, whose own doc says so, and `addJob`, whose
+    // trampoline the pool runs — carried nothing at all, while the guard sat on
+    // the new sparse path alone. Both now carry it, and the additions are free:
+    // `runChunkAt` has ZERO call sites in the repository and `addJob`'s
+    // twenty-five mentions pass no command buffer.
+    try testing.expectEqual(@as(usize, 4), entries.len);
+    try testing.expectEqual(@as(usize, 3), guarded);
 }

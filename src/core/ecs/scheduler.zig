@@ -284,6 +284,12 @@ pub const JobBuilder = struct {
     ) !void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
+        // M1.B/G8 — no job body receives a command buffer. This entry hands
+        // `args` to a body the worker pool runs, so it is one of the TWO real
+        // dispatch points; the bound lives on the TYPE
+        // (`command_buffer.refuseCommandBufferInArgs`) precisely so both reach
+        // it from their own imports rather than one of them carrying it alone.
+        command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const Trampoline = struct {
             fn call(chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void {

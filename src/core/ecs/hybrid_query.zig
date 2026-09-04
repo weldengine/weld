@@ -40,6 +40,7 @@ const chunk_mod = @import("chunk.zig");
 const query_mod = @import("query.zig");
 const registry_mod = @import("registry.zig");
 const world_mod = @import("world.zig");
+const command_buffer_mod = @import("command_buffer.zig");
 
 const Archetype = archetype_mod.Archetype;
 const Chunk = chunk_mod.Chunk;
@@ -232,7 +233,7 @@ pub const SparseDrivenQuery = struct {
         comptime Body: anytype,
         args: anytype,
     ) void {
-        refuseCommandBufferInArgs(@TypeOf(args));
+        command_buffer_mod.refuseCommandBufferInArgs(@TypeOf(args));
         const n = self.rangeCount(world, target);
         for (0..n) |i| {
             @call(.auto, Body, .{self.rangeAt(world, i, target)} ++ args);
@@ -276,59 +277,6 @@ pub const DenseRange = struct {
         return self.to - self.from;
     }
 };
-
-/// Refuse, AT COMPTIME, an argument tuple that carries a command buffer into a
-/// job body.
-///
-/// **The bound, and why it is a type-level refusal rather than a lint rule.**
-/// `engine-ecs-internals.md` §7 and this milestone's brief both state it as an
-/// absolute: no job body receives a command buffer. A tokenizer cannot see a
-/// type — it would flag a NAME — so a lint rule would carry a heuristic's false
-/// positives and, worse, its false negatives. Here the check is exact: the
-/// dispatch entry inspects its own `ArgsType` and fails to compile.
-///
-/// It is a BOUND and not a merge mechanism. A worker owns its range's storage
-/// and nothing else, so two workers recording structural changes would need a
-/// deterministic merge that has no producer anywhere in the repository —
-/// measured at G8: zero call sites pass a command buffer into a dispatch entry,
-/// and nothing in the types forbade it, which is exactly what makes a bound
-/// worth establishing rather than noting.
-///
-/// The walk is one level deep by design: a command buffer reaches a body either
-/// directly or behind a pointer, and both are caught. A buffer buried inside a
-/// caller's own struct is NOT caught, and that is stated rather than implied —
-/// closing it would need a recursive type walk whose cost is a comptime
-/// traversal of every field of every argument, for a shape no call site has.
-pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
-    comptime {
-        const info = @typeInfo(ArgsType);
-        const fields = switch (info) {
-            .@"struct" => |st| st.fields,
-            else => return,
-        };
-        for (fields) |f| {
-            if (carriesCommandBuffer(f.type)) @compileError(
-                "no job body receives a command buffer (M1.B/G8): argument of type `" ++
-                    @typeName(f.type) ++ "` reaches a dispatched body. A worker owns its " ++
-                    "range and nothing else; two workers recording structural changes would " ++
-                    "need a deterministic merge, which has no producer. Record the change " ++
-                    "outside the dispatch, or dispatch a body that does not record.",
-            );
-        }
-    }
-}
-
-fn carriesCommandBuffer(comptime T: type) bool {
-    comptime {
-        const CommandBuffer = @import("command_buffer.zig").CommandBuffer;
-        if (T == CommandBuffer or T == *CommandBuffer or T == *const CommandBuffer) return true;
-        return switch (@typeInfo(T)) {
-            .pointer => |p| p.child == CommandBuffer,
-            .optional => |o| carriesCommandBuffer(o.child),
-            else => false,
-        };
-    }
-}
 
 /// Build the sparse-driven query for `driver` out of a with/without set.
 pub fn planSparseDriven(

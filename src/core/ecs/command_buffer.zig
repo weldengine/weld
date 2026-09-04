@@ -43,6 +43,72 @@ const std = @import("std");
 const world_mod = @import("world.zig");
 const registry_mod = @import("registry.zig");
 
+/// Refuse, AT COMPTIME, an argument tuple that carries a command buffer into a
+/// job body.
+///
+/// **The bound, and why it is a type-level refusal rather than a lint rule.**
+/// `engine-ecs-internals.md` §7 and this milestone's brief both state it as an
+/// absolute: no job body receives a command buffer. A tokenizer cannot see a
+/// type — it would flag a NAME — so a lint rule would carry a heuristic's false
+/// positives and, worse, its false negatives. Here the check is exact: the
+/// dispatch entry inspects its own `ArgsType` and fails to compile.
+///
+/// **It lives HERE, with the type it refuses, and not beside a dispatch entry.**
+/// There are THREE entries that hand an argument tuple to a body — the
+/// sparse-driven `forEachDenseRange`, `Query.runChunkAt` (whose own doc says
+/// "used by the scheduler to dispatch chunks across workers") and
+/// `JobBuilder.addJob` — and a guard placed at one of them is the shape this
+/// milestone keeps meeting. Placed on the TYPE, all three reach it.
+///
+/// It is a BOUND and not a merge mechanism. A worker owns its range's storage
+/// and nothing else, so two workers recording structural changes would need a
+/// deterministic merge that has no producer anywhere in the repository —
+/// measured at G8: `runChunkAt` has ZERO call sites in the whole repository and
+/// `addJob`'s twenty-five mentions pass none, so the refusal breaks nothing that
+/// compiles — which is exactly what makes it free to add and what refutes
+/// "frozen file" as a motive for leaving it off.
+///
+/// *A first version of this guard sat on the sparse-driven entry ALONE, and
+/// justified the asymmetry against `forEachChunk` — which is a double loop on
+/// the CALLING thread and never carried the hazard at all. The count "0 of 7"
+/// was the wrong denominator: the two entries that do dispatch across workers
+/// carried nothing.*
+///
+/// The walk is one level deep by design: a command buffer reaches a body either
+/// directly or behind a pointer, and both are caught. A buffer buried inside a
+/// caller's own struct is NOT caught, and that is stated rather than implied —
+/// closing it would need a recursive type walk whose cost is a comptime
+/// traversal of every field of every argument, for a shape no call site has.
+pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
+    comptime {
+        const info = @typeInfo(ArgsType);
+        const fields = switch (info) {
+            .@"struct" => |st| st.fields,
+            else => return,
+        };
+        for (fields) |f| {
+            if (carriesCommandBuffer(f.type)) @compileError(
+                "no job body receives a command buffer (M1.B/G8): argument of type `" ++
+                    @typeName(f.type) ++ "` reaches a dispatched body. A worker owns its " ++
+                    "range and nothing else; two workers recording structural changes would " ++
+                    "need a deterministic merge, which has no producer. Record the change " ++
+                    "outside the dispatch, or dispatch a body that does not record.",
+            );
+        }
+    }
+}
+
+fn carriesCommandBuffer(comptime T: type) bool {
+    comptime {
+        if (T == CommandBuffer or T == *CommandBuffer or T == *const CommandBuffer) return true;
+        return switch (@typeInfo(T)) {
+            .pointer => |p| p.child == CommandBuffer,
+            .optional => |o| carriesCommandBuffer(o.child),
+            else => false,
+        };
+    }
+}
+
 const World = world_mod.World;
 const EntityId = world_mod.EntityId;
 const ComponentId = registry_mod.ComponentId;
