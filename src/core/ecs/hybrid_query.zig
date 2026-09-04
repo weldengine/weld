@@ -208,6 +208,12 @@ pub const SparseDrivenQuery = struct {
     /// The split is EVEN with the remainder spread over the leading ranges, so
     /// every range differs from every other by at most one — the property that
     /// keeps a work-stealing scheduler from starving on a tail.
+    ///
+    /// *That beneficiary was NAMED here before it existed: from M1.B/G8 until
+    /// `JobBuilder.addDenseRangeJobs` landed, no dense range reached a worker
+    /// at all, and the sentence above justified a split by a consumer with no
+    /// producer. It is true as of that entry, and the note stays because the
+    /// claim is only as good as the path that consumes it.*
     pub fn rangeAt(self: *const SparseDrivenQuery, world: *World, i: usize, target: usize) DenseRange {
         const total = blk: {
             const store = world.sparse_stores.getConst(self.driver) orelse break :blk 0;

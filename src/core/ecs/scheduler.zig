@@ -71,6 +71,7 @@ const jobs_sched_mod = @import("../jobs/scheduler.zig");
 const worker_mod = @import("../jobs/worker.zig");
 const registry_mod = @import("registry.zig");
 const command_buffer_mod = @import("command_buffer.zig");
+const hybrid_query_mod = @import("hybrid_query.zig");
 const observers_mod = @import("observers.zig");
 
 const World = world_mod.World;
@@ -310,6 +311,75 @@ pub const JobBuilder = struct {
         for (0..n) |i| {
             self.jobs.appendAssumeCapacity(.{
                 .chunk_ptr = @ptrCast(query.chunkAt(i)),
+                .trampoline = trampoline_fn,
+                .ctx_ptr = @ptrCast(ctx_storage),
+            });
+        }
+    }
+
+    /// Stage the dense ranges of a sparse-driven query into the builder, one
+    /// job per range, with `Body` as the trampoline target.
+    ///
+    /// **This is the entry that makes `engine-ecs-internals.md` §7's parity
+    /// real**: a chunk becomes a unit of work by being handed to `addJob`
+    /// above, and until this existed a dense range was split, bounded and
+    /// never dispatched — `forEachDenseRange` runs its bodies on the CALLING
+    /// thread, exactly like `Query.forEachChunk`. The split was delivered at
+    /// M1.B/G8; the consumption is here.
+    ///
+    /// Parity is EXACT on the property that matters, and inexact on one point
+    /// that is stated rather than implied. Exact: the same `Body` serves the
+    /// same-thread entry and this one, because `forEachDenseRange` calls it
+    /// with a `DenseRange` BY VALUE and this trampoline dereferences and
+    /// passes the same value — the way one chunk body serves `forEachChunk`,
+    /// `runChunkAt` and `addJob` alike. Inexact: a chunk is a heap allocation
+    /// and IS its own `chunk_ptr`, while a `DenseRange` is two integers with
+    /// no storage identity, so the ranges are materialised into the builder's
+    /// arena and the job carries a pointer to one of them. The arena's
+    /// lifetime is the level (`reset` is `.retain_capacity`), which is exactly
+    /// the lifetime `args` already has.
+    ///
+    /// `target` is the caller's, as it is on `forEachDenseRange` — the natural
+    /// granularity of a chunk query is `chunkCount()` and a dense array has
+    /// no equivalent given quantity. Overflow is caught where `addJob`'s is,
+    /// at `dispatchBatch`, which returns `error.TooManyChunks`; staging does
+    /// not check, and that is parity and not an omission.
+    pub fn addDenseRangeJobs(
+        self: *JobBuilder,
+        world: *world_mod.World,
+        sq: *const hybrid_query_mod.SparseDrivenQuery,
+        target: usize,
+        comptime Body: anytype,
+        args: anytype,
+    ) !void {
+        const ArgsType = @TypeOf(args);
+        // The same bound as `addJob`, for the same reason: a worker owns its
+        // range and nothing else.
+        command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
+
+        const n = sq.rangeCount(world, target);
+        if (n == 0) return;
+
+        const Trampoline = struct {
+            fn call(range_ptr: *anyopaque, ctx_ptr: *anyopaque) void {
+                const rp: *const hybrid_query_mod.DenseRange = @ptrCast(@alignCast(range_ptr));
+                const ctx: *ArgsType = @ptrCast(@alignCast(ctx_ptr));
+                @call(.auto, Body, .{rp.*} ++ ctx.*);
+            }
+        };
+
+        const arena_alloc = self.arena.allocator();
+        const ctx_storage = try arena_alloc.create(ArgsType);
+        ctx_storage.* = args;
+        const ranges = try arena_alloc.alloc(hybrid_query_mod.DenseRange, n);
+        for (0..n) |i| ranges[i] = sq.rangeAt(world, i, target);
+
+        const backing = self.arena.child_allocator;
+        const trampoline_fn: TrampolineFn = &Trampoline.call;
+        try self.jobs.ensureUnusedCapacity(backing, n);
+        for (0..n) |i| {
+            self.jobs.appendAssumeCapacity(.{
+                .chunk_ptr = @ptrCast(&ranges[i]),
                 .trampoline = trampoline_fn,
                 .ctx_ptr = @ptrCast(ctx_storage),
             });

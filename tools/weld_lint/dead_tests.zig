@@ -628,9 +628,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // per-tick semantics of `requires_removals_skipped` proven on an Etch program
     // carrying NO `changed` filter, which is the regime where `stepOnce` skips
     // `beginFrame` entirely (2142 -> 2143, suite closure reports 2143).
+    // G10/B1 added TWO to `tests/ecs/hybrid_query_test.zig` — a dense range
+    // reaching a WORKER through `JobBuilder.addDenseRangeJobs`, differential
+    // against the same body on the calling thread, plus the staging edge cases
+    // (2143 -> 2145, suite closure reports 2145).
     return switch (os) {
-        .windows => 2141,
-        else => 2143,
+        .windows => 2143,
+        else => 2145,
     };
 }
 

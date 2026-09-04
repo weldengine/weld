@@ -515,20 +515,42 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // — exact, where a lint rule would flag a NAME and carry a tokenizer's false
     // negatives. This test is the REPORT: it names the two dispatch entries and
     // asserts each carries the refusal.
-    // The FOUR entries that hand an argument tuple to a body, and which of them
+    // The entries that hand an argument tuple to a body, and which of them
     // dispatches ACROSS WORKERS — the distinction a first version of this gate
     // got wrong by comparing its own new path against the one that never
     // carried the hazard.
+    //
+    // THE LIST IS DERIVED, NOT MAINTAINED BY HAND, and the recipe is here so the
+    // next reader re-derives it in one pass instead of trusting it: every
+    // function in `src/` whose signature carries BOTH `comptime Body: anytype`
+    // and `args: anytype` is an arg-passing entry. At M1.B/G10 that derivation
+    // returns SIX. *A hand-kept version of this list said FOUR — it predated
+    // `addDenseRangeJobs` and had never contained `jobs.Scheduler.dispatch`,
+    // whose directory G8's sweep did not cover. This repository has found a
+    // hand-kept enumeration short three times (`ARCH-031` rule 5 at ten against
+    // three, the `Core` switch at eleven against six, the regime declarants at
+    // nine against seven), which is why the predicate is written down and the
+    // count is asserted against it.*
     const entries = [_][]const u8{
         "Query.runChunkAt", // across workers — GUARDED
         "JobBuilder.addJob", // across workers — GUARDED
-        "SparseDrivenQuery.forEachDenseRange", // dense-range unit — GUARDED
+        "JobBuilder.addDenseRangeJobs", // across workers — GUARDED (M1.B/G10 B1)
+        "jobs.Scheduler.dispatch", // across workers — NOT GUARDED (M1.B/G10 B2)
+        "SparseDrivenQuery.forEachDenseRange", // CALLING thread — guarded anyway
         "Query.forEachChunk", // CALLING thread — no hazard, unguarded
     };
-    const guarded: usize = 3;
+    // Of the FOUR that dispatch across workers, three carry the refusal. The
+    // fourth is `jobs.Scheduler.dispatch`, and its absence is stated here
+    // rather than left as a silent inaccuracy in the count: closing it is B2,
+    // and this control moves in B2's commit — a control that describes its
+    // object approximately is the defect it exists to prevent.
+    const dispatching: usize = 4;
+    const guarded_dispatching: usize = 3;
+    const guarded: usize = 4;
     std.debug.print(
-        "[job-bound] {d} arg-passing entries inspected, {d} dispatch across workers and are GUARDED\n",
-        .{ entries.len, guarded },
+        "[job-bound] {d} arg-passing entries derived, {d} dispatch across workers, " ++
+            "{d} of those GUARDED, {d} guarded in total\n",
+        .{ entries.len, dispatching, guarded_dispatching, guarded },
     );
 
     // The sparse-driven entry carries the refusal — asserted by the fact that a
@@ -549,6 +571,139 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // the new sparse path alone. Both now carry it, and the additions are free:
     // `runChunkAt` has ZERO call sites in the repository and `addJob`'s
     // twenty-five mentions pass no command buffer.
-    try testing.expectEqual(@as(usize, 4), entries.len);
-    try testing.expectEqual(@as(usize, 3), guarded);
+    try testing.expectEqual(@as(usize, 6), entries.len);
+    try testing.expectEqual(@as(usize, 4), dispatching);
+    try testing.expectEqual(@as(usize, 3), guarded_dispatching);
+    try testing.expectEqual(@as(usize, 4), guarded);
+}
+
+// ─── G10 / B1 — the dense range as a unit of DISPATCH, not only of SPLIT ────
+//
+// G8 above proves the SPLIT: the ranges cover the population exactly once and
+// differ by at most one. It proves nothing about dispatch, because
+// `forEachDenseRange` runs its bodies on the CALLING thread. What follows is
+// the other half of `engine-ecs-internals.md` §7's parity — that a range
+// reaches a WORKER the way a chunk does — and its oracle is built to tell
+// "reached a worker" apart from "ran here", without which a `dispatchBatch`
+// that silently ran everything inline would pass.
+
+const Scheduler = weld_core.jobs.scheduler.Scheduler;
+const JobBuilder = ecs.JobBuilder;
+
+const DispatchProbe = struct {
+    /// One counter per dense slot. Ranges are disjoint, so the writes are
+    /// disjoint and need no atomic — which is the entire reason a range is a
+    /// unit of work and not merely an interval.
+    hits: []u8,
+    /// The thread each body ran on, one slot per range.
+    tids: []std.Thread.Id,
+    filled: std.atomic.Value(usize) = .init(0),
+};
+
+fn markRange(r: hybrid.DenseRange, probe: *DispatchProbe) void {
+    for (r.from..r.to) |k| probe.hits[k] += 1;
+    const slot = probe.filled.fetchAdd(1, .monotonic);
+    if (slot < probe.tids.len) probe.tids[slot] = std.Thread.getCurrentId();
+}
+
+test "G10/B1: a dense range reaches a worker, and the same body agrees with the same-thread entry" {
+    const gpa = testing.allocator;
+    const io = std.testing.io;
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    const a = try reg(&world, gpa, "A", .sparse);
+    const n_entities: usize = 17;
+    for (0..n_entities) |_| _ = try world.spawnDynamic(gpa, &.{a});
+
+    var q = try hybrid.planSparseDriven(gpa, a, &.{a}, &.{});
+    defer q.deinit(gpa);
+
+    const target: usize = 5;
+    const n_ranges = q.rangeCount(&world, target);
+    try testing.expectEqual(@as(usize, 5), n_ranges);
+
+    // (1) The same-thread reference, through the entry G8 delivered.
+    const hits_same = try gpa.alloc(u8, n_entities);
+    defer gpa.free(hits_same);
+    @memset(hits_same, 0);
+    const tids_same = try gpa.alloc(std.Thread.Id, n_ranges);
+    defer gpa.free(tids_same);
+    var probe_same: DispatchProbe = .{ .hits = hits_same, .tids = tids_same };
+    q.forEachDenseRange(&world, target, markRange, .{&probe_same});
+
+    // (2) The dispatched run, through the entry B1 delivers.
+    var sched = try Scheduler.init(gpa, io);
+    try sched.start();
+    defer sched.deinit(gpa);
+
+    var builder = JobBuilder.init(gpa);
+    defer builder.deinit();
+
+    const hits_disp = try gpa.alloc(u8, n_entities);
+    defer gpa.free(hits_disp);
+    @memset(hits_disp, 0);
+    const tids_disp = try gpa.alloc(std.Thread.Id, n_ranges);
+    defer gpa.free(tids_disp);
+    var probe_disp: DispatchProbe = .{ .hits = hits_disp, .tids = tids_disp };
+
+    try builder.addDenseRangeJobs(&world, &q, target, markRange, .{&probe_disp});
+    try testing.expectEqual(n_ranges, builder.jobs.items.len); // one job per range
+    try sched.dispatchBatch(builder.jobs.items);
+
+    // (3) NON-VACUITY, and it is what makes assertion (4) mean anything: every
+    // range's body ran. Without this, "no body ran on the calling thread"
+    // would be satisfied by no body running at all.
+    try testing.expectEqual(n_ranges, probe_disp.filled.load(.monotonic));
+
+    // (4) THE CLAIM. `publishWaveAndWait` publishes, wakes and busy-yields —
+    // it invokes no trampoline — so a body on the dispatcher's own thread
+    // would mean the wave was never dispatched. Exact, not statistical.
+    const caller = std.Thread.getCurrentId();
+    for (probe_disp.tids) |t| try testing.expect(t != caller);
+
+    // And the mirror witness: the same-thread entry ran on the caller, all of
+    // it. A test that only asserted (4) could not tell a dispatched run from a
+    // harness that never touches the caller's thread at all.
+    try testing.expectEqual(n_ranges, probe_same.filled.load(.monotonic));
+    for (probe_same.tids) |t| try testing.expectEqual(caller, t);
+
+    // (5) PARITY, as a differential on the same `Body`: one chunk body serves
+    // `forEachChunk`, `runChunkAt` and `addJob` alike, and one range body must
+    // serve both range entries. This is independent of the coverage property
+    // G8 pins — a `rangeAt` that overlapped identically on both paths would
+    // pass here and fail there, and a trampoline passing the wrong value would
+    // pass there and fail here.
+    try testing.expectEqualSlices(u8, hits_same, hits_disp);
+    for (hits_disp) |h| try testing.expectEqual(@as(u8, 1), h);
+}
+
+test "G10/B1: an empty driver stages no job, and a target above the population stages one per entity" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const a = try reg(&world, gpa, "A", .sparse);
+    const empty = try reg(&world, gpa, "Empty", .sparse);
+
+    var builder = JobBuilder.init(gpa);
+    defer builder.deinit();
+
+    // An empty driver yields NO job — not one job over an empty range, which a
+    // worker would take and find nothing in.
+    var q_empty = try hybrid.planSparseDriven(gpa, empty, &.{empty}, &.{});
+    defer q_empty.deinit(gpa);
+    var sink = [_]u8{0};
+    var tid_sink: [1]std.Thread.Id = undefined;
+    var probe: DispatchProbe = .{ .hits = &sink, .tids = &tid_sink };
+    try builder.addDenseRangeJobs(&world, &q_empty, 4, markRange, .{&probe});
+    try testing.expectEqual(@as(usize, 0), builder.jobs.items.len);
+
+    // And the clamp carries through staging: three entities against a target of
+    // 64 stage three jobs, because `rangeCount` is the authority on the count
+    // and this entry does not second-guess it.
+    for (0..3) |_| _ = try world.spawnDynamic(gpa, &.{a});
+    var q_a = try hybrid.planSparseDriven(gpa, a, &.{a}, &.{});
+    defer q_a.deinit(gpa);
+    try builder.addDenseRangeJobs(&world, &q_a, 64, markRange, .{&probe});
+    try testing.expectEqual(@as(usize, 3), builder.jobs.items.len);
 }
