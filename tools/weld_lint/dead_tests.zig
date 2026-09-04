@@ -585,14 +585,20 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // permission G2 opened, which G3 pinned as MATCHING and not as iterating), and the
     // boundary pin that a rule does not yet SELECT by a sparse component, which is G7's
     // planner and whose arrival flips that assertion.
-    // (2101 -> 2109, suite reported 2109 - 2090 passed + 19 skipped, macOS aarch64, in ALL
-    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures. ReleaseFast is
-    // also green at 2089 + 20 skipped — ONE MORE skip than the other four, pre-existing and
-    // not investigated here: a test that stands down when `std.debug.assert` is compiled
-    // out. Recorded because the count differs, not because it moved.)
+    // M1.B / G6 adds SEVEN across three scene test files, and NO production change to the
+    // loader: three in `load_roundtrip_test.zig` (a sparse component loading into its own
+    // store; the SAME cooked bytes giving the same values under either mode, with the
+    // archetypes differing; and two on-disk blocks whose TABLE subset coincides landing in
+    // ONE archetype), one in `extensions_test.zig` (an ALL-SPARSE extension activating
+    // without touching the archetype — the self-migration guard's only production producer),
+    // and three in `crossref_test.zig` (a cross-ref resolving INTO a sparse row, plus the two
+    // Etch-cook seam tests: `@storage(.sparse)` changes NOTHING in the cooked bytes, and the
+    // same bytes load under either host registration).
+    // (2109 -> 2116, suite reported 2116 - 2097 passed + 19 skipped, macOS aarch64, in ALL
+    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
     return switch (os) {
-        .windows => 2107,
-        else => 2109,
+        .windows => 2114,
+        else => 2116,
     };
 }
 

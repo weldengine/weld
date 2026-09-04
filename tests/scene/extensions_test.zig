@@ -1001,3 +1001,94 @@ const DrainSpy = struct {
         if (world.componentBytes(entity, marker_id) != null) saw_marker_at_spawn = true;
     }
 };
+
+// ─── M1.B / G6 — an extension whose components are ALL sparse ───────────────
+
+test "G6: an ALL-SPARSE extension activates without touching the archetype" {
+    const gpa = std.testing.allocator;
+
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+
+    const combat =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
+        \\  entity "mod" {
+        \\    uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6"
+        \\    Weapon { damage: 25 }
+        \\  }
+        \\  on_attach { entity.get_mut(Health).max += 50 }
+        \\}
+    ;
+    var combat_cooked = try scene_cook.cookPrefab(gpa, combat, base_res.base(), null);
+    defer combat_cooked.deinit(gpa);
+    const combat_bytes = try scene.writer.write(gpa, combat_cooked.model, &combat_cooked.registry);
+    defer gpa.free(combat_bytes);
+
+    const scene_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule"]
+        \\    Health { current: 100, max: 100 }
+        \\  }
+        \\}
+    ;
+    var scene_cooked = try scene_cook.cook(gpa, scene_src, null);
+    defer scene_cooked.deinit(gpa);
+    const scene_bytes = try scene.writer.write(gpa, scene_cooked.model, &scene_cooked.registry);
+    defer gpa.free(scene_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The cooked bytes are IDENTICAL to the sibling test's — the only change is
+    // the RUNTIME registry, which is where the storage mode lives and the one
+    // place it has ever lived (`engine-scene-serialization.md` §4).
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{}, .storage = .sparse });
+    AttachSpy.reset();
+    world.registerOnAttach(null, &AttachSpy.cb);
+
+    var ext_res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, ext_res.ext());
+    defer result.deinit(gpa);
+
+    const npc = result.uuid_to_entity.get(uuidBytes(0xf1)).?;
+    const weapon_id = world.componentId("Weapon").?;
+    const health_id = world.componentId("Health").?;
+    const arch_before_ext = world.dynamicLocation(npc).?;
+
+    // The extension's ONLY component is sparse, so `addComponentsDynamic` adds
+    // nothing to the signature and takes its self-migration guard — the path
+    // `world.zig` names as reachable from production only through
+    // `loader.activateExtension`, and which before G3-bis stranded the entity's
+    // location on a freed slot.
+    const arch = world.dynamicArchetype(arch_before_ext.archetype_idx);
+    try std.testing.expect(!arch.hasComponent(weapon_id));
+    try std.testing.expect(arch.hasComponent(health_id));
+
+    // Carried nonetheless, with its cooked value, and the entity still sits on
+    // a LIVE slot — the assertion that would have caught the stranding.
+    const wb = world.componentBytes(npc, weapon_id) orelse return error.WeaponNotAdded;
+    try std.testing.expectEqual(@as(i32, 25), std.mem.readInt(i32, wb[0..4], .little));
+    const chunk = arch.chunks.items[arch_before_ext.chunk_idx];
+    try std.testing.expectEqual(npc, arch.entityIds(chunk)[arch_before_ext.slot]);
+    try std.testing.expect(arch_before_ext.slot < chunk.entityCount());
+
+    // And the `on_attach` SEAM still fired, carrying the extension's name and
+    // its hook text — the same three assertions the sibling table-mode test
+    // makes, and the same reason: `AttachSpy` REPLACES the Etch trampoline, so
+    // the hook body is never executed here and `Health.max` stays 100. A first
+    // version of this test asserted 150 and failed on that premise rather than
+    // on the routing — the harness's shape, not the code's.
+    try std.testing.expectEqual(@as(u32, 1), AttachSpy.fired);
+    try std.testing.expect(AttachSpy.saw_name);
+    try std.testing.expect(AttachSpy.saw_text);
+    const hb = world.componentBytes(npc, health_id).?;
+    try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, hb[4..8], .little));
+}

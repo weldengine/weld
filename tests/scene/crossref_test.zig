@@ -128,3 +128,130 @@ test "cook rejects a reference to an absent entity" {
     try std.testing.expectError(error.UnresolvedCrossRef, scene_cook.cook(gpa, bad, &diag));
     try std.testing.expect(diag.len > 0);
 }
+
+// ─── M1.B / G6 — a cross-ref borne by a SPARSE component ────────────────────
+
+test "G6: a cross-ref resolves into a SPARSE component's row" {
+    const gpa = std.testing.allocator;
+    // The SAME cooked bytes as the sibling test — the cook never sees a storage
+    // mode, so only the runtime registry differs.
+    var cooked = try scene_cook.cook(gpa, src, null);
+    defer cooked.deinit(gpa);
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Link", .size = 8, .alignment = 8, .default_bytes = &[_]u8{0xFF} ** 8, .fields = &.{}, .storage = .sparse });
+
+    var result = try scene.loader.loadFromBytes(&world, gpa, bytes, null);
+    defer result.deinit(gpa);
+
+    const link_id = world.componentId("Link").?;
+    const a = result.uuid_to_entity.get(uuidBytes(0xa1)).?;
+    const b = result.uuid_to_entity.get(uuidBytes(0xb2)).?;
+    const c = result.uuid_to_entity.get(uuidBytes(0xc3)).?;
+
+    // `resolveCrossRefs` writes the resolved handle INTO the component's bytes
+    // at the field's offset, and marks it changed — both through the World-level
+    // entries G3 made bimodal, so the write lands in the sparse ROW. This is the
+    // one production path in the loader that MUTATES a component after spawn,
+    // and it had no sparse coverage.
+    const a_target = std.mem.readInt(u64, world.componentBytes(a, link_id).?[0..8], .little);
+    try std.testing.expectEqual(@as(u64, @bitCast(b)), a_target);
+
+    // The unset reference stays dead — the negative twin, without which "the
+    // write lands" would not distinguish a resolved handle from a default.
+    const c_target = std.mem.readInt(u64, world.componentBytes(c, link_id).?[0..8], .little);
+    try std.testing.expectEqual(dead_u64, c_target);
+
+    // And `Link` is in nobody's archetype: the block named it, the spawn surface
+    // routed it away, and the cross-ref found it anyway.
+    for ([_]EntityId{ a, c }) |e| {
+        const arch = world.dynamicArchetype(world.dynamicLocation(e).?.archetype_idx);
+        try std.testing.expect(!arch.hasComponent(link_id));
+        try std.testing.expect(world.hasComponentDyn(e, link_id));
+    }
+    try std.testing.expectEqual(@as(usize, 2), world.sparse_stores.getConst(link_id).?.len());
+}
+
+// ─── M1.B / G6 — @storage(.sparse) through the ETCH COOK ────────────────────
+
+const src_plain =
+    \\component Marker { v: i32 = 0 }
+    \\component Burning { remaining: float = 3.0 }
+    \\scene "S" {
+    \\  entity "A" { uuid: "00000000-0000-0000-0000-0000000000a1" Burning { remaining: 5.0 } }
+    \\  entity "B" { uuid: "00000000-0000-0000-0000-0000000000b2" Marker { v: 7 } }
+    \\}
+;
+
+const src_sparse =
+    \\component Marker { v: i32 = 0 }
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\scene "S" {
+    \\  entity "A" { uuid: "00000000-0000-0000-0000-0000000000a1" Burning { remaining: 5.0 } }
+    \\  entity "B" { uuid: "00000000-0000-0000-0000-0000000000b2" Marker { v: 7 } }
+    \\}
+;
+
+test "G6: @storage(.sparse) changes NOTHING in the cooked bytes" {
+    const gpa = std.testing.allocator;
+
+    var plain = try scene_cook.cook(gpa, src_plain, null);
+    defer plain.deinit(gpa);
+    const b_plain = try scene.writer.write(gpa, plain.model, &plain.registry);
+    defer gpa.free(b_plain);
+
+    var sparse = try scene_cook.cook(gpa, src_sparse, null);
+    defer sparse.deinit(gpa);
+    const b_sparse = try scene.writer.write(gpa, sparse.model, &sparse.registry);
+    defer gpa.free(b_sparse);
+
+    // BYTE-IDENTICAL. The cook resolves the declared mode into its own registry
+    // (`types_mod.storageModeOf`, the same resolver the interpreter uses, so the
+    // two registries cannot disagree) and the WRITER never reads it back —
+    // measured: `writer.zig` contains no occurrence of `storage` at all. The
+    // storage mode is a runtime-registry property and is NEVER part of on-disk
+    // identity, which is the sentence that lets this milestone leave the frozen
+    // codec shut.
+    //
+    // This is also the seam the G6 recon found uncovered: every other test here
+    // hand-builds a `CookModel`, so nothing drove the annotation through the
+    // Etch front end.
+    try std.testing.expectEqualSlices(u8, b_plain, b_sparse);
+}
+
+test "G6: the Etch-cooked scene loads under EITHER host registration" {
+    const gpa = std.testing.allocator;
+    var cooked = try scene_cook.cook(gpa, src_sparse, null);
+    defer cooked.deinit(gpa);
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+
+    // The load-time mode comes from the HOST's registry, not from the file —
+    // which is what "not on-disk identity" means in practice, and why the same
+    // bytes are loaded twice here under opposite declarations.
+    inline for (.{ ecs.StorageKind.table, ecs.StorageKind.sparse }) |mode| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+        _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Burning", .size = 8, .alignment = 8, .default_bytes = &[_]u8{0} ** 8, .fields = &.{}, .storage = mode });
+
+        var result = try scene.loader.loadFromBytes(&world, gpa, bytes, null);
+        defer result.deinit(gpa);
+
+        const burning = world.componentId("Burning").?;
+        const a = result.uuid_to_entity.get(uuidBytes(0xa1)).?;
+        try std.testing.expect(world.hasComponentDyn(a, burning));
+        // Same value either way — `remaining: 5.0`, an Etch `float`, so an f64.
+        const v: f64 = @bitCast(std.mem.readInt(u64, world.componentBytes(a, burning).?[0..8], .little));
+        try std.testing.expectApproxEqAbs(@as(f64, 5.0), v, 1e-9);
+        // And the archetype differs, which is what makes the equality a
+        // statement about storage rather than about two identical loads.
+        const arch = world.dynamicArchetype(world.dynamicLocation(a).?.archetype_idx);
+        try std.testing.expectEqual(mode == .table, arch.hasComponent(burning));
+    }
+}

@@ -379,7 +379,9 @@ pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8, ext_re
 /// Phase 1 — instantiate every entity of every archetype block. Maps each
 /// block's on-disk schema-index columns to runtime `ComponentId`s (the E1
 /// remap), gathers each slot's raw component bytes (borrowed, on-disk column
-/// order — `spawnDynamicWithValues` reorders by id), spawns the entity, records
+/// order — `spawnDynamicWithValues` reorders by id AND PARTITIONS BY STORAGE
+/// MODE, so an id named by the block may never reach an archetype at all),
+/// spawns the entity, records
 /// `uuid → eid`, and appends to `spawned`. Validates each parent ordinal is
 /// `no_parent` or in `[0, uuidCount)` (else `error.MalformedScene`) but
 /// **applies no parent link** (no runtime hierarchy component exists yet —
