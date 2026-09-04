@@ -45,7 +45,27 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Raised 10 -> 20 at M1.B/G11, on measurement rather than on symmetry.
+    #
+    # `bench-ecs-smoke (windows-2025)` was ALREADY at the edge: the last run to
+    # pass took 9m37 against the 10-minute budget — 23 seconds of headroom — and
+    # the very next run on the following commit was cancelled at 11m28. That
+    # marginality is a standing open item, first closed by experiment at
+    # M1.1.11.1 (cancelled at 9m28, passed on rerun at 7m34 on the SAME commit),
+    # with the code exonerated there too.
+    #
+    # M1.B then made it worse, and MEASURED so rather than assumed: this step
+    # runs `zig build bench-ecs`, whose run step depends on the install step, so
+    # it compiles EVERY installed artifact — verified by deleting
+    # `zig-out/bin/` and observing `ecs-hybrid-crossover-bench` reappear
+    # alongside `ecs-benchmark`. The new crossover bench is therefore compiled by
+    # this job, and the growth is legitimate work rather than a regression.
+    #
+    # 20 is not a masking: `build-and-test (windows-2025, ReleaseSafe)` compiles
+    # the whole forge suite on the same runner class in 42m, so a hang is still
+    # caught here well before it costs an hour. A job that fails on budget every
+    # run is worse than an absent job — it teaches everyone not to read it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 

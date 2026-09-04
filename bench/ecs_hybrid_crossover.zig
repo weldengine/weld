@@ -918,6 +918,16 @@ fn writeReport(
         \\**The realised carrier and archetype counts are measured, never assumed** — `spread` is a
         \\filler modulus and a REQUEST, and the carrier/non-carrier split multiplies it.
         \\
+        \\**A `DISPATCH FAILED` CELL IS NOT A SLOW CELL, AND THE FRONTIER MUST NOT BE READ THROUGH IT.**
+        \\At high churn the table arm does not lose on time — it stops dispatching: `dispatchBatch`
+        \\returns `TooManyChunks` once the wave exceeds `workers x 8192`, and the arm produces no
+        \\answer at all. A table of times against churn that runs a contour through such a cell would
+        \\read as a smooth trade-off, and it is not one; the ratio column reads `n/a` rather than a
+        \\number for exactly that reason. Those cells are excluded from the bracket and counted in
+        \\its line. The mechanism is upstream of this bench and named in the milestone's debt: chunk
+        \\compaction is INTRA-chunk only and `archetype.zig` releases no chunk, so the count follows
+        \\the cumulative number of adds and never the live population.
+        \\
         \\
     , .{
         @tagName(builtin.mode),
@@ -968,7 +978,7 @@ fn writeReport(
                     // A refused wave has no steady figure, and printing a zero
                     // there would read as "instant" rather than "the job system
                     // declined the wave".
-                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | REFUSED at {d} chunks | — |\n", .{
+                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | **DISPATCH FAILED** at {d} chunks | n/a |\n", .{
                         f,
                         ch,
                         p.table.cell.carriers,
