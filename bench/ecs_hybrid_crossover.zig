@@ -803,8 +803,28 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var smoke = false;
+    // PROTOCOL MODE DEFAULTS TO NON-OPPOSABLE, and the default is the whole
+    // point rather than a convenience.
+    //
+    // `engine-phase-0-criteria.md` § bench methodology requires every archived
+    // report to state whether the cold-isolated protocol was respected —
+    // explicitly "cold-isolated, compliant" or "dev-mode — not opposable", the
+    // two forms `bench/reports/ecs_benchmark_C0.1_2026-05-{22,23}*.md` already
+    // use. **A bench cannot detect thermal isolation**: it cannot know whether
+    // a 30-minute idle preceded it, whether the session was active, or whether
+    // it is running on the reference machine. So the burden sits on the
+    // ASSERTER: the default label is the non-opposable one and `--cold-isolated`
+    // is the only way to claim compliance.
+    //
+    // Without that default, this bench would emit an artifact on every CI run —
+    // shared runner, no idle, not the reference machine — that LOOKS like the
+    // corpus measurement, and someone would cite it. That is precisely the
+    // mechanism behind the "14.2 ms M0.1 baseline" this milestone traced to a
+    // figure no M0.1 artifact carries, and CI would industrialise it.
+    var cold_isolated = false;
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "--smoke")) smoke = true;
+        if (std.mem.eql(u8, a, "--cold-isolated")) cold_isolated = true;
     }
 
     // One (fraction, churn) cell of one configuration, so CI's compile-and-run
@@ -844,7 +864,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try writeReport(io, gpa, &grids, n_fr, n_ch, smoke);
+    try writeReport(io, gpa, &grids, n_fr, n_ch, smoke, cold_isolated);
 
     std.debug.print("\n  (reported, not gated — the owning spec refuses to engrave a threshold)\n", .{});
     const leaked = debug_allocator.deinit();
@@ -864,6 +884,7 @@ fn writeReport(
     n_fr: usize,
     n_ch: usize,
     smoke: bool,
+    cold_isolated: bool,
 ) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
@@ -876,6 +897,8 @@ fn writeReport(
         \\this bench as what produces them instead. There is no future gate here: the output IS the
         \\deliverable. A pass threshold would grade an implementation against a number this bench
         \\exists to produce.
+        \\
+        \\**Protocol mode:** {s}
         \\
         \\**Build mode:** {s} · **entities:** {d} · **ticks:** 1 first + {d} warm-up + {d} measured
         \\· **chunk size:** {d} B (a compile-time constant — §2 lists it among the parameters the
@@ -930,6 +953,13 @@ fn writeReport(
         \\
         \\
     , .{
+        if (cold_isolated)
+            "cold-isolated, compliant — asserted by `--cold-isolated` at the invocation"
+        else
+            "⚠ **dev-mode — not opposable**. No `--cold-isolated` was passed, so nothing here " ++
+                "attests an idle window, an inactive session or the reference machine. A CI run " ++
+                "lands in this branch by construction: shared runner, no idle. Cite the archived " ++
+                "report of a protocol run, never this file.",
         @tagName(builtin.mode),
         n_entities,
         warmup_ticks,
