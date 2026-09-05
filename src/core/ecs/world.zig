@@ -785,7 +785,13 @@ pub const World = struct {
     /// does not hold its requisite back. Without that exception a legitimate
     /// teardown would be refused forever, which is the guard's other way of
     /// being wrong.
-    fn requiresRefusesRemoval(
+    /// Public since the M1.B reprise: the observer-dispatching apply must know
+    /// whether a removal will be REFUSED before it fires `on_remove`, because
+    /// an observer describes a state that has taken place. Reading it there and
+    /// then NOT reaching `removeComponentDynamic` keeps the skip counted
+    /// exactly once — the count lives in this function, so a pre-validation
+    /// that also fell through would count twice.
+    pub fn requiresRefusesRemoval(
         self: *World,
         entity: EntityId,
         cid: ComponentId,

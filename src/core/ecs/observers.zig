@@ -386,6 +386,16 @@ pub fn applyWithObservers(
             _ = try reg.spawnWithObservers(gpa, world, s.component_ids, s.payloads);
         },
         .despawn => |d| {
+            // SAME MECHANISM as the remove arm below: the command's own
+            // precondition, checked before any observer fires. `world.despawn`
+            // returns `StaleEntityHandle` on a handle whose generation is gone,
+            // and `on_despawned` fires UNCONDITIONALLY — so a double despawn in
+            // one tick, which two rules or one body can record, handed
+            // consumers the death of an entity whose despawn then failed. The
+            // `on_remove` loop below is naturally empty in that case (a dead
+            // entity carries no component), which is why `on_despawned` is the
+            // whole of the exposure and not a fraction of it.
+            if (!world.isLive(d.entity)) return error.StaleEntityHandle;
             // Pre-apply: fire on_remove[cid] for every component the
             // entity still has, then on_despawned. The observer is
             // free to read the entity's components — they live until
@@ -454,6 +464,18 @@ pub fn applyWithObservers(
             }
         },
         .remove_component => |r| {
+            // AN OBSERVER DESCRIBES A STATE THAT HAS TAKEN PLACE, so the
+            // command's own precondition is checked BEFORE the event. A
+            // `@requires` refusal is a silent SKIP inside
+            // `removeComponentDynamic`, and firing first handed consumers an
+            // `on_removed` for a component that is still there — a lie about
+            // the world, delivered by the mechanism that exists to report it.
+            //
+            // Returning here rather than falling through is what keeps the skip
+            // counted ONCE: the count lives inside `requiresRefusesRemoval`, so
+            // a pre-validation that then reached `removeComponentDynamic` would
+            // count the same refusal twice.
+            if (world.requiresRefusesRemoval(r.entity, r.component_id, &.{})) return;
             // Pre-apply: observer reads the component value (live slot), THEN
             // the migration drops it.
             if (reg.on_remove.get(r.component_id)) |list| {

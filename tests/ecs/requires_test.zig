@@ -429,3 +429,76 @@ test "P1-1: the typed add expands the closure" {
     try testing.expect(world.hasComponentDyn(e, c.mesh));
     try testing.expect(world.hasComponentDyn(e, c.transform));
 }
+
+// ─── Reprise / P1-3 — an observer describes a state that HAS TAKEN PLACE ────
+//
+// Derived over the six command kinds rather than started from the site the
+// review named. Four are already in the right order and are the positive
+// witnesses: `.add_component`'s replace arm overwrites unconditionally before
+// `on_replaced`, its fresh arm migrates before `on_add`, `.spawn` spawns before
+// `on_spawned`, and the tag kinds have no hook at all. TWO were wrong, and they
+// carry the same PRINCIPLE with two different PREDICATES — so two mechanisms,
+// and two counter-factuals.
+
+const observers_mod = weld_core.ecs.observers;
+const Command = weld_core.ecs.command_buffer.Command;
+
+test "P1-3: a refused removal fires no on_remove, and is counted exactly once" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const Spy = struct {
+        var fired: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, _: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            fired += 1;
+        }
+    };
+    Spy.fired = 0;
+    try world.observer_registry.registerOnRemove(gpa, &world, c.transform, null, Spy.cb);
+
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{c.mesh}); // closure adds Transform
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+    world.tickBoundary(); // a clean counter window
+
+    const cmd: Command = .{ .remove_component = .{ .entity = e, .component_id = c.transform } };
+    try observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa);
+
+    // THREE assertions that fail for THREE different reasons.
+    try testing.expectEqual(@as(usize, 0), Spy.fired); // no event for a non-event
+    try testing.expect(world.hasComponentDyn(e, c.transform)); // the refusal held
+    // Exactly ONE: zero would mean the pre-validation replaced the counting
+    // site instead of moving the order, two would mean it counted and then fell
+    // through to `removeComponentDynamic`, which counts again.
+    try testing.expectEqual(@as(u32, 1), world.requires_removals_skipped);
+}
+
+test "P1-3: a stale deferred despawn fires no on_despawned" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try reg(&world, gpa, "Anything", &.{}, .table);
+
+    const Spy = struct {
+        var fired: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, _: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            fired += 1;
+        }
+    };
+    Spy.fired = 0;
+    try world.observer_registry.registerOnDespawned(gpa, &world, null, Spy.cb);
+
+    const e = try world.spawnDynamic(gpa, &.{});
+    try world.despawn(gpa, e); // the handle goes stale BEFORE the flush
+
+    // Reachable by a double despawn in one tick — two rules, or one body.
+    const cmd: Command = .{ .despawn = .{ .entity = e } };
+    try testing.expectError(
+        error.StaleEntityHandle,
+        observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa),
+    );
+    // `on_despawned` fires unconditionally in that arm, so it was the WHOLE of
+    // the exposure: the `on_remove` walk is naturally empty on a dead entity.
+    try testing.expectEqual(@as(usize, 0), Spy.fired);
+}

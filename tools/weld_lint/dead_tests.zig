@@ -639,9 +639,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // the derived inventory found ignoring the closure, plus the observer half
     // and the idempotence that must stay green (2146 -> 2152, suite closure
     // reports 2152). P1-5 adds assertions to an EXISTING block and moves nothing.
+    // P1-3 adds TWO to `tests/ecs/requires_test.zig`, one per defective arm of
+    // R11 — the refused removal and the stale deferred despawn — the two
+    // sharing a principle and using two different predicates (2152 -> 2154,
+    // suite closure reports 2154).
     return switch (os) {
-        .windows => 2150,
-        else => 2152,
+        .windows => 2152,
+        else => 2154,
     };
 }
 
