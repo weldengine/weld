@@ -686,3 +686,51 @@ test "P1-2: a union of two table-driven terms applies BOTH sparse filters" {
     try std.testing.expectEqual(@as(i32, 1), n2); // admitted by term 2 — {B, S2}
     try std.testing.expectEqual(@as(i32, 0), n3); // admitted by neither
 }
+
+// ─── Reprise / P1-4 — the arity is preserved, not capped in silence ─────────
+
+const src_seventeen =
+    \\component R1 { v: i32 = 0 }
+    \\component R2 { v: i32 = 0 }
+    \\component R3 { v: i32 = 0 }
+    \\component R4 { v: i32 = 0 }
+    \\component R5 { v: i32 = 0 }
+    \\component R6 { v: i32 = 0 }
+    \\component R7 { v: i32 = 0 }
+    \\component R8 { v: i32 = 0 }
+    \\component R9 { v: i32 = 0 }
+    \\component R10 { v: i32 = 0 }
+    \\component R11 { v: i32 = 0 }
+    \\component R12 { v: i32 = 0 }
+    \\component R13 { v: i32 = 0 }
+    \\component R14 { v: i32 = 0 }
+    \\component R15 { v: i32 = 0 }
+    \\component R16 { v: i32 = 0 }
+    \\component R17 { v: i32 = 0 }
+    \\
+    \\@requires(R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17)
+    \\component Big { v: i32 = 0 }
+;
+
+test "P1-4: a seventeenth requisite is not lost" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_seventeen);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const big = world.registry.idOf("Big").?;
+    // SEVENTEEN, against the sixteen a caller-supplied `[16]` buffer admitted.
+    // A count is the oracle here rather than a presence check on the first few:
+    // the defect drops the TAIL, so an oracle reading R1..R3 would pass on it.
+    try std.testing.expectEqual(@as(usize, 17), world.registry.requiresClosure(big).len);
+    // And the seventeenth by name, so the count cannot be satisfied by any
+    // seventeen ids that happen to be there.
+    const r17 = world.registry.idOf("R17").?;
+    try std.testing.expect(std.mem.indexOfScalar(ComponentId, world.registry.requiresClosure(big), r17) != null);
+}

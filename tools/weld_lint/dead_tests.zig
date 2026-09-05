@@ -643,9 +643,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // R11 — the refused removal and the stale deferred despawn — the two
     // sharing a principle and using two different predicates (2152 -> 2154,
     // suite closure reports 2154).
+    // P1-4 adds ONE to `tests/etch/storage_mode_test.zig` — seventeen requisites
+    // against the sixteen a caller-supplied buffer admitted, the oracle being a
+    // COUNT because the defect cuts the tail (2154 -> 2155, suite closure
+    // reports 2155).
     return switch (os) {
-        .windows => 2152,
-        else => 2154,
+        .windows => 2153,
+        else => 2155,
     };
 }
 

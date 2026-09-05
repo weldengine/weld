@@ -7035,8 +7035,8 @@ fn compileComponent(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    var req_buf: [16][]const u8 = undefined;
-    const req = types_mod.requiresNamesOf(ast, decl, &req_buf);
+    const req = try types_mod.requiresNamesOf(gpa, ast, decl);
+    defer gpa.free(req);
     _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(ast, decl), literals);
 }
 

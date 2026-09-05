@@ -405,8 +405,9 @@ const Builder = struct {
                     // §4) — but two registries built from one declaration that
                     // disagreed about it would be a divergence waiting for its
                     // first reader, and resolving costs one accessor call.
-                    var req_buf: [16][]const u8 = undefined;
-                    const req = types_mod.requiresNamesOf(self.ast, decl, &req_buf);
+                    const req = types_mod.requiresNamesOf(self.gpa, self.ast, decl) catch
+                        return CookError.OutOfMemory;
+                    defer self.gpa.free(req);
                     _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(self.ast, decl), diag_out) catch |e| return e;
                 },
                 .resource_decl => {

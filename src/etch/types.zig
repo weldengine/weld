@@ -56,14 +56,26 @@ const storage_domain_dotted = blk: {
 /// into the AST's string pool, which outlives the registration, so nothing is
 /// copied here and the registry owns its own copies.
 pub fn requiresNamesOf(
+    gpa: std.mem.Allocator,
     ast: *const ast_mod.AstArena,
     decl: ast_mod.ComponentDecl,
-    out: [][]const u8,
-) [][]const u8 {
-    const annot = ast.requiresAnnotation(decl) orelse return out[0..0];
+) ![][]const u8 {
+    const annot = ast.requiresAnnotation(decl) orelse return &.{};
+    // SIZED BY THE ANNOTATION'S OWN ARITY. The previous form took a caller
+    // buffer and looped `while (i < args_len and n < out.len)`, with both
+    // callers passing `[16][]const u8` — so a component declaring seventeen
+    // requisites lost the seventeenth with NO diagnostic and NO error, and its
+    // closure was built from a truncated list: the missing requisite was never
+    // added and never refused on removal.
+    //
+    // The arity is preserved rather than the cap made normative. A normative cap
+    // owes a diagnostic code for a number nobody derived, and this milestone has
+    // spent itself removing engraved numbers rather than adding one.
+    const out = try gpa.alloc([]const u8, annot.args_len);
+    errdefer gpa.free(out);
     var n: usize = 0;
     var i: u32 = 0;
-    while (i < annot.args_len and n < out.len) : (i += 1) {
+    while (i < annot.args_len) : (i += 1) {
         if (ast.requiresTypeNameAt(annot, i)) |sid| {
             out[n] = ast.strings.slice(sid);
             n += 1;
