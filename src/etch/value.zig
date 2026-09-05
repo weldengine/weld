@@ -44,6 +44,38 @@ pub const ComponentRef = struct {
     /// hash `componentRefOf` already pays to build a table ref — and because a
     /// row POINTER would be invalidated by any swap-remove in that store, a
     /// hazard the entity form does not have.
+    ///
+    /// **AND THE TABLE ARM HAS EXACTLY THAT HAZARD, which the sentence above
+    /// only half says.** A `chunk_ptr` + `slot` is invalidated by a swap-remove
+    /// in its chunk or by an archetype migration of its entity — that is, by a
+    /// component REMOVE, a component ADD, or a DESPAWN. So a handle held across
+    /// a structural mutation is safe in sparse and unsafe in table, which means
+    /// `@storage` — presented everywhere as a storage choice with no semantic
+    /// effect — would change the lifetime semantics of a value visible from
+    /// Etch.
+    ///
+    /// **What makes the divergence unreachable today is TEMPORAL, not
+    /// structural, and measured rather than assumed.** Nothing in the language
+    /// forbids the shape: `let r = entity.get_mut(H)` then `entity.remove(M)`
+    /// then `r.hp = 99` parses and type-checks with ZERO diagnostics. What
+    /// saves it is that the three ops which MOVE a row — remove, add, despawn —
+    /// are DEFERRED from a rule body since M1.0.10, so no row moves while the
+    /// body runs; measured end to end, both entities of a two-entity archetype
+    /// take the write correctly and the removal lands at the tick boundary.
+    ///
+    /// **An immediate SPAWN is not a counter-example and must not be recorded as
+    /// one:** `Archetype.allocateSlot` takes the last chunk if it has room, else
+    /// allocates a new one, and writes at `slot = entity_count`. An append never
+    /// relocates an existing row, so a spawn — deferred or immediate, in this
+    /// archetype or another — leaves every handle valid.
+    ///
+    /// **The bound, so a later reader guards the right thing:** the property
+    /// holds while remove, add and despawn stay unreachable in immediate form
+    /// from a body. The day one of them is not, the divergence returns and no
+    /// guard says so. Making it a language rule rather than a consequence of
+    /// what happens to be deferred belongs to `etch-memory-model.md`, which says
+    /// nothing about a component handle's lifetime today — measured, zero
+    /// occurrences.
     where: Where,
 
     pub const Where = union(enum) {
