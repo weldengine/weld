@@ -581,13 +581,25 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     // NON-VACUITY. `*World` was this control until P1-5 made the walk sound,
     // and it FLIPPED: `World.observer_registry` is an `ObserverRegistry` whose
     // `deferred` field is a `CommandBuffer`, so `*World` transitively carries
-    // the marked type and the guard now refuses it. **That refusal is correct on
-    // the bound's own terms** — a body holding `*World` reaches
+    // the marked type and the guard now refuses it.
+    //
+    // **THE REFUSAL IS `ARCH-030`'s FIRST CONFORMITY TEST, not a side effect of
+    // this bound.** That invariant is FROZEN — *"Gel : définitif"*, scope
+    // *"Tier 0/1/3 — scheduler et tout système enregistré, quel que soit le
+    // tier"* — its Decision reads *"Un système ne reçoit jamais un handle non
+    // restreint sur le monde"*, and its first conformity test reads *"aucun
+    // point d'entrée de système ne reçoit `*World` ni aucun équivalent non
+    // restreint"*. Nothing in the repository established that; a sound
+    // transitive walk drops it out. The reader who finds this refusal
+    // surprising needs the invariant, not a chain of reasoning from the bound —
+    // though the bound agrees: a body holding `*World` reaches
     // `observer_registry.deferred` and can record structural changes from a
-    // worker, which is exactly what "no job body receives a command buffer"
-    // exists to prevent, and the one-level predicate could not see it. It is
-    // also `ARCH-030`'s subject arriving early: M1.A is the milestone that takes
-    // the unrestricted `*World` out of system entry points.
+    // worker, which the one-level predicate could not see.
+    //
+    // **M1.A.0 will find this half done.** `ARCH-030` is delivered there as a
+    // comptime view parameterised by the declared access set; the dispatch side
+    // of its first test holds as of M1.B's reprise, a milestone early and
+    // without being aimed at. It must not be rebuilt.
     //
     // The control is replaced rather than the walk narrowed, and by TWO types: a
     // synthetic one that carries nothing by construction, and a real engine type
