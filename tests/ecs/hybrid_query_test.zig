@@ -578,7 +578,37 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     try testing.expect(carries(ecs.command_buffer.CommandBuffer));
     try testing.expect(carries(*ecs.command_buffer.CommandBuffer));
     try testing.expect(carries(?*ecs.command_buffer.CommandBuffer));
-    try testing.expect(!carries(*World));
+    // NON-VACUITY. `*World` was this control until P1-5 made the walk sound,
+    // and it FLIPPED: `World.observer_registry` is an `ObserverRegistry` whose
+    // `deferred` field is a `CommandBuffer`, so `*World` transitively carries
+    // the marked type and the guard now refuses it. **That refusal is correct on
+    // the bound's own terms** — a body holding `*World` reaches
+    // `observer_registry.deferred` and can record structural changes from a
+    // worker, which is exactly what "no job body receives a command buffer"
+    // exists to prevent, and the one-level predicate could not see it. It is
+    // also `ARCH-030`'s subject arriving early: M1.A is the milestone that takes
+    // the unrestricted `*World` out of system entry points.
+    //
+    // The control is replaced rather than the walk narrowed, and by TWO types: a
+    // synthetic one that carries nothing by construction, and a real engine type
+    // so the control still means something about the engine.
+    const Plain = struct { a: u32 = 0, b: f32 = 0 };
+    try testing.expect(!carries(Plain));
+    try testing.expect(!carries(*ecs.Chunk));
+    try testing.expect(carries(*World)); // the flip, asserted rather than hidden
+
+    // P1-5 — THE SHAPE THE OLD PREDICATE'S DOC DECLARED NONEXISTENT. It did not
+    // traverse struct fields and justified that "for a shape no call site has",
+    // while `scheduler.zig` carries `cmd: *CommandBuffer` as a FIELD of
+    // `SystemContext` — in the file the bound guards. A justification false
+    // inside what it protects is the costliest class there is: it survives
+    // review by resembling an argument.
+    try testing.expect(carries(ecs.scheduler.SystemContext));
+    try testing.expect(carries(*ecs.scheduler.SystemContext));
+    // And the walk terminates on a self-referential type: the `seen` list stops
+    // the recursion, and a cycle is not a hit.
+    const Cyclic = struct { next: ?*@This() = null, v: u32 = 0 };
+    try testing.expect(!carries(Cyclic));
 
     // `forEachChunk` is deliberately UNGUARDED, and the reason is measured
     // rather than an asymmetry of convenience: its body is `for (matches) |m|

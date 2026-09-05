@@ -58,10 +58,53 @@ pub inline fn declaresMarker(comptime T: type) bool {
 /// predicate at runtime then fails to compile. `refuseMarkedArgs` below keeps
 /// its own block, where the compile error is actually raised.
 pub fn carriesMarked(comptime T: type) bool {
+    return carriesMarkedIn(T, &[_]type{});
+}
+
+/// The walk, carrying the types already on the stack so a self-referential type
+/// terminates.
+///
+/// **Fully recursive, and that is the point rather than an extra.** The earlier
+/// form stopped at one pointer level and never entered a struct, and its doc
+/// justified the omission "for a shape no call site has" — while
+/// `src/core/ecs/scheduler.zig:223` carries `cmd: *CommandBuffer` as a FIELD of
+/// `SystemContext`, in the very file the bound guards. A justification that is
+/// false inside what it protects is the costliest kind: it survives review by
+/// resembling an argument. Widening only to struct fields would have repeated
+/// the class this reprise exists to close — a rule applied to a subset of what
+/// it must cover — so every composite is followed.
+///
+/// The widening is a widening of a REFUSAL, so its direction is safe; the
+/// 21-case differential B2 measured is re-run and every case that flips is
+/// named in the milestone's journal rather than discovered later.
+fn carriesMarkedIn(comptime T: type, comptime seen: []const type) bool {
+    // A real argument type reaches deep graphs — `*World` alone is hundreds of
+    // fields — and the walk runs at EVERY guarded call site, so the default
+    // 1000-branch quota is not enough. Raised rather than depth-bounded: a
+    // depth bound would reintroduce the class this fix closes, a rule applied
+    // to a subset of what it must cover.
+    @setEvalBranchQuota(100_000);
+    inline for (seen) |s| {
+        if (s == T) return false; // already on the stack: a cycle, not a hit
+    }
     if (declaresMarker(T)) return true;
+    const next = seen ++ [_]type{T};
     return switch (@typeInfo(T)) {
-        .pointer => |p| declaresMarker(p.child),
-        .optional => |o| carriesMarked(o.child),
+        .pointer => |p| carriesMarkedIn(p.child, next),
+        .optional => |o| carriesMarkedIn(o.child, next),
+        .array => |a| carriesMarkedIn(a.child, next),
+        .@"struct" => |st| blk: {
+            inline for (st.fields) |f| {
+                if (carriesMarkedIn(f.type, next)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |un| blk: {
+            inline for (un.fields) |f| {
+                if (carriesMarkedIn(f.type, next)) break :blk true;
+            }
+            break :blk false;
+        },
         else => false,
     };
 }

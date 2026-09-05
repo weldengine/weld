@@ -311,3 +311,121 @@ test "G9/5: a GROUPED removal of the requisite with its dependents is allowed" {
     try testing.expect(world.hasComponentDyn(e2, t));
     try testing.expect(world.hasComponentDyn(e2, mesh));
 }
+
+// ─── Reprise / P1-1 — the closure applies on EVERY add and spawn path ───────
+//
+// The derived inventory measured the rule applied at ONE of SIX terminal
+// paths — no path delegates to a sibling — so five were ignoring it in
+// silence. One test per site, plus the observer half, plus the idempotence
+// that must stay green and would be a regression if it reddened.
+
+fn setupMeshTransform(world: *World, gpa: std.mem.Allocator) !struct { mesh: ComponentId, transform: ComponentId } {
+    const t = try reg(world, gpa, "Transform", &.{}, .table);
+    const m = try reg(world, gpa, "Mesh", &.{"Transform"}, .table);
+    try world.registry.finalizeRequires(gpa);
+    return .{ .mesh = m, .transform = t };
+}
+
+test "P1-1: spawnDynamic expands the closure" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{c.mesh});
+    try testing.expect(world.hasComponentDyn(e, c.mesh));
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+}
+
+test "P1-1: spawnDynamicWithValues expands the closure, and the caller's payload survives" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const v = word(0xABCD);
+    const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{c.mesh}, &[_][]const u8{&v});
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+    // The expansion builds a NEW pair of arrays; the caller's payload must land
+    // on the caller's component and not be shifted by the appended one.
+    try testing.expectEqualSlices(u8, &v, world.componentBytes(e, c.mesh).?);
+}
+
+test "P1-1: the grouped add expands the closure" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+    const other = try reg(&world, gpa, "Other", &.{}, .table);
+
+    const e = try world.spawnDynamic(gpa, &.{});
+    const v = word(7);
+    try world.addComponentsDynamic(gpa, e, &[_]ComponentId{ c.mesh, other }, &[_][]const u8{ &v, &v });
+    try testing.expect(world.hasComponentDyn(e, c.mesh));
+    try testing.expect(world.hasComponentDyn(e, other));
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+}
+
+test "P1-1: the union is idempotent — a caller may name a requisite itself" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    // GREEN under both forms, and a REGRESSION if it ever reddens: appending
+    // unconditionally would make `refuseDuplicateIds` reject a correct call,
+    // turning the duplicate rule into a regression of this one.
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{ c.mesh, c.transform });
+    try testing.expect(world.hasComponentDyn(e, c.mesh));
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+}
+
+test "P1-1: on_add fires for a component the CLOSURE added, not only the caller's" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const Seen = struct {
+        var ids: [8]ComponentId = undefined;
+        var n: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, cid: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            ids[n] = cid.?;
+            n += 1;
+        }
+    };
+    Seen.n = 0;
+    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+
+    const v = word(1);
+    _ = try world.observer_registry.spawnWithObservers(gpa, &world, &[_]ComponentId{c.mesh}, &[_][]const u8{&v});
+
+    // The caller never named `Transform`; the closure did. Firing over the
+    // caller's slice — which is what this loop did — never reaches it.
+    try testing.expectEqual(@as(usize, 1), Seen.n);
+    try testing.expectEqual(c.transform, Seen.ids[0]);
+}
+
+/// A Zig type whose `@typeName` is aliased onto a raw-registered component that
+/// DECLARES a requisite — the only way a comptime type carries a closure, since
+/// `registerComponent(T)` passes no `requires` of its own.
+const AliasedMesh = extern struct { v: u64 = 0 };
+
+test "P1-1: the typed add expands the closure" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+    try world.registry.registerAlias(gpa, @typeName(AliasedMesh), c.mesh);
+
+    const e = try world.spawnDynamic(gpa, &.{});
+    try world.addComponent(gpa, e, AliasedMesh, .{ .v = 3 });
+
+    // THIS TEST EXISTS BECAUSE THE PREDICTION DID. The counter-factual filed
+    // before the code named five sites; neutering the expansion reddened FOUR,
+    // and the missing one was this path — wired and untested. The gap between
+    // the predicted list and the obtained list is what found it, which is the
+    // whole reason the list is written first.
+    try testing.expect(world.hasComponentDyn(e, c.mesh));
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+}

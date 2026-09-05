@@ -673,6 +673,59 @@ pub const World = struct {
     /// with its current values rather than having it overwritten by a default.
     /// Missing members get their REGISTRY DEFAULTS, which is what
     /// `etch-reference-part3.md` §6 specifies ("et l'ajoute avec ses defaults").
+    /// Expand a caller-supplied component set with the transitive closure its
+    /// members declare, into a NEW pair of lists. Returns whether anything was
+    /// added.
+    ///
+    /// **One expansion semantics for every add and spawn path.** `@requires`
+    /// applies identically to an add and to a spawn carrying a component with a
+    /// non-empty closure, and the derived inventory measured the rule applied at
+    /// ONE of SIX terminal paths — no path delegates to a sibling, so five were
+    /// silently ignoring it. A second expansion written per site is how the six
+    /// would come to disagree.
+    ///
+    /// Three properties, each of which a caller would otherwise have to know:
+    ///
+    /// - **Idempotent.** A caller legitimately passes `{Mesh, Transform}` when
+    ///   `Mesh` requires `Transform`; appending unconditionally would make
+    ///   `refuseDuplicateIds` reject a correct call, turning the duplicate rule
+    ///   into a regression of this one. A requisite already in the list — or
+    ///   already on the entity, for an add — is skipped, and the duplicate
+    ///   refusal stays on the CALLER's slice where it belongs.
+    /// - **Payloads come from the registry**, `componentDefaultBytes`, the only
+    ///   source that asks the caller for nothing.
+    /// - **A NEW pair of arrays, never an expansion in place.** The positional
+    ///   ids-to-payloads pairing is a coincidence the scene loader relies on —
+    ///   it reuses one id array per block — and the `dupe` that protects it
+    ///   protects a PERMUTATION, not a change of length.
+    ///
+    /// `entity` is null for a spawn, where nothing is present yet.
+    fn expandRequires(
+        self: *World,
+        gpa: std.mem.Allocator,
+        ids_in: []const ComponentId,
+        vals_in: ?[]const []const u8,
+        entity: ?EntityId,
+        ids_out: *std.ArrayListUnmanaged(ComponentId),
+        vals_out: *std.ArrayListUnmanaged([]const u8),
+    ) !bool {
+        for (ids_in, 0..) |cid, i| {
+            try ids_out.append(gpa, cid);
+            try vals_out.append(gpa, if (vals_in) |v| v[i] else self.registry.componentDefaultBytes(cid));
+        }
+        var expanded = false;
+        for (ids_in) |cid| {
+            for (self.registry.requiresClosure(cid)) |c| {
+                if (std.mem.indexOfScalar(ComponentId, ids_out.items, c) != null) continue;
+                if (entity) |e| if (self.hasComponentDyn(e, c)) continue;
+                try ids_out.append(gpa, c);
+                try vals_out.append(gpa, self.registry.componentDefaultBytes(c));
+                expanded = true;
+            }
+        }
+        return expanded;
+    }
+
     fn addWithClosure(
         self: *World,
         gpa: std.mem.Allocator,
@@ -980,6 +1033,23 @@ pub const World = struct {
         const id_t = try self.ensureRegistered(gpa, Transform);
         const id_v = try self.ensureRegistered(gpa, Velocity);
         var ids = [_]ComponentId{ id_t, id_v };
+
+        // M1.B reprise / P1-1 — this entry writes ONLY the two columns it names
+        // and takes `allocateSlot`, which does not default-initialise, so a
+        // component the closure contributed would land here with undefined
+        // bytes. Rather than rewrite a hot path that is otherwise correct, an
+        // expanded set DELEGATES to the general entry, which writes every
+        // column it was given. The branch is measured, not stylistic: a typed
+        // component registers with no `requires` of its own, so the closure is
+        // empty unless an Etch declaration claimed the same name through
+        // `registerAlias` — rare, and exactly the case that must not silently
+        // skip the rule.
+        if (self.registry.requiresClosure(id_t).len != 0 or
+            self.registry.requiresClosure(id_v).len != 0)
+        {
+            const vals = [_][]const u8{ std.mem.asBytes(&transform), std.mem.asBytes(&velocity) };
+            return self.spawnDynamicWithValues(gpa, ids[0..], vals[0..]);
+        }
         // `Transform` and `Velocity` are core components and table-stored, but
         // the split runs anyway: the funnel takes no other input, and a path
         // exempted because its ids look trustworthy is the path that breaks
@@ -1030,10 +1100,18 @@ pub const World = struct {
     /// same shared paths as the typed `spawn` above.
     pub fn spawnDynamic(self: *World, gpa: std.mem.Allocator, component_ids: []const ComponentId) !EntityId {
         try refuseDuplicateIds(component_ids);
+        // M1.B reprise / P1-1 — the closure is expanded HERE, on the caller's
+        // set, before anything is resolved from it.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        _ = try self.expandRequires(gpa, component_ids, null, null, &ex_ids, &ex_vals);
+        const ids_all = ex_ids.items;
         // Caller's ids may be unsorted, and may mix the two storage modes.
         // `splitByStorage` sorts the table half into signature order and names
         // the sparse half in one pass over the dup.
-        const scratch = try gpa.dupe(ComponentId, component_ids);
+        const scratch = try gpa.dupe(ComponentId, ids_all);
         defer gpa.free(scratch);
         const split = self.splitByStorage(scratch);
 
@@ -1070,11 +1148,21 @@ pub const World = struct {
         std.debug.assert(component_ids.len == payloads.len);
         try refuseDuplicateIds(component_ids);
 
+        // M1.B reprise / P1-1 — the closure is expanded on the caller's set,
+        // into a NEW pair of lists, before anything is resolved from either.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        _ = try self.expandRequires(gpa, component_ids, payloads, null, &ex_ids, &ex_vals);
+        const ids_all = ex_ids.items;
+        const vals_all = ex_vals.items;
+
         // `splitByStorage` permutes the scratch buffer, so the original
         // (id, payload) pairing survives only in the caller's `component_ids` —
         // which both the column loop below and `addSparsePayloads` resolve
         // against by ComponentId rather than by position.
-        const scratch = try gpa.dupe(ComponentId, component_ids);
+        const scratch = try gpa.dupe(ComponentId, ids_all);
         defer gpa.free(scratch);
         const split = self.splitByStorage(scratch);
 
@@ -1084,7 +1172,7 @@ pub const World = struct {
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(eid);
 
-        try self.addSparsePayloads(gpa, eid, split.sparse, payloads, component_ids);
+        try self.addSparsePayloads(gpa, eid, split.sparse, vals_all, ids_all);
         errdefer self.removeSparsePayloads(eid, split.sparse);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
@@ -1094,7 +1182,7 @@ pub const World = struct {
         // ComponentId (linear scan — `component_ids.len` is small).
         for (arch.component_ids, 0..) |arch_cid, col| {
             var found: ?usize = null;
-            for (component_ids, 0..) |req_cid, k| {
+            for (ids_all, 0..) |req_cid, k| {
                 if (req_cid == arch_cid) {
                     found = k;
                     break;
@@ -1102,7 +1190,7 @@ pub const World = struct {
             }
             const dst = arch.componentSlot(chunk, col, r.slot);
             if (found) |k| {
-                @memcpy(dst, payloads[k]);
+                @memcpy(dst, vals_all[k]);
             } else {
                 // Unreachable: `split.table` is a subset of `component_ids`,
                 // so every archetype column has a payload. The ids that are
@@ -1350,6 +1438,20 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_new = try self.ensureRegistered(gpa, T);
+
+        // M1.B reprise / P1-1 — the fifth and last add path. It handles ONE
+        // component and branches on its storage; an expanded set needs the
+        // grouped machinery, which `addComponentDynamic` already reaches
+        // through the single expansion point. Same shape as `spawn`: the guard
+        // stays even though a typed component registers with no `requires` of
+        // its own, because what is kept is the PROPERTY and not today's
+        // instance — an Etch declaration can claim the same name through
+        // `registerAlias`, and that is exactly the case that must not skip the
+        // rule in silence.
+        if (self.registry.requiresClosure(cid_new).len != 0) {
+            return self.addComponentDynamic(gpa, entity, cid_new, std.mem.asBytes(&value));
+        }
+
         if (self.storageOf(cid_new) == .sparse) {
             // NO archetype transition at all: a sparse component's presence is
             // a row in its own store, so the entity's signature — and with it
@@ -1685,6 +1787,12 @@ pub const World = struct {
     /// archetype AND DISTINCT within `cids` — a real check (`error.DuplicateComponent`),
     /// not an assert; a duplicate would put the id twice in the target archetype
     /// (corruption) and mis-map values.
+    /// Add a set of components, expanding every `@requires` closure first.
+    ///
+    /// The expansion happens ONCE, here, and `addComponentsExact` below is the
+    /// terminal that assumes an already-closed set — which is what keeps the
+    /// recursion finite and gives the rule a single semantics for all six add
+    /// and spawn paths.
     pub fn addComponentsDynamic(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1696,6 +1804,30 @@ pub const World = struct {
         if (cids.len == 0) return;
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        // M1.B reprise / P1-1 — THE grouped expansion point. Every other add
+        // path routes here rather than expanding for itself, so there is one
+        // semantics and not six. The helper is entity-aware, so a requisite the
+        // entity already carries is skipped and the present-check below never
+        // sees one.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        //
+        // Allocation-free when nothing requires anything, which is the common
+        // case and the one the hot path must keep: the closure lookup is a
+        // slice length per id, and only a non-empty one reaches the copy.
+        var needs = false;
+        for (cids) |c| {
+            if (self.registry.requiresClosure(c).len != 0) {
+                needs = true;
+                break;
+            }
+        }
+        if (needs) _ = try self.expandRequires(gpa, cids, values, entity, &ex_ids, &ex_vals);
+        const ids_all = if (needs) ex_ids.items else cids;
+        const vals_all = if (needs) ex_vals.items else values;
         {
             // R11(c): real duplicate/present checks BEFORE any allocation.
             //
@@ -1707,9 +1839,9 @@ pub const World = struct {
             // to nothing in ReleaseFast, i.e. a silent double insert in the
             // mode a game ships. This is the check `hasComponentDyn` exists
             // for, and the reason it is not a convenience wrapper.
-            for (cids, 0..) |c, ci| {
+            for (ids_all, 0..) |c, ci| {
                 if (self.hasComponentDyn(entity, c)) return error.DuplicateComponent;
-                for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
+                for (ids_all[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
             }
         }
 
@@ -1717,10 +1849,10 @@ pub const World = struct {
         // per-transition cache is single-component-keyed, so the grouped path
         // resolves the target directly via `getOrCreateArchetype` (dedup by set).
         const src_len = self.archetypes.items[src_loc.archetype_idx].component_ids.len;
-        const target_ids = try gpa.alloc(ComponentId, src_len + cids.len);
+        const target_ids = try gpa.alloc(ComponentId, src_len + ids_all.len);
         defer gpa.free(target_ids);
         @memcpy(target_ids[0..src_len], self.archetypes.items[src_loc.archetype_idx].component_ids);
-        @memcpy(target_ids[src_len..], cids);
+        @memcpy(target_ids[src_len..], ids_all);
         // The funnel's own split does the filtering: `split.table` is
         // src ∪ (table half of `cids`), sorted, and `split.sparse` is exactly
         // the sparse half of `cids` — `src.component_ids` cannot contribute to
@@ -1742,7 +1874,7 @@ pub const World = struct {
         // nothing after it to unwind. `split.sparse` aliases `target_ids`,
         // whose `defer` was declared earlier and therefore runs AFTER this
         // `errdefer`.
-        try self.addSparsePayloads(gpa, entity, split.sparse, values, cids);
+        try self.addSparsePayloads(gpa, entity, split.sparse, vals_all, ids_all);
         errdefer self.removeSparsePayloads(entity, split.sparse);
 
         // SELF-MIGRATION GUARD, and it sits HERE — after the sparse rows — for a
@@ -1778,14 +1910,14 @@ pub const World = struct {
         for (dst_arch.component_ids, 0..) |dst_cid, i| {
             const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
             var new_k: ?usize = null;
-            for (cids, 0..) |c, k| {
+            for (ids_all, 0..) |c, k| {
                 if (c == dst_cid) {
                     new_k = k;
                     break;
                 }
             }
             if (new_k) |k| {
-                @memcpy(dst, values[k]); // a newly-added component: caller's bytes
+                @memcpy(dst, vals_all[k]); // a newly-added component: caller's bytes
             } else {
                 const src_i = src_arch.componentIndex(dst_cid).?;
                 const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);

@@ -635,9 +635,13 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // The external-review reprise adds one block per corrected P1, each RED
     // before its fix. P1-2 (the union applying every term's sparse filter) is
     // the first (2145 -> 2146, suite closure reports 2146).
+    // P1-1 adds SIX to `tests/ecs/requires_test.zig` — one per add/spawn site
+    // the derived inventory found ignoring the closure, plus the observer half
+    // and the idempotence that must stay green (2146 -> 2152, suite closure
+    // reports 2152). P1-5 adds assertions to an EXISTING block and moves nothing.
     return switch (os) {
-        .windows => 2144,
-        else => 2146,
+        .windows => 2150,
+        else => 2152,
     };
 }
 

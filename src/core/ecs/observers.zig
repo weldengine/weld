@@ -86,6 +86,61 @@ pub const Listener = struct {
 /// dispatch as `for items |l| try l.callback(...)`.
 const Listeners = std.ArrayListUnmanaged(Listener);
 
+/// Ascending-`ComponentId` walk over the UNION of an entity's table and sparse
+/// components.
+///
+/// **Extracted at the M1.B reprise rather than copied.** The despawn
+/// enumeration had this walk inline, and the spawn `on_add` loop needed the
+/// same one — it was iterating the CALLER's slice, so a component the
+/// `@requires` closure contributed existed on the entity and its `on_add` never
+/// fired. Two copies of a walk whose whole job is an ORDER is how the two
+/// directions would come to disagree on the property they are supposed to
+/// share.
+///
+/// **The order at spawn therefore CHANGES**, from the caller's slice order to
+/// ascending id, and that is arbitrated rather than incidental: a caller's slice
+/// order is a property of that caller's code, so the observer order would
+/// otherwise depend on how someone wrote a spawn literal. Ascending is
+/// determined by the world, symmetric with the despawn direction, and
+/// `engine-ecs-internals.md` §8 — which covers the despawn direction only —
+/// becomes bidirectional at the corpus owner's hand, not here.
+pub const ComponentUnionIter = struct {
+    world: *World,
+    entity: EntityId,
+    table_ids: []const ComponentId,
+    ti: usize = 0,
+    s_next: ?ComponentId = null,
+
+    pub fn init(world: *World, entity: EntityId) ComponentUnionIter {
+        const ids: []const ComponentId = blk: {
+            const loc = world.entity_locations.get(entity) orelse break :blk &.{};
+            break :blk world.archetypes.items[loc.archetype_idx].component_ids;
+        };
+        return .{
+            .world = world,
+            .entity = entity,
+            .table_ids = ids,
+            .s_next = world.sparse_stores.nextContaining(0, entity),
+        };
+    }
+
+    /// The archetype's `component_ids` are sorted and `nextContaining` is
+    /// ascending by construction, so taking the smaller head each step yields
+    /// the union in ascending id with no allocation and no sort.
+    pub fn next(it: *ComponentUnionIter) ?ComponentId {
+        const t_cid: ?ComponentId = if (it.ti < it.table_ids.len) it.table_ids[it.ti] else null;
+        if (t_cid == null and it.s_next == null) return null;
+        const take_table = if (t_cid) |t| (it.s_next == null or t < it.s_next.?) else false;
+        if (take_table) {
+            it.ti += 1;
+            return t_cid.?;
+        }
+        const sc = it.s_next.?;
+        it.s_next = it.world.sparse_stores.nextContaining(sc + 1, it.entity);
+        return sc;
+    }
+};
+
 /// Registry holding the four kinds of observer lists. Lives next to
 /// the `World` (typically as a field) and is consulted during every
 /// command buffer flush.
@@ -244,7 +299,11 @@ pub const ObserverRegistry = struct {
         self.ensureDeferred(gpa, world);
         const eid = try world.spawnDynamicWithValues(gpa, component_ids, payloads);
         try self.fireList(self.on_spawned, world, eid, null, null, null);
-        for (component_ids) |cid| {
+        // The ENTITY's real union, not the caller's slice: the `@requires`
+        // closure expands inside the spawn, so a component the caller never
+        // named can be present and owes its `on_add`.
+        var it = ComponentUnionIter.init(world, eid);
+        while (it.next()) |cid| {
             if (self.on_add.get(cid)) |list| {
                 const new_ptr: ?*const anyopaque = if (world.componentBytes(eid, cid)) |b| @ptrCast(b.ptr) else null;
                 try self.fireList(list, world, eid, cid, null, new_ptr);
@@ -332,7 +391,10 @@ pub fn applyWithObservers(
             // free to read the entity's components — they live until
             // we drop into `world.despawn` below, so `old_value` points
             // at the live (pre-destruction) slot.
-            if (world.entity_locations.get(d.entity)) |loc| {
+            // The capture is gone with the inline walk, the GUARD is not: an
+            // entity with no location is stale, and the pass is skipped whole
+            // exactly as before rather than walking its sparse stores.
+            if (world.entity_locations.get(d.entity) != null) {
                 // Ascending `ComponentId` over the UNION of both backends, by a
                 // two-pointer merge of two already-ascending sequences:
                 // `arch.component_ids` is sorted by `sortComponentIds`, and the
@@ -346,22 +408,11 @@ pub fn applyWithObservers(
                 // `on_remove` never fired at despawn at all. An observer
                 // silently skipped is undetectable by any caller, which is why
                 // the order and the membership are asserted together.
-                const arch = world.archetypes.items[loc.archetype_idx];
-                var ti: usize = 0;
-                var s_from: ComponentId = 0;
-                var s_next = world.sparse_stores.nextContaining(s_from, d.entity);
-                while (ti < arch.component_ids.len or s_next != null) {
-                    const t_cid: ?ComponentId = if (ti < arch.component_ids.len) arch.component_ids[ti] else null;
-                    const take_table = if (t_cid) |t| (s_next == null or t < s_next.?) else false;
-                    const cid = if (take_table) blk: {
-                        ti += 1;
-                        break :blk t_cid.?;
-                    } else blk: {
-                        const sc = s_next.?;
-                        s_from = sc + 1;
-                        s_next = world.sparse_stores.nextContaining(s_from, d.entity);
-                        break :blk sc;
-                    };
+                // The SAME walk the spawn direction takes — extracted at the
+                // M1.B reprise, so the two cannot drift on an order that is
+                // their shared property.
+                var it = ComponentUnionIter.init(world, d.entity);
+                while (it.next()) |cid| {
                     if (reg.on_remove.get(cid)) |list| {
                         const old_ptr: ?*const anyopaque = if (world.componentBytes(d.entity, cid)) |b| @ptrCast(b.ptr) else null;
                         try reg.fireList(list, world, d.entity, cid, old_ptr, null);
