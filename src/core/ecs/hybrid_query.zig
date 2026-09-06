@@ -161,11 +161,38 @@ pub const SparseDrivenQuery = struct {
     /// Walk the driver's dense array, yielding a `Locator` for every entity
     /// that satisfies the whole query.
     ///
-    /// The dense array is SNAPSHOT by length at the start: a structural change
-    /// during the walk is a programmer error on this path (the interpreter
-    /// defers every structural mutation to the tick boundary), and snapshotting
-    /// the length rather than re-reading it makes a swap-remove during the walk
-    /// visit-at-most-once rather than skip-or-repeat.
+    /// The iterator captures a SLICE of the driver's dense array, not a length:
+    /// `dense` is an `ArrayListUnmanaged`, and `s.entities()` is read once, here.
+    /// So a structural change to the driver DURING the walk is unsound in two
+    /// distinct ways, and this code survives neither:
+    ///
+    ///   - GROWTH reallocates, and the captured slice dangles. Loud in Debug
+    ///     and ReleaseSafe, undefined in ReleaseFast.
+    ///   - SHRINK (a swap-remove) leaves the pointer valid and the captured
+    ///     LENGTH stale, so the tail of the walk reads dead-but-allocated
+    ///     entries. Silent in every mode. In particular, capturing does NOT
+    ///     make a concurrent swap-remove visit-at-most-once: nothing here
+    ///     re-reads the length, so the removed entity's replacement is skipped
+    ///     AND a stale trailing slot is read.
+    ///
+    /// What makes the capture sound is not this code. It is TWO INDEPENDENT
+    /// guardians, and losing either one reopens its own half:
+    ///
+    ///   1. Remove, add and despawn are DEFERRED to the tick boundary — an Etch
+    ///      body enqueues onto `world.observer_registry.deferred`, drained by
+    ///      `Interpreter.flushStructural` — so no rule body shrinks the dense
+    ///      array under a live walk. This guardian also covers the chunk pointer
+    ///      `ComponentRef`'s table arm holds.
+    ///   2. A spawn IS immediate somewhere: `spawn_with` calls
+    ///      `World.spawnWithObservers` directly, and an APPEND is what
+    ///      reallocates. What keeps it out of a rule body is not deferral but
+    ///      the type-checker's surface gate — `test_world()` resolves only under
+    ///      `Checker.in_test_body` and falls through to E0102 otherwise
+    ///      (measured), so a rule body holds no world handle at all. This
+    ///      guardian covers the dense slice ONLY, an append never invalidating
+    ///      a chunk pointer, and it is the more fragile of the two: exposing
+    ///      world access to rule bodies is a plausible evolution that would
+    ///      leave guardian 1 untouched and this walk unprotected.
     pub fn iterator(self: *const SparseDrivenQuery, world: *World) Iterator {
         const store = world.sparse_stores.getConst(self.driver);
         return .{
@@ -176,6 +203,8 @@ pub const SparseDrivenQuery = struct {
         };
     }
 
+    /// `dense` is CAPTURED, not re-read — the two failure modes and the two
+    /// guardians that keep them unreachable are on `iterator` above.
     pub const Iterator = struct {
         q: *const SparseDrivenQuery,
         world: *World,
