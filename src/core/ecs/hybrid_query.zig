@@ -446,59 +446,142 @@ pub fn planTableDriven(
     };
 }
 
-/// One DNF term's plan: which of the two walks serves it.
+/// Which form of one term the current tick walks.
 ///
-/// A UNION and not a flag on one struct, because the two walks share no state:
-/// the table arm owns a matched-archetype cache and a tail-rescan cursor, the
-/// sparse arm owns neither and reads its driver's dense array live. A flag
-/// would force every consumer to hold both sets of fields and branch on which
-/// half is meaningful.
-pub const QueryPlan = union(enum) {
+/// `sparse` carries an INDEX into `QueryPlan.sparse` and not a `ComponentId`,
+/// because the form is what the walk needs and the id would have to be mapped
+/// back to it at every use.
+pub const Walk = union(enum) {
+    table,
+    sparse: usize,
+};
+
+/// One DNF term's plans — EVERY form the term can be walked in, built once,
+/// with the CHOICE of driver deferred to the walk.
+///
+/// **The FORM of a plan is static and the CHOICE of driver is not**, and that
+/// is the whole factorisation. `planTableDriven` partitions the two sets by
+/// `storageOf`, a REGISTRY fact recorded at registration and never mutated
+/// (`Registry.componentStorage` has no setter); `electDriver` compares
+/// POPULATIONS, a world fact that moves every tick. So the forms are built
+/// once and each walk elects among them, which makes a driver change free and
+/// removes the question of a beat entirely — there is no hysteresis to
+/// calibrate and no threshold to engrave, because nothing is being smoothed.
+///
+/// **Three preconditions of the design, not observations of it.** A form that
+/// lies dormant for N ticks and is then elected must be as correct as one
+/// walked every tick, and that rests on:
+///
+///   1. `world.archetypes` is APPEND-ONLY — one `append` in `World`, whose
+///      only `pop` is the `errdefer` that annuls it. `query.rescanNewArchetypes`
+///      walks `[last_seen, len)`, so a dormant table form's tail rescan is
+///      exact whatever its cursor's age. **The day a `swapRemove` reaches that
+///      list, this page is what must redden.**
+///   2. The table form's with/without split is derived from `storageOf`, so a
+///      form re-consulted after any number of dormant ticks carries the SAME
+///      sets it was built with. There is no with-set the cached archetypes were
+///      never examined against.
+///   3. `matching` holds `*Archetype` into individually allocated archetypes,
+///      stable for the world's lifetime, so growth of the list relocates
+///      nothing a dormant form still points at.
+pub const QueryPlan = struct {
+    /// The with-set in DECLARATION ORDER.
+    ///
+    /// Kept whole even though both forms hold partitioned copies: `electDriver`
+    /// breaks a population tie on the POSITION in this slice, and a partition
+    /// loses the interleaving that position encodes.
+    with_ids: []ComponentId,
+    /// The archetype walk. ALWAYS built — it serves any term, which is what
+    /// lets `elect` fall back on it rather than fail.
     table: TableDrivenQuery,
-    sparse: SparseDrivenQuery,
+    /// One sparse-driven form per SPARSE member of the with-set, in declaration
+    /// order. Empty when the with-set names no sparse component.
+    ///
+    /// One per member and not one shared form with a mutable driver: a form's
+    /// `other_with` is the with-set MINUS its own driver, so a shared form would
+    /// have to recompute that slice at every flip — an allocation on the very
+    /// path this design makes free — or test the driver against itself once per
+    /// entity on the hot walk.
+    sparse: []SparseDrivenQuery,
 
     pub fn deinit(self: *QueryPlan, gpa: std.mem.Allocator) void {
-        switch (self.*) {
-            .table => |*q| q.deinit(gpa),
-            .sparse => |*q| q.deinit(gpa),
+        gpa.free(self.with_ids);
+        self.table.deinit(gpa);
+        for (self.sparse) |*q| q.deinit(gpa);
+        gpa.free(self.sparse);
+        self.* = undefined;
+    }
+
+    /// Elect the form this walk uses, from the CURRENT populations.
+    ///
+    /// Called once per walk per term, and `population` is O(archetypes) for a
+    /// table member — the cost the milestone measures rather than assumes.
+    pub fn elect(self: *const QueryPlan, world: *const World) Walk {
+        switch (electDriver(world, self.with_ids)) {
+            .table => return .table,
+            .sparse => |cid| {
+                for (self.sparse, 0..) |*q, i| {
+                    if (q.driver == cid) return .{ .sparse = i };
+                }
+                // Unreachable by the two facts above — a returned cid is a
+                // sparse member of `with_ids`, and this array holds one form per
+                // such member — so the fallback exists for the state that cannot
+                // occur rather than for one that can. It is the TABLE form and
+                // NOT `unreachable`: that form is total, so an impossible state
+                // costs a slower walk and never a wrong answer.
+                std.debug.assert(false);
+                return .table;
+            },
         }
     }
 
-    /// Whether this term is served by the archetype walk. The disjunctive path
-    /// keeps its ascending-archetype-id merge only while EVERY term answers
-    /// true — one sparse-driven term and the whole union de-duplicates by
-    /// entity instead.
     /// Whether this term's admission is decided PER ENTITY, so a union
     /// containing it cannot de-duplicate by archetype.
     ///
-    /// True for a sparse-driven term, which has no archetype list at all — and
-    /// ALSO for a table-driven term that CARRIES sparse members, which is the
-    /// case M1.B/G7 left in the gap: `isTableDriven` answers the DRIVER and
-    /// says nothing about what the term tests per entity. The k-way merge runs
-    /// `iterateArchetype` once per archetype under a SINGLE owner, so every
-    /// other term's `admits` is skipped, and the entity a non-last term would
-    /// have admitted is silently lost.
-    pub fn needsEntityDedup(self: QueryPlan) bool {
-        return switch (self) {
-            .sparse => true,
-            .table => |t| t.sparse_with.len != 0 or t.sparse_without.len != 0,
-        };
-    }
-
-    pub fn isTableDriven(self: QueryPlan) bool {
-        return self == .table;
+    /// True for a term carrying ANY sparse member, present or absent — read off
+    /// the table form, whose two sparse lists are a partition by `storageOf`.
+    /// **So the predicate is a function of storage modes ALONE and does not
+    /// enter the election**: making it answer from the elected form would send a
+    /// term with sparse members but a table election back through the archetype
+    /// merge, which is the P1-2 defect exactly.
+    ///
+    /// The merge runs `iterateArchetype` once per archetype under a SINGLE
+    /// owner, so every other term's `admits` is skipped, and the entity a
+    /// non-last term would have admitted is silently lost.
+    pub fn needsEntityDedup(self: *const QueryPlan) bool {
+        return self.table.sparse_with.len != 0 or self.table.sparse_without.len != 0;
     }
 };
 
-/// Elect the driver for one term and build its plan.
+/// Build every form one term can be walked in. **No driver is elected here** —
+/// see `QueryPlan.elect`, which does it per walk from live populations.
 pub fn plan(
     gpa: std.mem.Allocator,
     world: *World,
     with_ids: []const ComponentId,
     without_ids: []const ComponentId,
 ) !QueryPlan {
-    return switch (electDriver(world, with_ids)) {
-        .table => .{ .table = try planTableDriven(gpa, world, with_ids, without_ids) },
-        .sparse => |driver| .{ .sparse = try planSparseDriven(gpa, driver, with_ids, without_ids) },
+    const with_copy = try gpa.dupe(ComponentId, with_ids);
+    errdefer gpa.free(with_copy);
+
+    var table = try planTableDriven(gpa, world, with_ids, without_ids);
+    errdefer table.deinit(gpa);
+
+    var forms: std.ArrayListUnmanaged(SparseDrivenQuery) = .empty;
+    errdefer {
+        for (forms.items) |*q| q.deinit(gpa);
+        forms.deinit(gpa);
+    }
+    // Reserved up front so no append can fail after a form is built and leak it.
+    try forms.ensureTotalCapacity(gpa, table.sparse_with.len);
+    for (with_ids) |cid| {
+        if (world.storageOf(cid) != .sparse) continue;
+        forms.appendAssumeCapacity(try planSparseDriven(gpa, cid, with_ids, without_ids));
+    }
+
+    return .{
+        .with_ids = with_copy,
+        .table = table,
+        .sparse = try forms.toOwnedSlice(gpa),
     };
 }

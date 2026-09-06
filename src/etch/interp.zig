@@ -89,6 +89,21 @@ pub const RuntimeReport = struct {
     /// evaluates each archetype once (at rescan, when it first appears), not
     /// once per archetype per tick.
     predicate_archetype_evals: u64 = 0,
+    /// Terms walked by a SPARSE form this tick (M1.B/P2-1) — the observable
+    /// that the driver is elected AT THE WALK and not at compile.
+    ///
+    /// It has to exist, and the reason is the finding P2-1 rests on: the answer
+    /// a term yields is INDEPENDENT of the elected driver by construction — the
+    /// two forms visit the same entities — so no oracle on the visited set can
+    /// see the election, and one that re-runs `elect` from the test would pass
+    /// unchanged against a walk that never elected at all. Only a count taken
+    /// ON the walk discriminates.
+    ///
+    /// A COUNT and not a driver id: with one sparse member in a term's with-set
+    /// the count carries the identity already, and a per-term id would have to
+    /// choose a shape for a multi-term rule that nothing needs. Interp-only and
+    /// informational, like the counters above.
+    sparse_driven_walks: u64 = 0,
 };
 
 const ResourceDep = struct {
@@ -2440,8 +2455,13 @@ pub const Interpreter = struct {
         // `isTableDriven` answers the DRIVER, not the admission, which is the
         // gap P1-2 named: a table-driven term carrying sparse members took the
         // merge, where a single `owner` decides for all of them.
+        // STATIC, and deliberately outside the election: the predicate reads
+        // the table form's two sparse lists, which are a partition by
+        // `storageOf`. A term's need to de-duplicate by entity is therefore
+        // decided once, by the registry, and never by which form this tick
+        // elected.
         var merge_by_archetype = true;
-        for (sel) |q| {
+        for (sel) |*q| {
             if (q.needsEntityDedup()) merge_by_archetype = false;
         }
 
@@ -2454,8 +2474,9 @@ pub const Interpreter = struct {
             // is what provides.
             self.merge_seen.clearRetainingCapacity();
             for (sel) |*q| {
-                switch (q.*) {
-                    .table => |*tq| {
+                switch (q.elect(world)) {
+                    .table => {
+                        const tq = &q.table;
                         report.predicate_archetype_evals += tq.inner.maybeRescan();
                         for (tq.inner.matching.items) |arch| {
                             for (arch.chunks.items) |chunk| {
@@ -2478,7 +2499,9 @@ pub const Interpreter = struct {
                             }
                         }
                     },
-                    .sparse => |*sq| {
+                    .sparse => |i| {
+                        report.sparse_driven_walks += 1;
+                        const sq = &q.sparse[i];
                         var it = sq.iterator(world);
                         while (it.next()) |loc| {
                             const gop = try self.merge_seen.getOrPut(self.gpa, loc.entity());
@@ -2505,7 +2528,16 @@ pub const Interpreter = struct {
         self.merge_cursors.clearRetainingCapacity();
         try self.merge_cursors.appendNTimes(self.gpa, 0, sel.len);
         const cursors = self.merge_cursors.items;
-        for (sel) |*q| report.predicate_archetype_evals += q.table.inner.maybeRescan();
+        // NO election on this path, and that is the ABSENCE of a choice rather
+        // than a saving: reaching here means every term answered
+        // `needsEntityDedup` false, so no term has a sparse member, so no term
+        // has a sparse FORM and `elect` could only return `.table`. Paying
+        // `population` — O(archetypes) per table member — for a decision with
+        // one outcome would be the cost without the choice.
+        for (sel) |*q| {
+            std.debug.assert(q.sparse.len == 0);
+            report.predicate_archetype_evals += q.table.inner.maybeRescan();
+        }
         while (true) {
             var min_id: ?u32 = null;
             for (sel, 0..) |q, qi| {
@@ -2580,15 +2612,17 @@ pub const Interpreter = struct {
     /// the cache test asserts, and widening its meaning would break that test
     /// for a reason unrelated to the cache.
     fn iteratePlan(self: *Interpreter, world: *World, rd: *RuleDesc, p: *QueryPlan, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
-        switch (p.*) {
-            .table => |*tq| {
+        switch (p.elect(world)) {
+            .table => {
+                const tq = &p.table;
                 report.predicate_archetype_evals += tq.inner.maybeRescan();
                 for (tq.inner.matching.items) |arch| {
                     try self.iterateArchetype(world, rd, arch, tq, rule_matched, report, collect);
                 }
             },
-            .sparse => |*sq| {
-                var it = sq.iterator(world);
+            .sparse => |i| {
+                report.sparse_driven_walks += 1;
+                var it = p.sparse[i].iterator(world);
                 while (it.next()) |loc| {
                     try self.visitLocator(world, rd, loc, rule_matched, report, collect);
                 }

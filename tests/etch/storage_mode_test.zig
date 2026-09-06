@@ -322,7 +322,8 @@ test "an all-negative rule VISITS an entity that carries only sparse components"
 
 /// A disjunctive rule with a SPARSE term. The union must visit an entity
 /// matching BOTH disjuncts exactly once — and the archetype-id merge cannot
-/// provide that here, because a sparse-driven term has no archetype to order by.
+/// provide that here, because a term carrying a sparse member admits PER ENTITY
+/// and one archetype cannot answer for all of its entities at once.
 const src_disjunct =
     \\@storage(.sparse)
     \\component Burning { remaining: float = 3.0 }
@@ -359,9 +360,9 @@ test "a disjunctive rule with a sparse term visits a both-matching entity ONCE" 
 
     // THREE, not four. The both-matching entity is the whole point: the
     // ascending-`archetype_id` merge de-duplicates by archetype, and one of
-    // these terms is sparse-driven and keeps no archetype cache — so the union
-    // switches to an ENTITY key. Without that switch the entity would be
-    // visited twice and this would read 4.
+    // these terms CARRIES a sparse member — which is what the union reads, not
+    // which form the tick elected — so it switches to an ENTITY key. Without
+    // that switch the entity would be visited twice and this would read 4.
     try std.testing.expectEqual(@as(u64, 3), report.entities_iterated);
 }
 
@@ -497,6 +498,12 @@ test "G8: the planner elects SPARSE, and the effect applies exactly once per mat
     AddSpy.reset();
     try world.observer_registry.registerOnAdd(gpa, &world, scorched, null, &AddSpy.cb);
 
+    try std.testing.expectEqual(@as(usize, 1), interp.rule_descs.len);
+    try std.testing.expectEqual(@as(usize, 1), interp.rule_descs[0].selection.len);
+
+    var report: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+
     // THE DISCRIMINATING HALF, and it exists because the correctness half below
     // does NOT discriminate. Measured: forcing `electDriver` to return `.table`
     // leaves every assertion below GREEN — with an all-sparse with-set the
@@ -504,16 +511,14 @@ test "G8: the planner elects SPARSE, and the effect applies exactly once per mat
     // and the per-entity membership test selects the same five. The answer is
     // driver-independent BY DESIGN; the cost is not. So the election is asserted
     // where it is decided, or this test's name would be a claim it cannot back.
-    {
-        try std.testing.expectEqual(@as(usize, 1), interp.rule_descs.len);
-        const sel = interp.rule_descs[0].selection;
-        try std.testing.expectEqual(@as(usize, 1), sel.len);
-        try std.testing.expect(!sel[0].isTableDriven());
-        try std.testing.expectEqual(burning, sel[0].sparse.driver);
-    }
-
-    var report: weld_etch.RuntimeReport = .{};
-    try interp.stepOnce(&world, &report);
+    //
+    // *Since M1.B/P2-1 that place is the WALK and no longer the compilation:
+    // this asserted the plan built on an EMPTY world, which after the election
+    // moved is never what runs. The observable is taken ON the walk, so a walk
+    // that skipped its election could not satisfy it. The term's with-set names
+    // one member, sparse, so a sparse-driven walk IS a walk driven by
+    // `Burning` — the count carries the identity here.*
+    try std.testing.expectEqual(@as(u64, 1), report.sparse_driven_walks);
 
     // THE CORRECTNESS HALF — a multiplicity, never an order. The contract
     // makes the visit order deterministic, non-invariant and OUT OF CONTRACT,
@@ -672,6 +677,24 @@ test "P1-2: a union of two table-driven terms applies BOTH sparse filters" {
     try world.addComponentDynamic(gpa, e1, s1, &zero4);
     try world.addComponentDynamic(gpa, e2, s2, &zero4);
 
+    // THE SPARSE MEMBERS ARE MADE THE LARGEST, and without this the scene stops
+    // being a witness. Since M1.B/P2-1 the driver is elected AT THE WALK from
+    // live populations, where `S1` at 1 beats `A` at 3 and BOTH terms would be
+    // sparse-driven — the configuration this test exists to cover, a TABLE
+    // -driven term CARRYING a sparse member, would never occur and the test
+    // would stay green while measuring something else. Measured: with the
+    // padding the counter-factual on the dedup predicate reddens this test;
+    // without it, it reddens nothing at all.
+    //
+    // 100 bystanders each, so `A` and `Hit` at 3 are the smallest members of
+    // their terms and the election is `.table` on both.
+    for (0..100) |_| {
+        const p1 = try world.spawnDynamic(gpa, &[_]ComponentId{});
+        try world.addComponentDynamic(gpa, p1, s1, &zero4);
+        const p2 = try world.spawnDynamic(gpa, &[_]ComponentId{});
+        try world.addComponentDynamic(gpa, p2, s2, &zero4);
+    }
+
     var report: weld_etch.RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
     world.tickBoundary();
@@ -733,4 +756,135 @@ test "P1-4: a seventeenth requisite is not lost" {
     // seventeen ids that happen to be there.
     const r17 = world.registry.idOf("R17").?;
     try std.testing.expect(std.mem.indexOfScalar(ComponentId, world.registry.requiresClosure(big), r17) != null);
+}
+
+// ─── M1.B / P2-1 — the driver is elected AT THE WALK ───────────────────────
+
+/// One sparse member and one table member in the same with-set, which is the
+/// smallest shape in which an election has two outcomes.
+const src_flip =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Marked { n: int = 0 }
+    \\
+    \\rule tally(entity: Entity)
+    \\    when entity has Burning and entity has Marked
+    \\{
+    \\    let m = entity.get_mut(Marked)
+    \\    m.n += 1
+    \\}
+;
+
+test "P2-1: the elected driver FLIPS between two ticks, and the answer does not" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_flip);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    const marked = world.registry.idOf("Marked").?;
+
+    // THREE matching entities, and 300 carrying the TABLE member alone: the
+    // populations are what the election reads, and only the three are answers.
+    var matching: [3]weld_core.ecs.EntityId = undefined;
+    for (&matching) |*e| e.* = try world.spawnDynamic(gpa, &.{ burning, marked });
+    for (0..300) |_| _ = try world.spawnDynamic(gpa, &.{marked});
+
+    // Tick 1 — Burning 3 against Marked 303, so the SPARSE member drives.
+    var r1: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r1);
+    try std.testing.expectEqual(@as(u64, 1), r1.sparse_driven_walks);
+
+    // The order is REVERSED between the ticks, by a population that carries the
+    // driver and matches NOTHING — so what moves is the election's input and
+    // not the answer.
+    for (0..400) |_| _ = try world.spawnDynamic(gpa, &.{burning});
+
+    // Tick 2 — Burning 403 against Marked 303, so the TABLE member drives.
+    // Under an election taken once at compile time this reads 1, which is the
+    // counter-factual this assertion exists for.
+    var r2: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r2);
+    try std.testing.expectEqual(@as(u64, 0), r2.sparse_driven_walks);
+
+    // AND THE ANSWER IS THE SAME AT BOTH TICKS, which is not a second oracle
+    // but the reason the first one has to exist: three entities visited under
+    // each arm, two increments each, and the 700 bystanders untouched. An
+    // oracle on the visited set would read identically either side of the flip.
+    try std.testing.expectEqual(@as(u64, 3), r1.entities_iterated);
+    try std.testing.expectEqual(@as(u64, 3), r2.entities_iterated);
+    for (matching) |e| try std.testing.expectEqual(@as(i64, 2), readI64(&world, e, marked));
+}
+
+/// Same shape as `src_flip` plus a THIRD table component, which is what makes a
+/// second archetype exist for the table form to have missed.
+const src_dormant =
+    \\@storage(.sparse)
+    \\component Burning { remaining: float = 3.0 }
+    \\component Marked { n: int = 0 }
+    \\component Extra { v: int = 0 }
+    \\
+    \\rule tally(entity: Entity)
+    \\    when entity has Burning and entity has Marked
+    \\{
+    \\    let m = entity.get_mut(Marked)
+    \\    m.n += 1
+    \\}
+;
+
+test "P2-1: a table form DORMANT through a tick is exact when it is next elected" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try weld_etch.parseSource(gpa, src_dormant);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const burning = world.registry.idOf("Burning").?;
+    const marked = world.registry.idOf("Marked").?;
+    const extra = world.registry.idOf("Extra").?;
+
+    // TWO archetypes among the matching entities — `{Marked}` and
+    // `{Marked, Extra}` — and BOTH are created before the first tick, which the
+    // table form spends dormant. Its cursor sits at the empty world it was
+    // built against, so at the flip it must scan both from zero.
+    var plain: [3]weld_core.ecs.EntityId = undefined;
+    for (&plain) |*e| e.* = try world.spawnDynamic(gpa, &.{ burning, marked });
+    var wide: [2]weld_core.ecs.EntityId = undefined;
+    for (&wide) |*e| e.* = try world.spawnDynamic(gpa, &.{ burning, marked, extra });
+    for (0..300) |_| _ = try world.spawnDynamic(gpa, &.{marked});
+
+    // Tick 1 — Burning 5 against Marked 305: the sparse form drives and the
+    // table form is never consulted.
+    var r1: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r1);
+    try std.testing.expectEqual(@as(u64, 1), r1.sparse_driven_walks);
+    try std.testing.expectEqual(@as(u64, 5), r1.entities_iterated);
+
+    for (0..400) |_| _ = try world.spawnDynamic(gpa, &.{burning});
+
+    // Tick 2 — Burning 405 against Marked 305: the table form drives for the
+    // first time, and its tail rescan is EXACT from a cursor that never moved.
+    // That exactness is precondition 1 of the two-arm design — `world.archetypes`
+    // is append-only, so `[last_seen, len)` misses nothing — and a cursor
+    // advanced without scanning during tick 1 answers ZERO here.
+    var r2: weld_etch.RuntimeReport = .{};
+    try interp.stepOnce(&world, &r2);
+    try std.testing.expectEqual(@as(u64, 0), r2.sparse_driven_walks);
+    try std.testing.expectEqual(@as(u64, 5), r2.entities_iterated);
+
+    // The oracle is the SET and not the count: the defect this pins drops whole
+    // ARCHETYPES, so a count could be satisfied by the wrong five.
+    for (plain) |e| try std.testing.expectEqual(@as(i64, 2), readI64(&world, e, marked));
+    for (wide) |e| try std.testing.expectEqual(@as(i64, 2), readI64(&world, e, marked));
 }

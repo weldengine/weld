@@ -647,9 +647,19 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // against the sixteen a caller-supplied buffer admitted, the oracle being a
     // COUNT because the defect cuts the tail (2154 -> 2155, suite closure
     // reports 2155).
+    // P2-1 adds TWO to `tests/etch/storage_mode_test.zig`, one per mechanism it
+    // has to pin separately: the elected driver FLIPPING between two ticks while
+    // the answer does not — the oracle the election moving to the walk requires,
+    // and which no assertion on the visited set could provide — and a table form
+    // DORMANT through a tick being exact when next elected, which is the
+    // append-only precondition the two-arm design rests on. Counted as one bump
+    // (2155 -> 2157) because the two landed in one commit. Re-derived from the
+    // SUITE and not from the closure: `zig build test --summary all` reports
+    // `2138/2157 tests passed (19 skipped)` on macOS, and the closure arrives at
+    // 2157 separately from the table above.
     return switch (os) {
-        .windows => 2153,
-        else => 2155,
+        .windows => 2155,
+        else => 2157,
     };
 }
 
