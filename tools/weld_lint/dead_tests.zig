@@ -657,9 +657,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // SUITE and not from the closure: `zig build test --summary all` reports
     // `2138/2157 tests passed (19 skipped)` on macOS, and the closure arrives at
     // 2157 separately from the table above.
+    // P2-1 fix-as-you-go adds ONE more — `requiresNamesOf` allocated `args_len`
+    // and returned `out[0..n]`, so a caller freed a size the allocation never
+    // had; the counter-factual on the old form panics `Invalid free` under
+    // `std.testing.allocator` (2157 -> 2158, suite reports
+    // `2139/2158 tests passed (19 skipped)`).
     return switch (os) {
-        .windows => 2155,
-        else => 2157,
+        .windows => 2156,
+        else => 2158,
     };
 }
 

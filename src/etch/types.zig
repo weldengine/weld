@@ -71,17 +71,29 @@ pub fn requiresNamesOf(
     // The arity is preserved rather than the cap made normative. A normative cap
     // owes a diagnostic code for a number nobody derived, and this milestone has
     // spent itself removing engraved numbers rather than adding one.
-    const out = try gpa.alloc([]const u8, annot.args_len);
-    errdefer gpa.free(out);
-    var n: usize = 0;
+    //
+    // COUNTED FIRST AND ALLOCATED EXACTLY, and the alternative is a defect and
+    // not a style: allocating `args_len` and returning `out[0..n]` hands the
+    // caller a slice SHORTER than the allocation, and `Allocator.free` sizes the
+    // release from the slice it is given. `requiresTypeNameAt` returns null for
+    // a named argument and for a non-path expression, so `n < args_len` is
+    // reachable — on an AST `checkRequiresAnnotation` would refuse, and nothing
+    // obliges a caller to have run it.
+    var count: usize = 0;
     var i: u32 = 0;
+    while (i < annot.args_len) : (i += 1) {
+        if (ast.requiresTypeNameAt(annot, i) != null) count += 1;
+    }
+    const out = try gpa.alloc([]const u8, count);
+    var n: usize = 0;
+    i = 0;
     while (i < annot.args_len) : (i += 1) {
         if (ast.requiresTypeNameAt(annot, i)) |sid| {
             out[n] = ast.strings.slice(sid);
             n += 1;
         }
     }
-    return out[0..n];
+    return out;
 }
 
 /// Resolve a `component` declaration's storage mode from its `@storage`

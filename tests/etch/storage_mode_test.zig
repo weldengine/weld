@@ -888,3 +888,40 @@ test "P2-1: a table form DORMANT through a tick is exact when it is next elected
     for (plain) |e| try std.testing.expectEqual(@as(i64, 2), readI64(&world, e, marked));
     for (wide) |e| try std.testing.expectEqual(@as(i64, 2), readI64(&world, e, marked));
 }
+
+/// A `@requires` whose second argument is NOT a bare type name. The
+/// type-checker refuses this (`annotation_arg_mismatch`), which is why the
+/// program below is never type-checked here: the point is the shape reaching
+/// `requiresNamesOf`, not the diagnostic.
+const src_requires_nonpath =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform, 3)
+    \\component Foo { v: int = 0 }
+;
+
+test "P2-1 fix-as-you-go: requiresNamesOf frees exactly what it allocated" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, src_requires_nonpath);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    // The `Foo` declaration is the second item; find it by name rather than by
+    // index, so re-ordering the source cannot silently point this at `Transform`
+    // — whose annotation-free path returns `&.{}` and would prove nothing.
+    const decl = blk: {
+        for (pr.ast.component_decls.items) |d| {
+            if (std.mem.eql(u8, pr.ast.strings.slice(d.name), "Foo")) break :blk d;
+        }
+        return error.DeclNotFound;
+    };
+
+    // ONE name out of TWO arguments, which is the whole case: the old form
+    // allocated two slots and returned a one-slot slice, so the `free` below
+    // released a size the allocation never had. `std.testing.allocator` checks
+    // that pairing, so the defect surfaces HERE and not as a silent corruption.
+    const req = try weld_etch.types.requiresNamesOf(gpa, &pr.ast, decl);
+    defer gpa.free(req);
+    try std.testing.expectEqual(@as(usize, 1), req.len);
+    try std.testing.expectEqualStrings("Transform", req[0]);
+}
