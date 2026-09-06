@@ -98,10 +98,18 @@ pub const Driver = union(enum) {
 /// The population of `cid` — the number of live entities carrying it.
 ///
 /// For a sparse member this is `dense.len`, an O(1) read. For a table member it
-/// is a sum over the archetypes carrying it, so O(archetypes) — paid once per
-/// election and not per entity, and the alternative (a per-component live count
-/// maintained on every migration) would put a write on the hot structural path
-/// to save a read on a cold one.
+/// is a sum over the archetypes carrying it, so O(archetypes), and
+/// `arch.hasComponent` is itself a walk of that archetype's signature.
+///
+/// **THIS PATH IS NO LONGER COLD.** The clause that stood here — a write on the
+/// hot structural path traded against "a read on a COLD one" — was exact while
+/// the driver was elected once at build. Since M1.B/P2-1 `QueryPlan.elect` runs
+/// at every walk, so one election per term per tick costs O(t · A) with `t` the
+/// table members of the term's with-set and `A` the archetype count. The
+/// arbitration against a per-component live count maintained on every migration
+/// therefore no longer follows from where the read sits, and stands only on a
+/// MEASUREMENT of that cost, which M1.B/P2-1 owes and this comment must not
+/// pre-empt.
 pub fn population(world: *const World, cid: ComponentId) usize {
     if (world.storageOf(cid) == .sparse) {
         const store = world.sparse_stores.getConst(cid) orelse return 0;
