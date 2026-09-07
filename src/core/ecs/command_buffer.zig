@@ -53,29 +53,16 @@ const job_bound = @import("foundation").job_bound;
 /// for `foundation.job_bound.refuseMarkedArgs`, kept so the call sites in this
 /// tier read in this tier's vocabulary.
 ///
-/// **The placement history is worth one paragraph, because two versions of it
-/// were wrong in the same way.** A first version sat on the sparse-driven entry
-/// ALONE and justified the asymmetry against `forEachChunk`, which is a double
-/// loop on the CALLING thread and never carried the hazard — the count "0 of 7"
-/// had the wrong denominator. M1.B/G8 moved the refusal onto the TYPE and wrote
-/// that, so placed, "all three reach it". **That sentence was true of placement
-/// and false of reach:** placement makes the guard available to any importer,
-/// it does not make an entry call it, and M1.B/G10 derived SIX arg-passing
-/// entries where that enumeration listed three — the sixth,
-/// `jobs.Scheduler.dispatch`, sitting in a directory G8's sweep did not cover.
-/// What closes it is the type declaring its own refusal and the predicate
-/// living in `foundation`, so an entry in a tier that cannot name
-/// `CommandBuffer` still reaches the bound. The derivation is written at
-/// `tests/ecs/hybrid_query_test.zig`'s job-bound control, and its count is
-/// asserted rather than maintained.
+/// The SITE SET is derived and asserted, not maintained by hand:
+/// `tests/ecs/hybrid_query_test.zig`'s job-bound control. Why placing the
+/// marker on the type is not the same as every entry calling it is written
+/// where that reasoning failed, at `src/core/jobs/scheduler.zig`'s dispatch.
 pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
     job_bound.refuseMarkedArgs(ArgsType);
 }
 
-/// Re-export of the tier-agnostic predicate — the SAME function, not a copy —
-/// so this tier's tests can assert the marker's contract without importing
-/// `foundation` directly. `src/core/jobs/scheduler.zig` calls it through
-/// `foundation` instead, which is the whole point of where it lives.
+/// Re-export of the tier-agnostic predicate — the SAME function, NOT a copy: a
+/// copy passes every test until it drifts.
 pub const carriesMarked = job_bound.carriesMarked;
 
 const World = world_mod.World;
@@ -138,12 +125,9 @@ pub const Command = union(CommandKind) {
 pub const CommandBuffer = struct {
     /// THE TYPE DECLARES ITS OWN REFUSAL, and its value is the reason.
     ///
-    /// `foundation.job_bound.refuseMarkedArgs` reads this at comptime from
-    /// every entry that hands an argument tuple to a body a worker pool runs,
-    /// which is how the refusal reaches entries in tiers that cannot name this
-    /// type — measured at M1.B/G10: `jobs.Scheduler.dispatch` is one such entry
-    /// and importing this file from `src/core/jobs/` would drag `world.zig`
-    /// into the job tier's graph.
+    /// Read at comptime by `foundation.job_bound.refuseMarkedArgs`, which is how
+    /// the bound reaches a tier that cannot name this type: importing this file
+    /// from `src/core/jobs/` would drag `world.zig` into the job tier's graph.
     pub const weld_no_job_body: []const u8 =
         "a worker owns its range's storage and nothing else, so two workers " ++
         "recording structural changes would need a deterministic merge, which " ++

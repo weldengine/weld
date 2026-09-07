@@ -227,39 +227,26 @@ pub const World = struct {
     entity_extensions: std.AutoHashMapUnmanaged(EntityId, std.ArrayListUnmanaged([]const u8)) = .empty,
 
     /// M1.B — per-component sparse sets, one slot per `ComponentId` whose
-    /// registry descriptor carries `.sparse`. Defaulted, and deliberately NOT
-    /// listed in `init()`: a world that registers no sparse component never
-    /// allocates a slot, which is the same discipline `observer_registry` and
-    /// `entity_extensions` already follow.
+    /// registry descriptor carries `.sparse`. Defaulted and NOT listed in
+    /// `init()`, so a world registering no sparse component allocates no slot.
     ///
-    /// The storage mode is a property of the RUNTIME REGISTRY, never of an
-    /// entity's on-disk identity — so a scene cooked before this milestone
-    /// loads unchanged and the mode is decided at registration time.
+    /// The mode is a property of the RUNTIME REGISTRY and never of an entity's
+    /// on-disk identity, which is what makes a pre-M1.B scene load unchanged.
     sparse_stores: sparse_mod.SparseStores = .{},
 
     /// M1.B/G9 — how many `@requires` removals were SKIPPED this tick.
     ///
-    /// The refusal channel, and its shape is the `syncIn` precedent read at
-    /// `src/modules/forge/sync_in.zig`: a COUNTED FIELD a caller can read plus a
-    /// `std.log.warn` bounded to one line per tick. That comment states the
-    /// division and it holds here — the count serves a reader that holds the
-    /// journal, the log line serves the developer who does not know to look.
+    /// The refusal channel: a counted field plus a `std.log.warn` bounded to one
+    /// line per tick, the `syncIn` shape.
     ///
-    /// On `World` and NOT on `RuntimeReport`, for the reason the same precedent
-    /// gives about its own counter: *a Zig system can have done it as readily as
-    /// a rule*. A counter on the Etch report would count only what a rule did,
-    /// and a removal refused for a Zig system would be invisible.
-    ///
-    /// This is NOT the channel the brief forbids. That one is "a deferred
-    /// command turned into an unobservable tick failure": the removal here is
-    /// skipped, the invariant holds, the deviation is counted and logged, and
-    /// the tick survives.
+    /// **On `World` and NOT on `RuntimeReport`** — a Zig system can refuse a
+    /// removal as readily as a rule, and a counter on the Etch report would make
+    /// the first invisible.
     ///
     /// **Per TICK, and cleared at BOTH boundaries** — see
-    /// `resetTickObservations` for why one is not enough. A first version reset
-    /// it in `beginFrame` alone, whose tree-walker call site is conditional on
-    /// `has_changed`, so the field meant "per tick" or "per run" depending on
-    /// whether the program used a `changed` filter somewhere else entirely.
+    /// `resetTickObservations`. Resetting in `beginFrame` alone makes the field
+    /// mean "per tick" or "per run" depending on whether the program uses a
+    /// `changed` filter somewhere else entirely.
     requires_removals_skipped: u32 = 0,
     /// The first component id whose removal was skipped this tick, so the log
     /// line names one rather than only counting.
@@ -645,19 +632,14 @@ pub const World = struct {
 
     /// Refuse a caller-supplied id slice that names the same component twice.
     ///
-    /// ACTIVE, not an assert. A repeated id makes `Archetype.init` build a
-    /// signature with a duplicate column, after which `componentIndex` answers
-    /// the FIRST and the second is written once and never read again — a
-    /// malformed archetype with no diagnostic. On the sparse side the same
-    /// input appended a second dense row (the G3 review's F4). Both halves were
-    /// carried by `std.debug.assert` alone, which ReleaseFast compiles to
-    /// nothing: the guard was absent in exactly the mode where its breach is
-    /// silent, which is the class `ci.yml`'s single ReleaseFast cell exists for.
+    /// **ACTIVE, not an assert**, because the breach is silent in the mode
+    /// ReleaseFast compiles the assert out of: a repeated id makes
+    /// `Archetype.init` build a duplicate column, after which `componentIndex`
+    /// answers the FIRST and the second is written once and never read; on the
+    /// sparse side it appends a second dense row.
     ///
-    /// O(n²) over the slice, which is what `addComponentsDynamic`'s own
-    /// present-and-distinct pass already does: these slices hold a handful of
-    /// ids, and the alternative — a set — would allocate on a path whose whole
-    /// point is not to.
+    /// O(n²) deliberately — these slices hold a handful of ids and a set would
+    /// allocate on a path whose whole point is not to.
     fn refuseDuplicateIds(ids: []const ComponentId) !void {
         for (ids, 0..) |c, i| {
             for (ids[i + 1 ..]) |other| {
@@ -677,27 +659,20 @@ pub const World = struct {
     /// members declare, into a NEW pair of lists. Returns whether anything was
     /// added.
     ///
-    /// **One expansion semantics for every add and spawn path.** `@requires`
-    /// applies identically to an add and to a spawn carrying a component with a
-    /// non-empty closure, and the derived inventory measured the rule applied at
-    /// ONE of SIX terminal paths — no path delegates to a sibling, so five were
-    /// silently ignoring it. A second expansion written per site is how the six
-    /// would come to disagree.
+    /// **ONE expansion semantics for all six add and spawn paths**, none of
+    /// which delegates to a sibling — a second expansion written per site is how
+    /// they would come to disagree.
     ///
-    /// Three properties, each of which a caller would otherwise have to know:
-    ///
-    /// - **Idempotent.** A caller legitimately passes `{Mesh, Transform}` when
-    ///   `Mesh` requires `Transform`; appending unconditionally would make
+    /// - **Idempotent**, because a caller legitimately passes `{Mesh, Transform}`
+    ///   when `Mesh` requires `Transform`: appending unconditionally would make
     ///   `refuseDuplicateIds` reject a correct call, turning the duplicate rule
-    ///   into a regression of this one. A requisite already in the list — or
-    ///   already on the entity, for an add — is skipped, and the duplicate
-    ///   refusal stays on the CALLER's slice where it belongs.
-    /// - **Payloads come from the registry**, `componentDefaultBytes`, the only
-    ///   source that asks the caller for nothing.
+    ///   into a regression of this one.
+    /// - **Payloads come from the registry**, the only source that asks the
+    ///   caller for nothing.
     /// - **A NEW pair of arrays, never an expansion in place.** The positional
     ///   ids-to-payloads pairing is a coincidence the scene loader relies on —
-    ///   it reuses one id array per block — and the `dupe` that protects it
-    ///   protects a PERMUTATION, not a change of length.
+    ///   it reuses one id array per block — so the `dupe` protects a
+    ///   PERMUTATION, not a change of length.
     ///
     /// `entity` is null for a spawn, where nothing is present yet.
     fn expandRequires(
@@ -761,16 +736,11 @@ pub const World = struct {
     /// program reaches only `tickBoundary`. Extracted rather than written twice,
     /// so the two sites cannot drift into resetting different sets.
     ///
-    /// The two boundaries CAN both fire in one tick — `stepOnce` opens with
-    /// `beginFrame` when the program carries a `changed` filter, and all three
-    /// of its drivers close with `tickBoundary` (`interp.zig:1738`, `5231`,
-    /// `5327`). That is harmless, but NOT because the second clear finds a zero:
-    /// it finds whatever the tick counted and erases it. What makes it harmless
-    /// is the READ WINDOW — the count is "since the last boundary", read during
-    /// the tick by a caller holding the world, so by the time a boundary closes
-    /// the tick the observation has already been available for its whole window.
-    /// An earlier version of this comment claimed the no-op instead; that clause
-    /// was false and looked like the one that concluded.
+    /// Both boundaries CAN fire in one tick, and that is harmless NOT because
+    /// the second clear finds a zero — it erases whatever the tick counted. What
+    /// makes it harmless is the READ WINDOW: the count means "since the last
+    /// boundary" and is read during the tick, so by the time a boundary closes
+    /// it the observation has been available for its whole window.
     fn resetTickObservations(self: *World) void {
         self.requires_removals_skipped = 0;
         self.first_requires_skip = null;
@@ -829,24 +799,19 @@ pub const World = struct {
 
     /// Which backend owns `cid`.
     ///
-    /// The REGISTRY is the authority on the mode; the existence of a sparse
-    /// store is not. A component declared `.sparse` that nobody has spawned
-    /// yet has no slot, and routing on slot existence would fall through to the
-    /// archetype and answer "absent" for the right reason by accident — one
-    /// authority per question, and the accident is not the authority.
+    /// **The REGISTRY is the authority, never the existence of a sparse store**:
+    /// a component declared `.sparse` that nobody has spawned yet has no slot,
+    /// and routing on slot existence would answer "absent" correctly by
+    /// accident.
     ///
-    /// An out-of-range id is NOT a programmer error at this level:
-    /// `componentBytes` and its siblings take a caller-supplied `ComponentId`
-    /// and answered `null` for an unknown one before this milestone, because
-    /// `componentIndex` merely failed to find it in a signature. Routing
-    /// through the registry would turn that same call into an out-of-bounds
-    /// index, so the bound is re-established here rather than inherited by
-    /// assumption. `.table` is the answer that reproduces the old behaviour
-    /// exactly: the archetype lookup then answers `null` as it always did.
-    /// PUBLIC since M1.B/G5: the Etch bridge decides which arm of its bimodal
-    /// `ComponentRef` to build, and the mode authority must be the same one the
-    /// routing uses — a second reading of the registry beside this one is how
-    /// the two would come to disagree.
+    /// **An out-of-range id is NOT a programmer error here.** `componentBytes`
+    /// and its siblings take a caller-supplied `ComponentId` and answer `null`
+    /// for an unknown one; indexing the registry unguarded would turn that call
+    /// into an out-of-bounds read, and `.table` is what reproduces the old
+    /// answer — the archetype lookup then returns `null` as it always did.
+    ///
+    /// Public so the Etch bridge picks its `ComponentRef` arm from the SAME
+    /// authority the routing uses.
     pub fn storageOf(self: *const World, cid: ComponentId) registry_mod.StorageKind {
         if (cid >= self.registry.componentCount()) return .table;
         return self.registry.componentStorage(cid);
@@ -880,14 +845,10 @@ pub const World = struct {
     /// is the LIFO order M1.1.1-HF1/D2 established after a forward undo was
     /// measured to corrupt a refcount on duplicate entries.
     ///
-    /// `payloads` + `id_order` carry the caller's own pairing rather than a
-    /// reshaped copy: `spawnDynamic` passes null/null and gets registry
-    /// defaults, while `spawnDynamicWithValues` and `addComponentsDynamic` pass
-    /// their caller's bytes alongside the caller's ORIGINAL id order, which is
-    /// what the resolution below scans — `splitByStorage` permuted the buffer,
-    /// so positional pairing is gone by the time control reaches here. (An
-    /// earlier draft took a `payload_for` closure and this paragraph outlived
-    /// it by one revision.)
+    /// `payloads` + `id_order` carry the caller's ORIGINAL pairing, which the
+    /// resolution below scans by id: `splitByStorage` permuted the buffer, so
+    /// positional pairing is gone by the time control reaches here.
+    /// `spawnDynamic` passes null/null and gets registry defaults.
     fn addSparsePayloads(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1246,34 +1207,27 @@ pub const World = struct {
 
     /// Whether `entity` carries `cid`, whichever backend stores it.
     ///
-    /// Total and infallible: `false` for a stale handle, an unknown id, or an
-    /// absent component, with no error channel and no way to distinguish those
-    /// three — which is the shape `WeldEcsAPI.component_has` is frozen at
-    /// (`(world, entity, comp) -> bool`, `ARCH-018`). That entry is a STUB
-    /// today, bound in Phase 3 by its own file's statement, so there is no
-    /// behaviour to reproduce here — only a signature to be servable by.
+    /// Total and infallible — `false` for a stale handle, an unknown id or an
+    /// absent component, indistinguishably, which is the shape
+    /// `WeldEcsAPI.component_has` is frozen at (`ARCH-018`).
     ///
-    /// This is not a convenience over `componentBytes() != null`. The batched
-    /// paths ask the presence question to raise `DuplicateComponent` /
-    /// `UnknownComponent`, and they asked it of the ARCHETYPE, which answers
-    /// `false` for a sparse component the entity actually carries — so a
-    /// batched add of an already-present sparse component would pass the check
-    /// and reach `SparseSetStorage.add`'s own assert, live in Debug and
-    /// compiled to nothing in ReleaseFast: a silent double insert in the mode a
-    /// game ships. The routed presence question is what closes that.
+    /// **Not a convenience over `componentBytes() != null`.** The batched paths
+    /// ask presence to raise `DuplicateComponent`/`UnknownComponent`, and they
+    /// asked it of the ARCHETYPE — which answers `false` for a sparse component
+    /// the entity carries, so a batched add of an already-present sparse
+    /// component passed the check and reached `SparseSetStorage.add`'s own
+    /// assert: live in Debug, compiled to nothing in ReleaseFast, a silent
+    /// double insert in the mode a game ships.
     /// `entity`'s `changed_tick` for `cid`, whichever backend holds it, or null
     /// when the entity is stale or does not carry the component.
     ///
-    /// The public surface had NO tick reader: every consumer reached the
-    /// archetype's `changedTick(chunk, col, slot)` through the
-    /// `dynamicLocation` + `dynamicArchetype` idiom, which answers for the
-    /// TABLE half only — so a sparse component read as "never changed", a wrong
-    /// answer with no diagnostic. Deriving the coverage from the public surface
-    /// rather than from the archetype funnel is what surfaced the absence.
+    /// **Use this and not the `dynamicLocation` + `dynamicArchetype` +
+    /// `changedTick` idiom**, which answers for the TABLE half only: a sparse
+    /// component reads as "never changed", a wrong answer with no diagnostic.
     ///
-    /// No `addedTickOf` twin: nothing consumes one outside the query paths,
-    /// which reach the archetype directly and are G7's. An accessor with no
-    /// caller is an unexercised entry, not symmetry.
+    /// No `addedTickOf` twin — nothing consumes one outside the query paths,
+    /// which reach the archetype directly. An accessor with no caller is an
+    /// unexercised entry, not symmetry.
     pub fn changedTickOf(self: *const World, entity: EntityId, cid: ComponentId) ?tick_mod.Tick {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
@@ -2181,32 +2135,18 @@ pub const World = struct {
         bit_index: u32,
         set: bool,
     ) !void {
-        // Routed through `componentBytes` rather than reaching the archetype
-        // directly. This entry mutates IN PLACE and only reaches
-        // `getOrCreateArchetype` indirectly, through `addComponentDynamic`
-        // below — so an enumeration of the archetype funnel's callers does NOT
-        // find it, and the set of structural mutators is strictly larger than
-        // the set of signature builders. On a sparse `TagSet` the old body
-        // asked `arch.componentIndex`, got null, and fell into `else if (set)`:
-        // a `set` would have double-added an existing row and a `clear` would
-        // have been a SILENT no-op.
+        // Routed through `componentBytes`, never the archetype: this entry
+        // mutates IN PLACE, so it does not appear in an enumeration of the
+        // archetype funnel's callers, and on a sparse `TagSet` reaching the
+        // archetype answers null. `componentBytes` hands out mutable bytes
+        // WITHOUT stamping a change, which is the behaviour here.
         //
-        // `componentBytes` hands out mutable bytes without stamping a change,
-        // which is what the previous body did too (`setTagBit` on the slot, no
-        // `markChanged`) — the behaviour is preserved, not merely the shape.
-        // Its extra `isLive` check is not a behaviour change either: a stale
-        // handle has no `entity_locations` entry, so both forms answered null.
-        // Stale handles are SILENTLY IGNORED, and restoring that is the whole
-        // point of this line: the pre-M1.B body opened with
-        // `entity_locations.get(entity) orelse return`, and the command-buffer
-        // flush depends on it — a tag recorded for an entity despawned later in
-        // the same tick is ordinary, and must not abort the flush. G3 replaced
-        // that head with `componentBytes`, which also answers null for a stale
-        // handle but then falls into the `else if (set)` arm below, where
-        // `addComponentDynamic` validates the handle and returns
-        // `error.StaleEntityHandle` — propagated, aborting every remaining
-        // command. The comment that replaced the old head claimed the behaviour
-        // was preserved; it was not, and this is not a shape fix.
+        // A STALE HANDLE MUST BE SILENTLY IGNORED, which is what this line
+        // restores. The command-buffer flush depends on it — a tag recorded for
+        // an entity despawned later in the same tick is ordinary — and without
+        // it the null falls into the `else if (set)` arm below, where
+        // `addComponentDynamic` returns `StaleEntityHandle`, propagated, which
+        // aborts every remaining command of the flush.
         if (self.entity_locations.get(entity) == null) return;
         if (self.componentBytes(entity, tagset_id)) |bytes| {
             setTagBit(bytes, bit_index, set);

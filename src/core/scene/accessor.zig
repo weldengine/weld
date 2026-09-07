@@ -3,26 +3,18 @@
 //! which layers mmap + identity remap + PER-ENTITY INSTANTIATION + UUID→handle
 //! remap + `on_spawned` on top — none of that lives here.
 //!
-//! *Corrected 2026-09-04 (M1.B/G6): this line said the loader "memcpy-into-
-//! chunks". The COPY is real — `world.zig` does `@memcpy(dst, payloads[k])`
-//! into an archetype chunk — but the loader does not perform it and does not
-//! see a chunk: it slices each column at an entity's rank and hands the slices
-//! to `World.spawnDynamicWithValues`, which places the bytes and, since M1.B,
-//! places only the TABLE half there. Attributing the copy to the loader is what
-//! made a second storage backend look like it required reopening this codec
-//! (`engine-scene-serialization.md` §4, anomalies 88 and 90).
-//!
-//! A first version of this note said the memcpy path "has never existed", which
-//! is FALSE and was caught by the adversarial verification of the very finding
-//! that prompted the edit — the mechanism exists, only its owner was wrong.*
+//! **The loader does NOT memcpy into chunks**, and attributing that copy to it
+//! is what made a second storage backend look like it required reopening this
+//! codec (`engine-scene-serialization.md` §4, anomalies 88 and 90). The copy is
+//! real and `world.zig` performs it; the loader slices each column at an
+//! entity's rank and hands the slices to `World.spawnDynamicWithValues`.
 //!
 //! No allocation: every getter returns a slice/pointer into the borrowed bytes
 //! (or a small value). `open` validates `magic` + `version`. Scalars are read
 //! little-endian via `std.mem.readInt` (unaligned-safe — the byte buffer need
-//! not be aligned); component column DATA is returned as raw byte slices, which
-//! the loader hands to the World's spawn surface at each entity's rank — it is
-//! the `World` that places the bytes, not the loader. Self-describing: column strides/alignments come from the
-//! Schema Registry, so no `Registry` is needed to slice archetype columns.
+//! not be aligned); component column DATA is returned as raw byte slices.
+//! Self-describing: column strides/alignments come from the Schema Registry, so
+//! no `Registry` is needed to slice archetype columns.
 //!
 //! Column placement is computed with `format.columnOffset` — the SAME routine
 //! the writer used — so reader/writer offsets agree by construction.

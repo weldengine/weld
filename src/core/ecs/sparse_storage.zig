@@ -7,50 +7,31 @@
 //! parallel to dense. Add and remove are O(1) by swap-remove, and neither
 //! migrates an archetype — which is the whole reason the mode exists.
 //!
-//! **Wired to the `World` since M1.B/G3.** G2 delivered the structure in
-//! isolation and this header said "not wired to the `World` at this gate" —
-//! true then, made false by G3, and left standing until an adversarial review
-//! of the G3 diff found it. `World` owns a `SparseStores` field, every
-//! resolution entry and every structural mutator routes through it, and
+//! Wired to the `World` since M1.B/G3: it owns a `SparseStores` field, every
+//! resolution entry and structural mutator routes through it, and
 //! `World.storageOf` is the mode authority.
 //!
-//! It does read exactly one thing from `chunk.zig`: `ChunkAlignment`, the
-//! engine's named bound on component alignment. That is a layout CONSTANT and
-//! not a dependency on chunk storage — and importing it is the point, since
-//! re-declaring the bound here would give the engine two of them, which is the
-//! defect the single-declaration discipline of the `StorageKind` domain exists
-//! to prevent. `rows` explains what the constant buys.
+//! The one thing read from `chunk.zig` is `ChunkAlignment`, a layout CONSTANT
+//! and not a dependency on chunk storage. **Importing it is the point** —
+//! re-declaring the bound here would give the engine two of them.
 //!
 //! The seven invariants of `engine-ecs-internals.md` §2 (*Invariants du backend
-//! sparse*) and where each is realised:
+//! sparse*), with the three that no test states written out:
 //!
-//! 1. **Swap-remove parity** — `remove`. The trailing entry moves into the
-//!    freed position and its `added_tick` / `changed_tick` travel with it,
-//!    exactly as `Archetype.removeSwap` makes them travel. MINUS the dirty bit,
-//!    because of invariant 2, and that subtraction is the only difference.
-//! 2. **No bitset, so no block skip** — this file allocates none and exposes no
-//!    skip entry. A sparse component is examined per entry; nothing here may be
-//!    written as if a block-granularity skip existed.
-//! 3. **Despawn removes from every storage** — `remove` is the primitive the
-//!    despawn path calls, and `SparseStores.removeEntity` is the union sweep it
-//!    calls once per entity. A sparse entry outliving its entity is both a leak
-//!    and a dangling index.
-//! 4. **Observer order at despawn** — `SparseStores.forEachOf` yields ascending
-//!    `ComponentId`, the same key the archetype's sorted component list gives,
-//!    so a union walk merging the two is ordered on one key. Storage mode
-//!    reorders nothing.
-//! 5. **Zero-sized components** — `elem_size == 0` allocates NO component
-//!    buffer, ever, and derives no pointer from one. A sparse tag is a dense
-//!    entity array and its two tick sidecars.
-//! 6. **`EntityId` generation** — `sparse` is addressed by the entity INDEX,
-//!    never by the full handle, and an entry whose generation no longer matches
-//!    counts as absence. Two entities of one index and different generations
-//!    therefore never share an entry.
-//! 7. **OOM rollback** — `add` reserves every fallible resource before it
-//!    mutates anything, so a failure leaves no half-written entry and no
-//!    `sparse[index]` designating an uninitialised dense row. This is the
-//!    repository's own **reserve-then-mutate** invariant, named at M1.1.1-HF1
-//!    (D3/D4) and applied here rather than re-invented.
+//! 1. **Swap-remove parity** — `remove`, minus the dirty bit by invariant 2.
+//! 2. **No bitset, so NO BLOCK SKIP** — this file allocates none and exposes no
+//!    skip entry. A sparse component is examined per entry, and nothing here may
+//!    be written as if a block-granularity skip existed.
+//! 3. **Despawn removes from every storage** — `SparseStores.removeEntity`.
+//! 4. **Observer order at despawn** — `SparseStores.forEachOf`, ascending
+//!    `ComponentId`, the same key the archetype's sorted list gives.
+//! 5. **ZERO-SIZED components** — `elem_size == 0` allocates no component buffer
+//!    ever and derives no pointer from one. A sparse tag is a dense entity array
+//!    and its two tick sidecars.
+//! 6. **`EntityId` GENERATION** — `sparse` is addressed by the entity INDEX and
+//!    never by the full handle; an entry whose generation no longer matches is
+//!    absence, so two entities of one index never share an entry.
+//! 7. **OOM rollback** — `add` is reserve-then-mutate (M1.1.1-HF1 D3/D4).
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");

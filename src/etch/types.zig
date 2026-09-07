@@ -4672,52 +4672,25 @@ pub const TypeChecker = struct {
     /// Validate `@storage`'s argument against the `StorageKind` domain
     /// (`engine-ecs-internals.md` §2 — `table | sparse`, default `table`), the
     /// two steps `etch-resolver-types.md` §13.3 numbers 3 and 4. Applicability
-    /// (`component`-only) is already enforced by `validateAnnotations`; this is
-    /// the argument, which nothing checked before M1.B/G1 — every value passed,
-    /// including a value outside the domain.
+    /// (`component`-only) is already enforced by `validateAnnotations`.
     ///
-    /// **The accepted spelling is the tag path, `@storage(.sparse)`, and only
-    /// that.** The bare `@storage(sparse)` is grammatical (`etch-grammar.md`
-    /// §1.5 admits a bare `IDENT` for `annotation_arg`) and is refused, because
-    /// the question is one of schema and not of grammar: an argument whose
-    /// declared type is an enumeration domain is written as a tag path, which is
-    /// what every sibling annotation of that shape already does. The decisive
-    /// reason is ambiguity rather than uniformity — a bare enumeration value is
-    /// syntactically indistinguishable from an identifier reference, so `sparse`
-    /// can collide with a type or a variable of that name and `.sparse` cannot.
-    /// The bare form was in the corpus for one reason only: `@storage` was a
-    /// no-op, so its spelling had never met an execution path.
+    /// The tag path `@storage(.sparse)` is the only accepted spelling: a bare
+    /// enumeration value is syntactically indistinguishable from an identifier
+    /// reference, so `sparse` can collide with a type or variable of that name.
     ///
-    /// **The order of the branches is the design, not a style choice.** Both
-    /// codes exist so the failures are told apart, and §13.3 assigns them
-    /// different questions: step 3 is arity, name and value; step 4 is
-    /// const-evaluability. The two are written as disjoint and are not —
-    /// `.tag_path` satisfies BOTH, since `isConstEvaluable` returns true for it —
-    /// so the name form must be resolved before the const test runs, or
-    /// `@storage(.archetype)` would be reported as a wrong-typed constant instead
-    /// of as a value outside the domain. The code would be the same and the
-    /// REASON would be wrong.
-    ///
-    /// Step 3 asks four questions here and all four land on E0503, by its own
-    /// wording (*number, name or type*): `@storage()` and `@storage(a, b)` fail
-    /// on number, `@storage(kind: .sparse)` on name, `@storage(sparse)` on
-    /// spelling, and `@storage(.archetype)` / `@storage(1)` on value. Only a
-    /// well-formed positional argument that is neither a tag path nor a constant
-    /// reaches step 4.
+    /// **The name form must be resolved BEFORE the const test**, the two being
+    /// written as disjoint and not being: `isConstEvaluable` returns true for a
+    /// `.tag_path`, so reordering reports `@storage(.archetype)` as a
+    /// wrong-typed constant instead of a value outside the domain.
     /// Validate `@requires(A, B, …)` on a component, and refuse a closure that
     /// is not a DAG.
     ///
-    /// Two things are checked here and nowhere else in the front end: every
-    /// argument is a bare TYPE PATH, and the requisite graph over the
-    /// program's component declarations has no cycle.
-    ///
-    /// **The cycle is detected HERE as well as in `Registry.finalizeRequires`,
-    /// and that is two detectors for two populations rather than one thing
-    /// written twice.** The type-checker sees the program and can point a SPAN
-    /// at the offending declaration, which is what `engine-ecs-internals.md` §3
-    /// means by "cycle refusé par diagnostic"; the registry sees components a
-    /// host registered from Zig, which the type-checker never reads, and must
-    /// refuse those too. Neither covers the other's population.
+    /// **The cycle is detected here AND in `Registry.finalizeRequires` — two
+    /// detectors for two populations, not one thing written twice.** The
+    /// type-checker sees the program and can point a SPAN at the declaration
+    /// (`engine-ecs-internals.md` §3, "cycle refusé par diagnostic"); the
+    /// registry sees components a host registered from Zig, which the
+    /// type-checker never reads. Neither covers the other's population.
     fn checkRequiresAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.requiresAnnotation(decl) orelse return;
         if (annot.args_len == 0) {

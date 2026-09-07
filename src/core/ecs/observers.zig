@@ -89,21 +89,13 @@ const Listeners = std.ArrayListUnmanaged(Listener);
 /// Ascending-`ComponentId` walk over the UNION of an entity's table and sparse
 /// components.
 ///
-/// **Extracted at the M1.B reprise rather than copied.** The despawn
-/// enumeration had this walk inline, and the spawn `on_add` loop needed the
-/// same one — it was iterating the CALLER's slice, so a component the
-/// `@requires` closure contributed existed on the entity and its `on_add` never
-/// fired. Two copies of a walk whose whole job is an ORDER is how the two
-/// directions would come to disagree on the property they are supposed to
-/// share.
+/// **ONE walk for both directions, never a copy per direction** — its whole job
+/// is an ORDER, which is exactly the property two copies would drift on.
 ///
-/// **The order at spawn therefore CHANGES**, from the caller's slice order to
-/// ascending id, and that is arbitrated rather than incidental: a caller's slice
-/// order is a property of that caller's code, so the observer order would
-/// otherwise depend on how someone wrote a spawn literal. Ascending is
-/// determined by the world, symmetric with the despawn direction, and
-/// `engine-ecs-internals.md` §8 — which covers the despawn direction only —
-/// becomes bidirectional at the corpus owner's hand, not here.
+/// Ascending id and NOT the caller's slice order: a slice order is a property of
+/// the calling code, so the observer order would otherwise depend on how someone
+/// wrote a spawn literal. `engine-ecs-internals.md` §8 covers the despawn
+/// direction only; making it bidirectional is the corpus owner's, not here.
 pub const ComponentUnionIter = struct {
     world: *World,
     entity: EntityId,
@@ -405,22 +397,11 @@ pub fn applyWithObservers(
             // entity with no location is stale, and the pass is skipped whole
             // exactly as before rather than walking its sparse stores.
             if (world.entity_locations.get(d.entity) != null) {
-                // Ascending `ComponentId` over the UNION of both backends, by a
-                // two-pointer merge of two already-ascending sequences:
-                // `arch.component_ids` is sorted by `sortComponentIds`, and the
-                // sparse stores are INDEXED by `ComponentId` so
-                // `nextContaining` walks them in ascending order too. No sort,
-                // no allocation, and no ordering that depends on the caller's
-                // slice or on registration order.
-                //
-                // Before M1.B this walked the archetype signature alone, which
-                // since G3 is the TABLE half only — so a sparse component's
-                // `on_remove` never fired at despawn at all. An observer
-                // silently skipped is undetectable by any caller, which is why
-                // the order and the membership are asserted together.
-                // The SAME walk the spawn direction takes — extracted at the
-                // M1.B reprise, so the two cannot drift on an order that is
-                // their shared property.
+                // The SAME walk the spawn direction takes: ascending
+                // `ComponentId` over the UNION of both backends, by a
+                // two-pointer merge of two already-ascending sequences. The
+                // archetype signature ALONE is the table half only, and an
+                // observer silently skipped is undetectable by any caller.
                 var it = ComponentUnionIter.init(world, d.entity);
                 while (it.next()) |cid| {
                     if (reg.on_remove.get(cid)) |list| {

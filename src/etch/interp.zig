@@ -2450,22 +2450,16 @@ pub const Interpreter = struct {
     fn iterateUnion(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         const sel = rd.selection;
 
-        // WHICH dedup key the union uses is decided by the terms, not chosen:
-        // the archetype merge below works by exploiting that each term's cache
-        // is ascending by `archetype_id`, and a sparse-driven term keeps no
-        // cache and has no archetype to order by. One such term and the whole
-        // union must de-duplicate by ENTITY instead.
-        // The merge below de-duplicates by ARCHETYPE, which is only sound when
-        // every term of the union admits the same entities within an archetype.
-        // A term whose admission is PER ENTITY breaks that premise — and
-        // `isTableDriven` answers the DRIVER, not the admission, which is the
-        // gap P1-2 named: a table-driven term carrying sparse members took the
-        // merge, where a single `owner` decides for all of them.
-        // STATIC, and deliberately outside the election: the predicate reads
-        // the table form's two sparse lists, which are a partition by
-        // `storageOf`. A term's need to de-duplicate by entity is therefore
-        // decided once, by the registry, and never by which form this tick
-        // elected.
+        // The merge below de-duplicates by ARCHETYPE, sound ONLY when every
+        // term admits the same entities within an archetype: it runs
+        // `iterateArchetype` once per archetype under a single `owner`, so a
+        // term whose admission is PER ENTITY has its `admits` skipped and the
+        // entity it alone would admit is silently lost.
+        //
+        // The predicate is STATIC and stays OUTSIDE the election — it reads the
+        // table form's sparse lists, a partition by `storageOf` — so the need to
+        // de-duplicate by entity is decided by the registry and never by which
+        // form this tick elected.
         var merge_by_archetype = true;
         for (sel) |*q| {
             if (q.needsEntityDedup()) merge_by_archetype = false;
@@ -6828,13 +6822,8 @@ fn filterPasses(world: *World, loc: Locator, ff: FieldFilter) bool {
 /// component's `changedTick` must exceed `last_run_tick`
 /// (`engine-ecs-internals.md` §5).
 ///
-/// Reads the tick through `World.changedTickOf` since M1.B/G7, which is the
-/// entry G5 added because the public surface had NO tick reader and every
-/// consumer reached the archetype directly — answering for the TABLE half only,
-/// so a sparse member read as NEVER CHANGED. The contract's own E0 list names
-/// this exact path: *"le filtre `Changed<T>` sur un membre table quand le driver
-/// est sparse (le tick se lit par lookup, pas par scan)"*, a site where
-/// "deterministic, non-invariant" must be VERIFIED and not supposed.
+/// Reads the tick through `World.changedTickOf`, which routes by storage — see
+/// there for why reaching the archetype directly is wrong.
 ///
 /// The `has T` predicate still guarantees presence — per entity now when the
 /// member is sparse, at the archetype when it is table — so an absent component

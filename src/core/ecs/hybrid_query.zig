@@ -7,11 +7,11 @@
 //!
 //! **Every entity-bound term reaches this file, all-table ones included.**
 //! `interp.buildSelection` calls `plan` for each satisfiable term with no
-//! branch, so an all-table term is planned, elected and walked here — its walk
-//! being `TableDrivenQuery`, which delegates to `DynamicQuery` and is therefore
-//! the archetype path unchanged. An earlier version of this header said the
-//! file was not on that path; it was wrong before P2-1 and wrong with a COST
-//! after it, the election having moved to the walk.
+//! branch, so an all-table term is planned and walked here — its walk being
+//! `TableDrivenQuery`, which delegates to `DynamicQuery` and is therefore the
+//! archetype path unchanged. It is NOT elected: `QueryPlan.elect` answers from
+//! the absence of a sparse form, and believing otherwise is what put an
+//! O(t · A) cost on that path for two commits.
 //!
 //! **The contract is `engine-ecs-internals.md` §2, *Driving set des queries
 //! mixtes*, and it is a contract before it is a mechanism:**
@@ -108,15 +108,14 @@ pub const Driver = union(enum) {
 /// is a sum over the archetypes carrying it, so O(archetypes), and
 /// `arch.hasComponent` is itself a walk of that archetype's signature.
 ///
-/// **THIS PATH IS NO LONGER COLD.** The clause that stood here — a write on the
-/// hot structural path traded against "a read on a COLD one" — was exact while
-/// the driver was elected once at build. Since M1.B/P2-1 `QueryPlan.elect` runs
-/// at every walk, so one election per term per tick costs O(t · A) with `t` the
-/// table members of the term's with-set and `A` the archetype count. The
-/// arbitration against a per-component live count maintained on every migration
-/// therefore no longer follows from where the read sits, and stands only on a
-/// MEASUREMENT of that cost, which M1.B/P2-1 owes and this comment must not
-/// pre-empt.
+/// **THIS PATH IS NOT COLD** — `QueryPlan.elect` runs at every walk, so one
+/// election costs O(t · A) in the table members of the with-set and the
+/// archetype count. The refusal of a per-component live count maintained on
+/// every migration therefore rests on a measurement and not on where the read
+/// sits: `bench/results/ecs_election.md` puts a mixed term at 808 ns and the
+/// worst declared shape at 8025 ns per election, against a 16.6 ms frame. What
+/// would reopen it is twenty or more terms each naming several table members in
+/// a world of hundreds of archetypes.
 pub fn population(world: *const World, cid: ComponentId) usize {
     if (world.storageOf(cid) == .sparse) {
         const store = world.sparse_stores.getConst(cid) orelse return 0;
@@ -178,38 +177,27 @@ pub const SparseDrivenQuery = struct {
     /// Walk the driver's dense array, yielding a `Locator` for every entity
     /// that satisfies the whole query.
     ///
-    /// The iterator captures a SLICE of the driver's dense array, not a length:
-    /// `dense` is an `ArrayListUnmanaged`, and `s.entities()` is read once, here.
-    /// So a structural change to the driver DURING the walk is unsound in two
-    /// distinct ways, and this code survives neither:
+    /// The iterator captures a SLICE, not a length: `dense` is an
+    /// `ArrayListUnmanaged` read once, here. A structural change to the driver
+    /// DURING the walk is unsound two ways, and neither is caught by a test —
+    /// GROWTH reallocates and the slice dangles (undefined in ReleaseFast);
+    /// SHRINK leaves the pointer valid and the length stale, so the tail reads
+    /// dead-but-allocated entries, silently, in every mode.
     ///
-    ///   - GROWTH reallocates, and the captured slice dangles. Loud in Debug
-    ///     and ReleaseSafe, undefined in ReleaseFast.
-    ///   - SHRINK (a swap-remove) leaves the pointer valid and the captured
-    ///     LENGTH stale, so the tail of the walk reads dead-but-allocated
-    ///     entries. Silent in every mode. In particular, capturing does NOT
-    ///     make a concurrent swap-remove visit-at-most-once: nothing here
-    ///     re-reads the length, so the removed entity's replacement is skipped
-    ///     AND a stale trailing slot is read.
+    /// What makes the capture sound is TWO INDEPENDENT guardians, and losing
+    /// either reopens its own half:
     ///
-    /// What makes the capture sound is not this code. It is TWO INDEPENDENT
-    /// guardians, and losing either one reopens its own half:
-    ///
-    ///   1. Remove, add and despawn are DEFERRED to the tick boundary — an Etch
-    ///      body enqueues onto `world.observer_registry.deferred`, drained by
-    ///      `Interpreter.flushStructural` — so no rule body shrinks the dense
-    ///      array under a live walk. This guardian also covers the chunk pointer
-    ///      `ComponentRef`'s table arm holds.
-    ///   2. A spawn IS immediate somewhere: `spawn_with` calls
-    ///      `World.spawnWithObservers` directly, and an APPEND is what
+    ///   1. Remove, add and despawn are DEFERRED to the tick boundary
+    ///      (`observer_registry.deferred`, drained by `flushStructural`), so no
+    ///      rule body shrinks the array under a live walk. This one also covers
+    ///      the chunk pointer `ComponentRef`'s table arm holds.
+    ///   2. A spawn is IMMEDIATE on the `spawn_with` path and an APPEND is what
     ///      reallocates. What keeps it out of a rule body is not deferral but
-    ///      the type-checker's surface gate — `test_world()` resolves only under
-    ///      `Checker.in_test_body` and falls through to E0102 otherwise
-    ///      (measured), so a rule body holds no world handle at all. This
-    ///      guardian covers the dense slice ONLY, an append never invalidating
-    ///      a chunk pointer, and it is the more fragile of the two: exposing
-    ///      world access to rule bodies is a plausible evolution that would
-    ///      leave guardian 1 untouched and this walk unprotected.
+    ///      the type-checker's surface gate: `test_world()` resolves only under
+    ///      `Checker.in_test_body`, E0102 otherwise. This one covers the dense
+    ///      slice ONLY — an append invalidates no chunk pointer — and is the
+    ///      more fragile: exposing world access to rule bodies would leave
+    ///      guardian 1 untouched and this walk unprotected.
     pub fn iterator(self: *const SparseDrivenQuery, world: *World) Iterator {
         const store = world.sparse_stores.getConst(self.driver);
         return .{
@@ -355,17 +343,11 @@ pub fn planSparseDriven(
 /// in its with-set at all.
 ///
 /// The walk is the archetype walk, delegated to `DynamicQuery` over the TABLE
-/// subset of both sets, and the SPARSE half of each set is applied PER ENTITY
-/// from the locator. That split is what the contract requires: "`not has T` on a
-/// sparse `T` ceases to be an archetype-level filter and becomes a per-entity
-/// membership test."
-///
-/// It is not an optimisation: `DynamicQuery`'s `without_ids` is evaluated at
-/// archetype level, and since M1.B/G3 a sparse component is in NO archetype's
-/// signature — so a sparse exclusion handed to it matches nothing to exclude
-/// and every candidate survives. The defect is pinned in
-/// `tests/ecs/hybrid_query_test.zig` before the fix, on the two entities that
-/// share one archetype precisely because the sparse member routes away.
+/// subset of both sets; the SPARSE half of each set is applied PER ENTITY from
+/// the locator, which the contract requires: "`not has T` on a sparse `T`
+/// ceases to be an archetype-level filter and becomes a per-entity membership
+/// test." Not an optimisation — a sparse component is in NO archetype signature
+/// since G3, so a sparse exclusion handed to `DynamicQuery` excludes nothing.
 pub const TableDrivenQuery = struct {
     /// The archetype-level query, over the table subset of both sets.
     inner: query_mod.DynamicQuery,
@@ -476,18 +458,16 @@ pub const Walk = union(enum) {
 /// One DNF term's plans — EVERY form the term can be walked in, built once,
 /// with the CHOICE of driver deferred to the walk.
 ///
-/// **The FORM of a plan is static and the CHOICE of driver is not**, and that
-/// is the whole factorisation. `planTableDriven` partitions the two sets by
-/// `storageOf`, a REGISTRY fact recorded at registration and never mutated
-/// (`Registry.componentStorage` has no setter); `electDriver` compares
-/// POPULATIONS, a world fact that moves every tick. So the forms are built
-/// once and each walk elects among them, which makes a driver change free and
-/// removes the question of a beat entirely — there is no hysteresis to
-/// calibrate and no threshold to engrave, because nothing is being smoothed.
+/// **The FORM of a plan is static and the CHOICE of driver is not.**
+/// `planTableDriven` partitions the two sets by `storageOf`, a registry fact
+/// never mutated after registration; `electDriver` compares POPULATIONS, which
+/// move every tick. Building the forms once makes a driver change free, and
+/// **there is therefore no hysteresis to calibrate and no threshold to
+/// engrave** — measured, the flip count follows the number of population
+/// CROSSINGS and not the churn rate, so nothing is being smoothed.
 ///
-/// **Three preconditions of the design, not observations of it.** A form that
-/// lies dormant for N ticks and is then elected must be as correct as one
-/// walked every tick, and that rests on:
+/// **Three preconditions.** A form dormant for N ticks and then elected must be
+/// as correct as one walked every tick, which rests on:
 ///
 ///   1. `world.archetypes` is APPEND-ONLY — one `append` in `World`, whose
 ///      only `pop` is the `errdefer` that annuls it. `query.rescanNewArchetypes`
