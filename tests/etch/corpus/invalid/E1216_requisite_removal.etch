@@ -1,0 +1,23 @@
+// M1.B/P2-2 — a rule whose `when` GUARANTEES the requirer's presence removes a
+// member of that requirer's `@requires` closure. The runtime refuses the removal
+// unconditionally, so the statement is not risky but dead: it can never have its
+// intended effect, which is the M1.0.18 -> HF4 structure (a front end admitting
+// what the runtime refuses) and the reason this is an error and not a warning.
+//
+// The STATIC half only. A removal whose requirer is present at run but not
+// provable from the selection stays on the counted-skip channel.
+// Expect: E1216 RequisiteRemovalRefused
+component Transform {
+    x: float = 0.0
+}
+
+@requires(Transform)
+component Mesh {
+    v: i32 = 0
+}
+
+rule strip(entity: Entity)
+    when entity has Mesh
+{
+    entity.remove(Transform)
+}

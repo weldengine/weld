@@ -4348,6 +4348,7 @@ pub const TypeChecker = struct {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
             try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
         }
+        ctx.when_root = when_root;
         if (when_root != ast_mod.RuleDecl.none_when) try self.collectWhen(&ctx, when_root);
 
         var i: u32 = 0;
@@ -4406,6 +4407,12 @@ pub const TypeChecker = struct {
         /// a when clause there (the construct's Tier-1 runtime owns the
         /// scheduling, no archetype query is derived). Rules keep the gate.
         unrestricted_ecs_access: bool = false,
+        /// The rule's `when` root, for the questions `components_in_when` cannot
+        /// answer (M1.B/P2-2). That set is FLAT — `collectWhen` recurses through
+        /// `or` and `not` with no context, so a component named under a `not` is
+        /// in it — and a GUARANTEE needs the tree. Stored rather than resolved
+        /// into a second set: the walk is needed only where a `remove` appears.
+        when_root: u32 = ast_mod.RuleDecl.none_when,
         /// Local variables in the rule body, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
 
@@ -4576,6 +4583,7 @@ pub const TypeChecker = struct {
         }
 
         // Validate when-clause and collect accessible component/resource types.
+        ctx.when_root = rule.when_root;
         if (rule.when_root != ast_mod.RuleDecl.none_when) {
             try self.collectWhen(&ctx, rule.when_root);
         }
@@ -4793,6 +4801,87 @@ pub const TypeChecker = struct {
         // frontier is the bound, and a program past it silently stops
         // widening — recorded rather than hidden, and a component graph of 64
         // requisites is past every shape the corpus shows.
+        return false;
+    }
+
+    /// Whether the `when` subtree at `idx` GUARANTEES `name`'s presence.
+    ///
+    /// `and` is satisfied by either side, `or` requires **BOTH** — a component
+    /// present in every disjunct is guaranteed and one present in a single
+    /// disjunct is not — and `not` guarantees nothing. That is what makes the
+    /// predicate sound rather than generous: it can under-report a guarantee and
+    /// never claim one, which is the direction a diagnostic must err in.
+    ///
+    /// `ctx.components_in_when` cannot answer this: it is populated for every
+    /// `.has` node wherever it sits.
+    fn whenGuarantees(self: *TypeChecker, idx: u32, name: ast_mod.StringId) bool {
+        const node = self.arena.when_nodes.items[idx];
+        return switch (node.kind) {
+            .has, .has_with_filter, .has_changed, .has_expr_filter => node.type_name == name,
+            .logical_and => self.whenGuarantees(node.lhs, name) or self.whenGuarantees(node.rhs, name),
+            .logical_or => self.whenGuarantees(node.lhs, name) and self.whenGuarantees(node.rhs, name),
+            else => false,
+        };
+    }
+
+    /// The requirer that refuses `target`'s removal, or null.
+    ///
+    /// A component whose presence the rule's `when` GUARANTEES and whose
+    /// `@requires` closure contains `target`: the runtime refuses that removal
+    /// unconditionally (`World.requiresRefusesRemoval`), so the statement is not
+    /// risky but DEAD — it can never have its intended effect.
+    ///
+    /// Bounded and allocation-free on the same frontier-with-dedup shape as
+    /// `requiresReachesSelf`, whose 64-name bound and termination argument are
+    /// written there; a second traversal of one graph is how the two would come
+    /// to disagree about what the closure contains.
+    fn requisiteRemovalRefused(
+        self: *TypeChecker,
+        target: ast_mod.StringId,
+        ctx: *RuleCtx,
+    ) ?ast_mod.StringId {
+        if (ctx.when_root == ast_mod.RuleDecl.none_when) return null;
+        var it = ctx.components_in_when.keyIterator();
+        while (it.next()) |k| {
+            const requirer = k.*;
+            if (requirer == target) continue;
+            if (!self.whenGuarantees(ctx.when_root, requirer)) continue;
+            const decl = self.requisiteDecl(requirer) orelse continue;
+            if (self.closureContains(decl, target)) return requirer;
+        }
+        return null;
+    }
+
+    /// Whether `decl`'s TRANSITIVE requisite closure contains `target`.
+    fn closureContains(self: *TypeChecker, decl: ast_mod.ComponentDecl, target: ast_mod.StringId) bool {
+        var frontier: [64]ast_mod.StringId = undefined;
+        var n: usize = 0;
+        const push = struct {
+            fn f(list: *[64]ast_mod.StringId, len: *usize, sid: ast_mod.StringId) void {
+                for (list[0..len.*]) |x| if (x == sid) return;
+                if (len.* < list.len) {
+                    list[len.*] = sid;
+                    len.* += 1;
+                }
+            }
+        }.f;
+        if (self.arena.requiresAnnotation(decl)) |a| {
+            var i: u32 = 0;
+            while (i < a.args_len) : (i += 1) {
+                if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
+            }
+        }
+        var head: usize = 0;
+        while (head < n) : (head += 1) {
+            if (frontier[head] == target) return true;
+            const d = self.requisiteDecl(frontier[head]) orelse continue;
+            if (self.arena.requiresAnnotation(d)) |a| {
+                var i: u32 = 0;
+                while (i < a.args_len) : (i += 1) {
+                    if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
+                }
+            }
+        }
         return false;
     }
 
@@ -7351,7 +7440,24 @@ pub const TypeChecker = struct {
                     if (self.arena.exprKind(arg) != .path) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method 'remove' expects a component type 'T'", .{});
                     } else {
-                        try self.checkStructuralComponentName(self.arena.exprData(arg), self.arena.exprSpan(arg));
+                        const target = self.arena.exprData(arg);
+                        try self.checkStructuralComponentName(target, self.arena.exprSpan(arg));
+                        // M1.B/P2-2 — the narrow STATIC half of the `@requires`
+                        // removal refusal. What the type-checker knows is the
+                        // closure graph and the rule's selection; what an entity
+                        // carries at runtime it does not, and that half is
+                        // G9's counted skip plus one warning per tick.
+                        if (ctx_opt) |ctx| {
+                            if (self.requisiteRemovalRefused(target, ctx)) |requirer| {
+                                try self.emit(
+                                    .requisite_removal_refused,
+                                    .error_,
+                                    self.arena.exprSpan(arg),
+                                    "'{s}' is required by '{s}', which this rule's 'when' guarantees is present — the removal is refused at run and does nothing",
+                                    .{ self.arena.strings.slice(target), self.arena.strings.slice(requirer) },
+                                );
+                            }
+                        }
                     }
                 }
                 return ResolvedType.unknown;

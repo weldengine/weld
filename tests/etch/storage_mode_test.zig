@@ -555,6 +555,13 @@ test "G8: the planner elects SPARSE, and the effect applies exactly once per mat
 
 // ─── M1.B / G9 — the counter is per TICK, on a `changed`-free program ───────
 
+/// **RE-POINTED at M1.B/P2-2, and the change repairs the test rather than only
+/// dodging a new diagnostic.** This program used `when entity has Mesh`, which
+/// is exactly the form P2-2 refuses statically — so it could no longer reach
+/// the RUNTIME refusal this test exists to count. Selecting on `Transform`
+/// instead leaves the requirer's presence unproven at compile time, which is
+/// the regime G9's channel owns, and makes the test honest about WHICH of the
+/// two channels it exercises.
 const src_requires_strip =
     \\component Transform { x: float = 0.0 }
     \\
@@ -562,7 +569,7 @@ const src_requires_strip =
     \\component Mesh { v: i32 = 0 }
     \\
     \\rule strip(entity: Entity)
-    \\    when entity has Mesh
+    \\    when entity has Transform
     \\{
     \\    entity.remove(Transform)
     \\}
@@ -924,4 +931,132 @@ test "P2-1 fix-as-you-go: requiresNamesOf frees exactly what it allocated" {
     defer gpa.free(req);
     try std.testing.expectEqual(@as(usize, 1), req.len);
     try std.testing.expectEqualStrings("Transform", req[0]);
+}
+
+// ─── M1.B / P2-2 — the STATIC half of the `@requires` removal refusal ──────
+
+fn diagCodes(gpa: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(weld_etch.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try weld_etch.typeCheck(gpa, &pr.ast, &diags);
+    for (diags.items) |d| try out.append(gpa, try gpa.dupe(u8, d.code.code()));
+}
+
+fn freeCodes(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) void {
+    for (list.items) |c| gpa.free(c);
+    list.deinit(gpa);
+}
+
+const src_p22_guaranteed =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P2-2: removing a requisite the `when` guarantees is E1216" {
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_guaranteed, &codes);
+
+    // The CODE and not merely "a diagnostic": `entity.remove` already emits
+    // `type_mismatch` for a non-component and for a wrong arity, so an oracle on
+    // the count could not tell this refusal from either of those.
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+}
+
+const src_p22_negated =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when not entity has Mesh
+    \\{
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P2-2: a requirer under `not` guarantees nothing, so no E1216" {
+    // THE NEGATIVE TWIN, and it discriminates where a positive one cannot.
+    // `ctx.components_in_when` holds `Mesh` here — the collection walk recurses
+    // through `not` with no context — so a check reading that set instead of
+    // proving the guarantee diagnoses a rule whose selection guarantees the
+    // requirer's ABSENCE. Measured: forcing `whenGuarantees` to true reddens
+    // exactly this test.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_negated, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
+const src_p22_two_hop =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Body { m: float = 1.0 }
+    \\
+    \\@requires(Body)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P2-2: the closure is TRANSITIVE — two hops still refuse" {
+    // `Mesh` does not name `Transform`; `Body` does. A walk that stopped at the
+    // direct requisites would answer clean, which is what the runtime does not
+    // do — `requiresClosure` is transitive, so the removal would still be
+    // refused and the program would still be dead.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_two_hop, &codes);
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+}
+
+const src_p22_one_disjunct =
+    \\component Transform { x: float = 0.0 }
+    \\component Other { v: i32 = 0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh or entity has Other
+    \\{
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P2-2: a requirer in ONE disjunct is not guaranteed, so no E1216" {
+    // The `or` arm requires BOTH sides, which is what makes the predicate sound
+    // rather than generous — and without this case that arm has no oracle at
+    // all. An entity matching only the `Other` disjunct carries no `Mesh`, so
+    // the removal is legal and diagnosing it would be a false positive.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_one_disjunct, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }

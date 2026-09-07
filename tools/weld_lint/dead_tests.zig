@@ -662,9 +662,16 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // had; the counter-factual on the old form panics `Invalid free` under
     // `std.testing.allocator` (2157 -> 2158, suite reports
     // `2139/2158 tests passed (19 skipped)`).
+    // P2-2 adds FOUR to `tests/etch/storage_mode_test.zig` — the static
+    // `@requires` removal refusal, plus the three cases without which two of its
+    // branches have no oracle: a requirer under `not`, a requirer in ONE
+    // disjunct, and a TWO-HOP closure. The corpus entry `E1216_*.etch` adds no
+    // block, the invalid corpus being one test over a declared list
+    // (2158 -> 2162). Re-derived from the SUITE: `zig build test --summary all`
+    // reports `2143/2162 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2156,
-        else => 2158,
+        .windows => 2160,
+        else => 2162,
     };
 }
 

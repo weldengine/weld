@@ -96,6 +96,7 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E0504_storage_arg_not_const.etch", .expected_code = "E0504", .source = @embedFile("corpus/invalid/E0504_storage_arg_not_const.etch") },
     .{ .name = "E0505_requires_cycle.etch", .expected_code = "E0505", .source = @embedFile("corpus/invalid/E0505_requires_cycle.etch") },
     .{ .name = "E0506_requires_unknown.etch", .expected_code = "E0506", .source = @embedFile("corpus/invalid/E0506_requires_unknown.etch") },
+    .{ .name = "E1216_requisite_removal.etch", .expected_code = "E1216", .source = @embedFile("corpus/invalid/E1216_requisite_removal.etch") },
     .{ .name = "E1101_non_const_default.etch", .expected_code = "E1101", .source = @embedFile("corpus/invalid/E1101_non_const_default.etch") },
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
     .{ .name = "E1211_field_filter_type_mismatch.etch", .expected_code = "E1211", .source = @embedFile("corpus/invalid/E1211_field_filter_type_mismatch.etch") },

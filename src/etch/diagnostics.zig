@@ -107,6 +107,7 @@ pub const DiagnosticCode = enum {
     observer_signature_mismatch, // M1.0.2 E2 — E1208 ObserverSignatureMismatch (param shape ≠ lifecycle kind)
     observer_component_invalid, // M1.0.2 E2 — E1209 ObserverComponentInvalid (annotation component arg arity / not a declared component)
     observer_rule_conflict, // M1.0.2 E2 — E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
+    requisite_removal_refused, // M1.B/P2-2 — E1216 RequisiteRemovalRefused (a rule body removes a component the requirer its `when` guarantees still declares via `@requires`)
 
     // ── behavior (E1500-E1519, M0.8 E4 — etch-validation-ecs.md §8) ──
     behavior_root_missing, // M0.8 E4 — E1500 BehaviorRootMissing
@@ -457,6 +458,7 @@ pub const DiagnosticCode = enum {
             .tag_invalid_operation => "E0833",
             .not_const_evaluable => "E1101",
             .on_event_type_mismatch => "E1203",
+            .requisite_removal_refused => "E1216",
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
             .unknown_tag => "E1212",
@@ -672,6 +674,7 @@ pub const DiagnosticCode = enum {
             .observer_signature_mismatch => "ObserverSignatureMismatch",
             .observer_component_invalid => "ObserverComponentInvalid",
             .observer_rule_conflict => "ObserverRuleConflict",
+            .requisite_removal_refused => "RequisiteRemovalRefused",
             .behavior_root_missing => "BehaviorRootMissing",
             .behavior_empty_composite => "BehaviorEmptyComposite",
             .behavior_invalid_leaf => "BehaviorInvalidLeaf",
