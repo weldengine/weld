@@ -669,9 +669,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // block, the invalid corpus being one test over a declared list
     // (2158 -> 2162). Re-derived from the SUITE: `zig build test --summary all`
     // reports `2143/2162 tests passed (19 skipped)` on macOS.
+    // The second review adds TWO to `tests/ecs/requires_test.zig` — one per
+    // mechanism of P1-B, the notified set being what the transaction ADDED and
+    // an already-present requisite not being re-notified (2162 -> 2164). The
+    // repointing of the typed-spawn test adds no block. Re-derived from the
+    // SUITE: `2145/2164 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2160,
-        else => 2162,
+        .windows => 2162,
+        else => 2164,
     };
 }
 

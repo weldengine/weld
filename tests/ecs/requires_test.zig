@@ -502,3 +502,67 @@ test "P1-3: a stale deferred despawn fires no on_despawned" {
     // the exposure: the `on_remove` walk is naturally empty on a dead entity.
     try testing.expectEqual(@as(usize, 0), Spy.fired);
 }
+
+// ─── Review P1-B — the ADD path notifies every component it added ───────────
+
+test "P1-B: on_add fires for a closure member on the deferred ADD path" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const Seen = struct {
+        var ids: [8]ComponentId = undefined;
+        var n: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, cid: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            ids[n] = cid.?;
+            n += 1;
+        }
+    };
+    Seen.n = 0;
+    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+
+    // The SPAWN direction already carried this property
+    // (`spawnWithObservers`, the test above); the ADD arm fired for the
+    // command's own id ALONE, so `Transform` — added by the closure, right
+    // here — got no `on_add` at all.
+    const e = try world.spawnDynamic(gpa, &.{});
+    const v = word(1);
+    const cmd: Command = .{ .add_component = .{ .entity = e, .component_id = c.mesh, .bytes = &v } };
+    try observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa);
+
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+    try testing.expectEqual(@as(usize, 1), Seen.n);
+    try testing.expectEqual(c.transform, Seen.ids[0]);
+}
+
+test "P1-B: a requisite ALREADY present is not re-notified" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try setupMeshTransform(&world, gpa);
+
+    const Seen = struct {
+        var n: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, _: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            n += 1;
+        }
+    };
+    Seen.n = 0;
+    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+
+    // `Transform` is present BEFORE the command, so the add contributes it to
+    // nothing. Firing over the closure unconditionally would announce a state
+    // change that did not happen — the same lie R11 forbids, in the other
+    // direction, which is why the absent set is snapshotted rather than the
+    // closure walked.
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{c.transform});
+    try testing.expect(world.hasComponentDyn(e, c.transform));
+
+    const v = word(1);
+    const cmd: Command = .{ .add_component = .{ .entity = e, .component_id = c.mesh, .bytes = &v } };
+    try observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa);
+
+    try testing.expect(world.hasComponentDyn(e, c.mesh));
+    try testing.expectEqual(@as(usize, 0), Seen.n);
+}

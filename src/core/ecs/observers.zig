@@ -437,10 +437,44 @@ pub fn applyWithObservers(
                     try reg.fireList(list, world, a.entity, a.component_id, old_ptr, new_ptr);
                 }
             } else {
+                // EVERY COMPONENT THE TRANSACTION ADDS IS NOTIFIED, and that set
+                // is not the command's id: `addComponentDynamic` expands the
+                // `@requires` closure, so firing for `a.component_id` alone left
+                // a requisite added here with no `on_add` at all. R11 had its six
+                // command kinds derived; this is its complement, and the spawn
+                // direction already carried it (`spawnWithObservers`) — the
+                // constraint was applied where it was shown and not where the
+                // rule reaches.
+                //
+                // The ABSENT set is snapshotted BEFORE the add, so a requisite
+                // the entity already carried is not re-notified: an `on_add` for
+                // a component that was already there is the same lie about the
+                // world R11 forbids in the other direction.
+                const closure = world.registry.requiresClosure(a.component_id);
+                var pending: std.ArrayListUnmanaged(ComponentId) = .empty;
+                defer pending.deinit(gpa);
+                try pending.ensureTotalCapacity(gpa, closure.len + 1);
+                if (!world.hasComponentDyn(a.entity, a.component_id)) {
+                    pending.appendAssumeCapacity(a.component_id);
+                }
+                for (closure) |cid| {
+                    if (cid == a.component_id) continue;
+                    if (!world.hasComponentDyn(a.entity, cid)) pending.appendAssumeCapacity(cid);
+                }
+                // ASCENDING id, the order R5 fixed for the union walk and for the
+                // same reason: the closure's own order is a registry internal, so
+                // an observer order resting on it would depend on registration.
+                std.mem.sort(ComponentId, pending.items, {}, std.sort.asc(ComponentId));
+
                 try world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
-                if (reg.on_add.get(a.component_id)) |list| {
-                    const new_ptr: ?*const anyopaque = if (world.componentBytes(a.entity, a.component_id)) |b| @ptrCast(b.ptr) else null;
-                    try reg.fireList(list, world, a.entity, a.component_id, null, new_ptr);
+
+                for (pending.items) |cid| {
+                    // Presence re-read AFTER the add: the command may have been
+                    // refused, and an observer describes a state that took place.
+                    const bytes = world.componentBytes(a.entity, cid) orelse continue;
+                    if (reg.on_add.get(cid)) |list| {
+                        try reg.fireList(list, world, a.entity, cid, null, @ptrCast(bytes.ptr));
+                    }
                 }
             }
         },
