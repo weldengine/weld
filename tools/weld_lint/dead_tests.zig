@@ -505,9 +505,173 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // demand it (G21). G22 is a test-shape correction and a brief reconciliation, which
     // add none.
     // (2049 -> 2051, suite reported 2051 - 2032 passed + 19 skipped, macOS aarch64.)
+    //
+    // ── M1.B ──
+    // G1 adds nine. Four are the `@storage` argument schema, and each asserts the
+    // ABSENCE of the other code as well as the presence of its own — E0503 on a value
+    // outside the domain, E0504 on a non-constant argument, E0503 on both arity
+    // failures, and the widening counter-factual over the four spellings a valid
+    // program may use. Five are the mode end to end: the registry records what the
+    // declaration said (the test that would have failed for the four months the
+    // annotation was a no-op), the mode is a DECLARED no-op so the storage has not
+    // moved, an Etch `component X {}` is legal and still records its mode, the codegen
+    // refuses a sparse program with its own typed error, and the same program without
+    // the annotation lowers.
+    // (2051 -> 2060, suite reported 2060 - 2041 passed + 19 skipped, macOS aarch64.)
+    // G1 adds a tenth, found by re-reading the doc comment against the code rather than
+    // by a failing test: `@storage(kind: sparse)` carries a value the domain HAS and a
+    // name the schema does not declare, so it is a step-3 failure — and it was falling
+    // through to the const test, answering `E0504 — must be a constant storage mode`,
+    // false about the value and silent about the fault. The test asserts E0503 and the
+    // ABSENCE of E0504. The valid-corpus `sparse_tag.etch` fixture adds NO block: the
+    // corpus driver is one test iterating a table.
+    // (2060 -> 2061, suite reported 2061 - 2042 passed + 19 skipped, macOS aarch64.)
+    // G1 reversal adds one: the BARE spelling of a domain value is refused, asserted with
+    // the ABSENCE of E0504 — an `ident` is not const-evaluable, so without its own branch
+    // it answered "must be a constant", false about a value the domain HAS. The widening
+    // counter-factual was rewritten rather than added to: it now carries the refused row
+    // beside the accepted ones, so it tests the bound in both directions in one block.
+    // (2061 -> 2062, suite reported 2062 - 2043 passed + 19 skipped, macOS aarch64.)
+    // G2 adds ten. Nine are the sparse backend's invariants, one per invariant plus the
+    // two discriminating halves the gate demands — the swap-remove counter-factual on the
+    // LAST entry, and the recycled-generation case. The tenth is the EMPTY archetype,
+    // legal since this gate: an entity spawns into it, resolves, shares it with a second
+    // such entity, and despawns. `chunk.zig`'s "rejects empty component list" test is
+    // REPLACED by its opposite rather than added to, so it contributes none.
+    //
+    // These nine were SILENTLY UNCOLLECTED first: `pub const sparse_storage = @import(…)`
+    // at the ECS root is two hops from the module root, and the suite reported the same
+    // total with them present as without. What caught it is this guard's own closure
+    // analysis, which is static — the pin `_ = ecs.sparse_storage;` in `src/core/root.zig`
+    // is what the four M0.8/E3-D pins beside it already record.
+    // (2062 -> 2072, suite reported 2072 - 2053 passed + 19 skipped, macOS aarch64.)
+    //
+    // M1.B / G3 adds TWENTY-THREE in `tests/ecs/sparse_routing_test.zig`, the Tier 0 routing
+    // acceptance file: the no-migration property of a sparse add and its table
+    // counter-factual, the no-migration property of a sparse remove, `hasComponentDyn`'s
+    // totality over the three ways of being absent, the batched add's refusal of an
+    // already-present sparse component and its mixed-set migration, four on the prepared
+    // remove trio (the hook window, abort, a sparse-only set that must build no new
+    // signature, and a refusal accompanied by its acceptance complement), the despawn
+    // sweep, the change mark, `componentBytes`'s non-stamping, the tag mutation's set AND
+    // clear, the World-level reserve-then-mutate sweep, and the all-negative query's
+    // permission over the empty archetype, and the sparse-ONLY entity, which backs the
+    // contract written on `dynamicLocation` (never null for a live handle, because the
+    // table half of the split is empty and the empty archetype is legal since G2). No test
+    // is replaced this gate except the G1 no-op pin in `tests/etch/storage_mode_test.zig`,
+    // swapped for its opposite — one for one, so it contributes none.
+    // SEVENTEEN of those were the gate's first pass; SIX more came from an adversarial review
+    // that REFUSED it — five pinning defects (the sparse-only self-migration on each batched
+    // path, `applyTagMutation`'s lost stale-handle return, the typed `spawn`'s missing
+    // `ensureSparseStores`, and the duplicate-sparse-id double insert) plus one closing the
+    // TYPED arms, which had no coverage at all. Each was written RED first, and each fix has a
+    // counter-factual that reddens exactly its own test. The comment that said SIXTEEN was
+    // itself one of that review's findings.
+    // M1.B / G4 adds SIX more to the same file, taking it to TWENTY-NINE: the three TABLE
+    // twins of the G3 review's F4/F5, whose preconditions predate M1.B and were carried by
+    // `std.debug.assert` alone — their counter-factual runs in ReleaseFast, where the assert
+    // is stripped, so it distinguishes "the active check works" from "the assert works"; the
+    // `on_remove` firing order over the UNION at despawn; add-on-present on a sparse
+    // component firing the replacement rather than the add; and the THREE-PATH oracle, which
+    // drives all six command kinds through each of the three apply switches and reports the
+    // count PER PATH on its own line (a counter-factual removing the despawn sweep takes all
+    // three to 5/6 and names the uncovered path, so the 6/6 is not vacuous).
+    // M1.B / G5 adds EIGHT: four inline in `src/etch/ecs_bridge.zig` — the bimodal
+    // `ComponentRef` round-trip on the sparse arm, its TABLE twin as the mode-only
+    // counter-factual, the sparse change stamp, and the refusal surviving the widening —
+    // two in `tests/ecs/sparse_routing_test.zig` for the new `World.changedTickOf` (both
+    // arms as twins, and its totality), and two in `tests/etch/storage_mode_test.zig`: the
+    // all-negative rule VISITING a sparse-only entity (the other half of the empty-archetype
+    // permission G2 opened, which G3 pinned as MATCHING and not as iterating), and the
+    // boundary pin that a rule does not yet SELECT by a sparse component, which is G7's
+    // planner and whose arrival flips that assertion.
+    // M1.B / G6 adds SEVEN across three scene test files, and NO production change to the
+    // loader: three in `load_roundtrip_test.zig` (a sparse component loading into its own
+    // store; the SAME cooked bytes giving the same values under either mode, with the
+    // archetypes differing; and two on-disk blocks whose TABLE subset coincides landing in
+    // ONE archetype), one in `extensions_test.zig` (an ALL-SPARSE extension activating
+    // without touching the archetype — the self-migration guard's only production producer),
+    // and three in `crossref_test.zig` (a cross-ref resolving INTO a sparse row, plus the two
+    // Etch-cook seam tests: `@storage(.sparse)` changes NOTHING in the cooked bytes, and the
+    // same bytes load under either host registration).
+    // M1.B / G7 adds TWELVE: nine in `tests/ecs/hybrid_query_test.zig` — two sparse members of
+    // OPPOSITE cardinality (the driver follows, and the visited SET is identical whichever one
+    // is smaller), equal cardinality decided by declaration order and re-elected to show it is
+    // stable, a TABLE member winning the election, an all-table query electing `.table`,
+    // `not has T` on a sparse T as a per-entity test, the locator reaching either backend, the
+    // frozen-surface control, an all-negative query whose exclusion is sparse, and a
+    // table-driven query reaching a sparse with-member — plus two in
+    // `tests/etch/storage_mode_test.zig` (a disjunctive rule with a sparse term visiting a
+    // both-matching entity ONCE, and a change filter on a table member while the driver is
+    // sparse) and one replacement that adds none: the G5 boundary pin, flipped to its opposite.
+    // M1.B / G8 adds FOUR: three in `hybrid_query_test.zig` — the dense split covering the
+    // population exactly once and evenly (checked as an interval COVER, not inferred from the
+    // sum: a split double-counting one index and skipping another passes a sum), a target
+    // above the population yielding one range per entity and never an empty one, and the
+    // report NAMING the two dispatch entries — plus one in `storage_mode_test.zig` for the
+    // structural effect under a sparse driver, which carries a DISCRIMINATING half asserted
+    // on the elected plan because the correctness half alone does not distinguish the driver
+    // (measured: forcing `.table` leaves the correctness assertions green).
+    // M1.B / G9 adds TEN in `tests/ecs/requires_test.zig`, written at Tier 0 through
+    // `registerComponentRaw`'s `.requires` name list so a front-end regression cannot read as a
+    // `@requires` regression: the cycle refusal with its DIAMOND complement (a visited-set
+    // implementation reports a cycle on a diamond and would pass the refusals while being
+    // wrong), the unknown requisite, the FORWARD reference, the transitive closure in one
+    // migration, the closure as a FLOOR rather than a reset, the failing-allocator sweep, the
+    // sparse member, the requirer's removal cascading nothing, the skipped-and-signalled
+    // refusal with its frame-boundary reset, and the grouped removal with its refusal
+    // complement. Two invalid corpus fixtures (E0505, E0506) are data rows in the existing
+    // corpus test and add no block.
+    // (2132 -> 2142, suite reported 2142 - 2123 passed + 19 skipped, macOS aarch64, in ALL
+    // FOUR corners {Debug, ReleaseSafe} x {f32, f64} with identical figures.)
+    // G9's re-render added ONE block to `tests/etch/storage_mode_test.zig` — the
+    // per-tick semantics of `requires_removals_skipped` proven on an Etch program
+    // carrying NO `changed` filter, which is the regime where `stepOnce` skips
+    // `beginFrame` entirely (2142 -> 2143, suite closure reports 2143).
+    // G10/B1 added TWO to `tests/ecs/hybrid_query_test.zig` — a dense range
+    // reaching a WORKER through `JobBuilder.addDenseRangeJobs`, differential
+    // against the same body on the calling thread, plus the staging edge cases
+    // (2143 -> 2145, suite closure reports 2145).
+    // The external-review reprise adds one block per corrected P1, each RED
+    // before its fix. P1-2 (the union applying every term's sparse filter) is
+    // the first (2145 -> 2146, suite closure reports 2146).
+    // P1-1 adds SIX to `tests/ecs/requires_test.zig` — one per add/spawn site
+    // the derived inventory found ignoring the closure, plus the observer half
+    // and the idempotence that must stay green (2146 -> 2152, suite closure
+    // reports 2152). P1-5 adds assertions to an EXISTING block and moves nothing.
+    // P1-3 adds TWO to `tests/ecs/requires_test.zig`, one per defective arm of
+    // R11 — the refused removal and the stale deferred despawn — the two
+    // sharing a principle and using two different predicates (2152 -> 2154,
+    // suite closure reports 2154).
+    // P1-4 adds ONE to `tests/etch/storage_mode_test.zig` — seventeen requisites
+    // against the sixteen a caller-supplied buffer admitted, the oracle being a
+    // COUNT because the defect cuts the tail (2154 -> 2155, suite closure
+    // reports 2155).
+    // P2-1 adds TWO to `tests/etch/storage_mode_test.zig`, one per mechanism it
+    // has to pin separately: the elected driver FLIPPING between two ticks while
+    // the answer does not — the oracle the election moving to the walk requires,
+    // and which no assertion on the visited set could provide — and a table form
+    // DORMANT through a tick being exact when next elected, which is the
+    // append-only precondition the two-arm design rests on. Counted as one bump
+    // (2155 -> 2157) because the two landed in one commit. Re-derived from the
+    // SUITE and not from the closure: `zig build test --summary all` reports
+    // `2138/2157 tests passed (19 skipped)` on macOS, and the closure arrives at
+    // 2157 separately from the table above.
+    // P2-1 fix-as-you-go adds ONE more — `requiresNamesOf` allocated `args_len`
+    // and returned `out[0..n]`, so a caller freed a size the allocation never
+    // had; the counter-factual on the old form panics `Invalid free` under
+    // `std.testing.allocator` (2157 -> 2158, suite reports
+    // `2139/2158 tests passed (19 skipped)`).
+    // P2-2 adds FOUR to `tests/etch/storage_mode_test.zig` — the static
+    // `@requires` removal refusal, plus the three cases without which two of its
+    // branches have no oracle: a requirer under `not`, a requirer in ONE
+    // disjunct, and a TWO-HOP closure. The corpus entry `E1216_*.etch` adds no
+    // block, the invalid corpus being one test over a declared list
+    // (2158 -> 2162). Re-derived from the SUITE: `zig build test --summary all`
+    // reports `2143/2162 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2049,
-        else => 2051,
+        .windows => 2160,
+        else => 2162,
     };
 }
 

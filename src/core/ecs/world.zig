@@ -49,6 +49,11 @@ const events_bus_mod = @import("../events/bus.zig");
 // owns the uniform decref walk over resource-owned payload slots; see
 // `releaseResourcePayloads`.
 const persistent = @import("../memory/persistent.zig");
+// M1.B — the second storage backend. `World` owns the per-component sparse
+// sets exactly as it owns `archetypes`; nothing below `world.zig` knows there
+// are two backends (cf. `briefs/artifacts/m1.B-g0-site-list-and-contract.md`
+// §2.1, one producer).
+const sparse_mod = @import("sparse_storage.zig");
 
 /// Public surface for consumers that spawn `(Transform, Velocity)`
 /// entities without depending on `components.zig` directly — the
@@ -221,6 +226,32 @@ pub const World = struct {
     /// the interpreter's `has_extension` / `active_extensions`.
     entity_extensions: std.AutoHashMapUnmanaged(EntityId, std.ArrayListUnmanaged([]const u8)) = .empty,
 
+    /// M1.B — per-component sparse sets, one slot per `ComponentId` whose
+    /// registry descriptor carries `.sparse`. Defaulted and NOT listed in
+    /// `init()`, so a world registering no sparse component allocates no slot.
+    ///
+    /// The mode is a property of the RUNTIME REGISTRY and never of an entity's
+    /// on-disk identity, which is what makes a pre-M1.B scene load unchanged.
+    sparse_stores: sparse_mod.SparseStores = .{},
+
+    /// M1.B/G9 — how many `@requires` removals were SKIPPED this tick.
+    ///
+    /// The refusal channel: a counted field plus a `std.log.warn` bounded to one
+    /// line per tick, the `syncIn` shape.
+    ///
+    /// **On `World` and NOT on `RuntimeReport`** — a Zig system can refuse a
+    /// removal as readily as a rule, and a counter on the Etch report would make
+    /// the first invisible.
+    ///
+    /// **Per TICK, and cleared at BOTH boundaries** — see
+    /// `resetTickObservations`. Resetting in `beginFrame` alone makes the field
+    /// mean "per tick" or "per run" depending on whether the program uses a
+    /// `changed` filter somewhere else entirely.
+    requires_removals_skipped: u32 = 0,
+    /// The first component id whose removal was skipped this tick, so the log
+    /// line names one rather than only counting.
+    first_requires_skip: ?ComponentId = null,
+
     pub fn init() World {
         return .{
             .identity = EntityIdentityStore.init(),
@@ -243,6 +274,7 @@ pub const World = struct {
         }
         self.archetypes.deinit(gpa);
         self.archetype_by_signature.deinit(gpa);
+        self.sparse_stores.deinit(gpa);
         self.entity_locations.deinit(gpa);
         // Reclaim resource-owned persistent payloads (strings, collections)
         // BEFORE freeing the byte buffers (M1.1.1-HF2 C4). Idempotent — a no-op
@@ -533,6 +565,362 @@ pub const World = struct {
 
     // ─── Archetype lookup ────────────────────────────────────────────────
 
+    /// A component-id set every member of which is `.table`-stored, sorted
+    /// into an archetype signature.
+    ///
+    /// `splitByStorage` is its ONLY constructor, so an archetype signature
+    /// cannot be built from a set nobody partitioned — the obligation is
+    /// carried by the TYPE and not by a `std.debug.assert`, which ReleaseFast
+    /// compiles to nothing. That distinction is not stylistic here: a sparse id
+    /// reaching a signature would not crash, it would silently give the
+    /// component a table column the sparse store also owns, after which the
+    /// answer depends on which of the two a given caller consulted. A wrong
+    /// answer with no diagnostic is the H1 class (cf. M1.1.15.1), and a guard
+    /// live only in the two matrix cells where a breach costs nothing is not a
+    /// guard on the path a game ships.
+    ///
+    /// Deliberately NOT an induction over `Archetype.component_ids`: it would
+    /// hold today, and it would be a proof a future reader can break by adding
+    /// one archetype constructor. Every site re-splits instead, which on the
+    /// remove paths re-checks a set already known table-only — one registry
+    /// lookup per id, against a migration that memcpys every column of every
+    /// entity slot. Measured against the wrong quantity, that cost is invisible.
+    const TableIds = struct {
+        sorted: []const ComponentId,
+    };
+
+    /// The two halves of a caller-supplied component-id set.
+    const StorageSplit = struct {
+        /// Table ids, compacted to the front of the caller's buffer and sorted
+        /// into signature order.
+        table: TableIds,
+        /// Sparse ids, in the buffer's tail. Order is the input's, minus the
+        /// table ids removed from it — deterministic, not contractual.
+        sparse: []const ComponentId,
+    };
+
+    /// Partition `buf` IN PLACE by storage mode: table ids first — then sorted,
+    /// so the prefix is a signature — sparse ids after. One pass, no
+    /// allocation, because every call site already owns a mutable id buffer.
+    ///
+    /// The partition is what ROUTES. It is not a validation step a path could
+    /// skip on the grounds that its ids came from somewhere trustworthy: it is
+    /// the only way to obtain the `TableIds` the archetype funnel demands, and
+    /// the only place the sparse half is named.
+    fn splitByStorage(self: *const World, buf: []ComponentId) StorageSplit {
+        var n_table: usize = 0;
+        for (0..buf.len) |i| {
+            // `storageOf` and not `registry.componentStorage`: this is the
+            // FIRST thing to touch a caller-supplied id, so an unregistered one
+            // would index the registry out of range here rather than downstream
+            // in `Archetype.init` as it always did. `storageOf` answers
+            // `.table` past the registry's end, which sends the id into the
+            // signature and lets `Archetype.init` fail exactly as before —
+            // the precondition is pre-existing and this keeps it unmoved
+            // instead of relocating its breach into the partition.
+            if (self.storageOf(buf[i]) == .table) {
+                std.mem.swap(ComponentId, &buf[n_table], &buf[i]);
+                n_table += 1;
+            }
+        }
+        archetype_mod.sortComponentIds(buf[0..n_table]);
+        return .{
+            .table = .{ .sorted = buf[0..n_table] },
+            .sparse = buf[n_table..],
+        };
+    }
+
+    /// Refuse a caller-supplied id slice that names the same component twice.
+    ///
+    /// **ACTIVE, not an assert**, because the breach is silent in the mode
+    /// ReleaseFast compiles the assert out of: a repeated id makes
+    /// `Archetype.init` build a duplicate column, after which `componentIndex`
+    /// answers the FIRST and the second is written once and never read; on the
+    /// sparse side it appends a second dense row.
+    ///
+    /// O(n²) deliberately — these slices hold a handful of ids and a set would
+    /// allocate on a path whose whole point is not to.
+    fn refuseDuplicateIds(ids: []const ComponentId) !void {
+        for (ids, 0..) |c, i| {
+            for (ids[i + 1 ..]) |other| {
+                if (other == c) return error.DuplicateComponent;
+            }
+        }
+    }
+
+    /// Add `cid_new` together with its `@requires` closure, in one transaction.
+    ///
+    /// Members already carried are skipped — the closure is a floor and not a
+    /// reset, so an entity that already has `Transform` keeps ITS `Transform`
+    /// with its current values rather than having it overwritten by a default.
+    /// Missing members get their REGISTRY DEFAULTS, which is what
+    /// `etch-reference-part3.md` §6 specifies ("et l'ajoute avec ses defaults").
+    /// Expand a caller-supplied component set with the transitive closure its
+    /// members declare, into a NEW pair of lists. Returns whether anything was
+    /// added.
+    ///
+    /// **ONE expansion semantics for all six add and spawn paths**, none of
+    /// which delegates to a sibling — a second expansion written per site is how
+    /// they would come to disagree.
+    ///
+    /// - **Idempotent**, because a caller legitimately passes `{Mesh, Transform}`
+    ///   when `Mesh` requires `Transform`: appending unconditionally would make
+    ///   `refuseDuplicateIds` reject a correct call, turning the duplicate rule
+    ///   into a regression of this one.
+    /// - **Payloads come from the registry**, the only source that asks the
+    ///   caller for nothing.
+    /// - **A NEW pair of arrays, never an expansion in place.** The positional
+    ///   ids-to-payloads pairing is a coincidence the scene loader relies on —
+    ///   it reuses one id array per block — so the `dupe` protects a
+    ///   PERMUTATION, not a change of length.
+    ///
+    /// `entity` is null for a spawn, where nothing is present yet.
+    fn expandRequires(
+        self: *World,
+        gpa: std.mem.Allocator,
+        ids_in: []const ComponentId,
+        vals_in: ?[]const []const u8,
+        entity: ?EntityId,
+        ids_out: *std.ArrayListUnmanaged(ComponentId),
+        vals_out: *std.ArrayListUnmanaged([]const u8),
+    ) !bool {
+        for (ids_in, 0..) |cid, i| {
+            try ids_out.append(gpa, cid);
+            try vals_out.append(gpa, if (vals_in) |v| v[i] else self.registry.componentDefaultBytes(cid));
+        }
+        var expanded = false;
+        for (ids_in) |cid| {
+            for (self.registry.requiresClosure(cid)) |c| {
+                if (std.mem.indexOfScalar(ComponentId, ids_out.items, c) != null) continue;
+                if (entity) |e| if (self.hasComponentDyn(e, c)) continue;
+                try ids_out.append(gpa, c);
+                try vals_out.append(gpa, self.registry.componentDefaultBytes(c));
+                expanded = true;
+            }
+        }
+        return expanded;
+    }
+
+    fn addWithClosure(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cid_new: ComponentId,
+        value_bytes: []const u8,
+        closure: []const ComponentId,
+    ) !void {
+        var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ids.deinit(gpa);
+        var vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer vals.deinit(gpa);
+        try ids.append(gpa, cid_new);
+        try vals.append(gpa, value_bytes);
+        for (closure) |c| {
+            if (self.hasComponentDyn(entity, c)) continue;
+            try ids.append(gpa, c);
+            try vals.append(gpa, self.registry.componentDefaultBytes(c));
+        }
+        // One entry point whatever the closure contributed: when every requisite
+        // is already present `ids` holds one id and the batched entry handles
+        // that correctly. A branch on `ids.items.len == 1` was written here and
+        // REMOVED — both arms called the same thing, so it was a branch that
+        // could not change behaviour carrying a comment that implied it could.
+        return self.addComponentsDynamic(gpa, entity, ids.items, vals.items);
+    }
+
+    /// Clear the per-tick observation counters.
+    ///
+    /// Called from BOTH frame boundaries — `beginFrame` and `tickBoundary` —
+    /// because each is reached by a population the other is not: the scheduler
+    /// and the codegen reach `beginFrame`, and a `changed`-free tree-walker
+    /// program reaches only `tickBoundary`. Extracted rather than written twice,
+    /// so the two sites cannot drift into resetting different sets.
+    ///
+    /// Both boundaries CAN fire in one tick, and that is harmless NOT because
+    /// the second clear finds a zero — it erases whatever the tick counted. What
+    /// makes it harmless is the READ WINDOW: the count means "since the last
+    /// boundary" and is read during the tick, so by the time a boundary closes
+    /// it the observation has been available for its whole window.
+    fn resetTickObservations(self: *World) void {
+        self.requires_removals_skipped = 0;
+        self.first_requires_skip = null;
+    }
+
+    /// Whether removing `cid` from `entity` is refused because something the
+    /// entity CARRIES still requires it, and record the refusal if so.
+    ///
+    /// `exempt` names the ids being dropped in the SAME command: a grouped
+    /// removal of a requisite together with all its dependents is ALLOWED
+    /// (`engine-ecs-internals.md` §3), so a requirer that is itself leaving
+    /// does not hold its requisite back. Without that exception a legitimate
+    /// teardown would be refused forever, which is the guard's other way of
+    /// being wrong.
+    /// Public since the M1.B reprise: the observer-dispatching apply must know
+    /// whether a removal will be REFUSED before it fires `on_remove`, because
+    /// an observer describes a state that has taken place. Reading it there and
+    /// then NOT reaching `removeComponentDynamic` keeps the skip counted
+    /// exactly once — the count lives in this function, so a pre-validation
+    /// that also fell through would count twice.
+    pub fn requiresRefusesRemoval(
+        self: *World,
+        entity: EntityId,
+        cid: ComponentId,
+        exempt: []const ComponentId,
+    ) bool {
+        var i: ComponentId = 0;
+        const n: ComponentId = @intCast(self.registry.componentCount());
+        while (i < n) : (i += 1) {
+            if (i == cid) continue;
+            var is_exempt = false;
+            for (exempt) |x| if (x == i) {
+                is_exempt = true;
+                break;
+            };
+            if (is_exempt) continue;
+            if (!self.registry.isRequiredBy(cid, i)) continue;
+            if (!self.hasComponentDyn(entity, i)) continue;
+            // ONE LINE PER TICK AT MOST — the first skip logs and names itself,
+            // the counter carries the rest. Bounded on purpose: a scene with a
+            // hundred offenders logs once, exactly as the `syncIn` precedent
+            // logs per pass and never per body.
+            if (self.requires_removals_skipped == 0) {
+                std.log.warn(
+                    "ecs/@requires: removal SKIPPED — component {d} is still required by {d} on this entity; " ++
+                        "drop them in one command to remove both",
+                    .{ cid, i },
+                );
+                self.first_requires_skip = cid;
+            }
+            self.requires_removals_skipped += 1;
+            return true;
+        }
+        return false;
+    }
+
+    /// Which backend owns `cid`.
+    ///
+    /// **The REGISTRY is the authority, never the existence of a sparse store**:
+    /// a component declared `.sparse` that nobody has spawned yet has no slot,
+    /// and routing on slot existence would answer "absent" correctly by
+    /// accident.
+    ///
+    /// **An out-of-range id is NOT a programmer error here.** `componentBytes`
+    /// and its siblings take a caller-supplied `ComponentId` and answer `null`
+    /// for an unknown one; indexing the registry unguarded would turn that call
+    /// into an out-of-bounds read, and `.table` is what reproduces the old
+    /// answer — the archetype lookup then returns `null` as it always did.
+    ///
+    /// Public so the Etch bridge picks its `ComponentRef` arm from the SAME
+    /// authority the routing uses.
+    pub fn storageOf(self: *const World, cid: ComponentId) registry_mod.StorageKind {
+        if (cid >= self.registry.componentCount()) return .table;
+        return self.registry.componentStorage(cid);
+    }
+
+    /// Declare a storage for every id in `ids`, which the caller has already
+    /// established sparse (they come from `StorageSplit.sparse`). Idempotent
+    /// per id.
+    ///
+    /// The loop lives on `World` and not on `SparseStores` because it needs the
+    /// registry for each id's size and alignment, and giving the backend a
+    /// registry dependency would undo G2's decoupling for the sake of one loop.
+    fn ensureSparseStores(self: *World, gpa: std.mem.Allocator, ids: []const ComponentId) !void {
+        for (ids) |cid| {
+            _ = try self.sparse_stores.ensure(
+                gpa,
+                cid,
+                self.registry.componentSize(cid),
+                self.registry.componentAlignment(cid),
+            );
+        }
+    }
+
+    /// Write `entity`'s payload into each sparse store of `ids`.
+    ///
+    /// `SparseSetStorage.add` is itself reserve-then-mutate, so ONE failing add
+    /// leaves ITS store untouched — but a failure on the third id would leave
+    /// the first two committed, and a half-populated entity is exactly the
+    /// observable mutation the invariant forbids. So the unwind is World-level:
+    /// `errdefer` removes from every store already written, in reverse, which
+    /// is the LIFO order M1.1.1-HF1/D2 established after a forward undo was
+    /// measured to corrupt a refcount on duplicate entries.
+    ///
+    /// `payloads` + `id_order` carry the caller's ORIGINAL pairing, which the
+    /// resolution below scans by id: `splitByStorage` permuted the buffer, so
+    /// positional pairing is gone by the time control reaches here.
+    /// `spawnDynamic` passes null/null and gets registry defaults.
+    fn addSparsePayloads(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        ids: []const ComponentId,
+        payloads: ?[]const []const u8,
+        id_order: ?[]const ComponentId,
+    ) !void {
+        var written: usize = 0;
+        errdefer self.removeSparsePayloads(entity, ids[0..written]);
+        for (ids) |cid| {
+            const store = self.sparse_stores.get(cid).?;
+            // A DUPLICATE id in the caller's set would land here twice, and
+            // `SparseSetStorage.add`'s `assert(!contains)` is compiled to nothing
+            // in ReleaseFast — so the second call would append a SECOND dense
+            // row for this entity, after which `positionOf` answers the first,
+            // `remove` swaps one away and the other is unreachable for the
+            // world's lifetime (a leak that survives `despawn`, since
+            // `removeEntity` drops one row per store). Loud instead.
+            //
+            // The TABLE side has the same precondition and the same hole — a
+            // duplicate id makes `Archetype.init` build a signature with a
+            // repeated column — but that PREDATES M1.B, so it is reported
+            // rather than silently changed here.
+            if (store.contains(entity)) return error.DuplicateComponent;
+            const bytes = blk: {
+                if (payloads) |ps| {
+                    // Resolve this id to its payload through the caller's
+                    // ORIGINAL id order: `splitByStorage` permuted the scratch
+                    // buffer, so positional pairing is gone by here.
+                    const order = id_order.?;
+                    for (order, 0..) |req, k| {
+                        if (req == cid) break :blk ps[k];
+                    }
+                    // Proven, not assumed. `ids` is `split.sparse`, whose every
+                    // member `splitByStorage` CHECKED against the registry, and
+                    // on the batched-add path the buffer it split is
+                    // `src.component_ids ++ cids` — so a member could come from
+                    // the archetype rather than from `order` only if a
+                    // component's mode changed after its archetype was built.
+                    // It cannot: `registerComponentRaw` refuses an existing
+                    // name with `DuplicateComponent`, and every one of the six
+                    // accesses to `entries.items[id].desc` in `registry.zig` is
+                    // a READ — there is no write path to an existing
+                    // descriptor anywhere in the tree. One grep re-checks that.
+                    unreachable;
+                }
+                break :blk self.registry.componentDefaultBytes(cid);
+            };
+            try store.add(gpa, entity, bytes, self.current_tick);
+            written += 1;
+        }
+    }
+
+    /// Remove `entity` from each sparse store of `ids`, in reverse.
+    ///
+    /// Infallible by construction: `SparseSetStorage.remove` is a swap-remove
+    /// over already-allocated arrays. That is what makes it usable as an
+    /// `errdefer`, and it is why the spawn paths write the SPARSE side FIRST
+    /// and the table slot LAST — undoing a table slot means `removeSwap` plus
+    /// repairing the swapped-in entity's location, and the step whose undo is
+    /// messier is the step that should have nothing after it to undo.
+    fn removeSparsePayloads(self: *World, entity: EntityId, ids: []const ComponentId) void {
+        var k = ids.len;
+        while (k > 0) {
+            k -= 1;
+            // The store exists (`ensureSparseStores` ran first) and the entity
+            // was added to it, so `remove` finds it.
+            _ = self.sparse_stores.get(ids[k]).?.remove(entity);
+        }
+    }
+
     /// Find an archetype by its sorted `ComponentId` signature. Returns
     /// `null` when no archetype with that exact signature exists yet.
     fn findArchetype(self: *World, sorted_ids: []const ComponentId) ?*Archetype {
@@ -545,7 +933,8 @@ pub const World = struct {
 
     /// Find or create the archetype for the given sorted `ComponentId`
     /// signature. Stable pointer for the world's lifetime.
-    fn getOrCreateArchetype(self: *World, gpa: std.mem.Allocator, sorted_ids: []const ComponentId) !*Archetype {
+    fn getOrCreateArchetype(self: *World, gpa: std.mem.Allocator, key_ids: TableIds) !*Archetype {
+        const sorted_ids = key_ids.sorted;
         if (self.findArchetype(sorted_ids)) |existing| return existing;
 
         const arch_id: ArchetypeId = @intCast(self.archetypes.items.len);
@@ -568,10 +957,31 @@ pub const World = struct {
         return self.archetypes.items.len;
     }
 
+    /// The archetype at `idx`. TABLE BACKEND ONLY, by nature and not by
+    /// omission: an archetype is the table storage, so there is no bimodal
+    /// version of this entry to write.
+    ///
+    /// Since M1.B it is therefore a BOUNDED primitive. Paired with
+    /// `dynamicLocation` it is the two-call idiom through which a caller
+    /// reaches a component's bytes itself — `componentIndex` then
+    /// `componentSlot` — and for a sparse component `componentIndex` answers
+    /// null, after which the caller's own `orelse` decides what happens and
+    /// each caller may decide differently. `World.componentBytes` is the entry
+    /// that answers for both backends; reach for this one only when the
+    /// archetype itself is the subject (its signature, its chunks, its
+    /// `is_singleton` flag), never as a way to read a component.
     pub fn dynamicArchetype(self: *World, idx: ArchetypeId) *Archetype {
         return self.archetypes.items[idx];
     }
 
+    /// Where `entity` lives in the TABLE storage — archetype, chunk, slot — or
+    /// null for a stale handle.
+    ///
+    /// Total and correct for every live entity, sparse-only ones included:
+    /// since M1.B an entity carrying no table component lives in the EMPTY
+    /// archetype rather than nowhere, so this never returns null for a live
+    /// handle. What it does not carry is any sparse-side information — see
+    /// `dynamicArchetype` for the bound the pair shares.
     pub fn dynamicLocation(self: *const World, id: EntityId) ?Location {
         return self.entity_locations.get(id);
     }
@@ -590,12 +1000,42 @@ pub const World = struct {
         const id_t = try self.ensureRegistered(gpa, Transform);
         const id_v = try self.ensureRegistered(gpa, Velocity);
         var ids = [_]ComponentId{ id_t, id_v };
-        archetype_mod.sortComponentIds(&ids);
-        const arch = try self.getOrCreateArchetype(gpa, &ids);
+
+        // M1.B reprise / P1-1 — this entry writes ONLY the two columns it names
+        // and takes `allocateSlot`, which does not default-initialise, so a
+        // component the closure contributed would land here with undefined
+        // bytes. Rather than rewrite a hot path that is otherwise correct, an
+        // expanded set DELEGATES to the general entry, which writes every
+        // column it was given. The branch is measured, not stylistic: a typed
+        // component registers with no `requires` of its own, so the closure is
+        // empty unless an Etch declaration claimed the same name through
+        // `registerAlias` — rare, and exactly the case that must not silently
+        // skip the rule.
+        if (self.registry.requiresClosure(id_t).len != 0 or
+            self.registry.requiresClosure(id_v).len != 0)
+        {
+            const vals = [_][]const u8{ std.mem.asBytes(&transform), std.mem.asBytes(&velocity) };
+            return self.spawnDynamicWithValues(gpa, ids[0..], vals[0..]);
+        }
+        // `Transform` and `Velocity` are core components and table-stored, but
+        // the split runs anyway: the funnel takes no other input, and a path
+        // exempted because its ids look trustworthy is the path that breaks
+        // the day one of them is registered differently.
+        const split = self.splitByStorage(ids[0..]);
+        // Without this, `addSparsePayloads` below unwraps `sparse_stores.get(cid).?`
+        // on a store that was never declared and PANICS. The comment above says
+        // the split exists for "the day one of them is registered differently";
+        // that day it panicked, which is what makes this line the point rather
+        // than the comment.
+        try self.ensureSparseStores(gpa, split.sparse);
+        const arch = try self.getOrCreateArchetype(gpa, split.table);
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(eid);
+
+        try self.addSparsePayloads(gpa, eid, split.sparse, null, null);
+        errdefer self.removeSparsePayloads(eid, split.sparse);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
         const chunk = arch.chunks.items[r.chunk_idx];
@@ -626,15 +1066,30 @@ pub const World = struct {
     /// component of the archetype. Identity and location go through the
     /// same shared paths as the typed `spawn` above.
     pub fn spawnDynamic(self: *World, gpa: std.mem.Allocator, component_ids: []const ComponentId) !EntityId {
-        // Caller's ids may be unsorted — dup and sort before lookup.
-        const sorted = try gpa.dupe(ComponentId, component_ids);
-        defer gpa.free(sorted);
-        archetype_mod.sortComponentIds(sorted);
+        try refuseDuplicateIds(component_ids);
+        // M1.B reprise / P1-1 — the closure is expanded HERE, on the caller's
+        // set, before anything is resolved from it.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        _ = try self.expandRequires(gpa, component_ids, null, null, &ex_ids, &ex_vals);
+        const ids_all = ex_ids.items;
+        // Caller's ids may be unsorted, and may mix the two storage modes.
+        // `splitByStorage` sorts the table half into signature order and names
+        // the sparse half in one pass over the dup.
+        const scratch = try gpa.dupe(ComponentId, ids_all);
+        defer gpa.free(scratch);
+        const split = self.splitByStorage(scratch);
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
-        const arch = try self.getOrCreateArchetype(gpa, sorted);
+        try self.ensureSparseStores(gpa, split.sparse);
+        const arch = try self.getOrCreateArchetype(gpa, split.table);
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(eid);
+
+        try self.addSparsePayloads(gpa, eid, split.sparse, null, null);
+        errdefer self.removeSparsePayloads(eid, split.sparse);
 
         const r = try arch.spawnDefault(gpa, eid, self.current_tick);
         self.entity_locations.putAssumeCapacity(eid, .{
@@ -658,18 +1113,34 @@ pub const World = struct {
         payloads: []const []const u8,
     ) !EntityId {
         std.debug.assert(component_ids.len == payloads.len);
+        try refuseDuplicateIds(component_ids);
 
-        // Build the sorted-id arch key while preserving the original
-        // (id, payload) pairing so we can resolve each payload to its
-        // sorted column index at write time.
-        const sorted = try gpa.dupe(ComponentId, component_ids);
-        defer gpa.free(sorted);
-        archetype_mod.sortComponentIds(sorted);
+        // M1.B reprise / P1-1 — the closure is expanded on the caller's set,
+        // into a NEW pair of lists, before anything is resolved from either.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        _ = try self.expandRequires(gpa, component_ids, payloads, null, &ex_ids, &ex_vals);
+        const ids_all = ex_ids.items;
+        const vals_all = ex_vals.items;
+
+        // `splitByStorage` permutes the scratch buffer, so the original
+        // (id, payload) pairing survives only in the caller's `component_ids` —
+        // which both the column loop below and `addSparsePayloads` resolve
+        // against by ComponentId rather than by position.
+        const scratch = try gpa.dupe(ComponentId, ids_all);
+        defer gpa.free(scratch);
+        const split = self.splitByStorage(scratch);
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
-        const arch = try self.getOrCreateArchetype(gpa, sorted);
+        try self.ensureSparseStores(gpa, split.sparse);
+        const arch = try self.getOrCreateArchetype(gpa, split.table);
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(eid);
+
+        try self.addSparsePayloads(gpa, eid, split.sparse, vals_all, ids_all);
+        errdefer self.removeSparsePayloads(eid, split.sparse);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
         const chunk = arch.chunks.items[r.chunk_idx];
@@ -678,7 +1149,7 @@ pub const World = struct {
         // ComponentId (linear scan — `component_ids.len` is small).
         for (arch.component_ids, 0..) |arch_cid, col| {
             var found: ?usize = null;
-            for (component_ids, 0..) |req_cid, k| {
+            for (ids_all, 0..) |req_cid, k| {
                 if (req_cid == arch_cid) {
                     found = k;
                     break;
@@ -686,10 +1157,11 @@ pub const World = struct {
             }
             const dst = arch.componentSlot(chunk, col, r.slot);
             if (found) |k| {
-                @memcpy(dst, payloads[k]);
+                @memcpy(dst, vals_all[k]);
             } else {
-                // Should never happen — sorted is derived from
-                // component_ids by `dupe`, so every column has a payload.
+                // Unreachable: `split.table` is a subset of `component_ids`,
+                // so every archetype column has a payload. The ids that are
+                // NOT columns are the sparse half, written above.
                 unreachable;
             }
         }
@@ -718,8 +1190,65 @@ pub const World = struct {
             self.entity_locations.getPtr(swapped_id).?.* = location;
         }
         _ = self.entity_locations.remove(id);
+        // Sweep every sparse store. Placed before `identity.release` for
+        // reading order and NOT as a correctness condition — a first version of
+        // this comment claimed otherwise and was refuted by its own
+        // counter-factual: moving the sweep after the release leaves the whole
+        // suite green. The reason is that `positionOf` compares the generation
+        // against the STORE's own copy of the handle (`dense.items[pos]`) and
+        // never consults the identity store, so releasing the index cannot
+        // change what `removeEntity(id)` finds. An order dependency would need
+        // a sweep keyed on something the identity store owns, and there is
+        // none.
+        _ = self.sparse_stores.removeEntity(id);
         self.purgeEntityExtensions(gpa, id);
         self.identity.release(id);
+    }
+
+    /// Whether `entity` carries `cid`, whichever backend stores it.
+    ///
+    /// Total and infallible — `false` for a stale handle, an unknown id or an
+    /// absent component, indistinguishably, which is the shape
+    /// `WeldEcsAPI.component_has` is frozen at (`ARCH-018`).
+    ///
+    /// **Not a convenience over `componentBytes() != null`.** The batched paths
+    /// ask presence to raise `DuplicateComponent`/`UnknownComponent`, and they
+    /// asked it of the ARCHETYPE — which answers `false` for a sparse component
+    /// the entity carries, so a batched add of an already-present sparse
+    /// component passed the check and reached `SparseSetStorage.add`'s own
+    /// assert: live in Debug, compiled to nothing in ReleaseFast, a silent
+    /// double insert in the mode a game ships.
+    /// `entity`'s `changed_tick` for `cid`, whichever backend holds it, or null
+    /// when the entity is stale or does not carry the component.
+    ///
+    /// **Use this and not the `dynamicLocation` + `dynamicArchetype` +
+    /// `changedTick` idiom**, which answers for the TABLE half only: a sparse
+    /// component reads as "never changed", a wrong answer with no diagnostic.
+    ///
+    /// No `addedTickOf` twin — nothing consumes one outside the query paths,
+    /// which reach the archetype directly. An accessor with no caller is an
+    /// unexercised entry, not symmetry.
+    pub fn changedTickOf(self: *const World, entity: EntityId, cid: ComponentId) ?tick_mod.Tick {
+        if (!self.identity.isLive(entity)) return null;
+        const loc = self.entity_locations.get(entity) orelse return null;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.getConst(cid) orelse return null;
+            return store.changedTick(entity);
+        }
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col = arch.componentIndex(cid) orelse return null;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        return arch.changedTick(chunk, col, loc.slot);
+    }
+
+    pub fn hasComponentDyn(self: *const World, entity: EntityId, cid: ComponentId) bool {
+        if (!self.identity.isLive(entity)) return false;
+        const loc = self.entity_locations.get(entity) orelse return false;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.getConst(cid) orelse return false;
+            return store.contains(entity);
+        }
+        return self.archetypes.items[loc.archetype_idx].hasComponent(cid);
     }
 
     pub fn entityCount(self: *const World) usize {
@@ -741,6 +1270,16 @@ pub const World = struct {
     pub fn beginFrame(self: *World) void {
         self.current_tick +%= 1;
         for (self.archetypes.items) |arch| arch.clearAllDirtyBitsets();
+        self.resetTickObservations();
+        // No sparse arm, and the absence is an INVARIANT rather than an
+        // omission: a sparse store carries per-row `added`/`changed` ticks and
+        // NO dirty bitset (M1.B/G2 invariant 2), because the bitset exists to
+        // let a chunk-granular query skip a whole chunk — a granularity a
+        // sparse set does not have. An arm here would have nothing to clear.
+        // The guard for it is `SparseSetStorage.field_set_pin`, which lives
+        // where a field gets added rather than here where one is read: adding a
+        // bitset to the backend breaks that pin, and its message names this
+        // function.
     }
 
     /// Read-only typed access to component `T` on `entity`. Returns
@@ -750,6 +1289,11 @@ pub const World = struct {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
         const cid = self.registry.idOf(@typeName(T)) orelse return null;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.getConst(cid) orelse return null;
+            const bytes = store.get(entity) orelse return null;
+            return @ptrCast(@alignCast(bytes.ptr));
+        }
         const arch = self.archetypes.items[loc.archetype_idx];
         const col_idx = arch.componentIndex(cid) orelse return null;
         const chunk = arch.chunks.items[loc.chunk_idx];
@@ -767,6 +1311,14 @@ pub const World = struct {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
         const cid = self.registry.idOf(@typeName(T)) orelse return null;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.get(cid) orelse return null;
+            // `getMut` stamps `changed_tick` in the sparse store exactly as the
+            // table arm stamps it in the chunk sidecar — the auto-mark is the
+            // entry's contract, not a table implementation detail.
+            const bytes = store.getMut(entity, self.current_tick) orelse return null;
+            return @ptrCast(@alignCast(bytes.ptr));
+        }
         const arch = self.archetypes.items[loc.archetype_idx];
         const col_idx = arch.componentIndex(cid) orelse return null;
         const chunk = arch.chunks.items[loc.chunk_idx];
@@ -783,6 +1335,16 @@ pub const World = struct {
     pub fn componentBytes(self: *World, entity: EntityId, cid: ComponentId) ?[]u8 {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
+        if (self.storageOf(cid) == .sparse) {
+            const store = self.sparse_stores.get(cid) orelse return null;
+            // Deliberately NOT `getMut`: this entry is the byte-level READ
+            // surface — `observers.zig` reads through it to build its
+            // `old_ptr`/`new_ptr` payloads — and stamping a change here would
+            // make an observer dispatch look like a mutation. The table arm
+            // does not stamp either; `markComponentChangedDyn` is the entry
+            // whose job that is.
+            return store.bytesMut(entity) orelse return null;
+        }
         const arch = self.archetypes.items[loc.archetype_idx];
         const col = arch.componentIndex(cid) orelse return null;
         const chunk = arch.chunks.items[loc.chunk_idx];
@@ -794,6 +1356,18 @@ pub const World = struct {
     /// mirroring `getMut`'s auto-mark. No-op when the entity/component is absent.
     pub fn markComponentChangedDyn(self: *World, entity: EntityId, cid: ComponentId) void {
         const loc = self.entity_locations.get(entity) orelse return;
+        if (self.storageOf(cid) == .sparse) {
+            // Without this arm the mark would be SILENTLY LOST: the entry
+            // returns `void`, and `componentIndex` on a sparse id answers null,
+            // so the pre-M1.B body's `orelse return` would swallow it. A change
+            // that never propagates has no diagnostic anywhere — the same class
+            // of defect as answering the wrong entity, and the reason this entry
+            // is routed rather than left to fail loud (it cannot fail at all).
+            if (self.sparse_stores.get(cid)) |store| {
+                store.markChanged(entity, self.current_tick);
+            }
+            return;
+        }
         const arch = self.archetypes.items[loc.archetype_idx];
         const col = arch.componentIndex(cid) orelse return;
         const chunk = arch.chunks.items[loc.chunk_idx];
@@ -824,8 +1398,63 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_new = try self.ensureRegistered(gpa, T);
+
+        // M1.B reprise / P1-1 — the fifth and last add path. It handles ONE
+        // component and branches on its storage; an expanded set needs the
+        // grouped machinery, which `addComponentDynamic` already reaches
+        // through the single expansion point. Same shape as `spawn`: the guard
+        // stays even though a typed component registers with no `requires` of
+        // its own, because what is kept is the PROPERTY and not today's
+        // instance — an Etch declaration can claim the same name through
+        // `registerAlias`, and that is exactly the case that must not skip the
+        // rule in silence.
+        if (self.registry.requiresClosure(cid_new).len != 0) {
+            return self.addComponentDynamic(gpa, entity, cid_new, std.mem.asBytes(&value));
+        }
+
+        if (self.storageOf(cid_new) == .sparse) {
+            // NO archetype transition at all: a sparse component's presence is
+            // a row in its own store, so the entity's signature — and with it
+            // its location, its chunk, and every other component's address —
+            // is untouched. That ABSENCE of migration is the mode's whole
+            // reason to exist, not an optimisation on top of it.
+            const store = try self.sparse_stores.ensure(
+                gpa,
+                cid_new,
+                self.registry.componentSize(cid_new),
+                self.registry.componentAlignment(cid_new),
+            );
+            // ACTIVE check, not an assert. `SparseSetStorage.add` asserts
+            // `!contains(entity)`, and `std.debug.assert` is compiled to NOTHING
+            // in ReleaseFast — so in the mode a game ships, a double add would
+            // append a SECOND dense row for the same entity, after which
+            // `positionOf` answers the first and `remove` swaps one of the two
+            // away, leaving the other permanently unreachable. A wrong answer
+            // with no diagnostic (the H1 class, M1.1.15.1). `DuplicateComponent`
+            // is the error `addComponentsDynamic` already returns for exactly
+            // this condition, so nothing new is invented.
+            //
+            // Deliberately in the SPARSE arm only: the table arm's own
+            // `assert(!src_arch.hasComponent(cid_new))` is stripped identically
+            // and has the same hole, but that hole PREDATES M1.B and changing it
+            // would change an existing contract. Reported, not silently fixed.
+            if (store.contains(entity)) return error.DuplicateComponent;
+            try store.add(gpa, entity, std.mem.asBytes(&value), self.current_tick);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        std.debug.assert(!src_arch.hasComponent(cid_new));
+        // ACTIVE, mirroring the sparse arm above and for the same reason: the
+        // `std.debug.assert` this replaces was compiled to nothing in
+        // ReleaseFast, so the migration proceeded and built a signature with
+        // `cid_new` TWICE. Restores a precondition already written rather than
+        // inventing one, and `DuplicateComponent` is the error the batched path
+        // already returns for this condition.
+        //
+        // `applyWithObservers` is unaffected: it tests presence FIRST and only
+        // reaches here on the absent branch, where add-on-present is a
+        // replacement rather than an error.
+        if (src_arch.hasComponent(cid_new)) return error.DuplicateComponent;
 
         // Resolve the target archetype — cache hit first, full lookup +
         // create if cold.
@@ -838,9 +1467,9 @@ pub const World = struct {
             defer gpa.free(target_ids);
             @memcpy(target_ids[0..src_arch.component_ids.len], src_arch.component_ids);
             target_ids[src_arch.component_ids.len] = cid_new;
-            archetype_mod.sortComponentIds(target_ids);
+            const split = self.splitByStorage(target_ids);
 
-            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const target = try self.getOrCreateArchetype(gpa, split.table);
             // Cache the transition on the source archetype. Re-resolve
             // the source pointer in case `getOrCreateArchetype` grew
             // the archetypes ArrayList — the existing `src_arch`
@@ -912,11 +1541,52 @@ pub const World = struct {
         cid_new: ComponentId,
         value_bytes: []const u8,
     ) !void {
+        // M1.B/G9 — `@requires`: the closure is added with the component, in ONE
+        // transaction. Delegated to `addComponentsDynamic` rather than
+        // reimplemented, because that entry ALREADY is the transaction — all
+        // fallible work before the first observable mutation — and a second
+        // implementation of the same atomicity is a second thing to keep true.
+        //
+        // The closure is read, never walked: `requiresClosure` returns the
+        // flattened array `finalizeRequires` computed once, which is what
+        // `engine-ecs-internals.md` §3 means by "jamais reparcouru à chaque
+        // ajout".
+        const closure = self.registry.requiresClosure(cid_new);
+        if (closure.len != 0) return self.addWithClosure(gpa, entity, cid_new, value_bytes, closure);
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
+        if (self.storageOf(cid_new) == .sparse) {
+            // NO archetype transition at all: a sparse component's presence is
+            // a row in its own store, so the entity's signature — and with it
+            // its location, its chunk, and every other component's address —
+            // is untouched. That ABSENCE of migration is the mode's whole
+            // reason to exist, not an optimisation on top of it.
+            const store = try self.sparse_stores.ensure(
+                gpa,
+                cid_new,
+                self.registry.componentSize(cid_new),
+                self.registry.componentAlignment(cid_new),
+            );
+            // ACTIVE check — see the twin in `addComponent` for why an assert
+            // will not do here and why the table arm is deliberately left alone.
+            if (store.contains(entity)) return error.DuplicateComponent;
+            try store.add(gpa, entity, value_bytes, self.current_tick);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        std.debug.assert(!src_arch.hasComponent(cid_new));
+        // ACTIVE, mirroring the sparse arm above and for the same reason: the
+        // `std.debug.assert` this replaces was compiled to nothing in
+        // ReleaseFast, so the migration proceeded and built a signature with
+        // `cid_new` TWICE. Restores a precondition already written rather than
+        // inventing one, and `DuplicateComponent` is the error the batched path
+        // already returns for this condition.
+        //
+        // `applyWithObservers` is unaffected: it tests presence FIRST and only
+        // reaches here on the absent branch, where add-on-present is a
+        // replacement rather than an error.
+        if (src_arch.hasComponent(cid_new)) return error.DuplicateComponent;
 
         const dst_arch = blk: {
             if (src_arch.transitions.add.get(cid_new)) |target_idx| {
@@ -926,9 +1596,9 @@ pub const World = struct {
             defer gpa.free(target_ids);
             @memcpy(target_ids[0..src_arch.component_ids.len], src_arch.component_ids);
             target_ids[src_arch.component_ids.len] = cid_new;
-            archetype_mod.sortComponentIds(target_ids);
+            const split = self.splitByStorage(target_ids);
 
-            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const target = try self.getOrCreateArchetype(gpa, split.table);
             const src_arch_after = self.archetypes.items[src_loc.archetype_idx];
             try src_arch_after.transitions.add.put(gpa, cid_new, target.archetype_id);
             break :blk target;
@@ -980,6 +1650,28 @@ pub const World = struct {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
+        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // the invariant "if A is present, its closure is present" holds, the
+        // deviation is counted on `World` and logged once per tick, and the
+        // tick survives. An error here would be the channel
+        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
+        // a deferred command turned into an unobservable tick failure.
+        if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
+
+        if (self.storageOf(cid_drop) == .sparse) {
+            // Mirrors the table arm's `assert(hasComponent)` below: removing an
+            // absent component is a programmer error on this entry. UNLIKE that
+            // arm, the release path is a no-op rather than undefined — the
+            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
+            // behind it would then be UB on the exact misuse the assert exists
+            // to name. Matching the table arm bit for bit would be matching a
+            // defect, so the absence is handled rather than assumed.
+            std.debug.assert(self.hasComponentDyn(entity, cid_drop));
+            const store = self.sparse_stores.get(cid_drop) orelse return;
+            _ = store.remove(entity);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(src_arch.hasComponent(cid_drop));
 
@@ -987,7 +1679,13 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            std.debug.assert(src_arch.component_ids.len >= 2);
+            // `>= 1` and not `>= 2`: since M1.B the EMPTY archetype is legal, so
+            // dropping an entity's last component is a transition to it rather
+            // than a programmer error. The `>= 2` this replaces was a leftover
+            // of the illegality G2 lifted — legal at the layout, still forbidden
+            // at the transition. Guaranteed by the `hasComponent(cid_drop)`
+            // check above, which is what makes the bound `1` and not `0`.
+            std.debug.assert(src_arch.component_ids.len >= 1);
             const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len - 1);
             defer gpa.free(target_ids);
             var di: usize = 0;
@@ -997,7 +1695,8 @@ pub const World = struct {
                 di += 1;
             }
 
-            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const split = self.splitByStorage(target_ids);
+            const target = try self.getOrCreateArchetype(gpa, split.table);
             const src_arch_after = self.archetypes.items[src_loc.archetype_idx];
             try src_arch_after.transitions.remove.put(gpa, cid_drop, target.archetype_id);
             break :blk target;
@@ -1048,6 +1747,12 @@ pub const World = struct {
     /// archetype AND DISTINCT within `cids` — a real check (`error.DuplicateComponent`),
     /// not an assert; a duplicate would put the id twice in the target archetype
     /// (corruption) and mis-map values.
+    /// Add a set of components, expanding every `@requires` closure first.
+    ///
+    /// The expansion happens ONCE, here, and `addComponentsExact` below is the
+    /// terminal that assumes an already-closed set — which is what keeps the
+    /// recursion finite and gives the rule a single semantics for all six add
+    /// and spawn paths.
     pub fn addComponentsDynamic(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1059,12 +1764,44 @@ pub const World = struct {
         if (cids.len == 0) return;
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        // M1.B reprise / P1-1 — THE grouped expansion point. Every other add
+        // path routes here rather than expanding for itself, so there is one
+        // semantics and not six. The helper is entity-aware, so a requisite the
+        // entity already carries is skipped and the present-check below never
+        // sees one.
+        var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ex_ids.deinit(gpa);
+        var ex_vals: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer ex_vals.deinit(gpa);
+        //
+        // Allocation-free when nothing requires anything, which is the common
+        // case and the one the hot path must keep: the closure lookup is a
+        // slice length per id, and only a non-empty one reaches the copy.
+        var needs = false;
+        for (cids) |c| {
+            if (self.registry.requiresClosure(c).len != 0) {
+                needs = true;
+                break;
+            }
+        }
+        if (needs) _ = try self.expandRequires(gpa, cids, values, entity, &ex_ids, &ex_vals);
+        const ids_all = if (needs) ex_ids.items else cids;
+        const vals_all = if (needs) ex_vals.items else values;
         {
             // R11(c): real duplicate/present checks BEFORE any allocation.
-            const src_arch = self.archetypes.items[src_loc.archetype_idx];
-            for (cids, 0..) |c, ci| {
-                if (src_arch.hasComponent(c)) return error.DuplicateComponent;
-                for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
+            //
+            // Routed through `hasComponentDyn` and NOT `src_arch.hasComponent`:
+            // the archetype answers `false` for a sparse component the entity
+            // actually carries, so the pre-M1.B form let a batched add of an
+            // already-present sparse component through, straight to
+            // `SparseSetStorage.add`'s own assert — live in Debug and compiled
+            // to nothing in ReleaseFast, i.e. a silent double insert in the
+            // mode a game ships. This is the check `hasComponentDyn` exists
+            // for, and the reason it is not a convenience wrapper.
+            for (ids_all, 0..) |c, ci| {
+                if (self.hasComponentDyn(entity, c)) return error.DuplicateComponent;
+                for (ids_all[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
             }
         }
 
@@ -1072,18 +1809,59 @@ pub const World = struct {
         // per-transition cache is single-component-keyed, so the grouped path
         // resolves the target directly via `getOrCreateArchetype` (dedup by set).
         const src_len = self.archetypes.items[src_loc.archetype_idx].component_ids.len;
-        const target_ids = try gpa.alloc(ComponentId, src_len + cids.len);
+        const target_ids = try gpa.alloc(ComponentId, src_len + ids_all.len);
         defer gpa.free(target_ids);
         @memcpy(target_ids[0..src_len], self.archetypes.items[src_loc.archetype_idx].component_ids);
-        @memcpy(target_ids[src_len..], cids);
-        archetype_mod.sortComponentIds(target_ids);
+        @memcpy(target_ids[src_len..], ids_all);
+        // The funnel's own split does the filtering: `split.table` is
+        // src ∪ (table half of `cids`), sorted, and `split.sparse` is exactly
+        // the sparse half of `cids` — `src.component_ids` cannot contribute to
+        // it, every archetype signature being table-only by construction. So
+        // the signature needs no separate pre-pass; `target_ids` is merely
+        // over-allocated by the sparse count, which is harmless.
+        const split = self.splitByStorage(target_ids);
+        try self.ensureSparseStores(gpa, split.sparse);
 
-        const dst_arch = try self.getOrCreateArchetype(gpa, target_ids);
+        const dst_arch = try self.getOrCreateArchetype(gpa, split.table);
         // `getOrCreateArchetype` may have grown `self.archetypes` — re-fetch the
         // source archetype pointer through the (possibly-moved) list.
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        // Sparse rows BEFORE the reserved table slot, per the rule stated at
+        // `removeSparsePayloads`: the sparse undo is infallible, the table
+        // undo is not, so the step with the messier undo goes last and has
+        // nothing after it to unwind. `split.sparse` aliases `target_ids`,
+        // whose `defer` was declared earlier and therefore runs AFTER this
+        // `errdefer`.
+        try self.addSparsePayloads(gpa, entity, split.sparse, vals_all, ids_all);
+        errdefer self.removeSparsePayloads(entity, split.sparse);
+
+        // SELF-MIGRATION GUARD, and it sits HERE — after the sparse rows — for a
+        // reason its first version got wrong: placed above `addSparsePayloads`
+        // it returned before writing them, so the entity ended up carrying
+        // nothing while the comment claimed "the sparse rows are already
+        // written above". The test caught it; the comment had asserted an order
+        // the code did not have.
+        //
+        // What it guards: when every added id is sparse, the target signature
+        // EQUALS the source's, so the funnel hands back the SOURCE archetype.
+        // The migration below would then reserve a SECOND slot in it, copy the
+        // row into it, and swap-pop the original — and that swap brings the
+        // fresh copy back down from the tail and reports THIS entity as the
+        // relocated one, so the `getPtr(swapped_id)` line records the correct
+        // slot and the `putAssumeCapacity` two lines later overwrites it with
+        // the slot the swap just freed. The entity's location then designates a
+        // dead slot outside `[0, entity_count)`, and the next spawn into this
+        // archetype ALIASES it: reads answer the other entity's bytes and writes
+        // corrupt them, with no diagnostic anywhere.
+        //
+        // Unreachable before M1.B — a grouped add always added at least one
+        // signature member — and reachable from production at
+        // `loader.activateExtension` for an extension declaring only sparse
+        // components.
+        if (dst_arch == src_arch) return;
+
         const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
         // ── from here down: infallible (reserve-then-mutate boundary) ──
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
@@ -1092,14 +1870,14 @@ pub const World = struct {
         for (dst_arch.component_ids, 0..) |dst_cid, i| {
             const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
             var new_k: ?usize = null;
-            for (cids, 0..) |c, k| {
+            for (ids_all, 0..) |c, k| {
                 if (c == dst_cid) {
                     new_k = k;
                     break;
                 }
             }
             if (new_k) |k| {
-                @memcpy(dst, values[k]); // a newly-added component: caller's bytes
+                @memcpy(dst, vals_all[k]); // a newly-added component: caller's bytes
             } else {
                 const src_i = src_arch.componentIndex(dst_cid).?;
                 const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
@@ -1131,7 +1909,30 @@ pub const World = struct {
         src_arch: *Archetype,
         src_loc: Location,
         dst_arch: *Archetype,
-        dst_r: archetype_mod.SpawnResult,
+        /// The reserved destination slot, or null when the drop set is
+        /// ENTIRELY sparse — in which case the target signature equals the
+        /// source's, the funnel returns the source archetype, and there is no
+        /// migration to perform. Null rather than a self-migration: see the
+        /// guard in `prepareRemoveComponentsDynamic` for what the self-migrating
+        /// form corrupts.
+        dst_r: ?archetype_mod.SpawnResult,
+        /// `prepare`'s OWNED copy of `cids`, partitioned in place: the first
+        /// `n_table` entries drop from the archetype signature, the rest are
+        /// sparse rows for `commit` to remove. Freed by `commit` or `abort`,
+        /// which is why both now take an allocator.
+        ///
+        /// Owned rather than a slice into the caller's `cids`: that would work
+        /// today — `loader.deactivateExtension` keeps its stack buffer alive
+        /// across the window — and it would make the trio's correctness depend
+        /// on a lifetime precondition no signature states. One allocation, on a
+        /// path that already makes one for `target_ids`.
+        cids_owned: []ComponentId,
+        n_table: usize,
+
+        /// The sparse ids this remove must drop.
+        pub fn sparseDrops(self: PreparedRemove) []const ComponentId {
+            return self.cids_owned[self.n_table..];
+        }
     };
 
     /// R12(a) — the fallible half of a grouped remove: validate, resolve the
@@ -1153,20 +1954,52 @@ pub const World = struct {
         const src_arch0 = self.archetypes.items[src_loc.archetype_idx];
         const src_len = src_arch0.component_ids.len;
 
-        // R11(c): present + distinct, checked before any allocation.
+        // R11(c): present + distinct, checked before any allocation. Routed
+        // through `hasComponentDyn` for the same reason as the batched add: the
+        // archetype answers `false` for a sparse component the entity carries,
+        // so `src_arch0.hasComponent` would reject a legitimate sparse drop
+        // with `UnknownComponent` — a refusal of the right shape for the wrong
+        // reason, and the harder kind to diagnose.
         for (cids, 0..) |c, ci| {
-            if (!src_arch0.hasComponent(c)) return error.UnknownComponent;
+            if (!self.hasComponentDyn(entity, c)) return error.UnknownComponent;
             for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
         }
-        std.debug.assert(src_len >= cids.len);
+        // M1.B/G9 — `exempt = cids`: a grouped removal of a requisite TOGETHER
+        // with its dependents is ALLOWED, so a requirer that is itself leaving
+        // does not hold its requisite back. Without that exception a legitimate
+        // teardown would be refused forever, which is the guard's other way of
+        // being wrong.
+        //
+        // **This path ERRORS where the single paths SKIP, and the asymmetry is
+        // the channel each path can afford — measured, not chosen.** All three
+        // flush paths (`CommandBuffer.applyOne`, `applyWithObservers`,
+        // `applyRawCommand`) call the SINGLE `removeComponentDynamic`, so an
+        // error there would abort the tick — the channel §3 and the brief both
+        // refuse. This grouped entry has exactly ONE caller in the repository,
+        // `loader.deactivateExtension`, a scene-load path that already returns
+        // typed errors and no tick depends on. And a grouped remove is ONE
+        // migration: dropping the subset the guard admits would be a silent
+        // partial answer, so the whole command is refused rather than trimmed.
+        for (cids) |c| {
+            if (self.requiresRefusesRemoval(entity, c, cids)) return error.RequiredComponent;
+        }
 
-        // Target archetype = source components \ `cids`.
-        const target_ids = try gpa.alloc(ComponentId, src_len - cids.len);
+        // Partition the drops: only the table half leaves the signature, and
+        // `src_len - cids.len` would UNDERFLOW the moment a sparse id is among
+        // them — `cids` is not a subset of the signature any more.
+        const cids_owned = try gpa.dupe(ComponentId, cids);
+        errdefer gpa.free(cids_owned);
+        const drop_split = self.splitByStorage(cids_owned);
+        const n_table = drop_split.table.sorted.len;
+        std.debug.assert(src_len >= n_table);
+
+        // Target archetype = source components \ the TABLE half of `cids`.
+        const target_ids = try gpa.alloc(ComponentId, src_len - n_table);
         defer gpa.free(target_ids);
         var di: usize = 0;
         for (src_arch0.component_ids) |cid| {
             var drop = false;
-            for (cids) |c| {
+            for (drop_split.table.sorted) |c| {
                 if (c == cid) {
                     drop = true;
                     break;
@@ -1178,21 +2011,51 @@ pub const World = struct {
         }
         std.debug.assert(di == target_ids.len); // guaranteed by the present+distinct checks
 
-        const dst_arch = try self.getOrCreateArchetype(gpa, target_ids);
+        const split = self.splitByStorage(target_ids);
+        const dst_arch = try self.getOrCreateArchetype(gpa, split.table);
         // `getOrCreateArchetype` may have grown `self.archetypes` — re-fetch src.
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
-        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
-        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
-        return .{ .entity = entity, .src_arch = src_arch, .src_loc = src_loc, .dst_arch = dst_arch, .dst_r = dst_r };
+        // SELF-MIGRATION GUARD, the twin of `addComponentsDynamic`'s: when every
+        // dropped id is sparse the funnel returns the SOURCE archetype, and
+        // reserving a slot in it would set up the copy-then-swap sequence that
+        // strands the entity's location on a freed slot. No slot is reserved, so
+        // `abort` has none to release and `commit` has none to fill.
+        const dst_r: ?archetype_mod.SpawnResult = if (dst_arch == src_arch)
+            null
+        else blk: {
+            try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+            break :blk try dst_arch.allocateSlot(gpa, self.current_tick);
+        };
+        return .{
+            .entity = entity,
+            .src_arch = src_arch,
+            .src_loc = src_loc,
+            .dst_arch = dst_arch,
+            .dst_r = dst_r,
+            .cids_owned = cids_owned,
+            .n_table = n_table,
+        };
     }
 
     /// R12(a) — the infallible half: copy the surviving columns into the reserved
     /// dst slot, swap-pop the source, and update `entity_locations` (capacity was
     /// reserved in `prepare`). After this the remove is observable.
-    pub fn commitRemoveComponentsDynamic(self: *World, prepared: PreparedRemove) void {
+    pub fn commitRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
+        defer gpa.free(prepared.cids_owned);
+        // The sparse rows go here and NOT in `prepare`, and the reason is
+        // semantic rather than structural: `loader.deactivateExtension` fires
+        // `on_detach` BETWEEN the two halves, and that hook may read the
+        // component being removed. The table columns are still in the source
+        // archetype at hook time, so the sparse row must still be in its store
+        // — dropping it in `prepare` would show the hook a half-removed
+        // component. Infallible either way, so atomicity does not decide it.
+        self.removeSparsePayloads(prepared.entity, prepared.sparseDrops());
+        // Null `dst_r` means the drop set was entirely sparse: the rows above are
+        // the whole removal and the entity does not move. Returning here is what
+        // keeps the self-migration guard's decision from being undone.
+        const dst_r = prepared.dst_r orelse return;
         const dst_arch = prepared.dst_arch;
         const src_arch = prepared.src_arch;
-        const dst_r = prepared.dst_r;
         const src_loc = prepared.src_loc;
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
         const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
@@ -1224,9 +2087,17 @@ pub const World = struct {
     /// path is single-threaded — so `removeSwap` on it is a pure pop (no swap,
     /// returns null). The entity was never recorded in `entity_locations` for the
     /// dst slot, so no map fix-up is needed.
-    pub fn abortRemoveComponentsDynamic(self: *World, prepared: PreparedRemove) void {
+    pub fn abortRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
         _ = self;
-        const swapped = prepared.dst_arch.removeSwap(prepared.dst_r.chunk_idx, prepared.dst_r.slot);
+        defer gpa.free(prepared.cids_owned);
+        // Nothing to undo on the sparse side: `commit` is what removes those
+        // rows, so an aborted prepare never touched them.
+        //
+        // And nothing to release when `dst_r` is null — an entirely sparse drop
+        // set reserved no slot, so a `removeSwap` here would pop a LIVE row
+        // belonging to some other entity.
+        const dst_r = prepared.dst_r orelse return;
+        const swapped = prepared.dst_arch.removeSwap(dst_r.chunk_idx, dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
     }
 
@@ -1243,7 +2114,7 @@ pub const World = struct {
     ) !void {
         if (cids.len == 0) return;
         const prepared = try self.prepareRemoveComponentsDynamic(gpa, entity, cids);
-        self.commitRemoveComponentsDynamic(prepared);
+        self.commitRemoveComponentsDynamic(gpa, prepared);
     }
 
     /// M0.8 E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
@@ -1264,11 +2135,20 @@ pub const World = struct {
         bit_index: u32,
         set: bool,
     ) !void {
-        const loc = self.entity_locations.get(entity) orelse return;
-        const arch = self.archetypes.items[loc.archetype_idx];
-        if (arch.componentIndex(tagset_id)) |col| {
-            const chunk = arch.chunks.items[loc.chunk_idx];
-            const bytes = arch.componentSlot(chunk, col, loc.slot);
+        // Routed through `componentBytes`, never the archetype: this entry
+        // mutates IN PLACE, so it does not appear in an enumeration of the
+        // archetype funnel's callers, and on a sparse `TagSet` reaching the
+        // archetype answers null. `componentBytes` hands out mutable bytes
+        // WITHOUT stamping a change, which is the behaviour here.
+        //
+        // A STALE HANDLE MUST BE SILENTLY IGNORED, which is what this line
+        // restores. The command-buffer flush depends on it — a tag recorded for
+        // an entity despawned later in the same tick is ordinary — and without
+        // it the null falls into the `else if (set)` arm below, where
+        // `addComponentDynamic` returns `StaleEntityHandle`, propagated, which
+        // aborts every remaining command of the flush.
+        if (self.entity_locations.get(entity) == null) return;
+        if (self.componentBytes(entity, tagset_id)) |bytes| {
             setTagBit(bytes, bit_index, set);
         } else if (set) {
             const size = self.registry.componentSize(tagset_id);
@@ -1294,6 +2174,28 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_drop = self.registry.idOf(@typeName(T)) orelse return error.StaleEntityHandle;
+        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // the invariant "if A is present, its closure is present" holds, the
+        // deviation is counted on `World` and logged once per tick, and the
+        // tick survives. An error here would be the channel
+        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
+        // a deferred command turned into an unobservable tick failure.
+        if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
+
+        if (self.storageOf(cid_drop) == .sparse) {
+            // Mirrors the table arm's `assert(hasComponent)` below: removing an
+            // absent component is a programmer error on this entry. UNLIKE that
+            // arm, the release path is a no-op rather than undefined — the
+            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
+            // behind it would then be UB on the exact misuse the assert exists
+            // to name. Matching the table arm bit for bit would be matching a
+            // defect, so the absence is handled rather than assumed.
+            std.debug.assert(self.hasComponentDyn(entity, cid_drop));
+            const store = self.sparse_stores.get(cid_drop) orelse return;
+            _ = store.remove(entity);
+            return;
+        }
+
         const src_arch = self.archetypes.items[src_loc.archetype_idx];
         std.debug.assert(src_arch.hasComponent(cid_drop));
 
@@ -1301,7 +2203,13 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            std.debug.assert(src_arch.component_ids.len >= 2);
+            // `>= 1` and not `>= 2`: since M1.B the EMPTY archetype is legal, so
+            // dropping an entity's last component is a transition to it rather
+            // than a programmer error. The `>= 2` this replaces was a leftover
+            // of the illegality G2 lifted — legal at the layout, still forbidden
+            // at the transition. Guaranteed by the `hasComponent(cid_drop)`
+            // check above, which is what makes the bound `1` and not `0`.
+            std.debug.assert(src_arch.component_ids.len >= 1);
             const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len - 1);
             defer gpa.free(target_ids);
             var di: usize = 0;
@@ -1311,7 +2219,8 @@ pub const World = struct {
                 di += 1;
             }
 
-            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const split = self.splitByStorage(target_ids);
+            const target = try self.getOrCreateArchetype(gpa, split.table);
             const src_arch_after = self.archetypes.items[src_loc.archetype_idx];
             try src_arch_after.transitions.remove.put(gpa, cid_drop, target.archetype_id);
             break :blk target;
@@ -1482,6 +2391,18 @@ pub const World = struct {
     /// by the interpreter after every rule has run.
     pub fn tickBoundary(self: *World) void {
         self.resources.tickBoundary();
+        // M1.B/G9 — the SECOND reset site, and both are required because neither
+        // covers the other's population. Measured rather than assumed:
+        // `beginFrame` is called unconditionally by the ECS scheduler's frame
+        // dispatch (`scheduler.zig`) and by the emitted codegen tick, so it is
+        // the boundary a Zig host reaches — but the TREE-WALKER gates it on
+        // `if (self.has_changed)`, by design and with its own comment saying "a
+        // `changed`-free program never advances the tick". With the reset in
+        // `beginFrame` alone, an Etch program carrying no `changed` filter never
+        // reset the counter at all: it accumulated over the whole run and the
+        // once-per-tick log fired once per PROGRAM. The field's meaning would
+        // have depended on whether the program used an unrelated feature.
+        self.resetTickObservations();
     }
 
     /// Decref and zero every resource's persistent-heap payload slot

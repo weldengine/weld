@@ -86,6 +86,53 @@ pub const Listener = struct {
 /// dispatch as `for items |l| try l.callback(...)`.
 const Listeners = std.ArrayListUnmanaged(Listener);
 
+/// Ascending-`ComponentId` walk over the UNION of an entity's table and sparse
+/// components.
+///
+/// **ONE walk for both directions, never a copy per direction** — its whole job
+/// is an ORDER, which is exactly the property two copies would drift on.
+///
+/// Ascending id and NOT the caller's slice order: a slice order is a property of
+/// the calling code, so the observer order would otherwise depend on how someone
+/// wrote a spawn literal. `engine-ecs-internals.md` §8 covers the despawn
+/// direction only; making it bidirectional is the corpus owner's, not here.
+pub const ComponentUnionIter = struct {
+    world: *World,
+    entity: EntityId,
+    table_ids: []const ComponentId,
+    ti: usize = 0,
+    s_next: ?ComponentId = null,
+
+    pub fn init(world: *World, entity: EntityId) ComponentUnionIter {
+        const ids: []const ComponentId = blk: {
+            const loc = world.entity_locations.get(entity) orelse break :blk &.{};
+            break :blk world.archetypes.items[loc.archetype_idx].component_ids;
+        };
+        return .{
+            .world = world,
+            .entity = entity,
+            .table_ids = ids,
+            .s_next = world.sparse_stores.nextContaining(0, entity),
+        };
+    }
+
+    /// The archetype's `component_ids` are sorted and `nextContaining` is
+    /// ascending by construction, so taking the smaller head each step yields
+    /// the union in ascending id with no allocation and no sort.
+    pub fn next(it: *ComponentUnionIter) ?ComponentId {
+        const t_cid: ?ComponentId = if (it.ti < it.table_ids.len) it.table_ids[it.ti] else null;
+        if (t_cid == null and it.s_next == null) return null;
+        const take_table = if (t_cid) |t| (it.s_next == null or t < it.s_next.?) else false;
+        if (take_table) {
+            it.ti += 1;
+            return t_cid.?;
+        }
+        const sc = it.s_next.?;
+        it.s_next = it.world.sparse_stores.nextContaining(sc + 1, it.entity);
+        return sc;
+    }
+};
+
 /// Registry holding the four kinds of observer lists. Lives next to
 /// the `World` (typically as a field) and is consulted during every
 /// command buffer flush.
@@ -244,7 +291,11 @@ pub const ObserverRegistry = struct {
         self.ensureDeferred(gpa, world);
         const eid = try world.spawnDynamicWithValues(gpa, component_ids, payloads);
         try self.fireList(self.on_spawned, world, eid, null, null, null);
-        for (component_ids) |cid| {
+        // The ENTITY's real union, not the caller's slice: the `@requires`
+        // closure expands inside the spawn, so a component the caller never
+        // named can be present and owes its `on_add`.
+        var it = ComponentUnionIter.init(world, eid);
+        while (it.next()) |cid| {
             if (self.on_add.get(cid)) |list| {
                 const new_ptr: ?*const anyopaque = if (world.componentBytes(eid, cid)) |b| @ptrCast(b.ptr) else null;
                 try self.fireList(list, world, eid, cid, null, new_ptr);
@@ -327,14 +378,32 @@ pub fn applyWithObservers(
             _ = try reg.spawnWithObservers(gpa, world, s.component_ids, s.payloads);
         },
         .despawn => |d| {
+            // SAME MECHANISM as the remove arm below: the command's own
+            // precondition, checked before any observer fires. `world.despawn`
+            // returns `StaleEntityHandle` on a handle whose generation is gone,
+            // and `on_despawned` fires UNCONDITIONALLY — so a double despawn in
+            // one tick, which two rules or one body can record, handed
+            // consumers the death of an entity whose despawn then failed. The
+            // `on_remove` loop below is naturally empty in that case (a dead
+            // entity carries no component), which is why `on_despawned` is the
+            // whole of the exposure and not a fraction of it.
+            if (!world.isLive(d.entity)) return error.StaleEntityHandle;
             // Pre-apply: fire on_remove[cid] for every component the
             // entity still has, then on_despawned. The observer is
             // free to read the entity's components — they live until
             // we drop into `world.despawn` below, so `old_value` points
             // at the live (pre-destruction) slot.
-            if (world.entity_locations.get(d.entity)) |loc| {
-                const arch = world.archetypes.items[loc.archetype_idx];
-                for (arch.component_ids) |cid| {
+            // The capture is gone with the inline walk, the GUARD is not: an
+            // entity with no location is stale, and the pass is skipped whole
+            // exactly as before rather than walking its sparse stores.
+            if (world.entity_locations.get(d.entity) != null) {
+                // The SAME walk the spawn direction takes: ascending
+                // `ComponentId` over the UNION of both backends, by a
+                // two-pointer merge of two already-ascending sequences. The
+                // archetype signature ALONE is the table half only, and an
+                // observer silently skipped is undetectable by any caller.
+                var it = ComponentUnionIter.init(world, d.entity);
+                while (it.next()) |cid| {
                     if (reg.on_remove.get(cid)) |list| {
                         const old_ptr: ?*const anyopaque = if (world.componentBytes(d.entity, cid)) |b| @ptrCast(b.ptr) else null;
                         try reg.fireList(list, world, d.entity, cid, old_ptr, null);
@@ -376,6 +445,18 @@ pub fn applyWithObservers(
             }
         },
         .remove_component => |r| {
+            // AN OBSERVER DESCRIBES A STATE THAT HAS TAKEN PLACE, so the
+            // command's own precondition is checked BEFORE the event. A
+            // `@requires` refusal is a silent SKIP inside
+            // `removeComponentDynamic`, and firing first handed consumers an
+            // `on_removed` for a component that is still there — a lie about
+            // the world, delivered by the mechanism that exists to report it.
+            //
+            // Returning here rather than falling through is what keeps the skip
+            // counted ONCE: the count lives inside `requiresRefusesRemoval`, so
+            // a pre-validation that then reached `removeComponentDynamic` would
+            // count the same refusal twice.
+            if (world.requiresRefusesRemoval(r.entity, r.component_id, &.{})) return;
             // Pre-apply: observer reads the component value (live slot), THEN
             // the migration drops it.
             if (reg.on_remove.get(r.component_id)) |list| {

@@ -29,9 +29,46 @@ pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 /// a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
     component_id: u32,
-    chunk_ptr: *anyopaque,
-    slot: u32,
     mutable: bool,
+    /// WHERE the bytes live — bimodal since M1.B/G5.
+    ///
+    /// **The two arms are asymmetric ON PURPOSE.** Sparse keeps the ENTITY and
+    /// re-resolves per access, because a row POINTER would be invalidated by any
+    /// swap-remove in that store — and the lookup is an array index plus a
+    /// generation compare, cheaper than the hash a table ref already pays.
+    ///
+    /// **The table arm HAS that hazard.** A `chunk_ptr` + `slot` is invalidated
+    /// by a swap-remove in its chunk or by an archetype migration — that is, by
+    /// a component REMOVE, ADD or DESPAWN. So a handle held across a structural
+    /// mutation is safe in sparse and unsafe in table, which makes `@storage` —
+    /// presented everywhere as a choice with no semantic effect — change the
+    /// lifetime semantics of a value visible from Etch.
+    ///
+    /// **What makes that unreachable is TEMPORAL, not structural.** Nothing in
+    /// the language forbids the shape: `let r = entity.get_mut(H)` then
+    /// `entity.remove(M)` then `r.hp = 99` type-checks with zero diagnostics.
+    /// The three ops that MOVE a row are DEFERRED from a rule body since
+    /// M1.0.10, so no row moves while the body runs.
+    ///
+    /// **An immediate SPAWN is not a counter-example and must not be recorded as
+    /// one:** `Archetype.allocateSlot` appends, and an append relocates no
+    /// existing row, so a spawn leaves every handle valid.
+    ///
+    /// **And preserving that deferral does not preserve every capture — the
+    /// sibling case has one more guardian.** `hybrid_query.zig`'s sparse-driven
+    /// iterator holds a SLICE of its driver's dense array, which an APPEND
+    /// invalidates, and what keeps an immediate spawn out of a rule body there
+    /// is the type-checker refusing `test_world()` outside a test body. The rule
+    /// belongs to `etch-memory-model.md` and is stated on the OPERATIONS rather
+    /// than on a handle's lifetime, so the charge falls on whoever makes a
+    /// structural op immediate rather than on every future capture site.
+    where: Where,
+
+    pub const Where = union(enum) {
+        table: struct { chunk_ptr: *anyopaque, slot: u32 },
+        /// The `u64` wire form, bitcast to the core packed handle at use.
+        sparse: EntityId,
+    };
 };
 
 /// A handle to a resource's backing bytes in the world `ResourceStore`.

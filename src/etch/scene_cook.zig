@@ -31,6 +31,7 @@ const std = @import("std");
 
 const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
+const types_mod = @import("types.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
 // M1.0.6 E5 — `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
@@ -139,6 +140,12 @@ pub const CookError = error{
     /// `error.ExtensionComponentConflict` for a/b, `error.ExtensionAlreadyActive`
     /// for c). See `engine-scene-serialization.md` (extension additive conflicts).
     ExtensionAdditiveConflict,
+    /// M1.B/G9 — a `@requires` closure that is not a DAG. NAMED rather than
+    /// folded into `RequiresNotSatisfied`, which belongs to the PREFAB
+    /// `requires` clause (`prefab "X" extends "Y" requires Health`) — a
+    /// different construct, and conflating the two would make one diagnostic
+    /// answer for two faults.
+    RequiresCycle,
     OutOfMemory,
 };
 
@@ -192,6 +199,7 @@ pub fn cookScene(
     errdefer b.arena.deinit();
 
     try b.registerDecls(diag_out);
+    try b.finalizeDecls(diag_out);
     const scene_decl = try b.findScene(diag_out);
     const model = try b.build(scene_decl, base_resolver, diag_out);
 
@@ -261,6 +269,7 @@ pub fn cookPrefab(
     errdefer b.arena.deinit();
 
     try b.registerDecls(diag_out);
+    try b.finalizeDecls(diag_out);
     const prefab_decl = try b.findPrefab(diag_out);
     const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
 
@@ -363,6 +372,24 @@ const Builder = struct {
 
     /// Pass A: register every `component`/`resource` declaration into the
     /// registry via the shared `interp.compileTypeDecl` path.
+    /// After every declaration is registered, resolve the `@requires` closures
+    /// ONCE. Called at the END of the pass and not per declaration, because a
+    /// declaration may name a component registered later — Etch admits forward
+    /// references, and the descriptor carries NAMES for exactly that reason.
+    fn finalizeDecls(self: *Builder, diag_out: ?*[]const u8) CookError!void {
+        // Every arm named, no `else`: `finalizeRequires` returns exactly three
+        // errors and an `else` here would widen `CookError` with whatever it
+        // grows next, which is the opposite of what a typed error set is for.
+        self.registry.finalizeRequires(self.gpa) catch |e| switch (e) {
+            error.RequiresCycle => return fail(diag_out, error.RequiresCycle, "`@requires` closure contains a cycle"),
+            // `UndeclaredType` and not a new member: an unknown requisite IS a
+            // type the program never declared, which is exactly what that
+            // member already means.
+            error.UnknownRequisite => return fail(diag_out, error.UndeclaredType, "`@requires` names a component that does not exist"),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
+
     fn registerDecls(self: *Builder, diag_out: ?*[]const u8) CookError!void {
         const kinds = self.ast.items.items(.kind);
         const datas = self.ast.items.items(.data);
@@ -371,11 +398,23 @@ const Builder = struct {
             switch (kinds[i]) {
                 .component_decl => {
                     const decl = self.ast.component_decls.items[datas[i]];
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, diag_out) catch |e| return e;
+                    // The cook resolves the mode through the SAME resolver the
+                    // interpreter uses (`interp.storageModeOf`). Its registry is
+                    // a throwaway used for layout and size, and the on-disk
+                    // format carries no mode (`engine-scene-serialization.md`
+                    // §4) — but two registries built from one declaration that
+                    // disagreed about it would be a divergence waiting for its
+                    // first reader, and resolving costs one accessor call.
+                    const req = types_mod.requiresNamesOf(self.gpa, self.ast, decl) catch
+                        return CookError.OutOfMemory;
+                    defer self.gpa.free(req);
+                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(self.ast, decl), diag_out) catch |e| return e;
                 },
                 .resource_decl => {
                     const decl = self.ast.resource_decls.items[datas[i]];
-                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, diag_out) catch |e| return e;
+                    // `.table`: `@storage` is component-only, so a resource has
+                    // no mode to read (mirror of `compileResource`).
+                    _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out) catch |e| return e;
                 },
                 else => {},
             }
@@ -388,9 +427,11 @@ const Builder = struct {
         fields_start: u32,
         fields_len: u32,
         reg_kind: interp.RegKind,
+        requires: []const []const u8,
+        storage: weld_core.ecs.registry.StorageKind,
         diag_out: ?*[]const u8,
     ) CookError!ComponentId {
-        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, &self.literals) catch |e| switch (e) {
+        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage, &self.literals) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
             error.DuplicateComponent => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
             else => error.OutOfMemory,

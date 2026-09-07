@@ -11,7 +11,14 @@ pub const math = @import("math/math.zig");
 /// Batched-SIMD kernels (adler32 in M0.6; audio mix, skinning, … later).
 pub const simd = @import("simd/simd.zig");
 
+/// Types a dispatched job body must never receive, declared by the type and
+/// tested by a tier-agnostic comptime predicate. Consumed by BOTH `src/core/ecs`
+/// and `src/core/jobs` (M1.B/G10) — which is what put it here rather than beside
+/// the type it refuses; the module header carries the measurement.
+pub const job_bound = @import("job_bound.zig");
+
 comptime {
     _ = math;
     _ = simd;
+    _ = job_bound;
 }

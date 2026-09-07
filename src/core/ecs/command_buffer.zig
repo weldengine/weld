@@ -42,6 +42,28 @@
 const std = @import("std");
 const world_mod = @import("world.zig");
 const registry_mod = @import("registry.zig");
+const job_bound = @import("foundation").job_bound;
+
+/// Refuse, at compile time, an argument tuple that carries a `CommandBuffer`
+/// into a body a worker pool runs.
+///
+/// `engine-ecs-internals.md` §7 states it as an absolute: no job body receives
+/// a command buffer. The reason travels WITH the type — see
+/// `CommandBuffer.weld_no_job_body` — and this function is the ECS-side name
+/// for `foundation.job_bound.refuseMarkedArgs`, kept so the call sites in this
+/// tier read in this tier's vocabulary.
+///
+/// The SITE SET is derived and asserted, not maintained by hand:
+/// `tests/ecs/hybrid_query_test.zig`'s job-bound control. Why placing the
+/// marker on the type is not the same as every entry calling it is written
+/// where that reasoning failed, at `src/core/jobs/scheduler.zig`'s dispatch.
+pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
+    job_bound.refuseMarkedArgs(ArgsType);
+}
+
+/// Re-export of the tier-agnostic predicate — the SAME function, NOT a copy: a
+/// copy passes every test until it drifts.
+pub const carriesMarked = job_bound.carriesMarked;
 
 const World = world_mod.World;
 const EntityId = world_mod.EntityId;
@@ -101,6 +123,17 @@ pub const Command = union(CommandKind) {
 
 /// Per-system command buffer.
 pub const CommandBuffer = struct {
+    /// THE TYPE DECLARES ITS OWN REFUSAL, and its value is the reason.
+    ///
+    /// Read at comptime by `foundation.job_bound.refuseMarkedArgs`, which is how
+    /// the bound reaches a tier that cannot name this type: importing this file
+    /// from `src/core/jobs/` would drag `world.zig` into the job tier's graph.
+    pub const weld_no_job_body: []const u8 =
+        "a worker owns its range's storage and nothing else, so two workers " ++
+        "recording structural changes would need a deterministic merge, which " ++
+        "has no producer anywhere in the repository. Record the change outside " ++
+        "the dispatch, or dispatch a body that does not record.";
+
     /// Arena that owns payload byte copies + per-spawn id/payload
     /// slices. Reset with `retain_capacity` on every flush so the
     /// steady-state behaviour matches the `JobBuilder` arena's
