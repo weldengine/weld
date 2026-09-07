@@ -566,3 +566,81 @@ test "P1-B: a requisite ALREADY present is not re-notified" {
     try testing.expect(world.hasComponentDyn(e, c.mesh));
     try testing.expectEqual(@as(usize, 0), Seen.n);
 }
+
+// ─── Review P4 — the add path allocated once per COMMAND ────────────────────
+
+const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
+
+/// Allocator ACTIVITY and not bytes: a list regrown from empty every tick shows
+/// up here and nowhere in a byte total, which stays flat once the sizes repeat.
+fn allocOps(d: CountingAllocator.Snapshot) u64 {
+    return d.alloc_count + d.resize_ok_count + d.remap_count;
+}
+
+test "P4: an add with no closure and no listener allocates nothing of its own" {
+    var counting = CountingAllocator.init(testing.allocator);
+    const gpa = counting.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const anchor = try reg(&world, gpa, "Anchor", &.{}, .table);
+    const mark = try reg(&world, gpa, "Mark", &.{}, .sparse);
+
+    // EVERY array reaches its final size BEFORE the window, and the two measured
+    // sets then give their slots back: the sparse store's dense and index arrays
+    // grow amortised, so a window that included their growth would measure the
+    // STORE and answer a number about the observer path. Measured: without this,
+    // the same two batches read 10 and 5 rather than 10 and 0, and the 5 was the
+    // store crossing a capacity inside the second window.
+    var all: [40]EntityId = undefined;
+    for (&all) |*e| e.* = try world.spawnDynamicWithValues(gpa, &.{anchor}, &.{&word(1)});
+    for (all) |e| try world.addComponentDynamic(gpa, e, mark, &word(2));
+    for (all[20..]) |e| try world.removeComponentDynamic(gpa, e, mark);
+
+    const via_obs = all[20..30];
+    const via_raw = all[30..40];
+
+    const o0 = counting.snapshot();
+    for (via_obs) |e| {
+        const cmd: Command = .{ .add_component = .{ .entity = e, .component_id = mark, .bytes = &word(3) } };
+        try observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa);
+    }
+    const o1 = counting.snapshot();
+    for (via_raw) |e| try world.addComponentDynamic(gpa, e, mark, &word(3));
+    const o2 = counting.snapshot();
+
+    const obs_ops = allocOps(CountingAllocator.delta(o1, o0));
+    const raw_ops = allocOps(CountingAllocator.delta(o2, o1));
+
+    // THE DIFFERENTIAL is the oracle and the absolute is its corroboration: the
+    // raw path is what the observer path reduces to on this cell, so equality is
+    // the claim, and it can fail while an absolute bound of "small" could not.
+    // Measured before the fix: 10 against 0, one allocation per COMMAND.
+    try testing.expectEqual(raw_ops, obs_ops);
+    try testing.expectEqual(@as(u64, 0), obs_ops);
+
+    // NON-VACUITY, and it is a change of the OBJECT: a fast path that fired
+    // nothing ever would satisfy everything above. Register a listener for the
+    // SAME component and the same command must both notify and pay — the second
+    // half asserts the CONDITION selects the branch, not merely that the effect
+    // arrived.
+    const Seen = struct {
+        var n: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, _: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *ecs.CommandBuffer) anyerror!void {
+            n += 1;
+        }
+    };
+    Seen.n = 0;
+    try world.observer_registry.registerOnAdd(gpa, &world, mark, null, Seen.cb);
+    for (all[0..10]) |e| try world.removeComponentDynamic(gpa, e, mark);
+
+    const l0 = counting.snapshot();
+    for (all[0..10]) |e| {
+        const cmd: Command = .{ .add_component = .{ .entity = e, .component_id = mark, .bytes = &word(4) } };
+        try observers_mod.applyWithObservers(cmd, &world.observer_registry, &world, gpa);
+    }
+    const listener_ops = allocOps(CountingAllocator.delta(counting.snapshot(), l0));
+
+    try testing.expectEqual(@as(usize, 10), Seen.n);
+    try testing.expect(listener_ops > 0);
+}

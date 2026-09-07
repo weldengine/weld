@@ -684,13 +684,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // by ONE mutation now that the two questions share a walk. P2-E adds no
     // block, extending the existing job-bound differential (2167 -> 2169).
     // Re-derived from the SUITE: `2150/2169 tests passed (19 skipped)` on macOS.
-    // P3 adds TWO to `tests/etch/storage_mode_test.zig` — the two forms that
-    // broke E1216's name-based identity model, a rebound parameter name and a
-    // removal through an alias (2170 -> 2172).
-    // Re-derived from the SUITE: `2153/2172 tests passed (19 skipped)` on macOS.
+    // P3 added TWO to `tests/etch/storage_mode_test.zig` (the rebound parameter
+    // name and the removal through an alias) and P4 ONE to
+    // `tests/ecs/requires_test.zig` (the add path's per-command allocation),
+    // 2170 -> 2173.
+    // Re-derived from the SUITE: `2154/2173 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2170,
-        else => 2172,
+        .windows => 2171,
+        else => 2173,
     };
 }
 

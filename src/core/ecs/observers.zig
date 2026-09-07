@@ -451,6 +451,24 @@ pub fn applyWithObservers(
                 // a component that was already there is the same lie about the
                 // world R11 forbids in the other direction.
                 const closure = world.registry.requiresClosure(a.component_id);
+
+                // THE ORDINARY ADD NOTIFIES NOTHING, and it was paying a list to
+                // discover that (M1.B review P4). With an empty closure the
+                // notified set is a subset of `{a.component_id}`, so with no
+                // `on_add` registered for that id the loop below fires nothing
+                // whatever the presence tests answer — the two paths are
+                // fire-for-fire identical on this cell, which is why the fast
+                // one may skip straight to the add.
+                //
+                // Measured before: ten sparse adds with neither closure nor
+                // listener cost TEN allocator operations against ZERO for the
+                // same ten through `addComponentDynamic`, so the whole of it was
+                // this list, on a per-COMMAND basis, on the churn path this
+                // milestone exists to serve.
+                if (closure.len == 0 and reg.on_add.get(a.component_id) == null) {
+                    return world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
+                }
+
                 var pending: std.ArrayListUnmanaged(ComponentId) = .empty;
                 defer pending.deinit(gpa);
                 try pending.ensureTotalCapacity(gpa, closure.len + 1);
