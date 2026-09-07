@@ -1286,6 +1286,37 @@ pub fn build(b: *std.Build) void {
     );
     hybrid_bench_step.dependOn(&hybrid_bench_run.step);
 
+    // -------------------------- M1.B / P2-1 driver-election cost + flip rate --
+    //
+    // Two tracks: the cost of ONE `QueryPlan.elect` by with-set shape over a
+    // swept archetype count, and the flip rate per tick under the crossover
+    // bench's churn values — doubled with a population-MOVING churn, because the
+    // crossover's own churn leaves both populations unchanged by construction
+    // and therefore cannot flip a cardinality election at all. REPORTED, NOT
+    // GATED, on the same grounds as its sibling: the owning spec refuses to
+    // engrave a threshold and names a bench as what produces figures instead.
+    // Writes `bench/results/ecs_election.md`. Pass `-- --smoke` for a
+    // one-archetype-count CI run.
+    const election_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/ecs_election.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    election_bench_module.addImport("weld_core", core_module);
+    const election_bench_exe = b.addExecutable(.{
+        .name = "ecs-election-bench",
+        .root_module = election_bench_module,
+    });
+    b.installArtifact(election_bench_exe);
+    const election_bench_run = b.addRunArtifact(election_bench_exe);
+    election_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| election_bench_run.addArgs(args);
+    const election_bench_step = b.step(
+        "bench-ecs-election",
+        "Run the M1.B driver-election bench (reported, not gated; writes bench/results/ecs_election.md)",
+    );
+    election_bench_step.dependOn(&election_bench_run.step);
+
     // ------------------------------ M1.1.4 forge narrowphase fast-path bench --
     //
     // Per-pair dispatched `collideOrdered` vs the generic GJK/EPA oracle
