@@ -4790,47 +4790,68 @@ pub const TypeChecker = struct {
         return self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
     }
 
-    /// Whether `decl`'s requisite closure reaches `decl` itself.
+    /// Whether `decl`'s transitive requisite closure reaches `target`.
     ///
-    /// Bounded by the declaration count rather than by a visited set: the walk
-    /// is a reachability question over a graph whose size is known, and a
-    /// bound that cannot be exceeded needs no allocation on the type-check path.
-    fn requiresReachesSelf(self: *TypeChecker, decl: ast_mod.ComponentDecl) !bool {
-        var frontier: [64]ast_mod.StringId = undefined;
-        var n: usize = 0;
-        const push = struct {
-            fn f(list: *[64]ast_mod.StringId, len: *usize, sid: ast_mod.StringId) void {
-                for (list[0..len.*]) |x| if (x == sid) return;
-                if (len.* < list.len) {
-                    list[len.*] = sid;
-                    len.* += 1;
-                }
-            }
-        }.f;
+    /// **ONE walk for both questions**, which is what `closureContains`'s own
+    /// doc gave as its motive while BEING a second traversal of the same graph:
+    /// `requiresReachesSelf` asks `target == decl.name`, the removal check asks
+    /// for the component it is about to drop. Two bodies would come to disagree
+    /// about what a closure contains.
+    ///
+    /// **SIZED ON THE GRAPH, not on a constant.** Both bodies declared
+    /// `[64]StringId` and abandoned SILENTLY past it, while the doc claimed a
+    /// bound "by the declaration count" — a sentence claiming a property its
+    /// code did not have. A cycle of 65 components produced no `requires_cycle`
+    /// at all and the language validation accepted an invalid program, the
+    /// registry refusing it only later. Refusing an invalid program is worth an
+    /// allocation on the type-check path, which is what that sentence already
+    /// promised.
+    ///
+    /// Terminates without a step budget: a name enters the frontier at most
+    /// once and `head` only advances.
+    fn requisiteClosureReaches(
+        self: *TypeChecker,
+        decl: ast_mod.ComponentDecl,
+        target: ast_mod.StringId,
+    ) !bool {
+        var frontier: std.ArrayListUnmanaged(ast_mod.StringId) = .empty;
+        defer frontier.deinit(self.gpa);
+        // A HINT and not a bound: a name that is not a declared component enters
+        // the frontier too (`requisiteDecl` answers null for those), so the list
+        // must be free to exceed this.
+        try frontier.ensureTotalCapacity(self.gpa, self.arena.component_decls.items.len);
 
         if (self.arena.requiresAnnotation(decl)) |a| {
-            var i: u32 = 0;
-            while (i < a.args_len) : (i += 1) {
-                if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
-            }
+            try self.pushRequisites(&frontier, a);
         }
         var head: usize = 0;
-        while (head < n) : (head += 1) {
-            if (frontier[head] == decl.name) return true;
-            const d = self.requisiteDecl(frontier[head]) orelse continue;
+        while (head < frontier.items.len) : (head += 1) {
+            if (frontier.items[head] == target) return true;
+            const d = self.requisiteDecl(frontier.items[head]) orelse continue;
             if (self.arena.requiresAnnotation(d)) |a| {
-                var i: u32 = 0;
-                while (i < a.args_len) : (i += 1) {
-                    if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
-                }
+                try self.pushRequisites(&frontier, a);
             }
         }
-        // Terminates without a step budget: `push` DEDUPLICATES, so `n` grows
-        // at most once per distinct name and `head` only advances. The 64-name
-        // frontier is the bound, and a program past it silently stops
-        // widening — recorded rather than hidden, and a component graph of 64
-        // requisites is past every shape the corpus shows.
         return false;
+    }
+
+    /// Append every bare-type-path argument of `annot`, deduplicated.
+    fn pushRequisites(
+        self: *TypeChecker,
+        frontier: *std.ArrayListUnmanaged(ast_mod.StringId),
+        annot: ast_mod.Annotation,
+    ) !void {
+        var i: u32 = 0;
+        while (i < annot.args_len) : (i += 1) {
+            const sid = self.arena.requiresTypeNameAt(annot, i) orelse continue;
+            if (std.mem.indexOfScalar(ast_mod.StringId, frontier.items, sid) != null) continue;
+            try frontier.append(self.gpa, sid);
+        }
+    }
+
+    /// Whether `decl`'s requisite closure reaches `decl` itself.
+    fn requiresReachesSelf(self: *TypeChecker, decl: ast_mod.ComponentDecl) !bool {
+        return self.requisiteClosureReaches(decl, decl.name);
     }
 
     /// Whether `recv` is the identity the rule's `when` selects.
@@ -4879,7 +4900,7 @@ pub const TypeChecker = struct {
         self: *TypeChecker,
         target: ast_mod.StringId,
         ctx: *RuleCtx,
-    ) ?ast_mod.StringId {
+    ) !?ast_mod.StringId {
         if (ctx.when_root == ast_mod.RuleDecl.none_when) return null;
         var it = ctx.components_in_when.keyIterator();
         while (it.next()) |k| {
@@ -4890,42 +4911,9 @@ pub const TypeChecker = struct {
             // this same receiver: it is gone by the time this command applies.
             if (ctx.removed_here.contains(requirer)) continue;
             const decl = self.requisiteDecl(requirer) orelse continue;
-            if (self.closureContains(decl, target)) return requirer;
+            if (try self.requisiteClosureReaches(decl, target)) return requirer;
         }
         return null;
-    }
-
-    /// Whether `decl`'s TRANSITIVE requisite closure contains `target`.
-    fn closureContains(self: *TypeChecker, decl: ast_mod.ComponentDecl, target: ast_mod.StringId) bool {
-        var frontier: [64]ast_mod.StringId = undefined;
-        var n: usize = 0;
-        const push = struct {
-            fn f(list: *[64]ast_mod.StringId, len: *usize, sid: ast_mod.StringId) void {
-                for (list[0..len.*]) |x| if (x == sid) return;
-                if (len.* < list.len) {
-                    list[len.*] = sid;
-                    len.* += 1;
-                }
-            }
-        }.f;
-        if (self.arena.requiresAnnotation(decl)) |a| {
-            var i: u32 = 0;
-            while (i < a.args_len) : (i += 1) {
-                if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
-            }
-        }
-        var head: usize = 0;
-        while (head < n) : (head += 1) {
-            if (frontier[head] == target) return true;
-            const d = self.requisiteDecl(frontier[head]) orelse continue;
-            if (self.arena.requiresAnnotation(d)) |a| {
-                var i: u32 = 0;
-                while (i < a.args_len) : (i += 1) {
-                    if (self.arena.requiresTypeNameAt(a, i)) |sid| push(&frontier, &n, sid);
-                }
-            }
-        }
-        return false;
     }
 
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
@@ -7496,7 +7484,7 @@ pub const TypeChecker = struct {
                         // local, a second entity — carries no guarantee and gets
                         // no diagnostic.
                         if (ctx_opt) |ctx| if (self.receiverIsSelectedEntity(mc.receiver, ctx)) {
-                            if (self.requisiteRemovalRefused(target, ctx)) |requirer| {
+                            if (try self.requisiteRemovalRefused(target, ctx)) |requirer| {
                                 try self.emit(
                                     .requisite_removal_refused,
                                     .error_,

@@ -89,10 +89,24 @@ fn carriesMarkedIn(comptime T: type, comptime seen: []const type) bool {
     }
     if (declaresMarker(T)) return true;
     const next = seen ++ [_]type{T};
+    // EXHAUSTIVE OVER `std.builtin.Type`, WITH NO `else`. An `else => false`
+    // over an enumeration of forms is the same signature as the one-level
+    // predicate P1-5 closed, and it cost one: `.error_union` fell through it, so
+    // `anyerror!*CommandBuffer` passed the bound and a worker recovered the
+    // pointer with a `catch`. Derived rather than extended — the day Zig adds a
+    // form, this switch is a compile error here instead of a silent `false`.
+    //
+    // Seven forms carry a nested type and are FOLLOWED; the other seventeen
+    // state their reason at the prong.
     return switch (@typeInfo(T)) {
+        // Followed.
         .pointer => |p| carriesMarkedIn(p.child, next),
         .optional => |o| carriesMarkedIn(o.child, next),
         .array => |a| carriesMarkedIn(a.child, next),
+        .error_union => |eu| carriesMarkedIn(eu.payload, next),
+        // A vector element may be a POINTER, so `@Vector(4, *CommandBuffer)` is
+        // expressible and reaches a body as data.
+        .vector => |v| carriesMarkedIn(v.child, next),
         .@"struct" => |st| blk: {
             inline for (st.fields) |f| {
                 if (carriesMarkedIn(f.type, next)) break :blk true;
@@ -105,7 +119,25 @@ fn carriesMarkedIn(comptime T: type, comptime seen: []const type) bool {
             }
             break :blk false;
         },
-        else => false,
+
+        // Carry no nested type at all: there is nothing to follow.
+        .type, .void, .noreturn, .bool, .int, .float => false,
+        .comptime_float, .comptime_int, .undefined, .null, .enum_literal => false,
+
+        // A set of error NAMES, no payload.
+        .error_set => false,
+        // The tag type is an integer; no user type is reachable as data.
+        .@"enum" => false,
+        // A function TYPE and not data: receiving `fn (*CommandBuffer) void`
+        // gives a body no buffer to record into. It would need one to call it,
+        // and that one reaches it through a field this walk does see.
+        .@"fn" => false,
+        // Declares no fields by definition — nothing to traverse.
+        .@"opaque" => false,
+        // Zig's async surface is unused in this language version and neither
+        // form appears in the repository. If one ever does, the absence of an
+        // `else` above is what will say so.
+        .frame, .@"anyframe" => false,
     };
 }
 

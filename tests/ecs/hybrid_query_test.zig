@@ -622,6 +622,22 @@ test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
     const Cyclic = struct { next: ?*@This() = null, v: u32 = 0 };
     try testing.expect(!carries(Cyclic));
 
+    // REVIEW P2-E — THE ERROR UNION, which fell through the old `else => false`.
+    // `anyerror!*CommandBuffer` passed the bound and a worker recovered the
+    // pointer with a `catch`; the form list is now DERIVED from
+    // `std.builtin.Type` with an exhaustive switch, so the day Zig adds a form
+    // this is a compile error rather than another silent `false`.
+    try testing.expect(carries(anyerror!*ecs.command_buffer.CommandBuffer));
+    try testing.expect(carries(error{X}!ecs.command_buffer.CommandBuffer));
+    // Nested one level further, so the fix is the TRAVERSAL and not one arm.
+    try testing.expect(carries(struct { r: anyerror!*ecs.command_buffer.CommandBuffer }));
+    // The negative twin on the same form: an error union is followed, not
+    // treated as a hit.
+    try testing.expect(!carries(anyerror!u32));
+    // A vector element may be a pointer, which is why that form is followed too.
+    try testing.expect(carries(@Vector(2, *ecs.command_buffer.CommandBuffer)));
+    try testing.expect(!carries(@Vector(4, f32)));
+
     // `forEachChunk` is deliberately UNGUARDED, and the reason is measured
     // rather than an asymmetry of convenience: its body is `for (matches) |m|
     // for (m.archetype.chunks.items) |chunk| @call(...)` — a double loop on the

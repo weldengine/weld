@@ -679,9 +679,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // the non-vacuity half, without which the retraction could be an
     // unconditional silence (2164 -> 2167). Re-derived from the SUITE:
     // `2148/2167 tests passed (19 skipped)` on macOS.
+    // P2-F adds TWO to `tests/etch/storage_mode_test.zig` — a 70-component cycle
+    // and a 70-deep closure, one per site the `[64]` cap silenced, both reddened
+    // by ONE mutation now that the two questions share a walk. P2-E adds no
+    // block, extending the existing job-bound differential (2167 -> 2169).
+    // Re-derived from the SUITE: `2150/2169 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2165,
-        else => 2167,
+        .windows => 2167,
+        else => 2169,
     };
 }
 
