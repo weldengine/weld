@@ -72,10 +72,20 @@ pub const ComponentRef = struct {
     /// **The bound, so a later reader guards the right thing:** the property
     /// holds while remove, add and despawn stay unreachable in immediate form
     /// from a body. The day one of them is not, the divergence returns and no
-    /// guard says so. Making it a language rule rather than a consequence of
-    /// what happens to be deferred belongs to `etch-memory-model.md`, which says
-    /// nothing about a component handle's lifetime today — measured, zero
-    /// occurrences.
+    /// guard says so.
+    ///
+    /// **And preserving that deferral does NOT preserve every capture** — the
+    /// sibling case has one more guardian, so a reader who guards only this one
+    /// guards half. `hybrid_query.zig`'s sparse-driven iterator holds a SLICE of
+    /// its driver's dense array, which an APPEND invalidates — the operation
+    /// this very doc says leaves every table handle valid — and what keeps an
+    /// immediate spawn out of a rule body is not deferral but the type-checker
+    /// refusing `test_world()` outside a test body.
+    ///
+    /// The rule belongs to `etch-memory-model.md` and is stated on the
+    /// OPERATIONS rather than on a handle's lifetime, which is what makes it
+    /// opposable: the charge falls on whoever makes a structural op immediate,
+    /// or exposes one to a rule body, rather than on every future capture site.
     where: Where,
 
     pub const Where = union(enum) {

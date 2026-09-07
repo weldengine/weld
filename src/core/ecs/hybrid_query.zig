@@ -3,8 +3,15 @@
 //! A query whose members span both storage backends elects **exactly one
 //! driver** — the member of smallest population, ties broken by declaration
 //! order in the query — and reaches every other member by an O(1) membership
-//! test. A query whose members are all table iterates archetypes exactly as
-//! today, and this file is not on that path.
+//! test.
+//!
+//! **Every entity-bound term reaches this file, all-table ones included.**
+//! `interp.buildSelection` calls `plan` for each satisfiable term with no
+//! branch, so an all-table term is planned, elected and walked here — its walk
+//! being `TableDrivenQuery`, which delegates to `DynamicQuery` and is therefore
+//! the archetype path unchanged. An earlier version of this header said the
+//! file was not on that path; it was wrong before P2-1 and wrong with a COST
+//! after it, the election having moved to the walk.
 //!
 //! **The contract is `engine-ecs-internals.md` §2, *Driving set des queries
 //! mixtes*, and it is a contract before it is a mechanism:**
@@ -130,8 +137,10 @@ pub fn population(world: *const World, cid: ComponentId) usize {
 /// stable across world states. That asymmetry is the contract, not an accident:
 /// deterministic, non-invariant, out of contract.
 ///
-/// Returns `.table` when `with_ids` names no sparse component, which keeps the
-/// delivered archetype path exactly as it was — this file is not on it.
+/// Returns `.table` when `with_ids` names no sparse component. `QueryPlan.elect`
+/// does not call this in that case — it answers from the absence of a sparse
+/// form — so the only callers reaching here with an all-table set are direct
+/// ones, tests among them.
 pub fn electDriver(world: *const World, with_ids: []const ComponentId) Driver {
     var best: ?struct { cid: ComponentId, pop: usize, sparse: bool } = null;
     for (with_ids) |cid| {
@@ -525,6 +534,15 @@ pub const QueryPlan = struct {
     /// Called once per walk per term, and `population` is O(archetypes) for a
     /// table member — the cost the milestone measures rather than assumes.
     pub fn elect(self: *const QueryPlan, world: *const World) Walk {
+        // NO sparse form means ONE possible election, and skipping it is the
+        // absence of a choice rather than a saving. Without this, a term of
+        // table members only pays `population` — O(archetypes) per member,
+        // measured at 8025 ns for eight members over 256 archetypes — on every
+        // tick, for a decision with one outcome. No test can see the difference:
+        // the elected walk is identical either way, so the guard against
+        // restoring the unconditional form is this sentence and
+        // `bench/ecs_election.zig`, nothing else.
+        if (self.sparse.len == 0) return .table;
         switch (electDriver(world, self.with_ids)) {
             .table => return .table,
             .sparse => |cid| {

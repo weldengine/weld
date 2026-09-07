@@ -10,10 +10,10 @@ CEILING at that archetype count and not a typical case.
 
 | with-set | A=1 | A=4 | A=16 | A=64 | A=256 | 
 |---|---|---|---|---|---|
-| 2 sparse | 0 | 0 | 0 | 0 | 0 | 
-| 8 sparse | 0 | 0 | 0 | 0 | 0 | 
-| 1 table + 1 sparse | 0 | 0 | 0 | 0 | 0 | 
-| 1 table + 7 sparse | 0 | 0 | 0 | 0 | 0 | 
+| 2 sparse | 6 | 5 | 5 | 5 | 5 | 
+| 8 sparse | 14 | 14 | 13 | 13 | 11 | 
+| 1 table + 1 sparse | 3 | 8 | 43 | 158 | 808 | 
+| 1 table + 7 sparse | 10 | 11 | 35 | 137 | 847 | 
 | 2 table | 0 | 0 | 0 | 0 | 0 | 
 | 8 table | 0 | 0 | 0 | 0 | 0 | 
 
@@ -30,9 +30,9 @@ a zero there a statement about the churn.
 | preserving | 1 | 0 |
 | preserving | 10 | 0 |
 | preserving | 60 | 0 |
-| moving | 1 | 0 |
-| moving | 10 | 0 |
-| moving | 60 | 0 |
-| oscillating | 1 | 0 |
+| moving | 1 | 1 |
+| moving | 10 | 1 |
+| moving | 60 | 1 |
+| oscillating | 1 | 59 |
 
-Anti-DCE checksum: 3000000
+Anti-DCE checksum: 4000304

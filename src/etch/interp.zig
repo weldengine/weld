@@ -2395,9 +2395,15 @@ pub const Interpreter = struct {
         // `query.rescanNewArchetypes`, option-β `engine-ecs-internals.md §4`):
         // O(0) in the steady state, O(new archetypes) after a spawn into a new
         // shape. Sound because an archetype's component set is immutable after
-        // creation (add/remove transitions the entity to a DIFFERENT archetype)
-        // and `world.archetypes` is append-only with stable order — a cached
-        // match never goes stale. A single term iterates its matches directly
+        // creation and `world.archetypes` is append-only with stable order — a
+        // cached match never goes stale.
+        //
+        // The parenthetical that used to carry this — "add/remove transitions
+        // the entity to a DIFFERENT archetype" — is FALSE for a sparse
+        // component, and `world.zig`'s sparse add says so in as many words: "NO
+        // archetype transition at all". The conclusion survives because a sparse
+        // member is admitted PER ENTITY and never at archetype grain, so the
+        // cached archetype set is not what would have to change. A single term iterates its matches directly
         // (ascending archetype-creation order, preserving the historical
         // direct-walk order → interp↔codegen parity); `or` unions the terms.
         try self.iterateSelection(world, rd, &rule_matched, report, null);
