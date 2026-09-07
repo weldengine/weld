@@ -1143,6 +1143,66 @@ test "P1-D: the REVERSED order still refuses the first removal" {
     try std.testing.expectEqualStrings("E1216", codes.items[0]);
 }
 
+// ─── Review P3 — the default is inverted, and the two forms that broke it ──
+
+const src_p3_masking =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\component Link { target: Entity }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh and entity has Link
+    \\{
+    \\    let l = entity.get(Link)
+    \\    let entity = l.target
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P3: a REBOUND name is not the selected identity" {
+    // The receiver test compares a `StringId`, so a `let` that rebinds the
+    // parameter's own name left the identity check answering yes about an
+    // entity the `when` says nothing about. The linked entity need carry no
+    // `Mesh`, so the removal is legal and the diagnostic was a refusal of
+    // correct code.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p3_masking, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
+const src_p3_alias =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    let alias = entity
+    \\    alias.remove(Mesh)
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P3: a removal through a SECOND name retracts the guarantee too" {
+    // The mirror image of the case above and the same cause: the retraction
+    // was keyed by receiver, so a removal of the requirer through an alias was
+    // not recorded and the guarantee survived a statement that destroyed it.
+    // `Mesh` is gone when `Transform` is removed, exactly as in the
+    // single-name form the P1-D pair already covers.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p3_alias, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
 // ─── Review P2-F — the requisite walk is sized on the graph ───────────────
 
 /// A cycle of 70 components. The walk declared `[64]StringId` and abandoned
