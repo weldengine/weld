@@ -684,9 +684,12 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // by ONE mutation now that the two questions share a walk. P2-E adds no
     // block, extending the existing job-bound differential (2167 -> 2169).
     // Re-derived from the SUITE: `2150/2169 tests passed (19 skipped)` on macOS.
+    // P1-G adds ONE to `tests/etch/storage_mode_test.zig` — a `@requires` naming
+    // a component declared LATER, which pass-1 resolution refused (2169 -> 2170).
+    // Re-derived from the SUITE: `2151/2170 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2167,
-        else => 2169,
+        .windows => 2168,
+        else => 2170,
     };
 }
 

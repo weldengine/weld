@@ -1374,225 +1374,230 @@ test "P2-F: a cycle longer than the old 64-name frontier is refused" {
     var saw_cycle = false;
     for (codes.items) |c| {
         if (std.mem.eql(u8, c, "E0505")) saw_cycle = true;
+        // P1-G: every reference in this cycle is FORWARD for some member, and
+        // pass-1 resolution refused those. Nothing here is an unknown requisite.
+        try std.testing.expect(!std.mem.eql(u8, c, "E0506"));
     }
     try std.testing.expect(saw_cycle);
 }
 
 /// A CHAIN of 70 requisites, not a cycle, whose last member the rule removes —
-/// declared LEAF FIRST so no reference is forward. The removal check walks the
-/// same frontier, so it carried the same cap.
+/// declared in its NATURAL order, root first. It declared LEAF FIRST until
+/// P1-G, because `@requires` resolved in pass 1 and a forward reference was
+/// refused: a test whose declaration order is constrained by a defect documents
+/// the defect without saying so.
 const src_p2f_chain =
-    \\component C70 { v: i32 = 0 }
-    \\
-    \\@requires(C70)
-    \\component C69 { v: i32 = 0 }
-    \\
-    \\@requires(C69)
-    \\component C68 { v: i32 = 0 }
-    \\
-    \\@requires(C68)
-    \\component C67 { v: i32 = 0 }
-    \\
-    \\@requires(C67)
-    \\component C66 { v: i32 = 0 }
-    \\
-    \\@requires(C66)
-    \\component C65 { v: i32 = 0 }
-    \\
-    \\@requires(C65)
-    \\component C64 { v: i32 = 0 }
-    \\
-    \\@requires(C64)
-    \\component C63 { v: i32 = 0 }
-    \\
-    \\@requires(C63)
-    \\component C62 { v: i32 = 0 }
-    \\
-    \\@requires(C62)
-    \\component C61 { v: i32 = 0 }
-    \\
-    \\@requires(C61)
-    \\component C60 { v: i32 = 0 }
-    \\
-    \\@requires(C60)
-    \\component C59 { v: i32 = 0 }
-    \\
-    \\@requires(C59)
-    \\component C58 { v: i32 = 0 }
-    \\
-    \\@requires(C58)
-    \\component C57 { v: i32 = 0 }
-    \\
-    \\@requires(C57)
-    \\component C56 { v: i32 = 0 }
-    \\
-    \\@requires(C56)
-    \\component C55 { v: i32 = 0 }
-    \\
-    \\@requires(C55)
-    \\component C54 { v: i32 = 0 }
-    \\
-    \\@requires(C54)
-    \\component C53 { v: i32 = 0 }
-    \\
-    \\@requires(C53)
-    \\component C52 { v: i32 = 0 }
-    \\
-    \\@requires(C52)
-    \\component C51 { v: i32 = 0 }
-    \\
-    \\@requires(C51)
-    \\component C50 { v: i32 = 0 }
-    \\
-    \\@requires(C50)
-    \\component C49 { v: i32 = 0 }
-    \\
-    \\@requires(C49)
-    \\component C48 { v: i32 = 0 }
-    \\
-    \\@requires(C48)
-    \\component C47 { v: i32 = 0 }
-    \\
-    \\@requires(C47)
-    \\component C46 { v: i32 = 0 }
-    \\
-    \\@requires(C46)
-    \\component C45 { v: i32 = 0 }
-    \\
-    \\@requires(C45)
-    \\component C44 { v: i32 = 0 }
-    \\
-    \\@requires(C44)
-    \\component C43 { v: i32 = 0 }
-    \\
-    \\@requires(C43)
-    \\component C42 { v: i32 = 0 }
-    \\
-    \\@requires(C42)
-    \\component C41 { v: i32 = 0 }
-    \\
-    \\@requires(C41)
-    \\component C40 { v: i32 = 0 }
-    \\
-    \\@requires(C40)
-    \\component C39 { v: i32 = 0 }
-    \\
-    \\@requires(C39)
-    \\component C38 { v: i32 = 0 }
-    \\
-    \\@requires(C38)
-    \\component C37 { v: i32 = 0 }
-    \\
-    \\@requires(C37)
-    \\component C36 { v: i32 = 0 }
-    \\
-    \\@requires(C36)
-    \\component C35 { v: i32 = 0 }
-    \\
-    \\@requires(C35)
-    \\component C34 { v: i32 = 0 }
-    \\
-    \\@requires(C34)
-    \\component C33 { v: i32 = 0 }
-    \\
-    \\@requires(C33)
-    \\component C32 { v: i32 = 0 }
-    \\
-    \\@requires(C32)
-    \\component C31 { v: i32 = 0 }
-    \\
-    \\@requires(C31)
-    \\component C30 { v: i32 = 0 }
-    \\
-    \\@requires(C30)
-    \\component C29 { v: i32 = 0 }
-    \\
-    \\@requires(C29)
-    \\component C28 { v: i32 = 0 }
-    \\
-    \\@requires(C28)
-    \\component C27 { v: i32 = 0 }
-    \\
-    \\@requires(C27)
-    \\component C26 { v: i32 = 0 }
-    \\
-    \\@requires(C26)
-    \\component C25 { v: i32 = 0 }
-    \\
-    \\@requires(C25)
-    \\component C24 { v: i32 = 0 }
-    \\
-    \\@requires(C24)
-    \\component C23 { v: i32 = 0 }
-    \\
-    \\@requires(C23)
-    \\component C22 { v: i32 = 0 }
-    \\
-    \\@requires(C22)
-    \\component C21 { v: i32 = 0 }
-    \\
-    \\@requires(C21)
-    \\component C20 { v: i32 = 0 }
-    \\
-    \\@requires(C20)
-    \\component C19 { v: i32 = 0 }
-    \\
-    \\@requires(C19)
-    \\component C18 { v: i32 = 0 }
-    \\
-    \\@requires(C18)
-    \\component C17 { v: i32 = 0 }
-    \\
-    \\@requires(C17)
-    \\component C16 { v: i32 = 0 }
-    \\
-    \\@requires(C16)
-    \\component C15 { v: i32 = 0 }
-    \\
-    \\@requires(C15)
-    \\component C14 { v: i32 = 0 }
-    \\
-    \\@requires(C14)
-    \\component C13 { v: i32 = 0 }
-    \\
-    \\@requires(C13)
-    \\component C12 { v: i32 = 0 }
-    \\
-    \\@requires(C12)
-    \\component C11 { v: i32 = 0 }
-    \\
-    \\@requires(C11)
-    \\component C10 { v: i32 = 0 }
-    \\
-    \\@requires(C10)
-    \\component C9 { v: i32 = 0 }
-    \\
-    \\@requires(C9)
-    \\component C8 { v: i32 = 0 }
-    \\
-    \\@requires(C8)
-    \\component C7 { v: i32 = 0 }
-    \\
-    \\@requires(C7)
-    \\component C6 { v: i32 = 0 }
-    \\
-    \\@requires(C6)
-    \\component C5 { v: i32 = 0 }
-    \\
-    \\@requires(C5)
-    \\component C4 { v: i32 = 0 }
-    \\
-    \\@requires(C4)
-    \\component C3 { v: i32 = 0 }
-    \\
-    \\@requires(C3)
-    \\component C2 { v: i32 = 0 }
+    \\@requires(C1)
+    \\component C0 { v: i32 = 0 }
     \\
     \\@requires(C2)
     \\component C1 { v: i32 = 0 }
     \\
-    \\@requires(C1)
-    \\component C0 { v: i32 = 0 }
+    \\@requires(C3)
+    \\component C2 { v: i32 = 0 }
+    \\
+    \\@requires(C4)
+    \\component C3 { v: i32 = 0 }
+    \\
+    \\@requires(C5)
+    \\component C4 { v: i32 = 0 }
+    \\
+    \\@requires(C6)
+    \\component C5 { v: i32 = 0 }
+    \\
+    \\@requires(C7)
+    \\component C6 { v: i32 = 0 }
+    \\
+    \\@requires(C8)
+    \\component C7 { v: i32 = 0 }
+    \\
+    \\@requires(C9)
+    \\component C8 { v: i32 = 0 }
+    \\
+    \\@requires(C10)
+    \\component C9 { v: i32 = 0 }
+    \\
+    \\@requires(C11)
+    \\component C10 { v: i32 = 0 }
+    \\
+    \\@requires(C12)
+    \\component C11 { v: i32 = 0 }
+    \\
+    \\@requires(C13)
+    \\component C12 { v: i32 = 0 }
+    \\
+    \\@requires(C14)
+    \\component C13 { v: i32 = 0 }
+    \\
+    \\@requires(C15)
+    \\component C14 { v: i32 = 0 }
+    \\
+    \\@requires(C16)
+    \\component C15 { v: i32 = 0 }
+    \\
+    \\@requires(C17)
+    \\component C16 { v: i32 = 0 }
+    \\
+    \\@requires(C18)
+    \\component C17 { v: i32 = 0 }
+    \\
+    \\@requires(C19)
+    \\component C18 { v: i32 = 0 }
+    \\
+    \\@requires(C20)
+    \\component C19 { v: i32 = 0 }
+    \\
+    \\@requires(C21)
+    \\component C20 { v: i32 = 0 }
+    \\
+    \\@requires(C22)
+    \\component C21 { v: i32 = 0 }
+    \\
+    \\@requires(C23)
+    \\component C22 { v: i32 = 0 }
+    \\
+    \\@requires(C24)
+    \\component C23 { v: i32 = 0 }
+    \\
+    \\@requires(C25)
+    \\component C24 { v: i32 = 0 }
+    \\
+    \\@requires(C26)
+    \\component C25 { v: i32 = 0 }
+    \\
+    \\@requires(C27)
+    \\component C26 { v: i32 = 0 }
+    \\
+    \\@requires(C28)
+    \\component C27 { v: i32 = 0 }
+    \\
+    \\@requires(C29)
+    \\component C28 { v: i32 = 0 }
+    \\
+    \\@requires(C30)
+    \\component C29 { v: i32 = 0 }
+    \\
+    \\@requires(C31)
+    \\component C30 { v: i32 = 0 }
+    \\
+    \\@requires(C32)
+    \\component C31 { v: i32 = 0 }
+    \\
+    \\@requires(C33)
+    \\component C32 { v: i32 = 0 }
+    \\
+    \\@requires(C34)
+    \\component C33 { v: i32 = 0 }
+    \\
+    \\@requires(C35)
+    \\component C34 { v: i32 = 0 }
+    \\
+    \\@requires(C36)
+    \\component C35 { v: i32 = 0 }
+    \\
+    \\@requires(C37)
+    \\component C36 { v: i32 = 0 }
+    \\
+    \\@requires(C38)
+    \\component C37 { v: i32 = 0 }
+    \\
+    \\@requires(C39)
+    \\component C38 { v: i32 = 0 }
+    \\
+    \\@requires(C40)
+    \\component C39 { v: i32 = 0 }
+    \\
+    \\@requires(C41)
+    \\component C40 { v: i32 = 0 }
+    \\
+    \\@requires(C42)
+    \\component C41 { v: i32 = 0 }
+    \\
+    \\@requires(C43)
+    \\component C42 { v: i32 = 0 }
+    \\
+    \\@requires(C44)
+    \\component C43 { v: i32 = 0 }
+    \\
+    \\@requires(C45)
+    \\component C44 { v: i32 = 0 }
+    \\
+    \\@requires(C46)
+    \\component C45 { v: i32 = 0 }
+    \\
+    \\@requires(C47)
+    \\component C46 { v: i32 = 0 }
+    \\
+    \\@requires(C48)
+    \\component C47 { v: i32 = 0 }
+    \\
+    \\@requires(C49)
+    \\component C48 { v: i32 = 0 }
+    \\
+    \\@requires(C50)
+    \\component C49 { v: i32 = 0 }
+    \\
+    \\@requires(C51)
+    \\component C50 { v: i32 = 0 }
+    \\
+    \\@requires(C52)
+    \\component C51 { v: i32 = 0 }
+    \\
+    \\@requires(C53)
+    \\component C52 { v: i32 = 0 }
+    \\
+    \\@requires(C54)
+    \\component C53 { v: i32 = 0 }
+    \\
+    \\@requires(C55)
+    \\component C54 { v: i32 = 0 }
+    \\
+    \\@requires(C56)
+    \\component C55 { v: i32 = 0 }
+    \\
+    \\@requires(C57)
+    \\component C56 { v: i32 = 0 }
+    \\
+    \\@requires(C58)
+    \\component C57 { v: i32 = 0 }
+    \\
+    \\@requires(C59)
+    \\component C58 { v: i32 = 0 }
+    \\
+    \\@requires(C60)
+    \\component C59 { v: i32 = 0 }
+    \\
+    \\@requires(C61)
+    \\component C60 { v: i32 = 0 }
+    \\
+    \\@requires(C62)
+    \\component C61 { v: i32 = 0 }
+    \\
+    \\@requires(C63)
+    \\component C62 { v: i32 = 0 }
+    \\
+    \\@requires(C64)
+    \\component C63 { v: i32 = 0 }
+    \\
+    \\@requires(C65)
+    \\component C64 { v: i32 = 0 }
+    \\
+    \\@requires(C66)
+    \\component C65 { v: i32 = 0 }
+    \\
+    \\@requires(C67)
+    \\component C66 { v: i32 = 0 }
+    \\
+    \\@requires(C68)
+    \\component C67 { v: i32 = 0 }
+    \\
+    \\@requires(C69)
+    \\component C68 { v: i32 = 0 }
+    \\
+    \\@requires(C70)
+    \\component C69 { v: i32 = 0 }
+    \\
+    \\component C70 { v: i32 = 0 }
     \\
     \\rule strip(entity: Entity)
     \\    when entity has C0
@@ -1608,4 +1613,27 @@ test "P2-F: the removal check reaches past the old 64-name frontier" {
     try diagCodes(gpa, src_p2f_chain, &codes);
     try std.testing.expectEqual(@as(usize, 1), codes.items.len);
     try std.testing.expectEqualStrings("E1216", codes.items[0]);
+}
+
+// ─── Review P1-G — a forward `@requires` reference resolves ────────────────
+
+const src_p1g_forward =
+    \\@requires(Body)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\component Body { m: float = 1.0 }
+;
+
+test "P1-G: a `@requires` naming a component declared LATER resolves" {
+    // The type-checker runs two passes and a forward reference resolves
+    // everywhere else in the language; `checkRequiresAnnotation` ran in pass 1,
+    // inside the loop that registers the symbols, so it asked the table for a
+    // name it had not reached. A declaration order legal everywhere was illegal
+    // there — E0506 on correct code, the third instance of the class P1-C and
+    // P1-D closed.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p1g_forward, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }

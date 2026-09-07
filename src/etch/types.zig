@@ -3311,7 +3311,9 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.checkStorageAnnotation(decl);
-                    try self.checkRequiresAnnotation(decl);
+                    // `@requires` is NOT resolved here — see `pass2Resolve`.
+                    // Pass 1 is the loop that BUILDS the symbol table, so a name
+                    // declared further down the file is not in it yet.
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
@@ -4294,6 +4296,13 @@ pub const TypeChecker = struct {
                 .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
                 .impl_decl => try self.checkImpl(self.arena.impl_decls.items[data]),
                 .test_decl => try self.checkTest(self.arena.test_decls.items[data]),
+                // `@requires` RESOLVES HERE, and pass 2 is the earliest point at
+                // which it can: pass 1 is the loop that builds the symbol table,
+                // so it asks for names it has not reached and refuses a FORWARD
+                // reference that every other position in the language accepts.
+                // Nothing in pass 1 reads the result — the only consumers are
+                // this function's own cycle and unknown-requisite diagnostics.
+                .component_decl => try self.checkRequiresAnnotation(self.arena.component_decls.items[data]),
                 else => {},
             }
         }
