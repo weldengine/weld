@@ -1060,3 +1060,85 @@ test "P2-2: a requirer in ONE disjunct is not guaranteed, so no E1216" {
     try diagCodes(gpa, src_p22_one_disjunct, &codes);
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
+
+// ─── Review P1-C / P1-D — the receiver, and the guarantee's lifetime ───────
+
+const src_p22_foreign_receiver =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\component Link { target: Entity }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh and entity has Link
+    \\{
+    \\    let l = entity.get(Link)
+    \\    l.target.remove(Transform)
+    \\}
+;
+
+test "P1-C: the `when` guarantee is about the SELECTED entity, not any receiver" {
+    // The rule's selection guarantees `Mesh` on the entity it selects, and says
+    // NOTHING about `l.target`. Judging the target by the selection refuses a
+    // program that is correct at run — the expensive failure direction for a
+    // check whose bound was narrow on purpose.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_foreign_receiver, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
+const src_p22_sequential =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    entity.remove(Mesh)
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P1-D: a requirer removed FIRST retracts the guarantee" {
+    // The two commands apply in the order the body writes them, so `Mesh` is
+    // gone when `Transform` is removed and the removal succeeds. A guarantee
+    // read as PERMANENT diagnoses a legal program.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_sequential, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
+const src_p22_sequential_reversed =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    entity.remove(Transform)
+    \\    entity.remove(Mesh)
+    \\}
+;
+
+test "P1-D: the REVERSED order still refuses the first removal" {
+    // THE NON-VACUITY HALF, and without it the retraction could be an
+    // unconditional silence: at the moment `Transform` is removed `Mesh` is
+    // still there, so that statement is dead exactly as before, and only the
+    // ORDER separates this program from the one above.
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p22_sequential_reversed, &codes);
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+}

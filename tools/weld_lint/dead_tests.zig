@@ -674,9 +674,14 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // an already-present requisite not being re-notified (2162 -> 2164). The
     // repointing of the typed-spawn test adds no block. Re-derived from the
     // SUITE: `2145/2164 tests passed (19 skipped)` on macOS.
+    // P1-C and P1-D add THREE to `tests/etch/storage_mode_test.zig`: the foreign
+    // receiver, the sequential removal, and its REVERSED order — the last being
+    // the non-vacuity half, without which the retraction could be an
+    // unconditional silence (2164 -> 2167). Re-derived from the SUITE:
+    // `2148/2167 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2162,
-        else => 2164,
+        .windows => 2165,
+        else => 2167,
     };
 }
 

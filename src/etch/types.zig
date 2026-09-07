@@ -4413,12 +4413,38 @@ pub const TypeChecker = struct {
         /// in it — and a GUARANTEE needs the tree. Stored rather than resolved
         /// into a second set: the walk is needed only where a `remove` appears.
         when_root: u32 = ast_mod.RuleDecl.none_when,
+        /// The name of the rule parameter typed `Entity` — the identity the
+        /// `when` clause SELECTS (M1.B review P1-C). Null outside a rule, and
+        /// null for a rule that binds no entity.
+        ///
+        /// A `when` guarantee is about that identity and no other. Without this,
+        /// `link.target.remove(Transform)` was refused because the SELECTED
+        /// entity carries `Mesh` — a diagnostic on correct code, which is the
+        /// expensive failure direction for a check whose bound was narrow on
+        /// purpose.
+        selected_entity: ?StringId = null,
+        /// Components this body has already removed FROM the selected entity, in
+        /// the order the body writes them (M1.B review P1-D).
+        ///
+        /// A `when` guarantee is not PERMANENT: `entity.remove(Mesh)` then
+        /// `entity.remove(Transform)` is legal, the commands applying in that
+        /// order. `checkRule` walks the body statements in order, so every prior
+        /// statement has been checked when a `remove` is reached — which is
+        /// exactly the ordering this needs and the only one the type-checker has.
+        ///
+        /// Under NESTING the record is imprecise in the SUPPRESSION direction
+        /// only: a removal inside an `if` counts as prior, so a diagnostic that
+        /// might have been warranted is withheld, and none is ever manufactured.
+        /// That is the direction the imprecision must fall — refusing correct
+        /// code is the expensive failure, which is why the bound was narrow.
+        removed_here: std.AutoHashMapUnmanaged(StringId, void) = .empty,
         /// Local variables in the rule body, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
 
         pub const Local = struct { type_: ResolvedType, is_mut: bool };
 
         pub fn deinit(self: *RuleCtx, gpa: std.mem.Allocator) void {
+            self.removed_here.deinit(gpa);
             self.components_in_when.deinit(gpa);
             self.resources_in_when.deinit(gpa);
             self.locals.deinit(gpa);
@@ -4534,6 +4560,9 @@ pub const TypeChecker = struct {
                 } else {
                     try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
                 }
+            }
+            if (ptype == .builtin and ptype.builtin == .entity and ctx.selected_entity == null) {
+                ctx.selected_entity = p.name;
             }
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
@@ -4804,6 +4833,17 @@ pub const TypeChecker = struct {
         return false;
     }
 
+    /// Whether `recv` is the identity the rule's `when` selects.
+    ///
+    /// A bare identifier equal to the rule's `Entity` parameter, and nothing
+    /// else: a field access, a local bound from a query, or a second entity
+    /// parameter is a DIFFERENT identity that the `when` says nothing about.
+    fn receiverIsSelectedEntity(self: *TypeChecker, recv: NodeId, ctx: *RuleCtx) bool {
+        const sel = ctx.selected_entity orelse return false;
+        if (self.arena.exprKind(recv) != .ident) return false;
+        return self.arena.exprData(recv) == sel;
+    }
+
     /// Whether the `when` subtree at `idx` GUARANTEES `name`'s presence.
     ///
     /// `and` is satisfied by either side, `or` requires **BOTH** — a component
@@ -4846,6 +4886,9 @@ pub const TypeChecker = struct {
             const requirer = k.*;
             if (requirer == target) continue;
             if (!self.whenGuarantees(ctx.when_root, requirer)) continue;
+            // The guarantee is RETRACTED by a prior removal of the requirer on
+            // this same receiver: it is gone by the time this command applies.
+            if (ctx.removed_here.contains(requirer)) continue;
             const decl = self.requisiteDecl(requirer) orelse continue;
             if (self.closureContains(decl, target)) return requirer;
         }
@@ -7447,7 +7490,12 @@ pub const TypeChecker = struct {
                         // closure graph and the rule's selection; what an entity
                         // carries at runtime it does not, and that half is
                         // G9's counted skip plus one warning per tick.
-                        if (ctx_opt) |ctx| {
+                        // THE RECEIVER, not merely the rule context. The `when`
+                        // guarantee is about the identity the `when` selects, so
+                        // a removal on any other receiver — a field access, a
+                        // local, a second entity — carries no guarantee and gets
+                        // no diagnostic.
+                        if (ctx_opt) |ctx| if (self.receiverIsSelectedEntity(mc.receiver, ctx)) {
                             if (self.requisiteRemovalRefused(target, ctx)) |requirer| {
                                 try self.emit(
                                     .requisite_removal_refused,
@@ -7457,7 +7505,13 @@ pub const TypeChecker = struct {
                                     .{ self.arena.strings.slice(target), self.arena.strings.slice(requirer) },
                                 );
                             }
-                        }
+                            // RECORDED AFTER the check, so `remove(Mesh)` then
+                            // `remove(Transform)` is legal while
+                            // `remove(Transform)` then `remove(Mesh)` still
+                            // diagnoses the first — the commands apply in the
+                            // order the body writes them.
+                            ctx.removed_here.put(self.gpa, target, {}) catch {};
+                        };
                     }
                 }
                 return ResolvedType.unknown;
