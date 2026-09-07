@@ -755,7 +755,16 @@ test "the typed spawn path serves a sparse core component instead of panicking" 
         .storage = .sparse,
     });
 
-    const e = try world.spawn(gpa, .{}, .{});
+    // NON-DEFAULT VALUES, and that is what makes this test read what it claims.
+    // It passed `.{}, .{}` and asserted PRESENCE only, so it could not tell "the
+    // caller's value was transmitted" from "the registry default was written" —
+    // and the sparse arm was written the default. Measured: repointed onto these
+    // values it is RED before the fix.
+    const e = try world.spawn(
+        gpa,
+        .{ .pos = .{ 1, 2, 3 } },
+        .{ .linear = .{ 4, 5, 6 } },
+    );
     const vid = world.registry.idOf(@typeName(world_mod.Velocity)).?;
     const tid = world.registry.idOf(@typeName(world_mod.Transform)).?;
     try testing.expect(world.hasComponentDyn(e, vid));
@@ -763,6 +772,12 @@ test "the typed spawn path serves a sparse core component instead of panicking" 
     const arch = world.dynamicArchetype(world.dynamicLocation(e).?.archetype_idx);
     try testing.expect(arch.hasComponent(tid));
     try testing.expect(!arch.hasComponent(vid));
+
+    // The TABLE half was already correct; the SPARSE half is the finding.
+    const t: *const world_mod.Transform = @ptrCast(@alignCast(world.componentBytes(e, tid).?.ptr));
+    try testing.expectEqual(@as(f32, 2), t.pos[1]);
+    const v: *const world_mod.Velocity = @ptrCast(@alignCast(world.componentBytes(e, vid).?.ptr));
+    try testing.expectEqual(@as(f32, 5), v.linear[1]);
 }
 
 test "a duplicate sparse id in a spawn is refused, not written twice" {

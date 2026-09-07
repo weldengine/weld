@@ -1021,6 +1021,11 @@ pub const World = struct {
         // the split runs anyway: the funnel takes no other input, and a path
         // exempted because its ids look trustworthy is the path that breaks
         // the day one of them is registered differently.
+        // CAPTURED BEFORE THE SPLIT, which permutes `ids` in place — the pairing
+        // `addSparsePayloads` scans is by id, and the order it scans must be one
+        // the permutation has not touched.
+        const named_ids = [_]ComponentId{ id_t, id_v };
+        const named_vals = [_][]const u8{ std.mem.asBytes(&transform), std.mem.asBytes(&velocity) };
         const split = self.splitByStorage(ids[0..]);
         // Without this, `addSparsePayloads` below unwraps `sparse_stores.get(cid).?`
         // on a store that was never declared and PANICS. The comment above says
@@ -1034,7 +1039,13 @@ pub const World = struct {
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(eid);
 
-        try self.addSparsePayloads(gpa, eid, split.sparse, null, null);
+        // THE CALLER'S VALUES, never `null, null`. Null writes the REGISTRY
+        // DEFAULT, so a component registered `.sparse` silently lost the value
+        // this entry was handed — the two named payloads reaching only the
+        // archetype's columns below. `spawnDynamic` passes null CORRECTLY, having
+        // no values at all, which is why the mutation helper's count assertion
+        // refused a first attempt aimed at both sites.
+        try self.addSparsePayloads(gpa, eid, split.sparse, named_vals[0..], named_ids[0..]);
         errdefer self.removeSparsePayloads(eid, split.sparse);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
