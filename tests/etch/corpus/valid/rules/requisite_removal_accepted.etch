@@ -1,0 +1,22 @@
+// M1.B/P5 — a rule whose `when` guarantees the requirer's presence removes a
+// member of that requirer's `@requires` closure. The runtime refuses that ONE
+// removal and counts the skip; the program is legal and type-checks clean.
+//
+// This fixture asserted `E1216 RequisiteRemovalRefused` until P5. The static
+// check refused correct code five times in three review rounds and was retired
+// by its own stop rule, so the narrowest form it ever refused correctly now
+// sits here as a witness that the type-checker accepts it.
+component Transform {
+    x: float = 0.0
+}
+
+@requires(Transform)
+component Mesh {
+    v: i32 = 0
+}
+
+rule strip(entity: Entity)
+    when entity has Mesh
+{
+    entity.remove(Transform)
+}

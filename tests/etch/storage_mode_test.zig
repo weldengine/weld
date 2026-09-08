@@ -953,6 +953,27 @@ fn freeCodes(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) 
     list.deinit(gpa);
 }
 
+// ─── M1.B/P2-2 → P5 — `E1216` IS RETIRED, AND THIS FAMILY IS ITS RECORD ───
+//
+// The static refusal of a dead `@requires` removal refused CORRECT CODE five
+// times in three review rounds — a foreign receiver, a guarantee read as
+// permanent, a shadowed parameter name, an aliased removal, and a removal
+// performed by a call — and was removed by its own stop rule. Every test below
+// therefore asserts ZERO diagnostics, and each one is a program the checker
+// once refused or was one round away from refusing.
+//
+// TWO THINGS A READER MUST NOT TAKE FOR COVERAGE. The six cases written as
+// NEGATIVE twins — `not`, one disjunct, a foreign receiver, a prior removal, a
+// rebound name, a second name — passed before the removal and pass after it, so
+// they no longer discriminate anything on this subject; they stay because the
+// programs are legal and that is worth pinning, not because they still bite.
+// And the counter-factual that restores the check reddens the four inverted
+// cases, the moved corpus fixture and the call case, and NOT those six.
+//
+// The guarantee itself is asserted where it now lives: `tests/ecs/requires_test`
+// `G9/4`, `G9/5` and `P1-3` — a counted skip, no `on_remove`, and a grouped
+// removal that is allowed.
+
 const src_p22_guaranteed =
     \\component Transform { x: float = 0.0 }
     \\
@@ -966,17 +987,15 @@ const src_p22_guaranteed =
     \\}
 ;
 
-test "P2-2: removing a requisite the `when` guarantees is E1216" {
+test "P2-2 -> P5: the narrowest form the retired check refused is accepted" {
+    // This is the one form E1216 refused CORRECTLY — the removal is dead, the
+    // runtime skips it and counts the skip. It is accepted anyway, because the
+    // check that caught it could not be made to catch only it.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p22_guaranteed, &codes);
-
-    // The CODE and not merely "a diagnostic": `entity.remove` already emits
-    // `type_mismatch` for a non-component and for a wrong arity, so an oracle on
-    // the count could not tell this refusal from either of those.
-    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
-    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
 const src_p22_negated =
@@ -992,7 +1011,7 @@ const src_p22_negated =
     \\}
 ;
 
-test "P2-2: a requirer under `not` guarantees nothing, so no E1216" {
+test "P2-2: a requirer under `not` is a legal removal" {
     // THE NEGATIVE TWIN, and it discriminates where a positive one cannot.
     // `ctx.components_in_when` holds `Mesh` here — the collection walk recurses
     // through `not` with no context — so a check reading that set instead of
@@ -1022,17 +1041,15 @@ const src_p22_two_hop =
     \\}
 ;
 
-test "P2-2: the closure is TRANSITIVE — two hops still refuse" {
-    // `Mesh` does not name `Transform`; `Body` does. A walk that stopped at the
-    // direct requisites would answer clean, which is what the runtime does not
-    // do — `requiresClosure` is transitive, so the removal would still be
-    // refused and the program would still be dead.
+test "P2-2 -> P5: a TWO-HOP closure is accepted too" {
+    // `Mesh` does not name `Transform`; `Body` does. The runtime's closure is
+    // transitive and still refuses this removal at run — the transitivity is
+    // asserted at `requires_test` `G9/4`, on the world and not on the checker.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p22_two_hop, &codes);
-    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
-    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
 const src_p22_one_disjunct =
@@ -1049,7 +1066,7 @@ const src_p22_one_disjunct =
     \\}
 ;
 
-test "P2-2: a requirer in ONE disjunct is not guaranteed, so no E1216" {
+test "P2-2: a requirer in ONE disjunct is a legal removal" {
     // The `or` arm requires BOTH sides, which is what makes the predicate sound
     // rather than generous — and without this case that arm has no oracle at
     // all. An entity matching only the `Other` disjunct carries no `Mesh`, so
@@ -1130,17 +1147,16 @@ const src_p22_sequential_reversed =
     \\}
 ;
 
-test "P1-D: the REVERSED order still refuses the first removal" {
-    // THE NON-VACUITY HALF, and without it the retraction could be an
-    // unconditional silence: at the moment `Transform` is removed `Mesh` is
-    // still there, so that statement is dead exactly as before, and only the
-    // ORDER separates this program from the one above.
+test "P1-D -> P5: the REVERSED order is accepted, order no longer read" {
+    // The pair above and this one differ only in statement ORDER, and the
+    // checker no longer distinguishes them: both are clean. What the order
+    // decides is which removal the runtime skips, which is a runtime fact and
+    // is asserted there.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p22_sequential_reversed, &codes);
-    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
-    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
 // ─── Review P3 — the default is inverted, and the two forms that broke it ──
@@ -1200,6 +1216,41 @@ test "P3: a removal through a SECOND name retracts the guarantee too" {
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p3_alias, &codes);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
+}
+
+// ─── Review P5 — the CONTROL forms, which the inversion did not close ─────
+
+/// The requirer is removed by a CALL, not by a statement the checker reads as a
+/// removal. `removal_seen` is written at one site only — inside the `.remove`
+/// arm — so condition 3 stays false and the second removal is refused, while at
+/// run `Mesh` is already gone and the removal succeeds.
+const src_p5_call =
+    \\component Transform { x: float = 0.0 }
+    \\
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\
+    \\fn strip_requirer(e: Entity) {
+    \\    e.remove(Mesh)
+    \\}
+    \\
+    \\rule strip(entity: Entity)
+    \\    when entity has Mesh
+    \\{
+    \\    strip_requirer(entity)
+    \\    entity.remove(Transform)
+    \\}
+;
+
+test "P5: a removal through a CALL is legal, and was the fifth false refusal" {
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, src_p5_call, &codes);
+    // Measured red before the removal: `1 diagnostic(s): E1216` on a program
+    // whose second removal the runtime performs, the requirer being already
+    // gone. That is the fifth false refusal and the one the stop rule fired on.
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
@@ -1666,13 +1717,18 @@ const src_p2f_chain =
     \\}
 ;
 
-test "P2-F: the removal check reaches past the old 64-name frontier" {
+test "P2-F -> P5: a 70-name chain with a removal is accepted" {
+    // THIS TEST LOST ITS OBJECT AND SAYS SO. It existed to prove the requisite
+    // walk passes the old 64-name frontier, and the retired removal check was
+    // that walk's only caller asking about a target other than the declaration
+    // itself. The frontier bound now rests entirely on `src_p2f_cycle` above,
+    // which reaches the same walk through `requiresReachesSelf` — a distinct
+    // source, verified, not this one read twice.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p2f_chain, &codes);
-    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
-    try std.testing.expectEqualStrings("E1216", codes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
 // ─── Review P1-G — a forward `@requires` reference resolves ────────────────

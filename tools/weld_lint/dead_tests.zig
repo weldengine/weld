@@ -689,9 +689,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `tests/ecs/requires_test.zig` (the add path's per-command allocation),
     // 2170 -> 2173.
     // Re-derived from the SUITE: `2154/2173 tests passed (19 skipped)` on macOS.
+    // P5 adds ONE to `tests/etch/storage_mode_test.zig` — the removal performed
+    // by a CALL, which is the fifth false refusal `E1216` produced and the one
+    // its stop rule fired on (2173 -> 2174). The corpus fixture MOVED from
+    // `invalid/` to `valid/` and adds no block either way, both corpus drivers
+    // being one test over a declared list.
+    // Re-derived from the SUITE: `2155/2174 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2171,
-        else => 2173,
+        .windows => 2172,
+        else => 2174,
     };
 }
 

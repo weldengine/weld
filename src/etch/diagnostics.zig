@@ -107,7 +107,15 @@ pub const DiagnosticCode = enum {
     observer_signature_mismatch, // M1.0.2 E2 — E1208 ObserverSignatureMismatch (param shape ≠ lifecycle kind)
     observer_component_invalid, // M1.0.2 E2 — E1209 ObserverComponentInvalid (annotation component arg arity / not a declared component)
     observer_rule_conflict, // M1.0.2 E2 — E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
-    requisite_removal_refused, // M1.B/P2-2 — E1216 RequisiteRemovalRefused (a rule body removes a component the requirer its `when` guarantees still declares via `@requires`)
+    // M1.B/P5 — E1216 RequisiteRemovalRefused is RETIRED, and the number stays
+    // reserved rather than freed: a later E1216 on another subject would be a
+    // collision of meaning for anyone re-reading this milestone, its brief or
+    // its corpus. The static check refused correct code five times in three
+    // review rounds and was removed by its own stop rule; the `@requires`
+    // removal guarantee lives on the runtime channel alone
+    // (`World.requiresRefusesRemoval`). Same shape as E1642 / E1643 below —
+    // a variant with its code and name arms and no emitter.
+    requisite_removal_refused, // M1.B/P2-2 → P5 — E1216 RequisiteRemovalRefused (RETIRED: the static form refused correct code; runtime-only)
 
     // ── behavior (E1500-E1519, M0.8 E4 — etch-validation-ecs.md §8) ──
     behavior_root_missing, // M0.8 E4 — E1500 BehaviorRootMissing

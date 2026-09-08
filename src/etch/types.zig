@@ -4357,7 +4357,6 @@ pub const TypeChecker = struct {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
             try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
         }
-        ctx.when_root = when_root;
         if (when_root != ast_mod.RuleDecl.none_when) try self.collectWhen(&ctx, when_root);
 
         var i: u32 = 0;
@@ -4416,55 +4415,10 @@ pub const TypeChecker = struct {
         /// a when clause there (the construct's Tier-1 runtime owns the
         /// scheduling, no archetype query is derived). Rules keep the gate.
         unrestricted_ecs_access: bool = false,
-        /// The rule's `when` root, for the questions `components_in_when` cannot
-        /// answer (M1.B/P2-2). That set is FLAT — `collectWhen` recurses through
-        /// `or` and `not` with no context, so a component named under a `not` is
-        /// in it — and a GUARANTEE needs the tree. Stored rather than resolved
-        /// into a second set: the walk is needed only where a `remove` appears.
-        when_root: u32 = ast_mod.RuleDecl.none_when,
-        /// The name of the rule parameter typed `Entity` — the identity the
-        /// `when` clause SELECTS (M1.B review P1-C). Null outside a rule, and
-        /// null for a rule that binds no entity.
-        ///
-        /// A `when` guarantee is about that identity and no other. Without this,
-        /// `link.target.remove(Transform)` was refused because the SELECTED
-        /// entity carries `Mesh` — a diagnostic on correct code, which is the
-        /// expensive failure direction for a check whose bound was narrow on
-        /// purpose.
-        selected_entity: ?StringId = null,
-        /// Whether ANY removal has been reached earlier in this body, whatever
-        /// its receiver (M1.B review P1-D, then P3).
-        ///
-        /// A `when` guarantee is not PERMANENT: `entity.remove(Mesh)` then
-        /// `entity.remove(Transform)` is legal, the commands applying in that
-        /// order. `checkRule` walks the body statements in order, so every prior
-        /// statement has been checked when a `remove` is reached — which is
-        /// exactly the ordering this needs and the only one the type-checker has.
-        ///
-        /// This was a per-component map keyed on removals from the SELECTED
-        /// receiver, and that is the question this checker cannot answer:
-        /// `let alias = entity` then `alias.remove(Mesh)` removes the requirer
-        /// and was not recorded, so the guarantee outlived the statement that
-        /// destroyed it. Answering it needs alias analysis; a bool needs none.
-        ///
-        /// The imprecision falls in the SUPPRESSION direction only, twice over:
-        /// a removal inside an `if` counts as prior, and so does one on a
-        /// receiver that may well be another entity. A diagnostic that might
-        /// have been warranted is withheld and none is ever manufactured, which
-        /// is the direction it must fall.
-        removal_seen: bool = false,
         /// Local variables in the rule body, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
 
-        /// `is_selection` is true for the ONE rule parameter that set
-        /// `ctx.selected_entity`, and its DEFAULT is the mechanism: every other
-        /// binding site — `let`, `for`, `while let`, `if let`, `catch`, a spawn
-        /// or timer binding, a match arm's payload, and any form added after
-        /// this line — takes the default and therefore retracts `E1216`'s
-        /// identity proof by construction. Nothing here enumerates those forms,
-        /// deliberately: a list is what goes stale, and the review that produced
-        /// this field found the shadowing form by finding the list too short.
-        pub const Local = struct { type_: ResolvedType, is_mut: bool, is_selection: bool = false };
+        pub const Local = struct { type_: ResolvedType, is_mut: bool };
 
         pub fn deinit(self: *RuleCtx, gpa: std.mem.Allocator) void {
             self.components_in_when.deinit(gpa);
@@ -4583,13 +4537,7 @@ pub const TypeChecker = struct {
                     try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
                 }
             }
-            // The FIRST `Entity` parameter is the identity the `when` selects,
-            // and the local it binds is the only one that carries that fact —
-            // see `RuleCtx.Local.is_selection`, whose default retracts it for
-            // every rebinding this body performs afterwards.
-            const is_selection = ptype == .builtin and ptype.builtin == .entity and ctx.selected_entity == null;
-            if (is_selection) ctx.selected_entity = p.name;
-            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false, .is_selection = is_selection });
+            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
 
         // `@on_event(T)` observer: bind the implicit `event` payload (M0.8 E3,
@@ -4637,7 +4585,6 @@ pub const TypeChecker = struct {
         }
 
         // Validate when-clause and collect accessible component/resource types.
-        ctx.when_root = rule.when_root;
         if (rule.when_root != ast_mod.RuleDecl.none_when) {
             try self.collectWhen(&ctx, rule.when_root);
         }
@@ -4879,101 +4826,24 @@ pub const TypeChecker = struct {
         return self.requisiteClosureReaches(decl, decl.name);
     }
 
-    /// Whether `recv` is PROVABLY the identity the rule's `when` selects, here.
+    /// `E1216 RequisiteRemovalRefused` IS RETIRED, and the number stays
+    /// reserved (`diagnostics.zig`) so no later milestone re-uses it for another
+    /// subject. Three helpers died with it here — the guarantee walk, the
+    /// receiver-identity proof, and the refusal itself.
     ///
-    /// Two conditions and both are halves of a PROOF, not reasons to stay
-    /// silent. The receiver is a bare identifier equal to the rule's `Entity`
-    /// parameter — a field access, a local bound from a query, or a second
-    /// entity parameter is a DIFFERENT identity the `when` says nothing about.
-    /// And that name still DENOTES that parameter: the comparison is between
-    /// `StringId`s, so a `let` rebinding the parameter's own name left this
-    /// answering yes about whatever the `let` bound, which is how a rule reading
-    /// `let entity = l.target` had its correct removal refused.
-    fn receiverIsSelectedEntity(self: *TypeChecker, recv: NodeId, ctx: *RuleCtx) bool {
-        const sel = ctx.selected_entity orelse return false;
-        if (self.arena.exprKind(recv) != .ident) return false;
-        if (self.arena.exprData(recv) != sel) return false;
-        const bound = ctx.locals.get(sel) orelse return false;
-        return bound.is_selection;
-    }
-
-    /// Whether the `when` subtree at `idx` GUARANTEES `name`'s presence.
-    ///
-    /// `and` is satisfied by either side, `or` requires **BOTH** — a component
-    /// present in every disjunct is guaranteed and one present in a single
-    /// disjunct is not — and `not` guarantees nothing. That is what makes the
-    /// predicate sound rather than generous: it can under-report a guarantee and
-    /// never claim one, which is the direction a diagnostic must err in.
-    ///
-    /// `ctx.components_in_when` cannot answer this: it is populated for every
-    /// `.has` node wherever it sits.
-    fn whenGuarantees(self: *TypeChecker, idx: u32, name: ast_mod.StringId) bool {
-        const node = self.arena.when_nodes.items[idx];
-        return switch (node.kind) {
-            .has, .has_with_filter, .has_changed, .has_expr_filter => node.type_name == name,
-            .logical_and => self.whenGuarantees(node.lhs, name) or self.whenGuarantees(node.rhs, name),
-            .logical_or => self.whenGuarantees(node.lhs, name) and self.whenGuarantees(node.rhs, name),
-            else => false,
-        };
-    }
-
-    /// The requirer that refuses `target`'s removal, or null.
-    ///
-    /// A component whose presence the rule's `when` GUARANTEES and whose
-    /// `@requires` closure contains `target`: the runtime refuses that removal
-    /// unconditionally (`World.requiresRefusesRemoval`), so the statement is not
-    /// risky but DEAD — it can never have its intended effect.
-    ///
-    /// THE DEFAULT IS SILENCE, and that inversion is the whole design (M1.B/P3).
-    /// This check emitted unless it found a reason not to, and produced FOUR
-    /// refusals of correct code in three review rounds — a foreign receiver, a
+    /// It was the STATIC half of the `@requires` removal refusal, and it refused
+    /// correct code FIVE times in three review rounds: a foreign receiver, a
     /// guarantee read as permanent, a shadowed parameter name, an aliased
-    /// removal — all one sign, each found by the round after the previous fix.
-    /// The cause is single: the identity of an entity was modelled by a NAME,
-    /// and Etch's binding forms break that model in both directions. So the
-    /// three conditions below are conditions of a PROOF, all three required:
+    /// removal, and finally a removal performed by a CALL. The first four are
+    /// binding forms and were closed one at a time; the fifth is a CONTROL form,
+    /// and closing it conservatively reads "no statement before the removal",
+    /// which fires on a one-line body and is not a check.
     ///
-    ///   1. the receiver is the rule's `Entity` parameter (`receiverIsSelectedEntity`),
-    ///   2. that name still denotes it (the same call, second half),
-    ///   3. no removal appears earlier in the body, whatever its receiver.
-    ///
-    /// Condition 3 admits no exception. A prior removal could be disregarded if
-    /// it were provable that it targets a DIFFERENT entity, and nothing here can
-    /// prove that: two identifiers can alias one entity, and a field access can
-    /// name the selected entity itself. An exception with no reachable case is
-    /// an assertion, not a check, so it gets no code.
-    ///
-    /// AND THE STOP RULE, for whoever takes this over: if this form still
-    /// refuses correct code, `E1216` is REMOVED, not extended. Its record is
-    /// four false refusals against zero documented captures of a real defect, so
-    /// a fourth extension is not owed a fifth round. The runtime channel — a
-    /// counted skip inside `World.requiresRefusesRemoval` plus one warning per
-    /// tick — covers the case and can never refuse a just program.
-    ///
-    /// Bounded and allocation-free on the same frontier-with-dedup shape as
-    /// `requiresReachesSelf`, whose bound and termination argument are written
-    /// there; a second traversal of one graph is how the two would come to
-    /// disagree about what the closure contains.
-    fn requisiteRemovalRefused(
-        self: *TypeChecker,
-        target: ast_mod.StringId,
-        ctx: *RuleCtx,
-    ) !?ast_mod.StringId {
-        if (ctx.when_root == ast_mod.RuleDecl.none_when) return null;
-        // Condition 3. Any earlier removal may have taken the requirer, so no
-        // guarantee survives it and no proof is available past this point.
-        if (ctx.removal_seen) return null;
-        var it = ctx.components_in_when.keyIterator();
-        while (it.next()) |k| {
-            const requirer = k.*;
-            if (requirer == target) continue;
-            if (!self.whenGuarantees(ctx.when_root, requirer)) continue;
-            const decl = self.requisiteDecl(requirer) orelse continue;
-            if (try self.requisiteClosureReaches(decl, target)) return requirer;
-        }
-        return null;
-    }
-
+    /// Its own stop rule decided this: five false refusals against zero
+    /// documented captures of a real defect. The guarantee lives entirely on the
+    /// runtime channel — a counted skip inside `World.requiresRefusesRemoval`
+    /// plus one warning per tick — which covers every path, the call included,
+    /// and can never refuse a just program.
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.storageAnnotation(decl) orelse return;
 
@@ -7531,37 +7401,13 @@ pub const TypeChecker = struct {
                     } else {
                         const target = self.arena.exprData(arg);
                         try self.checkStructuralComponentName(target, self.arena.exprSpan(arg));
-                        // M1.B/P2-2 — the narrow STATIC half of the `@requires`
-                        // removal refusal. What the type-checker knows is the
-                        // closure graph and the rule's selection; what an entity
-                        // carries at runtime it does not, and that half is
-                        // G9's counted skip plus one warning per tick.
-                        // THE RECEIVER, not merely the rule context. The `when`
-                        // guarantee is about the identity the `when` selects, so
-                        // a removal on any other receiver — a field access, a
-                        // local, a second entity — carries no guarantee and gets
-                        // no diagnostic.
-                        if (ctx_opt) |ctx| {
-                            if (self.receiverIsSelectedEntity(mc.receiver, ctx)) {
-                                if (try self.requisiteRemovalRefused(target, ctx)) |requirer| {
-                                    try self.emit(
-                                        .requisite_removal_refused,
-                                        .error_,
-                                        self.arena.exprSpan(arg),
-                                        "'{s}' is required by '{s}', which this rule's 'when' guarantees is present — the removal is refused at run and does nothing",
-                                        .{ self.arena.strings.slice(target), self.arena.strings.slice(requirer) },
-                                    );
-                                }
-                            }
-                            // OUTSIDE the identity gate, and that placement IS
-                            // condition 3: a removal this checker cannot attach
-                            // to an identity is exactly the one that may have
-                            // taken the requirer. Recorded AFTER the check, so
-                            // `remove(Transform)` then `remove(Mesh)` still
-                            // diagnoses the first — the commands apply in the
-                            // order the body writes them.
-                            ctx.removal_seen = true;
-                        }
+                        // NO static refusal of a dead removal here. The
+                        // `@requires` guarantee is enforced entirely at run —
+                        // `World.requiresRefusesRemoval`, a counted skip plus one
+                        // warning per tick — because the static form was tried,
+                        // refused correct code five times, and was retired by its
+                        // own stop rule. See `checkStorageAnnotation`'s preceding
+                        // note for what it was and why the number stays reserved.
                     }
                 }
                 return ResolvedType.unknown;
