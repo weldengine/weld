@@ -1,5 +1,5 @@
 //! `.scene.bin` writer — Tier 0. Serializes the neutral `format.CookModel`
-//! (produced by the M1.0.4 Etch cook) into the on-disk byte image. The M1.0.5
+//! (produced by the Etch cook) into the on-disk byte image. The
 //! loader reads it back with `accessor.zig` (the read half of this codec).
 //!
 //! File layout (all section offsets are file-relative, recorded in the header):
@@ -10,14 +10,14 @@
 //!   [Schema Registry]              §10 — one SchemaEntry per distinct type
 //!   [Resources Block]              per resource: schema-index + data + string refs
 //!   [Archetype Blocks]             per archetype: schema mask + entity meta + SoA columns
-//!   [Entity Extensions Table]      reserved — empty (M1.0.6)
-//!   [Cross-references Table]       reserved — empty (M1.0.6)
+//! [Entity Extensions Table] reserved — empty
+//! [Cross-references Table] reserved — empty
 //! ```
 //! `hash` covers everything after the header. Component identity on disk is the
 //! Schema Registry index (never a runtime `ComponentId`); schema identity is the
-//! component name (`engine-ecs-internals.md` §10, M1.0.4 brief deviation).
+//! component name (`engine-ecs-internals.md` §10, brief deviation).
 //!
-//! Determinism (the E3 re-cook byte-identity guarantee): every ordering here is
+//! Determinism (the re-cook byte-identity guarantee): every ordering here is
 //! deterministic — schemas sorted by ascending `ComponentId` (the cook assigns
 //! ids in declaration order), tables emitted in model order, no hashing of
 //! addresses. Same source → same registry ids → same bytes.
@@ -233,7 +233,7 @@ const Writer = struct {
     /// `CrossRefEntry` (16 B). The model carries `component_id`; here it is
     /// converted to the file-local Schema Registry index (`id_to_index`) — the
     /// on-disk entry never stores a runtime `ComponentId`.
-    /// Entity Extensions region @ `extensions_offset` (M1.0.6 E5, SHAPE A) — three
+    /// Entity Extensions region @ `extensions_offset` (shape A) — three
     /// self-delimiting sub-tables: the Entity Extensions Table (per-entity active
     /// extensions), the Prefab ID Table (dedup'd extension names → string-table
     /// offsets), and the hooks (`extends` prefab `on_attach`/`on_detach` text refs;

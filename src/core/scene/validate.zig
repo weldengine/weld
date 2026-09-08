@@ -1,4 +1,4 @@
-//! `.scene.bin` structural validator — Tier 0 (M1.1.1-HF3 / R1).
+//! `.scene.bin` structural validator — Tier 0.
 //!
 //! A standalone structural pre-flight that walks the raw `.scene.bin` bytes
 //! **directly** and **never calls an `accessor.zig` getter**. It is the front
@@ -172,7 +172,7 @@ const Validator = struct {
                 const schema_index = try readU32(self.bytes, off);
                 if (schema_index >= h.schema_count) return error.MalformedScene;
                 const data_size = try readU32(self.bytes, try add(off, 4));
-                // R10(a): the resource blob must be EXACTLY the component size — the
+                // the resource blob must be EXACTLY the component size — the
                 // loader memcpys `data_size` bytes into a `componentSize`-byte slot
                 // behind a `debug.assert` stripped in ReleaseFast, so a mismatch is
                 // an out-of-bounds write there.
@@ -187,7 +187,7 @@ const Validator = struct {
                 var s: usize = 0;
                 while (s < sf_count) : (s += 1) {
                     const pair = try add(sf_count_end, try mul(s, 8));
-                    // R10(b): the string-field offset is only a loader lookup key,
+                    // the string-field offset is only a loader lookup key,
                     // but bound it inside the blob anyway (defense in depth).
                     const field_off = try readU32(self.bytes, pair);
                     if (try add(field_off, 4) > data_size) return error.MalformedScene;
@@ -210,7 +210,7 @@ const Validator = struct {
                 const sidx_off = try add(off, 4);
                 const ec_off = try add(sidx_off, try mul(cc, 4));
                 if (try add(ec_off, 4) > ex) return error.MalformedScene;
-                // Schema indices in range AND strictly increasing (R11(a)): the
+                // Schema indices in range AND strictly increasing: the
                 // on-disk schema mask is normatively "sorted ascending"
                 // (`engine-scene-serialization.md` §4), so strict monotonicity also
                 // rules out a duplicate ComponentId hiding in one archetype.
@@ -744,7 +744,7 @@ test "seeded mutation robustness: hash-fixed corrupt scenes never panic" {
     }
 }
 
-/// One archetype `[Pos(8,4), Tag(4,4)]`, one entity — for the R11(a) monotonic
+/// One archetype `[Pos(8,4), Tag(4,4)]`, one entity — for the monotonic
 /// schema-index test. The block's `schema_indices` sit at a known offset.
 fn buildTwoCompScene(gpa: std.mem.Allocator, reg: *Registry) ![]u8 {
     const pos = try registerPod(gpa, reg, "Pos", 8, 4); // id 0 → file schema index 0
@@ -775,7 +775,7 @@ test "validator rejects bad resource data_size and string-field offset" {
     const acc = try accessor_mod.Accessor.open(base);
     const ro = acc.header.resources_offset;
 
-    // R10(a): data_size (@ resources_offset + 4) must equal the schema size (16).
+    // data_size (@ resources_offset + 4) must equal the schema size (16).
     inline for (.{ @as(u32, 15), @as(u32, 20) }) |bad_size| {
         const buf = try gpa.dupe(u8, base);
         defer gpa.free(buf);
@@ -783,7 +783,7 @@ test "validator rejects bad resource data_size and string-field offset" {
         refixHash(buf);
         try testing.expectError(error.MalformedScene, openAndValidate(buf));
     }
-    // R10(b): the string-field offset (first sf pair @ resources_offset + 8 +
+    // the string-field offset (first sf pair @ resources_offset + 8 +
     // data_size(16) + 4 = +28) must satisfy offset + 4 <= data_size(16).
     {
         const buf = try gpa.dupe(u8, base);
