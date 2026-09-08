@@ -231,11 +231,11 @@ pub fn checkAllowlist(
 
 /// True when `file`'s first path segment is one of `perimeter`.
 ///
-/// By segment: a `src/` prefix test puts the whole tree outside the perimeter on
-/// Windows, where the walker emits `\`, and the rule passes by measuring nothing.
+/// Either separator: the walker emits `\` on Windows and the allowlist is written
+/// with `/`, and a rule reading one of the two measures nothing on that platform.
 pub fn inPerimeter(file: []const u8) bool {
-    var it = std.mem.splitScalar(u8, file, std.fs.path.sep);
-    const first = it.next() orelse return false;
+    const end = std.mem.indexOfAny(u8, file, "/\\") orelse file.len;
+    const first = file[0..end];
     for (perimeter) |dir| {
         if (std.mem.eql(u8, first, dir)) return true;
     }
@@ -338,6 +338,12 @@ test "the perimeter is decided by segment" {
     try std.testing.expect(!inPerimeter("tests" ++ [_]u8{std.fs.path.sep} ++ "lint" ++ [_]u8{std.fs.path.sep} ++ "x.zig"));
     // Not a prefix match.
     try std.testing.expect(!inPerimeter("srcgen" ++ [_]u8{std.fs.path.sep} ++ "x.zig"));
+    // Both separators, on both platforms: the walker emits one and the allowlist
+    // the other, and a literal `/` here is what failed on Windows alone.
+    try std.testing.expect(inPerimeter("src/core/root.zig"));
+    try std.testing.expect(inPerimeter("src\\core\\root.zig"));
+    try std.testing.expect(!inPerimeter("tests/lint/x.zig"));
+    try std.testing.expect(!inPerimeter("tests\\lint\\x.zig"));
 }
 
 /// Drive `check` over one synthetic file and return the diagnostics it produced.
@@ -406,7 +412,7 @@ test "an allowlist entry for a file UNDER the ceiling is itself a diagnostic" {
         \\const d = 4;
         \\
     ;
-    const path = "src/sparse.zig";
+    const path = "src" ++ [_]u8{std.fs.path.sep} ++ "sparse.zig";
     try checkOn(arena, path, sparse, "src/sparse.zig | no reason can be true here\n", &diags);
 
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
@@ -419,7 +425,8 @@ test "an allowlist entry naming no measured file is a diagnostic" {
     const arena = arena_state.allocator();
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
 
-    try checkOn(arena, "src/dense.zig", dense_src, "src/typo_in_this_path.zig | stale\n", &diags);
+    const path = "src" ++ [_]u8{std.fs.path.sep} ++ "dense.zig";
+    try checkOn(arena, path, dense_src, "src/typo_in_this_path.zig | stale\n", &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expect(std.mem.indexOf(u8, diags.items[0].message, "did not measure") != null);
 }
@@ -430,9 +437,17 @@ test "an allowlist entry suppresses the ceiling diagnostic for its file" {
     const arena = arena_state.allocator();
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
 
-    try checkOn(arena, "src/dense.zig", dense_src, "src/dense.zig | every survivor meets the criterion\n", &diags);
+    const path = "src" ++ [_]u8{std.fs.path.sep} ++ "dense.zig";
+    try checkOn(arena, path, dense_src, "src/dense.zig | every survivor meets the criterion\n", &diags);
     // Zero in both modes: the entry is legitimate, so neither half fires either.
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    // The Windows configuration, run on every platform: the walker's path carries
+    // `\` and the hand-written entry `/`. Both halves must still match, or the
+    // entry grants nothing there and the file is reported as unmeasured.
+    var win: std.ArrayList(diag.Diagnostic) = .empty;
+    try checkOn(arena, "src\\dense.zig", dense_src, "src/dense.zig | same entry, other separator\n", &win);
+    try std.testing.expectEqual(@as(usize, 0), win.items.len);
 }
 
 test "an allowlist entry without a reason is refused" {
