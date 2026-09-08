@@ -1,22 +1,13 @@
-//! Deterministic identity + schema hashes for RTTI.
+//! FROZEN — see engine-phase-0-criteria.md C0.5. Every public entry below is.
 //!
-//! - `computeTypeId(T)` returns the 32-bit identity of a type by
-//!   hashing `@typeName(T)` with `XxHash32(seed=0)`.
-//! - `computeSchemaHash(T)` returns the 64-bit schema digest of a
-//!   type by hashing `(@typeName(T), [(field.name, kind, count,
-//!   offset) for each field])` with `XxHash64(seed=0)`.
+//! Deterministic identity and schema hashes for RTTI.
 //!
-//! Both functions are pure comptime — they fold to constants at
-//! compile time and produce the same bytes across builds (XxHash is
-//! deterministic, the inputs are build-independent: type name +
-//! comptime-resolved field layout).
+//! BOTH ARE PURE COMPTIME AND MUST STAY BYTE-STABLE ACROSS BUILDS: the inputs are a
+//! type name and a comptime-resolved field layout, and the digest is what makes
+//! `register` idempotent across a rebuild.
 //!
-//! Decision taken — `schema_hash` is **sensitive to `@typeName`**:
-//! two structs with the same layout but different names
-//! produce distinct `schema_hash` values. The hash_test.zig
-//! "schema_hash is sensitive to the type name" test documents the decision.
-//! The algorithm follows `briefs/M0.2-rtti-resources-events-bindgen.md`
-//! E1 §Deliverable.
+//! `schema_hash` is SENSITIVE to `@typeName` by decision — two structs of identical
+//! layout and different names hash differently.
 
 const std = @import("std");
 const type_info = @import("type_info.zig");
@@ -27,44 +18,23 @@ const FieldDesc = type_info.FieldDesc;
 const FieldKind = type_info.FieldKind;
 const builder = @import("comptime_builder.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Comptime-deterministic 32-bit identity for `T`. Wraps
-/// `computeTypeIdFromName(@typeName(T))`.
+/// Comptime-deterministic 32-bit identity for `T`.
 pub fn computeTypeId(comptime T: type) TypeId {
     return computeTypeIdFromName(@typeName(T));
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Comptime-deterministic 32-bit identity for an arbitrary name.
-/// Exposed for tests and for use cases (cross-language tools, IPC
-/// debugging) that need to compute a `TypeId` without holding the Zig
-/// type itself.
 pub fn computeTypeIdFromName(name: []const u8) TypeId {
     return std.hash.XxHash32.hash(0, name);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Comptime-deterministic 64-bit schema digest for `T`. The fields are
-/// derived from `builder.buildFields(T)`; the hash mixes the type
-/// name with the `(name, kind, count, offset)` tuple of each field in
-/// declaration order. Sensitive to field reordering and to
-/// `@typeName(T)`.
+/// Comptime-deterministic 64-bit schema digest for `T`, over its ordered fields.
 pub fn computeSchemaHash(comptime T: type) SchemaHash {
     const fields = comptime builder.buildFields(T);
     return computeSchemaHashFromParts(@typeName(T), fields);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Direct hash entry point used by `computeSchemaHash` and the
-/// E1 registry tests. Hashes the tuple `(type_name,
-/// [(field.name, kind, count, offset) for each field])` with
-/// `XxHash64(seed=0)`. Exposed so callers can verify field-order
-/// sensitivity without going through the comptime builder.
-///
-/// Comptime branch quota is raised because the hash loop iterates
-/// over an arbitrary field count and XxHash's `update` itself loops
-/// over chunked input — both consume branches when the call is
-/// evaluated at compile time.
+/// Digest entry point taking the parts directly, for callers that have no type.
 pub fn computeSchemaHashFromParts(type_name: []const u8, fields: []const FieldDesc) SchemaHash {
     @setEvalBranchQuota(100_000);
     var hasher = std.hash.XxHash64.init(0);
@@ -84,8 +54,7 @@ pub fn computeSchemaHashFromParts(type_name: []const u8, fields: []const FieldDe
 // ---------------------------------------------------------------- tests --
 
 test "computeTypeIdFromName matches XxHash32 reference" {
-    // XxHash32 seed=0 on "hello" — sanity check that we are wiring the
-    // canonical algorithm and not, say, an internal variant.
+    // A known XxHash32 value, so a wiring change to the algorithm shows up here.
     const got = computeTypeIdFromName("hello");
     const ref = std.hash.XxHash32.hash(0, "hello");
     try std.testing.expectEqual(ref, got);
@@ -99,8 +68,7 @@ test "computeTypeId is comptime-foldable" {
 }
 
 test "computeSchemaHashFromParts is field-order sensitive" {
-    // Two field lists that differ only in the iteration order should
-    // produce distinct hashes when fed to the parts-level helper.
+    // Field ORDER must change the digest, or a reordered struct hashes equal.
     const a = [_]FieldDesc{
         .{ .name = "x", .offset = 0, .size = 4, .alignment = 4, .kind = .f32, .count = 1, .nested_type_id = null, .unit = "" },
         .{ .name = "y", .offset = 4, .size = 4, .alignment = 4, .kind = .f32, .count = 1, .nested_type_id = null, .unit = "" },

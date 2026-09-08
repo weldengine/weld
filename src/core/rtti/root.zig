@@ -1,17 +1,8 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Public surface of the M0.2 RTTI subsystem.
-//!
-//! The Tier 0 reflection runtime — comptime builder, type metadata,
-//! deterministic hashes, and runtime registry. E1 ships the
-//! standalone surface without any metier consumer wired yet (the S6
-//! IPC swap is E2, resources are E3, events are E4).
-//!
-//! Re-exports follow the Tier 0 convention of `engine-zig-conventions.md`
-//! § "Fichier racine : `root.zig` (module) vs `main.zig` (exécutable)":
-//! flat surface (`rtti.Registry`, `rtti.TypeInfo`, …) with sub-module
-//! aliases (`rtti.type_info`, `rtti.hash`, …) for tests and internal
-//! consumers that need to address private symbols.
+//! Public surface of the RTTI subsystem: comptime builder, type metadata,
+//! deterministic hashes, runtime registry. Flat surface plus sub-module aliases for
+//! consumers that must address private symbols.
 
 const type_info_mod = @import("type_info.zig");
 const hash_mod = @import("hash.zig");
@@ -20,9 +11,7 @@ const registry_mod = @import("registry.zig");
 
 // -- Sub-module aliases ------------------------------------------------
 
-/// Type metadata declarations (`TypeId`, `SchemaHash`, `FieldKind`,
-/// `FieldDesc`, `TypeInfo`, engine composites). Sub-module alias for
-/// tests and internal consumers.
+/// Type metadata declarations.
 pub const type_info = type_info_mod;
 /// Deterministic identity + schema hashes for RTTI metadata.
 pub const hash = hash_mod;
@@ -32,10 +21,7 @@ pub const comptime_builder = builder_mod;
 pub const registry = registry_mod;
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Version of the frozen RTTI Tier-0 public surface (TypeId/SchemaHash,
-/// FieldDesc/TypeInfo, the builder + hash fns, the Registry API). Bumped
-/// on any breaking change — a tracked migration, not a freeze failure (the
-/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+/// Bumped on any breaking change to the frozen surface — a tracked migration.
 pub const WELD_RTTI_PROTOCOL_VERSION: u32 = 1;
 
 // -- Flat type surface -------------------------------------------------
@@ -84,10 +70,7 @@ pub const buildFields = builder_mod.buildFields;
 pub const classifyField = builder_mod.classifyField;
 /// POD predicate gating `buildTypeInfo`'s `@compileError`.
 pub const isPOD = builder_mod.isPOD;
-/// Reads the resource lifecycle from a struct's `pub const lifecycle`
-/// declaration. Returns `null` for non-resource categories;
-/// `.transient` is the default for resources without an explicit
-/// declaration (M0.2 / E3).
+/// Reads the resource lifecycle from a struct's `pub const lifecycle`, if any.
 pub const inferLifecycle = builder_mod.inferLifecycle;
 
 /// Comptime-deterministic 32-bit identity for `T`.
@@ -105,9 +88,8 @@ pub const Registry = registry_mod.Registry;
 pub const RegisterError = registry_mod.RegisterError;
 
 comptime {
-    // Force eager analysis of every RTTI sub-file so the inline tests
-    // are picked up by `zig build test` (lazy analysis guard, cf.
-    // `engine-zig-conventions.md` §13).
+    // NOT dead code: these references are what make Zig analyse the sub-files, so
+    // their inline `test` blocks are collected at all.
     _ = type_info_mod;
     _ = hash_mod;
     _ = builder_mod;

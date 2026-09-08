@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5. Every public entry below is.
+//!
 //! Comptime builder — turns a Zig type into a `TypeInfo` record.
 //!
 //! `buildTypeInfo(comptime T: type, category: Category) TypeInfo` is
@@ -47,7 +49,6 @@ const Color = type_info.Color;
 const Entity = type_info.Entity;
 const AssetHandle = type_info.AssetHandle;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Builds the full `TypeInfo` record for `T` at comptime. The returned
 /// value's `fields` slice points to a static comptime-promoted array;
 /// callers can store the `TypeInfo` by value and the slice remains
@@ -77,7 +78,6 @@ pub fn buildTypeInfo(comptime T: type, comptime category: Category) TypeInfo {
     }
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Reads the resource lifecycle for `T` at comptime. Returns `null`
 /// for categories other than `.resource`. For resources, returns the
 /// `T.lifecycle` declaration when present, otherwise `.transient` as
@@ -100,7 +100,6 @@ pub fn inferLifecycle(comptime T: type, comptime category: Category) ?Lifecycle 
     }
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Builds the per-field metadata slice for `T`. Comptime-only — the
 /// returned slice points to a comptime-promoted array.
 pub fn buildFields(comptime T: type) []const FieldDesc {
@@ -119,7 +118,6 @@ pub fn buildFields(comptime T: type) []const FieldDesc {
     }
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Maps a Zig type to its concrete `FieldKind`. Comptime-only.
 pub fn classifyField(comptime T: type) FieldKind {
     comptime {
@@ -171,7 +169,6 @@ pub fn classifyField(comptime T: type) FieldKind {
     }
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Returns `true` iff every transitive member of `T` is a value type
 /// usable in `extern struct`-style POD layouts: `bool` / `int` /
 /// `float` / `enum` / engine composite / `array` / `optional` / nested
