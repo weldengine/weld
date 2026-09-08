@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! M0.2 / E6 — `WeldAPI` table + 7 sub-APIs with stub
 //! implementations.

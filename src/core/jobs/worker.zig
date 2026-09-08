@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Worker thread loop. Each worker owns a Chase-Lev deque and runs a tight
 //! loop: pop from its own deque, then try to steal from peers in a fixed

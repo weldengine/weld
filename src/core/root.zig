@@ -39,7 +39,7 @@ pub const testing = struct {
 /// Platform namespace — window, Vulkan, process control, plus the M0.3
 /// commun layer (fs, time, threading, dynamic_lib, once).
 pub const platform = struct {
-    /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+    /// FROZEN — see engine-phase-0-criteria.md C0.5
     /// Version of the frozen PlatformLayer Tier-0 surface (window/process/
     /// fs/time/threading/dynamic_lib/once). EXCLUDES `vk` (bindgen-generated,
     /// versioned by the bindgen system) and `input` (covered by

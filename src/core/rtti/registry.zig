@@ -27,7 +27,7 @@ const TypeId = type_info.TypeId;
 const SchemaHash = type_info.SchemaHash;
 const TypeInfo = type_info.TypeInfo;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Errors returned by `Registry.register`.
 pub const RegisterError = error{
     /// A previous registration of the same `TypeId` had a different
@@ -38,7 +38,7 @@ pub const RegisterError = error{
     OutOfMemory,
 };
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Public Tier 0 registry. Owned by `World` once Phase 0 wires it up
 /// (E3+); E1 ships the standalone type with its own tests.
 pub const Registry = struct {

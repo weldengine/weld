@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Input Tier 0 — `InputRawState` resource (`@transient`).
 //!
@@ -43,7 +43,7 @@ const std = @import("std");
 const window = @import("../window.zig");
 const keycode = @import("keycode.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Version of the frozen InputModule (Tier-1, exercised) public surface —
 /// the logical `KeyCode` enum + `window.Event.code` contract, the
 /// `InputRawState` extern-struct layout, and the `apply*`/`pollAllSlots`

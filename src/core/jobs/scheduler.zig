@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! M0.1 / E5a work-stealing scheduler.
 //!
@@ -49,7 +49,7 @@ const TrampolineFn = worker_mod.TrampolineFn;
 const Worker = worker_mod.Worker;
 const WorkerStats = worker_mod.WorkerStats;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Version of the frozen Job-system Tier-0 public surface (Scheduler
 /// methods, SchedulerError, Job/TrampolineFn/Deque shapes). Bumped on
 /// any breaking change — a tracked migration, not a freeze failure (the

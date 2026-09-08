@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Comptime-typed multi-archetype query.
 //!

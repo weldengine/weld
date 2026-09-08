@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Minimal process control surface used by the S6 editor stub to
 //! spawn / monitor / kill the runtime stub. Tier 0 — `engine-

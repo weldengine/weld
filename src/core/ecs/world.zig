@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Tier 0 root `World` — owns the unified archetype list, the M0.1 / E1
 //! generational identity store, the runtime registry, and the resource

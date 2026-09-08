@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //! Frozen PlatformLayer window surface: `Window`, `Event`, `Desc`, `Error`,
 //! `KeyCode` (re-export), `MouseButton`, `MonitorInfo`, `QueryError`,
 //! `enumerateMonitors`, `currentMonitor`. EXCEPTION — `NativeHandles` /

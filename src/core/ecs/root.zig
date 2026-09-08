@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! Public API surface of the M0.1 ECS — canonical entry point for
 //! consumers (Tier 1 modules, the runtime executable, the editor IPC
@@ -27,7 +27,7 @@
 //! of the M0.1 contract. Consumers reading from them outside of
 //! tests should expect breakage on later milestones.
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Version of the frozen ECS Tier-0 public surface (World verbs,
 /// EntityId/ComponentId layout, Query/CommandBuffer/SystemScheduler
 /// signatures, and the byte-keyed `resources` store). Bumped on any

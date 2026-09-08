@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
 //! `IpcConnection` — symmetric wrapper around an `IpcSocket`, the
 //! 16-byte framing header (`framing.Header`), and the comptime
