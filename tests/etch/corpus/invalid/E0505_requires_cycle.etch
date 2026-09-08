@@ -1,0 +1,14 @@
+// M1.B/G9 — `@requires` closure that is not a DAG. Refused by diagnostic and
+// NOT resolved to a fixpoint: the fixpoint is computable, and would make
+// `add(A)` and `add(B)` indistinguishable while leaving every carrier of one
+// carrying the other, with nothing able to undo the coupling.
+// Expect: E0505 RequiresCycle
+@requires(B)
+component A {
+    v: i32 = 0
+}
+
+@requires(A)
+component B {
+    w: i32 = 0
+}

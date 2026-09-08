@@ -1,14 +1,20 @@
 //! `.scene.bin` accessor — Tier 0, zero-copy read view over the bytes the
 //! `writer.zig` produced. **Reused verbatim by the M1.0.5 runtime loader**,
-//! which layers mmap + memcpy-into-chunks + UUID→handle remap + `on_spawned` on
-//! top — none of that lives here.
+//! which layers mmap + identity remap + PER-ENTITY INSTANTIATION + UUID→handle
+//! remap + `on_spawned` on top — none of that lives here.
+//!
+//! **The loader does NOT memcpy into chunks**, and attributing that copy to it
+//! is what made a second storage backend look like it required reopening this
+//! codec (`engine-scene-serialization.md` §4, anomalies 88 and 90). The copy is
+//! real and `world.zig` performs it; the loader slices each column at an
+//! entity's rank and hands the slices to `World.spawnDynamicWithValues`.
 //!
 //! No allocation: every getter returns a slice/pointer into the borrowed bytes
 //! (or a small value). `open` validates `magic` + `version`. Scalars are read
 //! little-endian via `std.mem.readInt` (unaligned-safe — the byte buffer need
-//! not be aligned); component column DATA is returned as raw byte slices for the
-//! loader to memcpy. Self-describing: column strides/alignments come from the
-//! Schema Registry, so no `Registry` is needed to slice archetype columns.
+//! not be aligned); component column DATA is returned as raw byte slices.
+//! Self-describing: column strides/alignments come from the Schema Registry, so
+//! no `Registry` is needed to slice archetype columns.
 //!
 //! Column placement is computed with `format.columnOffset` — the SAME routine
 //! the writer used — so reader/writer offsets agree by construction.

@@ -29,6 +29,12 @@ pub const InvalidEntry = struct {
 /// `tests/etch/corpus_test.zig`. Each entry pins one `.etch` file
 /// the parser + type-checker must accept without diagnostics.
 pub const valid = [_]Entry{
+    // M1.B/P5 — this fixture was `invalid/E1216_requisite_removal.etch` and
+    // asserted a diagnostic. E1216 is retired, so the program it holds is
+    // ACCEPTED, and the fixture moved rather than being deleted: it is the
+    // narrowest form the retired check refused, and it belongs on the side of
+    // the corpus that says so.
+    .{ .name = "rules/requisite_removal_accepted.etch", .source = @embedFile("corpus/valid/rules/requisite_removal_accepted.etch") },
     .{ .name = "components/health.etch", .source = @embedFile("corpus/valid/components/health.etch") },
     .{ .name = "components/transform.etch", .source = @embedFile("corpus/valid/components/transform.etch") },
     .{ .name = "components/inventory.etch", .source = @embedFile("corpus/valid/components/inventory.etch") },
@@ -37,6 +43,7 @@ pub const valid = [_]Entry{
     .{ .name = "components/minimal.etch", .source = @embedFile("corpus/valid/components/minimal.etch") },
     .{ .name = "components/multi_decl.etch", .source = @embedFile("corpus/valid/components/multi_decl.etch") },
     .{ .name = "components/annotated.etch", .source = @embedFile("corpus/valid/components/annotated.etch") },
+    .{ .name = "components/sparse_tag.etch", .source = @embedFile("corpus/valid/components/sparse_tag.etch") },
 
     .{ .name = "resources/game_mode.etch", .source = @embedFile("corpus/valid/resources/game_mode.etch") },
     .{ .name = "resources/physics_config.etch", .source = @embedFile("corpus/valid/resources/physics_config.etch") },
@@ -90,6 +97,11 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E0301_resource_expected_component_given.etch", .expected_code = "E0301", .source = @embedFile("corpus/invalid/E0301_resource_expected_component_given.etch") },
     .{ .name = "E0302_component_expected_resource_given.etch", .expected_code = "E0302", .source = @embedFile("corpus/invalid/E0302_component_expected_resource_given.etch") },
     .{ .name = "E0502_annotation_misapplied.etch", .expected_code = "E0502", .source = @embedFile("corpus/invalid/E0502_annotation_misapplied.etch") },
+    .{ .name = "E0503_storage_value_out_of_domain.etch", .expected_code = "E0503", .source = @embedFile("corpus/invalid/E0503_storage_value_out_of_domain.etch") },
+    .{ .name = "E0503_storage_bare_value.etch", .expected_code = "E0503", .source = @embedFile("corpus/invalid/E0503_storage_bare_value.etch") },
+    .{ .name = "E0504_storage_arg_not_const.etch", .expected_code = "E0504", .source = @embedFile("corpus/invalid/E0504_storage_arg_not_const.etch") },
+    .{ .name = "E0505_requires_cycle.etch", .expected_code = "E0505", .source = @embedFile("corpus/invalid/E0505_requires_cycle.etch") },
+    .{ .name = "E0506_requires_unknown.etch", .expected_code = "E0506", .source = @embedFile("corpus/invalid/E0506_requires_unknown.etch") },
     .{ .name = "E1101_non_const_default.etch", .expected_code = "E1101", .source = @embedFile("corpus/invalid/E1101_non_const_default.etch") },
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
     .{ .name = "E1211_field_filter_type_mismatch.etch", .expected_code = "E1211", .source = @embedFile("corpus/invalid/E1211_field_filter_type_mismatch.etch") },

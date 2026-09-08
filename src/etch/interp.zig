@@ -23,6 +23,11 @@ const parser_mod = @import("parser.zig");
 const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
+/// M1.B/G7 — the storage-agnostic locator the per-slot guards take, and the
+/// per-term plan the selection holds.
+const hybrid_mod = weld_core.ecs.hybrid_query;
+const Locator = hybrid_mod.Locator;
+const QueryPlan = hybrid_mod.QueryPlan;
 const tags_mod = @import("tags.zig");
 const descriptor_mod = @import("descriptor.zig");
 const services_mod = @import("services.zig");
@@ -32,6 +37,9 @@ const weld_core = @import("weld_core");
 const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
+/// Storage backend recorded per component at registration — `table | sparse`,
+/// default `table` (`engine-ecs-internals.md` §2).
+const StorageKind = weld_core.ecs.registry.StorageKind;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
@@ -81,6 +89,21 @@ pub const RuntimeReport = struct {
     /// evaluates each archetype once (at rescan, when it first appears), not
     /// once per archetype per tick.
     predicate_archetype_evals: u64 = 0,
+    /// Terms walked by a SPARSE form this tick (M1.B/P2-1) — the observable
+    /// that the driver is elected AT THE WALK and not at compile.
+    ///
+    /// It has to exist, and the reason is the finding P2-1 rests on: the answer
+    /// a term yields is INDEPENDENT of the elected driver by construction — the
+    /// two forms visit the same entities — so no oracle on the visited set can
+    /// see the election, and one that re-runs `elect` from the test would pass
+    /// unchanged against a walk that never elected at all. Only a count taken
+    /// ON the walk discriminates.
+    ///
+    /// A COUNT and not a driver id: with one sparse member in a term's with-set
+    /// the count carries the identity already, and a per-term id would have to
+    /// choose a shape for a multi-term rule that nothing needs. Interp-only and
+    /// informational, like the counters above.
+    sparse_driven_walks: u64 = 0,
 };
 
 const ResourceDep = struct {
@@ -201,7 +224,7 @@ const RuleDesc = struct {
     /// (`query.rescanNewArchetypes`) — the interpreter no longer carries its
     /// own archetype matcher or rescan loop (the M1.0.0 root-cause fix:
     /// `interp.zig` stops duplicating `query.zig`).
-    selection: []DynamicQuery,
+    selection: []QueryPlan,
     resource_deps: []ResourceDep,
     /// Per-entity field filters, one per `has T { field == value }` clause
     /// (M0.8 E3-D, D-S4-multifilter — was a single overwrite-on-collision
@@ -286,7 +309,7 @@ const RuleDesc = struct {
 };
 
 /// Free a rule's archetype selection — every `DynamicQuery` plus the slice.
-fn freeSelection(gpa: std.mem.Allocator, selection: []DynamicQuery) void {
+fn freeSelection(gpa: std.mem.Allocator, selection: []QueryPlan) void {
     for (selection) |*q| q.deinit(gpa);
     gpa.free(selection);
 }
@@ -1228,6 +1251,16 @@ pub const Interpreter = struct {
     /// is retained across rules/ticks so the union path allocates at most once.
     /// Untouched by single-term rules (the common case iterates directly).
     merge_cursors: std.ArrayListUnmanaged(usize) = .empty,
+    /// M1.B/G7 — reusable entity set for the disjunctive path when ANY term is
+    /// sparse-driven. The archetype merge de-duplicates by exploiting the
+    /// ascending-`archetype_id` order of each term's cache; a sparse-driven term
+    /// has no archetype to order by, so the union de-duplicates by ENTITY. Held
+    /// on the interpreter and cleared per use — beside `merge_cursors` and for
+    /// the same reason — so the steady state allocates nothing.
+    /// Keyed on the CORE packed handle, not Etch's u64 wire form: the two share
+    /// a layout but not a type, and the archetype arm reads core handles
+    /// straight out of the chunk.
+    merge_seen: std.AutoHashMapUnmanaged(CoreEntityId, void) = .empty,
     /// Per-observer-rule contexts registered into the world's `ObserverRegistry`
     /// at `bindToWorld` (M1.0.2 E3). One entry per rule with `observer_kind`
     /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
@@ -1314,6 +1347,7 @@ pub const Interpreter = struct {
         self.captured_filter_strings.deinit(self.gpa);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
+        self.merge_seen.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
         self.test_msg_buf.deinit(self.gpa);
         self.* = undefined;
@@ -1399,6 +1433,20 @@ pub const Interpreter = struct {
                 else => {},
             }
         }
+
+        // M1.B/G9 — after Pass A, resolve every `@requires` closure ONCE.
+        //
+        // At the END of the pass and not per declaration: a declaration may name
+        // a component registered later, Etch admitting forward references, which
+        // is why the descriptor carries NAMES rather than ids.
+        //
+        // A cycle or an unknown requisite here is a PROGRAM error the
+        // type-checker already reports with a span (E0505 / E0506). This arm is
+        // the registry's own refusal for the population the type-checker never
+        // sees — components a host registered from Zig — so reaching it from an
+        // Etch program means the type-check was skipped, and surfacing it as an
+        // ordinary error is the honest answer rather than a second diagnostic.
+        try world.registry.finalizeRequires(gpa);
 
         // Register the builtin `TagSet` component (M0.8 E3) when the program
         // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
@@ -2330,7 +2378,7 @@ pub const Interpreter = struct {
         if (!rd.is_entity_bound) {
             // Bare expression conditions on a GLOBAL rule (M0.8 E4): evaluated
             // once per tick, rule params in scope (no entity binding).
-            if (rd.expr_conds.len > 0 and !(try self.exprGuardsPass(world, rd.*, null, null, null, 0))) return;
+            if (rd.expr_conds.len > 0 and !(try self.exprGuardsPass(world, rd.*, null, null))) return;
             try self.execBody(world, rd.*, null, null, report);
             report.rules_matched += 1;
             return;
@@ -2347,9 +2395,15 @@ pub const Interpreter = struct {
         // `query.rescanNewArchetypes`, option-β `engine-ecs-internals.md §4`):
         // O(0) in the steady state, O(new archetypes) after a spawn into a new
         // shape. Sound because an archetype's component set is immutable after
-        // creation (add/remove transitions the entity to a DIFFERENT archetype)
-        // and `world.archetypes` is append-only with stable order — a cached
-        // match never goes stale. A single term iterates its matches directly
+        // creation and `world.archetypes` is append-only with stable order — a
+        // cached match never goes stale.
+        //
+        // The parenthetical that used to carry this — "add/remove transitions
+        // the entity to a DIFFERENT archetype" — is FALSE for a sparse
+        // component, and `world.zig`'s sparse add says so in as many words: "NO
+        // archetype transition at all". The conclusion survives because a sparse
+        // member is admitted PER ENTITY and never at archetype grain, so the
+        // cached archetype set is not what would have to change. A single term iterates its matches directly
         // (ascending archetype-creation order, preserving the historical
         // direct-walk order → interp↔codegen parity); `or` unions the terms.
         try self.iterateSelection(world, rd, &rule_matched, report, null);
@@ -2383,13 +2437,9 @@ pub const Interpreter = struct {
         const sel = rd.selection;
         if (sel.len == 0) return;
         if (sel.len == 1) {
-            report.predicate_archetype_evals += sel[0].maybeRescan();
-            for (sel[0].matching.items) |arch| {
-                try self.iterateArchetype(world, rd, arch, rule_matched, report, collect);
-            }
+            try self.iteratePlan(world, rd, &sel[0], rule_matched, report, collect);
             return;
         }
-        for (sel) |*q| report.predicate_archetype_evals += q.maybeRescan();
         try self.iterateUnion(world, rd, rule_matched, report, collect);
     }
 
@@ -2399,30 +2449,116 @@ pub const Interpreter = struct {
     /// path allocates at most once over the interpreter's lifetime.
     fn iterateUnion(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         const sel = rd.selection;
+
+        // The merge below de-duplicates by ARCHETYPE, sound ONLY when every
+        // term admits the same entities within an archetype: it runs
+        // `iterateArchetype` once per archetype under a single `owner`, so a
+        // term whose admission is PER ENTITY has its `admits` skipped and the
+        // entity it alone would admit is silently lost.
+        //
+        // The predicate is STATIC and stays OUTSIDE the election — it reads the
+        // table form's sparse lists, a partition by `storageOf` — so the need to
+        // de-duplicate by entity is decided by the registry and never by which
+        // form this tick elected.
+        var merge_by_archetype = true;
+        for (sel) |*q| {
+            if (q.needsEntityDedup()) merge_by_archetype = false;
+        }
+
+        if (!merge_by_archetype) {
+            // Entity-level dedup, over the reusable `merge_seen` set so the
+            // steady state allocates nothing. The visit order here is the
+            // terms' own order, which the contract permits: deterministic (a
+            // pure function of world state), non-invariant, and OUT OF
+            // CONTRACT — what it must guarantee is EXACTLY ONCE, which the set
+            // is what provides.
+            self.merge_seen.clearRetainingCapacity();
+            for (sel) |*q| {
+                switch (q.elect(world)) {
+                    .table => {
+                        const tq = &q.table;
+                        report.predicate_archetype_evals += tq.inner.maybeRescan();
+                        for (tq.inner.matching.items) |arch| {
+                            for (arch.chunks.items) |chunk| {
+                                const ids = arch.entityIdsConst(chunk);
+                                const count = chunk.header().entity_count;
+                                var slot: u32 = 0;
+                                while (slot < count) : (slot += 1) {
+                                    if (!tq.admits(world, ids[slot])) continue;
+                                    const gop = try self.merge_seen.getOrPut(self.gpa, ids[slot]);
+                                    if (gop.found_existing) continue;
+                                    try self.visitLocator(
+                                        world,
+                                        rd,
+                                        .{ .table = .{ .arch = arch, .chunk = chunk, .slot = slot } },
+                                        rule_matched,
+                                        report,
+                                        collect,
+                                    );
+                                }
+                            }
+                        }
+                    },
+                    .sparse => |i| {
+                        report.sparse_driven_walks += 1;
+                        const sq = &q.sparse[i];
+                        var it = sq.iterator(world);
+                        while (it.next()) |loc| {
+                            const gop = try self.merge_seen.getOrPut(self.gpa, loc.entity());
+                            if (gop.found_existing) continue;
+                            try self.visitLocator(world, rd, loc, rule_matched, report, collect);
+                        }
+                    },
+                }
+            }
+            return;
+        }
+
+        // NO term admits per entity: the k-way merge is UNCHANGED from M1.0.0,
+        // and it stays because it de-duplicates for free — no set, no
+        // allocation — by advancing every cursor that sits on the smallest
+        // archetype id.
+        //
+        // *Its premise is that every term matching an archetype admits the same
+        // entities within it, which was true when a term could only test at
+        // archetype grain. `sparse_with` broke it, and the condition above is
+        // what restores it: `owner` below is overwritten by each matching term,
+        // so a single one decides for the whole archetype — sound only when they
+        // all decide alike, which is now guaranteed rather than assumed.*
         self.merge_cursors.clearRetainingCapacity();
         try self.merge_cursors.appendNTimes(self.gpa, 0, sel.len);
         const cursors = self.merge_cursors.items;
+        // NO election on this path, and that is the ABSENCE of a choice rather
+        // than a saving: reaching here means every term answered
+        // `needsEntityDedup` false, so no term has a sparse member, so no term
+        // has a sparse FORM and `elect` could only return `.table`. Paying
+        // `population` — O(archetypes) per table member — for a decision with
+        // one outcome would be the cost without the choice.
+        for (sel) |*q| {
+            std.debug.assert(q.sparse.len == 0);
+            report.predicate_archetype_evals += q.table.inner.maybeRescan();
+        }
         while (true) {
-            // Smallest archetype_id at the head of any non-exhausted term.
             var min_id: ?u32 = null;
             for (sel, 0..) |q, qi| {
-                if (cursors[qi] < q.matching.items.len) {
-                    const aid = q.matching.items[cursors[qi]].archetype_id;
+                const m = q.table.inner.matching.items;
+                if (cursors[qi] < m.len) {
+                    const aid = m[cursors[qi]].archetype_id;
                     if (min_id == null or aid < min_id.?) min_id = aid;
                 }
             }
             const target = min_id orelse break;
-            // Advance every cursor sitting on `target` (dedup), keep one ref.
             var arch: *DynamicArchetype = undefined;
-            for (sel, 0..) |q, qi| {
-                if (cursors[qi] < q.matching.items.len and
-                    q.matching.items[cursors[qi]].archetype_id == target)
-                {
-                    arch = q.matching.items[cursors[qi]];
+            var owner: *const hybrid_mod.TableDrivenQuery = undefined;
+            for (sel, 0..) |*q, qi| {
+                const m = q.table.inner.matching.items;
+                if (cursors[qi] < m.len and m[cursors[qi]].archetype_id == target) {
+                    arch = m[cursors[qi]];
+                    owner = &q.table;
                     cursors[qi] += 1;
                 }
             }
-            try self.iterateArchetype(world, rd, arch, rule_matched, report, collect);
+            try self.iterateArchetype(world, rd, arch, owner, rule_matched, report, collect);
         }
     }
 
@@ -2430,40 +2566,81 @@ pub const Interpreter = struct {
     /// per-archetype body of the cached-matching-set selection (M1.0.0). When
     /// `collect` is non-null, matched entities are gathered instead of run
     /// (M1.0.14 E3, entity-bound async spawn).
-    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
+    /// The per-entity guard chain and body, shared by BOTH walks.
+    ///
+    /// Extracted at M1.B/G7 because the sparse arm needs the same chain and a
+    /// second copy is how the two would come to disagree — the milestone's
+    /// dominant defect shape. Every guard here takes the storage-agnostic
+    /// locator, so the chain reads identically whichever walk produced it, and
+    /// the guard ORDER is unchanged and still mirrored by the codegen.
+    fn visitLocator(self: *Interpreter, world: *World, rd: *RuleDesc, loc: Locator, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
+        if (!allFiltersPass(world, loc, rd.field_filters)) return;
+        // The chunk array stores the core `EntityId` packed struct; Etch's local
+        // `EntityId` is the raw u64 wire form that lives inside
+        // `Value.entity_id`. The two share the same 8-byte layout — `@bitCast`
+        // does the conversion without touching bits.
+        const entity_id: EntityId = @bitCast(loc.entity());
+        // Per-entity tag predicates (M0.8 E3) — applied after the structural
+        // predicate, like the field filter.
+        if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) return;
+        // Per-entity `changed` filters (M0.8 E3) — the component's
+        // `changedTick(T)` must exceed the rule's `last_run_tick`.
+        if (rd.changed_filters.len > 0 and !changedFiltersPass(world, loc, rd.changed_filters, rd.last_run_tick)) return;
+        // §6 general filters + bare conditions (M0.8 E4): evaluated LAST in the
+        // per-entity guard order (fixed, mirrored by the codegen guards).
+        if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
+            !(try self.exprGuardsPass(world, rd.*, entity_id, loc))) return;
+        if (collect) |buf| {
+            // Entity-bound async spawn (M1.0.14 E3): gather the matched entity
+            // in selection order; the caller spawns its task.
+            try buf.append(self.gpa, entity_id);
+        } else {
+            report.entities_iterated += 1;
+            rd.matched_entities += 1;
+            rule_matched.* = true;
+            try self.execBody(world, rd.*, entity_id, null, report);
+        }
+    }
+
+    /// Walk ONE term's plan — the archetype walk or the driver's dense array —
+    /// and hand each admitted position to the shared per-entity body.
+    ///
+    /// `predicate_archetype_evals` counts the archetypes a tail rescan scanned
+    /// this call, which is meaningful for the table arm and structurally ZERO
+    /// for the sparse arm: a sparse-driven term keeps no archetype cache, so it
+    /// has nothing to rescan. The counter is not renamed — it is the observable
+    /// the cache test asserts, and widening its meaning would break that test
+    /// for a reason unrelated to the cache.
+    fn iteratePlan(self: *Interpreter, world: *World, rd: *RuleDesc, p: *QueryPlan, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
+        switch (p.elect(world)) {
+            .table => {
+                const tq = &p.table;
+                report.predicate_archetype_evals += tq.inner.maybeRescan();
+                for (tq.inner.matching.items) |arch| {
+                    try self.iterateArchetype(world, rd, arch, tq, rule_matched, report, collect);
+                }
+            },
+            .sparse => |i| {
+                report.sparse_driven_walks += 1;
+                var it = p.sparse[i].iterator(world);
+                while (it.next()) |loc| {
+                    try self.visitLocator(world, rd, loc, rule_matched, report, collect);
+                }
+            },
+        }
+    }
+
+    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, tq: *const hybrid_mod.TableDrivenQuery, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         for (arch.chunks.items) |chunk| {
             const ids = arch.entityIdsConst(chunk);
             const count = chunk.header().entity_count;
             var slot: u32 = 0;
             while (slot < count) : (slot += 1) {
-                if (!allFiltersPass(arch, chunk, rd.field_filters, slot)) continue;
-                // The chunk array stores the core `EntityId` packed
-                // struct; Etch's local `EntityId` is the raw u64 wire
-                // form that lives inside `Value.entity_id`. The two
-                // share the same 8-byte layout — `@bitCast` does the
-                // conversion without touching bits.
-                const entity_id: EntityId = @bitCast(ids[slot]);
-                // Per-entity tag predicates (M0.8 E3) — applied after the
-                // archetype-level predicate, like the field filter.
-                if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
-                // Per-entity `changed` filters (M0.8 E3) — the slot's
-                // `changedTick(T)` must exceed the rule's `last_run_tick`.
-                if (rd.changed_filters.len > 0 and !changedFiltersPass(arch, chunk, slot, rd.changed_filters, rd.last_run_tick)) continue;
-                // §6 general filters + bare conditions (M0.8 E4): evaluated
-                // LAST in the per-entity guard order (fixed, mirrored by the
-                // codegen guards).
-                if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
-                    !(try self.exprGuardsPass(world, rd.*, entity_id, arch, chunk, slot))) continue;
-                if (collect) |buf| {
-                    // Entity-bound async spawn (M1.0.14 E3): gather the matched
-                    // entity in selection order; the caller spawns its task.
-                    try buf.append(self.gpa, entity_id);
-                } else {
-                    report.entities_iterated += 1;
-                    rd.matched_entities += 1;
-                    rule_matched.* = true;
-                    try self.execBody(world, rd.*, entity_id, null, report);
-                }
+                const loc: Locator = .{ .table = .{ .arch = arch, .chunk = chunk, .slot = slot } };
+                // The SPARSE half of both id sets, per entity — the archetype
+                // cannot answer for a component it carries no column for.
+                if (!tq.admits(world, ids[slot])) continue;
+                try self.visitLocator(world, rd, loc, rule_matched, report, collect);
             }
         }
     }
@@ -2499,18 +2676,25 @@ pub const Interpreter = struct {
     /// `has T { expression }` filters (fields-only scope) then the bare
     /// expression conditions (rule params in scope; `entity_id` bound for an
     /// entity-bound rule, absent for a global one). Flat-AND; fixed order.
-    fn exprGuardsPass(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, arch: ?*DynamicArchetype, chunk: ?*Chunk, slot: u32) !bool {
+    fn exprGuardsPass(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, loc: ?Locator) !bool {
         var pass = true;
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         for (rd.expr_filters) |ef| {
             locals.map.clearRetainingCapacity();
-            const a = arch.?;
-            const col = a.componentIndex(ef.component_id) orelse {
+            // The FOURTH per-slot guard to take the locator (M1.B/G7). Its
+            // previous form asked the archetype for a column, which answers
+            // null for a sparse id — so a `component T { expression }` guard on
+            // a sparse member failed CLOSED and the rule silently matched
+            // nothing rather than reporting anything.
+            const here = loc orelse {
                 pass = false;
                 break;
             };
-            const slot_bytes = a.componentSlot(chunk.?, col, slot);
+            const slot_bytes = here.componentBytes(world, ef.component_id) orelse {
+                pass = false;
+                break;
+            };
             for (ef.fields) |bf| {
                 const v = bridge_mod.readBytesAsValue(bf.kind, slot_bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
                 try locals.put(self.gpa, bf.name, v, false);
@@ -6614,29 +6798,40 @@ fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
 /// Whether every per-rule field filter passes for `(chunk, slot)` (M0.8 E3-D,
 /// D-S4-multifilter): flat-AND over the rule's `field_filters`. Trivially
 /// true for a filter-free rule.
-fn allFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, filters: []const FieldFilter, slot: u32) bool {
+/// Whether every field filter passes for `loc`.
+///
+/// Takes a STORAGE-AGNOSTIC LOCATOR since M1.B/G7, not an
+/// `(archetype, chunk, slot)` triple: a sparse-driven walk has no chunk, so a
+/// triple could not express its position at all. The table arm of the locator
+/// keeps the direct offset, so the delivered path pays nothing.
+fn allFiltersPass(world: *World, loc: Locator, filters: []const FieldFilter) bool {
     for (filters) |ff| {
-        if (!filterPasses(arch, chunk, ff, slot)) return false;
+        if (!filterPasses(world, loc, ff)) return false;
     }
     return true;
 }
 
-fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u32) bool {
-    const idx = arch.componentIndex(ff.component_id) orelse return false;
-    const slot_bytes = arch.componentSlot(chunk, idx, slot);
+fn filterPasses(world: *World, loc: Locator, ff: FieldFilter) bool {
+    const slot_bytes = loc.componentBytes(world, ff.component_id) orelse return false;
     const f_bytes = slot_bytes[ff.field_offset .. ff.field_offset + @as(u16, @intCast(ff.field_kind.sizeBytes()))];
     const v = bridge_mod.readBytesAsValue(ff.field_kind, f_bytes);
     return v.eql(ff.expected_value);
 }
 
-/// Whether every `changed` filter passes for `(chunk, slot)` (M0.8 E3): each
-/// listed component's `changedTick` must exceed `last_run_tick`
-/// (`engine-ecs-internals.md` §5). The `has T` archetype predicate guarantees
-/// the component is present, so a missing column is an inconsistent program.
-fn changedFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, slot: u32, cids: []const ComponentId, last_run_tick: Tick) bool {
+/// Whether every `changed` filter passes for `loc` (M0.8 E3): each listed
+/// component's `changedTick` must exceed `last_run_tick`
+/// (`engine-ecs-internals.md` §5).
+///
+/// Reads the tick through `World.changedTickOf`, which routes by storage — see
+/// there for why reaching the archetype directly is wrong.
+///
+/// The `has T` predicate still guarantees presence — per entity now when the
+/// member is sparse, at the archetype when it is table — so an absent component
+/// remains an inconsistent program and reads as a failed filter.
+fn changedFiltersPass(world: *World, loc: Locator, cids: []const ComponentId, last_run_tick: Tick) bool {
     for (cids) |cid| {
-        const col = arch.componentIndex(cid) orelse return false;
-        if (!(arch.changedTick(chunk, col, slot) > last_run_tick)) return false;
+        const t = world.changedTickOf(loc.entity(), cid) orelse return false;
+        if (!(t > last_run_tick)) return false;
     }
     return true;
 }
@@ -6645,11 +6840,11 @@ fn changedFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, slot: u32, cids: [
 /// `TagSet` component reads as all-zero.
 fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit: u32) bool {
     const core_id: CoreEntityId = @bitCast(entity);
-    const loc = world.dynamicLocation(core_id) orelse return false;
-    const arch = world.dynamicArchetype(loc.archetype_idx);
-    const col = arch.componentIndex(tagset_id) orelse return false;
-    const chunk = arch.chunks.items[loc.chunk_idx];
-    const bytes = arch.componentSlot(chunk, col, loc.slot);
+    // Routed through `World.componentBytes`, which G3 made bimodal. A `TagSet`
+    // registered sparse is reachable — G4 drives exactly that through all three
+    // apply paths — and the previous body asked `arch.componentIndex`, which
+    // answers null for a sparse id, so every tag test would have read FALSE.
+    const bytes = world.componentBytes(core_id, tagset_id) orelse return false;
     const off: usize = @as(usize, bit / 64) * 8;
     var word: u64 = 0;
     @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
@@ -6869,7 +7064,9 @@ fn compileComponent(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, literals);
+    const req = try types_mod.requiresNamesOf(gpa, ast, decl);
+    defer gpa.free(req);
+    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(ast, decl), literals);
 }
 
 fn compileResource(
@@ -6885,7 +7082,14 @@ fn compileResource(
     // AND already lives in the resource store with its current value — adding
     // it again would reset it to defaults. Seed the store only on first compile.
     const pre_existing = world.registry.idOf(name) != null;
-    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, literals);
+    // `.table` and not a resolved mode: `@storage` applies to `component` only
+    // (`annotationAppliesTo`, refused on a resource with `E0502`), so a resource
+    // has no mode to read. Passing the default here states that rather than
+    // leaving a reader to infer it from the absence of a call.
+    // A resource carries no `@requires`: the annotation's applicability is
+    // validated to `component` only (`types.zig`), so an empty list here is the
+    // domain's answer and not a shortcut.
+    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, &.{}, .table, literals);
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
@@ -7103,6 +7307,19 @@ pub fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
+    /// DIRECT `@requires` names, already read from the declaration. Passed
+    /// RESOLVED for the same reason `storage` is: this function receives no
+    /// declaration node, so it cannot read an annotation itself, and handing it
+    /// the names keeps the reading in ONE place shared by both callers.
+    requires: []const []const u8,
+    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
+    /// not as the annotation range, deliberately: this function receives no
+    /// declaration node — measured at M1.B/G0 §1.8, it takes `name`,
+    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
+    /// `annotations_extra` at all — and widening it to take the node would give
+    /// the registry seam a dependency on AST item shape that its three callers
+    /// do not share. `storageModeOf` is the single resolver they share instead.
+    storage: StorageKind,
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !ComponentId {
     var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
@@ -7235,6 +7452,8 @@ pub fn compileTypeDecl(
         .alignment = @intCast(max_align),
         .default_bytes = default_buf,
         .fields = fields.items,
+        .storage = storage,
+        .requires = requires,
     });
     switch (reg_kind) {
         .component => try bridge.mapComponent(gpa, name, id),
@@ -7409,7 +7628,7 @@ fn crossProduct(gpa: std.mem.Allocator, lhs: Dnf, rhs: Dnf) !Dnf {
 /// carrying the selection. Unsatisfiable terms (`has T` ∧ `not has T`) are
 /// dropped — the rule never matches via that disjunct. Each query dup's its id
 /// sets, so the DNF is freed here.
-fn buildSelection(gpa: std.mem.Allocator, world: *World, pool: []const PredicateNode, predicate_root: ?u32) ![]DynamicQuery {
+fn buildSelection(gpa: std.mem.Allocator, world: *World, pool: []const PredicateNode, predicate_root: ?u32) ![]QueryPlan {
     var dnf: Dnf = .empty;
     defer freeDnf(gpa, &dnf);
     if (predicate_root) |root| {
@@ -7418,7 +7637,7 @@ fn buildSelection(gpa: std.mem.Allocator, world: *World, pool: []const Predicate
         try dnf.append(gpa, .{}); // single match-all term
     }
 
-    var queries: std.ArrayListUnmanaged(DynamicQuery) = .empty;
+    var queries: std.ArrayListUnmanaged(QueryPlan) = .empty;
     errdefer {
         for (queries.items) |*q| q.deinit(gpa);
         queries.deinit(gpa);
@@ -7427,7 +7646,11 @@ fn buildSelection(gpa: std.mem.Allocator, world: *World, pool: []const Predicate
     try queries.ensureTotalCapacity(gpa, dnf.items.len);
     for (dnf.items) |t| {
         if (!t.satisfiable()) continue;
-        const q = try world.queryDynamic(gpa, t.with.items, t.without.items);
+        // M1.B/G7 — one PLAN per term instead of one archetype query: the
+        // driver is elected here, from the term's own with-set, so a term whose
+        // smallest member is sparse is walked by that member's dense array and
+        // a term with no sparse member keeps the archetype walk verbatim.
+        const q = try hybrid_mod.plan(gpa, world, t.with.items, t.without.items);
         queries.appendAssumeCapacity(q);
     }
     return try queries.toOwnedSlice(gpa);
@@ -7533,10 +7756,13 @@ fn compileRule(
         }
     }
 
-    // M1.0.0 — the rule's archetype selection (DNF → one DynamicQuery per
-    // term). Built only for entity-bound rules; the global / resource-only /
-    // event paths never select archetypes, so they keep an empty selection.
-    const selection: []DynamicQuery = if (is_entity_bound)
+    // M1.0.0 — the rule's selection (DNF → one plan per term). Built only for
+    // entity-bound rules; the global / resource-only / event paths never select
+    // entities, so they keep an empty selection.
+    //
+    // *"archetype selection" since M1.B/G7: a term whose smallest member is
+    // sparse selects no archetype at all.*
+    const selection: []QueryPlan = if (is_entity_bound)
         try buildSelection(gpa, world, pool.items, predicate_root)
     else
         &.{};

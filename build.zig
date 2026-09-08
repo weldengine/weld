@@ -716,6 +716,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/observers.zig" },
         .{ .path = "tests/ecs/no_alloc_steady_state.zig" },
         .{ .path = "tests/ecs/integration_scenario.zig" },
+        .{ .path = "tests/ecs/sparse_routing_test.zig" },
+        .{ .path = "tests/ecs/hybrid_query_test.zig" },
+        .{ .path = "tests/ecs/requires_test.zig" },
         .{ .path = "tests/core/rtti/comptime_builder_test.zig" },
         .{ .path = "tests/core/rtti/hash_test.zig" },
         .{ .path = "tests/core/rtti/registry_test.zig" },
@@ -762,6 +765,11 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E7 — full-grammar 500+ line integration reference: parse
         // < 50 ms + type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
+        // M1.B / G1 — `@storage` consumed end to end: the mode reaches the
+        // registry, the storage does not move yet, and the codegen refuses a
+        // sparse program. `.etch = true` for `weld_etch`; `weld_core` is
+        // unconditional in this loop.
+        .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
         // M0.8 / E7 — TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
@@ -1245,6 +1253,69 @@ pub fn build(b: *std.Build) void {
         "Run the ECS benchmark (S1 non-regression case; pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // ------------------------- M1.B / G10 ECS hybrid-storage crossover bench --
+    //
+    // Table vs SparseSet per-tick cost over (population fraction, churn rate),
+    // swept one parameter at a time from a declared base over payload size,
+    // query member count, archetype spread and worker count. TWO COLUMNS per
+    // cell — first occurrence and steady state, never averaged — each with its
+    // allocation count. REPORTED, NOT GATED, and permanently: the owning spec
+    // (`engine-ecs-internals.md` §2) refuses to engrave a threshold and names
+    // this bench as what produces one instead, so a pass threshold here would
+    // grade an implementation against a number the bench exists to produce.
+    // Writes `bench/results/ecs_hybrid_crossover.md`. Pass `-- --smoke` for a
+    // one-cell-per-configuration CI run.
+    const hybrid_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/ecs_hybrid_crossover.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hybrid_bench_module.addImport("weld_core", core_module);
+    const hybrid_bench_exe = b.addExecutable(.{
+        .name = "ecs-hybrid-crossover-bench",
+        .root_module = hybrid_bench_module,
+    });
+    b.installArtifact(hybrid_bench_exe);
+    const hybrid_bench_run = b.addRunArtifact(hybrid_bench_exe);
+    hybrid_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| hybrid_bench_run.addArgs(args);
+    const hybrid_bench_step = b.step(
+        "bench-ecs-hybrid",
+        "Run the M1.B ECS hybrid-storage crossover bench (reported, not gated; writes bench/results/ecs_hybrid_crossover.md)",
+    );
+    hybrid_bench_step.dependOn(&hybrid_bench_run.step);
+
+    // -------------------------- M1.B / P2-1 driver-election cost + flip rate --
+    //
+    // Two tracks: the cost of ONE `QueryPlan.elect` by with-set shape over a
+    // swept archetype count, and the flip rate per tick under the crossover
+    // bench's churn values — doubled with a population-MOVING churn, because the
+    // crossover's own churn leaves both populations unchanged by construction
+    // and therefore cannot flip a cardinality election at all. REPORTED, NOT
+    // GATED, on the same grounds as its sibling: the owning spec refuses to
+    // engrave a threshold and names a bench as what produces figures instead.
+    // Writes `bench/results/ecs_election.md`. Pass `-- --smoke` for a
+    // one-archetype-count CI run.
+    const election_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/ecs_election.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    election_bench_module.addImport("weld_core", core_module);
+    const election_bench_exe = b.addExecutable(.{
+        .name = "ecs-election-bench",
+        .root_module = election_bench_module,
+    });
+    b.installArtifact(election_bench_exe);
+    const election_bench_run = b.addRunArtifact(election_bench_exe);
+    election_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| election_bench_run.addArgs(args);
+    const election_bench_step = b.step(
+        "bench-ecs-election",
+        "Run the M1.B driver-election bench (reported, not gated; writes bench/results/ecs_election.md)",
+    );
+    election_bench_step.dependOn(&election_bench_run.step);
 
     // ------------------------------ M1.1.4 forge narrowphase fast-path bench --
     //

@@ -42,6 +42,7 @@ const worker_mod = @import("worker.zig");
 // thread (`ARCH-031` rule 5). Imported from its single definition rather than
 // through a Tier 0 facade; the tier rule lives at that definition.
 const float_env = @import("foundation").math.float_env;
+const job_bound = @import("foundation").job_bound;
 
 const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;
@@ -240,6 +241,12 @@ pub const Scheduler = struct {
     pub fn dispatch(self: *Scheduler, query: anytype, comptime Body: anytype, args: anytype) SchedulerError!void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
+        // PLACEMENT ON THE TYPE MAKES A GUARD AVAILABLE, NOT CALLED — this
+        // entry was unguarded because the enumeration behind "every entry
+        // reaches it" was over `src/core/ecs/` and this file is not there. The
+        // predicate lives in `foundation` so this tier can reach it without
+        // importing the ECS.
+        job_bound.refuseMarkedArgs(ArgsType);
 
         const Trampoline = struct {
             fn call(chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void {
@@ -287,6 +294,11 @@ pub const Scheduler = struct {
     /// `incoming.len > workers.len * per_worker_capacity` (same
     /// build-mode-independent bound as `dispatch`).
     pub fn dispatchBatch(self: *Scheduler, incoming: []const Job) SchedulerError!void {
+        // No bound is possible HERE and none is owed: a `Job` carries an
+        // already-erased `ctx_ptr: *anyopaque`, so there is no argument type to
+        // interrogate. It is owed by the entries that BUILD those records —
+        // `JobBuilder.addJob` and `addDenseRangeJobs`, the only two producers,
+        // and both carry it.
         if (incoming.len > self.jobs.len) return error.TooManyChunks;
         @memcpy(self.jobs[0..incoming.len], incoming);
         self.publishWaveAndWait(@intCast(incoming.len));

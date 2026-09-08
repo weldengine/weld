@@ -161,7 +161,11 @@ pub const Archetype = struct {
         archetype_id: ArchetypeId,
         component_ids: []const ComponentId,
     ) ArchetypeError!Archetype {
-        if (component_ids.len == 0) return ArchetypeError.EmptyComponentList;
+        // An EMPTY component list is legal since M1.B/G2: an entity whose whole
+        // set is sparse still has an archetype, because an entity ALWAYS has
+        // one. Making it optional would create a second entity lifecycle that
+        // despawn, the observers, the three spawn paths and `dynamicLocation`
+        // would each have to tell apart.
 
         const ids = try gpa.dupe(ComponentId, component_ids);
         errdefer gpa.free(ids);

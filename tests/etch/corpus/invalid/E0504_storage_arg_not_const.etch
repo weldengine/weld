@@ -1,0 +1,17 @@
+// `@storage` with a syntactically valid but NON-CONSTANT argument.
+//
+// `config.mode` parses — the annotation-arg parser routes an `ident`
+// through its postfix chain precisely so `@requires(self.health)` works —
+// and it is a `field_access`, which `isConstEvaluable` refuses. So it is
+// not a domain name and not a constant: §13.3 step 4, not step 3.
+//
+// The distinction from `E0503_storage_value_out_of_domain.etch` is the
+// point of having both: one is a constant of the wrong value, the other is
+// not a constant at all, and a single code could not tell them apart.
+//
+// Expected: E0504 AnnotationArgNotConst.
+
+@storage(config.mode)
+component Poisoned {
+    stacks: int = 1
+}

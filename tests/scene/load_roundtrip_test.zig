@@ -240,3 +240,255 @@ test "loadScene mmaps a cooked file and instantiates every entity" {
     try std.testing.expect(result.mmap != null);
     try std.testing.expectEqual(@as(usize, n_entities), result.spawned.len);
 }
+
+// ─── M1.B / G6 — hybrid storage through the scene loader ────────────────────
+//
+// The codec is NOT reopened and needs no change: the storage mode is a RUNTIME
+// REGISTRY property and never part of on-disk identity, and the loader does not
+// write column by column — it walks the blocks and INSTANTIATES ENTITY BY
+// ENTITY, handing `World.spawnDynamicWithValues` the block's full ComponentId
+// set plus each column's byte view at that entity's rank. That surface has been
+// bimodal since G3, so the bifurcation is entirely in the spawn path.
+//
+// `engine-scene-serialization.md` §4, rectified 2026-09-03: "C'est le `World`
+// qui place les octets, et c'est ce qui rend le second mode de stockage
+// réalisable sans rouvrir ce codec."
+
+/// Same two-column scene as `cookPosVelScene`, with `Vel` declared SPARSE. The
+/// on-disk bytes are IDENTICAL in shape — only the registry entry differs, which
+/// is the whole claim.
+fn cookPosVelScene2(gpa: std.mem.Allocator, world: *World, vel_mode: ecs.StorageKind) ![]u8 {
+    const pos = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Pos",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+    });
+    const vel = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Vel",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+        .storage = vel_mode,
+    });
+    std.debug.assert(pos < vel);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "E")});
+    const uuids = try a.alloc([16]u8, n_entities);
+    for (0..n_entities) |i| uuids[i] = uuidFor(@intCast(i));
+
+    const pos_col = try a.alloc(u8, 8 * n_entities);
+    const vel_col = try a.alloc(u8, 8 * n_entities);
+    for (0..n_entities) |i| {
+        writeF32(pos_col, i * 8 + 0, posX(i));
+        writeF32(pos_col, i * 8 + 4, posY(i));
+        writeF32(vel_col, i * 8 + 0, velX(i));
+        writeF32(vel_col, i * 8 + 4, velY(i));
+    }
+    const cols = try a.dupe([]u8, &.{ pos_col, vel_col });
+    const ents = try a.alloc(format.EntityEntry, n_entities);
+    for (0..n_entities) |i| ents[i] = .{ .name = 0, .uuid = @intCast(i), .parent_uuid = format.no_parent };
+    const ids = try a.dupe(format.ComponentId, &.{ pos, vel });
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{
+        .component_ids = ids,
+        .entity_count = n_entities,
+        .columns = cols,
+        .entities = ents,
+    }});
+    var model: format.CookModel = .{
+        .strings = names,
+        .uuids = uuids,
+        .resources = &.{},
+        .archetypes = blocks,
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, &world.registry);
+}
+
+test "G6: a cooked scene loads a SPARSE component into its own store" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const bytes = try cookPosVelScene2(gpa, &world, .sparse);
+    defer gpa.free(bytes);
+
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
+    defer result.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, n_entities), world.entityCount());
+    const pos_id = world.componentId("Pos").?;
+    const vel_id = world.componentId("Vel").?;
+
+    for (0..n_entities) |i| {
+        const eid = result.uuid_to_entity.get(uuidFor(@intCast(i))).?;
+        // Both components carried, both with their cooked values — the sparse
+        // one through its store, the table one through its column.
+        try std.testing.expect(world.hasComponentDyn(eid, pos_id));
+        try std.testing.expect(world.hasComponentDyn(eid, vel_id));
+        const pb = world.componentBytes(eid, pos_id).?;
+        try std.testing.expectApproxEqAbs(posX(i), readF32(pb, 0), 1e-6);
+        try std.testing.expectApproxEqAbs(posY(i), readF32(pb, 4), 1e-6);
+        const vb = world.componentBytes(eid, vel_id).?;
+        try std.testing.expectApproxEqAbs(velX(i), readF32(vb, 0), 1e-6);
+        try std.testing.expectApproxEqAbs(velY(i), readF32(vb, 4), 1e-6);
+
+        // And `Vel` is NOT in the archetype signature: the block named it, and
+        // the spawn surface routed it away. The on-disk block is unchanged.
+        const arch = world.dynamicArchetype(world.dynamicLocation(eid).?.archetype_idx);
+        try std.testing.expect(arch.hasComponent(pos_id));
+        try std.testing.expect(!arch.hasComponent(vel_id));
+    }
+    try std.testing.expectEqual(@as(usize, n_entities), world.sparse_stores.getConst(vel_id).?.len());
+}
+
+test "G6: the SAME cooked bytes give the same values under either mode" {
+    // The counter-factual is the REGISTRY and nothing else: same cook function,
+    // same column bytes, same UUIDs — only `Vel`'s declared mode differs. This
+    // is what establishes that the on-disk identity does not carry the mode,
+    // rather than asserting it.
+    const gpa = std.testing.allocator;
+
+    var w_table = World.init();
+    defer w_table.deinit(gpa);
+    const b_table = try cookPosVelScene2(gpa, &w_table, .table);
+    defer gpa.free(b_table);
+
+    var w_sparse = World.init();
+    defer w_sparse.deinit(gpa);
+    const b_sparse = try cookPosVelScene2(gpa, &w_sparse, .sparse);
+    defer gpa.free(b_sparse);
+
+    // The COOKED BYTES are identical: the writer never saw a storage mode.
+    try std.testing.expectEqualSlices(u8, b_table, b_sparse);
+
+    var r_table = try loader.loadFromBytes(&w_table, gpa, b_table, null);
+    defer r_table.deinit(gpa);
+    var r_sparse = try loader.loadFromBytes(&w_sparse, gpa, b_sparse, null);
+    defer r_sparse.deinit(gpa);
+
+    const vt = w_table.componentId("Vel").?;
+    const vs = w_sparse.componentId("Vel").?;
+    for (0..n_entities) |i| {
+        const et = r_table.uuid_to_entity.get(uuidFor(@intCast(i))).?;
+        const es = r_sparse.uuid_to_entity.get(uuidFor(@intCast(i))).?;
+        try std.testing.expectEqualSlices(
+            u8,
+            w_table.componentBytes(et, vt).?,
+            w_sparse.componentBytes(es, vs).?,
+        );
+    }
+    // And the archetypes DIFFER, which is what makes the equality above a
+    // statement about the storage and not about two identical worlds.
+    const at = w_table.dynamicArchetype(w_table.dynamicLocation(r_table.spawned[0]).?.archetype_idx);
+    const as_ = w_sparse.dynamicArchetype(w_sparse.dynamicLocation(r_sparse.spawned[0]).?.archetype_idx);
+    try std.testing.expectEqual(@as(usize, 2), at.component_ids.len);
+    try std.testing.expectEqual(@as(usize, 1), as_.component_ids.len);
+}
+
+test "G6: two blocks whose TABLE subset coincides land in one archetype" {
+    // The property the corpus names: an Archetype Block is a SERIALIZATION
+    // group keyed by the full on-disk signature, so two entities differing only
+    // by a sparse component cook into DIFFERENT blocks — and instantiate into
+    // the SAME archetype, because the spawn surface routes the sparse id away
+    // before the signature is resolved. Nothing computes that; signature
+    // resolution gives it.
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Pos",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+    });
+    const vel = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Vel",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+        .storage = .sparse,
+    });
+    std.debug.assert(pos < vel);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "E")});
+    const uuids = try a.alloc([16]u8, 2);
+    uuids[0] = uuidFor(0);
+    uuids[1] = uuidFor(1);
+
+    // Block A: {Pos, Vel} — one entity. Block B: {Pos} — one entity.
+    const a_pos = try a.alloc(u8, 8);
+    const a_vel = try a.alloc(u8, 8);
+    const b_pos = try a.alloc(u8, 8);
+    writeF32(a_pos, 0, 1.0);
+    writeF32(a_pos, 4, 2.0);
+    writeF32(a_vel, 0, 3.0);
+    writeF32(a_vel, 4, 4.0);
+    writeF32(b_pos, 0, 5.0);
+    writeF32(b_pos, 4, 6.0);
+
+    const ent_a = try a.alloc(format.EntityEntry, 1);
+    ent_a[0] = .{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent };
+    const ent_b = try a.alloc(format.EntityEntry, 1);
+    ent_b[0] = .{ .name = 0, .uuid = 1, .parent_uuid = format.no_parent };
+
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{
+        .{
+            .component_ids = try a.dupe(format.ComponentId, &.{ pos, vel }),
+            .entity_count = 1,
+            .columns = try a.dupe([]u8, &.{ a_pos, a_vel }),
+            .entities = ent_a,
+        },
+        .{
+            .component_ids = try a.dupe(format.ComponentId, &.{pos}),
+            .entity_count = 1,
+            .columns = try a.dupe([]u8, &.{b_pos}),
+            .entities = ent_b,
+        },
+    });
+    var model: format.CookModel = .{
+        .strings = names,
+        .uuids = uuids,
+        .resources = &.{},
+        .archetypes = blocks,
+        .arena = arena,
+    };
+    defer model.deinit();
+    const bytes = try writer.write(gpa, model, &world.registry);
+    defer gpa.free(bytes);
+
+    // TWO blocks on disk — the cook grouped by the FULL signature.
+    {
+        var acc = try scene.accessor.Accessor.open(bytes);
+        try std.testing.expectEqual(@as(u32, 2), acc.archetypeCount());
+    }
+
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
+    defer result.deinit(gpa);
+
+    const e_a = result.uuid_to_entity.get(uuidFor(0)).?;
+    const e_b = result.uuid_to_entity.get(uuidFor(1)).?;
+
+    // ONE archetype after load — the two blocks' table subsets coincide.
+    try std.testing.expectEqual(
+        world.dynamicLocation(e_a).?.archetype_idx,
+        world.dynamicLocation(e_b).?.archetype_idx,
+    );
+    // And the sparse component is carried by A alone, which is what makes the
+    // shared archetype a routing result and not two identical entities.
+    try std.testing.expect(world.hasComponentDyn(e_a, vel));
+    try std.testing.expect(!world.hasComponentDyn(e_b, vel));
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), readF32(world.componentBytes(e_a, vel).?, 0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), readF32(world.componentBytes(e_a, pos).?, 0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), readF32(world.componentBytes(e_b, pos).?, 0), 1e-6);
+}

@@ -127,19 +127,55 @@ pub const Bridge = struct {
     ) BridgeError!ComponentRef {
         const core_id: CoreEntityId = @bitCast(entity);
         const loc = world.dynamicLocation(core_id) orelse return BridgeError.UnknownEntity;
+        // The MODE decides the arm, and the presence question is the routed one:
+        // asking `arch.componentIndex` for a sparse id answers null, which is
+        // what made a sparse component look ABSENT before G5 — the same error a
+        // caller gets for a component the entity really does not carry.
+        if (!world.hasComponentDyn(core_id, component_id)) return BridgeError.UnknownComponent;
+        if (world.storageOf(component_id) == .sparse) {
+            return .{
+                .component_id = component_id,
+                .mutable = mutable,
+                .where = .{ .sparse = entity },
+            };
+        }
         const arch = world.dynamicArchetype(loc.archetype_idx);
-        if (arch.componentIndex(component_id) == null) return BridgeError.UnknownComponent;
         const chunk = arch.chunks.items[loc.chunk_idx];
         return .{
             .component_id = component_id,
-            .chunk_ptr = chunk,
-            .slot = loc.slot,
             .mutable = mutable,
+            .where = .{ .table = .{ .chunk_ptr = chunk, .slot = loc.slot } },
         };
     }
 
     /// Read a field from a component slot as a `Value` (auto-tagged from
     /// the field's `FieldKind`).
+    /// The component's bytes for this handle, whichever backend holds them.
+    ///
+    /// ONE place, not four: the three accessors below each re-derived the
+    /// archetype from `chunk_ptr` and asked for the column, so the bimodal
+    /// decision would have had to be written three times — and a change landing
+    /// in one site and not its siblings is this milestone's dominant defect
+    /// shape.
+    fn refBytes(world: *World, ref: ComponentRef) BridgeError![]u8 {
+        switch (ref.where) {
+            .table => |t| {
+                const chunk: *Chunk = @ptrCast(@alignCast(t.chunk_ptr));
+                const arch = world.dynamicArchetype(chunk.header().archetype_id);
+                const idx = arch.componentIndex(ref.component_id) orelse return BridgeError.UnknownComponent;
+                return arch.componentSlot(chunk, idx, t.slot);
+            },
+            .sparse => |wire| {
+                const core_id: CoreEntityId = @bitCast(wire);
+                // Through the World-level entry, which G3 made bimodal and which
+                // deliberately does NOT stamp a change — the table arm does not
+                // either, and `markComponentChanged` owns the stamp.
+                return world.componentBytes(core_id, ref.component_id) orelse
+                    BridgeError.UnknownComponent;
+            },
+        }
+    }
+
     pub fn readComponentField(
         registry: *const Registry,
         ref: ComponentRef,
@@ -147,15 +183,7 @@ pub const Bridge = struct {
         field_name: []const u8,
     ) BridgeError!Value {
         const field = registry.findField(ref.component_id, field_name) orelse return BridgeError.UnknownField;
-        const loc_arch = blk: {
-            // The chunk's archetype id is in its header.
-            const chunk: *Chunk = @ptrCast(@alignCast(ref.chunk_ptr));
-            const archetype_id = chunk.header().archetype_id;
-            break :blk world.dynamicArchetype(archetype_id);
-        };
-        const idx = loc_arch.componentIndex(ref.component_id) orelse return BridgeError.UnknownComponent;
-        const chunk: *Chunk = @ptrCast(@alignCast(ref.chunk_ptr));
-        const slot_bytes = loc_arch.componentSlot(chunk, idx, ref.slot);
+        const slot_bytes = try refBytes(world, ref);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
         return readBytesAsValue(field.kind, field_bytes);
     }
@@ -171,10 +199,7 @@ pub const Bridge = struct {
     ) BridgeError!void {
         std.debug.assert(ref.mutable);
         const field = registry.findField(ref.component_id, field_name) orelse return BridgeError.UnknownField;
-        const chunk: *Chunk = @ptrCast(@alignCast(ref.chunk_ptr));
-        const arch = world.dynamicArchetype(chunk.header().archetype_id);
-        const idx = arch.componentIndex(ref.component_id) orelse return BridgeError.UnknownComponent;
-        const slot_bytes = arch.componentSlot(chunk, idx, ref.slot);
+        const slot_bytes = try refBytes(world, ref);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
         try writeValueAsBytes(field.kind, field_bytes, v);
     }
@@ -187,10 +212,22 @@ pub const Bridge = struct {
     /// `markChanged`, so the stamped tick is identical across backends → the
     /// `changed` differential is byte-exact by construction.
     pub fn markComponentChanged(world: *World, ref: ComponentRef, tick: Tick) void {
-        const chunk: *Chunk = @ptrCast(@alignCast(ref.chunk_ptr));
-        const arch = world.dynamicArchetype(chunk.header().archetype_id);
-        const idx = arch.componentIndex(ref.component_id) orelse return;
-        arch.markChanged(chunk, idx, ref.slot, tick);
+        // Two arms rather than `World.markComponentChangedDyn`, which would be
+        // shorter and would DROP the explicit `tick`. The sparse storage's own
+        // `markChanged` takes a tick too, so the parameter survives on both
+        // sides and the caller's contract does not move.
+        switch (ref.where) {
+            .table => |t| {
+                const chunk: *Chunk = @ptrCast(@alignCast(t.chunk_ptr));
+                const arch = world.dynamicArchetype(chunk.header().archetype_id);
+                const idx = arch.componentIndex(ref.component_id) orelse return;
+                arch.markChanged(chunk, idx, t.slot, tick);
+            },
+            .sparse => |wire| {
+                const core_id: CoreEntityId = @bitCast(wire);
+                if (world.sparse_stores.get(ref.component_id)) |store| store.markChanged(core_id, tick);
+            },
+        }
     }
 
     // ─── Resource access ─────────────────────────────────────────────────
@@ -516,4 +553,109 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
+}
+
+// ─── M1.B / G5 — the handle is bimodal ──────────────────────────────────────
+//
+// `ComponentRef` was chunk-anchored, and a sparse component has no chunk. These
+// tests live here rather than in `tests/etch/` because the bridge is not
+// exported from the Etch root, and exporting it to reach a test would widen the
+// public surface for the test's convenience. They also cannot be written end to
+// end yet: a rule does not SELECT an entity by a sparse component until G7's
+// planner lands, so the body that would use this handle never runs — pinned in
+// `tests/etch/storage_mode_test.zig` as the boundary of the day.
+
+fn g5TestWorld(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
+    const zero = [_]u8{0} ** 8;
+    return world.registry.registerComponentRaw(gpa, .{
+        .name = "Probe",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &zero,
+        .fields = &.{.{ .name = "v", .offset = 0, .kind = .f64_ }},
+        .storage = mode,
+    });
+}
+
+test "G5: componentRefOf resolves a SPARSE component, and the field round-trips" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const eid = try world.spawnDynamic(gpa, &.{cid});
+
+    // Before G5 this returned `BridgeError.UnknownComponent`: the resolution
+    // asked `arch.componentIndex(cid)`, which answers null for a sparse id, so
+    // `entity.get(T)` on a sparse component was indistinguishable from asking
+    // for a component the entity does not carry.
+    const ref = try Bridge.componentRefOf(&world, @bitCast(eid), cid, true);
+
+    try Bridge.writeComponentField(&world.registry, ref, &world, "v", .{ .float_ = 7.5 });
+    const read = try Bridge.readComponentField(&world.registry, ref, &world, "v");
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), read.float_, 1e-12);
+
+    // The write reached the STORE and not a copy: read it back through the
+    // World-level entry, which knows nothing of this handle.
+    const bytes = world.componentBytes(eid, cid).?;
+    const v: f64 = @bitCast(std.mem.readInt(u64, bytes[0..8], .little));
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), v, 1e-12);
+}
+
+test "G5: the TABLE arm is unchanged — the same round-trip, same assertions" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The counter-factual is the MODE and nothing else: same size, same field,
+    // same calls. Without it, "the sparse arm works" would not establish that
+    // the table arm still does.
+    const cid = try g5TestWorld(gpa, &world, .table);
+    const eid = try world.spawnDynamic(gpa, &.{cid});
+
+    const ref = try Bridge.componentRefOf(&world, @bitCast(eid), cid, true);
+    try Bridge.writeComponentField(&world.registry, ref, &world, "v", .{ .float_ = 7.5 });
+    const read = try Bridge.readComponentField(&world.registry, ref, &world, "v");
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), read.float_, 1e-12);
+
+    const bytes = world.componentBytes(eid, cid).?;
+    const v: f64 = @bitCast(std.mem.readInt(u64, bytes[0..8], .little));
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), v, 1e-12);
+}
+
+test "G5: markComponentChanged stamps a SPARSE component" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const eid = try world.spawnDynamic(gpa, &.{cid});
+    const at_spawn = world.sparse_stores.getConst(cid).?.changedTick(eid).?;
+
+    world.beginFrame();
+    world.beginFrame();
+    const ref = try Bridge.componentRefOf(&world, @bitCast(eid), cid, true);
+    Bridge.markComponentChanged(&world, ref, world.current_tick);
+
+    const after = world.sparse_stores.getConst(cid).?.changedTick(eid).?;
+    // The entry returns `void`, so a lost stamp has no diagnostic — asserted to
+    // have MOVED rather than merely to exist, with two frames making the two
+    // ticks distinguishable.
+    try std.testing.expect(after != at_spawn);
+    try std.testing.expectEqual(world.current_tick, after);
+}
+
+test "G5: componentRefOf still refuses a component the entity does NOT carry" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The refusal must survive the widening: a guard has two ways of being
+    // wrong, and making the sparse arm resolve must not make every id resolve.
+    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const eid = try world.spawnDynamic(gpa, &.{});
+    try std.testing.expectError(
+        BridgeError.UnknownComponent,
+        Bridge.componentRefOf(&world, @bitCast(eid), cid, false),
+    );
 }

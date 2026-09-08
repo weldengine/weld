@@ -1,5 +1,25 @@
 # ECS bench C0.1 — M0.2.1 / E6 (thermal-aware)
 
+> **HEAD NOTE added 2026-09-04 at M1.B/G11 — this report's § "Question — delta vs
+> M0.1 baseline 14.2 ms" INVESTIGATES A DIVERGENCE THAT DOES NOT EXIST, and its
+> conclusion (b) is a mechanism invented to explain it.** The M0.1 squash commit
+> body reads `C0.1, ReleaseFast, --workers=4 … median 3.84 ms (gate 16.6 ms —
+> 4.3× under)`, the annotated tag reads `C0.1 met at 3.84 ms median`, and
+> `briefs/M0.1-ecs-full.md:316` reads `Median: **3.84 ms**`. **No M0.1 artifact
+> carries 14.2 ms**; `git log --all --grep=14.2` returns two commits and the
+> earlier is `df67e1c` (M0.2.1 itself), which attributed the figure to "the
+> brief's baseline". So the real delta against this report's own 3.742958 ms is
+> **2.6 %**, not 3.8×, and there was never a ReleaseSafe-to-ReleaseFast gap to
+> account for. Note (a) here DID check the code and found it unchanged, correctly;
+> what was never checked is the NUMBER'S SOURCE.
+>
+> The measurements below are UNTOUCHED and remain valid — they are what this
+> instrument measured under a compliant protocol on that date. Only the § Question
+> is superseded, and the debt it opened,
+> `D-M0.2.1-c01-baseline-investigation`, is closed by this note plus the M1.B
+> brief: it was tracking a phantom. A dated report is the record of the milestone
+> that wrote it and is not rewritten.
+
 **Date** : 2026-05-23
 **Commit** : `3f6528a` (`3f6528ae6b8ec3078fc06edc171b0f921afa3441`)
 **Machine** : Apple M4 Pro

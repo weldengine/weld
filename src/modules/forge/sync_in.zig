@@ -268,12 +268,16 @@ pub const SyncInResult = struct {
 /// are the same predicate everywhere except on the first pass, which is the case that
 /// was wrong.
 fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
-    const loc = ecs.dynamicLocation(entity) orelse return false;
-    const arch = ecs.dynamicArchetype(loc.archetype_idx);
-    const chunk = arch.chunks.items[loc.chunk_idx];
+    // Routed through `World.changedTickOf` since M1.B/G5, which carries the
+    // storage decision so this site carries none. The previous body reached the
+    // archetype directly and therefore answered for the TABLE half only —
+    // unreachable today, since `registerComponent(T)` never sets a mode and
+    // every `T` here is a Zig-registered physics component, but that is a
+    // PREMISE about another module's registration path and this removes the
+    // need for it rather than documenting it.
     const cid = ecs.componentId(@typeName(T)) orelse return false;
-    const col = arch.componentIndex(cid) orelse return false;
-    return arch.changedTick(chunk, col, loc.slot) == tick;
+    const changed = ecs.changedTickOf(entity, cid) orelse return false;
+    return changed == tick;
 }
 
 /// Was `T`'s slot for `entity` stamped after `since`?
@@ -283,12 +287,10 @@ fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
 /// questions and the second one runs later, on the value.
 fn changedSince(ecs: *World, comptime T: type, entity: EntityId, since: ?Tick) bool {
     const baseline = since orelse return true; // never consumed: no baseline to filter by
-    const loc = ecs.dynamicLocation(entity) orelse return false;
-    const arch = ecs.dynamicArchetype(loc.archetype_idx);
-    const chunk = arch.chunks.items[loc.chunk_idx];
+    // Same routing as `changedAt`, same reason.
     const cid = ecs.componentId(@typeName(T)) orelse return false;
-    const col = arch.componentIndex(cid) orelse return false;
-    return arch.changedTick(chunk, col, loc.slot) > baseline;
+    const changed = ecs.changedTickOf(entity, cid) orelse return false;
+    return changed > baseline;
 }
 
 /// Consume gameplay's writes into the solver. Runs BEFORE `step`.

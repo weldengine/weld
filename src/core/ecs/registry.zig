@@ -32,6 +32,31 @@ const EntityId = @import("entity.zig").EntityId;
 /// out-of-band scheme like StableId — Phase 2).
 pub const ComponentId = u32;
 
+/// Storage backend of a component — the closed two-variant domain owned by
+/// `engine-ecs-internals.md` §2 (*Table vs SparseSet*). `table` is the default
+/// and, before M1.B.0, the only backend implemented; `sparse` is the explicit
+/// opt-in a declaration carries through `@storage(.sparse)`.
+///
+/// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
+/// §13.3.1 states the rule that makes this the right home: an annotation
+/// argument's type is either a language type or a domain defined and citable at
+/// the owner of the EFFECT — never a name introduced by the schema table. The
+/// Etch front-end therefore validates through `fromName` instead of re-listing
+/// the two spellings, so the domain has one text form in the tree.
+pub const StorageKind = enum {
+    table,
+    sparse,
+
+    /// Spelling → variant, and the single place the two names exist as text.
+    /// `null` for a value outside the domain, which the Etch front-end reports
+    /// as `E0503 AnnotationArgMismatch`.
+    pub fn fromName(name: []const u8) ?StorageKind {
+        if (std.mem.eql(u8, name, "table")) return .table;
+        if (std.mem.eql(u8, name, "sparse")) return .sparse;
+        return null;
+    }
+};
+
 /// Coarse-grained tag for primitive fields. The interpreter uses this to
 /// decide how to read or write raw bytes. The S3 subset only exercises
 /// `int_`, `float_`, `bool_`; the integer-family variants are reserved
@@ -158,6 +183,24 @@ pub const ComponentDesc = struct {
     alignment: u16,
     default_bytes: []const u8,
     fields: []const FieldDesc,
+    /// Storage backend. `table` unless the declaration carried
+    /// `@storage(.sparse)`. **Never part of on-disk identity**: a
+    /// `SchemaEntry` carries name, size and alignment, and the mode comes from
+    /// this runtime registry at load (`engine-scene-serialization.md` §4), so a
+    /// component changing mode invalidates no cooked scene and demands no
+    /// re-cook. Defaulted, so every existing initializer of this struct stays
+    /// source-compatible and absence of the annotation yields `table` by
+    /// construction rather than by a branch somebody has to remember.
+    storage: StorageKind = .table,
+    /// DIRECT requisites, by NAME — the `@requires(A, B)` list, variadic
+    /// (`etch-reference-part3.md` §6). Names and not ids because a declaration
+    /// may name a component registered LATER: Etch admits forward references,
+    /// and resolving at registration would make the closure depend on
+    /// declaration order. The transitive closure is computed once by
+    /// `finalizeRequires` after every registration and read per add — never
+    /// re-walked per add, which `engine-ecs-internals.md` §3 requires in those
+    /// words. Defaulted, so every existing initializer stays source-compatible.
+    requires: []const []const u8 = &.{},
 };
 
 /// Surfaced by `Registry.registerComponent`, `registerComponentRaw`,
@@ -171,6 +214,13 @@ pub const RegistryError = error{
 /// at registration time so the caller can free its inputs immediately.
 const Entry = struct {
     desc: ComponentDesc,
+    /// The TRANSITIVE closure of `desc.requires`, flattened to ids, computed
+    /// once by `finalizeRequires`. Beside the descriptor and not inside it
+    /// because the descriptor is what a CALLER supplies and this is what the
+    /// registry DERIVES — one authority per question, the rule this milestone
+    /// settled at G3. Empty until finalisation, and empty forever for a
+    /// component with no requisites.
+    closure: []const ComponentId = &.{},
 };
 
 /// Runtime registry of component (and resource) type descriptions.
@@ -203,6 +253,9 @@ pub const Registry = struct {
             // FieldDesc.name slices were each dup'd individually.
             for (e.desc.fields) |f| gpa.free(f.name);
             gpa.free(e.desc.fields);
+            for (e.desc.requires) |r| gpa.free(r);
+            gpa.free(e.desc.requires);
+            if (e.closure.len != 0) gpa.free(e.closure);
         }
         self.entries.deinit(gpa);
         self.by_name.deinit(gpa);
@@ -240,12 +293,26 @@ pub const Registry = struct {
             dup_count += 1;
         }
 
+        // Owned copies, freed in `deinit` — same discipline as `name` and the
+        // field names. `dup_req` counts what is already duplicated so a failure
+        // mid-loop frees exactly those and no more.
+        const requires_owned = try gpa.alloc([]const u8, desc.requires.len);
+        errdefer gpa.free(requires_owned);
+        var dup_req: usize = 0;
+        errdefer for (requires_owned[0..dup_req]) |r| gpa.free(r);
+        for (desc.requires, 0..) |r, i| {
+            requires_owned[i] = try gpa.dupe(u8, r);
+            dup_req += 1;
+        }
+
         try self.entries.append(gpa, .{ .desc = .{
             .name = name_owned,
             .size = desc.size,
             .alignment = desc.alignment,
             .default_bytes = default_owned,
             .fields = fields_owned,
+            .storage = desc.storage,
+            .requires = requires_owned,
         } });
         errdefer _ = self.entries.pop();
 
@@ -281,6 +348,96 @@ pub const Registry = struct {
         });
     }
 
+    /// The three-colour mark of the closure walk. NAMED and declared once: the
+    /// same `enum(u8) { … }` written at two sites is two distinct types, which
+    /// is what the compiler said the first time.
+    const Colour = enum(u8) { white, grey, black };
+
+    /// Resolve every `@requires` name list to ids and flatten the TRANSITIVE
+    /// closure, once, after all components are registered.
+    ///
+    /// Called by whoever finished registering — the Etch front end after its
+    /// declaration pass, a host after its own. Idempotent: a second call
+    /// recomputes from the same descriptors and yields the same arrays, which
+    /// is what makes a hot-reload re-registration safe.
+    ///
+    /// **A cycle is an ERROR and not a fixpoint.** The fixpoint is computable,
+    /// and `engine-ecs-internals.md` §3 refuses it with a reason worth keeping
+    /// in view: it would make `add(A)` and `add(B)` indistinguishable and leave
+    /// every carrier of one carrying the other, with nothing able to undo the
+    /// coupling.
+    ///
+    /// An unknown requisite name is also an error: `@requires(Nonexistent)`
+    /// silently ignored would leave the invariant unenforceable for that
+    /// component while reporting nothing.
+    pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
+        // Depth-first with a THREE-COLOUR mark: white unvisited, grey on the
+        // current path, black done. Grey-on-grey is the cycle — a two-colour
+        // visited set cannot tell a cycle from a diamond, and a diamond
+        // (`A requires B, C`; `B requires D`; `C requires D`) is legal.
+        const n = self.entries.items.len;
+        const colour = try gpa.alloc(Colour, n);
+        defer gpa.free(colour);
+        @memset(colour, .white);
+
+        for (self.entries.items, 0..) |*e, i| {
+            if (e.closure.len != 0) {
+                gpa.free(e.closure);
+                e.closure = &.{};
+            }
+            _ = i;
+        }
+        for (0..n) |i| {
+            if (colour[i] == .black) continue;
+            try self.closeOne(gpa, @intCast(i), colour);
+        }
+    }
+
+    fn closeOne(self: *Registry, gpa: std.mem.Allocator, id: ComponentId, colour: []Colour) !void {
+        if (colour[id] == .black) return;
+        if (colour[id] == .grey) return error.RequiresCycle;
+        colour[id] = .grey;
+
+        var acc: std.ArrayListUnmanaged(ComponentId) = .empty;
+        errdefer acc.deinit(gpa);
+        for (self.entries.items[id].desc.requires) |req_name| {
+            const req = self.by_name.get(req_name) orelse return error.UnknownRequisite;
+            if (req == id) return error.RequiresCycle; // self-requirement
+            try self.closeOne(gpa, req, colour);
+            try appendUnique(gpa, &acc, req);
+            for (self.entries.items[req].closure) |t| try appendUnique(gpa, &acc, t);
+        }
+        // Ascending id: the add path applies the closure in this order, so the
+        // order must be a pure function of the program and not of the walk.
+        const flat = try acc.toOwnedSlice(gpa);
+        std.mem.sort(ComponentId, flat, {}, std.sort.asc(ComponentId));
+        self.entries.items[id].closure = flat;
+        colour[id] = .black;
+    }
+
+    fn appendUnique(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged(ComponentId), v: ComponentId) !void {
+        for (list.items) |x| if (x == v) return;
+        try list.append(gpa, v);
+    }
+
+    /// The transitive closure of `id`'s requisites, ascending by id. Empty when
+    /// `id` requires nothing or before `finalizeRequires` has run.
+    pub fn requiresClosure(self: *const Registry, id: ComponentId) []const ComponentId {
+        if (id >= self.entries.items.len) return &.{};
+        return self.entries.items[id].closure;
+    }
+
+    /// Whether any registered component names `id` among its DIRECT requisites.
+    /// The removal guard's question, and it is over direct requisites and not
+    /// the closure: a component is "still required" iff something that carries
+    /// it names it, and the closure of a third party does not make it required
+    /// by that third party's own dependents.
+    pub fn isRequiredBy(self: *const Registry, id: ComponentId, by: ComponentId) bool {
+        if (by >= self.entries.items.len) return false;
+        for (self.entries.items[by].closure) |t| if (t == id) return true;
+        return false;
+    }
+
     pub fn componentCount(self: *const Registry) usize {
         return self.entries.items.len;
     }
@@ -303,6 +460,14 @@ pub const Registry = struct {
 
     pub fn componentFields(self: *const Registry, id: ComponentId) []const FieldDesc {
         return self.entries.items[id].desc.fields;
+    }
+
+    /// Storage backend recorded for `id` at registration. `table` for every
+    /// component declared without `@storage`, and for every component
+    /// registered from Zig — `registerComponent(T)` reaches no annotation, so
+    /// the Etch annotation is the mode's only producer (M1.B/G0 §2.1).
+    pub fn componentStorage(self: *const Registry, id: ComponentId) StorageKind {
+        return self.entries.items[id].desc.storage;
     }
 
     /// Lookup a field on a component by name. Returns `null` if the name

@@ -219,6 +219,15 @@ pub const WeldEcsAPI = extern struct {
     component_find: *const fn (world: WeldWorldHandle, name: WeldStr) callconv(.c) WeldComponentId = stub_component_find,
     component_add: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId, data: *const anyopaque) callconv(.c) WeldResult = stub_component_add,
     component_remove: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId) callconv(.c) WeldResult = stub_component_remove,
+    // M1.B — WHEN Phase 3 binds this, it must answer over the UNION of both
+    // storage backends. Since M1.B a component is stored either in its
+    // archetype's columns or in a per-component sparse set (a runtime registry
+    // property, never on-disk identity), and answering from the archetype alone
+    // returns `false` for a component the entity genuinely carries. Nothing in
+    // this signature says so, and no reader of it can infer it — hence the
+    // line. `World.hasComponentDyn` is the routed answer and is already shaped
+    // for this entry: total, infallible, `false` for a stale handle, an unknown
+    // id or a real absence, with no way to tell those apart.
     component_has: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId) callconv(.c) bool = stub_component_has,
     component_get: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId) callconv(.c) ?*const anyopaque = stub_component_get,
     component_get_mut: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId) callconv(.c) ?*anyopaque = stub_component_get_mut,

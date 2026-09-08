@@ -49,6 +49,8 @@ const std = @import("std");
 const archetype_mod = @import("archetype.zig");
 const chunk_mod = @import("chunk.zig");
 const registry_mod = @import("registry.zig");
+// M1.B/G8 — for the job-body bound only; the type is refused, never built here.
+const command_buffer_mod = @import("command_buffer.zig");
 const tick_mod = @import("tick.zig");
 
 const Archetype = archetype_mod.Archetype;
@@ -477,6 +479,12 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// invoked `chunkCount` first, which triggers the rescan and
         /// stabilises the index space for the rest of the dispatch.
         pub fn runChunkAt(self: *Self, idx: usize, comptime Body: anytype, args: anytype) void {
+            // M1.B/G8 — no job body receives a command buffer. THIS is a real
+            // dispatch entry: its doc above says "used by the scheduler to
+            // dispatch chunks across workers". `forEachChunk` above is a double
+            // loop on the CALLING thread and carries no such hazard, which is
+            // why the bound belongs here and not there.
+            command_buffer_mod.refuseCommandBufferInArgs(@TypeOf(args));
             const chunk = self.chunkAt(idx);
             @call(.auto, Body, .{chunk} ++ args);
         }

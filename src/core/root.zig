@@ -200,6 +200,14 @@ comptime {
     _ = ecs.resources;
     _ = ecs.comptime_query;
     _ = ecs.chunk;
+    // M1.B / G2 — pin the sparse backend. Measured, not assumed: with only
+    // `pub const sparse_storage = @import(...)` at the ECS root, `zig build
+    // test` reported the SAME collected total with the nine invariant tests
+    // present as without them. The same lazy-analysis trap the four pins above
+    // record, and the suite's own total does not reveal it — it just does not
+    // grow.
+    _ = ecs.sparse_storage;
+    _ = ecs.hybrid_query;
     // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
     _ = rtti.type_info;
     _ = rtti.hash;

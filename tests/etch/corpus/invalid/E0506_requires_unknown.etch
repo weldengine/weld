@@ -1,0 +1,8 @@
+// M1.B/G9 — `@requires` naming a component that does not exist. Silently
+// ignored, the invariant "if A is present its closure is present" would be
+// unenforceable for this component while nothing reported it.
+// Expect: E0506 UnknownRequisite
+@requires(Nonexistent)
+component A {
+    v: i32 = 0
+}

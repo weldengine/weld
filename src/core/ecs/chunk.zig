@@ -103,9 +103,18 @@ pub const ChunkLayout = struct {
 /// Surfaced by `chunk.computeLayout` and by every archetype operation
 /// that may have to grow the chunk list (the spawn paths).
 pub const ArchetypeError = error{
-    EmptyComponentList,
     LayoutTooLarge,
     OutOfMemory,
+    // `EmptyComponentList` was removed at M1.B/G2, when the EMPTY archetype
+    // became legal. An entity always has an archetype — making it optional
+    // would create a second entity lifecycle that despawn, the observers, the
+    // three spawn paths and `dynamicLocation` would each have to distinguish —
+    // so an entity whose whole component set is sparse lives in the archetype
+    // of zero components. With both producers gone the variant had no
+    // reachable cause, and an error no caller can provoke is an assertion, not
+    // an error; the repository has removed a dead public variant for that
+    // reason before. Nothing outside `chunk.zig` / `archetype.zig` switched on
+    // it — measured, one deprecated alias and no exhaustive switch.
 };
 
 /// Aligned raw 16 KiB buffer underpinning a single chunk. Type-erased on
@@ -202,15 +211,17 @@ pub const Chunk = struct {
 /// + dirty_bitset — fits within `ChunkSize`. Offsets land in
 /// freshly-allocated slices owned by the caller.
 ///
-/// Errors: `EmptyComponentList` if `sizes.len == 0`, `LayoutTooLarge` if
-/// no capacity fits, `OutOfMemory` from the slice allocations.
+/// An EMPTY column list is legal and yields a positive capacity: the per-slot
+/// cost is then the entity id plus the dirty bitset alone, which is what the
+/// archetype of an entity carrying only sparse components needs (M1.B/G2).
+///
+/// Errors: `LayoutTooLarge` if no capacity fits, `OutOfMemory` from the slice
+/// allocations.
 pub fn computeLayout(
     gpa: std.mem.Allocator,
     sizes: []const u16,
     aligns: []const u16,
 ) ArchetypeError!ChunkLayout {
-    if (sizes.len == 0) return ArchetypeError.EmptyComponentList;
-
     const header_size: usize = std.mem.alignForward(usize, @sizeOf(ChunkHeader), ChunkAlignment);
 
     // Per-slot byte cost: components + entity id + 2 × `Tick` per
@@ -313,12 +324,23 @@ test "chunk alignment is at least 16 bytes" {
     try std.testing.expect(@alignOf(Chunk) >= ChunkAlignment);
 }
 
-test "computeLayout rejects empty component list" {
+test "computeLayout ACCEPTS an empty component list (M1.B/G2)" {
+    // The reversal made observable. This test asserted the refusal until
+    // M1.B/G2; it is the same call with the opposite verdict, so a
+    // re-introduced guard fails here rather than surfacing three layers up as
+    // a spawn that cannot happen.
     const gpa = std.testing.allocator;
-    try std.testing.expectError(
-        ArchetypeError.EmptyComponentList,
-        computeLayout(gpa, &.{}, &.{}),
-    );
+    const layout = try computeLayout(gpa, &.{}, &.{});
+    defer {
+        gpa.free(layout.component_offsets);
+        gpa.free(layout.added_tick_offsets);
+        gpa.free(layout.changed_tick_offsets);
+    }
+    // A positive capacity, and the per-slot cost is the entity id plus the
+    // bitset alone — there are no component columns to price.
+    try std.testing.expect(layout.capacity > 0);
+    try std.testing.expectEqual(@as(usize, 0), layout.component_offsets.len);
+    try std.testing.expectEqual(@as(usize, 0), layout.added_tick_offsets.len);
 }
 
 test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars" {

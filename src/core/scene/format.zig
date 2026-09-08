@@ -3,9 +3,11 @@
 //!
 //! This file owns two things:
 //!   1. The **on-disk format contract** — magic / version constants and the SoA
-//!      column-layout rules (the M1.0.5 loader memcpys archetype columns into
-//!      16 KB ECS chunks, so the cook and the loader must agree on column order,
-//!      stride and alignment). The `SceneHeader` extern struct + the byte-level
+//!      column-layout rules (the M1.0.5 loader SLICES each column at an entity's
+//!      rank and hands the slices to the World's spawn surface, so the cook and
+//!      the loader must agree on column order, stride and alignment — the
+//!      agreement is what makes the slice land on the right bytes, and it is
+//!      required whether or not the destination is an archetype chunk). The `SceneHeader` extern struct + the byte-level
 //!      writer/accessor land in E2.
 //!   2. The **neutral cook model** (`CookModel`) — the in-memory representation
 //!      the M1.0.4 Etch cook driver (`src/etch/scene_cook.zig`) produces and the

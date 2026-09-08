@@ -57,6 +57,18 @@ pub const world = @import("world.zig");
 pub const scheduler = @import("scheduler.zig");
 /// S4 — runtime component registry (id assignment + per-type descriptor cache).
 pub const registry = @import("registry.zig");
+
+/// M1.B — sparse-set component storage, the second backend of `ARCH-005`.
+/// Opt-in per component through `@storage(.sparse)`; `table` remains the
+/// default and the only mode the resolution funnel routes before G3.
+pub const sparse_storage = @import("sparse_storage.zig");
+/// M1.B/G7 — the mixed-query planner and its DISTINCT iteration type. Additive
+/// to the ECS surface on the precedent written at `world.zig`'s `queryDynamic`:
+/// the C0.5 freeze covers the Tier-0 ↔ Tier-1 module interfaces, not internal
+/// `World` methods. `WELD_ECS_PROTOCOL_VERSION` stays at 1, and
+/// `tests/ecs/hybrid_query_test.zig` proves it by ENUMERATING this surface and
+/// reporting its size rather than by declaring the version unchanged.
+pub const hybrid_query = @import("hybrid_query.zig");
 /// S4 — deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
 /// S4 — runtime, `ComponentId`-keyed byte resource store: the permanent Etch
@@ -83,6 +95,12 @@ pub const EntityId = world.EntityId;
 
 /// Runtime component / resource id assigned by the registry.
 pub const ComponentId = registry.ComponentId;
+
+/// Storage backend of a component — `table | sparse`, default `table`
+/// (`engine-ecs-internals.md` §2). Re-exported so the Etch front-end can
+/// validate `@storage`'s argument against the domain's single declaration
+/// instead of re-listing its spellings (`etch-resolver-types.md` §13.3.1).
+pub const StorageKind = registry.StorageKind;
 
 /// Stable archetype handle (index into `World.archetypes`).
 pub const ArchetypeId = world.ArchetypeId;

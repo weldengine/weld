@@ -3887,6 +3887,86 @@ pub const AstArena = struct {
         return null;
     }
 
+    /// The `@storage` annotation on a `component` declaration (the first one
+    /// found), or null when the declaration carries none — in which case the
+    /// storage mode is `table` by the domain's default
+    /// (`engine-ecs-internals.md` §2). Mirror of `onEventAnnotation`: the
+    /// annotation range lives on the decl, so this is the accessor both the
+    /// type-checker and the codegen read instead of walking `annot_pool` by
+    /// hand at each site.
+    ///
+    /// Deliberately NOT a resolved mode: the AST does not know the domain, and
+    /// answering `?StorageKind` here would put a Tier-0 enum in the parser's
+    /// arena. This returns the annotation; the caller validates.
+    pub fn storageAnnotation(self: *const AstArena, decl: ComponentDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < decl.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[decl.annotations_extra + i];
+            if (annot.kind == .storage) return annot;
+        }
+        return null;
+    }
+
+    /// The enum-variant name of an annotation's single positional argument when
+    /// it is written in the language's form for such a value — the **tag path**,
+    /// `@storage(.sparse)`. Returns null for every other shape, including the
+    /// bare `IDENT` alternative, a named argument and a wrong arity; the
+    /// type-checker turns each of those into its own diagnostic.
+    ///
+    /// **Only the dotted form, and that is a decision, not an omission.**
+    /// `etch-grammar.md` §1.5 admits three alternatives for `annotation_arg` —
+    /// an expression, `IDENT ":" expression`, and a bare `IDENT` — so the bare
+    /// spelling is grammatical. It is refused here because this is a question of
+    /// SCHEMA, not of grammar: for an argument whose declared type is an
+    /// enumeration domain the language already has a form, and every sibling
+    /// annotation of that shape uses it (`@phase`, `@tag`, `@pause_group`, dotted
+    /// in every occurrence of the corpus).
+    ///
+    /// The load-bearing reason is not consistency, it is ambiguity: a bare
+    /// enumeration value is syntactically indistinguishable from an identifier
+    /// reference. `.sparse` cannot collide with a type or a variable named
+    /// `sparse`; `sparse` can, and nothing can remove that from the bare form.
+    /// The bare `IDENT` alternative of the grammar serves arguments whose type is
+    /// NOT an enumeration domain.
+    pub fn annotationTagPathName(self: *const AstArena, annot: Annotation) ?StringId {
+        if (annot.args_len != 1) return null;
+        const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not a bare value
+        if (self.exprKind(arg.value) != .tag_path) return null;
+        return self.exprData(arg.value);
+    }
+
+    /// The `@requires(...)` annotation on a component declaration, or null.
+    pub fn requiresAnnotation(self: *const AstArena, decl: ComponentDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < decl.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[decl.annotations_extra + i];
+            if (annot.kind == .requires) return annot;
+        }
+        return null;
+    }
+
+    /// The `i`-th requisite type name of a `@requires(A, B, …)` annotation, or
+    /// null when that argument is not a bare type path.
+    ///
+    /// The annotation is VARIADIC (`etch-reference-part3.md` §6's normative
+    /// example is `@requires(Transform, RigidBody)`), so this reads one
+    /// argument by index rather than assuming an arity — the shape three of the
+    /// four corpus documents had reduced to a single positional before
+    /// 2026-09-03.
+    ///
+    /// A requisite is a TYPE NAME, so the accepted expression kind is `.path` —
+    /// the same shape `onEventTypeName` reads for `@on_event(T)`, and NOT the
+    /// `.tag_path` that `@storage(.sparse)` uses: a type is named, an
+    /// enumeration value is dotted.
+    pub fn requiresTypeNameAt(self: *const AstArena, annot: Annotation, i: u32) ?StringId {
+        if (i >= annot.args_len) return null;
+        const arg = self.annot_args.items[annot.args_start + i];
+        if (arg.name != 0) return null; // a named argument is not a requisite
+        if (self.exprKind(arg.value) != .path) return null;
+        return self.exprData(arg.value);
+    }
+
     /// The event type name `T` from an `@on_event(T)` annotation, or null when
     /// the annotation is malformed (no argument, or the argument is not a type
     /// path). The resolver reports E1203 for the null / non-event cases.

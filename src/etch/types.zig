@@ -14,6 +14,108 @@ const ast_mod = @import("ast.zig");
 const diag_mod = @import("diagnostics.zig");
 const tags_mod = @import("tags.zig");
 const token_mod = @import("token.zig");
+/// The storage-mode domain, read from the owner of the EFFECT rather than
+/// re-listed here (`etch-resolver-types.md` §13.3.1). `weld_etch` already
+/// depends on `weld_core` (`build.zig:50`) and `weld_core` imports only
+/// `foundation`, so this adds a file-level import inside an existing module
+/// edge and no cycle.
+const StorageKind = @import("weld_core").ecs.StorageKind;
+
+/// The domain's spellings rendered once for the `@storage` diagnostics, and
+/// DERIVED from the enum rather than written out: a third variant would
+/// otherwise leave every message behind, which is the drift the domain's single
+/// declaration exists to prevent.
+const storage_domain_list = blk: {
+    var out: []const u8 = "";
+    for (@typeInfo(StorageKind).@"enum".fields, 0..) |f, i| {
+        out = out ++ (if (i == 0) "" else " | ") ++ f.name;
+    }
+    break :blk out;
+};
+
+/// The same domain rendered in the ACCEPTED spelling — `.table | .sparse` — for
+/// every message that tells an author what to write. Derived from the enum for
+/// the same reason as its bare twin, and separate from it because the arity
+/// message names a count of arguments while the others name a spelling.
+const storage_domain_dotted = blk: {
+    var out: []const u8 = "";
+    for (@typeInfo(StorageKind).@"enum".fields, 0..) |f, i| {
+        out = out ++ (if (i == 0) "" else " | ") ++ "." ++ f.name;
+    }
+    break :blk out;
+};
+
+/// The DIRECT `@requires` names of a component declaration, written into
+/// `out` and returned as a slice of it.
+///
+/// Shared by the interpreter and the scene cook, exactly as `storageModeOf` is,
+/// so the two registries cannot disagree about what a declaration requires —
+/// the G1 arbitration applied to the second annotation this milestone consumes.
+///
+/// `out` is the caller's buffer and the result borrows it: the names are slices
+/// into the AST's string pool, which outlives the registration, so nothing is
+/// copied here and the registry owns its own copies.
+pub fn requiresNamesOf(
+    gpa: std.mem.Allocator,
+    ast: *const ast_mod.AstArena,
+    decl: ast_mod.ComponentDecl,
+) ![][]const u8 {
+    const annot = ast.requiresAnnotation(decl) orelse return &.{};
+    // SIZED BY THE ANNOTATION'S OWN ARITY. The previous form took a caller
+    // buffer and looped `while (i < args_len and n < out.len)`, with both
+    // callers passing `[16][]const u8` — so a component declaring seventeen
+    // requisites lost the seventeenth with NO diagnostic and NO error, and its
+    // closure was built from a truncated list: the missing requisite was never
+    // added and never refused on removal.
+    //
+    // The arity is preserved rather than the cap made normative. A normative cap
+    // owes a diagnostic code for a number nobody derived, and this milestone has
+    // spent itself removing engraved numbers rather than adding one.
+    //
+    // COUNTED FIRST AND ALLOCATED EXACTLY, and the alternative is a defect and
+    // not a style: allocating `args_len` and returning `out[0..n]` hands the
+    // caller a slice SHORTER than the allocation, and `Allocator.free` sizes the
+    // release from the slice it is given. `requiresTypeNameAt` returns null for
+    // a named argument and for a non-path expression, so `n < args_len` is
+    // reachable — on an AST `checkRequiresAnnotation` would refuse, and nothing
+    // obliges a caller to have run it.
+    var count: usize = 0;
+    var i: u32 = 0;
+    while (i < annot.args_len) : (i += 1) {
+        if (ast.requiresTypeNameAt(annot, i) != null) count += 1;
+    }
+    const out = try gpa.alloc([]const u8, count);
+    var n: usize = 0;
+    i = 0;
+    while (i < annot.args_len) : (i += 1) {
+        if (ast.requiresTypeNameAt(annot, i)) |sid| {
+            out[n] = ast.strings.slice(sid);
+            n += 1;
+        }
+    }
+    return out;
+}
+
+/// Resolve a `component` declaration's storage mode from its `@storage`
+/// annotation. **Total by construction**: no annotation, or a value the domain
+/// does not carry, yields `table`.
+///
+/// The fallback is not leniency. `checkStorageAnnotation` has already refused an
+/// out-of-domain value with `E0503` by the time any registration runs, so a
+/// non-null-but-unknown name reaching here means the program was rejected and
+/// this registry will be discarded; answering `table` keeps this function total
+/// and stops it from inventing a mode the front-end declined to accept. Making
+/// it fallible would put a second refusal channel on a path that has no
+/// diagnostic sink.
+///
+/// Shared by the interpreter and the scene cook so the two registries cannot
+/// disagree about the same declaration — the asymmetry that would appear the
+/// moment either side resolved the annotation on its own.
+pub fn storageModeOf(ast: *const AstArena, decl: ast_mod.ComponentDecl) StorageKind {
+    const annot = ast.storageAnnotation(decl) orelse return .table;
+    const name_id = ast.annotationTagPathName(annot) orelse return .table;
+    return StorageKind.fromName(ast.strings.slice(name_id)) orelse .table;
+}
 
 const AstArena = ast_mod.AstArena;
 const NodeId = ast_mod.NodeId;
@@ -3208,6 +3310,10 @@ pub const TypeChecker = struct {
                     const decl = self.arena.component_decls.items[data];
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
+                    try self.checkStorageAnnotation(decl);
+                    // `@requires` is NOT resolved here — see `pass2Resolve`.
+                    // Pass 1 is the loop that BUILDS the symbol table, so a name
+                    // declared further down the file is not in it yet.
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
@@ -4190,6 +4296,13 @@ pub const TypeChecker = struct {
                 .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
                 .impl_decl => try self.checkImpl(self.arena.impl_decls.items[data]),
                 .test_decl => try self.checkTest(self.arena.test_decls.items[data]),
+                // `@requires` RESOLVES HERE, and pass 2 is the earliest point at
+                // which it can: pass 1 is the loop that builds the symbol table,
+                // so it asks for names it has not reached and refuses a FORWARD
+                // reference that every other position in the language accepts.
+                // Nothing in pass 1 reads the result — the only consumers are
+                // this function's own cycle and unknown-requisite diagnostics.
+                .component_decl => try self.checkRequiresAnnotation(self.arena.component_decls.items[data]),
                 else => {},
             }
         }
@@ -4562,6 +4675,226 @@ pub const TypeChecker = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    /// Validate `@storage`'s argument against the `StorageKind` domain
+    /// (`engine-ecs-internals.md` §2 — `table | sparse`, default `table`), the
+    /// two steps `etch-resolver-types.md` §13.3 numbers 3 and 4. Applicability
+    /// (`component`-only) is already enforced by `validateAnnotations`.
+    ///
+    /// The tag path `@storage(.sparse)` is the only accepted spelling: a bare
+    /// enumeration value is syntactically indistinguishable from an identifier
+    /// reference, so `sparse` can collide with a type or variable of that name.
+    ///
+    /// **The name form must be resolved BEFORE the const test**, the two being
+    /// written as disjoint and not being: `isConstEvaluable` returns true for a
+    /// `.tag_path`, so reordering reports `@storage(.archetype)` as a
+    /// wrong-typed constant instead of a value outside the domain.
+    /// Validate `@requires(A, B, …)` on a component, and refuse a closure that
+    /// is not a DAG.
+    ///
+    /// **The cycle is detected here AND in `Registry.finalizeRequires` — two
+    /// detectors for two populations, not one thing written twice.** The
+    /// type-checker sees the program and can point a SPAN at the declaration
+    /// (`engine-ecs-internals.md` §3, "cycle refusé par diagnostic"); the
+    /// registry sees components a host registered from Zig, which the
+    /// type-checker never reads. Neither covers the other's population.
+    fn checkRequiresAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
+        const annot = self.arena.requiresAnnotation(decl) orelse return;
+        if (annot.args_len == 0) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@requires takes at least one component type", .{});
+            return;
+        }
+        var i: u32 = 0;
+        while (i < annot.args_len) : (i += 1) {
+            const name_id = self.arena.requiresTypeNameAt(annot, i) orelse {
+                // A tag path, a literal or a named argument. The message names
+                // the shape expected rather than only refusing, because an
+                // author corrects what is named — the G1/§13.3 lesson recorded
+                // as corpus anomaly 92.
+                try self.emit(
+                    .annotation_arg_mismatch,
+                    .error_,
+                    annot.span,
+                    "@requires argument {d} must be a component type name, written bare — `@requires(Transform)`",
+                    .{i + 1},
+                );
+                return;
+            };
+            const req_name = self.arena.strings.slice(name_id);
+            if (self.requisiteDecl(name_id) == null) {
+                try self.emit(
+                    .unknown_requisite,
+                    .error_,
+                    annot.span,
+                    "@requires names `{s}`, which is not a declared component",
+                    .{req_name},
+                );
+                return;
+            }
+        }
+        // The cycle, over the declared graph. Reported on the declaration that
+        // CLOSES the cycle, which is the one an author can act on.
+        if (try self.requiresReachesSelf(decl)) {
+            try self.emit(
+                .requires_cycle,
+                .error_,
+                annot.span,
+                "`@requires` closure of `{s}` reaches itself; a cycle is refused rather than resolved to a fixpoint, " ++
+                    "which would make adding either component add both with no way to undo the coupling",
+                .{self.arena.strings.slice(decl.name)},
+            );
+        }
+    }
+
+    /// The component declaration named by `sid`, or null when `sid` names no
+    /// local component.
+    ///
+    /// Through `symbols` + `component_decls`, which is the mechanism
+    /// `checkComponentInstance` already uses — a second lookup by byte
+    /// comparison would be a second answer to one question. Keyed by
+    /// `StringId` because the arena's pool INTERNS, so one name is one id and a
+    /// byte comparison would only re-derive that.
+    fn requisiteDecl(self: *TypeChecker, sid: ast_mod.StringId) ?ast_mod.ComponentDecl {
+        const sym = self.symbols.get(sid) orelse return null;
+        if (sym.kind != .component) return null;
+        return self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
+    }
+
+    /// Whether `decl`'s transitive requisite closure reaches `target`.
+    ///
+    /// **ONE walk for both questions**, which is what `closureContains`'s own
+    /// doc gave as its motive while BEING a second traversal of the same graph:
+    /// `requiresReachesSelf` asks `target == decl.name`, the removal check asks
+    /// for the component it is about to drop. Two bodies would come to disagree
+    /// about what a closure contains.
+    ///
+    /// **SIZED ON THE GRAPH, not on a constant.** Both bodies declared
+    /// `[64]StringId` and abandoned SILENTLY past it, while the doc claimed a
+    /// bound "by the declaration count" — a sentence claiming a property its
+    /// code did not have. A cycle of 65 components produced no `requires_cycle`
+    /// at all and the language validation accepted an invalid program, the
+    /// registry refusing it only later. Refusing an invalid program is worth an
+    /// allocation on the type-check path, which is what that sentence already
+    /// promised.
+    ///
+    /// Terminates without a step budget: a name enters the frontier at most
+    /// once and `head` only advances.
+    fn requisiteClosureReaches(
+        self: *TypeChecker,
+        decl: ast_mod.ComponentDecl,
+        target: ast_mod.StringId,
+    ) !bool {
+        var frontier: std.ArrayListUnmanaged(ast_mod.StringId) = .empty;
+        defer frontier.deinit(self.gpa);
+        // A HINT and not a bound: a name that is not a declared component enters
+        // the frontier too (`requisiteDecl` answers null for those), so the list
+        // must be free to exceed this.
+        try frontier.ensureTotalCapacity(self.gpa, self.arena.component_decls.items.len);
+
+        if (self.arena.requiresAnnotation(decl)) |a| {
+            try self.pushRequisites(&frontier, a);
+        }
+        var head: usize = 0;
+        while (head < frontier.items.len) : (head += 1) {
+            if (frontier.items[head] == target) return true;
+            const d = self.requisiteDecl(frontier.items[head]) orelse continue;
+            if (self.arena.requiresAnnotation(d)) |a| {
+                try self.pushRequisites(&frontier, a);
+            }
+        }
+        return false;
+    }
+
+    /// Append every bare-type-path argument of `annot`, deduplicated.
+    fn pushRequisites(
+        self: *TypeChecker,
+        frontier: *std.ArrayListUnmanaged(ast_mod.StringId),
+        annot: ast_mod.Annotation,
+    ) !void {
+        var i: u32 = 0;
+        while (i < annot.args_len) : (i += 1) {
+            const sid = self.arena.requiresTypeNameAt(annot, i) orelse continue;
+            if (std.mem.indexOfScalar(ast_mod.StringId, frontier.items, sid) != null) continue;
+            try frontier.append(self.gpa, sid);
+        }
+    }
+
+    /// Whether `decl`'s requisite closure reaches `decl` itself.
+    fn requiresReachesSelf(self: *TypeChecker, decl: ast_mod.ComponentDecl) !bool {
+        return self.requisiteClosureReaches(decl, decl.name);
+    }
+
+    /// `E1216 RequisiteRemovalRefused` IS RETIRED, and the number stays
+    /// reserved (`diagnostics.zig`) so no later milestone re-uses it for another
+    /// subject. Three helpers died with it here — the guarantee walk, the
+    /// receiver-identity proof, and the refusal itself.
+    ///
+    /// It was the STATIC half of the `@requires` removal refusal, and it refused
+    /// correct code FIVE times in three review rounds: a foreign receiver, a
+    /// guarantee read as permanent, a shadowed parameter name, an aliased
+    /// removal, and finally a removal performed by a CALL. The first four are
+    /// binding forms and were closed one at a time; the fifth is a CONTROL form,
+    /// and closing it conservatively reads "no statement before the removal",
+    /// which fires on a one-line body and is not a check.
+    ///
+    /// Its own stop rule decided this: five false refusals against zero
+    /// documented captures of a real defect. The guarantee lives entirely on the
+    /// runtime channel — a counted skip inside `World.requiresRefusesRemoval`
+    /// plus one warning per tick — which covers every path, the call included,
+    /// and can never refuse a just program.
+    fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
+        const annot = self.arena.storageAnnotation(decl) orelse return;
+
+        // Step 3, arity.
+        if (annot.args_len != 1) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes exactly one argument, one of {s}", .{storage_domain_list});
+            return;
+        }
+
+        const arg = self.arena.annot_args.items[annot.args_start];
+
+        // Step 3, NAME — and this branch is here because writing the comment
+        // and re-reading the code disagreed. `@storage(kind: .sparse)` carries a
+        // value the domain does have and a name the schema does not declare, so
+        // it is a step-3 failure; without this branch it fell through to the
+        // const test, where the answer was `E0504 — must be a CONSTANT storage
+        // mode`, false about the value and silent about the actual fault.
+        if (arg.name != 0) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage takes a positional argument, not a named one; write one of {s}", .{storage_domain_dotted});
+            return;
+        }
+
+        // Step 3, value — the tag path, resolved against the domain's single
+        // declaration.
+        if (self.arena.annotationTagPathName(annot)) |name_id| {
+            const name = self.arena.strings.slice(name_id);
+            if (StorageKind.fromName(name) == null) {
+                try self.emit(.annotation_arg_mismatch, .error_, annot.span, "'.{s}' is not a storage mode; @storage takes one of {s}", .{ name, storage_domain_dotted });
+            }
+            return;
+        }
+
+        // Step 3, SPELLING — a bare enumeration value. Its own branch and its own
+        // message, because the fault is the sigil and not the value: falling
+        // through would answer `E0504 — must be a constant`, which is false about
+        // `sparse` and says nothing about what to write instead. An `ident` is
+        // not const-evaluable, so without this branch that is exactly where it
+        // would land.
+        if (self.arena.exprKind(arg.value) == .ident) {
+            const name = self.arena.strings.slice(self.arena.exprData(arg.value));
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage's argument is an enum value: write '.{s}', not '{s}'", .{ name, name });
+            return;
+        }
+
+        // Neither a tag path nor a bare name. A const-evaluable expression is
+        // still a step-3 failure (a value outside the domain, e.g. `@storage(1)`
+        // or `@storage("sparse")`); anything else fails step 4.
+        if (isConstEvaluable(self.arena, arg.value)) {
+            try self.emit(.annotation_arg_mismatch, .error_, annot.span, "@storage's argument must be a storage mode, one of {s}", .{storage_domain_dotted});
+        } else {
+            try self.emit(.annotation_arg_not_const, .error_, annot.span, "@storage's argument must be a constant storage mode, one of {s}", .{storage_domain_dotted});
         }
     }
 
@@ -7066,7 +7399,15 @@ pub const TypeChecker = struct {
                     if (self.arena.exprKind(arg) != .path) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method 'remove' expects a component type 'T'", .{});
                     } else {
-                        try self.checkStructuralComponentName(self.arena.exprData(arg), self.arena.exprSpan(arg));
+                        const target = self.arena.exprData(arg);
+                        try self.checkStructuralComponentName(target, self.arena.exprSpan(arg));
+                        // NO static refusal of a dead removal here. The
+                        // `@requires` guarantee is enforced entirely at run —
+                        // `World.requiresRefusesRemoval`, a counted skip plus one
+                        // warning per tick — because the static form was tried,
+                        // refused correct code five times, and was retired by its
+                        // own stop rule. See `checkStorageAnnotation`'s preceding
+                        // note for what it was and why the number stays reserved.
                     }
                 }
                 return ResolvedType.unknown;
@@ -7687,6 +8028,117 @@ test "type-checker emits E0101 on duplicate component declaration" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
+}
+
+// ── M1.B / G1 — `@storage` argument schema (E0503 / E0504) ────────────────
+//
+// The two codes exist so the two failures are TOLD APART, so each test below
+// asserts the presence of its own code AND the absence of the other. Asserting
+// presence alone would be satisfied by a checker that emitted both, and then
+// the fixtures of `tests/etch/corpus/invalid/` would be distinguished by
+// nothing but the fact that both fail.
+//
+// The accepted spelling is the tag path. Every source below is written in it
+// except where the bare form is the subject.
+
+test "E0503: @storage with a value outside the StorageKind domain" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(.archetype)
+        \\component Burning { remaining: float = 3.0 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+}
+
+test "E0503 and not E0504: the BARE spelling of a domain value is refused" {
+    // The fault is the sigil, not the value: `sparse` is in the domain. Falling
+    // through to the const test would answer `E0504 — must be a constant`, which
+    // is false about the value and silent about what to write instead — and an
+    // `ident` is not const-evaluable, so that is exactly where it would land
+    // without its own branch. The absence assertion is what holds that line.
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(sparse)
+        \\component Chilled { stacks: int = 1 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+}
+
+test "E0504: @storage with a syntactically valid but non-constant argument" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(config.mode)
+        \\component Poisoned { stacks: int = 1 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_not_const);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_mismatch);
+}
+
+test "E0503: @storage arity — no argument, and more than one" {
+    const gpa = std.testing.allocator;
+    {
+        var result = try parseAndCheck(gpa,
+            \\@storage()
+            \\component A { x: int = 0 }
+        );
+        defer result.deinit(gpa);
+        try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    }
+    {
+        var result = try parseAndCheck(gpa,
+            \\@storage(.sparse, .table)
+            \\component B { x: int = 0 }
+        );
+        defer result.deinit(gpa);
+        try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    }
+}
+
+test "E0503 and not E0504: @storage with a NAMED argument" {
+    // The schema declares one POSITIONAL argument. `kind: .sparse` carries a
+    // value the domain does have, so the fault is the name — step 3, not step
+    // 4. Before this case existed the checker answered `E0504 — must be a
+    // constant storage mode`, false about the value and silent about the fault.
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\@storage(kind: .sparse)
+        \\component Chilled { stacks: int = 1 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+    try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+}
+
+test "the guard's bound, tested in BOTH directions" {
+    // A guard has two ways of being wrong — missing what it must catch, and
+    // catching what it must let through. The tests above exercise the first.
+    // This one exercises both at once, which is what makes it a bound and not a
+    // second presence check: every accepted spelling must come out clean, and
+    // the refused one must come out refused, in the same test over the same
+    // shape of source. Under the earlier both-spellings rule the last row was
+    // clean, so this row is the reversal made observable.
+    const gpa = std.testing.allocator;
+    const Case = struct { src: []const u8, clean: bool };
+    for ([_]Case{
+        .{ .src = "@storage(.sparse)\ncomponent A { x: int = 0 }", .clean = true },
+        .{ .src = "@storage(.table)\ncomponent B { x: int = 0 }", .clean = true },
+        .{ .src = "component C { x: int = 0 }", .clean = true },
+        .{ .src = "@storage(sparse)\ncomponent D { x: int = 0 }", .clean = false },
+    }) |case| {
+        var result = try parseAndCheck(gpa, case.src);
+        defer result.deinit(gpa);
+        try expectNoCode(result.diagnostics.items, .annotation_arg_not_const);
+        if (case.clean) {
+            try expectNoCode(result.diagnostics.items, .annotation_arg_mismatch);
+        } else {
+            try expectAnyCode(result.diagnostics.items, .annotation_arg_mismatch);
+        }
+    }
 }
 
 // ── M0.8 E7 Level C — scene / prefab validation tests ─────────────────────
