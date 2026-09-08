@@ -694,7 +694,7 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // its stop rule fired on (2173 -> 2174). The corpus fixture MOVED from
     // `invalid/` to `valid/` and adds no block either way, both corpus drivers
     // being one test over a declared list.
-    // Re-derived from the SUITE: `2155/2174 tests passed (19 skipped)` on macOS.
+    // Re-derived from the SUITE: `2192/2211 tests passed (19 skipped)` on macOS.
     return switch (os) {
         .windows => 2209,
         else => 2211,
