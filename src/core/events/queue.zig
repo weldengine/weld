@@ -1,47 +1,21 @@
-//! M0.2 / E4 — bounded MPMC event queue with cursor-style readers.
+//! FROZEN — see engine-phase-0-criteria.md C0.5. Every public entry below is.
 //!
-//! Implements the Vyukov bounded MPMC pattern adapted for
-//! broadcast (cursor) readers:
-//!
-//!   - Power-of-two capacity, slot index = `pos & mask`.
-//!   - Each slot carries an atomic `seq` initialised to its
-//!     index. A producer that wants to write at logical position
-//!     `pos` first observes `seq == pos`; on success it CAS-claims
-//!     `head pos → pos+1`, writes the payload, then publishes
-//!     `slot.seq = pos+1` (release). A reader that wants to read
-//!     position `pos` observes `seq == pos+1` (acquire) before
-//!     reading the payload.
-//!
-//! Saturation policy: when the producer observes `seq < pos`
-//! (slot still holds an older event that no consumer has caught
-//! up to), it drops the oldest by overwriting the slot and bumps
-//! `drops_since_last_drain`. Producers never block.
-//!
-//! Readers: every cursor tracks its own `last_read`. There is no
-//! shared dequeue position. If a reader falls behind the
-//! producers' overwrite window, `poll` snaps the cursor to the
-//! oldest still-present position (`head - cap`) and resumes from
-//! there. The reader sees "skip" events — there is no separate
-//! counter exposed to the cursor.
-//!
-//! Drain bumps `epoch` and resets `head` + every slot's `seq` to
-//! its index. Cursors with a stale `epoch` get
-//! `error.CursorInvalidated` from `poll`.
+//! Bounded MPMC queue with cursor readers, on the Vyukov protocol. THE ORDERING IS
+//! THE CORRECTNESS: capacity is a power of two, slot index is `pos & mask`, and each
+//! slot's atomic `seq` starts at its own index. A producer at logical `pos` observes
+//! `seq == pos`, CAS-claims `head`, writes, then publishes `seq = pos + 1` RELEASE; a
+//! reader at `pos` observes `seq == pos + 1` ACQUIRE before it reads the payload.
+//! Weaken either ordering and the race is invisible to every test here.
 
 const std = @import("std");
 const Lifetime = @import("lifetime.zig").Lifetime;
 const cursor_mod = @import("cursor.zig");
 const EventCursor = cursor_mod.EventCursor;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Surfaced by `poll` when the cursor's `epoch` no longer matches
-/// the queue's current epoch (drain happened in the interim).
+/// Raised by `poll` when a drain has invalidated the cursor's epoch.
 pub const PollError = error{CursorInvalidated};
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Returns the typed `EventQueue` for `T`. POD `T` only —
-/// `enqueue` copies the value into the slot and `poll` returns
-/// a value by copy, no allocation involved.
+/// Per-type bounded queue. `cap` must be a power of two >= 2.
 pub fn EventQueue(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -59,9 +33,7 @@ pub fn EventQueue(comptime T: type) type {
         epoch: std.atomic.Value(u64),
         lifetime: Lifetime,
 
-        /// Allocate a queue with `cap` slots (must be a
-        /// power of two, `>= 2`). The queue is heap-allocated so
-        /// the bus can hold it through a stable pointer.
+        /// Allocate a queue with `cap` slots; `cap` must be a power of two >= 2.
         pub fn init(gpa: std.mem.Allocator, cap: usize, lifetime: Lifetime) !*Self {
             std.debug.assert(cap >= 2 and (cap & (cap - 1)) == 0);
             const self = try gpa.create(Self);
@@ -91,9 +63,7 @@ pub fn EventQueue(comptime T: type) type {
             gpa.destroy(self);
         }
 
-        /// Lock-free enqueue. Never blocks; drops the oldest entry
-        /// (and bumps `drops_since_last_drain`) when the queue is
-        /// saturated.
+        /// Lock-free enqueue. Never blocks; DROPS THE OLDEST entry on saturation.
         pub fn enqueue(self: *Self, event: T) void {
             while (true) {
                 const pos = self.head.load(.monotonic);
@@ -126,17 +96,10 @@ pub fn EventQueue(comptime T: type) type {
             }
         }
 
-        /// Poll one event for `cursor`. Returns:
-        ///   - `null` when there is nothing new to read.
-        ///   - `error.CursorInvalidated` when the cursor's epoch is
-        ///     stale (a drain happened since `subscribe`).
-        ///   - The payload (and advances `cursor.last_read`)
-        ///     otherwise.
+        /// Poll one event, or null when empty.
         ///
-        /// When the cursor has fallen behind the overwrite window,
-        /// `poll` snaps `cursor.last_read` to `head - cap` and
-        /// resumes from there — silently skipping any overwritten
-        /// events.
+        /// A reader that fell outside the overwrite window is SNAPPED to the oldest
+        /// still-present position and resumes there — skipped events are not counted.
         pub fn poll(self: *Self, cursor: *EventCursor) PollError!?T {
             const cur_epoch = self.epoch.load(.acquire);
             if (cursor.epoch != cur_epoch) return error.CursorInvalidated;
@@ -166,18 +129,10 @@ pub fn EventQueue(comptime T: type) type {
             }
         }
 
-        /// Reset the queue to its empty state and bump `epoch`.
-        /// Cursors carrying the previous epoch will fail their next
-        /// `poll` with `error.CursorInvalidated`.
-        ///
-        /// `drops_since_last_drain` is NOT reset here — the caller
-        /// (the bus's `drainAtBoundary`) reads it first to drive
-        /// the warning log, then calls `resetDropsSinceLastDrain`.
+        /// Reset to empty and bump `epoch`, which invalidates every live cursor.
         pub fn drain(self: *Self) void {
-            // No allocation; reset head + every slot's seq to its
-            // initial value. Drain happens between scheduler
-            // phases when no systems are running concurrently, so
-            // monotonic ordering is sufficient.
+            // Every slot's `seq` returns to its own index, which is what the
+            // producer's `seq == pos` test expects on the next pass.
             self.head.store(0, .monotonic);
             for (self.slots, 0..) |*slot, i| {
                 slot.seq.store(i, .monotonic);

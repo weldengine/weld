@@ -1,22 +1,12 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Public surface of the M0.2 / E4 event subsystem.
-//!
-//! Heterogeneous bus of typed MPMC ring-buffer queues. Producers
-//! call `emit(T, event)`; consumers `subscribe(T)` to obtain a
-//! cursor, then `poll(T, &cursor)` repeatedly. The scheduler
-//! drives lifetime drains via `drainAtBoundary(lt)`.
-//!
-//! Module convention follows `src/core/ecs/root.zig`,
-//! `src/core/rtti/root.zig`, `src/core/resources/root.zig` —
-//! single canonical entry point, no parallel `src/core/events.zig`.
+//! Public surface of the event subsystem — the single entry point. Producers `emit`,
+//! consumers `subscribe` then `poll`; the scheduler drives `drainAtBoundary`.
 
 const lifetime_mod = @import("lifetime.zig");
 const cursor_mod = @import("cursor.zig");
 const queue_mod = @import("queue.zig");
 const bus_mod = @import("bus.zig");
-
-// -- Sub-module aliases ------------------------------------------------
 
 /// Lifetime tag declarations.
 pub const lifetime = lifetime_mod;
@@ -26,8 +16,6 @@ pub const cursor = cursor_mod;
 pub const queue = queue_mod;
 /// Heterogeneous bus.
 pub const bus = bus_mod;
-
-// -- Flat type surface -------------------------------------------------
 
 /// Drain cadence enum (`.tick` / `.phase` / `.frame`).
 pub const Lifetime = lifetime_mod.Lifetime;
@@ -45,17 +33,12 @@ pub const PollError = queue_mod.PollError;
 pub const DROPS_WARN_THRESHOLD = bus_mod.DROPS_WARN_THRESHOLD;
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Version of the frozen EventBus Tier-0 public surface (register/emit/
-/// subscribe/poll/drainAtBoundary/queueCount + EventCursor/Lifetime/
-/// BusError/PollError/DROPS_WARN_THRESHOLD). Bumped on any breaking change
-/// — a tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION`
-/// rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+/// Bumped on any breaking change to the frozen surface — a tracked migration.
 pub const WELD_EVENTS_PROTOCOL_VERSION: u32 = 1;
 
 comptime {
-    // Lazy analysis guard — force eager analysis of every
-    // events sub-file so inline tests are picked up by
-    // `zig build test`.
+    // NOT dead code: this reference is what makes Zig analyse the sub-files, so their
+    // inline `test` blocks are collected at all.
     _ = lifetime_mod;
     _ = cursor_mod;
     _ = queue_mod;

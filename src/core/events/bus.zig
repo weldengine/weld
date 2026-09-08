@@ -1,22 +1,9 @@
-//! M0.2 / E4 — heterogeneous event bus.
+//! FROZEN — see engine-phase-0-criteria.md C0.5. Every public entry below is.
 //!
-//! `EventBus` indexes typed `EventQueue(T)` instances by
-//! `rtti.TypeId`. The bus stores each queue as an opaque pointer
-//! plus a per-type `VTable` so the bus-level operations (deinit,
-//! drain, drops accounting) can run without monomorphising on
-//! every visit. Typed operations (`emit`, `subscribe`, `poll`)
-//! resolve the queue pointer at the call site, then cast back to
-//! `*EventQueue(T)` with a comptime-safe `@ptrCast(@alignCast)`.
-//!
-//! The bus is registered once per event type via `register`. The
-//! brief makes `register` mandatory before `emit` — emitting an
-//! unknown type returns `error.EventTypeNotRegistered`.
-//!
-//! Lifetime drains use `drainAtBoundary(lt)`: every queue whose
-//! lifetime matches `lt` is reset (its epoch bumped). The bus
-//! also reads the per-queue `drops_since_last_drain` counter
-//! before the reset and emits a `std.log.scoped(.events).warn`
-//! when it exceeds the per-drain threshold of 10.
+//! Heterogeneous event bus: typed `EventQueue(T)` instances indexed by `rtti.TypeId`,
+//! stored type-erased and cast back with `@ptrCast(@alignCast)` at the call site.
+//! `register` is mandatory before `emit` — an unregistered type is an error, not a
+//! silent no-op.
 
 const std = @import("std");
 const rtti = @import("../rtti/root.zig");
@@ -30,28 +17,22 @@ const log = std.log.scoped(.events);
 pub const Lifetime = lifetime_mod.Lifetime;
 /// Re-export of `EventCursor` for bus-local convenience.
 pub const EventCursor = cursor_mod.EventCursor;
-/// Re-export of the typed `EventQueue` factory for bus-local
-/// convenience.
+/// Re-export of the typed `EventQueue` factory.
 pub const EventQueue = queue_mod.EventQueue;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Errors surfaced by the bus's user-facing entry points.
 pub const BusError = error{
-    /// `emit` / `subscribe` / `poll` called on a type that was
-    /// never `register`ed.
+    /// `emit` / `subscribe` / `poll` on a type that was never registered.
     EventTypeNotRegistered,
     /// `register` called on a type that was already registered.
     AlreadyRegistered,
-    /// `poll`'s cursor `type_id` does not match the registered
-    /// queue's `type_id` — usually a programming error (a cursor
-    /// was reused across types).
+    /// The cursor's `type_id` does not match the queue's — a cursor reused across types.
     CursorTypeMismatch,
     /// Forwarded from the underlying allocator.
     OutOfMemory,
 } || queue_mod.PollError;
 
-/// Per-queue dispatch table — type-erased operations the bus
-/// needs without monomorphising on every visit.
+/// Per-queue dispatch table: the operations the bus needs without monomorphising.
 const QueueVTable = struct {
     deinit: *const fn (ptr: *anyopaque, gpa: std.mem.Allocator) void,
     drain: *const fn (ptr: *anyopaque) void,
@@ -61,9 +42,7 @@ const QueueVTable = struct {
     currentHead: *const fn (ptr: *anyopaque) usize,
 };
 
-/// Build the static vtable for `EventQueue(T)`. Returns a pointer
-/// to a comptime-monomorphised constant — same pointer for all
-/// callers requesting the same `T`.
+/// Static vtable for `EventQueue(T)` — the same pointer for every caller of one `T`.
 fn vtableFor(comptime T: type) *const QueueVTable {
     const gen = struct {
         const Q = EventQueue(T);
@@ -110,15 +89,11 @@ const QueueEntry = struct {
     vtable: *const QueueVTable,
 };
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Drain-warning threshold — `drains_since_last_drain` above this
-/// value at drain time emits a `log.warn`. Set per the brief
-/// (`drops/sec > 10`); the threshold is evaluated per drain rather
-/// than per second, but on a typical 60 Hz tick this is a strict
-/// upper bound on the per-second rate.
+/// Drops above this count at drain time emit a warning.
+///
+/// Evaluated PER DRAIN, not per second — at 60 Hz that is a strict upper bound on the rate.
 pub const DROPS_WARN_THRESHOLD: u64 = 10;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Per-world heterogeneous event bus.
 pub const EventBus = struct {
     queues: std.AutoHashMapUnmanaged(rtti.TypeId, QueueEntry) = .empty,
@@ -136,9 +111,7 @@ pub const EventBus = struct {
         self.* = undefined;
     }
 
-    /// Register an event type. Must be called once before any
-    /// `emit` / `subscribe` / `poll` for `T`. `cap` is the queue's
-    /// ring buffer size; must be a power of two `>= 2`.
+    /// Register an event type once, before any `emit`. `cap` must be a power of two >= 2.
     pub fn register(
         self: *EventBus,
         gpa: std.mem.Allocator,
@@ -162,9 +135,7 @@ pub const EventBus = struct {
         });
     }
 
-    /// Enqueue an event of type `T`. Lock-free, never blocks,
-    /// drops the oldest entry on saturation (and bumps the
-    /// queue's `drops_since_last_drain`).
+    /// Enqueue an event of `T`. Never blocks; DROPS THE OLDEST entry on saturation.
     pub fn emit(self: *EventBus, comptime T: type, event: T) BusError!void {
         const tid: rtti.TypeId = comptime rtti.computeTypeId(T);
         const entry = self.queues.get(tid) orelse return error.EventTypeNotRegistered;
@@ -172,9 +143,7 @@ pub const EventBus = struct {
         q.enqueue(event);
     }
 
-    /// Open a fresh cursor on the queue for `T`. The cursor reads
-    /// from the queue's current head — events emitted before this
-    /// call are not visible.
+    /// Open a cursor at the queue's current head — events emitted earlier are not visible.
     pub fn subscribe(self: *const EventBus, comptime T: type) BusError!EventCursor {
         const tid: rtti.TypeId = comptime rtti.computeTypeId(T);
         const entry = self.queues.get(tid) orelse return error.EventTypeNotRegistered;
@@ -186,11 +155,10 @@ pub const EventBus = struct {
         };
     }
 
-    /// Poll one event for `cursor`. Returns `null` when empty,
-    /// `error.CursorInvalidated` when the cursor's epoch is
-    /// stale, `error.CursorTypeMismatch` when the cursor is
-    /// bound to a different type, `error.EventTypeNotRegistered`
-    /// when `T` is not registered.
+    /// Poll one event, or null when empty.
+    ///
+    /// Fails with `CursorInvalidated` on a stale epoch, `CursorTypeMismatch` on a
+    /// foreign cursor, `EventTypeNotRegistered` when `T` was never registered.
     pub fn poll(
         self: *const EventBus,
         comptime T: type,
@@ -203,10 +171,7 @@ pub const EventBus = struct {
         return q.poll(cursor);
     }
 
-    /// Drain every queue whose lifetime matches `lt`. For each
-    /// matching queue: log a warning when
-    /// `drops_since_last_drain > DROPS_WARN_THRESHOLD`, reset the
-    /// drops counter, reset head + slot sequences, bump epoch.
+    /// Drain every queue of lifetime `lt`: warn on excess drops, reset, bump epoch.
     pub fn drainAtBoundary(self: *EventBus, lt: Lifetime) void {
         var it = self.queues.valueIterator();
         while (it.next()) |entry| {
