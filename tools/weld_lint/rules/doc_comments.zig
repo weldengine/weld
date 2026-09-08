@@ -38,43 +38,15 @@
 //! consts) is out of scope for M0.0 — covered by future stricter
 //! rules listed in the brief's *Out-of-scope*.
 //!
-//! ─────────────────────────────────────────────────────────────────
+//! A second arm flags an ORPHANED `///` run — one separated from its
+//! declaration by an inserted line. The arm above cannot see those:
+//! blank lines and plain `//` comments produce no tokens, so the token
+//! before `pub` is the doc comment either way.
 //!
-//! **SECOND ARM — the orphaned doc block.** A `///` run separated from
-//! the declaration it documents by an inserted line still satisfies
-//! the arm above, because blank lines and plain `//` comments produce
-//! no tokens: the token before `pub` is the doc comment either way.
-//! So the guard reads a doc as attached while the reader sees it
-//! floating, and an edit anchored on a declaration line can split the
-//! two without anything going red.
-//!
-//! WHAT THE COMPILER ALREADY REFUSES, measured with `zig ast-check`
-//! rather than assumed, because a rule that claims a compile error is
-//! a rule whose power cannot be shown: a doc on a `comptime` block, a
-//! doc on a `test` block, a doc in statement position, and an
-//! unattached doc at end of file are all hard errors. Those four need
-//! no lint. What the compiler ACCEPTS is exactly the orphan class —
-//! a `///` run followed by a blank line, or by a plain `//` comment,
-//! then its declaration; at root level, inside a container, and on a
-//! field alike.
-//!
-//! SO THE ARM IS LEXICAL AND COVERS BOTH LEVELS. It has to cover
-//! container-internal declarations: the instance that motivated it was
-//! a method's doc migrated onto a neighbouring method, and the arm
-//! above is blind to those by construction.
-//!
-//! IT IS BLOCKING FROM THE START, and that is a measurement rather
-//! than a preference — the tree carries ZERO orphans of this form
-//! today, in `src/`, `bench/`, `tests/` and `tools/` alike, so the
-//! rule costs no remediation and its whole value is preventive.
-//!
-//! WHAT IT DOES NOT REACH, named rather than left to be discovered. A
-//! doc block that migrated onto a NEIGHBOURING owner with no blank
-//! line between the two runs is structurally indistinguishable from
-//! one legitimate two-paragraph doc. Catching it means flagging the
-//! declaration it robbed, which is a container-level *missing*-doc
-//! rule — 1 323 sites on this tree, measured, and a different
-//! milestone from one that removes comments.
+//! It does NOT reach a doc block migrated onto a neighbouring owner
+//! with no line between the two runs — that is byte-for-byte one
+//! two-paragraph doc, and flagging the declaration it robbed means a
+//! container-level missing-doc rule over 1 323 sites.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -126,16 +98,10 @@ pub fn check(
     }
 }
 
-/// Flag every `///` run that is separated from its declaration by an
-/// inserted line.
+/// Flag every `///` run separated from its declaration by an inserted line.
 ///
-/// A run is a maximal block of consecutive `///` lines. It is an orphan
-/// when the line immediately after it is blank or a plain `//` comment
-/// — the two forms the compiler accepts and a reader misreads.
-///
-/// `//!` runs are container docs and are NOT considered: a module
-/// header followed by a blank line is the normal shape of every file
-/// in the tree, and treating it as an orphan would fire on all of them.
+/// `//!` runs are container docs and are excluded: a module header followed by a
+/// blank line is the normal shape of every file, and would fire on all of them.
 pub fn checkOrphanDocs(
     arena: std.mem.Allocator,
     file: []const u8,
@@ -224,8 +190,6 @@ fn isEntryPoint(tree: *const Ast, source: []const u8, decl: Ast.Node.Index) bool
     return std.mem.eql(u8, name_slice, "main") or std.mem.eql(u8, name_slice, "build");
 }
 
-// ─── tests ──────────────────────────────────────────────────────────────────
-
 /// Diagnostics from the orphan arm alone.
 fn orphansOn(source: []const u8) !usize {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -235,7 +199,7 @@ fn orphansOn(source: []const u8) !usize {
     return diags.items.len;
 }
 
-/// Diagnostics from BOTH arms, i.e. what `runLint` produces for a file.
+/// Diagnostics from both arms, i.e. what `runLint` produces for a file.
 fn allOn(source: [:0]const u8) !usize {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -271,10 +235,6 @@ test "one inserted plain comment orphans the block" {
 }
 
 test "the arm covers container-internal declarations, not only root ones" {
-    // The instance that motivated this arm was a method's doc, and the
-    // pre-existing arm reads `rootDecls()` only — so an arm that also
-    // looked at root level alone would have missed the very case it
-    // exists for.
     try std.testing.expectEqual(@as(usize, 1), try orphansOn(
         \\pub const World = struct {
         \\    /// Spawns an entity.
@@ -296,10 +256,8 @@ test "the arm covers container-internal declarations, not only root ones" {
 }
 
 test "a `//!` container header followed by a blank line is not an orphan" {
-    // Non-vacuity control for every test above: `//!` then a blank line is
-    // the shape of every file header in the tree, so an arm that did not
-    // distinguish the two sigils would fire 275 times and its other tests
-    // would still pass.
+    // Non-vacuity control: an arm blind to the two sigils would fire on every
+    // file header in the tree and still pass every test above.
     try std.testing.expectEqual(@as(usize, 0), try orphansOn(
         \\//! Module header.
         \\//! Second line of it.
@@ -336,24 +294,16 @@ test "the diagnostic names which separator split the block" {
     try std.testing.expect(std.mem.indexOf(u8, plain.items[0].message, "plain `//` comment") != null);
 }
 
-test "the six splits of the hybrid-storage milestone, reconstructed" {
-    // FORM ONE — five of the six. An edit anchored on the declaration line
-    // left the declaration carrying a plain `//` where its `///` belonged.
-    // The pre-existing arm catches these, and this pins that it still does.
+test "a split doc, reconstructed in both forms" {
+    // A declaration left carrying a plain `//` where its `///` belonged: the
+    // pre-existing arm catches this, and this pins that it still does.
     try std.testing.expectEqual(@as(usize, 1), try allOn(
         \\// Spawns an entity.
         \\pub fn spawn() void {}
         \\
     ));
-    // Same shape with the doc pushed away from its owner by an insertion, and
-    // here is the whole reason the second arm exists: exactly ONE diagnostic
-    // fires, and it is the orphan arm's. The original arm stays silent because
-    // blank lines and plain `//` comments produce no tokens, so the token before
-    // `pub` is still the doc comment — the guard reads the doc as attached.
-    //
-    // Asserted on the MESSAGE and not on the count: a count of one is also what
-    // a tree with only the original arm would report if the doc had vanished
-    // entirely, and this test would then pass while measuring the wrong arm.
+    // Asserted on the MESSAGE, not the count: one diagnostic is also what the
+    // original arm alone would report had the doc vanished entirely.
     {
         var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena_state.deinit();
@@ -370,19 +320,10 @@ test "the six splits of the hybrid-storage milestone, reconstructed" {
         try std.testing.expect(std.mem.indexOf(u8, diags.items[0].message, "missing") == null);
     }
 
-    // FORM TWO — the sixth, and the arm does NOT reach it. A doc block that
-    // migrated onto a neighbouring owner, with no line between the two runs,
-    // is byte-for-byte one legitimate two-paragraph doc. Below,
-    // `wasDedupNeeded`'s doc is really `isTableDriven`'s, and `isTableDriven`
-    // is left with none — but it is container-internal, which the original
-    // arm does not read.
-    //
-    // Asserted as ZERO on purpose: a test claiming this is caught would be a
-    // text that affirms more than its oracle establishes. Closing it means a
-    // container-level MISSING-doc rule, 1 323 sites on this tree.
-    // The container carries its own doc, so the only thing this fixture can
-    // report is the property under test — without it the original arm fires on
-    // `pub const QueryPlan` and the zero would be measuring the wrong absence.
+    // A doc migrated onto a neighbouring owner. Asserted as ZERO on purpose: a
+    // test claiming this is caught would affirm more than its oracle establishes.
+    // The container carries its own doc, or the original arm fires on it and the
+    // zero measures the wrong absence.
     try std.testing.expectEqual(@as(usize, 0), try allOn(
         \\/// The plan a mixed query is walked under.
         \\pub const QueryPlan = struct {

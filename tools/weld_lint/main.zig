@@ -84,10 +84,7 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     // state would survive between runs and contaminate that rule's own unit tests.
     var crossing_tally: no_precision_crossing.Tally = .{};
 
-    // The density allowlist is read once, before the walk, for the same reason the
-    // crossing tally lives here: its check is bilateral, so it needs state across
-    // files. A missing file is not an error — an empty allowlist is the expected
-    // state, and the rule's second half reports a stale entry either way.
+    // A missing allowlist is not an error: empty is the expected state.
     var density_tally: comment_density.Tally = .{};
     defer density_tally.deinit(arena);
     if (scan.readSourceZ(arena, io, comment_density.allowlist_path)) |allowlist_src| {
@@ -120,9 +117,8 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     // follows the files this invocation actually READ, so a partial list simply says less.
     try no_precision_crossing.checkDeclarations(arena, io, &crossing_tally, &diags);
 
-    // The density allowlist's other direction. `perimeter_walked` is what keeps a
-    // partial invocation (`zig build lint -- src/core`) from reporting every entry
-    // outside it as unmatched: a run that read less says less.
+    // `paths.len == 0` is what keeps a partial invocation from reporting every
+    // entry outside it as unmatched.
     try comment_density.checkAllowlist(arena, &density_tally, &diags, paths.len == 0);
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
@@ -347,15 +343,10 @@ fn perRootControl(
     );
 }
 
-/// `comment-density` — the per-file measurement, printed rather than enforced.
+/// Print the per-file comment-density measurement over the perimeter.
 ///
-/// This subcommand is the report the milestone is reviewed on: a diff of several
-/// thousand removed comment lines is unreadable, a per-file before/after table is
-/// not. It reads the SAME `countLines` the blocking rule uses, so the number a gate
-/// reports and the number the ceiling is applied to cannot part company — a report
-/// built on its own second counter would measure a quantity nobody enforces.
-///
-/// `--markdown` emits the table in the form committed under `briefs/artifacts/`.
+/// Reads the same `countLines` the blocking rule uses: a second counter here would
+/// report a quantity nobody enforces.
 fn runCommentDensity(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -369,7 +360,9 @@ fn runCommentDensity(
 
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
-    try scan.collectZigFiles(arena, io, comment_density.perimeter, &files);
+    for (comment_density.perimeter) |dir| {
+        try scan.collectZigFiles(arena, io, dir, &files);
+    }
     std.mem.sort([]const u8, files.items, {}, lessThanPath);
 
     var total: comment_density.Counts = .{};
@@ -381,13 +374,14 @@ fn runCommentDensity(
         try out.writeAll("|---|---:|---:|---:|---:|\n");
     } else {
         try out.print(
-            "comment-density: ceiling {d} %, perimeter `{s}`, enforcement {s}\n",
+            "comment-density: ceiling {d} %, enforcement {s}, perimeter",
             .{
                 comment_density.ceiling_percent,
-                comment_density.perimeter,
                 if (comment_density.enforced) "BLOCKING" else "report only",
             },
         );
+        for (comment_density.perimeter) |dir| try out.print(" `{s}`", .{dir});
+        try out.writeAll("\n");
     }
 
     for (files.items) |file| {
@@ -439,15 +433,10 @@ fn runCommentDensity(
     return 0;
 }
 
-/// `milestone-ids` — the identifier population, printed rather than enforced.
+/// Print how many milestone, gate and review identifiers sit in comments.
 ///
-/// Driven by the rule's OWN matcher, which is the point: the shape set excludes
-/// `D<n>` and carries a keyboard-modifier guard, so a count taken with any second
-/// matcher would report a population the rule does not flag.
-///
-/// It walks the whole scanned tree and splits the total by top-level directory,
-/// because the perimeter the rule blocks on at closure is exactly the arbitration
-/// this figure informs.
+/// Driven by the rule's own matcher: its shape set has exclusions and a guard, so a
+/// second matcher would report a population the rule does not flag.
 fn runMilestoneIds(
     arena: std.mem.Allocator,
     io: std.Io,

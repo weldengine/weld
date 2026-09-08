@@ -695,17 +695,6 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `invalid/` to `valid/` and adds no block either way, both corpus drivers
     // being one test over a declared list.
     // Re-derived from the SUITE: `2155/2174 tests passed (19 skipped)` on macOS.
-    // The comment-rules pass adds THIRTY-SEVEN, all of them the linter's own unit
-    // tests for the three rules it introduces: `comment_density` (13),
-    // `no_milestone_ids` (13) and the orphan arm of `doc_comments` (11), the last
-    // being a file that held no test block at all before. 2174 -> 2211.
-    // Re-derived from the SUITE: `2192/2211 tests passed (19 skipped)` on macOS.
-    //
-    // This is the ONE movement that pass allows itself, and it happens in the gate
-    // that writes the rules. Every later gate of it removes comment lines only, so
-    // a floor that moves there means code was removed and is a defect of the gate.
-    // The Windows figure keeps its two-block deficit: the new blocks are the
-    // linter's, and nothing in them is platform-dispatched.
     return switch (os) {
         .windows => 2209,
         else => 2211,

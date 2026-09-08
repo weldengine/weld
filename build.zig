@@ -2328,11 +2328,6 @@ pub fn build(b: *std.Build) void {
     );
     dead_tests_step.dependOn(&dead_tests_run.step);
 
-    // M1.E — the two comment-rule measurements, as steps that REPORT rather than
-    // gate. `comment-report --markdown` regenerates the per-file table committed
-    // under `briefs/artifacts/`; a table maintained by hand beside the rule that
-    // enforces the ceiling would drift from it, and the drift would read as a
-    // number nobody had to re-measure.
     const comment_report_run = b.addRunArtifact(weld_lint_exe);
     comment_report_run.addArg("comment-density");
     if (b.args) |args| comment_report_run.addArgs(args);
