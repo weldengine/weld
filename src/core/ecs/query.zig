@@ -491,8 +491,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
     };
 }
 
-// ─── Convenience for the world's matching routine ─────────────────────────
-
 /// Helper consumed by `World` when populating the matches list. Returns
 /// `true` if `arch` satisfies the requested component / with / without
 /// component-id sets. Predicate evaluation happens at iteration time

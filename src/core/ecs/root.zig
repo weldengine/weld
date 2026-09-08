@@ -84,8 +84,6 @@ pub const command_buffer = @import("command_buffer.zig");
 /// E6 — observer registry hooked into the per-phase cmd buffer flush.
 pub const observers = @import("observers.zig");
 
-// ─── Flat public API ──────────────────────────────────────────────────────
-
 /// Top-level ECS world. Owns archetypes, identities, registry,
 /// resources, observer registry, current tick.
 pub const World = world.World;

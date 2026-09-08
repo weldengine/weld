@@ -325,8 +325,6 @@ pub const CommandBuffer = struct {
     }
 };
 
-// ─── inline tests ─────────────────────────────────────────────────────────
-
 const testing = std.testing;
 
 test "CommandBuffer init/deinit round-trip is leak-free" {

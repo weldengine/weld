@@ -368,8 +368,6 @@ pub const Accessor = struct {
     };
 };
 
-// ── tests ─────────────────────────────────────────────────────────────────
-
 const registry_mod = @import("../ecs/registry.zig");
 const writer = @import("writer.zig");
 

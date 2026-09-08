@@ -171,8 +171,6 @@ comptime {
     std.debug.assert(@alignOf(EntityId) == @alignOf(u64));
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "EntityId is exactly 8 bytes" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(EntityId));
 }

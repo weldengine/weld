@@ -206,8 +206,6 @@ pub const Archetype = struct {
         self.* = undefined;
     }
 
-    // ─── Inspection ──────────────────────────────────────────────────────
-
     pub fn capacity(self: *const Archetype) u32 {
         return self.layout.capacity;
     }
@@ -236,8 +234,6 @@ pub const Archetype = struct {
     pub fn hasComponent(self: *const Archetype, component_id: ComponentId) bool {
         return self.componentIndex(component_id) != null;
     }
-
-    // ─── Spawn / despawn primitives ──────────────────────────────────────
 
     /// Reserve a slot in the trailing chunk (allocating a new chunk when
     /// the current one is full) without writing any component data. The
@@ -382,8 +378,6 @@ pub const Archetype = struct {
         return chunk;
     }
 
-    // ─── Byte-level accessors (shared by query view + Etch bridge) ──────
-
     /// Pointer to a single component slot — `sizes[i]` bytes long.
     /// `i` is the index into `component_ids`, not a public ComponentId.
     pub fn componentSlot(self: *const Archetype, chunk: *Chunk, i: usize, slot: u32) []u8 {
@@ -408,8 +402,6 @@ pub const Archetype = struct {
     pub fn entityIdsConst(self: *const Archetype, chunk: *const Chunk) [*]const EntityId {
         return @ptrCast(@alignCast(&chunk.bytes[self.layout.entity_ids_offset]));
     }
-
-    // ─── M0.1 / E4 change-detection helpers ─────────────────────────────
 
     /// Mark `(comp_idx, slot)` as modified at `tick`. Writes the
     /// `changed_tick` sidecar and sets the slot's dirty bit so chunk-
@@ -450,8 +442,6 @@ pub const Archetype = struct {
         }
     }
 };
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "Archetype init pins sorted component_ids and registry-driven sizes/aligns" {
     const gpa = std.testing.allocator;

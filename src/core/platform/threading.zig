@@ -37,8 +37,6 @@ pub const Error = error{
     InvalidCoreId,
 };
 
-// --- Win32 -------------------------------------------------------------
-
 const win = struct {
     extern "kernel32" fn SetThreadAffinityMask(hThread: *anyopaque, dwThreadAffinityMask: usize) callconv(.winapi) usize;
     extern "kernel32" fn SetThreadPriority(hThread: *anyopaque, nPriority: i32) callconv(.winapi) i32;
@@ -56,8 +54,6 @@ const win = struct {
         return thread.getHandle();
     }
 };
-
-// --- POSIX -------------------------------------------------------------
 
 const posix = struct {
     const cpu_set_t = extern struct {

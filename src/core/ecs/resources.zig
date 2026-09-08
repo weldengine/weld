@@ -126,8 +126,6 @@ pub const ResourceStore = struct {
     }
 };
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "addResource then getResource roundtrip" {
     const gpa = std.testing.allocator;
     var store = ResourceStore.init();

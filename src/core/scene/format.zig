@@ -48,8 +48,6 @@ pub const ComponentId = registry_mod.ComponentId;
 /// handle the resource-only `string_` slot (a string-table reference on disk).
 pub const FieldKind = registry_mod.FieldKind;
 
-// ── On-disk format constants ────────────────────────────────────────────────
-
 /// File magic at offset 0. `[4]u8` (not a `u32`) so the on-disk byte order is
 /// unambiguous regardless of host endianness (the `RuntimeHeader` precedent,
 /// `src/modules/asset_pipeline/format/runtime_bin.zig`).
@@ -242,7 +240,6 @@ pub fn columnsRegionEnd(region_start: usize, sizes: []const u16, aligns: []const
     return off;
 }
 
-// ── Neutral cook model (E1 output → E2 writer input) ─────────────────────────
 //
 // All references below are indices into the `CookModel`'s own tables; the E2
 // writer resolves them to on-disk offsets. No `weld_etch` types appear here.

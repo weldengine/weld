@@ -91,8 +91,6 @@ pub const Event = union(enum) {
     /// monitor; the caller is expected to recreate the swapchain.
     dpi_changed: f32,
 
-    // ============================ M0.3 additions ============================
-
     /// Physical key pressed. `code` is the normalized identifier (see
     /// `KeyCode`); `scancode` is the raw OS scan code for advanced
     /// applications that need exact hardware identity. `repeat` is true

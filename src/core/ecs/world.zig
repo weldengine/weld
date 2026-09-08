@@ -298,8 +298,6 @@ pub const World = struct {
         self.* = undefined;
     }
 
-    // ─── Observer registration (M0.1 / E6) ───────────────────────────────
-
     /// Register an `on_spawned` observer (M1.0.2 E3: `ctx` threaded back to the
     /// callback; native callers pass `null`).
     pub fn registerOnSpawned(
@@ -514,8 +512,6 @@ pub const World = struct {
         }
     }
 
-    // ─── Component registration helpers ──────────────────────────────────
-
     /// Register a component whose layout is described at runtime.
     /// Returns the assigned `ComponentId`. Forwarded straight to the
     /// underlying `Registry` — see `registry.zig`.
@@ -562,8 +558,6 @@ pub const World = struct {
             .fields = &.{},
         });
     }
-
-    // ─── Archetype lookup ────────────────────────────────────────────────
 
     /// A component-id set every member of which is `.table`-stored, sorted
     /// into an archetype signature.
@@ -986,8 +980,6 @@ pub const World = struct {
         return self.entity_locations.get(id);
     }
 
-    // ─── Spawn / despawn ─────────────────────────────────────────────────
-
     /// Spawn an entity with the S1 `(Transform, Velocity)` archetype.
     /// Generational id drawn from the identity store; archetype found
     /// or created on first call.
@@ -1272,8 +1264,6 @@ pub const World = struct {
         return self.identity.isLive(id);
     }
 
-    // ─── M0.1 / E4 — frame tick + typed component access ────────────────
-
     /// Open a new frame. Bumps `current_tick` (wrapping arithmetic — a
     /// follow-up milestone handles the u32 wraparound per the brief)
     /// and clears every chunk's dirty bitset so `Changed<T>` queries
@@ -1384,8 +1374,6 @@ pub const World = struct {
         const chunk = arch.chunks.items[loc.chunk_idx];
         arch.markChanged(chunk, col, loc.slot, self.current_tick);
     }
-
-    // ─── Add / remove component (M0.1 / E2 — transition cache) ──────────
 
     /// Insert component `T` on `entity`. Routes through the current
     /// archetype's `TransitionCache`: the first add of `T` from this
@@ -2267,8 +2255,6 @@ pub const World = struct {
         });
     }
 
-    // ─── Queries ─────────────────────────────────────────────────────────
-
     /// S1 sugar — `world.query(gpa)` returns the no-filter
     /// `Query(.{Transform, Velocity}, .{})` over every materialised
     /// (Transform, Velocity)-containing archetype. The bench, the
@@ -2391,8 +2377,6 @@ pub const World = struct {
         };
     }
 
-    // ─── Resources ───────────────────────────────────────────────────────
-
     /// Add a resource. `init_bytes` is duplicated by the store.
     pub fn addResource(self: *World, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) !void {
         try self.resources.addResource(gpa, id, init_bytes);
@@ -2470,8 +2454,6 @@ pub const World = struct {
             }
         }
     }
-
-    // ─── Inspection helpers ──────────────────────────────────────────────
 
     /// Total chunk count across every archetype. Used by the bench
     /// harness for the report.

@@ -80,8 +80,6 @@ const TrampolineFn = worker_mod.TrampolineFn;
 const ComponentId = registry_mod.ComponentId;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
 
-// ─── Phase pipeline ────────────────────────────────────────────────────────
-
 /// Canonical Phase-0 phase pipeline. Dispatched once per
 /// `dispatchFrame` in declaration order:
 ///
@@ -105,8 +103,6 @@ pub const Phase = enum(u8) {
 
     pub const count = std.meta.fields(@This()).len;
 };
-
-// ─── Access descriptors ────────────────────────────────────────────────────
 
 /// Kind tag distinguishing component reads/writes from resource
 /// reads/writes. Components and resources share the same DAG
@@ -190,8 +186,6 @@ pub fn WritesResource(comptime R: type) AccessDescriptor {
     };
 }
 
-// ─── Frame / system context ────────────────────────────────────────────────
-
 /// Per-frame state surfaced to every system. `dt` is the seconds
 /// elapsed since the previous frame (provided by `dispatchFrame`);
 /// `user` is an opaque pointer the caller can use to share custom
@@ -240,8 +234,6 @@ pub const SystemDescriptor = struct {
     run: SystemFn,
     accesses: []const AccessDescriptor = &.{},
 };
-
-// ─── JobBuilder ────────────────────────────────────────────────────────────
 
 /// Accumulator for the heterogeneous job batch dispatched at the
 /// end of a topological level. Owns an arena allocator that stores
@@ -387,8 +379,6 @@ pub const JobBuilder = struct {
     }
 };
 
-// ─── DAG ───────────────────────────────────────────────────────────────────
-
 /// Per-phase access tracker: which already-registered systems read
 /// or write a given component / resource id. Used by
 /// `registerSystem` to compute the new system's incoming edges and
@@ -455,8 +445,6 @@ const PhaseState = struct {
     }
 };
 
-// ─── Errors ────────────────────────────────────────────────────────────────
-
 /// Errors surfaced by `SystemScheduler.registerSystem`. Currently
 /// limited to `WriteWriteConflict` (two writes on the same id in
 /// the same phase) plus the usual `OutOfMemory`. Promoted to a
@@ -470,8 +458,6 @@ pub const RegistrationError = error{
     WriteWriteConflict,
     OutOfMemory,
 };
-
-// ─── SystemScheduler ───────────────────────────────────────────────────────
 
 /// Phase-based system registry + implicit DAG + concurrent
 /// intra-phase dispatch.
@@ -794,14 +780,10 @@ pub const SystemScheduler = struct {
     }
 };
 
-// ─── helpers ───────────────────────────────────────────────────────────────
-
 fn appendUnique(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged(u32), value: u32) !void {
     for (list.items) |existing| if (existing == value) return;
     try list.append(gpa, value);
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
 

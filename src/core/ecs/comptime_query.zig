@@ -139,8 +139,6 @@ pub fn query(world: *World, comptime tuple: anytype) ComptimeQuery(tuple) {
     return ComptimeQuery(tuple).init(world);
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "query yields typed rows over a single dynamic archetype" {
     const gpa = std.testing.allocator;
     var world = World.init();

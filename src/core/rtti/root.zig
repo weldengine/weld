@@ -9,8 +9,6 @@ const hash_mod = @import("hash.zig");
 const builder_mod = @import("comptime_builder.zig");
 const registry_mod = @import("registry.zig");
 
-// -- Sub-module aliases ------------------------------------------------
-
 /// Type metadata declarations.
 pub const type_info = type_info_mod;
 /// Deterministic identity + schema hashes for RTTI metadata.
@@ -23,8 +21,6 @@ pub const registry = registry_mod;
 /// FROZEN — see engine-phase-0-criteria.md C0.5
 /// Bumped on any breaking change to the frozen surface — a tracked migration.
 pub const WELD_RTTI_PROTOCOL_VERSION: u32 = 1;
-
-// -- Flat type surface -------------------------------------------------
 
 /// Stable 32-bit identity of a registered type (cf. `type_info.zig`).
 pub const TypeId = type_info_mod.TypeId;
@@ -59,8 +55,6 @@ pub const Color = type_info_mod.Color;
 pub const Entity = type_info_mod.Entity;
 /// Opaque asset handle, ABI-equivalent to `u64` (`FieldKind.asset_handle`).
 pub const AssetHandle = type_info_mod.AssetHandle;
-
-// -- Flat function surface ---------------------------------------------
 
 /// Builds the full `TypeInfo` record for `T` at comptime.
 pub const buildTypeInfo = builder_mod.buildTypeInfo;

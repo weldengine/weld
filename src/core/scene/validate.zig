@@ -372,8 +372,6 @@ pub fn structure(bytes: []const u8, header: SceneHeader) StructureError!void {
     try v.run();
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────
-
 const registry_mod = @import("../ecs/registry.zig");
 const writer = @import("writer.zig");
 const Registry = registry_mod.Registry;

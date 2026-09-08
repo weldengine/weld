@@ -148,8 +148,6 @@ pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Access
     return remap;
 }
 
-// ─── E2 — instantiation + UUID map + two-phase on_spawned ────────────────────
-
 /// 16-byte UUID → runtime `EntityId`, built as the scene loads. Keyed on the
 /// raw UUID bytes (`Archetype.entityUuid`) so the accessor stays untouched; a
 /// dense ordinal-keyed map is a later optimization.
@@ -198,8 +196,6 @@ pub const LoadResult = struct {
 fn uuidCount(acc: Accessor) u32 {
     return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
 }
-
-// ─── D2 — resource-write transaction (snapshot / commit / rollback) ──────────
 
 /// One resource the loader wrote, recorded for commit or rollback (M1.1.1-HF1 /
 /// D2). `snapshot` is the resource's full byte image captured immediately BEFORE
@@ -811,8 +807,6 @@ fn dispatchSpawnLifecycle(world: *World, gpa: std.mem.Allocator, spawned: []cons
 fn readU32At(acc: Accessor, off: u32) u32 {
     return std.mem.readInt(u32, acc.bytes[off..][0..4], .little);
 }
-
-// ─── inline tests ───────────────────────────────────────────────────────────
 
 const testing = std.testing;
 const writer = @import("writer.zig");

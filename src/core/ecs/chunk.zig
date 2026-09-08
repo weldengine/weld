@@ -161,8 +161,6 @@ pub const Chunk = struct {
         };
     }
 
-    // ─── M0.1 / E4 sidecar accessors ────────────────────────────────────
-
     /// Pointer to the `added_tick[capacity]u32` column for component
     /// index `comp_idx`. Length is the chunk's `capacity` (every slot
     /// has a tick, including unused trailing slots — the sidecar
@@ -313,8 +311,6 @@ fn fits(sizes: []const u16, aligns: []const u16, n: usize, header_size: usize) b
     off += ((n + 63) / 64) * @sizeOf(u64);
     return off <= ChunkSize;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "chunk total size is 16 KiB" {
     try std.testing.expectEqual(@as(usize, ChunkSize), @sizeOf(Chunk));

@@ -181,8 +181,6 @@ fn freeBlock(gpa: std.mem.Allocator, p: [*]u8) void {
     gpa.free(blockSlice(p, headerOf(p).size));
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "alloc sets refcount 1 and decref to zero frees + drops" {
     const gpa = std.testing.allocator;
     const p = try alloc(gpa, type_string, 5);

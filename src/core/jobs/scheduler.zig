@@ -333,7 +333,6 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     var idle_spin_count: u32 = 0;
 
     while (true) {
-        // ── Hot path: lock-free pop / steal ───────────────────────
         const maybe_job = blk: {
             if (self.deque.pop()) |j| break :blk j;
 
@@ -390,7 +389,6 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             continue;
         }
 
-        // ── Idle path: park until a new generation appears ────────
         idle_spin_count = 0;
         sched.mu.lockUncancelable(sched.io);
         const snapshot = unpack(sched.gen_and_n.load(.acquire));

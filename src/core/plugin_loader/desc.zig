@@ -1,40 +1,19 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5
+//! FROZEN — see engine-phase-0-criteria.md C0.5. Every declaration below is.
 //!
-//! M0.2 / E6 — fundamental C types for the Tier 3 plugin API and
-//! the plugin descriptor.
-//!
-//! Layout consistent with `engine-c-api.md` §2 (fundamental types) + §3
-//! (plugin lifecycle). The types are `extern` or aliases of C
-//! integers — ABI-compatible with plugins compiled in C / C++ /
-//! Rust / etc. via the `include/weld_api.h` header (generated in
-//! Phase 3, brief § Out-of-scope).
-//!
-//! All declarations are **frozen final signatures** in the sense
-//! of the C0.5 partial freeze (cf. brief § Scope). No runtime
-//! wiring — `Loader` only loads the `.so` / `.dll`, reads the
-//! descriptor, and logs the declared capabilities. Runtime
-//! enforcement of capabilities (filesystem, network, threading)
-//! is Phase 3 (cf. brief § Out-of-scope).
+//! Fundamental C types of the Tier 3 plugin API and the plugin descriptor, laid out
+//! per `engine-c-api.md` §2 and §3. `extern` or C integer aliases, so a plugin built
+//! in any language matching that ABI links against them.
 
 const std = @import("std");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5. This semver
-/// triple IS the PluginLoader's `*_PROTOCOL_VERSION` axis — the C0.5
-/// versioning rule reuses it rather than minting a separate constant
-/// (MAJOR = binary break, MINOR = additive, PATCH = fix).
-/// Major version of the Weld plugin API. Incremented on every
-/// binary break (function removal / rename, signature change,
-/// struct layout change). Cf. `engine-c-api.md` §1.1.
+/// FROZEN — see engine-phase-0-criteria.md C0.5
+/// THIS SEMVER TRIPLE IS THE LOADER'S PROTOCOL VERSION — no separate constant is
+/// minted. MAJOR is a binary break, MINOR an additive change, PATCH a fix.
 pub const WELD_API_VERSION_MAJOR: u32 = 0;
-/// Minor version. Incremented on every binary-compatible
-/// addition (new function at the end of the table, new field
-/// at the end of a struct).
+/// Minor version: a binary-compatible addition at the end of a table or struct.
 pub const WELD_API_VERSION_MINOR: u32 = 1;
-/// Patch version. Incremented for bug fixes without surface
-/// change.
+/// Patch version: a fix with no surface change.
 pub const WELD_API_VERSION_PATCH: u32 = 0;
-
-// -- ABI-stable scalar types (cf. engine-c-api.md §2.1) ------------
 
 /// Opaque entity handle, ABI-equivalent to `uint64_t`. Encodes
 /// `index` (low 32 bits) + `generation` (high 32 bits).
@@ -57,8 +36,6 @@ pub const WeldTagId = u64;
 /// Sentinel "no entity" (cf. `engine-c-api.md` §2.1).
 pub const WELD_ENTITY_NULL: WeldEntity = 0;
 
-// -- Math types (cf. engine-c-api.md §2.2) ----------------------------
-
 /// 2-component float vector. ABI = `struct { float x, y; }`.
 pub const WeldVec2 = extern struct { x: f32 = 0, y: f32 = 0 };
 /// 3-component float vector.
@@ -73,8 +50,6 @@ pub const WeldMat3 = extern struct { m: [9]f32 = .{ 1, 0, 0, 0, 1, 0, 0, 0, 1 } 
 pub const WeldMat4 = extern struct { m: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
 /// RGBA float color (linear space).
 pub const WeldColor = extern struct { r: f32 = 0, g: f32 = 0, b: f32 = 0, a: f32 = 1 };
-
-// -- String view + slice (cf. engine-c-api.md §2.3 + §2.4) ------------
 
 /// Non-owning UTF-8 view. ABI = `struct { const char* ptr;
 /// uint32_t len; }`. Not guaranteed NUL-terminated.
@@ -103,8 +78,6 @@ pub const WeldSlice = extern struct {
     stride: u32 = 0,
 };
 
-// -- Opaque handles (cf. engine-c-api.md §2.5) ------------------------
-
 /// Opaque handle to the ECS `World`. The plugin receives the
 /// pointer via `WeldAPI.world` and passes it to ECS callbacks.
 pub const WeldWorldHandle = ?*anyopaque;
@@ -116,8 +89,6 @@ pub const WeldAllocatorHandle = ?*anyopaque;
 /// Opaque handle to the editor context (`null` in runtime
 /// mode without an editor).
 pub const WeldEditorCtxHandle = ?*anyopaque;
-
-// -- Error codes (cf. engine-c-api.md §2.6) --------------------------
 
 /// Result of a plugin API operation. `0 == WELD_OK`,
 /// negative reserved for future errors.
@@ -153,8 +124,6 @@ pub const WeldResult = enum(c_int) {
     WELD_ERR_NOT_IMPLEMENTED = 11,
 };
 
-// -- Plugin capabilities (cf. engine-c-api.md §3.2) -------------------
-
 /// Capabilities declared by the plugin at load time. M0.2 READS
 /// these declarations and logs them; NO runtime check is
 /// performed — enforcement (refusing `component_get` on a
@@ -184,8 +153,6 @@ pub const WeldPluginCaps = extern struct {
     _pad: [5]u8 = .{ 0, 0, 0, 0, 0 },
 };
 
-// -- Plugin lifecycle callbacks (cf. engine-c-api.md §3.3) ------------
-
 /// Plugin lifecycle callbacks. All optional (`null` =
 /// ignored). The M0.2 stub plugin leaves all callbacks `null`.
 ///
@@ -209,8 +176,6 @@ pub const WeldPluginCallbacks = extern struct {
     /// resources (ECS components are managed by the engine).
     on_shutdown: ?*const fn (api: *const anyopaque) callconv(.c) void = null,
 };
-
-// -- Plugin descriptor (cf. engine-c-api.md §3.1) ---------------------
 
 /// Descriptor returned by the plugin's single entry point
 /// (`weld_plugin_entry`). Identity + capabilities + callbacks.

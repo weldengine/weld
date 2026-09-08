@@ -62,8 +62,6 @@ const sys = struct {
     extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) c_int; // 0600 test (macOS)
 };
 
-// -------------------------------------------------- constants ----------
-
 const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = if (is_linux) 1 else 1; // same value on macOS
 const SOL_SOCKET: c_int = if (is_linux) 1 else 0xFFFF;
@@ -182,8 +180,6 @@ fn peerUidMatches(fd: c_int) bool {
         return euid == our_uid;
     }
 }
-
-// -------------------------------------------------- public types ------
 
 /// Picked up by `transport.zig`'s comptime backend dispatch — must
 /// keep matching shape with `transport_windows.OsHandle` so call

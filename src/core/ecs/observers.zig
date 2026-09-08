@@ -320,8 +320,6 @@ pub const ObserverRegistry = struct {
     }
 };
 
-// ─── Flush orchestrator ───────────────────────────────────────────────────
-
 /// Apply a single command buffer with observer dispatch interleaved
 /// between each command's apply step. After the loop, also flush the
 /// registry's `deferred` buffer (the cmds queued by observers during
@@ -540,8 +538,6 @@ fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c: Command) !void {
     }
 }
 
-// ─── inline tests ─────────────────────────────────────────────────────────
-
 const testing = std.testing;
 
 test "ObserverRegistry init/deinit round-trip is leak-free" {
@@ -551,8 +547,6 @@ test "ObserverRegistry init/deinit round-trip is leak-free" {
     try testing.expect(reg.deferred == null);
     try testing.expectEqual(@as(usize, 0), reg.on_spawned.items.len);
 }
-
-// ─── M1.0.2 E3 — replace detection + old-value capture ─────────────────────
 
 /// Test-only capture of the old/new component bytes (single `i32`) seen by an
 /// observer fire (M1.0.2 E3).
@@ -652,8 +646,6 @@ test "on_removed receives the pre-removal value (M1.0.2 E3)" {
     try testing.expectEqual(@as(i32, 99), E3Capture.old); // the pre-removal value
     try testing.expect(world.componentBytes(e, drop) == null); // component gone
 }
-
-// ─── M1.0.5 E2 — two-phase on_spawned dispatch entry ───────────────────────
 
 const SpawnCounter = struct {
     var count: u32 = 0;

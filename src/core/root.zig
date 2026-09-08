@@ -1,27 +1,9 @@
-//! Public surface of the `weld_core` Zig module — the Tier 0 internals
-//! exposed to the runtime and editor executables, the tests, and the
-//! benches. Spans the full Tier 0 surface: `ecs`, `jobs`, `memory`,
-//! `rtti`, `resources`, `events`, `plugin_loader`, `ipc`, `scene`,
-//! `platform`, and `testing`. Each namespace is documented at its
-//! declaration below.
+//! Public surface of the `weld_core` Zig module; each namespace is documented at its
+//! own declaration below.
 
 const builtin = @import("builtin");
 
-/// ECS namespace — single canonical entry point at
-/// `src/core/ecs/root.zig` (M0.1 / E7). The root provides both:
-///   * Flat public types : `ecs.World`, `ecs.EntityId`, `ecs.Query`,
-///     `ecs.CommandBuffer`, `ecs.SystemScheduler`, etc. — the M0.1
-///     stable contract listed in the milestone brief.
-///   * Sub-module aliases: `ecs.world`, `ecs.scheduler`,
-///     `ecs.query`, `ecs.command_buffer`, … — kept reachable for
-///     tests and the bench so they can address internal symbols
-///     without going through the flat surface.
-///
-/// Consumers writing new code should prefer the flat surface
-/// (`ecs.World` over `ecs.world.World`). The sub-module aliases are
-/// stable for the lifetime of M0.1 but may be pruned at M0.2 once
-/// the RTTI rework cleans up the deprecated `archetype_dynamic`
-/// shim and the S4 surface.
+/// ECS: entities, archetypes, queries, scheduler, observers.
 pub const ecs = @import("ecs/root.zig");
 
 /// Jobs namespace — Chase-Lev deque + work-stealing scheduler.
@@ -36,22 +18,15 @@ pub const testing = struct {
     pub const alloc_counting = @import("testing/alloc_counting.zig");
 };
 
-/// Platform namespace — window, Vulkan, process control, plus the M0.3
-/// commun layer (fs, time, threading, dynamic_lib, once).
+/// Platform: window, Vulkan loader, process control, filesystem, threading.
 pub const platform = struct {
     /// FROZEN — see engine-phase-0-criteria.md C0.5
-    /// Version of the frozen PlatformLayer Tier-0 surface (window/process/
-    /// fs/time/threading/dynamic_lib/once). EXCLUDES `vk` (bindgen-generated,
-    /// versioned by the bindgen system) and `input` (covered by
-    /// `WELD_INPUT_PROTOCOL_VERSION`). Bumped on any breaking change — a
-    /// tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION` rule).
+    /// Bumped on any breaking change to the frozen platform surface.
     pub const WELD_PLATFORM_PROTOCOL_VERSION: u32 = 1;
 
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
     pub const process = @import("platform/process.zig");
-    // M0.3 — once-init primitive (CAS tri-state on std.atomic.Value(u32)).
-    // Used by win32 thread-safety patches and by time.sleepPrecise.
     pub const once = @import("platform/once.zig");
     // M0.3 — sleepPrecise wrapper with Win32 timeBeginPeriod(1) once-init.
     pub const time = @import("platform/time.zig");
@@ -70,10 +45,7 @@ pub const platform = struct {
     };
 };
 
-// S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
-// S6 brief. Public surface declared inline, same pattern as `ecs` and
-// `jobs` above.
-/// IPC namespace — editor↔runtime transport, framing, shm, viewport.
+/// Editor-runtime IPC endpoint.
 pub const ipc = struct {
     pub const protocol = @import("ipc/protocol.zig");
     pub const messages = @import("ipc/messages.zig");
@@ -89,76 +61,41 @@ pub const ipc = struct {
     pub const snapshot = @import("ipc/snapshot.zig");
 };
 
-/// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
-/// builder, type metadata, deterministic identity + schema hashes,
-/// runtime registry. Single canonical entry point at
-/// `src/core/rtti/root.zig` (consistent with the `ecs/root.zig` pattern).
+/// RTTI: the Tier 0 reflection runtime.
 pub const rtti = @import("rtti/root.zig");
 
-/// Resources namespace — Tier 0 singleton-entity resource subsystem
-/// (M0.2 / E3). Public API for `setResource` / `getResource` /
-/// `getResourceMut` / `hasResource` / `removeResource` /
-/// `resourceChanged`. Single canonical entry point at
-/// `src/core/resources/root.zig`.
+/// Resources: the singleton-entity resource subsystem.
 pub const resources = @import("resources/root.zig");
 
-/// Events namespace — Tier 0 MPMC event bus (M0.2 / E4). `EventBus`
-/// is a field on `World` (technical decision E4) and holds the
-/// typed `EventQueue(T)` instances. Producers `emit(T, e)`,
-/// consumers `subscribe(T)` → cursor → `poll(T, &cursor)`. The
-/// scheduler drives lifetime drains at phase / tick / frame
-/// boundaries.
+/// Events: the heterogeneous MPMC event bus.
 pub const events = @import("events/root.zig");
 
-/// Plugin loader namespace — Tier 0 skeleton M0.2 / E6.
-/// `Loader` loads `.so` / `.dll` / `.dylib` files, reads the
-/// exported `WeldPluginDesc`, and exposes the `WeldAPI` table
-/// with 7 sub-APIs (final signatures, stub implementations
-/// returning `WELD_ERR_NOT_IMPLEMENTED`). Runtime wiring
-/// Phase 3.
+/// Plugin loader: the Tier 3 boundary.
 pub const plugin_loader = @import("plugin_loader/root.zig");
 
-/// Scene namespace — Tier 0 `.scene.bin` format (M1.0.4). The neutral cook
-/// model + on-disk format contract (`scene.format`), the byte writer
-/// (`scene.writer`, E2) and the zero-copy accessor (`scene.accessor`, E2,
-/// reused verbatim by the M1.0.5 loader). Single canonical entry point at
-/// `src/core/scene/root.zig`. Imports `weld_core` internals only — never
-/// `weld_etch` (tier discipline).
+/// Scene: the `.scene.bin` format, codec and loader.
 pub const scene = @import("scene/root.zig");
 
-/// Memory namespace — Tier 0 persistent pools. `memory.persistent` is the
-/// refcounted string/value heap for non-POD resource fields (moved here from
-/// `src/etch/` in M1.0.5). Consumed by the scene loader and, via `weld_core`,
-/// by the Etch runtime.
+/// Memory: the refcounted persistent heap.
 pub const memory = @import("memory/root.zig");
 
-/// The Tier 0 context handed to every Tier 1 module at `init` (M1.1.15.1).
-/// Normative shape in `engine-tier-interfaces.md` §0: FOUR fields, and the count is
-/// the contract — the motive for each absent field is on the type itself. Spelled
-/// `core.ModuleContext` by `src/interfaces/`, which is why the alias is flat here
-/// rather than behind a namespace.
+/// The Tier 0 context handed to every Tier 1 module at `init`.
 pub const ModuleContext = @import("module_context.zig").ModuleContext;
 
 comptime {
-    // Force eager analysis of every IPC sub-file so inline tests are
-    // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
-    // would otherwise skip files whose declarations are not
-    // transitively referenced from the test binary's root — and
-    // `test` blocks are not "references" in that sense.
+    // EVERY REFERENCE BELOW IS LOAD-BEARING, NOT DECORATION. Zig 0.16 analyses
+    // lazily and a `test` block is not a reference, so a sub-file nothing names
+    // here has its inline tests silently uncollected — and the suite's own total
+    // does not reveal it, it simply does not grow.
     _ = ipc.protocol;
     _ = ipc.messages;
     _ = ipc.framing;
     _ = ipc.transport;
     _ = ipc.shm;
-    // M1.1.14 — the POSIX backend is selected inside `shm.zig` at comptime, so
-    // referencing `ipc.shm` never analyses it. Its one test had never run.
-    //
-    // The guard MIRRORS `shm.zig`'s own dispatch and is not decoration: the file
-    // opens with a `@compileError` for any other OS, so an unconditional wire-in
-    // breaks every Windows build. It did, and `zig build test` on a POSIX host
-    // could not show it — `forge-asm-inventory` cross-compiles to
-    // `x86_64-windows-gnu` from ANY host, and that step is not part of
-    // `zig build test`. A green local suite is a smaller claim than a green cell.
+    // This guard MIRRORS `shm.zig`'s own comptime dispatch: that file opens with a
+    // `@compileError` on any other OS, so an unconditional pin breaks every Windows
+    // build — and a POSIX host cannot show it, because the step that cross-compiles
+    // to Windows is not part of `zig build test`.
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         _ = @import("ipc/shm_posix.zig");
     }
@@ -169,43 +106,19 @@ comptime {
     _ = ipc.cleanup;
     _ = ipc.command_log;
     _ = ipc.snapshot;
-    // Same guard for the M0.1 identity module — `entity.zig`'s inline
-    // tests must be reachable from the core test target's root.
     _ = ecs.entity;
-    // M0.1 / E4 — pin the change-detection helpers + the tick module
-    // so their inline tests are picked up by `zig build test`.
     _ = ecs.tick;
     _ = ecs.change_detection;
     // M0.1 / E5a — pin the system scheduler.
     _ = ecs.scheduler;
-    // M0.1 / E5b — pin archetype + world so their inline tests run.
-    // The pre-E5b `core_tests` build target silently skipped them
-    // because no consumer in the analysis frontier referenced the
-    // pub aliases (lazy analysis guard, `engine-zig-conventions.md`
-    // §13). Latent regression caught when the E5b SystemScheduler
-    // added a new reference path; pinning closes the test coverage
-    // gap going forward.
     _ = ecs.archetype;
     _ = ecs.world;
-    // M0.1 / E6 — pin the command buffer + observer modules so their
-    // inline tests run alongside the rest of the ECS surface.
     _ = ecs.command_buffer;
     _ = ecs.observers;
-    // M0.8 / E3-D — pin the remaining ECS sub-files carrying inline
-    // tests. The D-S4-runtime-query investigation proved empirically
-    // that these four were silently skipped by `zig build test` (the
-    // same lazy-analysis trap that hid `query_runtime.zig`'s tests
-    // until the module was dropped as dead code).
     _ = ecs.registry;
     _ = ecs.resources;
     _ = ecs.comptime_query;
     _ = ecs.chunk;
-    // M1.B / G2 — pin the sparse backend. Measured, not assumed: with only
-    // `pub const sparse_storage = @import(...)` at the ECS root, `zig build
-    // test` reported the SAME collected total with the nine invariant tests
-    // present as without them. The same lazy-analysis trap the four pins above
-    // record, and the suite's own total does not reveal it — it just does not
-    // grow.
     _ = ecs.sparse_storage;
     _ = ecs.hybrid_query;
     // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
@@ -216,8 +129,6 @@ comptime {
     // M0.2 / E3 — pin the resources sub-files.
     _ = resources.registry;
     _ = resources.api;
-    // M0.2 / E4 — pin the events sub-files so their inline tests
-    // run alongside the rest of the surface.
     _ = events.lifetime;
     _ = events.cursor;
     _ = events.queue;
@@ -233,10 +144,6 @@ comptime {
     _ = scene.loader;
     // M1.0.5 — pin the Tier-0 persistent heap (moved from src/etch).
     _ = memory.persistent;
-    // M1.1.15.1 — pin `ModuleContext` so `module_context.zig`'s inline field-set
-    // test is collected. A bare `pub const` re-export creates no reference and
-    // collects nothing (`engine-zig-conventions.md` §13): the discriminant is the
-    // REFERENCE, never the import syntax.
     _ = ModuleContext;
     // M0.3 — pin the new platform sub-files so their inline tests run.
     _ = platform.once;
@@ -251,12 +158,8 @@ comptime {
 }
 
 test "runtime-query abstraction stays dropped (D-S4-runtime-query)" {
-    // M0.8 E3-D: the S4 `RuntimeQuery` / `World.query_dynamic` surface was
-    // dropped — zero consumers materialised (the brief-sanctioned exit), the
-    // interpreter hot path iterates archetypes through its own predicate
-    // pool, and the abstraction could not express the E3 query surface
-    // (`or`/`not` trees, tag predicates, `changed` tick baselines). Guard
-    // the drop so the dead surface cannot silently come back.
+    // Guards a DROPPED surface so it cannot silently return: the dynamic query
+    // abstraction had zero consumers and could not express the real query surface.
     const std = @import("std");
     comptime std.debug.assert(!@hasDecl(ecs, "query_runtime"));
     comptime std.debug.assert(!@hasDecl(ecs.world.World, "query_dynamic"));

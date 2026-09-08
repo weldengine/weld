@@ -549,8 +549,6 @@ fn onSurfacePreferredTransform(
 
 // ============================================================== M0.3 callbacks
 
-// ----- wl_seat -----
-
 fn onSeatCapabilities(
     data: ?*anyopaque,
     seat: *core.wl_seat,
@@ -583,8 +581,6 @@ fn onSeatCapabilities(
 fn onSeatName(data: ?*anyopaque, seat: *core.wl_seat, name: [*:0]const u8) callconv(.c) void {
     _ = .{ data, seat, name };
 }
-
-// ----- wl_keyboard -----
 
 fn onKeyboardKeymap(
     data: ?*anyopaque,
@@ -673,8 +669,6 @@ fn onKeyboardRepeatInfo(
 ) callconv(.c) void {
     _ = .{ data, proxy, rate, delay };
 }
-
-// ----- wl_pointer -----
 
 fn onPointerEnter(
     data: ?*anyopaque,
@@ -796,8 +790,6 @@ fn onPointerAxisValue120(data: ?*anyopaque, proxy: *core.wl_pointer, axis: u32, 
 fn onPointerAxisRelativeDirection(data: ?*anyopaque, proxy: *core.wl_pointer, axis: u32, direction: u32) callconv(.c) void {
     _ = .{ data, proxy, axis, direction };
 }
-
-// ----- wl_output -----
 
 fn onOutputGeometry(
     data: ?*anyopaque,

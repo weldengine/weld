@@ -38,11 +38,9 @@ const WeldQueryHandle = desc.WeldQueryHandle;
 const WeldAllocatorHandle = desc.WeldAllocatorHandle;
 const WeldEditorCtxHandle = desc.WeldEditorCtxHandle;
 
-// =============================================================
 // FieldDesc (cf. engine-c-api.md §5.3) — per-field metadata
 // passed to `component_register` / `resource_register` /
 // `event_register`. Mirror of the RTTI `FieldDesc` (E1).
-// =============================================================
 
 /// Discriminant tag of a `WeldFieldDesc`. Mirrors `rtti.FieldKind`
 /// (E1) at the C ABI boundary — extended with `WELD_FIELD_*` variants
@@ -88,10 +86,8 @@ pub const WeldFieldDesc = extern struct {
     group: WeldStr = .{},
 };
 
-// =============================================================
 // Resource lifecycle (cf. engine-c-api.md §6) — mirror of
 // rtti.Lifecycle (E1).
-// =============================================================
 
 /// Lifecycle tag declared at `resource_register`. Mirror of
 /// `rtti.Lifecycle` (E1) — drives the serialization / replication
@@ -102,9 +98,7 @@ pub const WeldResourceLifecycle = enum(c_int) {
     WELD_RESOURCE_TRANSIENT,
 };
 
-// =============================================================
 // Query chunk + callback (cf. engine-c-api.md §5.4-5.5).
-// =============================================================
 
 /// Contiguous slice of entities matching a query, surfaced to the
 /// `WeldQueryCallback`. SoA component arrays are addressable via
@@ -120,9 +114,7 @@ pub const WeldQueryChunk = extern struct {
 /// Callback fired by `query_each` for every matching chunk.
 pub const WeldQueryCallback = *const fn (chunk: *const WeldQueryChunk, user_data: ?*anyopaque) callconv(.c) void;
 
-// =============================================================
 // System phase (cf. engine-c-api.md §5.6).
-// =============================================================
 
 /// Scheduler phase a system runs in. Mirrors the engine's internal
 /// `Phase` enum (cf. `engine-c-api.md §5.6`).
@@ -135,24 +127,18 @@ pub const WeldSystemPhase = enum(c_int) {
     WELD_PHASE_PRE_RENDER = 5,
 };
 
-// =============================================================
 // Event callback (cf. engine-c-api.md §7).
-// =============================================================
 
 /// Callback fired by `event.subscribe` for every emitted event of
 /// the subscribed type.
 pub const WeldEventCallback = *const fn (event_id: WeldEventId, payload: *const anyopaque, user_data: ?*anyopaque) callconv(.c) void;
 
-// =============================================================
 // Job callback (cf. engine-c-api.md §11).
-// =============================================================
 
 /// Callback submitted to `platform.job_submit`.
 pub const WeldJobFn = *const fn (user_data: ?*anyopaque) callconv(.c) void;
 
-// =============================================================
 // Editor draw callbacks (cf. engine-c-api.md §10).
-// =============================================================
 
 /// Draw callback for a `panel_register`-ed custom editor panel.
 pub const WeldPanelDrawFn = *const fn (ctx: WeldEditorCtxHandle, user_data: ?*anyopaque) callconv(.c) void;
@@ -182,10 +168,8 @@ pub const WeldNodePort = extern struct {
     port_type: WeldPortType = .WELD_PORT_ANY,
 };
 
-// =============================================================
 // Stub bodies — each returns the "not wired" default.
 // Factored by return type to minimize noise.
-// =============================================================
 
 fn stubResult() callconv(.c) WeldResult {
     return .WELD_ERR_NOT_IMPLEMENTED;
@@ -193,9 +177,7 @@ fn stubResult() callconv(.c) WeldResult {
 
 fn stubVoid() callconv(.c) void {}
 
-// =============================================================
 // WeldEcsAPI (cf. engine-c-api.md §5).
-// =============================================================
 
 /// ECS sub-API table (cf. `engine-c-api.md §5`). Every callback is
 /// currently a stub returning `WELD_ERR_NOT_IMPLEMENTED` / null / 0
@@ -409,9 +391,7 @@ fn stub_tag_has_all(world: WeldWorldHandle, entity: WeldEntity, tags: ?[*]const 
     return false;
 }
 
-// =============================================================
 // WeldResourceAPI (cf. engine-c-api.md §6).
-// =============================================================
 
 /// Resources sub-API table (cf. `engine-c-api.md §6`). Stubbed in
 /// M0.2 — wiring is Phase 3.
@@ -482,9 +462,7 @@ fn stub_resource_changed(world: WeldWorldHandle, id: WeldResourceId, since_frame
     return false;
 }
 
-// =============================================================
 // WeldEventAPI (cf. engine-c-api.md §7).
-// =============================================================
 
 /// Events sub-API table (cf. `engine-c-api.md §7`). Stubbed in M0.2
 /// — wiring is Phase 3.
@@ -543,9 +521,7 @@ fn stub_event_read(world: WeldWorldHandle, event_id: WeldEventId) callconv(.c) W
     return .{};
 }
 
-// =============================================================
 // WeldServiceAPI (cf. engine-c-api.md §8).
-// =============================================================
 
 /// Inter-module service registry sub-API (cf. `engine-c-api.md §8`).
 /// Stubbed in M0.2 — the registry itself is Phase 3.
@@ -565,9 +541,7 @@ fn stub_service_available(world: WeldWorldHandle, name: WeldStr) callconv(.c) bo
     return false;
 }
 
-// =============================================================
 // WeldMemoryAPI (cf. engine-c-api.md §9).
-// =============================================================
 
 /// Memory sub-API table (cf. `engine-c-api.md §9`) — exposes the
 /// engine's allocator hierarchy + a pool factory. Stubbed in M0.2.
@@ -620,9 +594,7 @@ fn stub_destroy_pool(pool: WeldAllocatorHandle) callconv(.c) void {
     _ = pool;
 }
 
-// =============================================================
 // WeldEditorAPI (cf. engine-c-api.md §10).
-// =============================================================
 
 /// Editor sub-API table (cf. `engine-c-api.md §10`) — only callable
 /// from the editor process. Stubbed in M0.2.
@@ -762,9 +734,7 @@ fn stub_draw_collapsible_end(ctx: WeldEditorCtxHandle) callconv(.c) void {
     _ = ctx;
 }
 
-// =============================================================
 // WeldPlatformAPI (cf. engine-c-api.md §11).
-// =============================================================
 
 /// Platform sub-API table (cf. `engine-c-api.md §11`) — filesystem,
 /// time, jobs, logging, OS introspection. Stubbed in M0.2.
@@ -836,9 +806,7 @@ fn stub_total_memory_bytes() callconv(.c) u64 {
     return 0;
 }
 
-// =============================================================
 // WeldAPI — table principale (cf. engine-c-api.md §4).
-// =============================================================
 
 /// Top-level API table passed to `weld_plugin_entry`. Aggregates
 /// the 7 sub-API tables plus the per-tick context (`world`, `dt`,
@@ -869,11 +837,9 @@ pub const WeldAPI = extern struct {
     frame: u64 = 0,
 };
 
-// =============================================================
 // Static stub instances — pre-built with the default stub
 // functions. The `Loader` passes `&stub_api` to plugins in
 // M0.2 (the real runtime wiring is Phase 3).
-// =============================================================
 
 /// ECS sub-API pre-built with the stubs.
 pub const stub_ecs_api: WeldEcsAPI = .{};

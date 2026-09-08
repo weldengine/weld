@@ -493,7 +493,6 @@ pub const SparseStores = struct {
     }
 };
 
-// ─── inline tests — the seven invariants, one by one ──────────────────────
 //
 // Each invariant gets its own test and its own counter-factual, and the
 // counter-factual changes the OBJECT rather than the expected constant
@@ -585,8 +584,6 @@ const OneShotFail = struct {
     }
 };
 
-// ── Invariant 1 — swap-remove parity ──────────────────────────────────────
-
 test "invariant 1: swap-remove moves the trailing row AND both tick sidecars" {
     const gpa = testing.allocator;
     var s = SparseSetStorage.init(7, @sizeOf(Pair), @alignOf(Pair));
@@ -644,8 +641,6 @@ test "invariant 1, counter-factual: removing the LAST entry relocates nothing" {
     try testing.expect(s.contains(e(0, 0)));
 }
 
-// ── Invariant 2 — no bitset, so no block skip ─────────────────────────────
-
 test "invariant 2: there is no bitset and no block-skip entry, and per-entry works" {
     // The ABSENCE, checked structurally at comptime so it cannot rot: the table
     // backend's block-granularity vocabulary must not exist here.
@@ -682,8 +677,6 @@ test "invariant 2: there is no bitset and no block-skip entry, and per-entry wor
     try testing.expectEqual(@as(usize, 6), scanned);
     try testing.expectEqual(@as(usize, 2), changed);
 }
-
-// ── Invariant 3 — despawn removes from every storage ──────────────────────
 
 test "invariant 3: the union sweep drops every sparse entry of an entity" {
     const gpa = testing.allocator;
@@ -735,8 +728,6 @@ test "invariant 3 + 6: a recycled index with a new generation inherits nothing" 
     try testing.expect(!s.contains(e(6, 0)));
 }
 
-// ── Invariant 4 — observer order at despawn ───────────────────────────────
-
 test "invariant 4: the union enumerates in ascending ComponentId" {
     const gpa = testing.allocator;
     var stores = SparseStores{};
@@ -769,8 +760,6 @@ test "invariant 4: the union enumerates in ascending ComponentId" {
     try testing.expectEqualSlices(ComponentId, &.{ 4, 8, 12 }, sink.seen[0..3]);
 }
 
-// ── Invariant 5 — zero-sized components ───────────────────────────────────
-
 test "invariant 5: a zero-sized component allocates no row buffer, ever" {
     const gpa = testing.allocator;
     var tag = SparseSetStorage.init(1, 0, 0);
@@ -799,8 +788,6 @@ test "invariant 5: a zero-sized component allocates no row buffer, ever" {
     try testing.expect(sized.rows_capacity > 0);
 }
 
-// ── Invariant 6 — EntityId generation ─────────────────────────────────────
-
 test "invariant 6: the sparse index is keyed by INDEX and generation decides" {
     const gpa = testing.allocator;
     var s = SparseSetStorage.init(1, 0, 0);
@@ -821,8 +808,6 @@ test "invariant 6: the sparse index is keyed by INDEX and generation decides" {
     // Slots below the inserted index are absent rather than uninitialised.
     for (s.sparse.items[0..5]) |slot| try testing.expectEqual(absent, slot);
 }
-
-// ── Invariant 7 — OOM rollback ────────────────────────────────────────────
 
 test "invariant 7: a failed add rolls back every fallible step, and a retry works" {
     // TWO sweeps, because one state cannot exercise both halves of the

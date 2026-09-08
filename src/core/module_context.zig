@@ -28,8 +28,6 @@ pub const ModuleContext = struct {
     job_scheduler: *jobs_scheduler.Scheduler,
 };
 
-// --- tests -------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "ModuleContext carries exactly four fields, by name and by type" {

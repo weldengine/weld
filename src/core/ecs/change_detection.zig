@@ -60,8 +60,6 @@ pub fn isAllZero(bitset: []const u64) bool {
     return true;
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "setDirty / isDirty round-trip" {
     var words: [4]u64 = .{ 0, 0, 0, 0 };
     const bitset: DirtyBitset = &words;

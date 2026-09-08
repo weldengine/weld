@@ -1,23 +1,11 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Public surface of the M0.2 / E6 plugin loader skeleton.
-//!
-//! Tier 0 component that loads Tier 3 plugin shared libraries
-//! (.so / .dll / .dylib), reads their `WeldPluginDesc`, and
-//! exposes the `WeldAPI` table. All 7 sub-APIs are present with
-//! final signatures but every callback returns
-//! `WELD_ERR_NOT_IMPLEMENTED` — the runtime wiring is Phase 3
-//! (cf. brief § Out-of-scope).
-//!
-//! Module convention follows `src/core/ecs/root.zig`,
-//! `src/core/rtti/root.zig`, `src/core/resources/root.zig`,
-//! `src/core/events/root.zig` — single canonical entry point.
+//! Public surface of the Tier 0 plugin loader: the C ABI types, the descriptor, the
+//! stub API table and the loader itself.
 
 const desc_mod = @import("desc.zig");
 const api_mod = @import("api.zig");
 const loader_mod = @import("loader.zig");
-
-// -- Sub-module aliases ------------------------------------------------
 
 /// C ABI types + constants + plugin descriptor.
 pub const desc = desc_mod;
@@ -25,8 +13,6 @@ pub const desc = desc_mod;
 pub const api = api_mod;
 /// Loader implementation wrapping `std.DynLib`.
 pub const loader = loader_mod;
-
-// -- Flat type surface (most-frequently used) -------------------------
 
 /// Loader registry.
 pub const Loader = loader_mod.Loader;
@@ -48,14 +34,12 @@ pub const WeldResult = desc_mod.WeldResult;
 pub const WELD_API_VERSION_MAJOR = desc_mod.WELD_API_VERSION_MAJOR;
 /// `WELD_API_VERSION_MINOR` constant.
 pub const WELD_API_VERSION_MINOR = desc_mod.WELD_API_VERSION_MINOR;
-/// Stub API singleton — what the loader passes to every plugin
-/// in M0.2. The 7 sub-APIs all return `WELD_ERR_NOT_IMPLEMENTED`.
+/// Stub API table the loader hands every plugin.
 pub const stub_api = api_mod.stub_api;
 
 comptime {
-    // Lazy-analysis guard — force eager analysis of every plugin
-    // loader sub-file so inline tests are picked up by
-    // `zig build test`.
+    // NOT dead code: these references are what make Zig analyse the sub-files, so
+    // their inline `test` blocks are collected at all.
     _ = desc_mod;
     _ = api_mod;
     _ = loader_mod;

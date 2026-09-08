@@ -510,8 +510,6 @@ pub const Registry = struct {
     }
 };
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "registerComponent assigns stable ComponentId" {
     const gpa = std.testing.allocator;
     var reg = Registry.init();
