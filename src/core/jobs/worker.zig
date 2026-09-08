@@ -1,86 +1,45 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Worker thread loop. Each worker owns a Chase-Lev deque and runs a tight
-//! loop: pop from its own deque, then try to steal from peers in a fixed
-//! rotation, then yield if both fail. The scheduler holds the trampoline
-//! function pointer and an opaque context pointer for the current dispatch;
-//! workers pick those up atomically with `acquire` ordering after their own
-//! `acquire` load on the deque.
-//!
-//! Per-worker stats (chunks processed, steals attempted/succeeded, total
-//! work duration in nanoseconds) feed the bench Markdown report so the
-//! load-imbalance metric and steal hit rate can be inspected after a run.
+//! Worker loop: pop from its own deque, then steal from peers in a fixed rotation,
+//! then yield. The trampoline and context pointers are picked up with ACQUIRE
+//! ordering after the worker's own acquire load on the deque.
 
 const std = @import("std");
 const deque_mod = @import("deque.zig");
 
-/// Type-erased trampoline signature called from `Worker.run` once
-/// per stolen / popped job. The chunk and context pointers are
-/// recovered to their concrete types inside the trampoline.
+/// Type-erased trampoline called from `Worker.run` for each job.
 pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
 
-/// Type-erased work unit stored on each worker's Chase-Lev deque.
-/// M0.1 / E5b each job carries its own `trampoline` + `ctx_ptr` so
-/// a single dispatch can run heterogeneous bodies — required by the
-/// E5b multi-job concurrent intra-phase scheduler which interleaves
-/// chunks from different systems on the same workers.
+/// Type-erased work unit on a worker's Chase-Lev deque.
 pub const Job = struct {
-    /// Type-erased pointer to a chunk. The trampoline knows the concrete
-    /// chunk type at the dispatch call site.
+    /// Type-erased chunk pointer; the trampoline knows its concrete type.
     chunk_ptr: *anyopaque,
-    /// Per-job trampoline. Workers call `trampoline(chunk_ptr, ctx_ptr)`
-    /// rather than pulling a global trampoline from the scheduler.
+    /// Per-job trampoline.
     trampoline: TrampolineFn,
-    /// Per-job context pointer (args storage owned by the dispatcher's
-    /// stack frame or by the system scheduler's job arena).
+    /// Per-job context pointer, owned by the dispatcher's frame.
     ctx_ptr: *anyopaque,
 };
 
-/// Maximum number of jobs per worker deque. Sized at 8192 to cover
-/// the M0.1 / E7 C0.1 bench worst case: 1 000 000 entities across 4
-/// archetypes ≈ 6 800 chunks per wave on the widest query (every
-/// archetype matched). At `--workers=1` the single worker must hold
-/// the full wave in its deque — 8192 leaves margin. Lower worker
-/// counts (the S1 baseline at 4 workers handles ~640 chunks per
-/// worker; well below the ceiling) and higher worker counts (14
-/// workers per CPU handle ~500 chunks each — also well below)
-/// inherit the same per-worker cap.
+/// Maximum jobs per worker deque.
 ///
-/// Each Job is 24 bytes (chunk_ptr + trampoline + ctx_ptr) so the
-/// per-worker deque footprint is 8192 × 24 = 192 KiB. On a 14-worker
-/// machine the cross-scheduler footprint is ~2.7 MiB — negligible.
-///
-/// Exposed so the M0.1 / E5a scheduler can size the dynamic
-/// `MaxChunksPerDispatch` buffer at `worker_count * DequeCapacity`.
+/// The bound that sizes it is `--workers=1`, where ONE worker must hold an entire
+/// wave. Exposed so the scheduler can size its buffer at `worker_count * this`.
 pub const DequeCapacity: usize = 8192;
 const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 
-/// Atomic counters surfaced by each worker — chunks processed,
-/// steal attempts / hits, total work-thread CPU time, and the
-/// number of times the worker parked on the `work_available`
-/// condvar (M0.1 / E5a, sleep/wake replacement of S1's busy-yield).
+/// Per-worker atomic counters, surfaced in the bench report.
 pub const WorkerStats = struct {
     chunks_processed: std.atomic.Value(u64) = .init(0),
     steals_attempted: std.atomic.Value(u64) = .init(0),
     steals_succeeded: std.atomic.Value(u64) = .init(0),
     work_duration_ns: std.atomic.Value(u64) = .init(0),
-    /// Number of times the worker ENTERED the parked path — incremented under
-    /// the park mutex immediately BEFORE `work_available.waitUncancelable`, the
-    /// mirror of `parks_completed` (which counts the wake-ups after the wait
-    /// returns). Because entered is always bumped before completed, the
-    /// invariant `parks_completed <= parks_entered` holds at every observation
-    /// (`snapshot` reads completed first — see below); a strict
-    /// `parks_entered > parks_completed` means at least one worker has entered a
-    /// park it has not yet woken from. Once a dispatched wave has drained (no
-    /// park↔wake churn — the state the E9 test relies on) that is a worker
-    /// parked right now. The M1.1.1-HF3 E9 deterministic parking test observes
-    /// this in place of a fixed sleep window.
+    /// Parks ENTERED — bumped under the park mutex immediately before the wait.
+    ///
+    /// Always bumped before `parks_completed`, so `completed <= entered` holds at
+    /// every observation and `entered > completed` proves a worker is parked. That
+    /// is why `snapshot` reads completed FIRST; reversing the two loads breaks it.
     parks_entered: std.atomic.Value(u64) = .init(0),
-    /// Number of times the worker successfully completed a
-    /// `work_available.waitUncancelable` (i.e. actually slept rather
-    /// than busy-yielded). Used by the E5a "idle workers sleep"
-    /// acceptance test as the observable proof that the worker
-    /// reached the parked path.
+    /// Parks COMPLETED — a wait that actually slept rather than busy-yielded.
     parks_completed: std.atomic.Value(u64) = .init(0),
 
     pub const Snapshot = struct {
@@ -119,9 +78,7 @@ pub const WorkerStats = struct {
     }
 };
 
-/// One work-stealing thread in the scheduler pool. Owns its
-/// `WorkerDeque`, holds atomic stats, and runs until `shutdown` is
-/// flipped by the scheduler.
+/// One work-stealing thread; owns its deque and its stats.
 pub const Worker = struct {
     id: u32,
     deque: WorkerDeque align(64) = .init(),

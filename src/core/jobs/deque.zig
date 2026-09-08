@@ -1,36 +1,20 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Chase-Lev work-stealing deque (Chase & Lev, SPAA 2005), with the C11
-//! memory orderings refined by Lê, Pop, Cohen, Nardelli (PPoPP 2013).
+//! Chase-Lev work-stealing deque (SPAA 2005) with the C11 orderings of Lê, Pop,
+//! Cohen, Nardelli (PPoPP 2013). Owner pushes and pops at the BOTTOM, any number of
+//! stealers take from the TOP; capacity must be a power of two.
 //!
-//! Owner thread pushes/pops at the BOTTOM (LIFO). Any number of stealer
-//! threads steal from the TOP. The buffer is a fixed-size circular array
-//! whose capacity must be a power of two; indexing is via `index & MASK`.
+//! `top` is a monotonic 64-bit counter and is NEVER decremented — that, and not a
+//! tag, is what makes ABA unreachable here, so narrowing it or reusing values
+//! reintroduces the problem this design does not guard against.
 //!
-//! ## ABA mitigation
-//!
-//! `top` is a 64-bit monotonically-increasing counter — never decremented.
-//! Stealers `cmpxchg(top, t, t+1)` will only succeed for the exact value of
-//! `top` they read at the start of the steal; since `top` never wraps in any
-//! realistic lifetime (2^64 steals is hardware-bounded out of reach), ABA on
-//! the counter itself is not possible. The buffer slots are reused as the
-//! deque circles, but every slot read happens-before its consuming
-//! `cmpxchg(top)`, and the slot won't be overwritten by the owner until
-//! `top` has advanced past it (Chase-Lev correctness invariant). For S1 with
-//! capacity 1024 and ~135 chunks per worker, the deque is never near full,
-//! so this invariant holds with margin.
-//!
-//! `@fence` was removed in Zig 0.16 (cf. release notes); we promote the
-//! crucial sync points (the second `bottom` store in `pop`, the `top` load
-//! in `pop`, and both loads in `steal`) to `seq_cst` instead of using a
-//! standalone fence — equivalent under the C11 memory model.
+//! `@fence` was removed in Zig 0.16, so three sync points are `seq_cst` INSTEAD of a
+//! standalone fence: the second `bottom` store in `pop`, the `top` load in `pop`, and
+//! both loads in `steal`. Relaxing any of them to release/acquire is not equivalent.
 
 const std = @import("std");
 
-/// Generic Chase-Lev work-stealing deque factory. Returns a struct
-/// holding `CAPACITY` slots of `T` plus the `top`/`bottom` atomics
-/// used by the worker (owner) and the thieves (stealers). `CAPACITY`
-/// must be a power of two.
+/// Chase-Lev deque over `T`; `CAPACITY` must be a power of two.
 pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
     comptime {
         if (CAPACITY == 0 or (CAPACITY & (CAPACITY - 1)) != 0) {
@@ -42,8 +26,8 @@ pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
         pub const capacity: usize = CAPACITY;
         const Mask: usize = CAPACITY - 1;
 
-        /// `top` and `bottom` are placed on their own cache lines to avoid
-        /// false sharing between the owner and stealers.
+        /// `top` and `bottom` sit on separate cache lines — they are written by
+        /// different threads on the hot path.
         top: std.atomic.Value(usize) align(64) = .init(0),
         bottom: std.atomic.Value(usize) align(64) = .init(0),
         buffer: [CAPACITY]T align(64) = undefined,
@@ -58,8 +42,7 @@ pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
             return .{};
         }
 
-        /// Owner-only. Push at the bottom. Returns `false` when the deque is
-        /// full — the caller decides whether to spin, drop, or yield.
+        /// OWNER ONLY. Push at the bottom; false when full.
         pub fn push(self: *Self, item: T) bool {
             const b = self.bottom.load(.monotonic);
             const t = self.top.load(.acquire);
@@ -70,9 +53,7 @@ pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
             return true;
         }
 
-        /// Owner-only. Pop from the bottom (LIFO). Returns `null` when the
-        /// deque is empty or when the owner lost a race against a stealer
-        /// for the last remaining item.
+        /// OWNER ONLY. Pop from the bottom (LIFO); null when empty.
         pub fn pop(self: *Self) ?T {
             const b_orig = self.bottom.load(.monotonic);
             if (b_orig == 0) return null;
@@ -97,9 +78,7 @@ pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
             return item;
         }
 
-        /// Stealer. Any thread. Returns `.empty` when the deque has no work,
-        /// `.aborted` when another stealer/owner won the race, or `.success`
-        /// with the stolen item.
+        /// Any thread. `.empty` when there is nothing, `.abort` on a lost race.
         pub fn steal(self: *Self) StealOutcome {
             const t = self.top.load(.seq_cst);
             const b = self.bottom.load(.acquire);
