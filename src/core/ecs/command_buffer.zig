@@ -1,6 +1,6 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! M0.1 / E6 — per-system command buffer.
+//! per-system command buffer.
 //!
 //! Records deferred structural mutations (`spawn`, `despawn`,
 //! `add_component`, `remove_component`) during a phase's systems and
@@ -99,7 +99,7 @@ pub const RemoveComponentCommand = struct {
     component_id: ComponentId,
 };
 
-/// Deferred tag bit set/clear (M0.8 E3, `etch-grammar.md` §4.4). `tagset_id`
+/// Deferred tag bit set/clear (E3, `etch-grammar.md` §4.4). `tagset_id`
 /// is the registered `TagSet` component id; `bit_index` is the leaf's global
 /// bit. Applied via `World.applyTagMutation`, which adds `TagSet` to the
 /// entity (an archetype transition) when a `set_tag` lands on an entity that
@@ -251,7 +251,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `add_tag` (M0.8 E3) — set `bit_index` of `entity`'s
+    /// Record a deferred `add_tag` (E3) — set `bit_index` of `entity`'s
     /// `TagSet` at flush time. `tagset_id` is the registered `TagSet`
     /// component id.
     pub fn setTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
@@ -262,7 +262,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `remove_tag` (M0.8 E3) — clear `bit_index` of
+    /// Record a deferred `remove_tag` (E3) — clear `bit_index` of
     /// `entity`'s `TagSet` at flush time.
     pub fn clearTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
         try self.commands.append(self.gpa, .{ .clear_tag = .{

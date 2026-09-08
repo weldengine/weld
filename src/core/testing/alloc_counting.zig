@@ -1,6 +1,6 @@
 //! Counting allocator wrapper. Forwards every `alloc` / `resize` / `remap` /
 //! `free` to a backing allocator and increments atomic counters in the
-//! process. Used by the S1 no-allocation test (asserts the steady-state
+//! process. Used by the no-allocation test (asserts the steady-state
 //! simulation loop performs zero allocations after init) and by the bench
 //! harness (records the allocator activity during a measurement window).
 //!

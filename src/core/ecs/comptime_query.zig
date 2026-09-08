@@ -2,7 +2,7 @@
 //!
 //! `query(world, .{T1, T2, ...})` returns an iterator that walks the
 //! world's `DynamicArchetype`s, finds those whose registry-keyed
-//! component set is a superset of `{@typeName(T1), @typeName(T2), ...}`,
+//! component set is a superset of `{@typeName, @typeName, ...}`,
 //! and yields a comptime-typed tuple of pointers `(*T1, *T2, ...)` per
 //! matching slot.
 //!
@@ -102,7 +102,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                 // component.
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
-                    // M0.2 / E3 — singleton resources are invisible to
+                    // singleton resources are invisible to
                     // user queries (cf. `ARCH-006`).
                     if (arch.is_singleton) continue;
                     var all_present = true;

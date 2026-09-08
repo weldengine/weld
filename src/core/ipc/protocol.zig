@@ -30,27 +30,27 @@ pub const MAGIC: u32 = 0x57454C44;
 /// Current protocol version. Bumped on any breaking change of the wire
 /// format or message catalogue. Editor and runtime must agree exactly.
 ///
-/// Bumped M0.2 (1 → 2) — schema_hash algorithm switched from Wyhash
+/// Bumped (1 → 2) — schema_hash algorithm switched from Wyhash
 /// (S6 legacy, hash over a concatenated `<typeName>{field:Type;…}`
 /// key) to RTTI xxHash64 (hash over a structured
 /// `(typeName, [(field.name, kind, count, offset)])` tuple). The two
 /// algorithms produce different bytes on the wire and
 /// `engine-ipc.md` §5.2 forbids negotiation, hence the version bump.
-/// Cf. `briefs/M0.2-rtti-resources-events-bindgen.md` E2.
+/// Cf. `briefs/rtti-resources-events-bindgen.md` E2.
 ///
-/// Bumped M0.7 (2 → 3) — two conjoint breaking changes
+/// Bumped (2 → 3) — two conjoint breaking changes
 /// (`engine-ipc.md` §5.2): (1) POSIX shm attach becomes `SCM_RIGHTS`
 /// fd-passing via `ShmRegionsHandoff` after the handshake (attach
 /// semantics, §4.8 / §5.1); (2) the catalogue gains mandatory messages
 /// (`ShmRegionsHandoff`, `SaveProject`, `ProjectSaved`, `RuntimeError`)
 /// and activates `Play`/`Pause`/`Stop`, `LoadScene`, `HotReloadScript`.
-/// An S6/M0.2 editor and an M0.7 runtime are strictly incompatible —
+/// An S6/editor and an runtime are strictly incompatible —
 /// expected behavior, no negotiation. Cf.
-/// `briefs/M0.7-ipc-scm-rights-windows-fuzz.md`.
+/// `briefs/ipc-scm-rights-windows-fuzz.md`.
 ///
 /// FROZEN — see engine-phase-0-criteria.md C0.5. This is the
 /// `*_PROTOCOL_VERSION` template generalized to the other Tier-0/1
-/// interfaces in M0.9. Keep value 3 (last bump M0.7, 2→3); a Phase-1+
+/// interfaces in . Keep value 3 (last bump , 2→3); a Phase-1+
 /// wire change is a tracked bump, not a silent edit.
 pub const WELD_IPC_PROTOCOL_VERSION: u16 = 3;
 

@@ -1,4 +1,4 @@
-//! Mixed-query planner — M1.B/G7.
+//! Mixed-query planner — .
 //!
 //! A query whose members span both storage backends elects **exactly one
 //! driver** — the member of smallest population, ties broken by declaration
@@ -59,7 +59,7 @@ const World = world_mod.World;
 /// the per-slot guards take instead of an `(archetype, chunk, slot)` triple.
 ///
 /// The two arms are asymmetric deliberately, exactly as `ComponentRef`'s are
-/// (M1.B/G5): the table arm keeps the direct triple so the delivered fast path
+///: the table arm keeps the direct triple so the delivered fast path
 /// pays nothing, and the sparse arm carries the ENTITY because a sparse lookup
 /// is an array index plus a generation compare, and because a row pointer would
 /// be invalidated by any swap-remove in that store.
@@ -243,7 +243,7 @@ pub const SparseDrivenQuery = struct {
     /// every range differs from every other by at most one — the property that
     /// keeps a work-stealing scheduler from starving on a tail.
     ///
-    /// *That beneficiary was NAMED here before it existed: from M1.B/G8 until
+    /// *That beneficiary was NAMED here before it existed: from until
     /// `JobBuilder.addDenseRangeJobs` landed, no dense range reached a worker
     /// at all, and the sentence above justified a split by a consumer with no
     /// producer. It is true as of that entry, and the note stays because the

@@ -1,37 +1,16 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Time primitives — `sleepPrecise(ns)` + monotonic `now()` for the Weld
-//! platform layer.
+//! `sleepPrecise` and a monotonic `nowNanos`. This layer sits BELOW `std.Io`, so it
+//! calls `nanosleep` / `QueryPerformanceCounter` directly rather than the std wrapper.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (Time section) and the M0.3 brief.
-//!
-//! Zig 0.16's `std.time.Instant` and `std.time.sleep` were removed (sleep
-//! moved to `std.Io.sleep`, monotonic timing moved to `Io.Clock`). Weld's
-//! platform layer is OS-direct — it sits *below* `std.Io.Threaded` and
-//! provides the primitives that the std-level sleep wraps. So we use
-//! `Sleep`/`nanosleep` and `QueryPerformanceCounter`/`clock_gettime`
-//! directly.
-//!
-//! ## sleepPrecise
-//!
-//! On Win32, `Sleep(1)` defaults to ~15.6 ms resolution unless the
-//! multimedia timer minimum period has been raised. `sleepPrecise` calls
-//! `timeBeginPeriod(1)` once per process via the shared `Once` primitive,
-//! then issues `Sleep`. The once-init never deactivates the high-res
-//! timer for the lifetime of the process (negligible system-wide cost on
-//! modern Windows — the API is informational only since Windows 10 2004).
-//!
-//! On Linux/macOS, `nanosleep` is already precise so the wrapper is a
-//! direct call.
+//! On Win32 a bare `Sleep(1)` rounds to ~15.6 ms, so `sleepPrecise` raises the
+//! multimedia timer period once per process and never lowers it again.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const once_mod = @import("once.zig");
 
-/// Win32 multimedia timer minimum period activation. Lazy — runs at most
-/// once per process. Consistent with the pattern documented in the
-/// M0.3 brief § "std.once verification for Zig 0.16".
+/// Lazy activation of the Win32 multimedia timer period.
 var win32_period_once: once_mod.Once = .{};
 
 const winmm = struct {
@@ -51,8 +30,7 @@ const posix_c = struct {
     };
     extern "c" fn nanosleep(req: *const timespec, rem: ?*timespec) c_int;
     extern "c" fn clock_gettime(clk_id: c_int, tp: *timespec) c_int;
-    // Linux: CLOCK_MONOTONIC = 1. macOS: CLOCK_MONOTONIC = 6 (mach_absolute_time
-    // wrapper). Both expose the constant via `<time.h>`.
+    // The `CLOCK_MONOTONIC` constant differs between Linux and macOS.
     const CLOCK_MONOTONIC: c_int = switch (builtin.os.tag) {
         .linux => 1,
         .macos => 6,
@@ -63,17 +41,11 @@ const posix_c = struct {
 fn activateWin32Period() anyerror!void {
     if (comptime builtin.os.tag != .windows) return;
     const rc = winmm.timeBeginPeriod(1);
-    // TIMERR_NOERROR == 0. Any non-zero indicates the requested period is
-    // out of range (we always pass 1ms which is supported on every Windows
-    // ≥ 2000).
+    // Any non-zero return means the requested period was refused.
     if (rc != 0) return error.WinMMTimeBeginPeriodFailed;
 }
 
-/// Sleep for at least `nanoseconds`. On Win32, ensures `timeBeginPeriod(1)`
-/// has been called so the scheduler quantum is 1 ms.
-///
-/// `io` is required to drive the once-init's futex wait path; pass the
-/// engine-level `std.Io` (typically `init.io` from Juicy Main).
+/// Sleep for AT LEAST `nanoseconds`.
 pub fn sleepPrecise(io: std.Io, nanoseconds: u64) !void {
     switch (builtin.os.tag) {
         .windows => {
@@ -86,9 +58,7 @@ pub fn sleepPrecise(io: std.Io, nanoseconds: u64) !void {
                 .tv_sec = @intCast(nanoseconds / 1_000_000_000),
                 .tv_nsec = @intCast(nanoseconds % 1_000_000_000),
             };
-            // Loop on EINTR — nanosleep can be interrupted by signals; we
-            // restart with the remaining time so the total slept duration
-            // is at least the requested amount.
+            // Loop on EINTR: `nanosleep` returns early on a signal with the remainder.
             var req = ts;
             var rem: posix_c.timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
             while (posix_c.nanosleep(&req, &rem) != 0) {
@@ -99,12 +69,7 @@ pub fn sleepPrecise(io: std.Io, nanoseconds: u64) !void {
     }
 }
 
-/// Read the monotonic clock as a u64 of nanoseconds since an arbitrary
-/// origin. Suitable for measuring elapsed time, not for wall-clock dates.
-///
-/// Win32: `QueryPerformanceCounter` scaled to nanoseconds via
-/// `QueryPerformanceFrequency` (cached on first call).
-/// POSIX: `clock_gettime(CLOCK_MONOTONIC, ...)`.
+/// Monotonic nanoseconds since an arbitrary epoch.
 pub fn nowNanos() u64 {
     switch (builtin.os.tag) {
         .windows => {
@@ -134,9 +99,7 @@ test "time.sleepPrecise: 1 ms accuracy" {
     const start = nowNanos();
     try sleepPrecise(io, 1_000_000); // 1 ms
     const elapsed_ns = nowNanos() - start;
-    // Tolerance: 50 ms ceiling for slow CI. The dedicated bench test in
-    // tests/platform/time_test.zig enforces the tighter brief gate
-    // (< 2 ms Win32 / < 1 ms Linux).
+    // A ceiling loose enough for a loaded CI runner; the bench measures precision.
     try std.testing.expect(elapsed_ns >= 1_000_000);
     try std.testing.expect(elapsed_ns < 50_000_000);
 }

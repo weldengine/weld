@@ -153,7 +153,7 @@ pub const IpcConnection = struct {
     /// (`engine-ipc.md` §4.8). `buf` should be sized to exactly
     /// `framing.frameSizeOf(T)` so the first read cannot pull bytes of
     /// a following frame. Returns `error.Unimplemented` on Windows
-    /// (the named-pipe backend has no `recvWithHandles` in M0.7).
+    /// (the named-pipe backend has no `recvWithHandles` in ).
     pub fn recvFrameWithHandles(
         self: *IpcConnection,
         buf: []u8,
@@ -227,7 +227,7 @@ pub const HandoffError = error{InvalidHandoff};
 ///
 /// On a violation, **every** received fd is closed before returning so
 /// a malformed handoff cannot leak descriptors into the runtime. On
-/// success, M0.7 maps only `regions[0]` (`viewport_framebuffer`); the
+/// success, maps only `regions[0]` (`viewport_framebuffer`); the
 /// fds of any further declared regions are closed here, and the
 /// viewport fd (`handles[0]`, now owned by the caller) is returned.
 pub fn acceptShmHandoff(

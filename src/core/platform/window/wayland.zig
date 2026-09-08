@@ -93,7 +93,7 @@ const State = struct {
     xdg_surface_listener: xdg_shell.xdg_surface_listener,
     xdg_toplevel_listener: xdg_shell.xdg_toplevel_listener,
 
-    // ============================== M0.3 — input devices
+    // ============================== input devices
     seat: ?*core.wl_seat = null,
     keyboard: ?*core.wl_keyboard = null,
     pointer: ?*core.wl_pointer = null,
@@ -111,7 +111,7 @@ const State = struct {
     /// Surface the keyboard currently has focus on.
     keyboard_focus: ?*core.wl_surface = null,
 
-    // ============================== M0.3 — multi-monitor
+    // ============================== multi-monitor
     /// All `wl_output` globals advertised by the compositor. Owning —
     /// `deinit` frees each entry.
     outputs: std.ArrayList(*OutputEntry) = .empty,
@@ -209,7 +209,7 @@ pub const Backend = struct {
             state.outputs.deinit(gpa);
         }
 
-        // M0.3 — publish the active state so `enumerateMonitors` can
+        // publish the active state so `enumerateMonitors` can
         // reach it without a backend-pointer parameter. Single-window
         // model — Phase 0+ multi-window upgrade tracked separately.
         live_state = state;
@@ -271,7 +271,7 @@ pub const Backend = struct {
         const s = self.state;
         const lib = &core.lib_wayland;
 
-        // M0.3 — clear the live_state pointer before tearing down.
+        // clear the live_state pointer before tearing down.
         if (live_state == s) live_state = null;
 
         // Release input device proxies (release request added in
@@ -370,13 +370,13 @@ fn onRegistryGlobal(
         const proxy = registry.bind(name, &xdg_decoration.zxdg_decoration_manager_v1_interface, v) catch return;
         state.decoration_manager = @ptrCast(@alignCast(proxy));
     } else if (std.mem.eql(u8, iface_str, "wl_seat")) {
-        // M0.3 — bind wl_seat at version ≤ 7 (we use keymap fd, repeat_info).
+        // bind wl_seat at version ≤ 7 (we use keymap fd, repeat_info).
         const v = @min(version, 7);
         const proxy = registry.bind(name, &core.wl_seat_interface, v) catch return;
         state.seat = @ptrCast(@alignCast(proxy));
         state.seat.?.addListener(&state.seat_listener, state) catch {};
     } else if (std.mem.eql(u8, iface_str, "wl_output")) {
-        // M0.3 — bind wl_output at version ≤ 4 (we use name event).
+        // bind wl_output at version ≤ 4 (we use name event).
         const v = @min(version, 4);
         const proxy = registry.bind(name, &core.wl_output_interface, v) catch return;
 
@@ -547,7 +547,7 @@ fn onSurfacePreferredTransform(
     _ = transform;
 }
 
-// ============================================================== M0.3 callbacks
+// ============================================================== callbacks
 
 fn onSeatCapabilities(
     data: ?*anyopaque,
@@ -590,7 +590,7 @@ fn onKeyboardKeymap(
     size: u32,
 ) callconv(.c) void {
     _ = .{ data, proxy, format, size };
-    // Close the fd — M0.3 does not parse XKB keymaps (layout-aware text input
+    // Close the fd — does not parse XKB keymaps (layout-aware text input
     // is Phase 1+, cf. brief § Out-of-scope). The keymap fd must still be
     // closed to avoid leaking it.
     _ = std.c.close(fd);
@@ -656,7 +656,7 @@ fn onKeyboardModifiers(
     group: u32,
 ) callconv(.c) void {
     _ = .{ data, proxy, serial, mods_depressed, mods_latched, mods_locked, group };
-    // M0.3 does not surface modifier-state events — gameplay can read the
+    // does not surface modifier-state events — gameplay can read the
     // pressed bitset directly. Phase 1+ Input Tier 1 may consume modifiers
     // for chorded actions.
 }
@@ -877,7 +877,7 @@ fn onOutputDescription(data: ?*anyopaque, proxy: *core.wl_output, description: [
     _ = .{ data, proxy, description };
 }
 
-// ============================================================== M0.3 queries
+// ============================================================== queries
 
 /// Wayland implementation of `enumerateMonitors`. Returns a snapshot of
 /// the cached `wl_output` table. Caller owns the slice.
@@ -892,7 +892,7 @@ pub fn enumerateMonitors(gpa: std.mem.Allocator) std.mem.Allocator.Error![]windo
     // a more general design (a module-level singleton or a backend
     // parameter through the public API) is wired in.
     //
-    // For M0.3 acceptance, the test creates a window then queries —
+    // For acceptance, the test creates a window then queries —
     // `currentMonitor(window)` is the supported path; `enumerateMonitors`
     // returns the snapshot iff we can hook a live State. We return an
     // empty slice when no live State is available.
@@ -921,7 +921,7 @@ pub fn currentMonitor(backend_ptr: *const Backend) ?u32 {
 //
 // PHASE 0+ TRANSFER NOTE — mutable non-atomic global variable in tension
 // with the "no hidden global state" rule inherited from the ECS scheduler
-// M0.1. Acceptable in Phase 0 because init and destroy are serialized by
+// . Acceptable in Phase 0 because init and destroy are serialized by
 // construction (1 Backend per process). To be replaced by a module-level
 // registry indexed by display+surface once multi-window ships (Islandz
 // multi-window editor, debug tools). The replacement pattern exists in the

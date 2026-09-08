@@ -6,12 +6,12 @@
 //! `schema_hash` that detects build-version drift between the editor
 //! and the runtime.
 //!
-//! S6 shipped 13 message types; M0.7 / E1 adds `ShmRegionsHandoff`
-//! (the POSIX fd handoff, §3.3 + §4.8). M0.7 / E2 extends the
+//! S6 shipped 13 message types; adds `ShmRegionsHandoff`
+//! (the POSIX fd handoff, §3.3 + §4.8). extends the
 //! catalogue further (`Play`/`Pause`/`Stop`, `LoadScene`,
 //! `HotReloadScript`, `SaveScene`, `SaveProject`/`ProjectSaved`,
 //! `RuntimeError`). The `WELD_IPC_PROTOCOL_VERSION` 2→3 bump covers
-//! the whole M0.7 catalogue + attach-semantics change.
+//! the whole catalogue + attach-semantics change.
 //!
 //! The S6 brief acknowledges a triple count inconsistency in its own
 //! text — the catalogue is described as "exactly 11 message types",
@@ -70,7 +70,7 @@ pub const MsgType = enum(u16) {
     shutdown_ack = 12,
     /// Runtime → Editor — unidirectional log event (no ack).
     log_message = 13,
-    /// Editor → Runtime — POSIX shm fd handoff (M0.7 / E1,
+    /// Editor → Runtime — POSIX shm fd handoff (,
     /// `engine-ipc.md` §3.3 + §4.8). Sent right after the handshake
     /// via `sendWithHandles`; the fds ride as ancillary data.
     shm_regions_handoff = 14,
@@ -85,7 +85,7 @@ pub const MsgType = enum(u16) {
     /// Editor → Runtime — hot-reload a script by asset handle.
     hot_reload_script = 19,
     /// Editor → Runtime — save ONE scene by path (scene granularity).
-    /// Declared in M0.7 with **no wired handler** — wiring deferred to
+    /// Declared in with **no wired handler** — wiring deferred to
     /// the scene serialization pipeline (out of Phase 0, brief § Out-of-scope).
     save_scene = 20,
     /// Editor → Runtime — save the whole project (transactional, §3.4).
@@ -167,7 +167,7 @@ pub const ProtocolHelloAck = extern struct {
 
 /// Editor → Runtime. Transactional. The runtime replies with
 /// `EchoReply` carrying the same `seq_id` and payload. The 64-byte
-/// payload exists to make the RTT bench (G1/G2) measure a
+/// payload exists to make the RTT bench measure a
 /// non-trivial frame body.
 pub const Echo = extern struct {
     payload: [64]u8,
@@ -252,12 +252,12 @@ pub const LogMessage = extern struct {
 };
 
 /// NUL-terminated capacity for a `ShmRegionDesc.logical_name`.
-/// `"viewport_framebuffer"` (20 bytes) is the longest name M0.7 hands
+/// `"viewport_framebuffer"` (20 bytes) is the longest name hands
 /// off; 32 leaves headroom for the §4.1 names (`debug_overlays`,
 /// `profiler_samples`, `selection_snapshot`, `log_stream`).
 pub const SHM_LOGICAL_NAME_LEN: usize = 32;
 
-/// Maximum shm regions carried by one `ShmRegionsHandoff`. M0.7 hands
+/// Maximum shm regions carried by one `ShmRegionsHandoff`. hands
 /// off only `viewport_framebuffer`; the §4.1 catalogue tops out at 5
 /// regions. 8 is comfortable headroom and keeps the frame small
 /// (`8 × 40 + 8 = 328` payload bytes).
@@ -275,7 +275,7 @@ pub const ShmRegionDesc = extern struct {
     size: u64,
 };
 
-/// Editor → Runtime, POSIX (M0.7 / E1). Hands the runtime the file
+/// Editor → Runtime, POSIX. Hands the runtime the file
 /// descriptors of the shm regions the editor created
 /// (`engine-ipc.md` §4.8 + §3.3). Sent immediately after
 /// `ProtocolHelloAck` through `IpcSocket.sendWithHandles`: the fds
@@ -286,7 +286,7 @@ pub const ShmRegionDesc = extern struct {
 /// `region_count` (`engine-ipc.md` §8.3).
 pub const ShmRegionsHandoff = extern struct {
     /// Number of valid entries in `regions` (and of fds in the
-    /// ancillary data). `1` in M0.7 (`viewport_framebuffer` only).
+    /// ancillary data). `1` in (`viewport_framebuffer` only).
     region_count: u32,
     _pad0: u32 = 0,
     /// Fixed-capacity descriptor table; only the first `region_count`
@@ -324,7 +324,7 @@ pub const HotReloadScript = extern struct {
 };
 
 /// Editor → Runtime. Save ONE scene by path (scene granularity, maps
-/// Conduit `scene.save`). Declared in M0.7 with **no wired handler**
+/// Conduit `scene.save`). Declared in with **no wired handler**
 /// (see `MsgType.save_scene`); wiring deferred to the scene
 /// serialization pipeline (out of Phase 0).
 pub const SaveScene = extern struct {
@@ -399,7 +399,7 @@ pub fn msgTypeOf(comptime T: type) MsgType {
 
 /// Comptime schema hash for a message type. Delegates to the Tier 0
 /// RTTI subsystem (`rtti.computeSchemaHash`) — the swap of the
-/// dette D-S6-RTTI (M0.2 / E2). Call sites are unchanged.
+/// dette D-S6-RTTI. Call sites are unchanged.
 ///
 /// Pre-swap, the body inlined `std.hash.Wyhash.hash(0, key)` on a
 /// stringified `(typeName, fields)` key. The RTTI subsystem hashes

@@ -1,72 +1,30 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Input Tier 0 — `InputRawState` resource (`@transient`).
+//! Per-frame snapshot of raw input devices, surfaced as a `@transient` Tier 0
+//! resource. The Tier 1 module derives typed actions from it.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-input-system.md`
-//! §1 (Hardware Layer Tier 0) and the M0.3 brief.
+//! `beginFrame` clears the `*_this_frame` transition sets and the mouse and wheel
+//! accumulators, and PRESERVES the `pressed` sets and the gamepad state, which are
+//! steady-state. Clearing those too would make every held key read as released.
 //!
-//! ## Model
-//!
-//! `InputRawState` is a per-frame snapshot of raw input devices —
-//! keyboard, mouse, up to 4 gamepad slots. Surfaced as a Tier 0 ECS
-//! resource (`@transient`, reset every frame). Consumed by the Input
-//! Tier 1 module (`engine-input-system.md` Mapping Layer, Phase 1) to
-//! derive `Action<T>` outputs according to the active `input_mapping`.
-//!
-//! ## Per-frame lifecycle
-//!
-//! Each frame:
-//!   1. `beginFrame()` clears the `*_this_frame` transition bitsets and
-//!      resets mouse delta / wheel accumulators. The "pressed" bitsets
-//!      and gamepad state are preserved (they track steady-state).
-//!   2. The platform window backend drains its event queue and calls
-//!      `applyEvent(InputRawState, Event)` for each surfaced event.
-//!   3. The gamepad polling routine (`win32_xinput` or `linux_evdev`)
-//!      reads the current state of each slot and calls
-//!      `applyGamepadSnapshot(self, slot, snapshot)`.
-//!   4. Gameplay systems (Phase 1+) read `InputRawState` and derive
-//!      typed actions.
-//!
-//! ## Bitset layout
-//!
-//! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total
-//! (256+256+256 = 768 bytes for the keyboard alone), the memory cost
-//! is irrelevant compared to the readability win of a direct
-//! `state.keyboard.pressed[scancode]` index over a packed-bitset
-//! shift-and-mask. The brief gates "pressed bitset (256 scancodes)" —
-//! `[256]bool` keyed by **raw scancode** is the literal interpretation.
-//! Logical-key access in Phase 0 is `window.Event.code` (the frozen
-//! `KeyCode` contract); a KeyCode-keyed steady-state view is the
-//! Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
+//! The keyboard sets are keyed by RAW SCANCODE, not by logical key; the logical view
+//! is `window.Event.code`.
 
 const std = @import("std");
 const window = @import("../window.zig");
 const keycode = @import("keycode.zig");
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Version of the frozen InputModule (Tier-1, exercised) public surface —
-/// the logical `KeyCode` enum + `window.Event.code` contract, the
-/// `InputRawState` extern-struct layout, and the `apply*`/`pollAllSlots`
-/// signatures. Bumped on any breaking change — a tracked migration, not a
-/// freeze failure (the `*_PROTOCOL_VERSION` rule, generalized from
-/// `WELD_IPC_PROTOCOL_VERSION`).
+/// Bumped on any breaking change to the frozen input surface.
 pub const WELD_INPUT_PROTOCOL_VERSION: u32 = 1;
 
 /// Keyboard state — physical key press/release tracking.
 pub const KeyboardState = extern struct {
-    /// 1 if the physical key is currently held. Indexed by the **raw OS
-    /// scancode** (`ev.scancode & 0xFF`), NOT by the `KeyCode` enum — the
-    /// two do not share a codomain (the same logical key has different
-    /// scancodes on Win32 vs evdev). This is the raw hardware layer: for
-    /// logical-key input read `window.Event.code` (the frozen `KeyCode`
-    /// contract); cross-backend logical-key steady-state querying is the
-    /// Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
+    /// Held keys, indexed by RAW SCANCODE.
     pressed: [256]bool = [_]bool{false} ** 256,
-    /// 1 on the frame the key transitioned from up to down (rising edge).
-    /// Cleared at the start of each frame.
+    /// Rising edge this frame; cleared by `beginFrame`.
     pressed_this_frame: [256]bool = [_]bool{false} ** 256,
-    /// 1 on the frame the key transitioned from down to up (falling edge).
-    /// Cleared at the start of each frame.
+    /// Falling edge this frame; cleared by `beginFrame`.
     released_this_frame: [256]bool = [_]bool{false} ** 256,
 };
 
@@ -74,11 +32,9 @@ pub const KeyboardState = extern struct {
 pub const MouseState = extern struct {
     /// Absolute client-area position in physical pixels.
     position: [2]f32 = .{ 0, 0 },
-    /// Accumulated delta this frame (sum of all motion events). Reset
-    /// at the start of each frame.
+    /// Motion accumulated this frame; reset by `beginFrame`.
     delta: [2]f32 = .{ 0, 0 },
-    /// Wheel scroll accumulator: [horizontal, vertical]. Reset each
-    /// frame.
+    /// Wheel accumulator, horizontal then vertical; reset by `beginFrame`.
     wheel: [2]f32 = .{ 0, 0 },
     /// 1 if the button is currently held. Indexed by MouseButton enum.
     buttons: [8]bool = [_]bool{false} ** 8,
@@ -92,21 +48,15 @@ pub const MouseState = extern struct {
 pub const GamepadState = extern struct {
     /// True if a controller is currently connected to this slot.
     connected: bool = false,
-    /// Bitset of currently-held buttons (32 button slots max). The bit
-    /// layout is backend-dependent — XInput's wButtons mask on Win32,
-    /// evdev's KEY_BTN_* layout on Linux. Phase 0 ships the raw bits;
-    /// Phase 1 Input Tier 1 normalizes via per-controller mappings.
+    /// Currently-held buttons, 32 slots.
     buttons: u32 = 0,
     /// Rising edge bitset, cleared each frame.
     buttons_this_frame: u32 = 0,
     /// Falling edge bitset, cleared each frame.
     released_this_frame: u32 = 0,
-    /// Stick positions, raw [-1, 1] without deadzone. Layout:
-    /// `sticks[0]` = left stick {x, y}; `sticks[1]` = right stick {x, y}.
-    /// y is positive = up (industry convention, matches XInput post-normalisation).
+    /// Stick positions, raw and deadzone-free.
     sticks: [2][2]f32 = .{ .{ 0, 0 }, .{ 0, 0 } },
-    /// Trigger positions, raw [0, 1]. Layout: `triggers[0]` = left
-    /// trigger, `triggers[1]` = right trigger.
+    /// Trigger positions, left then right.
     triggers: [2]f32 = .{ 0, 0 },
 };
 
@@ -133,21 +83,12 @@ pub fn beginFrame(self: *InputRawState) void {
     }
 }
 
-/// Apply a single `window.Event` to the state. Mouse motion, wheel,
-/// and button events update the mouse sub-state; keyboard events
-/// update the keyboard sub-state; gamepad connect/disconnect events
-/// update the `connected` flag on the appropriate slot. Other event
-/// variants are ignored.
-///
-/// The mouse `delta` field is accumulated additively across multiple
-/// motion events in the same frame; the `position` always reflects
-/// the most-recent event.
+/// Apply one `window.Event` to the state.
 pub fn applyEvent(self: *InputRawState, event: window.Event) void {
     switch (event) {
         .key_down => |ev| {
             const idx = @as(usize, ev.scancode) & 0xFF;
-            // Auto-repeat events don't fire pressed_this_frame (the brief
-            // gate is rising-edge only).
+            // An auto-repeat must NOT fire a rising edge.
             if (!self.keyboard.pressed[idx] and !ev.repeat) {
                 self.keyboard.pressed_this_frame[idx] = true;
             }
@@ -203,8 +144,7 @@ pub const GamepadSnapshot = struct {
     triggers: [2]f32,
 };
 
-/// Apply a gamepad snapshot to slot `slot`. Computes the rising/falling
-/// edge bitsets from the previous frame's buttons.
+/// Apply a gamepad snapshot to `slot`, deriving its edges from the previous one.
 pub fn applyGamepadSnapshot(self: *InputRawState, slot: u8, snapshot: GamepadSnapshot) void {
     if (slot >= self.gamepads.len) return;
     const g = &self.gamepads[slot];
@@ -324,8 +264,7 @@ test "InputRawState: gamepad snapshot computes button transitions" {
     try std.testing.expect((s.gamepads[0].released_this_frame & 0b0001) != 0);
 }
 
-// Ensure the KeyCode re-export is consumed (so this file pins keycode.zig
-// in the analysis frontier — the inline tests of keycode also get picked up).
+// NOT dead code: this is what makes Zig analyse `keycode.zig`, so its tests run.
 comptime {
     _ = keycode.KeyCode;
 }

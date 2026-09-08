@@ -1,38 +1,17 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! XInput gamepad polling for the Win32 platform layer.
-//!
-//! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
-//! in the M0.3 brief § Input system Tier 0 minimal :
-//!
-//!   > Win32: `XInputGetState` polled every frame for the 4 gamepad
-//!   > slots.
-//!
-//! XInput is the Microsoft-Xbox controller API; it exposes up to 4
-//! slots and is the most reliable Windows gamepad API for the common
-//! case (Xbox-style controllers + Steam Input transparent passthrough).
-//! DirectInput would be needed for legacy / non-Xbox layouts — out of
-//! scope for Phase 0 (the brief gates the Tier 1 mapping layer in
-//! Phase 1 for that).
-//!
-//! ## Hot-plug
-//!
-//! XInput does not surface a "controller connected" callback — the
-//! standard approach is to poll all 4 slots every frame and observe
-//! `XInputGetState` returning `ERROR_DEVICE_NOT_CONNECTED` (1167)
-//! for empty slots. Connection state changes are emitted as
-//! `gamepad_connected` / `gamepad_disconnected` events.
+//! XInput surfaces no connect/disconnect callback, so all 4 slots are polled every
+//! frame and an empty slot is the `ERROR_DEVICE_NOT_CONNECTED` return.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const raw_state = @import("raw_state.zig");
 
-// XInput constants.
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 const XINPUT_GAMEPAD_TRIGGER_THRESHOLD: u8 = 30;
 
-// XINPUT_GAMEPAD struct from XInput.h — Microsoft-stable since Windows 7.
+// Mirrors `XINPUT_GAMEPAD` in XInput.h — field order and widths are the ABI.
 const XINPUT_GAMEPAD = extern struct {
     wButtons: u16,
     bLeftTrigger: u8,
@@ -48,10 +27,7 @@ const XINPUT_STATE = extern struct {
     Gamepad: XINPUT_GAMEPAD,
 };
 
-// Late-bound — XInput's DLL has had three names across Windows versions
-// (XInput1_4.dll on Win8+, XInput9_1_0.dll on Win7, XInput1_3.dll on
-// DirectX SDK installs). Resolved at runtime via DynamicLib so Phase 0
-// builds run on all three.
+// Late-bound: the DLL name differs across Windows versions.
 const XInputGetStateFn = *const fn (dwUserIndex: u32, pState: *XINPUT_STATE) callconv(.winapi) u32;
 
 var xinput_get_state: ?XInputGetStateFn = null;
@@ -64,7 +40,7 @@ fn ensureLoaded(gpa: std.mem.Allocator) void {
     xinput_loaded = true;
     if (comptime builtin.os.tag != .windows) return;
 
-    // Try the modern DLL first, fall back to legacy names.
+    // Newest DLL first — the order is the fallback chain.
     const candidates = [_][]const u8{
         "XInput1_4.dll",
         "XInput9_1_0.dll",
@@ -77,17 +53,13 @@ fn ensureLoaded(gpa: std.mem.Allocator) void {
             continue;
         };
         xinput_get_state = @ptrCast(@alignCast(sym));
-        // Intentionally leak the lib handle for the process lifetime —
-        // XInput's state machine is process-wide; closing the lib would
-        // require also clearing every cached function pointer.
+        // The handle is leaked for the process lifetime on purpose: closing it
+        // would leave `xinput_get_state` dangling.
         return;
     }
 }
 
-/// Poll all 4 XInput slots and apply snapshots to `state`. Emits
-/// `gamepad_connected` / `gamepad_disconnected` events into a caller-
-/// provided event sink whenever a slot's connected status changes.
-/// On non-Windows targets, returns immediately.
+/// Poll all 4 XInput slots into `state`; a no-op off Windows.
 pub fn pollAllSlots(gpa: std.mem.Allocator, state: *raw_state.InputRawState) void {
     if (comptime builtin.os.tag != .windows) return;
     ensureLoaded(gpa);
@@ -111,9 +83,7 @@ pub fn pollAllSlots(gpa: std.mem.Allocator, state: *raw_state.InputRawState) voi
                 .triggers = .{ lt, rt },
             });
         } else {
-            // ERROR_DEVICE_NOT_CONNECTED or any other failure — mark slot
-            // disconnected. Per-frame polling means hot-plug arrives
-            // naturally on the next frame.
+            // Any non-success return clears the slot, so stale state cannot survive.
             state.gamepads[slot].connected = false;
             state.gamepads[slot].buttons = 0;
             state.gamepads[slot].sticks = .{ .{ 0, 0 }, .{ 0, 0 } };

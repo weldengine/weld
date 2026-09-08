@@ -7,3 +7,5 @@
 #
 # Checked in both directions — an entry naming a file UNDER the ceiling, or naming
 # no file at all, is itself a lint error.
+
+src/core/platform/window/wayland_protocols/tests_facade.zig | three re-export lines, each owing a mandatory `///`, put the floor at 50%

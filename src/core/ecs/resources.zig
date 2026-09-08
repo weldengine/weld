@@ -11,7 +11,7 @@
 //! `[]u8` (size from the registry) plus a dirty flag. The Etch bridge
 //! reads or writes fields through the registry's `FieldDesc` offsets.
 //!
-//! Every buffer is over-aligned to `ChunkAlignment` (M0.8 E3-C, Option A)
+//! Every buffer is over-aligned to `ChunkAlignment` (E3-C, Option A)
 //! so generated code can form a typed `*R` over the bytes — `@alignCast`
 //! sound in ReleaseSafe, ABI pointer identity (`etch-abi-zig.md` §3.1).
 //! UNCONDITIONAL: one alignment regime for every resource buffer regardless
@@ -101,7 +101,7 @@ pub const ResourceStore = struct {
     /// (a different Zig file — hence `pub`) restores the pre-load dirty state
     /// after a rejected transaction, because `getMutResource` (called during both
     /// the failed load and the rollback) unconditionally sets `dirty = true`
-    /// (M1.1.1-HF2 C6). No-op if the resource is absent.
+    /// (C6). No-op if the resource is absent.
     pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
         const e = self.entries.getPtr(id) orelse return;
         e.dirty = value;

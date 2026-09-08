@@ -53,7 +53,7 @@ const sys = struct {
     extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
     extern "c" fn send(sockfd: c_int, buf: [*]const u8, len: usize, flags: c_int) isize;
     extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: Socklen) c_int;
-    // R2 (M1.1.1-HF3): socket-permission + peer-credential surface.
+    // socket-permission + peer-credential surface.
     extern "c" fn chmod(path: [*:0]const u8, mode: mode_t) c_int;
     extern "c" fn getsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *anyopaque, optlen: *Socklen) c_int; // Linux SO_PEERCRED
     extern "c" fn getpeereid(sockfd: c_int, euid: *u32, egid: *u32) c_int; // macOS/BSD
@@ -72,7 +72,7 @@ const MSG_NOSIGNAL: c_int = if (is_linux) 0x4000 else 0;
 // referenced only under `is_macos`, so it is unused (but harmless) on Linux.
 const SO_NOSIGPIPE: c_int = 0x1022;
 
-// R2 (M1.1.1-HF3): `mode_t` for `chmod`/`umask` (u32 on Linux, u16 on macOS/BSD).
+// `mode_t` for `chmod`/`umask` (u32 on Linux, u16 on macOS/BSD).
 const mode_t = if (is_linux) u32 else u16;
 // Linux `SO_PEERCRED` (17) + its `struct ucred`. Unused on macOS (which uses
 // `getpeereid` instead), harmless to declare.
@@ -147,7 +147,7 @@ fn cmsgLen(len: usize) usize {
     return cmsgAlign(@sizeOf(CmsgHdr)) + len;
 }
 
-/// Suppress SIGPIPE on this socket's send path (M1.1.1-HF2 C5). On BSD/macOS
+/// Suppress SIGPIPE on this socket's send path (C5). On BSD/macOS
 /// this is the per-socket `SO_NOSIGPIPE` option — there `MSG_NOSIGNAL` is
 /// unavailable (it is `0`), so without this a peer-closed write would raise a
 /// process-fatal `SIGPIPE`. On Linux `SO_NOSIGPIPE` does not exist and the
@@ -161,7 +161,7 @@ fn setNoSigPipe(fd: c_int) void {
     }
 }
 
-/// R2 (M1.1.1-HF3): does the peer connected on `fd` run as our own UID? Linux
+/// does the peer connected on `fd` run as our own UID? Linux
 /// reads `SO_PEERCRED`; macOS/BSD reads `getpeereid`. A failed query returns
 /// `false` (fail-closed — reject rather than trust an unverifiable peer). This is
 /// the authoritative local-IPC security boundary (`engine-ipc.md §8.2`); the
@@ -237,7 +237,7 @@ pub const Backend = struct {
         if (sys.bind(fd, &addr, addr_len) != 0) return error.BindFailed;
         errdefer _ = sys.unlink(path_z.ptr);
 
-        // R2 (M1.1.1-HF3): force owner-only (0600) on the socket file
+        // force owner-only (0600) on the socket file
         // IMMEDIATELY after bind and BEFORE listen, so its permissions never
         // depend on the process umask (`engine-ipc.md §8.2`). Hard failure — a
         // socket we cannot lock down must not begin accepting. The errdefers
@@ -274,7 +274,7 @@ pub const Backend = struct {
 
         if (sys.connect(fd, &addr, addr_len) != 0) return error.ConnectionRefused;
 
-        // C5: suppress SIGPIPE on the connected data socket (no-op on Linux,
+        // suppress SIGPIPE on the connected data socket (no-op on Linux,
         // where `send(MSG_NOSIGNAL)` covers it; `SO_NOSIGPIPE` on macOS).
         setNoSigPipe(fd);
         return Backend{ .fd = fd };
@@ -283,7 +283,7 @@ pub const Backend = struct {
     pub fn accept(self: *Backend) Error!Backend {
         const client_fd = sys.accept(self.fd, null, null);
         if (client_fd < 0) return error.ConnectionRefused;
-        // R2 (M1.1.1-HF3): the AUTHORITATIVE check — reject a peer running as a
+        // the AUTHORITATIVE check — reject a peer running as a
         // different UID (close the fd first). This also closes the bind→chmod
         // TOCTOU window: a connection that sneaked in before `chmod` is still
         // rejected here.
@@ -291,7 +291,7 @@ pub const Backend = struct {
             _ = sys.close(client_fd);
             return error.PeerCredentialMismatch;
         }
-        // C5: suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
+        // suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
         setNoSigPipe(client_fd);
         return Backend{ .fd = client_fd };
     }
@@ -302,14 +302,14 @@ pub const Backend = struct {
 
     /// Write `bytes` in full over the raw stream socket, looping over partial
     /// writes and retrying on `EINTR`. Shared by `send` and the short-write
-    /// remainder path of `sendWithHandles` (M1.1.1-HF1 / D5) so the
+    /// remainder path of `sendWithHandles` so the
     /// partial-write loop is defined once, never duplicated. Carries no
     /// ancillary data — a `sendWithHandles` remainder re-sends only leftover
     /// payload bytes, never the fds (those rode out with the first segment).
     fn writeAll(self: *Backend, bytes: []const u8) Error!void {
         var offset: usize = 0;
         while (offset < bytes.len) {
-            // C5 (M1.1.1-HF2): `send(MSG_NOSIGNAL)`, not raw `write`. On Linux the
+            // `send(MSG_NOSIGNAL)`, not raw `write`. On Linux the
             // flag suppresses the process-fatal SIGPIPE a peer-closed socket
             // would otherwise raise (raw `write` cannot carry it). On macOS
             // `MSG_NOSIGNAL` is 0 and the suppression comes from `SO_NOSIGPIPE`
@@ -394,7 +394,7 @@ pub const Backend = struct {
             // The fds rode out with this first segment. On a short write —
             // a signal after a partial transfer left 0 < sent < bytes.len —
             // flush the remaining payload through the shared plain-write loop;
-            // the remainder carries no ancillary data (D5).
+            // the remainder carries no ancillary data.
             const sent: usize = @intCast(n);
             if (sent < bytes.len) try self.writeAll(bytes[sent..]);
             break;

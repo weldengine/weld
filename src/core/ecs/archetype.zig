@@ -1,6 +1,6 @@
 //! Generalised byte-level archetype storage.
 //!
-//! M0.1 / E2 collapses the S1 comptime-typed `Archetype(Components)` and
+//! collapses the S1 comptime-typed `Archetype(Components)` and
 //! the S4 `DynamicArchetype` into a single byte-level `Archetype` that
 //! both spawn paths can share. The chunk layout is computed from the
 //! component sizes + alignments registered with the world (cf.
@@ -145,7 +145,7 @@ pub const Archetype = struct {
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
     transitions: TransitionCache = .{},
-    /// M0.2 / E3 — `true` iff this archetype hosts a singleton-entity
+    /// `true` iff this archetype hosts a singleton-entity
     /// resource. Set by `resources.setResource` after spawning the
     /// resource's entity. `Query.maybeRescan` skips singleton
     /// archetypes so user queries never see resource entities.
@@ -154,14 +154,14 @@ pub const Archetype = struct {
     /// Initialise the archetype with the given sorted component list.
     /// Asserts the list is non-empty (an empty archetype is the
     /// no-component archetype, reachable via `World.spawnEmpty` once
-    /// E3+ exposes it; M0.1 / E2 does not).
+    /// E3+ exposes it; does not).
     pub fn init(
         gpa: std.mem.Allocator,
         registry: *const Registry,
         archetype_id: ArchetypeId,
         component_ids: []const ComponentId,
     ) ArchetypeError!Archetype {
-        // An EMPTY component list is legal since M1.B/G2: an entity whose whole
+        // An EMPTY component list is legal since : an entity whose whole
         // set is sparse still has an archetype, because an entity ALWAYS has
         // one. Making it optional would create a second entity lifecycle that
         // despawn, the observers, the three spawn paths and `dynamicLocation`
@@ -449,9 +449,9 @@ test "Archetype init pins sorted component_ids and registry-driven sizes/aligns"
     defer reg.deinit(gpa);
 
     const Health = extern struct { current: f32 = 0, max: f32 = 100 };
-    // M0.1 / E5b note: Tag uses `u32` rather than `u8` because the
+    // / E5b note: Tag uses `u32` rather than `u8` because the
     // E4 `FieldKind` registry whitelist does not include `u8`
-    // (RTTI cleanup is M0.2). The test only cares that two
+    // (RTTI cleanup is ). The test only cares that two
     // components with distinct sizes/aligns sort correctly.
     const Tag = extern struct { v: u32 = 0 };
 

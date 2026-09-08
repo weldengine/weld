@@ -1,8 +1,8 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Tier 0 root `World` — owns the unified archetype list, the M0.1 / E1
+//! Tier 0 root `World` — owns the unified archetype list, the
 //! generational identity store, the runtime registry, and the resource
-//! store. M0.1 / E2 collapsed the S1 (single hardcoded archetype) and S4
+//! store. collapsed the S1 (single hardcoded archetype) and S4
 //! (list of dynamic archetypes) storage paths into a single byte-level
 //! archetype layer (`archetype.zig`); both spawn paths and every query
 //! now resolve to one entry in `archetypes`.
@@ -35,21 +35,21 @@ const tick_mod = @import("tick.zig");
 const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
 const observers_mod = @import("observers.zig");
-// M0.2 / E3 — singleton-entity resource registry, distinct from the
-// M0.1 / S4 byte-keyed `ResourceStore` above (which the Etch
+// singleton-entity resource registry, distinct from the
+// byte-keyed `ResourceStore` above (which the Etch
 // interpreter still consumes).
 const singleton_resources_mod = @import("../resources/registry.zig");
-// M0.2 / E4 — heterogeneous event bus. Direct field on World per
+// heterogeneous event bus. Direct field on World per
 // the technical decision E4 in the brief § Notes (alternative was
 // scheduler-injected via ModuleContext; field-on-World aligns with
 // E3's singleton_resources and with `engine-tier-interfaces.md`
 // §0 which lists `event_bus` among Tier 0 services).
 const events_bus_mod = @import("../events/bus.zig");
-// M1.1.1-HF2 C4 — Tier-0 persistent heap (moved to core in M1.0.5). `World`
+// HF2 C4 — Tier-0 persistent heap (moved to core in ). `World`
 // owns the uniform decref walk over resource-owned payload slots; see
 // `releaseResourcePayloads`.
 const persistent = @import("../memory/persistent.zig");
-// M1.B — the second storage backend. `World` owns the per-component sparse
+// the second storage backend. `World` owns the per-component sparse
 // sets exactly as it owns `archetypes`; nothing below `world.zig` knows there
 // are two backends (cf. `briefs/artifacts/m1.B-g0-site-list-and-contract.md`
 // §2.1, one producer).
@@ -73,7 +73,7 @@ pub const WorldError = entity_mod.WorldError;
 /// scheduler tests can declare typed `*Chunk` bodies without spelling
 /// out the comptime filter tuple.
 pub const Query = query_mod.Query(&.{ Transform, Velocity }, .{});
-/// Runtime, `ComponentId`-keyed query type (M1.0.0). Re-exported so the Etch
+/// Runtime, `ComponentId`-keyed query type. Re-exported so the Etch
 /// interpreter (which holds resolved ids, not Zig types) can name the return
 /// type of `World.queryDynamic` without reaching into `query.zig`.
 pub const DynamicQuery = query_mod.DynamicQuery;
@@ -101,11 +101,11 @@ const FieldKind = registry_mod.FieldKind;
 const ResourceStore = resources_mod.ResourceStore;
 const EntityIdentityStore = entity_mod.EntityIdentityStore;
 
-/// M1.0.6 E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0 function
+/// E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0 function
 /// pointer the Etch bridge registers; the scene loader fires it after adding an
 /// extension's components, passing the entity, the extension name, and the cooked
-/// `on_attach` Etch source text (`null` if absent). M1.0.6 wired + fired the
-/// seam; M1.0.9 registers the Etch bridge's callback, which re-parses + runs the
+/// `on_attach` Etch source text (`null` if absent). wired + fired the
+/// seam; registers the Etch bridge's callback, which re-parses + runs the
 /// text — the seam itself still only fires whatever callback is registered.
 pub const ExtensionAttachFn = *const fn (
     ctx: ?*anyopaque,
@@ -118,7 +118,7 @@ pub const ExtensionAttachFn = *const fn (
 /// A registered `on_attach` callback + its opaque context.
 const AttachHook = struct { ctx: ?*anyopaque, func: ExtensionAttachFn };
 
-/// M1.0.9 — the `on_detach` extension dispatch seam, mirror of
+/// the `on_detach` extension dispatch seam, mirror of
 /// `ExtensionAttachFn`. Fired by the runtime `deactivate_extension` path BEFORE
 /// removing the extension's components (so the hook still sees them), passing
 /// the cooked `on_detach` Etch source text (`null` if absent). Never fired at
@@ -137,13 +137,13 @@ const DetachHook = struct { ctx: ?*anyopaque, func: ExtensionDetachFn };
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
 pub const World = struct {
-    // ── Shared identity (M0.1 / E1) ──
+    // ── Shared identity ──
     /// Generational identity store driving every spawn / despawn. A
     /// single store guarantees that the `(index, generation)` halves of
     /// an `EntityId` stay unique world-wide.
     identity: EntityIdentityStore,
 
-    // ── Change detection (M0.1 / E4) ──
+    // ── Change detection ──
     /// Monotonic frame counter. Incremented by `beginFrame()` at the
     /// start of each tick; written into every spawn / migration's
     /// `added_tick` + `changed_tick` sidecars and into every
@@ -151,7 +151,7 @@ pub const World = struct {
     /// comparisons.
     current_tick: Tick,
 
-    // ── Component metadata + storage (M0.1 / E2) ──
+    // ── Component metadata + storage ──
     /// Runtime component / resource type registry. Assigns
     /// `ComponentId`s on first registration and caches size +
     /// alignment + default bytes + field descriptors.
@@ -168,7 +168,7 @@ pub const World = struct {
     /// Single `EntityId → Location` map covering every spawn path.
     entity_locations: std.AutoHashMapUnmanaged(EntityId, Location),
 
-    /// **Runtime, `ComponentId`-keyed** resource store (M0.1 / S4) —
+    /// **Runtime, `ComponentId`-keyed** resource store —
     /// the resource backend the **Etch** subsystem requires: the
     /// tree-walking interpreter and the Zig codegen resolve resource
     /// names → `ComponentId` and access raw bytes at runtime (neither
@@ -177,7 +177,7 @@ pub const World = struct {
     /// runtime/dynamic resource access.
     resources: ResourceStore,
 
-    /// M0.2 / E3 — **comptime-`TypeId`-keyed** singleton-entity resource
+    /// **comptime-`TypeId`-keyed** singleton-entity resource
     /// registry (`rtti.TypeId → EntityId`) for resources set via
     /// `src/core/resources/` (`setResource(T)` / `getResourceMut(T)`).
     /// Canonical for the comptime-typed host / slice / test API, and the
@@ -191,33 +191,33 @@ pub const World = struct {
     /// in Phase 0 and is deferred to a Phase-1 milestone.
     singleton_resources: singleton_resources_mod.ResourceRegistry = .{},
 
-    /// M0.2 / E4 — heterogeneous event bus. Owns the per-event-type
+    /// heterogeneous event bus. Owns the per-event-type
     /// MPMC queues registered via `events.register(world, gpa, T,
     /// cap, lifetime)`. Drained by the scheduler at phase / tick
     /// / frame boundaries.
     event_bus: events_bus_mod.EventBus = .{},
 
-    /// M0.1 / E6 — observer registry. Carries per-event callback
+    /// observer registry. Carries per-event callback
     /// lists + a shared deferred command buffer for observer-issued
     /// mutations. Lazy-init'd by the first `registerOn*` call; tests
     /// that don't exercise observers never pay the alloc cost.
     observer_registry: observers_mod.ObserverRegistry = .{},
 
-    /// M1.0.6 E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0
+    /// E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0
     /// callback the Etch bridge registers; the scene loader fires it after adding
     /// an extension's components. `loader.zig` never calls the Etch VM directly —
-    /// it goes through this hook. **M1.0.6 wires + fires the seam only**; the
-    /// actual execution of `on_attach_text` (Etch code) is **M1.0.9** (wired in
+    /// it goes through this hook. **wires + fires the seam only**; the
+    /// actual execution of `on_attach_text` (Etch code) is **** (wired in
     /// the Etch bridge's registered callback, not here — the seam still just
     /// fires).
     attach_hook: ?AttachHook = null,
 
-    /// M1.0.9 — the `on_detach` extension dispatch seam, mirror of `attach_hook`.
+    /// the `on_detach` extension dispatch seam, mirror of `attach_hook`.
     /// Registered by the Etch bridge; fired by the runtime deactivate path before
     /// removing an extension's components. `null` until registered (last wins).
     detach_hook: ?DetachHook = null,
 
-    /// M1.0.9 — per-entity active-extension set: an entity → the OWNED copies of
+    /// per-entity active-extension set: an entity → the OWNED copies of
     /// the names of the extensions currently active on it, in activation order.
     /// Populated by `addEntityExtension` inside the shared activate path (so load
     /// AND runtime activation both track for free), pruned by
@@ -226,15 +226,15 @@ pub const World = struct {
     /// the interpreter's `has_extension` / `active_extensions`.
     entity_extensions: std.AutoHashMapUnmanaged(EntityId, std.ArrayListUnmanaged([]const u8)) = .empty,
 
-    /// M1.B — per-component sparse sets, one slot per `ComponentId` whose
+    /// per-component sparse sets, one slot per `ComponentId` whose
     /// registry descriptor carries `.sparse`. Defaulted and NOT listed in
     /// `init()`, so a world registering no sparse component allocates no slot.
     ///
     /// The mode is a property of the RUNTIME REGISTRY and never of an entity's
-    /// on-disk identity, which is what makes a pre-M1.B scene load unchanged.
+    /// on-disk identity, which is what makes a pre-scene load unchanged.
     sparse_stores: sparse_mod.SparseStores = .{},
 
-    /// M1.B/G9 — how many `@requires` removals were SKIPPED this tick.
+    /// how many `@requires` removals were SKIPPED this tick.
     ///
     /// The refusal channel: a counted field plus a `std.log.warn` bounded to one
     /// line per tick, the `syncIn` shape.
@@ -277,7 +277,7 @@ pub const World = struct {
         self.sparse_stores.deinit(gpa);
         self.entity_locations.deinit(gpa);
         // Reclaim resource-owned persistent payloads (strings, collections)
-        // BEFORE freeing the byte buffers (M1.1.1-HF2 C4). Idempotent — a no-op
+        // BEFORE freeing the byte buffers (C4). Idempotent — a no-op
         // when an interpreter already ran this in its own deinit.
         self.releaseResourcePayloads(gpa);
         self.resources.deinit(gpa);
@@ -287,7 +287,7 @@ pub const World = struct {
         self.identity.deinit(gpa);
         self.observer_registry.deinit(gpa);
         {
-            // Free each entity's owned extension-name copies + its list (M1.0.9).
+            // Free each entity's owned extension-name copies + its list.
             var it = self.entity_extensions.valueIterator();
             while (it.next()) |list| {
                 for (list.items) |name| gpa.free(name);
@@ -298,7 +298,7 @@ pub const World = struct {
         self.* = undefined;
     }
 
-    /// Register an `on_spawned` observer (M1.0.2 E3: `ctx` threaded back to the
+    /// Register an `on_spawned` observer (E3: `ctx` threaded back to the
     /// callback; native callers pass `null`).
     pub fn registerOnSpawned(
         self: *World,
@@ -343,7 +343,7 @@ pub const World = struct {
         try self.observer_registry.registerOnRemove(gpa, self, cid, ctx, callback);
     }
 
-    /// Register an `on_replaced` observer for component `T` (M1.0.2 E3 — fires
+    /// Register an `on_replaced` observer for component `T` (E3 — fires
     /// when `T` is added to an entity that already has it).
     pub fn registerOnReplaced(
         self: *World,
@@ -356,7 +356,7 @@ pub const World = struct {
         try self.observer_registry.registerOnReplaced(gpa, self, cid, ctx, callback);
     }
 
-    /// M1.0.5 E2 — fire `on_spawned` for one already-spawned entity. The scene
+    /// E2 — fire `on_spawned` for one already-spawned entity. The scene
     /// loader's two-phase lifecycle pass calls this directly: entities are
     /// instantiated by `spawnDynamicWithValues` (which fires no observers), then
     /// `on_spawned` is dispatched per entity in a second pass, guaranteeing
@@ -367,7 +367,7 @@ pub const World = struct {
         try self.observer_registry.dispatchOnSpawned(gpa, self, eid);
     }
 
-    /// M1.0.15 — immediate spawn with initial values that fires the same
+    /// immediate spawn with initial values that fires the same
     /// observers a deferred `.spawn` flush would (on_spawned + on_add), returning
     /// the new handle. Backs the Etch `world.spawn_with` test-runner surface;
     /// wraps `ObserverRegistry.spawnWithObservers`.
@@ -380,30 +380,30 @@ pub const World = struct {
         return self.observer_registry.spawnWithObservers(gpa, self, component_ids, payloads);
     }
 
-    /// M1.0.6 E6 — register the `on_attach` extension dispatch callback (the Etch
-    /// bridge supplies the real one; M1.0.6 tests supply a Tier-0 stand-in). One
+    /// E6 — register the `on_attach` extension dispatch callback (the Etch
+    /// bridge supplies the real one; tests supply a Tier-0 stand-in). One
     /// hook per world (last registration wins).
     pub fn registerOnAttach(self: *World, ctx: ?*anyopaque, callback: ExtensionAttachFn) void {
         self.attach_hook = .{ .ctx = ctx, .func = callback };
     }
 
-    /// M1.0.6 E6 — fire the `on_attach` seam for `entity`'s newly-activated
+    /// E6 — fire the `on_attach` seam for `entity`'s newly-activated
     /// extension `extension_name`, passing the cooked `on_attach_text` (the Etch
     /// hook source; `null` if the extension has no `on_attach`). No-op if no hook
     /// is registered. The loader calls this after adding the extension's
-    /// components. The registered callback (the Etch bridge, M1.0.9) re-parses +
+    /// components. The registered callback (the Etch bridge, ) re-parses +
     /// executes the text; here the seam just fires it.
     pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
         if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
     }
 
-    /// M1.0.9 — register the `on_detach` extension dispatch callback (mirror of
+    /// register the `on_detach` extension dispatch callback (mirror of
     /// `registerOnAttach`). One hook per world (last registration wins).
     pub fn registerOnDetach(self: *World, ctx: ?*anyopaque, callback: ExtensionDetachFn) void {
         self.detach_hook = .{ .ctx = ctx, .func = callback };
     }
 
-    /// M1.0.9 — fire the `on_detach` seam for `entity`'s extension being
+    /// fire the `on_detach` seam for `entity`'s extension being
     /// deactivated, passing the cooked `on_detach_text` (`null` if absent). The
     /// runtime deactivate path calls this BEFORE removing the extension's
     /// components, so the hook still sees them. No-op if no hook is registered.
@@ -411,7 +411,7 @@ pub const World = struct {
         if (self.detach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_detach_text);
     }
 
-    /// M1.0.9 — record `name` as an active extension on `entity` (storing an
+    /// record `name` as an active extension on `entity` (storing an
     /// OWNED copy). Called inside the shared activate path after the extension's
     /// components are added. A name already present is not duplicated (the
     /// activate path rejects a re-activation via component conflict first, so
@@ -427,7 +427,7 @@ pub const World = struct {
         try gop.value_ptr.append(gpa, owned);
     }
 
-    /// R6 (M1.1.1-HF3) — reserve everything a following `commitEntityExtension`
+    /// R6 — reserve everything a following `commitEntityExtension`
     /// needs so that commit is infallible: dupe `name` (returned to the caller),
     /// reserve one map slot, and reserve one slot in the entity's inner list.
     /// This is the fallible half of the reserve-then-mutate split
@@ -447,7 +447,7 @@ pub const World = struct {
         return owned;
     }
 
-    /// R6 (M1.1.1-HF3) — infallibly record an extension reserved by
+    /// R6 — infallibly record an extension reserved by
     /// `reserveEntityExtension`, taking ownership of `owned`. Appends via
     /// `appendAssumeCapacity` (capacity reserved). Belt-and-braces dedup: if the
     /// name is already active it frees `owned` instead (the activate path's
@@ -464,7 +464,7 @@ pub const World = struct {
         list.appendAssumeCapacity(owned);
     }
 
-    /// M1.0.9 — drop `name` from `entity`'s active-extension set, freeing the
+    /// drop `name` from `entity`'s active-extension set, freeing the
     /// owned copy. No-op if absent. Removes the map entry once the set empties.
     pub fn removeEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8) void {
         const list = self.entity_extensions.getPtr(entity) orelse return;
@@ -482,7 +482,7 @@ pub const World = struct {
         }
     }
 
-    /// M1.0.9 — whether `name` is currently active on `entity`.
+    /// whether `name` is currently active on `entity`.
     pub fn hasEntityExtension(self: *const World, entity: EntityId, name: []const u8) bool {
         const list = self.entity_extensions.getPtr(entity) orelse return false;
         for (list.items) |existing| {
@@ -491,7 +491,7 @@ pub const World = struct {
         return false;
     }
 
-    /// M1.0.9 — the OWNED names of the extensions active on `entity`, in
+    /// the OWNED names of the extensions active on `entity`, in
     /// activation order (empty slice if none). Borrowed view — valid until the
     /// entity's set is next mutated.
     pub fn entityExtensions(self: *const World, entity: EntityId) []const []const u8 {
@@ -499,7 +499,7 @@ pub const World = struct {
         return list.items;
     }
 
-    /// M1.1.1-HF1 (D7) — drop `entity`'s entire active-extension set, freeing
+    /// HF1 — drop `entity`'s entire active-extension set, freeing
     /// every owned name copy and the backing list, and dropping the map entry.
     /// No-op when the entity has no active extensions. Called from `despawn` so
     /// a despawned entity never leaves its extension-name copies stranded in
@@ -546,7 +546,7 @@ pub const World = struct {
     /// default bytes — not the per-field descriptors that Etch consumes
     /// for byte-oriented field access. Components like `Transform` and
     /// `Velocity` carry array fields (`[3]f32`, `[4]f32`) which the
-    /// `FieldKind` enum deliberately rejects until RTTI lands in M0.2.
+    /// `FieldKind` enum deliberately rejects until RTTI lands in .
     fn ensureRegistered(self: *World, gpa: std.mem.Allocator, comptime T: type) !ComponentId {
         if (self.registry.idOf(@typeName(T))) |id| return id;
         var default: T = .{};
@@ -569,7 +569,7 @@ pub const World = struct {
     /// reaching a signature would not crash, it would silently give the
     /// component a table column the sparse store also owns, after which the
     /// answer depends on which of the two a given caller consulted. A wrong
-    /// answer with no diagnostic is the H1 class (cf. M1.1.15.1), and a guard
+    /// answer with no diagnostic is the H1 class (cf. ), and a guard
     /// live only in the two matrix cells where a breach costs nothing is not a
     /// guard on the path a game ships.
     ///
@@ -749,7 +749,7 @@ pub const World = struct {
     /// does not hold its requisite back. Without that exception a legitimate
     /// teardown would be refused forever, which is the guard's other way of
     /// being wrong.
-    /// Public since the M1.B reprise: the observer-dispatching apply must know
+    /// Public since the reprise: the observer-dispatching apply must know
     /// whether a removal will be REFUSED before it fires `on_remove`, because
     /// an observer describes a state that has taken place. Reading it there and
     /// then NOT reaching `removeComponentDynamic` keeps the skip counted
@@ -836,7 +836,7 @@ pub const World = struct {
     /// the first two committed, and a half-populated entity is exactly the
     /// observable mutation the invariant forbids. So the unwind is World-level:
     /// `errdefer` removes from every store already written, in reverse, which
-    /// is the LIFO order M1.1.1-HF1/D2 established after a forward undo was
+    /// is the LIFO order established after a forward undo was
     /// measured to corrupt a refcount on duplicate entries.
     ///
     /// `payloads` + `id_order` carry the caller's ORIGINAL pairing, which the
@@ -865,7 +865,7 @@ pub const World = struct {
             //
             // The TABLE side has the same precondition and the same hole — a
             // duplicate id makes `Archetype.init` build a signature with a
-            // repeated column — but that PREDATES M1.B, so it is reported
+            // repeated column — but that PREDATES , so it is reported
             // rather than silently changed here.
             if (store.contains(entity)) return error.DuplicateComponent;
             const bytes = blk: {
@@ -955,7 +955,7 @@ pub const World = struct {
     /// omission: an archetype is the table storage, so there is no bimodal
     /// version of this entry to write.
     ///
-    /// Since M1.B it is therefore a BOUNDED primitive. Paired with
+    /// Since it is therefore a BOUNDED primitive. Paired with
     /// `dynamicLocation` it is the two-call idiom through which a caller
     /// reaches a component's bytes itself — `componentIndex` then
     /// `componentSlot` — and for a sparse component `componentIndex` answers
@@ -972,7 +972,7 @@ pub const World = struct {
     /// null for a stale handle.
     ///
     /// Total and correct for every live entity, sparse-only ones included:
-    /// since M1.B an entity carrying no table component lives in the EMPTY
+    /// since an entity carrying no table component lives in the EMPTY
     /// archetype rather than nowhere, so this never returns null for a live
     /// handle. What it does not carry is any sparse-side information — see
     /// `dynamicArchetype` for the bound the pair shares.
@@ -993,7 +993,7 @@ pub const World = struct {
         const id_v = try self.ensureRegistered(gpa, Velocity);
         var ids = [_]ComponentId{ id_t, id_v };
 
-        // M1.B reprise / P1-1 — this entry writes ONLY the two columns it names
+        // reprise / P1-1 — this entry writes ONLY the two columns it names
         // and takes `allocateSlot`, which does not default-initialise, so a
         // component the closure contributed would land here with undefined
         // bytes. Rather than rewrite a hot path that is otherwise correct, an
@@ -1070,7 +1070,7 @@ pub const World = struct {
     /// same shared paths as the typed `spawn` above.
     pub fn spawnDynamic(self: *World, gpa: std.mem.Allocator, component_ids: []const ComponentId) !EntityId {
         try refuseDuplicateIds(component_ids);
-        // M1.B reprise / P1-1 — the closure is expanded HERE, on the caller's
+        // reprise / P1-1 — the closure is expanded HERE, on the caller's
         // set, before anything is resolved from it.
         var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
         defer ex_ids.deinit(gpa);
@@ -1103,7 +1103,7 @@ pub const World = struct {
         return eid;
     }
 
-    /// M0.1 / E6 — dynamic spawn with payload bytes per component.
+    /// dynamic spawn with payload bytes per component.
     /// Variant of `spawnDynamic` used by the command-buffer flush path
     /// so deferred spawn commands can carry the caller-provided values
     /// instead of falling back to the registry's default bytes.
@@ -1118,7 +1118,7 @@ pub const World = struct {
         std.debug.assert(component_ids.len == payloads.len);
         try refuseDuplicateIds(component_ids);
 
-        // M1.B reprise / P1-1 — the closure is expanded on the caller's set,
+        // reprise / P1-1 — the closure is expanded on the caller's set,
         // into a NEW pair of lists, before anything is resolved from either.
         var ex_ids: std.ArrayListUnmanaged(ComponentId) = .empty;
         defer ex_ids.deinit(gpa);
@@ -1182,7 +1182,7 @@ pub const World = struct {
     /// when the handle's index is unknown, the slot is already freed,
     /// or the generation does not match. Updates the swapped-in
     /// entity's location atomically with the chunk-level swap. Purges the
-    /// entity's active-extension set (M1.1.1-HF1 D7) so its owned name copies
+    /// entity's active-extension set (D7) so its owned name copies
     /// are freed here rather than stranded until `World.deinit`.
     pub fn despawn(self: *World, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
         try self.identity.validate(id);
@@ -1274,7 +1274,7 @@ pub const World = struct {
         self.resetTickObservations();
         // No sparse arm, and the absence is an INVARIANT rather than an
         // omission: a sparse store carries per-row `added`/`changed` ticks and
-        // NO dirty bitset (M1.B/G2 invariant 2), because the bitset exists to
+        // NO dirty bitset (invariant 2), because the bitset exists to
         // let a chunk-granular query skip a whole chunk — a granularity a
         // sparse set does not have. An arm here would have nothing to clear.
         // The guard for it is `SparseSetStorage.field_set_pin`, which lives
@@ -1329,7 +1329,7 @@ pub const World = struct {
     }
 
     /// Dynamic (by `ComponentId`) read of `entity`'s component bytes — the
-    /// runtime analogue of `get`, used by the observer dispatch (M1.0.2 E3).
+    /// runtime analogue of `get`, used by the observer dispatch (E3).
     /// Returns the live storage slice (`componentSize(cid)` long), or `null`
     /// when the entity is stale or its archetype lacks `cid`. Does not mark
     /// the slot changed.
@@ -1352,7 +1352,7 @@ pub const World = struct {
         return arch.componentSlot(chunk, col, loc.slot);
     }
 
-    /// Stamp `entity`'s `cid` slot as changed at `current_tick` (M1.0.2 E3) —
+    /// Stamp `entity`'s `cid` slot as changed at `current_tick` (E3) —
     /// used after an in-place replace overwrite so a `Changed<T>` query sees it,
     /// mirroring `getMut`'s auto-mark. No-op when the entity/component is absent.
     pub fn markComponentChangedDyn(self: *World, entity: EntityId, cid: ComponentId) void {
@@ -1360,7 +1360,7 @@ pub const World = struct {
         if (self.storageOf(cid) == .sparse) {
             // Without this arm the mark would be SILENTLY LOST: the entry
             // returns `void`, and `componentIndex` on a sparse id answers null,
-            // so the pre-M1.B body's `orelse return` would swallow it. A change
+            // so the pre-body's `orelse return` would swallow it. A change
             // that never propagates has no diagnostic anywhere — the same class
             // of defect as answering the wrong entity, and the reason this entry
             // is routed rather than left to fail loud (it cannot fail at all).
@@ -1398,7 +1398,7 @@ pub const World = struct {
 
         const cid_new = try self.ensureRegistered(gpa, T);
 
-        // M1.B reprise / P1-1 — the fifth and last add path. It handles ONE
+        // reprise / P1-1 — the fifth and last add path. It handles ONE
         // component and branches on its storage; an expanded set needs the
         // grouped machinery, which `addComponentDynamic` already reaches
         // through the single expansion point. Same shape as `spawn`: the guard
@@ -1429,13 +1429,13 @@ pub const World = struct {
             // append a SECOND dense row for the same entity, after which
             // `positionOf` answers the first and `remove` swaps one of the two
             // away, leaving the other permanently unreachable. A wrong answer
-            // with no diagnostic (the H1 class, M1.1.15.1). `DuplicateComponent`
+            // with no diagnostic (the H1 class, ). `DuplicateComponent`
             // is the error `addComponentsDynamic` already returns for exactly
             // this condition, so nothing new is invented.
             //
             // Deliberately in the SPARSE arm only: the table arm's own
             // `assert(!src_arch.hasComponent(cid_new))` is stripped identically
-            // and has the same hole, but that hole PREDATES M1.B and changing it
+            // and has the same hole, but that hole PREDATES and changing it
             // would change an existing contract. Reported, not silently fixed.
             if (store.contains(entity)) return error.DuplicateComponent;
             try store.add(gpa, entity, std.mem.asBytes(&value), self.current_tick);
@@ -1528,7 +1528,7 @@ pub const World = struct {
         });
     }
 
-    /// M0.1 / E6 — dynamic addComponent used by the command-buffer
+    /// dynamic addComponent used by the command-buffer
     /// flush path. Same migration logic as `addComponent` but the
     /// component's identity is given directly (already resolved at
     /// record time) and the new column's bytes come from the caller's
@@ -1540,7 +1540,7 @@ pub const World = struct {
         cid_new: ComponentId,
         value_bytes: []const u8,
     ) !void {
-        // M1.B/G9 — `@requires`: the closure is added with the component, in ONE
+        // `@requires`: the closure is added with the component, in ONE
         // transaction. Delegated to `addComponentsDynamic` rather than
         // reimplemented, because that entry ALREADY is the transaction — all
         // fallible work before the first observable mutation — and a second
@@ -1636,7 +1636,7 @@ pub const World = struct {
         });
     }
 
-    /// M0.1 / E6 — dynamic removeComponent used by the command-buffer
+    /// dynamic removeComponent used by the command-buffer
     /// flush path. Same migration logic as `removeComponent` but the
     /// component identity is given as a `ComponentId` (already resolved
     /// at record time).
@@ -1649,7 +1649,7 @@ pub const World = struct {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
-        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // a removal refused by `@requires` is SKIPPED, not an error:
         // the invariant "if A is present, its closure is present" holds, the
         // deviation is counted on `World` and logged once per tick, and the
         // tick survives. An error here would be the channel
@@ -1678,7 +1678,7 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            // `>= 1` and not `>= 2`: since M1.B the EMPTY archetype is legal, so
+            // `>= 1` and not `>= 2`: since the EMPTY archetype is legal, so
             // dropping an entity's last component is a transition to it rather
             // than a programmer error. The `>= 2` this replaces was a leftover
             // of the illegality G2 lifted — legal at the layout, still forbidden
@@ -1730,7 +1730,7 @@ pub const World = struct {
         });
     }
 
-    /// R6 (M1.1.1-HF3) — add SEVERAL components to `entity` in a SINGLE archetype
+    /// R6 — add SEVERAL components to `entity` in a SINGLE archetype
     /// migration. Either the whole set lands (the entity moves once to the target
     /// archetype with every new column written) or nothing changes: the only
     /// fallible steps — target-archetype creation, `entity_locations` reservation,
@@ -1742,7 +1742,7 @@ pub const World = struct {
     ///
     /// `cids[i]` pairs with `values[i]` (`values[i].len == componentSize(cids[i])`,
     /// a programmer contract — asserted). `cids` length 0 is a no-op. R11(c)
-    /// (M1.1.1-HF3): every `cids[i]` must be ABSENT from `entity`'s current
+    ///: every `cids[i]` must be ABSENT from `entity`'s current
     /// archetype AND DISTINCT within `cids` — a real check (`error.DuplicateComponent`),
     /// not an assert; a duplicate would put the id twice in the target archetype
     /// (corruption) and mis-map values.
@@ -1764,7 +1764,7 @@ pub const World = struct {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
-        // M1.B reprise / P1-1 — THE grouped expansion point. Every other add
+        // reprise / P1-1 — THE grouped expansion point. Every other add
         // path routes here rather than expanding for itself, so there is one
         // semantics and not six. The helper is entity-aware, so a requisite the
         // entity already carries is skipped and the present-check below never
@@ -1788,11 +1788,11 @@ pub const World = struct {
         const ids_all = if (needs) ex_ids.items else cids;
         const vals_all = if (needs) ex_vals.items else values;
         {
-            // R11(c): real duplicate/present checks BEFORE any allocation.
+            // real duplicate/present checks BEFORE any allocation.
             //
             // Routed through `hasComponentDyn` and NOT `src_arch.hasComponent`:
             // the archetype answers `false` for a sparse component the entity
-            // actually carries, so the pre-M1.B form let a batched add of an
+            // actually carries, so the pre-form let a batched add of an
             // already-present sparse component through, straight to
             // `SparseSetStorage.add`'s own assert — live in Debug and compiled
             // to nothing in ReleaseFast, i.e. a silent double insert in the
@@ -1855,7 +1855,7 @@ pub const World = struct {
         // archetype ALIASES it: reads answer the other entity's bytes and writes
         // corrupt them, with no diagnostic anywhere.
         //
-        // Unreachable before M1.B — a grouped add always added at least one
+        // Unreachable before a grouped add always added at least one
         // signature member — and reachable from production at
         // `loader.activateExtension` for an extension declaring only sparse
         // components.
@@ -1897,7 +1897,7 @@ pub const World = struct {
         });
     }
 
-    /// R12(a) (M1.1.1-HF3) — a validated, slot-reserved grouped remove awaiting
+    /// R12(a) — a validated, slot-reserved grouped remove awaiting
     /// `commitRemoveComponentsDynamic` (infallible) or `abortRemoveComponentsDynamic`
     /// (infallible). Produced by `prepareRemoveComponentsDynamic`, which does ALL
     /// the fallible work. Lets a caller run a fallible-but-non-structural step
@@ -1953,7 +1953,7 @@ pub const World = struct {
         const src_arch0 = self.archetypes.items[src_loc.archetype_idx];
         const src_len = src_arch0.component_ids.len;
 
-        // R11(c): present + distinct, checked before any allocation. Routed
+        // present + distinct, checked before any allocation. Routed
         // through `hasComponentDyn` for the same reason as the batched add: the
         // archetype answers `false` for a sparse component the entity carries,
         // so `src_arch0.hasComponent` would reject a legitimate sparse drop
@@ -1963,7 +1963,7 @@ pub const World = struct {
             if (!self.hasComponentDyn(entity, c)) return error.UnknownComponent;
             for (cids[ci + 1 ..]) |other| if (other == c) return error.DuplicateComponent;
         }
-        // M1.B/G9 — `exempt = cids`: a grouped removal of a requisite TOGETHER
+        // `exempt = cids`: a grouped removal of a requisite TOGETHER
         // with its dependents is ALLOWED, so a requirer that is itself leaving
         // does not hold its requisite back. Without that exception a legitimate
         // teardown would be refused forever, which is the guard's other way of
@@ -2082,7 +2082,7 @@ pub const World = struct {
     /// R12(a) — roll back a `PreparedRemove` without committing: pop the reserved
     /// dst slot. INVARIANT: the reserved slot is the LAST of its chunk
     /// (`allocateSlot` appended it) and nothing allocates into `dst_arch` between
-    /// prepare and abort — hook structural changes are deferred (M1.0.10) and the
+    /// prepare and abort — hook structural changes are deferred and the
     /// path is single-threaded — so `removeSwap` on it is a pure pop (no swap,
     /// returns null). The entity was never recorded in `entity_locations` for the
     /// dst slot, so no map fix-up is needed.
@@ -2116,7 +2116,7 @@ pub const World = struct {
         self.commitRemoveComponentsDynamic(gpa, prepared);
     }
 
-    /// M0.8 E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
+    /// E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
     /// deferred-structural-change primitive shared by the Etch interpreter's
     /// tag queue and the codegen command buffer's `set_tag`/`clear_tag`.
     /// `tagset_id` is the registered `TagSet` component — a `[words]u64`
@@ -2173,7 +2173,7 @@ pub const World = struct {
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
         const cid_drop = self.registry.idOf(@typeName(T)) orelse return error.StaleEntityHandle;
-        // M1.B/G9 — a removal refused by `@requires` is SKIPPED, not an error:
+        // a removal refused by `@requires` is SKIPPED, not an error:
         // the invariant "if A is present, its closure is present" holds, the
         // deviation is counted on `World` and logged once per tick, and the
         // tick survives. An error here would be the channel
@@ -2202,7 +2202,7 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            // `>= 1` and not `>= 2`: since M1.B the EMPTY archetype is legal, so
+            // `>= 1` and not `>= 2`: since the EMPTY archetype is legal, so
             // dropping an entity's last component is a transition to it rather
             // than a programmer error. The `>= 2` this replaces was a leftover
             // of the illegality G2 lifted — legal at the layout, still forbidden
@@ -2336,7 +2336,7 @@ pub const World = struct {
         return w.archetypes.items;
     }
 
-    /// Build a runtime, `ComponentId`-keyed dynamic query (M1.0.0) — the
+    /// Build a runtime, `ComponentId`-keyed dynamic query — the
     /// selection primitive the Etch interpreter routes rule entity selection
     /// through. The interpreter resolves `when` components to `ComponentId`s
     /// (no Zig type to hand to the comptime `queryFiltered`), so it needs an
@@ -2386,7 +2386,7 @@ pub const World = struct {
     /// by the interpreter after every rule has run.
     pub fn tickBoundary(self: *World) void {
         self.resources.tickBoundary();
-        // M1.B/G9 — the SECOND reset site, and both are required because neither
+        // the SECOND reset site, and both are required because neither
         // covers the other's population. Measured rather than assumed:
         // `beginFrame` is called unconditionally by the ECS scheduler's frame
         // dispatch (`scheduler.zig`) and by the emitted codegen tick, so it is
@@ -2402,7 +2402,7 @@ pub const World = struct {
 
     /// Decref and zero every resource's persistent-heap payload slot
     /// (`.string_` / `.array_` / `.map_` / `.set_`) — the uniform teardown of
-    /// resource-owned heap blocks (M1.1.1-HF2 C4). Tier-0 `World` owns this
+    /// resource-owned heap blocks (C4). Tier-0 `World` owns this
     /// walk so a world with no interpreter (e.g. the scene loader over a bare
     /// world) and any resource outside the interpreter's `bridge.resources`
     /// still reclaim their blocks. `ResourceStore` stays string-agnostic in
@@ -2420,7 +2420,7 @@ pub const World = struct {
     /// Allocation-free (decrefs + in-place slot zeroing only); never fails.
     /// Reaches into `resources.entries` directly rather than through a store
     /// method: the enumeration is a `World`-level teardown concern, and
-    /// `ResourceStore` (FROZEN, M0.9) exposes no all-resources iterator.
+    /// `ResourceStore` (FROZEN, ) exposes no all-resources iterator.
     pub fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
         var it = self.resources.entries.iterator();
         while (it.next()) |kv| {
@@ -2437,7 +2437,7 @@ pub const World = struct {
                             @memcpy(buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)], std.mem.asBytes(&ss));
                         }
                     },
-                    // Collection field (M1.0.17): decref the container block; its
+                    // Collection field: decref the container block; its
                     // registered drop releases string elements/keys/values before
                     // the block frees.
                     .array_, .map_, .set_ => {
@@ -2464,7 +2464,7 @@ pub const World = struct {
     }
 };
 
-/// Set or clear a single bit in a `TagSet`'s raw `[words]u64` bytes (M0.8 E3).
+/// Set or clear a single bit in a `TagSet`'s raw `[words]u64` bytes (E3).
 /// The bit index maps to word `bit / 64`, position `bit % 64`.
 fn setTagBit(bytes: []u8, bit: u32, set: bool) void {
     const off: usize = @as(usize, bit / 64) * 8;
@@ -2590,7 +2590,7 @@ test "despawn is allocation-free after spawn (M1.1.1-HF2 C1)" {
     const live_before = world.identity.liveCount();
 
     // Despawn allocates nothing: `identity.release` is a bare
-    // `appendAssumeCapacity` (C1), `entity_locations.remove` frees a hash slot,
+    // `appendAssumeCapacity`, `entity_locations.remove` frees a hash slot,
     // and this entity carries no extension entry to purge. Prove it by failing
     // every allocation for the whole despawn — it must still succeed and
     // reclaim the slot.

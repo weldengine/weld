@@ -1,32 +1,18 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Threading helpers — `setAffinity` and `setPriority` OS-specific wrappers.
-//!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (Threading section) and the M0.3 brief.
-//!
-//! `std.Thread` / `std.atomic` / `std.Io.Mutex` etc. are propagated as-is.
-//! Weld only adds two helpers that are not in the stdlib:
-//!   - `setAffinity(thread, core_id)` — pins a thread to a single CPU core.
-//!   - `setPriority(thread, .high | .normal | .low)` — adjusts scheduling
-//!     priority.
-//!
-//! Used by the M0.1 job system scheduler (worker pinning) and by the future
-//! audio thread (Tier 1, Phase 1) which needs high priority + dedicated
-//! core.
+//! The two threading helpers the stdlib does not carry: `setAffinity` pins a thread
+//! to one core, `setPriority` adjusts scheduling. Everything else propagates as-is.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 /// Priority tier surfaced by `setPriority`. Maps to OS-specific levels.
 pub const Priority = enum {
-    /// Real-time-ish — Win32 `THREAD_PRIORITY_HIGHEST`, Linux SCHED_FIFO 80.
-    /// Used for the audio thread.
+    /// Real-time-ish, as far as the OS allows without capabilities.
     high,
     /// Default — Win32 `THREAD_PRIORITY_NORMAL`, Linux SCHED_OTHER nice 0.
     normal,
-    /// Background — Win32 `THREAD_PRIORITY_BELOW_NORMAL`, Linux SCHED_OTHER
-    /// nice 10. Used for background asset loaders.
+    /// Background.
     low,
 };
 
@@ -47,10 +33,7 @@ const win = struct {
     const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
 
     fn threadHandle(thread: std.Thread) *anyopaque {
-        // std.Thread on Windows wraps a HANDLE. The `impl.thread.handle`
-        // field exposes it. In 0.16 the layout is:
-        //   std.Thread.Impl = struct { thread: *anyopaque, ... }
-        // We use `getHandle` accessor which exists on Windows std.Thread.
+        // On Windows a `std.Thread` wraps a HANDLE, which is what the API below needs.
         return thread.getHandle();
     }
 };
@@ -60,9 +43,7 @@ const posix = struct {
         bits: [128]u64 = [_]u64{0} ** 128, // CPU_SETSIZE / 64 on glibc
     };
 
-    // pthread_t in std.c is `*opaque{}` on every supported OS. We accept
-    // it as a typed parameter so callers can pass `thread.getHandle()`
-    // directly without casts.
+    // `pthread_t` is an opaque pointer in `std.c` on every supported OS.
     extern "c" fn pthread_setaffinity_np(thread: std.c.pthread_t, cpusetsize: usize, cpuset: *const cpu_set_t) c_int;
     extern "c" fn pthread_setschedparam(thread: std.c.pthread_t, policy: c_int, param: *const sched_param) c_int;
 
@@ -85,10 +66,7 @@ const posix = struct {
     }
 };
 
-/// Pin `thread` to CPU `core_id`. On Linux uses `pthread_setaffinity_np`,
-/// on Windows uses `SetThreadAffinityMask`. macOS does not support thread
-/// affinity (the kernel scheduler ignores hints); we return success and
-/// the call is a no-op there.
+/// Pin `thread` to CPU `core_id`. Best-effort; see `setPriority`.
 pub fn setAffinity(thread: std.Thread, core_id: u32) Error!void {
     switch (builtin.os.tag) {
         .windows => {
@@ -103,18 +81,14 @@ pub fn setAffinity(thread: std.Thread, core_id: u32) Error!void {
             if (rc != 0) return error.SetAffinityFailed;
         },
         .macos => {
-            // macOS thread_policy / THREAD_AFFINITY_POLICY is documented as
-            // hints only. We accept the call as a no-op rather than fail.
+            // No portable equivalent on this OS; the mach API is a hint only.
             _ = .{ thread, core_id };
         },
         else => return error.SetAffinityFailed,
     }
 }
 
-/// Set the scheduling priority of `thread`. On Windows uses
-/// `SetThreadPriority`. On Linux uses `pthread_setschedparam` (SCHED_FIFO
-/// for `.high` if the process has CAP_SYS_NICE, falls back to SCHED_OTHER
-/// otherwise). macOS uses `pthread_setschedparam` similarly.
+/// Set the scheduling priority of `thread`. BEST-EFFORT, see below.
 pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
     switch (builtin.os.tag) {
         .windows => {
@@ -127,35 +101,13 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
             if (win.SetThreadPriority(handle, win_prio) == 0) return error.SetPriorityFailed;
         },
         .linux, .macos => {
-            // Best-effort, soft-success.
+            // BEST-EFFORT, SOFT SUCCESS: a non-zero return is tolerated, because the
+            // call needs a capability a container runner does not grant and setting
+            // the default policy is a no-op anyway.
             //
-            // Linux: pthread_setschedparam with SCHED_OTHER + priority=0
-            // is the canonical "reset to default". The call still returns
-            // EPERM in containerized CI runners that lack CAP_SYS_NICE
-            // (observed on ubuntu-24.04 GitHub Actions). Since setting
-            // the default policy is pragmatically a no-op anyway — the
-            // thread is already at default after spawn — we attempt the
-            // call but tolerate non-zero rc as success. Elevating to
-            // SCHED_FIFO / SCHED_RR with non-zero priority requires
-            // CAP_SYS_NICE + operator setup; M0.3 ships best-effort
-            // semantics, real-time priority lands Phase 1+ when the
-            // audio thread arrives (cf. `engine-audio-pulse.md` §11).
-            //
-            // macOS: pthread_setschedparam on a regular thread without
-            // explicit policy setup returns EINVAL/EPERM in CI. The
-            // mach-level API (thread_policy_set / THREAD_PRECEDENCE_POLICY)
-            // is the proper path, but it's a no-op hint on user-space
-            // processes anyway.
-            //
-            // PHASE 1+ TRANSFER NOTE — when the Phase 1 audio thread arrives
-            // with a real need for SCHED_FIFO/SCHED_RR priority (cf.
-            // engine-audio-pulse.md §11), this best-effort soft-success code must
-            // NOT be reused as-is. Silently ignoring EPERM would mask a critical
-            // realtime configuration failure. Add a dedicated
-            // `setRealtimePriority(thread, policy) !void` function that returns
-            // `error.NoCapability` explicitly on EPERM, and keep the current
-            // `setPriority` only for best-effort paths (background threads,
-            // non-critical job workers).
+            // DO NOT REUSE THIS FOR REAL-TIME PRIORITY. Silently ignoring the
+            // permission error would mask a realtime configuration failure; that
+            // caller wants its own entry returning an explicit error.
             const param: posix.sched_param = .{ .sched_priority = 0 };
             _ = posix.pthread_setschedparam(thread.getHandle(), posix.SCHED_OTHER, &param);
         },
@@ -163,8 +115,6 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
     }
 }
 
-// Inline tests use `std.testing.allocator` and spawn an actual thread, then
-// pin + set priority on it. Skipped on platforms we don't claim to support.
 test "threading.setAffinity + setPriority: spawned thread runs without error" {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
         return error.SkipZigTest;
@@ -174,8 +124,7 @@ test "threading.setAffinity + setPriority: spawned thread runs without error" {
         done: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
         fn run(self: *@This()) void {
-            // Spin briefly so the parent thread has time to call setAffinity
-            // / setPriority before the child exits.
+            // Spin so the parent has time to call the two helpers on us.
             var i: u32 = 0;
             while (i < 1000) : (i += 1) {
                 std.atomic.spinLoopHint();

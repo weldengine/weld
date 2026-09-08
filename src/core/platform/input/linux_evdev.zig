@@ -1,40 +1,13 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Linux evdev gamepad polling.
-//!
-//! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
-//! in the M0.3 brief § Input system Tier 0 minimal :
-//!
-//!   > Wayland: ... non-blocking read of `/dev/input/eventN` for
-//!   > gamepad (integrated into the mainloop via `std.posix.poll` on
-//!   > the Wayland + evdev fds). Gamepad hot-plug via periodic polling
-//!   > of `/dev/input/` every N seconds (udev monitoring deferred to
-//!   > Phase 1+ if polling suffices).
-//!
-//! ## Phase 0 scope
-//!
-//! M0.3 ships the API surface and the device-scan loop. Full input
-//! parsing (EV_KEY for buttons, EV_ABS for axes, ioctl EVIOCGBIT for
-//! capability detection) is sketched here but kept minimal — the
-//! brief gate is the InputRawState contract + simulated-event tests,
-//! which the Wayland window backend already satisfies via
-//! `wl_keyboard` / `wl_pointer`. Real evdev gamepad polling is the
-//! optional path that lights up when the user plugs in a controller.
-//!
-//! Hot-plug is via `scanDevices()` which scans `/dev/input/event*`.
-//! The caller invokes it periodically (e.g., once per second) from
-//! the main loop. udev monitoring is documented as "Phase 1+ if
-//! polling proves insufficient" per the brief.
+//! Linux evdev gamepad polling. Hot-plug is by periodic `scanDevices()` over
+//! `/dev/input/event*`, which the caller drives from its own loop.
 
-// PHASE 1+ TRANSFER NOTE — this module is a Phase 0 stub. `pollAllSlots`
-// is a no-op, `scanDevices` opens-then-closes the fds without extracting
-// capabilities. Observable consequence: a gamepad plugged in under Linux
-// Phase 0 stays invisible (mouse/keyboard go through
-// wl_pointer/wl_keyboard, which cover the desktop common case). Phase 1
-// must deliver EV_KEY/EV_ABS parsing via EVIOCGBIT + an event loop
-// integrated into the Wayland mainloop (`std.posix.poll` on the evdev fds).
-// If an external Phase 1 studio needs Linux gamepad support before the
-// Input Tier 1 module arrives, this is where it happens — not in Tier 1.
+// THIS MODULE IS A STUB: `pollAllSlots` is a no-op and `scanDevices` opens then
+// closes each fd without extracting capabilities, so a gamepad plugged in under
+// Linux stays INVISIBLE. Mouse and keyboard go through the Wayland protocols
+// instead. Completing it means EV_KEY / EV_ABS parsing via EVIOCGBIT and an event
+// loop folded into the Wayland mainloop — and it happens HERE, not in Tier 1.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -48,8 +21,7 @@ const Device = struct {
     fd: i32,
 };
 
-/// Global state — devices currently open + next free slot allocator.
-/// Phase 0+ single-process model; multi-process / sandboxed Phase 2+.
+/// Devices currently open, plus the next free slot.
 const State = struct {
     devices: std.ArrayList(Device) = .empty,
     last_scan_ns: u64 = 0,
@@ -57,9 +29,7 @@ const State = struct {
 
 var g_state: State = .{};
 
-// Linux ioctl + extern declarations. We keep this minimal — full evdev
-// capability probing is Phase 1+. M0.3 opens any /dev/input/event* file
-// that looks like a gamepad based on a name heuristic.
+// Minimal by intent; the full ioctl surface is not needed by the stub.
 
 const O_RDONLY: c_int = 0;
 const O_NONBLOCK: c_int = 0x800;
@@ -68,10 +38,7 @@ extern "c" fn open(pathname: [*:0]const u8, flags: c_int) c_int;
 extern "c" fn close_fd(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, nbytes: usize) isize;
 
-/// Scan `/dev/input/` for new gamepad-like devices and open the ones
-/// that aren't already tracked. Caller invokes this periodically (the
-/// brief recommends every ~1 second). Returns the number of newly
-/// opened devices (0 in steady state).
+/// Scan `/dev/input/` for gamepad-like devices and open them into free slots.
 pub fn scanDevices(gpa: std.mem.Allocator) usize {
     if (comptime builtin.os.tag != .linux) return 0;
 
@@ -100,32 +67,17 @@ pub fn scanDevices(gpa: std.mem.Allocator) usize {
         const fd = open(path_z.ptr, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
 
-        // Capability probing via ioctl EVIOCGBIT is Phase 1+. Phase 0
-        // closes the fd immediately and leaves the slot free; the brief
-        // gate is satisfied by the wl_keyboard / wl_pointer paths in
-        // wayland.zig. This stub establishes the API surface.
+        // Capability probing is what this stub does not do.
         _ = close_fd(fd);
         opened += 1;
     }
     return opened;
 }
 
-/// Drain any pending evdev events from the currently-open devices and
-/// update `state` accordingly. On non-Linux targets, no-op.
-///
-/// Phase 0 stub — the full EV_KEY / EV_ABS parsing is Phase 1+. This
-/// function is exposed so the Window backend mainloop has a stable
-/// callsite; lighting it up does not require API changes downstream.
-/// The `gpa` parameter mirrors `win32_xinput.pollAllSlots` so a
-/// cross-OS mainloop binds a single signature (B12 / E7) — unused here
-/// (the Linux stub tracks no devices in Phase 0).
+/// Drain pending evdev events from the open devices — a no-op in this stub.
 pub fn pollAllSlots(gpa: std.mem.Allocator, state: *raw_state.InputRawState) void {
     if (comptime builtin.os.tag != .linux) return;
     _ = .{ gpa, state };
-    // No devices tracked Phase 0 — the wl_pointer / wl_keyboard paths
-    // cover the main keyboard + mouse via the compositor, which is the
-    // common case. Real gamepad support fleshes out from `scanDevices`
-    // + EV_KEY/EV_ABS parsing in Phase 1+.
 }
 
 /// Tear down — close all open device fds.

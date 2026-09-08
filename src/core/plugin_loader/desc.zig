@@ -118,13 +118,13 @@ pub const WeldResult = enum(c_int) {
     WELD_ERR_SERVICE_UNAVAILABLE = 9,
     /// Incompatible API version.
     WELD_ERR_VERSION_MISMATCH = 10,
-    /// Feature declared but not yet wired — M0.2 returns this
+    /// Feature declared but not yet wired — returns this
     /// code for 100% of the callbacks of the 7 sub-APIs
     /// (cf. brief § Out-of-scope, Phase 3 wiring).
     WELD_ERR_NOT_IMPLEMENTED = 11,
 };
 
-/// Capabilities declared by the plugin at load time. M0.2 READS
+/// Capabilities declared by the plugin at load time. READS
 /// these declarations and logs them; NO runtime check is
 /// performed — enforcement (refusing `component_get` on a
 /// component not declared in `reads_components`, etc.) is
@@ -154,7 +154,7 @@ pub const WeldPluginCaps = extern struct {
 };
 
 /// Plugin lifecycle callbacks. All optional (`null` =
-/// ignored). The M0.2 stub plugin leaves all callbacks `null`.
+/// ignored). The stub plugin leaves all callbacks `null`.
 ///
 /// The callbacks receive `*const anyopaque` rather than the
 /// concrete `*const WeldAPI` (defined in `api.zig`) — it is the

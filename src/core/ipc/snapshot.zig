@@ -2,7 +2,7 @@
 //! `SaveProject`, reloaded on restart as the best-effort-replay
 //! reference point (`engine-ipc.md` §7.1, brief E4 "option 1"). This is
 //! **not** a `.scene.etch` writer and carries no project-settings
-//! serialization (out of Phase 0): for the M0.7 runtime stub the
+//! serialization (out of Phase 0): for the runtime stub the
 //! "active scene" is the mire, so the snapshot records a single marker
 //! (`frame_id`) — enough to give replay a concrete reload point on the
 //! restarted runtime.
@@ -23,7 +23,7 @@ pub const Snapshot = extern struct {
     magic: u32,
     version: u16,
     _pad: u16 = 0,
-    /// The active scene's minimal state. M0.7 stub: a save marker (the
+    /// The active scene's minimal state. stub: a save marker (the
     /// `SaveProject` seq_id) standing in for the reloadable scene state.
     frame_id: u64,
 };

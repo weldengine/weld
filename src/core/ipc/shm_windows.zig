@@ -123,7 +123,7 @@ pub const Backend = struct {
         return error.Unimplemented;
     }
 
-    /// The mapping kernel-object handle. Unused by the M0.7 Windows
+    /// The mapping kernel-object handle. Unused by the Windows
     /// attach path (which is by name); present for API symmetry with
     /// the POSIX backend.
     pub fn handle(self: *const Backend) Handle {

@@ -56,7 +56,7 @@ const AssetHandle = type_info.AssetHandle;
 ///
 /// When `category == .resource`, the `lifecycle` field is populated by
 /// `inferLifecycle(T)` — reads the `pub const lifecycle: Lifecycle`
-/// declaration if present, otherwise defaults to `.transient` (M0.2 /
+/// declaration if present, otherwise defaults to `.transient` (/
 /// E3 decision, cf. brief § Notes). For other categories,
 /// `lifecycle` is `null`.
 pub fn buildTypeInfo(comptime T: type, comptime category: Category) TypeInfo {

@@ -66,7 +66,7 @@ pub const ShmRegion = struct {
     /// creator side; the attacher gets a fresh virtual address but
     /// the same physical pages.
     ///
-    /// M1.1.14 — `page_size_min` AND NOT `pageSize()`, because a struct field's
+    /// `page_size_min` AND NOT `pageSize()`, because a struct field's
     /// alignment must be comptime-known and `pageSize()` is not on every target.
     /// Where the page size is fixed it folds at comptime and this is a strict
     /// no-op (x86_64 and Windows: min = max = 4096); where it is VARIABLE it
@@ -109,7 +109,7 @@ pub const ShmRegion = struct {
         };
     }
 
-    /// Intra-process attach by name. Demoted in M0.7: it is **no
+    /// Intra-process attach by name. Demoted in : it is **no
     /// longer** the cross-process runtime attach (that is `fromFd`,
     /// §4.8). Reserved for a single process re-attaching a region it
     /// created, and for the Windows attach path (named mapping, no
@@ -143,7 +143,7 @@ pub const ShmRegion = struct {
     /// The OS handle backing this region (POSIX fd / Windows mapping
     /// handle), to forward to the runtime via
     /// `IpcSocket.sendWithHandles` (`engine-ipc.md` §4.8). Only the
-    /// POSIX fd is used for the cross-process attach in M0.7.
+    /// POSIX fd is used for the cross-process attach in .
     pub fn fd(self: *const ShmRegion) OsHandle {
         return self.impl.handle();
     }

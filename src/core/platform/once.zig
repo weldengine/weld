@@ -1,50 +1,19 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Once-init primitive — tri-state CAS on `std.atomic.Value(u32)`.
+//! Once-init primitive: a tri-state CAS on `std.atomic.Value(u32)`, this Zig version
+//! carrying no `std.once`.
 //!
-//! Zig 0.16.0 has **no** `std.once` / `std.Thread.Once` primitive (verified
-//! at M0.3 kick-off, 2026-05-25, via `@hasDecl(std, "once")` and
-//! `@hasDecl(std.Thread, "Once")` — both return false). This module
-//! implements the CAS-based fallback documented in the M0.3 brief.
+//! THE THIRD STATE AND ITS BACKWARD TRANSITION ARE THE POINT. 0 not started, 1 in
+//! progress, 2 done; `0 -> 1` is the CAS winner, `1 -> 2` publishes and wakes the
+//! waiters, and `1 -> 0` is the winner's init having FAILED — it releases so another
+//! caller may retry. Collapse it to a boolean and a failed init is permanent.
 //!
-//! Used by three sites in the Phase 0 platform layer:
-//!   - `window/win32.zig` : `class_atom` (RegisterClassExW), `dpi_awareness_set`
-//!     (SetProcessDpiAwarenessContext).
-//!   - `time.zig` : `timeBeginPeriod(1)` activation on Win32.
-//!
-//! ## State machine
-//!
-//! Three states encoded in a `std.atomic.Value(u32)`:
-//!
-//!   - `0` (not_started) : nobody has tried yet.
-//!   - `1` (in_progress) : a thread is running the init function; others wait.
-//!   - `2` (done)        : init completed; future calls return immediately.
-//!
-//! Transitions:
-//!
-//!   0 -> 1 : winner of the CAS, runs the init.
-//!   1 -> 2 : winner sets DONE, wakes waiters.
-//!   1 -> 0 : winner's init failed; releases so another thread can retry.
-//!
-//! ## Cancellation
-//!
-//! All waits use `futexWaitUncancelable` per `engine-zig-conventions.md` §11
-//! (platform layer is intra-process — external cancellation has no meaning).
-//!
-//! ## API
-//!
-//! ```zig
-//! var my_once: once.Once = .{};
-//! try my_once.call(io, my_init_fn);
-//! ```
-//!
-//! `init_fn` returns `anyerror!void`. On error, the state is reset to
-//! `not_started` so the next caller may retry.
+//! Every wait is `futexWaitUncancelable`: the platform layer is intra-process, where
+//! external cancellation has no meaning (`engine-zig-conventions.md` §11).
 
 const std = @import("std");
 
-/// Tri-state CAS once-init primitive. Initial state is `not_started`.
-/// Place `.{}` to zero-initialize.
+/// Tri-state CAS once-init primitive.
 pub const Once = struct {
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(NOT_STARTED),
 
@@ -52,13 +21,9 @@ pub const Once = struct {
     pub const IN_PROGRESS: u32 = 1;
     pub const DONE: u32 = 2;
 
-    /// Run `init_fn` exactly once across all callers. Subsequent calls
-    /// return immediately. If `init_fn` returns an error, the state is
-    /// reset so the next caller may retry.
+    /// Run `init_fn` exactly once across all callers; later calls return at once.
     ///
-    /// `io` is used for the bounded `futexWaitUncancelable` path when
-    /// another thread is mid-init. Pass the engine-level `std.Io`
-    /// (typically `init.io` from Juicy Main).
+    /// On an init ERROR the state returns to not-started, so the next caller retries.
     pub fn call(self: *Once, io: std.Io, init_fn: *const fn () anyerror!void) anyerror!void {
         while (true) {
             // Fast path: already done.
@@ -87,16 +52,9 @@ pub const Once = struct {
         }
     }
 
-    /// Same semantics as `call` but uses a bounded busy-yield loop on the
-    /// IN_PROGRESS path instead of `futexWaitUncancelable`. Trade-off: no
-    /// `io` parameter required, at the cost of a few hundred nanoseconds
-    /// of CPU spin per concurrent loser of the CAS. Acceptable for paths
-    /// whose contention window is bounded (window-class registration,
-    /// SetProcessDpiAwarenessContext) — both complete in microseconds.
+    /// As `call`, but waits by bounded busy-yield instead of a futex.
     ///
-    /// The yield is implemented as `std.Thread.yield()` with a fallback
-    /// `std.atomic.spinLoopHint()` if the OS scheduler doesn't honor
-    /// yield (e.g. single-core boxes).
+    /// For a caller that has no `std.Io` to hand.
     pub fn callBusyYield(self: *Once, init_fn: *const fn () anyerror!void) anyerror!void {
         while (true) {
             const cur = self.state.load(.acquire);
@@ -120,8 +78,7 @@ pub const Once = struct {
         }
     }
 
-    /// Reset to `not_started`. Caller MUST ensure no concurrent `call` is
-    /// in flight. Intended for tests only.
+    /// Reset to not-started. THE CALLER MUST ensure no concurrent `call` is running.
     pub fn reset(self: *Once) void {
         self.state.store(NOT_STARTED, .release);
     }

@@ -14,7 +14,7 @@ const entity_mod = @import("entity.zig");
 /// Canonical generational entity identifier (`packed struct(u64)`,
 /// `(index, generation)` low-to-high). The 8-byte size assertion below
 /// pins the wire layout S1 committed to; the generational halves are an
-/// M0.1 / E1 addition (cf. `briefs/M0.1-ecs-full.md` E1 — Identity
+/// addition (cf. `briefs/ecs-full.md` E1 — Identity
 /// foundations) that closes the S1 debts D-S1-1 (slot reuse) and D-S1-2
 /// (generational indices). See `entity.zig` for the type definition and
 /// the matching `EntityIdentityStore`.

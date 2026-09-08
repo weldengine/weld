@@ -28,15 +28,15 @@ pub const platform = struct {
     pub const vk = @import("platform/vk.zig");
     pub const process = @import("platform/process.zig");
     pub const once = @import("platform/once.zig");
-    // M0.3 — sleepPrecise wrapper with Win32 timeBeginPeriod(1) once-init.
+    // sleepPrecise wrapper with Win32 timeBeginPeriod(1) once-init.
     pub const time = @import("platform/time.zig");
-    // M0.3 — setAffinity / setPriority OS-specific helpers.
+    // setAffinity / setPriority OS-specific helpers.
     pub const threading = @import("platform/threading.zig");
-    // M0.3 — DynamicLib { open, lookup, close } over LoadLibraryW / dlopen.
+    // DynamicLib { open, lookup, close } over LoadLibraryW / dlopen.
     pub const dynamic_lib = @import("platform/dynamic_lib.zig");
-    // M0.3 — VFS resolver (assets:// / cache:// / user://) + mmapFile.
+    // VFS resolver (assets:// / cache:// / user://) + mmapFile.
     pub const fs = @import("platform/fs.zig");
-    // M0.3 — Input Tier 0 namespace (raw_state, keycode, OS-specific).
+    // Input Tier 0 namespace (raw_state, keycode, OS-specific).
     pub const input = struct {
         pub const keycode = @import("platform/input/keycode.zig");
         pub const raw_state = @import("platform/input/raw_state.zig");
@@ -109,7 +109,7 @@ comptime {
     _ = ecs.entity;
     _ = ecs.tick;
     _ = ecs.change_detection;
-    // M0.1 / E5a — pin the system scheduler.
+    // / E5a — pin the system scheduler.
     _ = ecs.scheduler;
     _ = ecs.archetype;
     _ = ecs.world;
@@ -121,31 +121,31 @@ comptime {
     _ = ecs.chunk;
     _ = ecs.sparse_storage;
     _ = ecs.hybrid_query;
-    // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
+    // pin the RTTI sub-files so their inline tests run.
     _ = rtti.type_info;
     _ = rtti.hash;
     _ = rtti.comptime_builder;
     _ = rtti.registry;
-    // M0.2 / E3 — pin the resources sub-files.
+    // pin the resources sub-files.
     _ = resources.registry;
     _ = resources.api;
     _ = events.lifetime;
     _ = events.cursor;
     _ = events.queue;
     _ = events.bus;
-    // M0.2 / E6 — pin the plugin loader sub-files.
+    // pin the plugin loader sub-files.
     _ = plugin_loader.desc;
     _ = plugin_loader.api;
     _ = plugin_loader.loader;
-    // M1.0.4 — pin the scene sub-files so their inline tests run.
+    // pin the scene sub-files so their inline tests run.
     _ = scene.format;
     _ = scene.writer;
     _ = scene.accessor;
     _ = scene.loader;
-    // M1.0.5 — pin the Tier-0 persistent heap (moved from src/etch).
+    // pin the Tier-0 persistent heap (moved from src/etch).
     _ = memory.persistent;
     _ = ModuleContext;
-    // M0.3 — pin the new platform sub-files so their inline tests run.
+    // pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;
     _ = platform.threading;

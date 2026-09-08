@@ -2,8 +2,8 @@
 //!
 //! Filesystem helpers — VFS scheme resolver + `mmapFile`.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (FileSystem section) and the M0.3 brief.
+//! Phase 0.3 / deliverable. Documented in `engine-platform.md` §4
+//! (FileSystem section) and the brief.
 //!
 //! `std.Io.File` / `std.fs.Dir` are propagated as-is for low-level ops.
 //! Weld adds two pieces:

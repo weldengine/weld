@@ -1,23 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Minimal process control surface used by the S6 editor stub to
-//! spawn / monitor / kill the runtime stub. Tier 0 — `engine-
-//! platform.md` §4 (Process section) defines a wider API; S6 fills
-//! only the four entry points the brief calls out:
-//!
-//!   - `spawnProcess(path, argv) !Process`
-//!   - `waitNonblock(proc) !?i32`
-//!   - `kill(proc) !void`
-//!   - `isAlive(pid) bool`
-//!
-//! The rest of the surface (stdout/stderr piping, env passing,
-//! redirection, working directory) lands in Phase 0.3 alongside
-//! the X11 backend + input handling — out of scope for S6.
-//!
-//! POSIX: `posix_spawnp` + `waitpid(WNOHANG)` + `kill(SIGKILL)` +
-//! `kill(0)` for the liveness probe.
-//! Windows: `CreateProcessW` + `WaitForSingleObject(0)` +
-//! `TerminateProcess` + `OpenProcess(SYNCHRONIZE)`.
+//! No stdio piping, no redirection, no working directory: the child inherits the
+//! parent's environment as-is and its output goes wherever the parent's goes.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -30,19 +14,14 @@ pub const Error = error{
     InvalidArgument,
 } || std.mem.Allocator.Error;
 
-/// OS-native process identifier — signed on POSIX, unsigned on
-/// Windows. Used by `spawn` / `waitNonblock` / `kill` to track a
-/// child runtime process.
+/// OS-native process id — SIGNED on POSIX, unsigned on Windows.
 pub const Pid = switch (builtin.os.tag) {
     .linux, .macos => i32,
     .windows => u32,
     else => @compileError("Pid: unsupported OS"),
 };
 
-/// Opaque handle on the child process. On POSIX the only state we
-/// need is the pid; on Windows we additionally hold the process
-/// `HANDLE` so `TerminateProcess` / `GetExitCodeProcess` don't have
-/// to re-open it.
+/// Child-process handle; the Windows arm also retains the OS `HANDLE`.
 pub const Process = switch (builtin.os.tag) {
     .linux, .macos => extern struct {
         pid: i32,
@@ -94,9 +73,7 @@ const win = struct {
     extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 };
 
-/// `STARTUPINFOW` — `cb` must be `@sizeOf(STARTUPINFOW)`; the rest is
-/// zeroed for a plain console-less spawn (we inherit nothing and pipe
-/// nothing — stdio piping is Phase 0.3 per the file header).
+/// `cb` MUST be `@sizeOf(STARTUPINFOW)` or `CreateProcessW` refuses the call.
 const STARTUPINFOW = extern struct {
     cb: u32,
     lpReserved: ?[*:0]u16,
@@ -118,8 +95,6 @@ const STARTUPINFOW = extern struct {
     hStdError: ?*anyopaque,
 };
 
-/// `PROCESS_INFORMATION` — filled by `CreateProcessW` with the child's
-/// process + primary-thread handles and ids.
 const PROCESS_INFORMATION = extern struct {
     hProcess: ?*anyopaque,
     hThread: ?*anyopaque,
@@ -127,10 +102,8 @@ const PROCESS_INFORMATION = extern struct {
     dwThreadId: u32,
 };
 
-// `posix_spawnp` needs the parent process's `envp` pointer. The
-// underlying symbol is OS-specific: Linux/glibc exposes a real
-// `environ` global; macOS hides it behind `_NSGetEnviron()` to
-// allow the two-level namespace dyld to relocate it.
+// Linux/glibc exposes a real `environ` global; macOS hides it behind
+// `_NSGetEnviron()` so two-level-namespace dyld can relocate it.
 extern "c" fn _NSGetEnviron() *[*]const ?[*:0]const u8;
 extern var environ: [*]const ?[*:0]const u8;
 
@@ -142,21 +115,8 @@ fn currentEnvp() [*]const ?[*:0]const u8 {
     };
 }
 
-/// Quotes a single argument for a Windows command line per the MSVCRT /
-/// `CommandLineToArgvW` rules, so the spawned process reconstructs
-/// `argv[i]` byte-for-byte — including the tricky cases the naive
-/// `"arg"` wrapping gets wrong (a path ending in one or more `\`, or an
-/// argument containing `"`). Caller owns the returned slice.
-///
-/// Operates on UTF-8: every metacharacter (` `, `\t`, `\n`, vertical
-/// tab, `"`, `\`) is ASCII and UTF-8 is ASCII-transparent, so byte-wise
-/// quoting matches the wide-char algorithm `CreateProcessW` will parse.
-///
-/// Algorithm (Daniel Colascione's `ArgvQuote`): emit the argument
-/// verbatim when it is non-empty and contains no whitespace or `"`;
-/// otherwise wrap in `"` and, scanning runs of backslashes, double them
-/// before a `"` (literal or the closing one) and leave them as-is
-/// elsewhere.
+/// Quote one argument per the `CommandLineToArgvW` rules. Caller owns the slice.
+/// The naive `"arg"` wrapping is WRONG for a trailing `\` run or an embedded `"`.
 pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -172,17 +132,14 @@ pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error
         var backslashes: usize = 0;
         while (i < arg.len and arg[i] == '\\') : (i += 1) backslashes += 1;
         if (i == arg.len) {
-            // Trailing backslashes precede the closing quote — double them
-            // so the quote stays a delimiter, not an escaped literal.
+            // Doubled so the closing quote stays a delimiter, not an escaped literal.
             try out.appendNTimes(gpa, '\\', backslashes * 2);
             break;
         } else if (arg[i] == '"') {
-            // Escape the run of backslashes AND the embedded quote.
             try out.appendNTimes(gpa, '\\', backslashes * 2 + 1);
             try out.append(gpa, '"');
             i += 1;
         } else {
-            // Backslashes are literal away from a quote.
             try out.appendNTimes(gpa, '\\', backslashes);
             try out.append(gpa, arg[i]);
             i += 1;
@@ -192,10 +149,6 @@ pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error
     return out.toOwnedSlice(gpa);
 }
 
-/// UTF-8 → NUL-terminated UTF-16LE for the Win32 wide APIs, remapping a
-/// non-UTF-8 input to `error.InvalidArgument` (it is invalid caller
-/// input, not an engine fault) so the process `Error` set stays free of
-/// a Unicode member. Caller owns the returned slice.
 fn utf8ToUtf16Z(gpa: std.mem.Allocator, s: []const u8) error{ InvalidArgument, OutOfMemory }![:0]u16 {
     return std.unicode.utf8ToUtf16LeAllocZ(gpa, s) catch |e| switch (e) {
         error.InvalidUtf8 => error.InvalidArgument,
@@ -203,11 +156,8 @@ fn utf8ToUtf16Z(gpa: std.mem.Allocator, s: []const u8) error{ InvalidArgument, O
     };
 }
 
-/// Spawns a child process running `path` with the supplied
-/// `argv`. The caller's environment is inherited as-is. The
-/// returned `Process` must be passed to `waitNonblock` /
-/// `kill` for cleanup; on POSIX the child becomes a zombie
-/// until reaped.
+/// Spawn `path` with `argv`; the caller's environment is inherited as-is.
+/// On POSIX the child stays a ZOMBIE until `waitNonblock` reaps it.
 pub fn spawnProcess(
     gpa: std.mem.Allocator,
     path: []const u8,
@@ -218,8 +168,7 @@ pub fn spawnProcess(
             const path_z = try gpa.dupeZ(u8, path);
             defer gpa.free(path_z);
 
-            // Build a null-terminated argv vector. Includes argv[0]
-            // (conventionally the binary path) plus a trailing null.
+            // `argv` must already carry argv[0]; only the trailing null is added.
             var c_argv = try gpa.alloc(?[*:0]const u8, argv.len + 1);
             defer {
                 for (c_argv[0..argv.len]) |maybe| if (maybe) |p| gpa.free(std.mem.span(p));
@@ -244,10 +193,7 @@ pub fn spawnProcess(
             return .{ .pid = pid };
         },
         .windows => {
-            // Build a UTF-8 command line (each arg quoted), convert to
-            // UTF-16, and spawn via CreateProcessW. `lpApplicationName`
-            // pins the binary; argv[0] stays in the command line by
-            // convention. M0.7 / E3 — wires the Windows editor path.
+            // `lpApplicationName` pins the binary; argv[0] must still lead the command line.
             var cmd: std.ArrayList(u8) = .empty;
             defer cmd.deinit(gpa);
             for (argv, 0..) |a, i| {
@@ -278,18 +224,14 @@ pub fn spawnProcess(
                 @ptrCast(&pi),
             );
             if (ok == 0) {
-                // Surface the Win32 last-error so a spawn failure is
-                // diagnosable (e.g. 2 = ERROR_FILE_NOT_FOUND when the
-                // exe path is wrong / missing the `.exe` suffix) instead
-                // of an opaque `error.SpawnFailed`.
+                // Without the last-error the caller sees only an opaque `SpawnFailed`.
                 std.log.scoped(.process).err(
                     "CreateProcessW failed: path='{s}' GetLastError={d}",
                     .{ path, win.GetLastError() },
                 );
                 return error.SpawnFailed;
             }
-            // The primary-thread handle is unused; close it now. The
-            // process handle is retained for `waitNonblock` / `kill`.
+            // Close the unused thread handle; the process handle is kept for wait/kill.
             if (pi.hThread) |h| _ = win.CloseHandle(h);
             return .{ .pid = pi.dwProcessId, .handle = pi.hProcess };
         },
@@ -297,9 +239,8 @@ pub fn spawnProcess(
     }
 }
 
-/// Polls without blocking. Returns `null` if the child is still
-/// alive, or its exit code if it has terminated. Reaps zombies on
-/// POSIX so subsequent `isAlive(pid)` calls don't lie.
+/// Poll without blocking: `null` while the child lives, else its exit code.
+/// Reaps the POSIX zombie, without which `isAlive(pid)` keeps answering true.
 pub fn waitNonblock(proc: *Process) Error!?i32 {
     switch (builtin.os.tag) {
         .linux, .macos => {
@@ -307,7 +248,7 @@ pub fn waitNonblock(proc: *Process) Error!?i32 {
             const r = posix.waitpid(proc.pid, &status, posix.WNOHANG);
             if (r == 0) return null; // still alive
             if (r < 0) return error.WaitFailed;
-            // WEXITSTATUS macro: (status >> 8) & 0xFF
+            // `WEXITSTATUS` is exactly this shift and mask — not `status` itself.
             return @intCast((status >> 8) & 0xFF);
         },
         .windows => {
@@ -325,8 +266,7 @@ pub fn waitNonblock(proc: *Process) Error!?i32 {
     }
 }
 
-/// Sends SIGKILL (POSIX) or `TerminateProcess` (Windows). Does not
-/// wait; caller follows up with `waitNonblock` to reap.
+/// SIGKILL or `TerminateProcess`; does not wait — follow with `waitNonblock`.
 pub fn kill(proc: *Process) Error!void {
     switch (builtin.os.tag) {
         .linux, .macos => {
@@ -340,10 +280,7 @@ pub fn kill(proc: *Process) Error!void {
     }
 }
 
-/// Liveness probe — true if a process with `pid` exists in our
-/// session. Implemented via `kill(pid, 0)` on POSIX (signal 0
-/// performs the error checks of `kill` without sending a signal) and
-/// `OpenProcess(SYNCHRONIZE)` on Windows.
+/// True if `pid` exists AND we may signal it; a foreign-owned pid answers false.
 pub fn isAlive(pid: Pid) bool {
     switch (builtin.os.tag) {
         .linux, .macos => return posix.kill(pid, 0) == 0,
@@ -357,5 +294,4 @@ pub fn isAlive(pid: Pid) bool {
     }
 }
 
-// Runtime tests live in `tests/ipc/process.zig` — see that file
-// for spawn + reap + isAlive + kill coverage.
+// No inline test here: coverage lives in `tests/ipc/process.zig`.
