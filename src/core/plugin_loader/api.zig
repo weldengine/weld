@@ -393,8 +393,7 @@ fn stub_tag_has_all(world: WeldWorldHandle, entity: WeldEntity, tags: ?[*]const 
 
 // WeldResourceAPI (cf. engine-c-api.md §6).
 
-/// Resources sub-API table (cf. `engine-c-api.md §6`). Stubbed in
-/// wiring is Phase 3.
+/// Resources sub-API table (cf. `engine-c-api.md §6`) — stubbed; wiring is Phase 3.
 pub const WeldResourceAPI = extern struct {
     resource_register: *const fn (
         world: WeldWorldHandle,
@@ -464,8 +463,7 @@ fn stub_resource_changed(world: WeldWorldHandle, id: WeldResourceId, since_frame
 
 // WeldEventAPI (cf. engine-c-api.md §7).
 
-/// Events sub-API table (cf. `engine-c-api.md §7`). Stubbed in
-/// — wiring is Phase 3.
+/// Events sub-API table (cf. `engine-c-api.md §7`) — stubbed; wiring is Phase 3.
 pub const WeldEventAPI = extern struct {
     event_register: *const fn (
         world: WeldWorldHandle,
@@ -524,7 +522,7 @@ fn stub_event_read(world: WeldWorldHandle, event_id: WeldEventId) callconv(.c) W
 // WeldServiceAPI (cf. engine-c-api.md §8).
 
 /// Inter-module service registry sub-API (cf. `engine-c-api.md §8`).
-/// Stubbed in the registry itself is Phase 3.
+/// Stubbed; the registry itself is Phase 3.
 pub const WeldServiceAPI = extern struct {
     service_get: *const fn (world: WeldWorldHandle, name: WeldStr) callconv(.c) ?*const anyopaque = stub_service_get,
     service_available: *const fn (world: WeldWorldHandle, name: WeldStr) callconv(.c) bool = stub_service_available,
@@ -544,7 +542,7 @@ fn stub_service_available(world: WeldWorldHandle, name: WeldStr) callconv(.c) bo
 // WeldMemoryAPI (cf. engine-c-api.md §9).
 
 /// Memory sub-API table (cf. `engine-c-api.md §9`) — exposes the
-/// engine's allocator hierarchy + a pool factory. Stubbed in .
+/// engine's allocator hierarchy + a pool factory. Stubbed.
 pub const WeldMemoryAPI = extern struct {
     get_frame_allocator: *const fn () callconv(.c) WeldAllocatorHandle = stub_get_frame_allocator,
     get_persistent_allocator: *const fn () callconv(.c) WeldAllocatorHandle = stub_get_persistent_allocator,
@@ -597,7 +595,7 @@ fn stub_destroy_pool(pool: WeldAllocatorHandle) callconv(.c) void {
 // WeldEditorAPI (cf. engine-c-api.md §10).
 
 /// Editor sub-API table (cf. `engine-c-api.md §10`) — only callable
-/// from the editor process. Stubbed in .
+/// from the editor process. Stubbed.
 pub const WeldEditorAPI = extern struct {
     // --- Custom panels ---
     panel_register: *const fn (name: WeldStr, category: WeldStr, draw_fn: WeldPanelDrawFn, user_data: ?*anyopaque) callconv(.c) WeldResult = stub_panel_register,
@@ -737,7 +735,7 @@ fn stub_draw_collapsible_end(ctx: WeldEditorCtxHandle) callconv(.c) void {
 // WeldPlatformAPI (cf. engine-c-api.md §11).
 
 /// Platform sub-API table (cf. `engine-c-api.md §11`) — filesystem,
-/// time, jobs, logging, OS introspection. Stubbed in .
+/// time, jobs, logging, OS introspection. Stubbed.
 pub const WeldPlatformAPI = extern struct {
     file_read: *const fn (path: WeldStr, allocator: WeldAllocatorHandle, out_data: *?*anyopaque, out_size: *u32) callconv(.c) WeldResult = stub_file_read,
     file_write: *const fn (path: WeldStr, data: *const anyopaque, size: u32) callconv(.c) WeldResult = stub_file_write,
@@ -810,8 +808,7 @@ fn stub_total_memory_bytes() callconv(.c) u64 {
 
 /// Top-level API table passed to `weld_plugin_entry`. Aggregates
 /// the 7 sub-API tables plus the per-tick context (`world`, `dt`,
-/// `frame`). Stubbed in every sub-API callback returns
-/// `WELD_ERR_NOT_IMPLEMENTED`.
+/// `frame`). Every sub-API callback returns `WELD_ERR_NOT_IMPLEMENTED`.
 pub const WeldAPI = extern struct {
     /// ECS sub-API.
     ecs: *const WeldEcsAPI,

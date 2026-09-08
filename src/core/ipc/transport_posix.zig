@@ -1,19 +1,9 @@
-//! POSIX backend (Linux + macOS) for the Weld IPC transport. Uses a
-//! Unix domain socket in `SOCK_STREAM` mode and `sendmsg`/`recvmsg`
-//! with `SCM_RIGHTS` ancillary data for out-of-band file descriptor
-//! passing (cf. `engine-ipc.md` §2.3).
+//! POSIX backend for the IPC transport: a `SOCK_STREAM` Unix socket, with
+//! `sendmsg`/`recvmsg` + `SCM_RIGHTS` for out-of-band descriptor passing.
 //!
-//! libc is linked (build.zig sets `link_libc = true` on
-//! `core_module`); socket, bind, listen, accept, connect, sendmsg,
-//! recvmsg, close, and unlink are pulled via direct `extern "c"`
-//! declarations to avoid coupling to the evolving `std.posix`
-//! signatures across Zig 0.16 minor patches.
-//!
-//! `cmsghdr` layout diverges between Linux glibc (`cmsg_len: size_t`,
-//! 8 bytes on LP64) and macOS BSD (`cmsg_len: socklen_t`, 4 bytes).
-//! The `CmsgHdr` struct below is platform-switched accordingly, and
-//! the alignment helper rounds to the same width — required for the
-//! receiver to parse our ancillary buffer back into discrete cmsgs.
+//! `cmsghdr` DIVERGES: `cmsg_len` is a `size_t` on Linux glibc and a `socklen_t` on
+//! macOS. `CmsgHdr` and the alignment helper are platform-switched to match, without
+//! which the receiver cannot split our ancillary buffer back into cmsgs.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,13 +19,7 @@ comptime {
     }
 }
 
-// -------------------------------------------------- libc declarations --
-//
-// `usize` is `size_t` on every 64-bit POSIX target Weld supports;
-// `isize` is `ssize_t`. `u32` is the canonical `socklen_t` on both
-// Linux and macOS. The `sys` namespace shields the libc names from
-// `Backend.listen` / `Backend.accept` / `Backend.connect` /
-// `Backend.close` which would otherwise shadow them.
+// The `sys` namespace shields the libc names the `Backend` methods would shadow.
 
 const Socklen = u32;
 
@@ -469,10 +453,7 @@ pub const Backend = struct {
     }
 };
 
-// Most runtime tests live in `tests/ipc/transport.zig` — one exe each
-// to keep an eventual deadlock in one case from stalling the rest of
-// `zig build test`. The R2 permission test below is bind-only (no
-// accept/recv, so no deadlock risk) and is kept inline with the code it guards.
+// One exe per case in `tests/ipc/transport.zig`; the bind-only test below stays here.
 
 /// Test helper: the raw `st_mode` of a path, read WITHOUT opening it (so it works
 /// on a socket file). Linux goes kernel-native via the `statx` syscall —

@@ -32,7 +32,7 @@ pub const type_array: TypeId = 2;
 /// A map container block; same discipline as `type_array`.
 pub const type_map: TypeId = 3;
 
-/// A set container block (`Set<T>`, ). Same discipline as `type_array`.
+/// A set container block (`Set<T>`). Same discipline as `type_array`.
 pub const type_set: TypeId = 4;
 
 /// Refcount marking an immortal block: `incref` and `decref` are no-ops on it.

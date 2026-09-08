@@ -1,15 +1,6 @@
-//! Minimal binary scene snapshot persisted by the runtime on
-//! `SaveProject`, reloaded on restart as the best-effort-replay
-//! reference point (`engine-ipc.md` §7.1, brief E4 "option 1"). This is
-//! **not** a `.scene.etch` writer and carries no project-settings
-//! serialization (out of Phase 0): for the runtime stub the
-//! "active scene" is the mire, so the snapshot records a single marker
-//! (`frame_id`) — enough to give replay a concrete reload point on the
-//! restarted runtime.
-//!
-//! File I/O goes through `std.Io.Dir` + `io` (the 0.16 filesystem API);
-//! `std.fs.cwd()` no longer exists. The runtime supplies `io` from its
-//! `std.process.Init`.
+//! Minimal binary snapshot the runtime persists on `SaveProject` and reloads on
+//! restart as the replay reference point. NOT a `.scene.etch` writer, and it
+//! serialises no project settings — `frame_id` is the whole record.
 
 const std = @import("std");
 
@@ -23,14 +14,11 @@ pub const Snapshot = extern struct {
     magic: u32,
     version: u16,
     _pad: u16 = 0,
-    /// The active scene's minimal state. stub: a save marker (the
-    /// `SaveProject` seq_id) standing in for the reloadable scene state.
+    /// Stands in for the reloadable scene state — the `SaveProject` seq_id.
     frame_id: u64,
 };
 
-/// Persist `snap` to `path`, overwriting any prior snapshot. Called by
-/// the runtime when it acks `SaveProject`. `magic`/`version` are stamped
-/// here so callers need only fill `frame_id`.
+/// Persist `snap`, stamping `magic` and `version` so callers fill only `frame_id`.
 pub fn write(io: std.Io, path: []const u8, snap: Snapshot) !void {
     var rec = snap;
     rec.magic = magic;
@@ -40,9 +28,7 @@ pub fn write(io: std.Io, path: []const u8, snap: Snapshot) !void {
     try f.writeStreamingAll(io, std.mem.asBytes(&rec));
 }
 
-/// Read the snapshot at `path`. Returns `null` when absent or malformed
-/// (a fresh runtime with no prior save starts clean — `engine-ipc.md`
-/// §7.2: no save ⇒ no reload point).
+/// The snapshot at `path`, or `null` when it is absent, short, or a wrong version.
 pub fn read(io: std.Io, path: []const u8) ?Snapshot {
     const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer f.close(io);

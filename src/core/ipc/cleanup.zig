@@ -1,24 +1,13 @@
-//! Startup orphan reaping for IPC endpoints (`engine-ipc.md` §2.4 +
-//! §6.3). The editor owns its Unix socket file (`/tmp/weld-<pid>.sock`)
-//! and its POSIX shm regions (`/weld-shm-<role>-<pid>`); a `kill -9`
-//! of the editor leaves both behind, named with the dead editor's PID.
-//! The next editor calls `reapOrphans` at startup to remove any such
-//! orphan whose embedded PID is no longer alive (`process.isAlive`).
+//! Startup reaping of IPC endpoints a `kill -9`ed editor left behind, named with
+//! its own PID.
 //!
-//! Safety: an endpoint is removed **only** when its PID is dead, so a
-//! second editor running concurrently (live PID) never has its
-//! endpoints reaped. The reap is best-effort — every failure is
-//! swallowed (it is startup hygiene, not a correctness gate).
+//! An endpoint is removed ONLY when its embedded PID is dead, so a second live
+//! editor never has its socket or regions reaped. Best-effort: every failure is
+//! swallowed, this being startup hygiene and not a correctness gate.
 //!
-//! Implementation note: raw `opendir`/`readdir` via `extern "c"`,
-//! consistent with the rest of the IPC module (`shm_posix.zig`,
-//! `transport_posix.zig`) which binds libc directly to stay decoupled
-//! from the evolving `std.fs` / `std.Io.Dir` signatures across Zig
-//! 0.16 patches. Windows is a no-op: named pipes and named file
-//! mappings are refcounted kernel objects that vanish with their last
-//! handle, so there is nothing to unlink. shm orphan scanning uses the
-//! Linux `/dev/shm` tmpfs listing (macOS POSIX shm objects are not
-//! filesystem-visible, so only the socket reap runs there).
+//! Windows is a no-op — named pipes and mappings are refcounted and vanish with
+//! their last handle. macOS reaps the socket only: its shm objects are not visible
+//! in the filesystem, where Linux lists them under `/dev/shm`.
 
 const std = @import("std");
 const builtin = @import("builtin");

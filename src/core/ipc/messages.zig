@@ -1,60 +1,25 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Catalogue of the IPC messages, defined as `extern struct` POD per
-//! `engine-ipc.md` §3.2 + brief § Scope. Every payload is written/read
-//! byte-for-byte across the socket, preceded by an 8-byte
-//! `schema_hash` that detects build-version drift between the editor
-//! and the runtime.
-//!
-//! S6 shipped 13 message types; adds `ShmRegionsHandoff`
-//! (the POSIX fd handoff, §3.3 + §4.8). extends the
-//! catalogue further (`Play`/`Pause`/`Stop`, `LoadScene`,
-//! `HotReloadScript`, `SaveScene`, `SaveProject`/`ProjectSaved`,
-//! `RuntimeError`). The `WELD_IPC_PROTOCOL_VERSION` 2→3 bump covers
-//! the whole catalogue + attach-semantics change.
-//!
-//! The S6 brief acknowledges a triple count inconsistency in its own
-//! text — the catalogue is described as "exactly 11 message types",
-//! the tabular body lists 13 entries, and a closing footnote claims
-//! 12. The implementation follows the table (the explicit list) which
-//! is the exhaustive enumeration; the discrepancy is logged in the
-//! brief's execution journal as a textual observation, not as a
-//! design deviation.
-//!
-//! S6 keeps the message structs deliberately minimal — the runtime
-//! stub increments a counter on `SpawnEntity` rather than wiring the
-//! real ECS, and `ModifyComponent` is exercised only as a non-trivial
-//! payload shape. The same `extern struct` layouts will survive into
-//! Phase 0.6 where the real semantics land (cf. brief § Out-of-scope).
-//!
-//! NUL-terminated fixed-size byte buffers represent the few "string"
-//! fields (`engine_version`, `build_hash`, `reason`, `text`). The
-//! buffer length is part of the wire schema — a longer string is
-//! truncated at write time; a shorter string is followed by zero
-//! bytes that the receiver stops at the first NUL.
+//! Every payload is an `extern struct` written byte-for-byte, preceded by an 8-byte
+//! `schema_hash` that catches editor/runtime build drift. Fixed byte buffers stand
+//! in for strings: a longer write is TRUNCATED and the reader stops at the first NUL.
 
 const std = @import("std");
 const rtti = @import("../rtti/root.zig");
 
-/// Message-type discriminator written in the framing header
-/// (`framing.zig` `Header.msg_type: u16`). Discriminant values are
-/// stable for a given `WELD_IPC_PROTOCOL_VERSION`; reordering or
-/// renumbering is a breaking change that bumps the protocol version.
+/// Discriminator in the framing header; renumbering is a protocol-version bump.
 pub const MsgType = enum(u16) {
     /// Runtime → Editor — handshake (first message after connect).
     protocol_hello = 1,
     /// Editor → Runtime — handshake response.
     protocol_hello_ack = 2,
-    /// Editor → Runtime — transactional, 64-byte random payload used
-    /// to measure round-trip latency (G1/G2 of the brief).
+    /// Editor → Runtime — transactional; the round-trip latency probe.
     echo = 3,
     /// Runtime → Editor — echoes the seq_id and payload of the Echo.
     echo_reply = 4,
-    /// Editor → Runtime — transactional, requests entity creation
-    /// (S6 stub: increments a counter).
+    /// Editor → Runtime — transactional, requests entity creation.
     spawn_entity = 5,
-    /// Runtime → Editor — confirms `SpawnEntity` with a synthetic
-    /// `entity` id.
+    /// Runtime → Editor — confirms `SpawnEntity` with a synthetic id.
     entity_created = 6,
     /// Editor → Runtime — transactional non-trivial payload exercise.
     modify_component = 7,
@@ -70,9 +35,7 @@ pub const MsgType = enum(u16) {
     shutdown_ack = 12,
     /// Runtime → Editor — unidirectional log event (no ack).
     log_message = 13,
-    /// Editor → Runtime — POSIX shm fd handoff (,
-    /// `engine-ipc.md` §3.3 + §4.8). Sent right after the handshake
-    /// via `sendWithHandles`; the fds ride as ancillary data.
+    /// Editor → Runtime — POSIX shm fd handoff; the fds ride as ancillary data.
     shm_regions_handoff = 14,
     /// Editor → Runtime — start simulation (fire-and-forget, §3.4).
     play = 15,
@@ -84,22 +47,16 @@ pub const MsgType = enum(u16) {
     load_scene = 18,
     /// Editor → Runtime — hot-reload a script by asset handle.
     hot_reload_script = 19,
-    /// Editor → Runtime — save ONE scene by path (scene granularity).
-    /// Declared in with **no wired handler** — wiring deferred to
-    /// the scene serialization pipeline (out of Phase 0, brief § Out-of-scope).
+    /// Editor → Runtime — save ONE scene by path; declared with NO wired handler.
     save_scene = 20,
-    /// Editor → Runtime — save the whole project (transactional, §3.4).
-    /// The runtime replies with `project_saved` carrying the same `seq_id`.
+    /// Editor → Runtime — transactional; the reply is `project_saved`, same `seq_id`.
     save_project = 21,
     /// Runtime → Editor — ack of `save_project` (same `seq_id`).
     project_saved = 22,
-    /// Runtime → Editor — non-fatal recoverable error event (no ack).
-    /// Distinct from `CrashReport` (reserved for the fatal case).
+    /// Runtime → Editor — non-fatal, no ack; `CrashReport` is the fatal case.
     runtime_error = 23,
 
-    /// Returns true when the raw `u16` from a frame header maps to a
-    /// declared variant. Used by `framing.validate` to fail fast on
-    /// unknown discriminants.
+    /// True when the raw header `u16` maps to a declared variant.
     pub fn isKnown(raw: u16) bool {
         return switch (raw) {
             1...23 => true,
@@ -108,17 +65,12 @@ pub const MsgType = enum(u16) {
     }
 };
 
-/// Bit positions for `ProtocolHello.capabilities` per `engine-ipc.md`
-/// §5.1. The brief locks `GPU_SHARED_FB` at bit 0 and the runtime
-/// stub publishes the capability bitfield at zero in S6 — stabilising
-/// the schema_hash of `ProtocolHello` for the Phase 3 introduction of
-/// shared GPU framebuffers.
+/// Bit positions for `ProtocolHello.capabilities`; bit 0 is locked to GPU_SHARED_FB.
 pub const Capability = struct {
     pub const GPU_SHARED_FB: u32 = 1 << 0;
 };
 
-/// Log severity transported by `LogMessage.level`. Numeric values are
-/// stable across the protocol version.
+/// Severity for `LogMessage.level`; the numeric values are wire-stable.
 pub const LogLevel = enum(u32) {
     trace = 0,
     debug = 1,
@@ -127,78 +79,54 @@ pub const LogLevel = enum(u32) {
     err = 4,
 };
 
-/// Severity carried by `RuntimeError.severity` (`engine-ipc.md` §3.3).
-/// Numeric values are stable across the protocol version.
+/// Severity for `RuntimeError.severity`; the numeric values are wire-stable.
 pub const ErrorSeverity = enum(u32) {
     warning = 0,
     err = 1,
 };
 
-/// Runtime → Editor. First message of the handshake (cf.
-/// `engine-ipc.md` §5.1). The editor replies with `ProtocolHelloAck`
-/// to accept or reject.
+/// Runtime → Editor. First message of the handshake; the editor replies with an ack.
 pub const ProtocolHello = extern struct {
-    /// Equal to `protocol.WELD_IPC_PROTOCOL_VERSION` at the runtime's
-    /// build time.
+    /// The runtime's build-time `WELD_IPC_PROTOCOL_VERSION`.
     protocol_version: u16,
-    /// Pads `protocol_version` up to the natural 4-byte alignment of
-    /// the next field; always zero on the wire.
+    /// Explicit padding, always zero on the wire — removing it changes the layout.
     _pad0: u16 = 0,
-    /// NUL-terminated engine version string (e.g. `"0.0.6"`). Stable
-    /// width keeps the struct extern-friendly.
+    /// NUL-terminated engine version; the WIDTH is part of the wire schema.
     engine_version: [32]u8,
-    /// NUL-terminated short git SHA of the runtime build.
     build_hash: [16]u8,
-    /// Capability bitfield (cf. `Capability`). S6 publishes 0.
     capabilities: u32,
 };
 
-/// Editor → Runtime. Handshake response. `accepted == 1` ⇒
-/// connection becomes ready; `accepted == 0` ⇒ runtime logs `reason`
-/// and exits.
+/// Editor → Runtime. On `accepted == 0` the runtime logs `reason` and exits.
 pub const ProtocolHelloAck = extern struct {
-    /// 1 = accepted, 0 = rejected. Stored as `u8` because `bool` is
-    /// not legal in `extern struct` in Zig 0.16.
+    /// 1 = accepted. `u8` and not `bool`, which is illegal in an `extern struct`.
     accepted: u8,
     _pad0: [3]u8 = .{ 0, 0, 0 },
     /// NUL-terminated rejection reason. Empty when `accepted == 1`.
     reason: [128]u8,
 };
 
-/// Editor → Runtime. Transactional. The runtime replies with
-/// `EchoReply` carrying the same `seq_id` and payload. The 64-byte
-/// payload exists to make the RTT bench measure a
-/// non-trivial frame body.
+/// Editor → Runtime. Transactional; the reply carries the same `seq_id` and payload.
 pub const Echo = extern struct {
     payload: [64]u8,
 };
 
-/// Runtime → Editor. Echoes the seq_id of the originating `Echo`
-/// (the seq_id is carried in the frame header, not in the body) and
-/// the 64-byte payload byte-for-byte.
+/// Runtime → Editor. The `seq_id` rides the frame header, never the body.
 pub const EchoReply = extern struct {
     payload: [64]u8,
 };
 
-/// Editor → Runtime. Transactional. S6 stub: the runtime increments
-/// a counter and replies with `EntityCreated`. The `archetype_hint`
-/// field is informational only — kept so the struct is a non-zero-
-/// sized extern struct and so Phase 0.6 can wire a real archetype
-/// lookup without changing the schema_hash if the field is reused.
+/// Editor → Runtime. Transactional; `archetype_hint` is informational only.
 pub const SpawnEntity = extern struct {
     archetype_hint: u32 = 0,
 };
 
-/// Runtime → Editor. Reply to `SpawnEntity`. The `entity` field is a
-/// synthetic counter in S6; Phase 0.6 will widen it to a generational
-/// `EntityId` from `weld_core.ecs`.
+/// Runtime → Editor. Reply to `SpawnEntity`.
 pub const EntityCreated = extern struct {
     entity: u64,
 };
 
-/// Editor → Runtime. Transactional. Non-trivial payload exercise —
-/// 56 bytes of mixed primitives + a fixed-width opaque value blob.
-/// S6 runtime echoes back via `ModifyAck` with `success = 1`.
+/// Editor → Runtime. Transactional.
 pub const ModifyComponent = extern struct {
     entity: u64,
     component_type: u32,
@@ -206,31 +134,24 @@ pub const ModifyComponent = extern struct {
     new_value: [40]u8,
 };
 
-/// Runtime → Editor. Reply to `ModifyComponent`. The seq_id of the
-/// originating command is carried in the frame header. `success` is
-/// 1 in S6 (the runtime never rejects in stub mode).
+/// Runtime → Editor. Reply to `ModifyComponent`; the `seq_id` is in the header.
 pub const ModifyAck = extern struct {
     success: u8,
     _pad0: [7]u8 = .{ 0, 0, 0, 0, 0, 0, 0 },
 };
 
-/// Editor → Runtime. Periodic liveness probe — emitted every
-/// `HEARTBEAT_PERIOD_NS` (1 s). The runtime replies immediately with
-/// `HeartbeatAck`.
+/// Editor → Runtime. Liveness probe, one per `HEARTBEAT_PERIOD_NS`.
 pub const Heartbeat = extern struct {
     sent_at_us: u64,
 };
 
-/// Runtime → Editor. Echoes the `Heartbeat.sent_at_us` and stamps
-/// the local reception time in microseconds.
+/// Runtime → Editor. Echoes `sent_at_us` and stamps the local reception time.
 pub const HeartbeatAck = extern struct {
     sent_at_us: u64,
     received_at_us: u64,
 };
 
-/// Editor → Runtime. Requests a graceful termination. The runtime
-/// must reply with `ShutdownAck` before exiting (otherwise the
-/// editor reports a timeout).
+/// Editor → Runtime. The runtime MUST reply `ShutdownAck` or the editor times out.
 pub const Shutdown = extern struct {
     _reserved: u8 = 0,
 };
@@ -240,34 +161,21 @@ pub const ShutdownAck = extern struct {
     _reserved: u8 = 0,
 };
 
-/// Runtime → Editor. Fire-and-forget event. Covers `LogMessage`,
-/// the only unidirectional event in S6 (no ack expected).
+/// Runtime → Editor. Fire-and-forget: no ack is expected or sent.
 pub const LogMessage = extern struct {
     level: u32,
     _pad0: u32 = 0,
     timestamp_us: u64,
-    /// NUL-terminated UTF-8 text. Longer messages are truncated at
-    /// the sender.
     text: [256]u8,
 };
 
-/// NUL-terminated capacity for a `ShmRegionDesc.logical_name`.
-/// `"viewport_framebuffer"` (20 bytes) is the longest name hands
-/// off; 32 leaves headroom for the §4.1 names (`debug_overlays`,
-/// `profiler_samples`, `selection_snapshot`, `log_stream`).
+/// NUL-terminated capacity of `ShmRegionDesc.logical_name`; the §4.1 names fit.
 pub const SHM_LOGICAL_NAME_LEN: usize = 32;
 
-/// Maximum shm regions carried by one `ShmRegionsHandoff`. hands
-/// off only `viewport_framebuffer`; the §4.1 catalogue tops out at 5
-/// regions. 8 is comfortable headroom and keeps the frame small
-/// (`8 × 40 + 8 = 328` payload bytes).
+/// Region ceiling per handoff — 8 keeps the frame at 328 payload bytes.
 pub const MAX_SHM_REGIONS: usize = 8;
 
-/// One shm-region descriptor inside a `ShmRegionsHandoff`
-/// (`engine-ipc.md` §3.3). The fd travels out-of-band via
-/// `SCM_RIGHTS`; this struct carries only the logical name and size so
-/// the runtime can pair each received fd with its role and `mmap` the
-/// right length via `ShmRegion.fromFd`.
+/// One region descriptor; the fd itself travels out-of-band via `SCM_RIGHTS`.
 pub const ShmRegionDesc = extern struct {
     /// NUL-terminated logical role, e.g. `"viewport_framebuffer"`.
     logical_name: [SHM_LOGICAL_NAME_LEN]u8,
@@ -275,28 +183,17 @@ pub const ShmRegionDesc = extern struct {
     size: u64,
 };
 
-/// Editor → Runtime, POSIX. Hands the runtime the file
-/// descriptors of the shm regions the editor created
-/// (`engine-ipc.md` §4.8 + §3.3). Sent immediately after
-/// `ProtocolHelloAck` through `IpcSocket.sendWithHandles`: the fds
-/// ride as `SCM_RIGHTS` ancillary data in the same order as
-/// `regions[0..region_count]`. The runtime maps each via
-/// `ShmRegion.fromFd` and **never** calls cross-process `shm_open`.
-/// The receiver validates that the ancillary fd count equals
-/// `region_count` (`engine-ipc.md` §8.3).
+/// Editor → Runtime, POSIX. Sent right after `ProtocolHelloAck` through
+/// `sendWithHandles`: the fds ride in the SAME ORDER as `regions[0..region_count]`.
 pub const ShmRegionsHandoff = extern struct {
-    /// Number of valid entries in `regions` (and of fds in the
-    /// ancillary data). `1` in (`viewport_framebuffer` only).
+    /// Valid entries in `regions`, and the ancillary fd count the receiver checks.
     region_count: u32,
     _pad0: u32 = 0,
-    /// Fixed-capacity descriptor table; only the first `region_count`
-    /// entries are meaningful. Fixed size keeps the frame an
-    /// `extern struct` POD like every other catalogue message.
+    /// Fixed capacity; only the first `region_count` entries are meaningful.
     regions: [MAX_SHM_REGIONS]ShmRegionDesc,
 };
 
-/// Editor → Runtime. Start the simulation. Fire-and-forget (§3.4) — no
-/// ack. The single reserved byte keeps it a non-zero-sized extern POD.
+/// Editor → Runtime. Start the simulation. Fire-and-forget — no ack.
 pub const Play = extern struct {
     _reserved: u8 = 0,
 };
@@ -313,61 +210,44 @@ pub const Stop = extern struct {
 
 /// Editor → Runtime. Load a scene by filesystem path. Fire-and-forget.
 pub const LoadScene = extern struct {
-    /// NUL-terminated scene path. Longer paths truncate at the sender.
     path: [256]u8,
 };
 
-/// Editor → Runtime. Hot-reload a script identified by its stable asset
-/// handle (`AssetHandle` = `u64` per §3.2).
+/// Editor → Runtime. Hot-reload a script by its `AssetHandle` (a `u64`).
 pub const HotReloadScript = extern struct {
     script_handle: u64,
 };
 
-/// Editor → Runtime. Save ONE scene by path (scene granularity, maps
-/// Conduit `scene.save`). Declared in with **no wired handler**
-/// (see `MsgType.save_scene`); wiring deferred to the scene
-/// serialization pipeline (out of Phase 0).
+/// Editor → Runtime. Save ONE scene by path; declared with NO wired handler.
 pub const SaveScene = extern struct {
-    /// NUL-terminated scene path.
     path: [256]u8,
 };
 
-/// Editor → Runtime. Save the whole project (all dirty scenes + project
-/// settings + modified prefabs). Transactional (§3.4): the runtime
-/// replies with `ProjectSaved` carrying the same `seq_id`. This ack
-/// anchors the editor `CommandLog.last_clean_line` (§7, wired in E4).
-/// No body — project granularity carries no path.
+/// Editor → Runtime. Save the whole project. Transactional: the reply is
+/// `ProjectSaved` with the same `seq_id`, which anchors `CommandLog.last_clean_line`.
 pub const SaveProject = extern struct {
     _reserved: u8 = 0,
 };
 
-/// Runtime → Editor. Ack of `SaveProject` (same `seq_id` in the frame
-/// header). `ok == 0` carries a human-readable `reason`.
+/// Runtime → Editor. Ack of `SaveProject`; `ok == 0` carries a `reason`.
 pub const ProjectSaved = extern struct {
-    /// 1 = saved, 0 = failed. `u8` because `bool` is not legal in an
-    /// `extern struct` in Zig 0.16.
+    /// 1 = saved. `u8` and not `bool`, which is illegal in an `extern struct`.
     ok: u8,
     _pad0: [3]u8 = .{ 0, 0, 0 },
     /// NUL-terminated failure reason. Empty when `ok == 1`.
     reason: [128]u8,
 };
 
-/// Runtime → Editor. Non-fatal, recoverable error event (failed
-/// non-transactional command, missing asset, …), surfaced for a toast
-/// or the "Replay Errors" panel. Unidirectional — no ack. Distinct from
-/// `CrashReport` (reserved for the fatal signal + stacktrace case).
+/// Runtime → Editor. Non-fatal and recoverable, no ack. Distinct from
+/// `CrashReport`, which is reserved for the fatal signal-and-stacktrace case.
 pub const RuntimeError = extern struct {
     /// `ErrorSeverity` as `u32` — extern struct can't embed Zig enums.
     severity: u32,
-    /// NUL-terminated source module name.
     source: [64]u8,
-    /// NUL-terminated UTF-8 error text.
     text: [256]u8,
 };
 
-/// Returns the `MsgType` discriminator for a given message struct.
-/// Used by callers to fill the framing header without manually
-/// keeping the type↔enum mapping in sync at each call site.
+/// The `MsgType` for a message struct, so no call site keeps the mapping by hand.
 pub fn msgTypeOf(comptime T: type) MsgType {
     return switch (T) {
         ProtocolHello => .protocol_hello,
@@ -397,39 +277,24 @@ pub fn msgTypeOf(comptime T: type) MsgType {
     };
 }
 
-/// Comptime schema hash for a message type. Delegates to the Tier 0
-/// RTTI subsystem (`rtti.computeSchemaHash`) — the swap of the
-/// dette D-S6-RTTI. Call sites are unchanged.
-///
-/// Pre-swap, the body inlined `std.hash.Wyhash.hash(0, key)` on a
-/// stringified `(typeName, fields)` key. The RTTI subsystem hashes
-/// `(typeName, [(field.name, kind, count, offset) for each field])`
-/// with `XxHash64(seed=0)` — a structurally different algorithm.
-/// Byte-for-byte equivalence is enforced by
-/// `tests/core/rtti/ipc_compat_test.zig`, which guards the 5
-/// reference S6 messages (`ProtocolHello`, `SpawnEntity`,
-/// `ModifyComponent`, `Heartbeat`, `LogMessage`).
+/// Comptime schema hash, delegated to the RTTI subsystem.
+/// `tests/core/rtti/ipc_compat_test.zig` guards five reference messages byte-for-byte.
 pub fn schemaHash(comptime T: type) u64 {
     return rtti.computeSchemaHash(T);
 }
 
-/// Writes a NUL-terminated string into a fixed-width buffer. Truncates
-/// silently if `text` is longer than `buf.len - 1`. Leftover bytes are
-/// zeroed so the wire image is deterministic.
+/// Write a NUL-terminated string, TRUNCATING silently and zeroing the remainder.
 pub fn writeFixedString(buf: []u8, text: []const u8) void {
     @memset(buf, 0);
     const n = @min(text.len, buf.len - 1);
     @memcpy(buf[0..n], text[0..n]);
 }
 
-/// Returns the slice up to the first NUL byte in a fixed-width
-/// buffer, or the full buffer when no NUL is present.
+/// The slice up to the first NUL, or the whole buffer when there is none.
 pub fn readFixedString(buf: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
     return buf[0..end];
 }
-
-// ---------------------------------------------------------------- tests --
 
 test "every message type is extern with non-zero size" {
     inline for (.{

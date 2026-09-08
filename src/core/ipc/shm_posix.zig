@@ -1,61 +1,18 @@
 //! POSIX backend for shared memory (Linux + macOS).
 //!
-//! `shm_open` returns a file descriptor that names a POSIX shm
-//! object. `ftruncate` sets its size. `mmap` maps it into the
-//! process address space. On Linux the fd can be closed once the
-//! mapping is established — the kernel keeps the backing pages
-//! alive for as long as any process holds a mapping. **macOS
-//! differs**: once the creating fd is `close()`d, a subsequent
-//! `shm_open(name, O_RDWR)` from the same process returns `EACCES`
-//! even though the kernel object is still alive (the name namespace
-//! and the access namespace are decoupled in BSD-derived shm).
-//! We therefore keep the fd open inside the `Backend` and only
-//! close it in `Backend.close()` — the mapping survives the whole
-//! `Backend` lifetime and the name remains openable in the same
-//! process for the FIRST create+open pair.
+//! THE FD STAYS OPEN inside the `Backend` until `close`. Closing it after `mmap` is
+//! correct on Linux and makes a later `shm_open` of the same name return `EACCES` on
+//! macOS, where the name and access namespaces are decoupled.
 //!
-//! macOS multi-region caveat: macOS additionally limits a process
-//! to ONE successful `shm_open(O_CREAT) → shm_open(O_RDWR)`
-//! sequence per process lifetime (independent of `shm_unlink`
-//! status or names). Subsequent attempts return `EACCES`. The
-//! real S6 demo is unaffected because the editor (creator) and
-//! the runtime (opener) live in different processes; the bug
-//! only surfaces in single-process tests, which gate themselves
-//! on `builtin.os.tag != .macos` in `tests/ipc/shm.zig` and
-//! `tests/ipc/shm_viewport.zig`. Linux is unaffected. The Phase 0.6
-//! macOS hardware validation milestone revisits this when the
-//! editor lifecycle integration test lands (cf. `briefs/S6-…` §
-//! "Inherited debts" — promoted from inherited to active).
+//! `open` passes `O_CREAT | O_RDWR`, never `O_RDWR` alone, against the same quirk
+//! for a `posix_spawnp`-ed sibling; a spurious create yields an empty region that
+//! `ShmViewport.open` then refuses as `error.InvalidHeader`.
 //!
-//! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o600)` →
-//!                   `ftruncate(fd, size)` → `mmap`. Keep fd.
-//! Attacher (runtime): `shm_open(name, O_RDWR | O_CREAT, 0o600)` →
-//!                     `mmap`.
-//! Close (creator): `munmap` + `close(fd)` + `shm_unlink(name)`.
-//! Close (attacher): `munmap` + `close(fd)`.
+//! NO `umask(0)` around `shm_open`: `0o600 & ~umask` is `0o600` whatever the umask,
+//! and mutating a process-global would race the engine's other threads.
 //!
-//! Permission note: mode `0o600` (`rw-------`). Owner-only access
-//! is the tight permission that matches the editor↔runtime
-//! parent-child spawn relationship — both processes run under the
-//! same UID. We do **not** call `umask(0)` around `shm_open`:
-//! `0o600 & ~umask = 0o600` regardless of the caller's umask
-//! because the masked-out bits (group/other) are already zero in
-//! the requested mode. This avoids a process-global `umask`
-//! mutation that would race with other threads in the engine.
-//!
-//! `Backend.open` passes `O_CREAT | O_RDWR` rather than `O_RDWR`
-//! alone — that combination works around a macOS BSD shm quirk
-//! where the no-`O_CREAT` form returns `EACCES` for a
-//! `posix_spawnp`-spawned sibling of the creator, even when both
-//! processes share the same UID. The kernel returns the existing
-//! region if `name` is present; if absent (a spurious orphan run),
-//! the create path produces an empty region that
-//! `ShmViewport.open` rejects via `error.InvalidHeader`. Linux
-//! tolerates pure `O_RDWR` but we keep the platform-symmetric
-//! code path.
-//!
-//! Name length: macOS caps `PSHMNAMLEN-1 = 30` chars; Linux is more
-//! permissive. We bail at 30 for portability.
+//! macOS allows ONE create-then-open sequence per process, which is why the
+//! single-process tests gate themselves off it. Names cap at 30 chars.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -88,17 +45,12 @@ const sys = struct {
 
 const Error = shm.Error;
 
-/// POSIX `shm_open` + `mmap` backend for the IPC viewport shared
-/// memory segment. Embedded inside `shm.Segment.impl` on Linux/macOS.
+/// `shm_open` + `mmap` backend, embedded in `shm.ShmRegion.impl`.
 pub const Backend = struct {
-    /// `null` for a `fromFd` attach (the received fd has no name in
-    /// this process — cross-process attach is by fd, not by name,
-    /// per `engine-ipc.md` §4.8). Non-null for `create`/`open`.
+    /// `null` for a `fromFd` attach: that fd has no name in this process.
     name_z: ?[:0]u8 = null,
     gpa: std.mem.Allocator,
-    /// `shm_open` fd (create/open) or the fd received via SCM_RIGHTS
-    /// (`fromFd`). Kept open for the lifetime of the `Backend` per the
-    /// macOS quirk documented in the file header. Closed in `close()`.
+    /// Kept open for the whole `Backend` lifetime — see the header.
     fd: i32,
     ptr: [*]align(std.heap.page_size_min) u8,
     size: usize,
@@ -110,9 +62,7 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        // Unlink any stale region from a previous crashed editor
-        // with the same PID. Best-effort; ENOENT is the desired
-        // post-state.
+        // Best-effort unlink of a stale region from a crashed editor; ENOENT is fine.
         _ = sys.shm_unlink(name_z.ptr);
 
         const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o600);
@@ -145,9 +95,7 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        // `O_CREAT | O_RDWR` — see file header for the macOS BSD
-        // shm quirk. Mode `0o600` is honored as-is (no umask hack
-        // needed: 0o600 has no group/other bits for umask to mask).
+        // `O_CREAT` is load-bearing here — see the header.
         const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT, 0o600);
         if (fd < 0) return error.ShmOpenFailed;
         errdefer _ = sys.close(fd);
@@ -165,13 +113,8 @@ pub const Backend = struct {
         };
     }
 
-    /// Attach to a shm region from a file descriptor received over the
-    /// IPC socket via `SCM_RIGHTS` (`IpcSocket.recvWithHandles`). This
-    /// is the **primary cross-process attach** on POSIX
-    /// (`engine-ipc.md` §4.8): no `shm_open`, no name. The fd ownership
-    /// transfers to the `Backend` and is closed in `close()`. The
-    /// region is never the owner (the editor that created it via
-    /// `create` keeps ownership), so `close()` never `shm_unlink`s.
+    /// POSIX cross-process attach: no `shm_open`, no name. The fd ownership TRANSFERS
+    /// here and `close` releases it, but never `shm_unlink`s — the creator owns that.
     pub fn fromFd(fd: i32, size: usize) Error!Backend {
         const raw = sys.mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
@@ -186,9 +129,7 @@ pub const Backend = struct {
         };
     }
 
-    /// The backing fd, to transmit to the runtime via
-    /// `IpcSocket.sendWithHandles` (`engine-ipc.md` §4.8). Named
-    /// `handle` rather than `fd` to avoid shadowing the `fd` field.
+    /// The backing fd; named `handle` so it does not shadow the `fd` field.
     pub fn handle(self: *const Backend) i32 {
         return self.fd;
     }
@@ -206,9 +147,7 @@ pub const Backend = struct {
     }
 };
 
-// Runtime tests live in `tests/ipc/shm.zig` (negative cases) and
-// `tests/ipc/shm_cases/*.zig` (one exe per `create + open` case to
-// avoid the macOS BSD shm intra-process quirk).
+// One exe per `create + open` case in `tests/ipc/shm_cases/` — the macOS quirk.
 
 test "create rejects too-long names" {
     const too_long = "/weld-this-name-is-deliberately-way-too-long-for-pshmnamlen";

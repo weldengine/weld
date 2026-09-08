@@ -1,28 +1,12 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Framing layer for the Weld editor↔runtime IPC.
+//! A frame is a 16-byte `Header` then `payload_len` bytes, the first 8 of which are
+//! the `schema_hash`. The receiver validates magic, version, `msg_type` and length
+//! BEFORE reading further, and any violation is a fatal connection reset; the
+//! `schema_hash` is checked later, when the body is decoded into a known type.
 //!
-//! Each frame on the wire is laid out as:
-//!
-//! ```
-//! ┌─────────────────── 16-byte header (extern struct) ──────────────┐
-//! │ magic: u32        │ version: u16 │ msg_type: u16 │ seq_id: u32  │
-//! │ payload_len: u32  │                                              │
-//! ├──────────────────── payload (payload_len bytes) ────────────────┤
-//! │ schema_hash: u64 │ extern struct bytes                          │
-//! └──────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! The receiver validates the magic + version + msg_type + payload_len
-//! before reading any further; any violation maps to a fatal
-//! connection reset (cf. `engine-ipc.md` §8.3). The `schema_hash` is
-//! validated when the body is decoded into a known message type.
-//!
-//! The encoder allocates a single contiguous slice that the transport
-//! can hand to `send`/`write` directly. The decoder splits parsing in
-//! two phases — header first (validates length bounds before any
-//! allocation) — so the caller can stream the payload into a sized
-//! buffer.
+//! Decoding is two-phase on purpose: the header bounds the length before anything
+//! is allocated, so a hostile `payload_len` cannot make the caller reserve for it.
 
 const std = @import("std");
 

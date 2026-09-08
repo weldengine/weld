@@ -1,18 +1,9 @@
-//! Editor-side command log for best-effort replay after a runtime crash
-//! (`engine-ipc.md` §7, `engine-tools-editor.md` §2.7.3). A fixed-capacity
-//! ring of the editor→runtime commands sent, each retaining its encoded
-//! frame so it can be re-sent verbatim to a freshly restarted runtime.
+//! Editor-side ring of sent commands, each retaining its ENCODED frame so a
+//! freshly restarted runtime can be re-sent it verbatim.
 //!
-//! `last_clean_line` is advanced to the current head when a `SaveProject`
-//! ack (`ProjectSaved`) arrives — everything appended up to that point is
-//! durable on disk (the runtime's minimal snapshot, §7.1) and need not be
-//! replayed. After a crash + restart the editor replays the entries since
-//! `last_clean_line` that the runtime never acked (§7.2). No idempotence
-//! is attempted (§7.3): a replay that nacks or times out stops hard.
-//!
-//! scope: this is the IPC-replay materialization the brief E4 calls
-//! for. The richer Islandz `Command` model (`engine-tools-editor.md`
-//! §2.4) is Phase 2 — here an entry is just the wire frame + status.
+//! `last_clean_line` advances on a `ProjectSaved` ack: everything up to it is
+//! durable and must NOT be replayed. Replay covers the entries after it that were
+//! never acked, and attempts no idempotence — a nack or timeout stops it hard.
 
 const std = @import("std");
 

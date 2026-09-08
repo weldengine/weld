@@ -1,20 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! `IpcClient` — runtime-side wrapper around the IPC stack.
-//!
-//! Mirrors `IpcServer` but does not own a listening socket. The
-//! runtime connects to the path the editor passed via argv,
-//! handshakes by sending `ProtocolHello` and reading
-//! `ProtocolHelloAck`, then either drives the IPC loop or exits
-//! cleanly when the editor rejects.
-//!
-//! S6 lifecycle:
-//!   1. `IpcClient.init(gpa)`
-//!   2. `client.connect(socket_path)`
-//!   3. `client.sendHello(engine_version, build_hash, capabilities)`
-//!   4. `client.recvHelloAck(scratch)` — fatal on `accepted == 0`.
-//!   5. `client.connection()` drives the rest of the S6 traffic.
-//!   6. `client.deinit()` — closes the socket.
+//! Runtime side. Connects to the path the editor passed on argv, sends
+//! `ProtocolHello`, and reads the ack — on `accepted == 0` the runtime must exit.
 
 const std = @import("std");
 
@@ -27,8 +14,7 @@ const transport = @import("transport.zig");
 /// Re-exports `connection.Error` — closed set of IPC connection errors.
 pub const Error = conn_mod.Error;
 
-/// Runtime-side IPC client — holds the connected socket + the
-/// versioned connection state machine.
+/// Holds the connected socket and the connection over it.
 pub const IpcClient = struct {
     gpa: std.mem.Allocator,
     socket: ?transport.IpcSocket = null,
@@ -48,9 +34,7 @@ pub const IpcClient = struct {
         return &self.conn.?;
     }
 
-    /// Send the opening `ProtocolHello`. `engine_version` and
-    /// `build_hash` are written into the fixed-width buffers with
-    /// silent truncation past 31 / 15 bytes.
+    /// `engine_version` and `build_hash` truncate silently past 31 and 15 bytes.
     pub fn sendHello(
         self: *IpcClient,
         engine_version: []const u8,
@@ -68,9 +52,7 @@ pub const IpcClient = struct {
         try self.connection().sendMessage(messages.ProtocolHello, 0, &hello);
     }
 
-    /// Read the editor's `ProtocolHelloAck`. The runtime's contract
-    /// is to log+exit on `accepted == 0`; this helper just deserialises
-    /// the wire payload.
+    /// Deserialises only — acting on `accepted == 0` is the caller's contract.
     pub fn recvHelloAck(
         self: *IpcClient,
         scratch: []u8,

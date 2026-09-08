@@ -1,12 +1,7 @@
-//! Windows backend for shared memory.
+//! Windows backend for shared memory: an anonymous page-file mapping.
 //!
-//! `CreateFileMappingA(INVALID_HANDLE_VALUE, ...)` creates an
-//! anonymous file mapping in the page file. `MapViewOfFile` projects
-//! it into the process address space. The mapping handle is kept on
-//! the `Backend` so `CloseHandle` can release it at `close()` time.
-//!
-//! Names start with `Local\` (session-local). The editor's PID is
-//! appended by the caller to disambiguate concurrent Weld sessions.
+//! The mapping handle lives on the `Backend` so `close` can release it. Names are
+//! session-local (`Local\`) and the caller appends the editor PID.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -111,21 +106,14 @@ pub const Backend = struct {
         return Backend{ .mapping = mapping, .ptr = ptr, .size = size };
     }
 
-    /// Windows CPU shm attach stays by name (`open`) — the named
-    /// mapping has no BSD shm quirk, so the `SCM_RIGHTS`/`fromFd` pivot
-    /// (`engine-ipc.md` §4.8) is POSIX-only. Handle passing on Windows
-    /// (`DuplicateHandle`) is reserved for the Phase 3 GPU shared
-    /// framebuffer (§4.7). Returns `error.Unimplemented` so a caller
-    /// that mistakenly routes the Windows attach through `fromFd`
-    /// fails loudly instead of silently.
+    /// Refused, loudly: the Windows attach is BY NAME, and `DuplicateHandle` passing
+    /// waits for the Phase 3 GPU framebuffer.
     pub fn fromFd(handle_in: shm.OsHandle, size: usize) Error!Backend {
         _ = .{ handle_in, size };
         return error.Unimplemented;
     }
 
-    /// The mapping kernel-object handle. Unused by the Windows
-    /// attach path (which is by name); present for API symmetry with
-    /// the POSIX backend.
+    /// Present for symmetry with the POSIX backend; the attach path never reads it.
     pub fn handle(self: *const Backend) Handle {
         return self.mapping;
     }

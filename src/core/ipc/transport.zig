@@ -1,34 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Transport interface for the Weld editor↔runtime IPC.
-//!
-//! Two channels share this surface: a Unix domain socket on Linux /
-//! macOS (`transport_posix.zig`) and a named pipe in byte mode on
-//! Windows (`transport_windows.zig`). The public API is identical
-//! across backends — the comptime dispatch below picks the OS-specific
-//! `Backend` at compile time. Refer to `engine-ipc.md` §2 for the
-//! transport rationale and §4.7 for the Phase 3 GPU handle passing
-//! that motivates the `sendWithHandles` surface (Windows backend
-//! returns `error.Unimplemented` in S6 per the brief).
-//!
-//! Semantics:
-//!   - `listen(path)` — editor side; binds and starts accepting.
-//!   - `connect(path)` — runtime side; opens the channel.
-//!   - `accept()` — editor side; blocks until the runtime connects.
-//!   - `send(bytes)` / `recv(buffer)` — blocking I/O, byte-stream
-//!     semantics on both backends (no framing — the framing layer
-//!     above (`framing.zig`) is what gives messages their shape).
-//!   - `sendWithHandles(bytes, handles)` /
-//!     `recvWithHandles(buffer, handles)` — out-of-band handle
-//!     transport per `engine-ipc.md` §2.3 + §4.7. POSIX uses
-//!     `SCM_RIGHTS` cmsg ancillary data; Windows returns
-//!     `error.Unimplemented` and the implementation lands in Phase 3
-//!     when GPU shared framebuffers arrive.
-//!   - `close()` — releases the socket / pipe.
-//!
-//! EOF detection: `recv` (and `recvWithHandles`) return 0 bytes when
-//! the peer closes its end cleanly. Callers map that to crash /
-//! shutdown detection per `engine-ipc.md` §6.2.
+//! BYTE-STREAM on both backends: `recv` carries no message boundary, and the shape
+//! comes from `framing.zig` above. A Unix socket on POSIX, a named pipe on Windows.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -39,20 +12,14 @@ const backend = switch (builtin.os.tag) {
     else => @compileError("Weld IPC transport: unsupported OS"),
 };
 
-/// OS-native handle type. `std.posix.fd_t` (i32) on Linux/macOS,
-/// `std.os.windows.HANDLE` on Windows. Used by `sendWithHandles` /
-/// `recvWithHandles` to transport file descriptors and NT handles
-/// out-of-band (cf. `engine-ipc.md` §2.3).
+/// OS-native handle type, transported out-of-band by `sendWithHandles`.
 pub const OsHandle = backend.OsHandle;
 
 /// Sentinel marking an absent handle in a slot.
 pub const invalid_handle: OsHandle = backend.invalid_handle;
 
-/// Close a single OS handle (POSIX `close` / Windows `CloseHandle`).
-/// Used to release an fd received via `recvWithHandles` that the
-/// receiver will not retain — e.g. a shm region the runtime declines
-/// to map — so a malformed or multi-region handoff cannot leak
-/// descriptors (`engine-ipc.md` §8.3).
+/// Close one OS handle. An fd received through `recvWithHandles` and NOT retained
+/// must come here, or a malformed handoff leaks descriptors.
 pub fn closeHandle(h: OsHandle) void {
     backend.closeHandle(h);
 }
@@ -77,19 +44,13 @@ pub const Error = error{
     ListenFailed,
     NameTooLong,
     PermissionDenied,
-    /// the post-`bind` `chmod(path, 0600)` failed — the socket
-    /// could not be locked to owner-only, so `listen` refuses to start it.
+    /// The post-`bind` `chmod(path, 0600)` failed, so `listen` refuses to start.
     SocketPermissionFailed,
-    /// an accepted peer runs as a different UID than us; the
-    /// connection is closed and rejected (the authoritative local-IPC boundary,
-    /// `engine-ipc.md §8.2`).
+    /// An accepted peer runs under another UID — THE local-IPC boundary.
     PeerCredentialMismatch,
     SocketCreationFailed,
     SystemResources,
-    /// Windows: `sendWithHandles` / `recvWithHandles` are scoped to
-    /// Phase 3 per `engine-ipc.md §4.7` + S6 brief. The named-pipe
-    /// implementation lives in `transport_windows.zig` and returns
-    /// this error so callers can opt-out gracefully.
+    /// Windows: `sendWithHandles` / `recvWithHandles` have no implementation.
     Unimplemented,
     UnexpectedEof,
 } || std.posix.UnexpectedError || std.mem.Allocator.Error;
@@ -98,10 +59,7 @@ pub const Error = error{
 pub const IpcSocket = struct {
     impl: backend.Backend,
 
-    /// Editor side. Binds to `path` and marks the socket as
-    /// accepting. `path` is the Unix domain socket path on POSIX
-    /// (e.g. `/tmp/weld-<pid>.sock`) or the named-pipe name on
-    /// Windows (e.g. `\\.\pipe\weld-<pid>`).
+    /// Editor side. `path` is a Unix socket path on POSIX, a pipe name on Windows.
     pub fn listen(path: []const u8) Error!IpcSocket {
         return .{ .impl = try backend.Backend.listen(path) };
     }
@@ -111,30 +69,22 @@ pub const IpcSocket = struct {
         return .{ .impl = try backend.Backend.connect(path) };
     }
 
-    /// Editor side. Blocks until the runtime connects, then returns
-    /// a fresh `IpcSocket` for the accepted client. The listening
-    /// socket itself is left in `self` for subsequent reconnects.
+    /// Editor side. The LISTENING socket stays in `self` — do not close it.
     pub fn accept(self: *IpcSocket) Error!IpcSocket {
         return .{ .impl = try self.impl.accept() };
     }
 
-    /// Writes the entire slice. Loops over short writes
-    /// transparently (POSIX `write` may return less than requested).
+    /// Writes the ENTIRE slice, looping over short writes.
     pub fn send(self: *IpcSocket, bytes: []const u8) Error!void {
         return self.impl.send(bytes);
     }
 
-    /// Reads up to `buffer.len` bytes. Returns the number actually
-    /// read; a return of 0 means peer EOF (clean close) and the
-    /// connection must be reset by the caller.
+    /// Reads up to `buffer.len`; a return of 0 is the peer's clean EOF.
     pub fn recv(self: *IpcSocket, buffer: []u8) Error!usize {
         return self.impl.recv(buffer);
     }
 
-    /// Out-of-band handle transport. `bytes` must be non-empty
-    /// (POSIX requires at least one regular byte alongside any
-    /// ancillary cmsg). On Windows: returns `error.Unimplemented`
-    /// in S6 (cf. file header).
+    /// `bytes` must be NON-EMPTY: POSIX needs one regular byte alongside a cmsg.
     pub fn sendWithHandles(
         self: *IpcSocket,
         bytes: []const u8,
@@ -143,9 +93,6 @@ pub const IpcSocket = struct {
         return self.impl.sendWithHandles(bytes, handles);
     }
 
-    /// Out-of-band handle receive. `handles_out` receives up to its
-    /// `len` slots; the actual count is returned in `RecvResult`.
-    /// Windows S6: `error.Unimplemented`.
     pub fn recvWithHandles(
         self: *IpcSocket,
         buffer: []u8,
@@ -159,17 +106,7 @@ pub const IpcSocket = struct {
     }
 };
 
-/// Build the platform-correct path for an IPC endpoint named
-/// `name`. POSIX returns `/tmp/<name>.sock`, Windows returns
-/// `\\.\pipe\<name>`. The caller passes a writable buffer; the
-/// returned slice is a NUL-terminated `[*:0]const u8`-convertible
-/// view into that buffer.
-///
-/// Pattern from `engine-ipc.md` §2.2: Unix domain sockets on
-/// Linux/macOS, named pipes on Windows. The runtime stub takes
-/// the editor-built path verbatim via `--socket=<…>`, so the
-/// editor and the bench harness are the only call sites that need
-/// to construct one.
+/// `/tmp/<name>.sock` on POSIX, `\\.\pipe\<name>` on Windows, written into `buf`.
 pub fn buildSocketPath(buf: []u8, name: []const u8) ![:0]const u8 {
     const prefix = switch (builtin.os.tag) {
         .linux, .macos => "/tmp/",
@@ -190,9 +127,7 @@ pub fn buildSocketPath(buf: []u8, name: []const u8) ![:0]const u8 {
     return buf[0..total :0];
 }
 
-// Sanity at compile time — the comptime dispatch above must produce
-// a backend with the expected surface. A signature drift surfaces as
-// a compile error here rather than at the first call site.
+// A backend signature drift surfaces here instead of at the first call site.
 comptime {
     _ = backend.Backend;
     _ = backend.OsHandle;

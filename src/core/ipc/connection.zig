@@ -1,29 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! `IpcConnection` — symmetric wrapper around an `IpcSocket`, the
-//! 16-byte framing header (`framing.Header`), and the comptime
-//! schema-hashed message catalogue (`messages.MsgType`).
-//!
-//! Both the editor's `IpcServer` and the runtime's `IpcClient` hold
-//! one of these once their handshake completes. The connection
-//! exposes:
-//!
-//!   - `sendMessage(T, seq_id, *const T)` — encodes a `Header` +
-//!     `schema_hash` + `extern struct` and writes the whole frame to
-//!     the socket through the transport's `send`.
-//!   - `recvFrame(buf)` — reads exactly one frame: 16-byte header +
-//!     `payload_len` bytes into the caller's buffer. Validates the
-//!     magic / version / msg_type / payload size and returns the
-//!     header + a slice into `buf`.
-//!   - `sendMessageWithHandles(T, seq_id, *const T, []OsHandle)` —
-//!     POSIX-only out-of-band variant used for the viewport fd
-//!     transfer + future Phase 3 GPU shared framebuffer handles.
-//!
-//! The connection does not own the socket: the caller passes a
-//! `*IpcSocket` and remains responsible for closing it. This makes
-//! the two-process handshake (`IpcServer.accept` + `IpcClient.connect`)
-//! resilient to a crash on either end — closing the socket is the
-//! only correct response to a fatal framing error.
+//! The connection BORROWS its socket: the caller owns and closes it, and closing it
+//! is the only correct response to a framing error — nothing here survives one.
 
 const std = @import("std");
 
@@ -33,56 +11,41 @@ const protocol = @import("protocol.zig");
 const transport = @import("transport.zig");
 const command_log = @import("command_log.zig");
 
-/// All errors a connection method can raise. Union of the transport
-/// errors (socket I/O), framing errors (invalid header / schema
-/// mismatch / truncated payload), and allocator errors (for the
-/// encode-side scratch buffer).
+/// Union of the transport, framing and allocator error sets.
 pub const Error = transport.Error || framing.Error || std.mem.Allocator.Error;
 
-/// One framed message after the header has been validated. `header`
-/// is the decoded `framing.Header`; `payload_bytes` is a slice of
-/// the caller-supplied receive buffer covering exactly
-/// `header.payload_len` bytes (`schema_hash` + extern struct body).
+/// A validated frame; `payload_bytes` is a SLICE INTO the caller's receive buffer.
 pub const Frame = struct {
     header: framing.Header,
     payload_bytes: []const u8,
 };
 
-/// A frame received alongside out-of-band OS handles
-/// (`recvFrameWithHandles`). `handles` is the number of descriptors
-/// written into the caller's `handles_out` slot vector — the order
-/// matches the sender's `sendMessageWithHandles` handle order.
+/// A frame plus its handle count; the order matches the sender's handle order.
 pub const FrameWithHandles = struct {
     header: framing.Header,
     payload_bytes: []const u8,
     handles: usize,
 };
 
-/// One IPC connection. `socket` is borrowed — the caller owns the
-/// `IpcSocket` lifetime.
+/// One IPC connection over a borrowed socket.
 pub const IpcConnection = struct {
     socket: *transport.IpcSocket,
     gpa: std.mem.Allocator,
-    /// Monotonic counter used to seed outgoing `seq_id`s when the
-    /// caller does not pin one explicitly. Wraps freely at `u32`'s
-    /// max — replay-detection lives at a higher layer.
+    /// Wraps freely at `u32` max — replay detection belongs to a higher layer.
     next_seq: u32 = 1,
 
     pub fn init(gpa: std.mem.Allocator, socket: *transport.IpcSocket) IpcConnection {
         return .{ .socket = socket, .gpa = gpa };
     }
 
-    /// Allocate and assign the next `seq_id`. Useful for callers
-    /// that want the wire-side correlation key in their own state.
+    /// Take the next `seq_id`, for a caller keeping the correlation key itself.
     pub fn nextSeqId(self: *IpcConnection) u32 {
         const s = self.next_seq;
         self.next_seq +%= 1;
         return s;
     }
 
-    /// Encode `msg` into a framed buffer and write it to the socket.
-    /// `seq_id == 0` is a sentinel meaning "auto-assign from
-    /// `next_seq`".
+    /// Encode and write one frame. `seq_id == 0` is the auto-assign SENTINEL.
     pub fn sendMessage(
         self: *IpcConnection,
         comptime T: type,
@@ -95,9 +58,7 @@ pub const IpcConnection = struct {
         try self.socket.send(frame_buf);
     }
 
-    /// Same as `sendMessage` but transmits an out-of-band handle
-    /// vector via `sendmsg`/`SCM_RIGHTS` (POSIX). Returns
-    /// `error.Unimplemented` on Windows in S6 per the brief.
+    /// As `sendMessage`, with an `SCM_RIGHTS` handle vector; Windows refuses.
     pub fn sendMessageWithHandles(
         self: *IpcConnection,
         comptime T: type,
@@ -111,23 +72,14 @@ pub const IpcConnection = struct {
         try self.socket.sendWithHandles(frame_buf, handles);
     }
 
-    /// Read exactly one frame into `buf`. `buf` must be at least
-    /// `@sizeOf(framing.Header) + max payload` bytes; for
-    /// fixed-size message types the caller can size it from
-    /// `framing.frameSizeOf(T)`.
-    ///
-    /// Returns `error.UnexpectedEof` if the socket closes mid-
-    /// frame. The connection is unusable after any error and the
-    /// caller must close `socket` and reset (cf. `engine-ipc.md`
-    /// §6.2).
+    /// Read exactly one frame; size `buf` from `framing.frameSizeOf(T)`.
     pub fn recvFrame(
         self: *IpcConnection,
         buf: []u8,
     ) Error!Frame {
         if (buf.len < @sizeOf(framing.Header)) return error.UnexpectedEof;
 
-        // Read the header in full first — short reads on a stream
-        // socket are normal, so we loop until 16 bytes are buffered.
+        // Short reads are NORMAL on a stream socket, so loop for the 16 header bytes.
         try readExact(self.socket, buf[0..@sizeOf(framing.Header)]);
         const header = try framing.parseHeader(buf[0..@sizeOf(framing.Header)]);
 
@@ -143,17 +95,9 @@ pub const IpcConnection = struct {
         };
     }
 
-    /// Receive one frame together with the out-of-band OS handles the
-    /// sender attached via `sendMessageWithHandles` (POSIX
-    /// `SCM_RIGHTS`). The ancillary fds are delivered by the kernel
-    /// with the first byte chunk; this reads that chunk via
-    /// `recvWithHandles` (capturing the handles), then tops up any
-    /// short read with plain `recv` to complete the frame — the
-    /// handles have already arrived. Used for `ShmRegionsHandoff`
-    /// (`engine-ipc.md` §4.8). `buf` should be sized to exactly
-    /// `framing.frameSizeOf(T)` so the first read cannot pull bytes of
-    /// a following frame. Returns `error.Unimplemented` on Windows
-    /// (the named-pipe backend has no `recvWithHandles` in ).
+    /// One frame plus the sender's out-of-band fds, which the kernel delivers with
+    /// the FIRST chunk. Size `buf` to exactly one frame or the first read steals the
+    /// next frame's bytes. Windows refuses.
     pub fn recvFrameWithHandles(
         self: *IpcConnection,
         buf: []u8,
@@ -165,8 +109,7 @@ pub const IpcConnection = struct {
         if (first.bytes == 0) return error.UnexpectedEof;
         var got: usize = first.bytes;
 
-        // Top up the header if the first chunk was short — the fds
-        // already rode in with `first`, so plain `recv` is correct here.
+        // The fds already rode in with `first`, so a plain `recv` top-up is correct.
         while (got < @sizeOf(framing.Header)) {
             const n = try self.socket.recv(buf[got..]);
             if (n == 0) return error.UnexpectedEof;
@@ -190,10 +133,7 @@ pub const IpcConnection = struct {
         };
     }
 
-    /// Convenience helper — receive a frame and decode it as `T` in
-    /// one shot. The caller must size `scratch` to at least
-    /// `framing.frameSizeOf(T)`. Returns `error.UnknownMsgType` if
-    /// the wire frame's `msg_type` does not match `T`.
+    /// Receive and decode in one shot; a `msg_type` mismatch is `UnknownMsgType`.
     pub fn recvMessage(
         self: *IpcConnection,
         comptime T: type,
@@ -216,20 +156,9 @@ fn readExact(socket: *transport.IpcSocket, dst: []u8) transport.Error!void {
 /// Raised by `acceptShmHandoff` when a `ShmRegionsHandoff` is malformed.
 pub const HandoffError = error{InvalidHandoff};
 
-/// Validate a decoded `ShmRegionsHandoff` against the fds delivered
-/// out-of-band and select the viewport fd to map (`engine-ipc.md`
-/// §8.3). `handles` is the populated prefix of the receiver's handle
-/// vector (i.e. `handoff_handles[0..recv_result.handles]`).
-///
-/// Rules (any violation ⇒ `error.InvalidHandoff`):
-///   - `region_count` is in `[1, MAX_SHM_REGIONS]`;
-///   - the fd count equals `region_count` exactly.
-///
-/// On a violation, **every** received fd is closed before returning so
-/// a malformed handoff cannot leak descriptors into the runtime. On
-/// success, maps only `regions[0]` (`viewport_framebuffer`); the
-/// fds of any further declared regions are closed here, and the
-/// viewport fd (`handles[0]`, now owned by the caller) is returned.
+/// Validate a handoff against the fds actually delivered and return the viewport's.
+/// On ANY violation every received fd is closed, so a malformed handoff cannot leak
+/// descriptors; on success only `regions[0]` survives and the caller OWNS it.
 pub fn acceptShmHandoff(
     handoff: *const messages.ShmRegionsHandoff,
     handles: []const transport.OsHandle,
@@ -242,8 +171,6 @@ pub fn acceptShmHandoff(
         for (handles) |h| transport.closeHandle(h);
         return error.InvalidHandoff;
     }
-    // Map only the viewport (regions[0]); close every other region fd so
-    // a multi-region handoff cannot leak descriptors into the runtime.
     for (handles[1..]) |h| transport.closeHandle(h);
     return handles[0];
 }
@@ -252,33 +179,14 @@ pub fn acceptShmHandoff(
 pub const ReplayResult = struct {
     /// Commands successfully re-sent and acked.
     replayed: usize,
-    /// True when every pending command replayed; false when a nack /
-    /// timeout / desync stopped the pass early (§7.2).
+    /// False when a nack, timeout or desync stopped the pass early.
     complete: bool,
 };
 
-/// Best-effort replay after a crash + restart (`engine-ipc.md` §7.2,
-/// `engine-tools-editor.md` §2.7.4). For each command in `log` since the
-/// last clean line still pending, re-send its frame verbatim over `conn`
-/// and await a reply carrying the same `seq_id`; on a match, mark it
-/// acked and continue. The first nack, timeout, or desync stops the pass
-/// hard — no idempotence is attempted (§7.3). The caller arms the
-/// per-command timeout via a socket recv timeout (`SO_RCVTIMEO` on
-/// POSIX); a recv error (timeout / EOF) ends the pass. `scratch` must
-/// hold one full reply frame. Never raises — failures end the pass with
-/// `complete = false`.
-///
-/// **Invariant — `seq_id` safety (§3.4).** This pass is *synchronous* and
-/// drains each replayed command fully — `send` → `recvFrame` of the ack
-/// carrying the same `seq_id` → `markAcked` — before advancing to the next
-/// entry, and the caller (the editor) MUST NOT resume emitting new commands
-/// until this function returns. That strict serialization is what
-/// guarantees a replayed `seq_id` can never coexist with a freshly-issued
-/// one in the editor's `seq_id`→callback map: each replayed id is retired
-/// (acked) one at a time, before any new id is minted. Making the replay
-/// asynchronous, or pipelining it (issuing the next frame before the prior
-/// ack lands, or overlapping it with normal traffic), would BREAK this
-/// guarantee and reopen the collision window. Keep it strictly serial.
+/// Best-effort replay after a crash: re-send each pending frame VERBATIM and await
+/// the ack carrying the same `seq_id`. Never raises — a nack, timeout or desync ends
+/// the pass with `complete = false`. STRICTLY SERIAL, and that is the contract:
+/// pipelining it lets a replayed `seq_id` coexist with a freshly-minted one.
 pub fn replayCommands(
     conn: *IpcConnection,
     log: *command_log.CommandLog,
@@ -289,11 +197,7 @@ pub fn replayCommands(
     var replayed: usize = 0;
     while (it.next()) |entry| {
         const seq = entry.seq_id;
-        // Re-send the original frame byte-for-byte (same seq_id). `seq`
-        // is captured before any mutation; `entry` is not read after the
-        // `markAcked` below (forward-only iteration, no revisit).
-        // Synchronous drain: block on THIS command's ack before the next
-        // send — never pipeline (see the seq_id-safety invariant above).
+        // Synchronous drain: block on THIS command's ack before the next send.
         conn.socket.send(entry.frameBytes()) catch return .{ .replayed = replayed, .complete = false };
         const frame = conn.recvFrame(scratch) catch return .{ .replayed = replayed, .complete = false };
         if (frame.header.seq_id != seq) return .{ .replayed = replayed, .complete = false };

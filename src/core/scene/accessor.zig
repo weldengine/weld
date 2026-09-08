@@ -159,7 +159,7 @@ pub const Accessor = struct {
     //     `{ uuid_ordinal:u32, extension_count:u32, extension_ids:[…]u32 }`
     //   Prefab ID Table — `prefab_id_count:u32` then `[…]u32` string-table offsets
     //   Hooks — `hook_count:u32` then `[…]{ on_attach_ref:u32, on_detach_ref:u32 }`
-    // (string-table offsets; 0 = absent). `hook_count ∈ {0,1}` in .
+    // (string-table offsets; 0 = absent). `hook_count` is 0 or 1, never more.
 
     /// A view over one Entity Extensions Table entry.
     pub const ExtEntry = struct {
@@ -243,7 +243,7 @@ pub const Accessor = struct {
     // ── Cross-references Table ──
 
     /// Number of entity→entity cross-reference entries (`0` for a scene with no
-    /// `Entity` field references, and for every .0.5 file).
+    /// `Entity` field references, and for every `format_version` 1 file).
     pub fn crossrefsCount(self: Accessor) u32 {
         return self.readU32(self.header.crossrefs_offset);
     }

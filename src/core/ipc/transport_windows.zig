@@ -1,10 +1,7 @@
-//! Windows backend for the Weld IPC transport. Uses a named pipe in
-//! byte mode via `CreateNamedPipeA` / `ConnectNamedPipe` /
-//! `CreateFileA` / `ReadFile` / `WriteFile` / `CloseHandle`. Out-of-
-//! band handle passing (`sendWithHandles` / `recvWithHandles`)
-//! returns `error.Unimplemented` in S6 per `engine-ipc.md` §4.7 +
-//! S6 brief — the `DuplicateHandle`-based implementation lands in
-//! Phase 3 when GPU shared framebuffers arrive.
+//! Windows backend for the IPC transport: a named pipe in BYTE mode.
+//!
+//! `sendWithHandles` / `recvWithHandles` refuse — `DuplicateHandle` passing waits
+//! for the Phase 3 GPU framebuffer.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -98,16 +95,11 @@ pub fn closeHandle(h: OsHandle) void {
 
 const Error = transport.Error;
 
-/// Win32 named-pipe backend for `IpcSocket`. Embedded inside
-/// `IpcSocket.impl` on Windows.
+/// Win32 named-pipe backend, embedded in `IpcSocket.impl`.
 pub const Backend = struct {
     handle: Handle,
-    /// Listener vs accepted-client distinction — only the listener
-    /// instance was created by `CreateNamedPipeA`. An accepted
-    /// client owns the listener's pipe instance after the handshake;
-    /// the listener's `accept` consumes the original handle and
-    /// creates a fresh pipe instance for the next would-be client
-    /// (out of scope for S6 — only one connection is ever accepted).
+    /// Only the listener instance was created by `CreateNamedPipeA`, and `accept`
+    /// hands its pipe instance to the client — after which the listener is INERT.
     is_listener: bool = false,
 
     pub fn listen(path: []const u8) Error!Backend {
@@ -129,11 +121,8 @@ pub const Backend = struct {
         );
         if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) {
             const code = sys.GetLastError();
-            // Surface the Win32 last-error so callers (bench harness,
-            // tests, the editor) can diagnose `BindFailed` without
-            // guessing. 123 = ERROR_INVALID_NAME (path is not
-            // `\\.\pipe\…`), 231 = ERROR_PIPE_BUSY, 5 =
-            // ERROR_ACCESS_DENIED, 87 = ERROR_INVALID_PARAMETER.
+            // Without the last-error a `BindFailed` is a guess: 123 is a path that
+            // is not `\\.\pipe\…`, 231 busy, 5 denied, 87 a bad parameter.
             std.log.scoped(.ipc).err(
                 "CreateNamedPipeA failed: path='{s}' GetLastError={d}",
                 .{ path, code },
@@ -162,9 +151,7 @@ pub const Backend = struct {
         );
         if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) {
             const code = sys.GetLastError();
-            // 2 = ERROR_FILE_NOT_FOUND (listener absent), 231 =
-            // ERROR_PIPE_BUSY (all listener instances connected),
-            // 5 = ERROR_ACCESS_DENIED.
+            // 2 = listener absent, 231 = every listener instance already connected.
             std.log.scoped(.ipc).err(
                 "CreateFileA failed: path='{s}' GetLastError={d}",
                 .{ path, code },
@@ -177,13 +164,11 @@ pub const Backend = struct {
 
     pub fn accept(self: *Backend) Error!Backend {
         const ok = sys.ConnectNamedPipe(self.handle, null);
-        // ERROR_PIPE_CONNECTED means the client raced ahead of our
-        // listener — already connected, treat as success.
+        // `ERROR_PIPE_CONNECTED` is the client racing ahead of us — a success.
         if (ok == 0 and sys.GetLastError() != ERROR_PIPE_CONNECTED) {
             return error.ConnectionRefused;
         }
-        // Transfer ownership of the pipe instance to the accepted
-        // backend; the listener becomes inert.
+        // Ownership of the pipe instance moves to the accepted backend.
         const accepted = Backend{ .handle = self.handle, .is_listener = false };
         self.handle = INVALID_HANDLE_VALUE;
         return accepted;
