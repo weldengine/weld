@@ -1,0 +1,17 @@
+# Files exempt from the `comment_density` ceiling.
+#
+# Format: <path> | <reason>
+# `#` starts a comment line; blank lines are ignored. An entry with no reason
+# is refused by the rule — an unreasoned exemption is a bypass.
+#
+# WHAT EARNS AN ENTRY. One thing only: every comment remaining in the file meets
+# the conservation criterion — its removal would make possible a false statement
+# that no test catches — and the file still exceeds the ceiling. A file that is
+# merely tedious to reduce does not earn one.
+#
+# THE LIST IS CHECKED IN BOTH DIRECTIONS. An entry naming a file that is UNDER
+# the ceiling is itself a lint error, and so is an entry naming no file at all.
+# So a stale exemption cannot sit here covering the next comment someone adds,
+# and a path typo cannot look like a granted escape.
+#
+# Empty is the expected state until a file is measured to need an entry.

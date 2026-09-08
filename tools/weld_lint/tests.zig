@@ -33,6 +33,8 @@ comptime {
     _ = @import("rules/no_device_dispatch_outside_gal.zig");
     _ = @import("rules/no_float_reduce.zig");
     _ = @import("rules/no_precision_crossing.zig");
+    _ = @import("rules/comment_density.zig");
+    _ = @import("rules/no_milestone_ids.zig");
     _ = @import("rules/conventional_commit.zig");
     // Shared machinery.
     // `main.zig` too: the lint subcommand's own path-coverage logic lives there, and a

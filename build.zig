@@ -2328,6 +2328,29 @@ pub fn build(b: *std.Build) void {
     );
     dead_tests_step.dependOn(&dead_tests_run.step);
 
+    // M1.E — the two comment-rule measurements, as steps that REPORT rather than
+    // gate. `comment-report --markdown` regenerates the per-file table committed
+    // under `briefs/artifacts/`; a table maintained by hand beside the rule that
+    // enforces the ceiling would drift from it, and the drift would read as a
+    // number nobody had to re-measure.
+    const comment_report_run = b.addRunArtifact(weld_lint_exe);
+    comment_report_run.addArg("comment-density");
+    if (b.args) |args| comment_report_run.addArgs(args);
+    const comment_report_step = b.step(
+        "comment-report",
+        "Report per-file comment density over src/ (zig build comment-report -- --markdown)",
+    );
+    comment_report_step.dependOn(&comment_report_run.step);
+
+    const milestone_ids_run = b.addRunArtifact(weld_lint_exe);
+    milestone_ids_run.addArg("milestone-ids");
+    if (b.args) |args| milestone_ids_run.addArgs(args);
+    const milestone_ids_step = b.step(
+        "milestone-ids",
+        "Report milestone/gate/review identifiers found in comments, by directory",
+    );
+    milestone_ids_step.dependOn(&milestone_ids_run.step);
+
     const lint_commit_run = b.addRunArtifact(weld_lint_exe);
     lint_commit_run.addArg("commit-msg");
     if (b.args) |args| lint_commit_run.addArgs(args);

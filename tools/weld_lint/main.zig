@@ -23,6 +23,8 @@ const conventional_commit = @import("rules/conventional_commit.zig");
 const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
 const no_float_reduce = @import("rules/no_float_reduce.zig");
 const no_precision_crossing = @import("rules/no_precision_crossing.zig");
+const comment_density = @import("rules/comment_density.zig");
+const no_milestone_ids = @import("rules/no_milestone_ids.zig");
 const dead_tests = @import("dead_tests.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
@@ -52,6 +54,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, sub, "dead-tests")) {
         return runDeadTests(arena, init.io, stdout, argv[2..]);
     }
+    if (std.mem.eql(u8, sub, "comment-density")) {
+        return runCommentDensity(arena, init.io, stdout, argv[2..]);
+    }
+    if (std.mem.eql(u8, sub, "milestone-ids")) {
+        return runMilestoneIds(arena, init.io, stdout, argv[2..]);
+    }
 
     try stdout.print("unknown subcommand: {s}\n\n", .{sub});
     try stdout.writeAll(usage_text);
@@ -76,6 +84,22 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     // state would survive between runs and contaminate that rule's own unit tests.
     var crossing_tally: no_precision_crossing.Tally = .{};
 
+    // The density allowlist is read once, before the walk, for the same reason the
+    // crossing tally lives here: its check is bilateral, so it needs state across
+    // files. A missing file is not an error — an empty allowlist is the expected
+    // state, and the rule's second half reports a stale entry either way.
+    var density_tally: comment_density.Tally = .{};
+    defer density_tally.deinit(arena);
+    if (scan.readSourceZ(arena, io, comment_density.allowlist_path)) |allowlist_src| {
+        try comment_density.parseAllowlist(
+            arena,
+            comment_density.allowlist_path,
+            allowlist_src,
+            &density_tally,
+            &diags,
+        );
+    } else |_| {}
+
     for (files.items) |file| {
         const source = scan.readSourceZ(arena, io, file) catch |err| {
             try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
@@ -88,11 +112,18 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
         try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
+        try no_milestone_ids.check(arena, file, source, &diags);
+        try comment_density.check(arena, file, source, &diags, &density_tally);
     }
 
     // The second half of the bilateral control. It needs no notion of a "full scan": it
     // follows the files this invocation actually READ, so a partial list simply says less.
     try no_precision_crossing.checkDeclarations(arena, io, &crossing_tally, &diags);
+
+    // The density allowlist's other direction. `perimeter_walked` is what keeps a
+    // partial invocation (`zig build lint -- src/core`) from reporting every entry
+    // outside it as unmatched: a run that read less says less.
+    try comment_density.checkAllowlist(arena, &density_tally, &diags, paths.len == 0);
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
@@ -316,6 +347,153 @@ fn perRootControl(
     );
 }
 
+/// `comment-density` — the per-file measurement, printed rather than enforced.
+///
+/// This subcommand is the report the milestone is reviewed on: a diff of several
+/// thousand removed comment lines is unreadable, a per-file before/after table is
+/// not. It reads the SAME `countLines` the blocking rule uses, so the number a gate
+/// reports and the number the ceiling is applied to cannot part company — a report
+/// built on its own second counter would measure a quantity nobody enforces.
+///
+/// `--markdown` emits the table in the form committed under `briefs/artifacts/`.
+fn runCommentDensity(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    argv_extra: []const [:0]const u8,
+) !u8 {
+    var markdown = false;
+    for (argv_extra) |a| {
+        if (std.mem.eql(u8, a, "--markdown")) markdown = true;
+    }
+
+    var files: std.ArrayList([]const u8) = .empty;
+    defer files.deinit(arena);
+    try scan.collectZigFiles(arena, io, comment_density.perimeter, &files);
+    std.mem.sort([]const u8, files.items, {}, lessThanPath);
+
+    var total: comment_density.Counts = .{};
+    var over_count: usize = 0;
+    var to_remove: u64 = 0;
+
+    if (markdown) {
+        try out.writeAll("| file | comment | code | density | over ceiling |\n");
+        try out.writeAll("|---|---:|---:|---:|---:|\n");
+    } else {
+        try out.print(
+            "comment-density: ceiling {d} %, perimeter `{s}`, enforcement {s}\n",
+            .{
+                comment_density.ceiling_percent,
+                comment_density.perimeter,
+                if (comment_density.enforced) "BLOCKING" else "report only",
+            },
+        );
+    }
+
+    for (files.items) |file| {
+        const source = scan.readSourceZ(arena, io, file) catch |err| {
+            try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
+            continue;
+        };
+        const counts = comment_density.countLines(source);
+        total.comment += counts.comment;
+        total.code += counts.code;
+        const over = counts.linesOverCeiling();
+        if (counts.exceedsCeiling()) {
+            over_count += 1;
+            to_remove += over;
+        }
+        const bp = counts.ratioBasisPoints();
+        if (markdown) {
+            try out.print("| `{s}` | {d} | {d} | {d}.{d:0>2} % | {d} |\n", .{
+                file, counts.comment, counts.code, bp / 100, bp % 100, over,
+            });
+        } else {
+            try out.print("{d}.{d:0>2}%\t{d}\t{d}\t{d}\t{s}\n", .{
+                bp / 100, bp % 100, counts.comment, counts.code, over, file,
+            });
+        }
+    }
+
+    const tbp = total.ratioBasisPoints();
+    if (markdown) {
+        try out.print("| **total — {d} files** | **{d}** | **{d}** | **{d}.{d:0>2} %** | **{d}** |\n", .{
+            files.items.len, total.comment, total.code, tbp / 100, tbp % 100, to_remove,
+        });
+    } else {
+        try out.print(
+            "comment-density: {d} files, {d} comment lines, {d} code lines, {d}.{d:0>2} % overall\n",
+            .{ files.items.len, total.comment, total.code, tbp / 100, tbp % 100 },
+        );
+        try out.print(
+            "comment-density: {d} file(s) over the {d} % ceiling, {d} comment line(s) to remove to reach it\n",
+            .{ over_count, comment_density.ceiling_percent, to_remove },
+        );
+        try out.writeAll(
+            "The removal figure is the MINIMUM to reach the ceiling, not the work: removing a\n" ++
+                "comment line shrinks the denominator too, so a file may keep one comment line per\n" ++
+                "three of code. The conservation criterion may remove more, and a file whose every\n" ++
+                "survivor meets it takes an allowlist entry instead.\n",
+        );
+    }
+    return 0;
+}
+
+/// `milestone-ids` — the identifier population, printed rather than enforced.
+///
+/// Driven by the rule's OWN matcher, which is the point: the shape set excludes
+/// `D<n>` and carries a keyboard-modifier guard, so a count taken with any second
+/// matcher would report a population the rule does not flag.
+///
+/// It walks the whole scanned tree and splits the total by top-level directory,
+/// because the perimeter the rule blocks on at closure is exactly the arbitration
+/// this figure informs.
+fn runMilestoneIds(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    argv_extra: []const [:0]const u8,
+) !u8 {
+    var per_file = false;
+    for (argv_extra) |a| {
+        if (std.mem.eql(u8, a, "--list")) per_file = true;
+    }
+
+    var counts = [_]usize{0} ** default_lint_paths.len;
+    for (default_lint_paths, 0..) |area, area_idx| {
+        var files: std.ArrayList([]const u8) = .empty;
+        defer files.deinit(arena);
+        try scan.collectZigFiles(arena, io, area, &files);
+        std.mem.sort([]const u8, files.items, {}, lessThanPath);
+
+        for (files.items) |file| {
+            const source = scan.readSourceZ(arena, io, file) catch continue;
+            var diags: std.ArrayList(diag.Diagnostic) = .empty;
+            defer diags.deinit(arena);
+            try no_milestone_ids.collect(arena, file, source, &diags);
+            counts[area_idx] += diags.items.len;
+            if (per_file and diags.items.len > 0) {
+                try out.print("{d}\t{s}\n", .{ diags.items.len, file });
+            }
+        }
+    }
+
+    var total: usize = 0;
+    try out.print("milestone-ids: enforcement {s}\n", .{
+        if (no_milestone_ids.enforced) "BLOCKING" else "report only",
+    });
+    for (default_lint_paths, counts) |area, n| {
+        total += n;
+        try out.print("milestone-ids: {s}\t{d}\n", .{ area, n });
+    }
+    try out.print("milestone-ids: total\t{d}\n", .{total});
+    return 0;
+}
+
+fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
 var reader_arena: std.mem.Allocator = undefined;
 var reader_io: std.Io = undefined;
 
@@ -341,6 +519,16 @@ const usage_text =
     \\      --per-root  print each root's own closure and their SUM —
     \\                  the quantity comparable to the suite's collected
     \\                  total, which counts a shared file once per binary.
+    \\
+    \\  weld_lint comment-density [--markdown]
+    \\      Print the per-file comment-density measurement over the
+    \\      perimeter. Always exits 0 — it reports, the `lint`
+    \\      subcommand is what enforces. --markdown emits the table
+    \\      committed under briefs/artifacts/.
+    \\
+    \\  weld_lint milestone-ids [--list]
+    \\      Print how many milestone, gate and review identifiers sit
+    \\      in comments, split by top-level directory. Always exits 0.
     \\
     \\  weld_lint commit-msg <file>
     \\      Validate the title of the commit message at <file> against
