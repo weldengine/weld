@@ -1,68 +1,33 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! per-system command buffer.
+//! Records deferred structural mutations during a phase and applies them at the
+//! phase boundary, so a query built before the phase keeps seeing the same chunks,
+//! slots and locations throughout it.
 //!
-//! Records deferred structural mutations (`spawn`, `despawn`,
-//! `add_component`, `remove_component`) during a phase's systems and
-//! applies them at the phase boundary in submission order. Until the
-//! flush runs, the world's structural state stays frozen — queries
-//! built before the phase continue to see the same chunks, slots,
-//! and entity locations.
+//! INSIDE a system body the direct `World.spawn` / `despawn` / `addComponent` /
+//! `removeComponent` surface is programmer error — it breaks exactly that pointer
+//! stability. Outside a dispatch it stays available: this is a phase-time
+//! concession, not a façade over the world.
 //!
-//! Mutation rules during a phase (cf. brief E6):
+//! Order at flush is system registration order, then record order within one
+//! buffer. Recording is SINGLE-THREADED and main-thread only: the worker
+//! trampolines never receive a buffer, which is what the marker below enforces.
 //!
-//! - Inside a system body, structural mutations MUST go through the
-//!   command buffer (`ctx.cmd.spawn(...)` etc.). Calling
-//!   `World.spawn` / `World.despawn` / `World.addComponent` /
-//!   `World.removeComponent` directly during a dispatch is a
-//!   programmer error and breaks query / chunk pointer stability.
-//! - Outside a dispatch (init, teardown, replay, out-of-phase paths)
-//!   the direct `World.*` mutation surface stays available — the
-//!   command buffer is a phase-time concession, not a permanent
-//!   façade.
-//!
-//! Application order at flush time = submission order of the systems
-//! inside the phase (the order they were registered in the
-//! `SystemScheduler`). Inside a single system's buffer, commands
-//! apply in the order they were recorded. Both ordering guarantees
-//! are deterministic and tested.
-//!
-//! Threading: the command buffer is single-threaded. Recording must
-//! happen on the main thread inside the `SystemFn` body — the worker
-//! trampolines that run chunk bodies do **not** get the cmd buffer,
-//! so they cannot record. Per-worker buffers + merge-at-flush is a
-//! Phase 1 refinement; not needed for E6 acceptance.
-//!
-//! Allocation: each `CommandBuffer` owns an arena. Payload bytes and
-//! per-spawn id/payload slices are duplicated into the arena so the
-//! caller's stack values can go out of scope between recording and
-//! flushing. The arena is reset with `retain_capacity` between
-//! frames so steady-state allocation is zero after the first flush.
+//! The arena resets with `retain_capacity`, so steady state allocates nothing.
 
 const std = @import("std");
 const world_mod = @import("world.zig");
 const registry_mod = @import("registry.zig");
 const job_bound = @import("foundation").job_bound;
 
-/// Refuse, at compile time, an argument tuple that carries a `CommandBuffer`
-/// into a body a worker pool runs.
-///
-/// `engine-ecs-internals.md` §7 states it as an absolute: no job body receives
-/// a command buffer. The reason travels WITH the type — see
-/// `CommandBuffer.weld_no_job_body` — and this function is the ECS-side name
-/// for `foundation.job_bound.refuseMarkedArgs`, kept so the call sites in this
-/// tier read in this tier's vocabulary.
-///
-/// The SITE SET is derived and asserted, not maintained by hand:
-/// `tests/ecs/hybrid_query_test.zig`'s job-bound control. Why placing the
-/// marker on the type is not the same as every entry calling it is written
-/// where that reasoning failed, at `src/core/jobs/scheduler.zig`'s dispatch.
+/// Refuse, at comptime, an argument tuple carrying a `CommandBuffer` into a body a
+/// worker pool runs. The ECS-side name for `foundation.job_bound.refuseMarkedArgs`,
+/// so the call sites read in this tier's vocabulary.
 pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
     job_bound.refuseMarkedArgs(ArgsType);
 }
 
-/// Re-export of the tier-agnostic predicate — the SAME function, NOT a copy: a
-/// copy passes every test until it drifts.
+/// The SAME function, NOT a copy: a copy passes every test until it drifts.
 pub const carriesMarked = job_bound.carriesMarked;
 
 const World = world_mod.World;
@@ -72,10 +37,7 @@ const ComponentId = registry_mod.ComponentId;
 /// Tag enum for the `Command` union.
 pub const CommandKind = enum { spawn, despawn, add_component, remove_component, set_tag, clear_tag };
 
-/// Deferred spawn: arrays of component ids + payload bytes. Both
-/// arrays live in the buffer's arena. `payloads[i]` is paired with
-/// `component_ids[i]` (same ordering, before any sort the world does
-/// internally).
+/// `payloads[i]` pairs with `component_ids[i]`, before any sort the world does.
 pub const SpawnCommand = struct {
     component_ids: []const ComponentId,
     payloads: []const []const u8,
@@ -99,12 +61,8 @@ pub const RemoveComponentCommand = struct {
     component_id: ComponentId,
 };
 
-/// Deferred tag bit set/clear (E3, `etch-grammar.md` §4.4). `tagset_id`
-/// is the registered `TagSet` component id; `bit_index` is the leaf's global
-/// bit. Applied via `World.applyTagMutation`, which adds `TagSet` to the
-/// entity (an archetype transition) when a `set_tag` lands on an entity that
-/// lacks one. Sits beside add/remove-component as a sibling deferred
-/// structural change.
+/// `bit_index` is the leaf's GLOBAL bit. Applied through `World.applyTagMutation`,
+/// which adds `TagSet` — an archetype transition — to an entity that lacks one.
 pub const TagCommand = struct {
     entity: EntityId,
     tagset_id: ComponentId,
@@ -123,34 +81,25 @@ pub const Command = union(CommandKind) {
 
 /// Per-system command buffer.
 pub const CommandBuffer = struct {
-    /// THE TYPE DECLARES ITS OWN REFUSAL, and its value is the reason.
-    ///
-    /// Read at comptime by `foundation.job_bound.refuseMarkedArgs`, which is how
-    /// the bound reaches a tier that cannot name this type: importing this file
-    /// from `src/core/jobs/` would drag `world.zig` into the job tier's graph.
+    /// THE TYPE DECLARES ITS OWN REFUSAL and its value is the reason, read at
+    /// comptime by `foundation.job_bound`: importing this file from `src/core/jobs/`
+    /// would drag `world.zig` into the job tier's graph.
     pub const weld_no_job_body: []const u8 =
         "a worker owns its range's storage and nothing else, so two workers " ++
         "recording structural changes would need a deterministic merge, which " ++
         "has no producer anywhere in the repository. Record the change outside " ++
         "the dispatch, or dispatch a body that does not record.";
 
-    /// Arena that owns payload byte copies + per-spawn id/payload
-    /// slices. Reset with `retain_capacity` on every flush so the
-    /// steady-state behaviour matches the `JobBuilder` arena's
-    /// pattern.
+    /// Owns the payload copies; reset with `retain_capacity` on every flush.
     arena: std.heap.ArenaAllocator,
     /// Recorded commands, in submission order inside this system.
     commands: std.ArrayListUnmanaged(Command) = .empty,
-    /// Borrowed pointer to the world. Used for type resolution
-    /// (`ensureComponentRegistered`) at record time and for the
-    /// actual mutations at flush time.
+    /// BORROWED — used for type resolution at record time and mutation at flush.
     world: *World,
-    /// Backing allocator for the `commands` ArrayList. The arena is
-    /// initialised from this allocator too.
+    /// Backs the `commands` list; the arena is initialised from it too.
     gpa: std.mem.Allocator,
 
-    /// Construct a fresh command buffer. `world` is borrowed and
-    /// must outlive the buffer.
+    /// `world` is borrowed and MUST outlive the buffer.
     pub fn init(gpa: std.mem.Allocator, world: *World) CommandBuffer {
         return .{
             .arena = std.heap.ArenaAllocator.init(gpa),
@@ -165,23 +114,19 @@ pub const CommandBuffer = struct {
         self.* = undefined;
     }
 
-    /// Drop every command + reset the arena to its first chunk.
-    /// Steady-state alloc-free.
+    /// Drop every command and reset the arena; steady-state alloc-free.
     pub fn reset(self: *CommandBuffer) void {
         self.commands.clearRetainingCapacity();
         _ = self.arena.reset(.retain_capacity);
     }
 
-    /// Number of recorded commands (across all kinds). Mostly for
-    /// tests and zero-alloc assertions.
+    /// For tests and zero-alloc assertions.
     pub fn commandCount(self: *const CommandBuffer) usize {
         return self.commands.items.len;
     }
 
-    /// Record a deferred spawn. `values` is a tuple of component
-    /// values (e.g. `.{Transform{}, Velocity{}}`); each field's type
-    /// is resolved through `world.ensureComponentRegistered` and its
-    /// bytes are duplicated into the buffer's arena.
+    /// `values` is a tuple of component values; each type is resolved through
+    /// `world.ensureComponentRegistered` and its bytes COPIED into the arena.
     pub fn spawn(self: *CommandBuffer, values: anytype) !void {
         const Args = @TypeOf(values);
         const info = @typeInfo(Args).@"struct";
@@ -195,8 +140,7 @@ pub const CommandBuffer = struct {
         inline for (info.fields, 0..) |field, i| {
             const T = field.type;
             ids[i] = try self.world.ensureComponentRegistered(self.gpa, T);
-            // Materialise the field as a local so `std.mem.asBytes`
-            // has a stable address, then dupe into the arena.
+            // A local first, so `std.mem.asBytes` has a stable address to dupe.
             const v: T = @field(values, field.name);
             payloads[i] = try arena_alloc.dupe(u8, std.mem.asBytes(&v));
         }
@@ -207,18 +151,13 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred despawn. The entity handle is captured by
-    /// value — if the entity has already been despawned by the time
-    /// the flush runs, the flush surfaces a `StaleEntityHandle`
-    /// error and the cmd buffer stops processing further commands
-    /// from this system's buffer (the next system's buffer still
-    /// flushes normally).
+    /// The handle is captured BY VALUE: if it is stale at flush time the flush
+    /// stops this buffer with `StaleEntityHandle` and the next system's still runs.
     pub fn despawn(self: *CommandBuffer, entity: EntityId) !void {
         try self.commands.append(self.gpa, .{ .despawn = .{ .entity = entity } });
     }
 
-    /// Record a deferred component add. `T`'s bytes are duplicated
-    /// into the arena.
+    /// `T`'s bytes are COPIED into the arena.
     pub fn addComponent(
         self: *CommandBuffer,
         entity: EntityId,
@@ -235,10 +174,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred component remove. The component must
-    /// already be registered in the world (or the remove will fail
-    /// at flush time with `StaleEntityHandle` if the type is
-    /// unknown).
+    /// An unregistered type fails at FLUSH time, as `StaleEntityHandle`.
     pub fn removeComponent(
         self: *CommandBuffer,
         entity: EntityId,
@@ -251,9 +187,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `add_tag` (E3) — set `bit_index` of `entity`'s
-    /// `TagSet` at flush time. `tagset_id` is the registered `TagSet`
-    /// component id.
+    /// Sets `bit_index` of `entity`'s `TagSet` at flush time.
     pub fn setTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
         try self.commands.append(self.gpa, .{ .set_tag = .{
             .entity = entity,
@@ -262,8 +196,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `remove_tag` (E3) — clear `bit_index` of
-    /// `entity`'s `TagSet` at flush time.
+    /// Clears `bit_index` of `entity`'s `TagSet` at flush time.
     pub fn clearTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
         try self.commands.append(self.gpa, .{ .clear_tag = .{
             .entity = entity,
@@ -272,12 +205,8 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Apply every recorded command, in submission order, against
-    /// the world. Resets the buffer at the end so the system is
-    /// ready for the next frame. Observer dispatch is layered on top
-    /// via `flushWithObservers` (see `observers.zig`) — this raw
-    /// flush is used by tests that exercise the cmd-buffer logic in
-    /// isolation.
+    /// Apply in submission order and reset. The RAW flush: observer dispatch is
+    /// `flushWithObservers` in `observers.zig`, and this one fires nothing.
     pub fn flush(self: *CommandBuffer) !void {
         for (self.commands.items) |cmd| {
             try self.applyOne(cmd);
@@ -285,9 +214,7 @@ pub const CommandBuffer = struct {
         self.reset();
     }
 
-    /// Apply a single command. Exposed at module scope so the
-    /// observer-aware flush in `observers.zig` can interleave
-    /// dispatch between mutations.
+    /// Module-scope so the observer-aware flush can interleave dispatch.
     pub fn applyOne(self: *CommandBuffer, cmd: Command) !void {
         switch (cmd) {
             .spawn => |s| {

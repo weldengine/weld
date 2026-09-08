@@ -853,7 +853,7 @@ pub const stub_editor_api: WeldEditorAPI = .{};
 /// Platform sub-API pre-built.
 pub const stub_platform_api: WeldPlatformAPI = .{};
 
-/// Stub API table used by `Loader.loadPlugin` in .
+/// Stub API table `Loader.loadPlugin` hands to a plugin.
 /// All callbacks return `WELD_ERR_NOT_IMPLEMENTED`,
 /// `null`, `0`, `false` or are no-ops depending on their return
 /// type. The runtime wiring of the 7 sub-APIs to the Zig

@@ -28,15 +28,10 @@ pub const platform = struct {
     pub const vk = @import("platform/vk.zig");
     pub const process = @import("platform/process.zig");
     pub const once = @import("platform/once.zig");
-    // sleepPrecise wrapper with Win32 timeBeginPeriod(1) once-init.
     pub const time = @import("platform/time.zig");
-    // setAffinity / setPriority OS-specific helpers.
     pub const threading = @import("platform/threading.zig");
-    // DynamicLib { open, lookup, close } over LoadLibraryW / dlopen.
     pub const dynamic_lib = @import("platform/dynamic_lib.zig");
-    // VFS resolver (assets:// / cache:// / user://) + mmapFile.
     pub const fs = @import("platform/fs.zig");
-    // Input Tier 0 namespace (raw_state, keycode, OS-specific).
     pub const input = struct {
         pub const keycode = @import("platform/input/keycode.zig");
         pub const raw_state = @import("platform/input/raw_state.zig");
@@ -109,7 +104,6 @@ comptime {
     _ = ecs.entity;
     _ = ecs.tick;
     _ = ecs.change_detection;
-    // / E5a — pin the system scheduler.
     _ = ecs.scheduler;
     _ = ecs.archetype;
     _ = ecs.world;
@@ -121,31 +115,25 @@ comptime {
     _ = ecs.chunk;
     _ = ecs.sparse_storage;
     _ = ecs.hybrid_query;
-    // pin the RTTI sub-files so their inline tests run.
     _ = rtti.type_info;
     _ = rtti.hash;
     _ = rtti.comptime_builder;
     _ = rtti.registry;
-    // pin the resources sub-files.
     _ = resources.registry;
     _ = resources.api;
     _ = events.lifetime;
     _ = events.cursor;
     _ = events.queue;
     _ = events.bus;
-    // pin the plugin loader sub-files.
     _ = plugin_loader.desc;
     _ = plugin_loader.api;
     _ = plugin_loader.loader;
-    // pin the scene sub-files so their inline tests run.
     _ = scene.format;
     _ = scene.writer;
     _ = scene.accessor;
     _ = scene.loader;
-    // pin the Tier-0 persistent heap (moved from src/etch).
     _ = memory.persistent;
     _ = ModuleContext;
-    // pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;
     _ = platform.threading;

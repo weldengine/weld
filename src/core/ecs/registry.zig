@@ -1,55 +1,31 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Tier 0 runtime component registry — assigns a stable `ComponentId` to
-//! every component (or resource) type known to the engine, plus enough
-//! metadata for the rest of the ECS (dynamic archetype storage, runtime
-//! queries, the Etch bridge) to operate on raw bytes.
+//! Assigns a stable `ComponentId` per component or resource type, plus the metadata
+//! the rest of the ECS needs to work on raw bytes. Two registration paths share one
+//! backing store: comptime `T` derived from `@typeInfo`, and a runtime descriptor
+//! the Etch bridge builds from the parsed AST.
 //!
-//! Two registration paths share the same backing storage:
-//!
-//! - `registerComponent(gpa, comptime T) ComponentId` — for types known at
-//!   Zig compile time. The descriptor is derived from `@typeInfo(T)`.
-//! - `registerComponentRaw(gpa, desc) ComponentId` — for types discovered
-//!   at runtime (the Etch bridge consumes this path from the parsed AST:
-//!   component names, field names, default bytes come from the source
-//!   file).
-//!
-//! Coexists with the S1 comptime `(Transform, Velocity)` archetype defined
-//! in `world.zig` — additive, never replaces it. The struct stores no
-//! allocator; per `engine-zig-conventions.md` §3, the gpa is passed at
-//! every mutating op.
+//! The struct stores NO allocator; the gpa is passed at every mutating op.
 
 const std = @import("std");
 
-/// `EntityId` (`packed struct(u64)`) — the storage type of a `.entity_` field
-/// (E4). Imported only for `FieldKind.fromZigType`; `entity.zig` imports
-/// nothing of `registry.zig`, so this is acyclic.
+/// Storage type of a `.entity_` field slot.
 const EntityId = @import("entity.zig").EntityId;
 
-/// Stable identifier assigned at registration. The first registered
-/// component gets `ComponentId(0)`; subsequent registrations get the next
-/// integer. Stability across runs is *not* guaranteed (it would require an
-/// out-of-band scheme like StableId — Phase 2).
+/// Stable id assigned at registration, ascending from the first registered type.
 pub const ComponentId = u32;
 
-/// Storage backend of a component — the closed two-variant domain owned by
-/// `engine-ecs-internals.md` §2 (*Table vs SparseSet*). `table` is the default
-/// and, before , the only backend implemented; `sparse` is the explicit
-/// opt-in a declaration carries through `@storage(.sparse)`.
+/// `table` is the default and `sparse` the explicit opt-in through
+/// `@storage(.sparse)`.
 ///
-/// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
-/// §13.3.1 states the rule that makes this the right home: an annotation
-/// argument's type is either a language type or a domain defined and citable at
-/// the owner of the EFFECT — never a name introduced by the schema table. The
-/// Etch front-end therefore validates through `fromName` instead of re-listing
-/// the two spellings, so the domain has one text form in the tree.
+/// DECLARED HERE AND NOWHERE ELSE: the Etch front-end validates through
+/// `fromName` instead of re-listing the two spellings, so the domain has ONE text
+/// form in the tree.
 pub const StorageKind = enum {
     table,
     sparse,
 
-    /// Spelling → variant, and the single place the two names exist as text.
-    /// `null` for a value outside the domain, which the Etch front-end reports
-    /// as `E0503 AnnotationArgMismatch`.
+    /// The single place the two spellings exist as text.
     pub fn fromName(name: []const u8) ?StorageKind {
         if (std.mem.eql(u8, name, "table")) return .table;
         if (std.mem.eql(u8, name, "sparse")) return .sparse;
@@ -57,10 +33,8 @@ pub const StorageKind = enum {
     }
 };
 
-/// Coarse-grained tag for primitive fields. The interpreter uses this to
-/// decide how to read or write raw bytes. The S3 subset only exercises
-/// `int_`, `float_`, `bool_`; the integer-family variants are reserved
-/// for future extension.
+/// How the interpreter reads or writes raw field bytes. The integer-family
+/// variants are reserved and unexercised.
 pub const FieldKind = enum {
     int_, // i64
     float_, // f64
@@ -69,44 +43,26 @@ pub const FieldKind = enum {
     u32_,
     f32_,
     f64_,
-    /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
-    /// pointing into the Tier-0 persistent heap (`src/core/memory/persistent.zig`,
-    /// `StringSlot`). **Resource-only by construction**: the Etch
-    /// validator rejects `string` on `component` and `fieldKindFromTypeName`
-    /// only emits this kind for the `.resource` origin, so no component can ever
-    /// carry it — the component SoA/POD invariant (`ARCH-004`) is
-    /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
-    /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
+    /// `{ ptr: u64, len: u32 }`, 16 bytes 8-aligned, into the persistent heap.
+    /// RESOURCE-ONLY BY CONSTRUCTION — the validator rejects `string` on a
+    /// component and `fieldKindFromTypeName` emits it only for `.resource`, so the
+    /// component POD invariant holds. Tier 0 copies the 16 slot bytes and owns none
+    /// of the pointed-to memory.
     string_,
-    /// An enum field slot: the variant's declaration-order index as a `u32`
-    /// discriminant (4 bytes, 4-aligned). POD — no persistent heap, no decref,
-    /// no teardown. **Resource-only** like `.string_` (validator-gated out of
-    /// components). The declared enum type's interned name id rides on
-    /// `FieldDesc.enum_type_name_id` so the Etch bridge can rebuild a typed
-    /// `enum_value{ type_name, variant }` on read.
+    /// The variant's declaration-order index as a `u32`. POD, RESOURCE-ONLY like
+    /// `.string_`. The enum type's interned name rides on `enum_type_name_id`.
     enum_,
-    /// An `Entity` field slot: an `EntityId` (`packed struct(u64)`, 8 bytes,
-    /// 8-aligned). POD — no heap, no teardown — so the component SoA/POD invariant
-    /// (`ARCH-004`) is untouched. **Component-only by construction**
-    /// (D-A): the exact mirror of `.string_`/`.enum_` (resource-only) —
-    /// `fieldKindFromTypeName` emits `.entity_` only for the `.component` origin.
-    /// An unassigned / dangling slot holds `EntityId.dead` (all-ones); at scene
-    /// cook the slot is written `dead` and an entity→entity reference is carried by
-    /// the Cross-references Table, resolved to the target's handle at load.
+    /// An `EntityId`, 8 bytes 8-aligned. POD, and COMPONENT-ONLY by construction —
+    /// the exact mirror of the resource-only kinds. An unassigned slot holds
+    /// `EntityId.dead`, and a cooked reference is carried by the Cross-references
+    /// Table and resolved at load.
     entity_,
-    /// A dynamic-array field slot (`T[]`, ): a `CollectionSlot`
-    /// (`{ ptr: u64 }`, 8 bytes, 8-aligned, `src/core/memory/persistent.zig`)
-    /// holding the persistent-heap pointer of the owned container block. Like
-    /// `.string_`, **resource-only by construction** — the Etch validator gates
-    /// collection fields to resources, so no component SoA slot ever carries one
-    /// (the POD invariant, `ARCH-004`, is untouched). Tier 0 stores/
-    /// copies the 8 raw slot bytes; the Etch runtime owns the container's lifetime.
+    /// A `CollectionSlot { ptr: u64 }`, 8 bytes, into the persistent heap.
+    /// RESOURCE-ONLY by construction like `.string_`; Tier 0 copies the 8 bytes.
     array_,
-    /// A map field slot (`[K: V]`, ). Same 8-byte `CollectionSlot`
-    /// discipline and resource-only gating as `.array_`.
+    /// Same 8-byte `CollectionSlot` discipline and gating as `.array_`.
     map_,
-    /// A set field slot (`Set<T>`, ). Same 8-byte `CollectionSlot`
-    /// discipline and resource-only gating as `.array_`.
+    /// Same 8-byte `CollectionSlot` discipline and gating as `.array_`.
     set_,
 
     pub fn sizeBytes(self: FieldKind) usize {
@@ -118,13 +74,11 @@ pub const FieldKind = enum {
             .u32_ => @sizeOf(u32),
             .f32_ => @sizeOf(f32),
             .f64_ => @sizeOf(f64),
-            // `{ ptr: u64, len: u32 }` padded to 8-alignment — must equal
-            // `@sizeOf(persistent.StringSlot)` (asserted in `ecs_bridge.zig`).
+            // Must equal the persistent-heap `StringSlot` layout.
             .string_ => 16,
             .enum_ => @sizeOf(u32), // declaration-order discriminant
             .entity_ => @sizeOf(EntityId), // 8 (packed u64)
-            // `CollectionSlot { ptr: u64 }` — 8 bytes; must equal
-            // `@sizeOf(persistent.CollectionSlot)` (asserted in `ecs_bridge.zig`).
+            // Must equal the persistent-heap `CollectionSlot` layout.
             .array_, .map_, .set_ => 8,
         };
     }
@@ -165,13 +119,9 @@ pub const FieldDesc = struct {
     name: []const u8,
     offset: u16,
     kind: FieldKind,
-    /// For a `.enum_` field (resource-only, E3): the Etch-interned id of
-    /// the declared enum type name (an AST `StringId`, kept opaque by Tier-0 —
-    /// a plain `u32`, never dereferenced here). Lets the Etch bridge rebuild a
-    /// typed `enum_value{ type_name, variant }` on read with no string pool.
-    /// Stored as the id (not a string) so it needs no allocation and cannot
-    /// dangle when the AST outlives nothing while the registry persists in the
-    /// world. `0` and unused for every non-`.enum_` kind.
+    /// For a `.enum_` field: the Etch-interned id of the declared enum type name,
+    /// kept OPAQUE here and never dereferenced. An id and not a string, so it needs
+    /// no allocation and cannot dangle. `0` for every other kind.
     enum_type_name_id: u32 = 0,
 };
 
@@ -183,23 +133,14 @@ pub const ComponentDesc = struct {
     alignment: u16,
     default_bytes: []const u8,
     fields: []const FieldDesc,
-    /// Storage backend. `table` unless the declaration carried
-    /// `@storage(.sparse)`. **Never part of on-disk identity**: a
-    /// `SchemaEntry` carries name, size and alignment, and the mode comes from
-    /// this runtime registry at load (`engine-scene-serialization.md` §4), so a
-    /// component changing mode invalidates no cooked scene and demands no
-    /// re-cook. Defaulted, so every existing initializer of this struct stays
-    /// source-compatible and absence of the annotation yields `table` by
-    /// construction rather than by a branch somebody has to remember.
+    /// NEVER part of on-disk identity: a `SchemaEntry` carries name, size and
+    /// alignment, and the mode comes from this registry at load — so changing a
+    /// component's mode invalidates no cooked scene.
     storage: StorageKind = .table,
-    /// DIRECT requisites, by NAME — the `@requires(A, B)` list, variadic
-    /// (`etch-reference-part3.md` §6). Names and not ids because a declaration
-    /// may name a component registered LATER: Etch admits forward references,
-    /// and resolving at registration would make the closure depend on
-    /// declaration order. The transitive closure is computed once by
-    /// `finalizeRequires` after every registration and read per add — never
-    /// re-walked per add, which `engine-ecs-internals.md` §3 requires in those
-    /// words. Defaulted, so every existing initializer stays source-compatible.
+    /// DIRECT requisites, by NAME and not by id, because a declaration may name a
+    /// component registered LATER — Etch admits forward references, and resolving at
+    /// registration would make the closure depend on declaration order. The closure
+    /// is computed once by `finalizeRequires` and never re-walked per add.
     requires: []const []const u8 = &.{},
 };
 
@@ -214,12 +155,9 @@ pub const RegistryError = error{
 /// at registration time so the caller can free its inputs immediately.
 const Entry = struct {
     desc: ComponentDesc,
-    /// The TRANSITIVE closure of `desc.requires`, flattened to ids, computed
-    /// once by `finalizeRequires`. Beside the descriptor and not inside it
-    /// because the descriptor is what a CALLER supplies and this is what the
-    /// registry DERIVES — one authority per question, the rule this milestone
-    /// settled at G3. Empty until finalisation, and empty forever for a
-    /// component with no requisites.
+    /// The TRANSITIVE closure, computed once by `finalizeRequires`. Beside the
+    /// descriptor and not inside it: the descriptor is what a CALLER supplies and
+    /// this is what the registry DERIVES — one authority per question.
     closure: []const ComponentId = &.{},
 };
 
@@ -233,13 +171,9 @@ pub const Registry = struct {
     /// `desc.name` slice is owned by `entries[id]`; alias slices added via
     /// `registerAlias` are owned by the `aliases` ArrayList below.
     by_name: std.StringHashMapUnmanaged(ComponentId) = .empty,
-    /// Extra name slices that map to existing component ids. Lets a single
-    /// component be reached by both its Etch name (via `idOf("Counter")`)
-    /// and its Zig type's `@typeName(T)` (so the S5 codegen's comptime
-    /// `world.query(.{T})` can resolve to the same `ComponentId` as
-    /// `world.spawnDynamic(gpa, &.{idOf("Counter").?})`). Stored separately
-    /// from the primary names so `deinit` can free them without
-    /// double-freeing the entries' own names.
+    /// Extra name → id mappings, so one component is reachable by its Etch name AND
+    /// by `@typeName(T)`. Stored apart from the entries' own names so `deinit` frees
+    /// them without double-freeing.
     aliases: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init() Registry {
@@ -348,33 +282,21 @@ pub const Registry = struct {
         });
     }
 
-    /// The three-colour mark of the closure walk. NAMED and declared once: the
-    /// same `enum(u8) { … }` written at two sites is two distinct types, which
-    /// is what the compiler said the first time.
+    /// NAMED and declared once: the same `enum(u8) { … }` written at two sites is two
+    /// distinct types, which is what the compiler said the first time.
     const Colour = enum(u8) { white, grey, black };
 
-    /// Resolve every `@requires` name list to ids and flatten the TRANSITIVE
-    /// closure, once, after all components are registered.
+    /// Resolve every `@requires` name to an id and flatten the TRANSITIVE closure,
+    /// once, after all components are registered. Idempotent, which is what makes a
+    /// hot-reload re-registration safe.
     ///
-    /// Called by whoever finished registering — the Etch front end after its
-    /// declaration pass, a host after its own. Idempotent: a second call
-    /// recomputes from the same descriptors and yields the same arrays, which
-    /// is what makes a hot-reload re-registration safe.
-    ///
-    /// **A cycle is an ERROR and not a fixpoint.** The fixpoint is computable,
-    /// and `engine-ecs-internals.md` §3 refuses it with a reason worth keeping
-    /// in view: it would make `add(A)` and `add(B)` indistinguishable and leave
-    /// every carrier of one carrying the other, with nothing able to undo the
-    /// coupling.
-    ///
-    /// An unknown requisite name is also an error: `@requires(Nonexistent)`
-    /// silently ignored would leave the invariant unenforceable for that
-    /// component while reporting nothing.
+    /// A CYCLE IS AN ERROR AND NOT A FIXPOINT: the fixpoint is computable and would
+    /// make `add(A)` and `add(B)` indistinguishable, leaving every carrier of one
+    /// carrying the other with nothing able to undo it. An unknown requisite name is
+    /// an error too — ignored, it would leave the invariant unenforceable in silence.
     pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
-        // Depth-first with a THREE-COLOUR mark: white unvisited, grey on the
-        // current path, black done. Grey-on-grey is the cycle — a two-colour
-        // visited set cannot tell a cycle from a diamond, and a diamond
-        // (`A requires B, C`; `B requires D`; `C requires D`) is legal.
+        // Three-colour mark: grey-on-grey is the cycle. A two-colour visited set
+        // cannot tell a cycle from a diamond, and a diamond is LEGAL.
         const n = self.entries.items.len;
         const colour = try gpa.alloc(Colour, n);
         defer gpa.free(colour);
@@ -427,11 +349,8 @@ pub const Registry = struct {
         return self.entries.items[id].closure;
     }
 
-    /// Whether any registered component names `id` among its DIRECT requisites.
-    /// The removal guard's question, and it is over direct requisites and not
-    /// the closure: a component is "still required" iff something that carries
-    /// it names it, and the closure of a third party does not make it required
-    /// by that third party's own dependents.
+    /// The removal guard's question, over DIRECT requisites and not the closure: a
+    /// third party's closure does not make `id` required by that party's dependents.
     pub fn isRequiredBy(self: *const Registry, id: ComponentId, by: ComponentId) bool {
         if (by >= self.entries.items.len) return false;
         for (self.entries.items[by].closure) |t| if (t == id) return true;
@@ -487,15 +406,8 @@ pub const Registry = struct {
         return self.by_name.get(name);
     }
 
-    /// Add an additional name → id mapping for an already-registered
-    /// component. Used by the S5 codegen's `register()` function so the
-    /// component is reachable by both its Etch name (e.g. `"Counter"`)
-    /// and its Zig `@typeName(T)` (e.g. `"corpus_codegen.p01_…Counter"`).
-    /// The two names share one entry — no duplication of the underlying
-    /// descriptor.
-    ///
-    /// Errors `DuplicateComponent` if `alias_name` already maps to a
-    /// different id. Idempotent when the alias already maps to `id`.
+    /// A second name for one entry — no duplicated descriptor. `DuplicateComponent`
+    /// when `alias_name` already maps elsewhere; idempotent when it maps to `id`.
     pub fn registerAlias(self: *Registry, gpa: std.mem.Allocator, alias_name: []const u8, id: ComponentId) RegistryError!void {
         std.debug.assert(id < self.entries.items.len);
         if (self.by_name.get(alias_name)) |existing| {

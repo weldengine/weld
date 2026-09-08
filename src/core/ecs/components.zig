@@ -1,23 +1,11 @@
-//! S1 component definitions — `Transform` and `Velocity` POD `extern struct`.
-//!
-//! Layout follows the suggested baseline of `briefs/S1-mini-ecs.md` (Notes):
-//! pos/rot/scale (resp. linear/angular) each on their own 16-byte lane via
-//! field-level `align(16)`. Total sizes are 48 (Transform) and 32 (Velocity)
-//! bytes, both 16-byte aligned — friendly to `@Vector(4, f32)` SIMD and to
-//! the chunk SoA layout (cf. `chunk.zig`). Per `engine-zig-conventions.md`
-//! §16, components are `extern struct` POD, carry no methods, and default
-//! every field. The trailing `_pad*` slots round each lane to 16 bytes.
+//! POD `extern struct` components, every field defaulted. Each lane carries a
+//! field-level `align(16)` and a trailing `_pad`, so the sizes are 48 and 32 —
+//! pinned below, because `chunk.zig`'s capacity math assumes them.
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");
 
-/// Canonical generational entity identifier (`packed struct(u64)`,
-/// `(index, generation)` low-to-high). The 8-byte size assertion below
-/// pins the wire layout S1 committed to; the generational halves are an
-/// addition (cf. `briefs/ecs-full.md` E1 — Identity
-/// foundations) that closes the S1 debts D-S1-1 (slot reuse) and D-S1-2
-/// (generational indices). See `entity.zig` for the type definition and
-/// the matching `EntityIdentityStore`.
+/// Canonical generational entity identifier — see `entity.zig`.
 pub const EntityId = entity_mod.EntityId;
 
 /// Position, rotation (quaternion), and scale of an entity in world space.
@@ -29,8 +17,7 @@ pub const Transform = extern struct {
     _pad1: f32 = 0,
 };
 
-/// Linear and angular velocity of an entity (units per second / radians per
-/// second). The S1 bench body integrates `linear` against `Transform.pos`.
+/// Linear and angular velocity, per second and radians per second.
 pub const Velocity = extern struct {
     linear: [3]f32 align(16) = .{ 0, 0, 0 },
     _pad0: f32 = 0,
@@ -39,8 +26,6 @@ pub const Velocity = extern struct {
 };
 
 comptime {
-    // Lock the layout assumed by `chunk.zig` and the bench. Any future change
-    // to these sizes/alignments must update the chunk capacity test.
     std.debug.assert(@sizeOf(Transform) == 48);
     std.debug.assert(@alignOf(Transform) == 16);
     std.debug.assert(@sizeOf(Velocity) == 32);

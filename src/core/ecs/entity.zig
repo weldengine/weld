@@ -1,71 +1,39 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Generational entity identity for the Tier 0 ECS.
-//!
-//! `EntityId` packs a u32 slot index and a u32 generation tag into a 64-bit
-//! handle (low half = index, high half = generation, fixed by `packed
-//! struct(u64)`). The slot index addresses the world's per-slot table; the
-//! generation tag detects use-after-free of stale handles after the slot
-//! has been despawned and reused.
-//!
-//! The 64-bit layout is stable — Etch's `Value.entity_id` stores it as a
-//! raw u64 via `@bitCast`, and the chunk `entity_ids[]` array remains a
-//! `[*]EntityId` with the same 8-byte stride S1 committed to (cf.
-//! `chunk.zig`'s capacity test). Changing the layout requires bumping
-//! every chunk capacity reference.
-//!
-//! `EntityIdentityStore` owns the slot table + free-list. Both world spawn
-//! paths — the S1 comptime archetype (`world.spawn`) and the S4 dynamic
-//! archetypes (`world.spawnDynamic`) — allocate identity through this
-//! single store so the generation counter is unique across the world
-//! regardless of which storage path the entity lives in.
+//! `EntityId` is 8 bytes, index low and generation high, and the layout is STABLE:
+//! Etch bit-casts it to a `u64` and the chunk `entity_ids[]` stride depends on it,
+//! so a change here forces every chunk capacity reference with it.
 
 const std = @import("std");
 
-/// Generational entity handle. Always 8 bytes, with `(index, generation)`
-/// laid out low-to-high — `@bitCast(u64, eid) == (generation << 32) | index`.
-/// The default value (index=0, generation=0) is the first entity allocated
-/// from a fresh store; callers that need a "no entity" sentinel should use
-/// `dead` rather than relying on default-zero.
+/// Generational handle, `(index, generation)` low-to-high.
+/// The default (0, 0) is the FIRST allocated entity, never a sentinel — see `dead`.
 pub const EntityId = packed struct(u64) {
     index: u32,
     generation: u32,
 
-    /// Bit pattern reserved for "no entity". Never produced by
-    /// `EntityIdentityStore.allocate` — `index = maxInt(u32)` would require
-    /// 4 G slots already allocated, well past any milestone target.
+    /// Reserved "no entity"; `allocate` cannot produce it without 4 G live slots.
     pub const dead = EntityId{
         .index = std.math.maxInt(u32),
         .generation = std.math.maxInt(u32),
     };
 };
 
-/// Surfaced by `World.despawn`, `World.spawn`, `World.spawnDynamic`, and any
-/// other API that consumes or returns an identity through the store.
+/// Raised by every API that consumes or returns an identity through the store.
 pub const WorldError = error{
     StaleEntityHandle,
     OutOfMemory,
 };
 
-/// One row of the slot table. Small (5 bytes once packed in
-/// `ArrayList(EntitySlot)`) so a 1 M-entity world's table stays well under
-/// the L2 cache budget. Kept private to this module so consumers go through
-/// `EntityIdentityStore`'s public verbs.
+/// Private on purpose — consumers go through `EntityIdentityStore`'s verbs.
 const EntitySlot = struct {
-    /// Current generation of the slot. Brand-new slots start at 0;
-    /// `release` increments this so any outstanding handle to the previous
-    /// occupant fails `validate`.
+    /// `release` increments it, which is what fails a stale handle's `validate`.
     generation: u32,
-    /// `true` while the slot points at a live entity. Toggled to `false`
-    /// in `release` and back to `true` in `allocate` when the slot is
-    /// pulled off the free list.
+    /// `false` between `release` and the `allocate` that pulls the slot back.
     alive: bool,
 };
 
-/// Owns the per-slot generation table and the free-index stack. One
-/// store per world; both spawn paths drive the same store so a generation
-/// bump on despawn invalidates any outstanding handle regardless of which
-/// storage path it indexed.
+/// One store per world, driven by BOTH spawn paths, so a generation is unique.
 pub const EntityIdentityStore = struct {
     slots: std.ArrayListUnmanaged(EntitySlot) = .empty,
     free_indices: std.ArrayListUnmanaged(u32) = .empty,
@@ -80,27 +48,12 @@ pub const EntityIdentityStore = struct {
         self.* = undefined;
     }
 
-    /// Reserve a fresh `EntityId`. Recycles a slot from the free list when
-    /// one is available (returning the bumped generation captured by the
-    /// previous `release`), otherwise appends a new slot with generation 0.
+    /// Reserve a fresh `EntityId`, recycling a freed slot when one is available.
     ///
-    /// Establishes the C1 invariant *`free_indices.capacity >= slots.len` at
-    /// all times*, which is what lets `release` be an infallible
-    /// `appendAssumeCapacity`: the recycled path frees a free-list slot the
-    /// re-push reuses (`pop` drops `len` under an unchanged capacity), and the
-    /// fresh path reserves free-list capacity for the new slot **before**
-    /// growing `slots`. On the fresh path `free_indices.items.len == 0`, so
-    /// `ensureTotalCapacity(slots.len + 1)` makes `capacity >= slots.len + 1`
-    /// (`ensureUnusedCapacity(1)` would only guarantee `capacity >= 1` and
-    /// freeze there — see brief B1).
-    ///
-    /// Reserve-then-mutate: an `OutOfMemory` from the free-list reservation
-    /// leaves `slots` untouched and returns no handle; an `OutOfMemory` from
-    /// the subsequent `slots.append` leaves harmless spare free-list capacity
-    /// and adds no slot. Either way there is no observable mutation.
-    ///
-    /// Errors: `OutOfMemory` if either the free list or the slot table needs
-    /// to grow and the allocator refuses.
+    /// ESTABLISHES `free_indices.capacity >= slots.len`, the only reason `release`
+    /// can be infallible. On the fresh path that means `ensureTotalCapacity(slots.len
+    /// + 1)`: `ensureUnusedCapacity(1)` guarantees only `capacity >= 1` and freezes
+    /// there. Either `OutOfMemory` leaves no observable mutation.
     pub fn allocate(self: *EntityIdentityStore, gpa: std.mem.Allocator) WorldError!EntityId {
         if (self.free_indices.pop()) |idx| {
             const slot = &self.slots.items[idx];
@@ -114,9 +67,7 @@ pub const EntityIdentityStore = struct {
         return .{ .index = idx, .generation = 0 };
     }
 
-    /// Confirm that `id` still refers to a live slot with a matching
-    /// generation. Returns `error.StaleEntityHandle` for indices past the
-    /// slot table, for freed slots, and for generation mismatches.
+    /// `StaleEntityHandle` for an index past the table, a freed slot, or a mismatch.
     pub fn validate(self: *const EntityIdentityStore, id: EntityId) WorldError!void {
         if (id.index >= self.slots.items.len) return error.StaleEntityHandle;
         const slot = self.slots.items[id.index];
@@ -125,28 +76,16 @@ pub const EntityIdentityStore = struct {
         }
     }
 
-    /// `true` if `id` refers to a live entity in this store. Non-erroring
-    /// counterpart to `validate` for paths that just need a boolean.
+    /// Non-erroring counterpart to `validate`.
     pub fn isLive(self: *const EntityIdentityStore, id: EntityId) bool {
         if (id.index >= self.slots.items.len) return false;
         const slot = self.slots.items[id.index];
         return slot.alive and slot.generation == id.generation;
     }
 
-    /// Mark `id`'s slot as freed, bump its generation, and push the index
-    /// onto the free list for recycling. Caller must have validated `id`
-    /// prior; this still asserts liveness in debug.
-    ///
-    /// Infallible and allocation-free by construction: `allocate` already
-    /// reserved the free-list slot this push reuses (C1 invariant
-    /// `free_indices.capacity >= slots.len`), so this is a bare
-    /// `appendAssumeCapacity` — no allocator parameter, no error. See
-    /// `allocate` for the reservation that backs it.
-    ///
-    /// Generation arithmetic uses wrapping increment — the u32 counter is
-    /// only at risk after 4 G releases of the same slot, which is well
-    /// past the Phase 0 horizon. A future-phase milestone can introduce a
-    /// guard that retires the slot once `generation == maxInt(u32) - 1`.
+    /// Free `id`'s slot and bump its generation. The caller validates first; debug
+    /// asserts liveness. Infallible and allocation-free BECAUSE `allocate` reserved
+    /// this push. The generation WRAPS at `u32` and nothing retires a spent slot.
     pub fn release(self: *EntityIdentityStore, id: EntityId) void {
         std.debug.assert(id.index < self.slots.items.len);
         const slot = &self.slots.items[id.index];
@@ -164,9 +103,7 @@ pub const EntityIdentityStore = struct {
 };
 
 comptime {
-    // Lock the wire-format identity layout. Chunks, the IPC catalogue, and
-    // every consumer that bit-casts an `EntityId` to/from u64 assumes
-    // 8-byte alignment and size.
+    // Every consumer that bit-casts an `EntityId` to a `u64` assumes this.
     std.debug.assert(@sizeOf(EntityId) == 8);
     std.debug.assert(@alignOf(EntityId) == @alignOf(u64));
 }
@@ -229,8 +166,7 @@ test "validate rejects out-of-range index, freed slot, and stale generation" {
     // Freed slot, original handle is stale.
     try std.testing.expectError(error.StaleEntityHandle, store.validate(a));
 
-    // Same slot recycled — the original handle stays stale even though the
-    // slot is alive again.
+    // The original handle stays stale even though the slot is alive again.
     const b = try store.allocate(gpa);
     try std.testing.expect(a.index == b.index);
     try std.testing.expectError(error.StaleEntityHandle, store.validate(a));
@@ -282,12 +218,8 @@ test "100k allocate then release back to zero live count" {
 }
 
 test "allocate reserves release capacity; release is allocation-free" {
-    // C1 acceptance test. N is deliberately large (1000) so the buggy
-    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation (brief B1) would
-    // freeze `free_indices.capacity` far below `slots.len` and overflow the
-    // infallible `appendAssumeCapacity` in `release` (repro: overflow at
-    // release #33). The corrected `ensureTotalCapacity(gpa, slots.len + 1)`
-    // keeps `free_indices.capacity >= slots.len`, so every release fits.
+    // N is deliberately 1000: the buggy `ensureUnusedCapacity(gpa, 1)` froze
+    // `free_indices.capacity` far below `slots.len` and overflowed at release #33.
     const gpa = std.testing.allocator;
     var store = EntityIdentityStore.init();
     defer store.deinit(gpa);
@@ -300,14 +232,10 @@ test "allocate reserves release capacity; release is allocation-free" {
     while (i < N) : (i += 1) ids[i] = try store.allocate(gpa);
     try std.testing.expectEqual(@as(usize, N), store.liveCount());
 
-    // The invariant `allocate` establishes: the free list can already hold
-    // every slot, so `release` never needs to grow it.
+    // The free list can ALREADY hold every slot, so `release` never grows it.
     try std.testing.expect(store.free_indices.capacity >= store.slots.items.len);
 
-    // Release all N. `release` takes no allocator and is a bare
-    // `appendAssumeCapacity` — allocation-free by construction. No allocator
-    // can be consulted here, so "release with the allocator set to fail every
-    // request" is satisfied structurally.
+    // `release` consults no allocator, so "release under a failing allocator" holds.
     i = 0;
     while (i < N) : (i += 1) store.release(ids[i]);
     try std.testing.expectEqual(@as(usize, 0), store.liveCount());
@@ -318,10 +246,8 @@ test "allocate is reserve-then-mutate: OOM on a fresh slot leaves no observable 
     var store = EntityIdentityStore.init();
     defer store.deinit(gpa);
 
-    // Fill the slot table exactly to capacity so the NEXT fresh allocate is
-    // forced to grow (and can therefore OOM). Without this, `allocate`
-    // amortizes on the spare capacity from an earlier geometric growth and
-    // never touches the allocator, so there would be no OOM to observe.
+    // Fill the table exactly to capacity, or `allocate` amortizes on spare capacity
+    // and never reaches the allocator — there would be no OOM to observe.
     const a = try store.allocate(gpa);
     while (store.slots.items.len < store.slots.capacity) {
         _ = try store.allocate(gpa);
@@ -329,10 +255,8 @@ test "allocate is reserve-then-mutate: OOM on a fresh slot leaves no observable 
     const slots_before = store.slots.items.len;
     const live_before = store.liveCount();
 
-    // The free list is empty (every slot is live), so the next allocate takes
-    // the fresh path. Its first allocation is the free-list reservation, made
-    // *before* `slots` is touched; `slots.append` then must grow too. Failing
-    // the first allocation request exercises the reserve-then-mutate ordering.
+    // Failing the FIRST request hits the free-list reservation, which is made before
+    // `slots` is touched — the reserve-then-mutate ordering under test.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, store.allocate(failing.allocator()));
 

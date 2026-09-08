@@ -9,3 +9,17 @@
 # no file at all, is itself a lint error.
 
 src/core/platform/window/wayland_protocols/tests_facade.zig | three re-export lines, each owing a mandatory `///`, put the floor at 50%
+src/core/ecs/tick.zig | two `pub const` lines owing a mandatory `///` each, over three code lines
+src/core/ecs/archetype_dynamic.zig | eight deprecated aliases, one mandatory `///` apiece
+src/core/ecs/root.zig | 52 re-export lines, one mandatory `///` apiece, put the floor at 50%
+src/core/plugin_loader/desc.zig | 30 frozen C-ABI declarations over 88 code lines, each owing a mandatory `///` and several a bound the C type cannot carry
+src/core/rtti/root.zig | 32 re-export lines, one mandatory `///` apiece
+src/core/resources/root.zig | 12 re-export lines over 18 code lines
+src/core/plugin_loader/root.zig | 14 re-export lines over 22 code lines
+src/core/events/root.zig | 12 re-export lines over 22 code lines
+src/core/scene/root.zig | five re-exports plus the analysis-forcing comptime block, over 12 code lines
+src/core/memory/root.zig | one re-export plus the analysis-forcing comptime block, over 4 code lines
+src/core/events/lifetime.zig | a three-variant enum whose variants each name their drain point
+src/core/events/cursor.zig | a five-field POD whose epoch field carries the invalidation rule
+src/core/rtti/registry.zig | a 42-line file whose contract is three bounds no signature states
+src/core/resources/registry.zig | two frozen declarations plus the marker's collision argument

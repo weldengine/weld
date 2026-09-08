@@ -1,22 +1,9 @@
-//! Comptime-typed query over the dynamic side of the world.
+//! Comptime-typed query the Etch → Zig codegen consumes: one `query(world, .{…})`
+//! per rule, and Zig monomorphises one iterator type per distinct tuple — which is
+//! the instantiation count `bench-etch-compile` gates on.
 //!
-//! `query(world, .{T1, T2, ...})` returns an iterator that walks the
-//! world's `DynamicArchetype`s, finds those whose registry-keyed
-//! component set is a superset of `{@typeName, @typeName, ...}`,
-//! and yields a comptime-typed tuple of pointers `(*T1, *T2, ...)` per
-//! matching slot.
-//!
-//! This is the path the S5 codegen consumes — each rule emits one
-//! `query(world, .{...})` invocation, and Zig's comptime monomorphises
-//! one iterator type per distinct tuple of component types. The total
-//! number of distinct instantiations is the figure reported by
-//! `bench-etch-compile` for Gate 4.
-//!
-//! Coexists with the S1 single-archetype `world.query()` (which still
-//! covers the comptime `(Transform, Velocity)` path). They do not share
-//! storage — `query` here only sees archetypes spawned via
-//! `world.spawnDynamic`, the path the codegen and the differential
-//! corpus runner use.
+//! It sees ONLY archetypes spawned through `world.spawnDynamic`; the comptime
+//! `world.query()` covers the typed path and the two share no storage.
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
@@ -28,12 +15,8 @@ const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
 const Chunk = arch_dyn_mod.Chunk;
 const World = world_mod.World;
 
-/// Generic iterator over entities whose archetype contains all of
-/// `tuple`'s component types. Comptime-monomorphised per distinct
-/// `tuple`. The `Row` type is a comptime tuple struct (`.@"0"`, `.@"1"`,
-/// …) of `*Ti` pointers into the chunk's SoA arrays — readers and writers
-/// alike go through these pointers, no `Value` tagged union on the hot
-/// path.
+/// Monomorphised per distinct `tuple`. `Row` is a comptime tuple of `*Ti` pointers
+/// INTO the chunk's SoA arrays — no `Value` union on the hot path.
 pub fn ComptimeQuery(comptime tuple: anytype) type {
     const types_count: usize = tuple.len;
     return struct {
@@ -132,9 +115,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
     };
 }
 
-/// Comptime entry point. The `tuple` value is e.g. `.{Counter, Position}`
-/// at the call site; Zig monomorphises one return type per distinct
-/// `tuple`.
+/// Zig monomorphises one return type per distinct `tuple`.
 pub fn query(world: *World, comptime tuple: anytype) ComptimeQuery(tuple) {
     return ComptimeQuery(tuple).init(world);
 }

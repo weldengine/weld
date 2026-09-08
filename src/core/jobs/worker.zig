@@ -1,8 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Worker loop: pop from its own deque, then steal from peers in a fixed rotation,
-//! then yield. The trampoline and context pointers are picked up with ACQUIRE
-//! ordering after the worker's own acquire load on the deque.
+//! Own deque, then peers in a FIXED rotation, then yield; the trampoline and the
+//! context pointer are picked up with ACQUIRE ordering.
 
 const std = @import("std");
 const deque_mod = @import("deque.zig");
@@ -14,16 +13,12 @@ pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) 
 pub const Job = struct {
     /// Type-erased chunk pointer; the trampoline knows its concrete type.
     chunk_ptr: *anyopaque,
-    /// Per-job trampoline.
     trampoline: TrampolineFn,
     /// Per-job context pointer, owned by the dispatcher's frame.
     ctx_ptr: *anyopaque,
 };
 
-/// Maximum jobs per worker deque.
-///
-/// The bound that sizes it is `--workers=1`, where ONE worker must hold an entire
-/// wave. Exposed so the scheduler can size its buffer at `worker_count * this`.
+/// Maximum jobs per worker deque; `--workers=1` is the bound that sizes it.
 pub const DequeCapacity: usize = 8192;
 const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 
@@ -33,11 +28,10 @@ pub const WorkerStats = struct {
     steals_attempted: std.atomic.Value(u64) = .init(0),
     steals_succeeded: std.atomic.Value(u64) = .init(0),
     work_duration_ns: std.atomic.Value(u64) = .init(0),
-    /// Parks ENTERED — bumped under the park mutex immediately before the wait.
+    /// Parks ENTERED, bumped under the park mutex immediately BEFORE the wait.
     ///
     /// Always bumped before `parks_completed`, so `completed <= entered` holds at
-    /// every observation and `entered > completed` proves a worker is parked. That
-    /// is why `snapshot` reads completed FIRST; reversing the two loads breaks it.
+    /// every observation — which is why `snapshot` reads completed FIRST.
     parks_entered: std.atomic.Value(u64) = .init(0),
     /// Parks COMPLETED — a wait that actually slept rather than busy-yielded.
     parks_completed: std.atomic.Value(u64) = .init(0),
@@ -52,11 +46,7 @@ pub const WorkerStats = struct {
     };
 
     pub fn snapshot(self: *const WorkerStats) Snapshot {
-        // Read `parks_completed` BEFORE `parks_entered` so the snapshot always
-        // satisfies `parks_completed <= parks_entered`, even if a worker cycles
-        // park→wake between the two atomic loads (entered is bumped before
-        // completed under the park mutex, so reading completed first can never
-        // observe a completed value that outruns the later-read entered value).
+        // Completed FIRST, or a park→wake cycle between the loads breaks the bound.
         const completed = self.parks_completed.load(.acquire);
         return .{
             .chunks_processed = self.chunks_processed.load(.acquire),

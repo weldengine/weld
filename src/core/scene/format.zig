@@ -1,17 +1,13 @@
-//! `.scene.bin` format — the single source of truth shared verbatim with the runtime
-//! loader (`engine-scene-serialization.md` §4). Owns the on-disk contract and the
-//! neutral cook model.
+//! `.scene.bin` format — the contract shared VERBATIM with the runtime loader, plus
+//! the neutral cook model.
 //!
 //! THE SoA LAYOUT IS AN AGREEMENT WITH THE LOADER, which slices each column at an
 //! entity's rank: column order is ascending component order, stride is
-//! `componentSize`, and each column start is aligned to `componentAlignment`. Break
-//! any of the three and the slice lands on the wrong bytes.
+//! `componentSize`, each column start is aligned to `componentAlignment`. Break any
+//! of the three and the slice lands on the wrong bytes.
 //!
 //! ON-DISK COMPONENT IDENTITY IS A FILE-LOCAL SCHEMA INDEX, never a runtime
-//! `ComponentId` — those are not stable across runs or processes. The loader maps each
-//! schema name back through `idOf(name)`.
-//!
-//! Tier discipline: `src/core/scene/` never imports `weld_etch`.
+//! `ComponentId`, which is stable across neither runs nor processes.
 
 const std = @import("std");
 

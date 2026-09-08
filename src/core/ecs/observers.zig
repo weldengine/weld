@@ -1,35 +1,14 @@
-//! structural mutation observers.
+//! Structural-mutation observers, fired during the per-system command-buffer flush.
 //!
-//! Hooks that fire during the per-system command-buffer flush, in
-//! lock-step with the four deferrable mutations:
+//! THE DISPATCH POSITION IS THE CONTRACT. `remove_component` and `despawn` fire
+//! PRE-apply, which is what lets a callback read the entity's components one last
+//! time before the swap-and-pop invalidates the slot; `spawn` and `add_component`
+//! fire POST-apply, so `on_add` sees the attached values.
 //!
-//! - `on_spawned` (global, one list)
-//! - `on_despawned` (global, one list)
-//! - `on_add[ComponentId]` (per-component, hash-keyed)
-//! - `on_remove[ComponentId]` (per-component, hash-keyed)
-//!
-//! Dispatch timing relative to each command (per brief E6):
-//!
-//! | Command            | Pre-apply observers              | Post-apply observers       |
-//! |--------------------|----------------------------------|----------------------------|
-//! | `spawn`            | —                                | on_spawned + on_add[cid]*  |
-//! | `add_component`    | —                                | on_add[cid]                |
-//! | `remove_component` | on_remove[cid]                   | —                          |
-//! | `despawn`          | on_remove[cid]* + on_despawned   | —                          |
-//!
-//! The pre-apply position for remove / despawn is critical: it lets
-//! `on_despawned` callbacks read the entity's components one last
-//! time before the swap-and-pop invalidates the slot. The post-apply
-//! position for spawn / add lets `on_add` see the newly-attached
-//! component values.
-//!
-//! Re-entrancy contract (brief E6): observers MAY record structural
-//! mutations through the shared deferred command buffer
-//! (`ObserverRegistry.deferred`), but those mutations are NOT
-//! applied re-entrantly during the current flush. They run at the
-//! NEXT phase boundary's flush, before that phase's own system cmd
-//! buffers. This guarantees forward progress: no recursive observer
-//! loop can stall the engine.
+//! An observer MAY record structural mutations into the shared `deferred` buffer,
+//! and they are NOT applied re-entrantly: they run at the NEXT flush, before that
+//! phase's own buffers. That one flush-point of latency is what guarantees forward
+//! progress — no recursive observer loop can stall the engine.
 
 const std = @import("std");
 const world_mod = @import("world.zig");
@@ -43,29 +22,14 @@ const CommandBuffer = command_buffer_mod.CommandBuffer;
 const Command = command_buffer_mod.Command;
 
 /// Callback fired when a structural mutation triggers an observer.
-/// Arguments (E3 — uniform signature carrying a context pointer
-/// and old/new value pointers):
-/// - `ctx` — opaque per-listener context (e.g. the Etch interpreter's
-///    `{ interp, rule_desc_idx }`), threaded back to the callback. `null`
-///    for context-free (native) observers.
-/// - `world` — the world being mutated (read access only is safe;
-///    direct write access is allowed but discouraged — prefer the
-///    `deferred` buffer for cmds that should land at the next flush).
-/// - `entity` — the entity that triggered the event.
-/// - `component_id` — the component involved. Populated for
-///    `on_add` / `on_remove` / `on_replaced`; `null` for
-///    `on_spawned` / `on_despawned`.
-/// - `old_value` — pointer to the pre-mutation component bytes
-///    (`componentSize(component_id)` long). Set for `on_remove` and
-///    `on_replaced`; `null` otherwise.
-/// - `new_value` — pointer to the post-mutation component bytes. Set for
-///    `on_add` and `on_replaced`; `null` otherwise.
-/// - `deferred` — shared command buffer where observer-issued
-///    mutations are queued for the next flush.
 ///
-/// Conventions: `on_added` → `new_value` set, `old_value` null;
-/// `on_removed` → `old_value` set, `new_value` null; `on_replaced` →
-/// both set; `on_spawned` / `on_despawned` → both null, `component_id` null.
+/// WHICH POINTERS ARE SET IS PER EVENT and a callback must not assume: `on_added`
+/// has `new_value` only, `on_removed` `old_value` only, `on_replaced` both,
+/// `on_spawned` / `on_despawned` neither and no `component_id`. Each value pointer
+/// is `componentSize(component_id)` bytes.
+///
+/// `world` is safe to READ; a direct write is allowed and discouraged — the
+/// `deferred` buffer is where a mutation belongs.
 pub const ObserverFn = *const fn (
     ctx: ?*anyopaque,
     world: *World,
@@ -89,13 +53,10 @@ const Listeners = std.ArrayListUnmanaged(Listener);
 /// Ascending-`ComponentId` walk over the UNION of an entity's table and sparse
 /// components.
 ///
-/// **ONE walk for both directions, never a copy per direction** — its whole job
-/// is an ORDER, which is exactly the property two copies would drift on.
-///
-/// Ascending id and NOT the caller's slice order: a slice order is a property of
-/// the calling code, so the observer order would otherwise depend on how someone
-/// wrote a spawn literal. `engine-ecs-internals.md` §8 covers the despawn
-/// direction only; making it bidirectional is the corpus owner's, not here.
+/// ONE walk for both directions, never a copy per direction — its whole job is an
+/// ORDER, which is exactly what two copies would drift on. Ascending id and NOT the
+/// caller's slice order, or the observer order would depend on how someone wrote a
+/// spawn literal.
 pub const ComponentUnionIter = struct {
     world: *World,
     entity: EntityId,
@@ -116,9 +77,8 @@ pub const ComponentUnionIter = struct {
         };
     }
 
-    /// The archetype's `component_ids` are sorted and `nextContaining` is
-    /// ascending by construction, so taking the smaller head each step yields
-    /// the union in ascending id with no allocation and no sort.
+    /// Both heads are ascending by construction, so taking the smaller yields the
+    /// union in ascending id with no allocation and no sort.
     pub fn next(it: *ComponentUnionIter) ?ComponentId {
         const t_cid: ?ComponentId = if (it.ti < it.table_ids.len) it.table_ids[it.ti] else null;
         if (t_cid == null and it.s_next == null) return null;
@@ -133,9 +93,7 @@ pub const ComponentUnionIter = struct {
     }
 };
 
-/// Registry holding the four kinds of observer lists. Lives next to
-/// the `World` (typically as a field) and is consulted during every
-/// command buffer flush.
+/// Lives beside the `World` and is consulted at every command-buffer flush.
 pub const ObserverRegistry = struct {
     on_spawned: Listeners = .empty,
     on_despawned: Listeners = .empty,
@@ -145,9 +103,8 @@ pub const ObserverRegistry = struct {
     /// entity that already has `cid` (E3). Carries old + new values.
     on_replaced: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
 
-    /// Shared deferred buffer for observer-issued cmds. Created
-    /// lazily on first observer registration so test paths that do
-    /// not exercise observers stay alloc-free.
+    /// Created LAZILY on first registration, so a path exercising no observer stays
+    /// allocation-free.
     deferred: ?CommandBuffer = null,
 
     pub fn init() ObserverRegistry {
@@ -255,14 +212,11 @@ pub const ObserverRegistry = struct {
         try entry.value_ptr.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
-    /// Fire `on_spawned` for one already-instantiated entity (E2). The
-    /// scene loader drives the spawn lifecycle in a dedicated second pass —
-    /// after every loaded entity exists — rather than through the
-    /// command-buffer flush, so the ordering guarantee "all entities present
-    /// before any `on_spawned` fires" holds. Ensures the shared `deferred`
-    /// buffer exists first (a `null` `deferred` makes `fireList` early-return),
-    /// letting an `on_spawned` rule queue structural commands the caller drains
-    /// afterwards. Only `on_spawned` is fired — never `on_add`/`on_replaced`.
+    /// Fire `on_spawned` for an already-instantiated entity. The scene loader drives
+    /// this in a dedicated SECOND pass, after every loaded entity exists, so the
+    /// guarantee "all entities present before any `on_spawned`" holds. Ensures
+    /// `deferred` exists first — a null one makes `fireList` early-return. Fires
+    /// `on_spawned` ONLY, never `on_add` or `on_replaced`.
     pub fn dispatchOnSpawned(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
@@ -273,14 +227,10 @@ pub const ObserverRegistry = struct {
         try self.fireList(self.on_spawned, world, eid, null, null, null);
     }
 
-    /// Spawn an entity with initial component values AND fire the exact
-    /// observers a deferred `.spawn` flush fires — `on_spawned`, then
-    /// `on_add[cid]` per component — returning the new handle. Factored out of
-    /// `applyWithObservers`'s `.spawn` arm so an IMMEDIATE spawn that must return
-    /// a handle (the Etch `world.spawn_with` test-runner surface, ) shares
-    /// the one observer-firing spawn path instead of duplicating it. The handle
-    /// is valid on return (same tick). Observer-issued structural changes queue
-    /// into the shared `deferred` buffer (drained at the next flush / tick).
+    /// Spawn with initial values and fire EXACTLY what a deferred `.spawn` flush
+    /// fires — `on_spawned`, then `on_add[cid]` per component — returning the handle,
+    /// valid on return. Factored out of `applyWithObservers` so an immediate spawn
+    /// that must return a handle shares the ONE observer-firing spawn path.
     pub fn spawnWithObservers(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
@@ -291,9 +241,8 @@ pub const ObserverRegistry = struct {
         self.ensureDeferred(gpa, world);
         const eid = try world.spawnDynamicWithValues(gpa, component_ids, payloads);
         try self.fireList(self.on_spawned, world, eid, null, null, null);
-        // The ENTITY's real union, not the caller's slice: the `@requires`
-        // closure expands inside the spawn, so a component the caller never
-        // named can be present and owes its `on_add`.
+        // The ENTITY's real union, not the caller's slice: the `@requires` closure
+        // expands inside the spawn, so an unnamed component still owes its `on_add`.
         var it = ComponentUnionIter.init(world, eid);
         while (it.next()) |cid| {
             if (self.on_add.get(cid)) |list| {
@@ -320,17 +269,11 @@ pub const ObserverRegistry = struct {
     }
 };
 
-/// Apply a single command buffer with observer dispatch interleaved
-/// between each command's apply step. After the loop, also flush the
-/// registry's `deferred` buffer (the cmds queued by observers during
-/// THIS flush stay deferred — they apply at the NEXT call to
-/// `flushWithObservers` on a subsequent phase, NOT now).
+/// Apply one buffer with observers interleaved around each command.
 ///
-/// In other words: each call to `flushWithObservers` drains the
-/// **previous** flush's deferred cmds + the system's own cmds, then
-/// stashes new observer-issued cmds into `registry.deferred` for the
-/// next call. This is the "1 flush-point latency" semantic from the
-/// brief.
+/// Each call drains the PREVIOUS flush's observer-issued commands plus the system's
+/// own, then stashes newly-issued ones for the next call — the one flush-point of
+/// latency, never re-entrancy.
 pub fn flushWithObservers(
     cmd: *CommandBuffer,
     registry: ?*ObserverRegistry,
@@ -343,17 +286,13 @@ pub fn flushWithObservers(
     const world = cmd.world;
     const gpa = cmd.gpa;
 
-    // First — drain the previous flush's queued observer cmds (raw,
-    // no observer dispatch on these, since they were observer-issued
-    // and we do not want recursion).
+    // RAW: no observer dispatch on these, they were observer-issued and recursion is
+    // exactly what the deferral exists to prevent.
     if (reg.deferred) |*deferred| {
         for (deferred.commands.items) |c| try applyRawCommand(world, gpa, c);
         deferred.reset();
     }
 
-    // Then — apply this system's cmds with observers dispatched
-    // around each one. Observers may queue more cmds into
-    // `reg.deferred` for the next flush.
     for (cmd.commands.items) |c| {
         try applyWithObservers(c, reg, world, gpa);
     }
@@ -370,36 +309,22 @@ pub fn applyWithObservers(
 ) !void {
     switch (c) {
         .spawn => |s| {
-            // Shares the returning-eid primitive with the immediate
-            // `world.spawn_with` surface — one observer-firing spawn
-            // path (on_spawned + on_add per component).
+            // The one observer-firing spawn path, shared with `world.spawn_with`.
             _ = try reg.spawnWithObservers(gpa, world, s.component_ids, s.payloads);
         },
         .despawn => |d| {
-            // SAME MECHANISM as the remove arm below: the command's own
-            // precondition, checked before any observer fires. `world.despawn`
-            // returns `StaleEntityHandle` on a handle whose generation is gone,
-            // and `on_despawned` fires UNCONDITIONALLY — so a double despawn in
-            // one tick, which two rules or one body can record, handed
-            // consumers the death of an entity whose despawn then failed. The
-            // `on_remove` loop below is naturally empty in that case (a dead
-            // entity carries no component), which is why `on_despawned` is the
-            // whole of the exposure and not a fraction of it.
+            // The command's own precondition, checked BEFORE any observer fires:
+            // `on_despawned` fires unconditionally, so a double despawn in one tick
+            // handed consumers the death of an entity whose despawn then failed. The
+            // `on_remove` loop below is naturally empty there, which is why
+            // `on_despawned` is the whole of the exposure.
             if (!world.isLive(d.entity)) return error.StaleEntityHandle;
-            // Pre-apply: fire on_remove[cid] for every component the
-            // entity still has, then on_despawned. The observer is
-            // free to read the entity's components — they live until
-            // we drop into `world.despawn` below, so `old_value` points
-            // at the live (pre-destruction) slot.
-            // The capture is gone with the inline walk, the GUARD is not: an
-            // entity with no location is stale, and the pass is skipped whole
-            // exactly as before rather than walking its sparse stores.
+            // Pre-apply, so `old_value` points at the LIVE slot: the components
+            // survive until `world.despawn` runs below.
             if (world.entity_locations.get(d.entity) != null) {
-                // The SAME walk the spawn direction takes: ascending
-                // `ComponentId` over the UNION of both backends, by a
-                // two-pointer merge of two already-ascending sequences. The
-                // archetype signature ALONE is the table half only, and an
-                // observer silently skipped is undetectable by any caller.
+                // The SAME walk the spawn direction takes. The archetype signature
+                // ALONE is the table half only, and a skipped observer is
+                // undetectable by any caller.
                 var it = ComponentUnionIter.init(world, d.entity);
                 while (it.next()) |cid| {
                     if (reg.on_remove.get(cid)) |list| {
@@ -412,17 +337,13 @@ pub fn applyWithObservers(
             try world.despawn(gpa, d.entity);
         },
         .add_component => |a| {
-            // Replace = add-on-present (E3): if the entity already has
-            // the component, this is an in-place overwrite, not a migration —
-            // `addComponentDynamic` would panic on the already-present assert.
-            // Capture the old bytes before the overwrite (storage is clobbered),
-            // overwrite, then fire `on_replaced[cid]` with old + new. Otherwise
-            // it is a genuine add: migrate, then fire `on_add[cid]` with new.
+            // Add-on-present is an in-place OVERWRITE, not a migration —
+            // `addComponentDynamic` would panic on its already-present assert. The
+            // old bytes are captured before the clobber, then `on_replaced` fires.
             if (world.componentBytes(a.entity, a.component_id)) |slot| {
                 const list_opt = reg.on_replaced.get(a.component_id);
-                // Capture the old bytes ONLY when an `on_replaced` listener will
-                // consume them — otherwise the shared Tier-0 path stays alloc-free
-                // (a listener-less add-on-present must not pay a `dupe`).
+                // Only when a listener will consume them: a listener-less
+                // add-on-present must not pay a `dupe`.
                 const old_copy: ?[]u8 = if (list_opt != null) try gpa.dupe(u8, slot) else null;
                 defer if (old_copy) |oc| gpa.free(oc);
                 // The in-place overwrite + change-mark are UNCONDITIONAL — the
@@ -435,34 +356,22 @@ pub fn applyWithObservers(
                     try reg.fireList(list, world, a.entity, a.component_id, old_ptr, new_ptr);
                 }
             } else {
-                // EVERY COMPONENT THE TRANSACTION ADDS IS NOTIFIED, and that set
-                // is not the command's id: `addComponentDynamic` expands the
-                // `@requires` closure, so firing for `a.component_id` alone left
-                // a requisite added here with no `on_add` at all. R11 had its six
-                // command kinds derived; this is its complement, and the spawn
-                // direction already carried it (`spawnWithObservers`) — the
-                // constraint was applied where it was shown and not where the
-                // rule reaches.
+                // EVERY COMPONENT THE TRANSACTION ADDS IS NOTIFIED, and that set is
+                // not the command's id: `addComponentDynamic` expands the `@requires`
+                // closure, so firing for `a.component_id` alone left a requisite
+                // added here with no `on_add` at all.
                 //
-                // The ABSENT set is snapshotted BEFORE the add, so a requisite
-                // the entity already carried is not re-notified: an `on_add` for
-                // a component that was already there is the same lie about the
-                // world R11 forbids in the other direction.
+                // The ABSENT set is snapshotted BEFORE the add, so a requisite the
+                // entity already carried is not re-notified — an `on_add` for a
+                // component that was already there is the same lie in reverse.
                 const closure = world.registry.requiresClosure(a.component_id);
 
-                // THE ORDINARY ADD NOTIFIES NOTHING, and it was paying a list to
-                // discover that (review P4). With an empty closure the
-                // notified set is a subset of `{a.component_id}`, so with no
-                // `on_add` registered for that id the loop below fires nothing
-                // whatever the presence tests answer — the two paths are
-                // fire-for-fire identical on this cell, which is why the fast
-                // one may skip straight to the add.
-                //
-                // Measured before: ten sparse adds with neither closure nor
-                // listener cost TEN allocator operations against ZERO for the
-                // same ten through `addComponentDynamic`, so the whole of it was
-                // this list, on a per-COMMAND basis, on the churn path this
-                // milestone exists to serve.
+                // With an empty closure the notified set is a subset of
+                // `{a.component_id}`, so with no listener for that id the loop below
+                // fires nothing whatever the presence tests answer — the two paths
+                // are fire-for-fire identical here, which is why the fast one may
+                // skip straight to the add. Measured: ten sparse adds with neither
+                // closure nor listener cost TEN allocator operations against zero.
                 if (closure.len == 0 and reg.on_add.get(a.component_id) == null) {
                     return world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
                 }
@@ -477,9 +386,8 @@ pub fn applyWithObservers(
                     if (cid == a.component_id) continue;
                     if (!world.hasComponentDyn(a.entity, cid)) pending.appendAssumeCapacity(cid);
                 }
-                // ASCENDING id, the order R5 fixed for the union walk and for the
-                // same reason: the closure's own order is a registry internal, so
-                // an observer order resting on it would depend on registration.
+                // ASCENDING id: the closure's own order is a registry internal, so an
+                // observer order resting on it would depend on registration order.
                 std.mem.sort(ComponentId, pending.items, {}, std.sort.asc(ComponentId));
 
                 try world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
@@ -495,17 +403,13 @@ pub fn applyWithObservers(
             }
         },
         .remove_component => |r| {
-            // AN OBSERVER DESCRIBES A STATE THAT HAS TAKEN PLACE, so the
-            // command's own precondition is checked BEFORE the event. A
-            // `@requires` refusal is a silent SKIP inside
-            // `removeComponentDynamic`, and firing first handed consumers an
-            // `on_removed` for a component that is still there — a lie about
-            // the world, delivered by the mechanism that exists to report it.
+            // AN OBSERVER DESCRIBES A STATE THAT HAS TAKEN PLACE, so the command's
+            // precondition is checked BEFORE the event. A `@requires` refusal is a
+            // silent SKIP inside `removeComponentDynamic`, and firing first handed
+            // consumers an `on_removed` for a component that is still there.
             //
-            // Returning here rather than falling through is what keeps the skip
-            // counted ONCE: the count lives inside `requiresRefusesRemoval`, so
-            // a pre-validation that then reached `removeComponentDynamic` would
-            // count the same refusal twice.
+            // Returning rather than falling through keeps the skip counted ONCE —
+            // the count lives inside `requiresRefusesRemoval`.
             if (world.requiresRefusesRemoval(r.entity, r.component_id, &.{})) return;
             // Pre-apply: observer reads the component value (live slot), THEN
             // the migration drops it.
@@ -522,9 +426,7 @@ pub fn applyWithObservers(
     }
 }
 
-/// Raw apply without observer dispatch — used to drain the previous
-/// flush's deferred buffer (those cmds were already "observer-issued"
-/// and re-firing on them would create recursion).
+/// RAW, no dispatch: re-firing on observer-issued commands would recurse.
 fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c: Command) !void {
     switch (c) {
         .spawn => |s| {

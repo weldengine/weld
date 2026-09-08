@@ -1,22 +1,10 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Tier 0 resource store — singleton storage indexed by `ComponentId`.
-//! Each resource carries a `dirty` flag set by `getMutResource` and cleared
-//! by `tickBoundary`. Used by the `when resource T changed` filter (see
-//! `engine-ecs-internals.md` §5 — change detection; S4 implements a
-//! degenerate per-resource dirty bit, full tick-based detection is Phase
-//! 0.5).
-//!
-//! Resource storage is byte-level: each entry holds a heap-allocated
-//! `[]u8` (size from the registry) plus a dirty flag. The Etch bridge
-//! reads or writes fields through the registry's `FieldDesc` offsets.
-//!
-//! Every buffer is over-aligned to `ChunkAlignment` (E3-C, Option A)
-//! so generated code can form a typed `*R` over the bytes — `@alignCast`
-//! sound in ReleaseSafe, ABI pointer identity (`etch-abi-zig.md` §3.1).
-//! UNCONDITIONAL: one alignment regime for every resource buffer regardless
-//! of access path (two regimes by access path would reopen an
-//! interpreter/codegen divergence); byte-offset access works unchanged.
+//! Byte-level singleton store keyed by `ComponentId`, each entry a heap `[]u8`
+//! plus a dirty flag. Every buffer is over-aligned to `ChunkAlignment`
+//! UNCONDITIONALLY, so generated code can form a typed `*R` over the bytes and one
+//! alignment regime covers every access path — two would reopen an
+//! interpreter/codegen divergence.
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
@@ -24,17 +12,14 @@ const chunk_mod = @import("chunk.zig");
 
 const ComponentId = registry_mod.ComponentId;
 
-/// Alignment of every resource byte buffer. ≥ the largest POD field
-/// alignment (8, `etch-abi-zig.md` §3.1), pinned at comptime.
+/// At least the largest POD field alignment; pinned at comptime below.
 pub const BufferAlignment: usize = chunk_mod.ChunkAlignment;
 
 comptime {
     std.debug.assert(BufferAlignment >= 8);
 }
 
-/// Surfaced by `ResourceStore.addResource` and `removeResource`;
-/// the read paths (`getResource` / `getMutResource`) return `?[]u8`
-/// rather than failing through this set.
+/// The READ paths return `?[]u8` instead of failing through this set.
 pub const ResourceError = error{
     DuplicateResource,
     UnknownResource,
@@ -43,14 +28,11 @@ pub const ResourceError = error{
 
 const Entry = struct {
     bytes: []align(BufferAlignment) u8,
-    /// Set by `getMutResource`; cleared by `tickBoundary`. Read by the
-    /// `when resource T changed` filter (interpreter).
+    /// Set by `getMutResource`, cleared by `tickBoundary`.
     dirty: bool,
 };
 
-/// Per-world store of singleton resources, keyed by `ComponentId`.
-/// Owns the raw byte buffer for each resource plus a per-entry dirty
-/// flag flipped on `getMutResource` and cleared on `tickBoundary`.
+/// Owns each resource's byte buffer and its dirty flag.
 pub const ResourceStore = struct {
     entries: std.AutoHashMapUnmanaged(ComponentId, Entry) = .empty,
 
@@ -65,10 +47,8 @@ pub const ResourceStore = struct {
         self.* = undefined;
     }
 
-    /// Add a new resource. `init_bytes` is copied into a freshly allocated
-    /// buffer (length must match the registry's `componentSize(id)`),
-    /// over-aligned to `BufferAlignment`. Initial `dirty` is `false`.
-    /// Adding an already-present resource returns `error.DuplicateResource`.
+    /// `init_bytes` is COPIED, and its length must equal `componentSize(id)`.
+    /// A resource already present is `error.DuplicateResource`.
     pub fn addResource(self: *ResourceStore, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) ResourceError!void {
         if (self.entries.contains(id)) return ResourceError.DuplicateResource;
         const buf = try gpa.alignedAlloc(u8, comptime .fromByteUnits(BufferAlignment), init_bytes.len);
@@ -83,8 +63,7 @@ pub const ResourceStore = struct {
         return e.bytes;
     }
 
-    /// Mutable view of the resource bytes. Sets `dirty = true`. Returns
-    /// `null` if absent.
+    /// Mutable view; sets `dirty = true` unconditionally, even for an equal write.
     pub fn getMutResource(self: *ResourceStore, id: ComponentId) ?[]u8 {
         const e = self.entries.getPtr(id) orelse return null;
         e.dirty = true;
@@ -96,12 +75,9 @@ pub const ResourceStore = struct {
         return e.dirty;
     }
 
-    /// Set a resource's dirty bit to an explicit value. **Tier-0-internal seam**,
-    /// not a public runtime / Etch / plugin API: the scene loader's rollback path
-    /// (a different Zig file — hence `pub`) restores the pre-load dirty state
-    /// after a rejected transaction, because `getMutResource` (called during both
-    /// the failed load and the rollback) unconditionally sets `dirty = true`
-    /// (C6). No-op if the resource is absent.
+    /// Tier-0-internal seam, `pub` only because the scene loader lives elsewhere:
+    /// its rollback restores the pre-load dirty state, which `getMutResource` has
+    /// already clobbered on both the failed load and the undo.
     pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
         const e = self.entries.getPtr(id) orelse return;
         e.dirty = value;
@@ -111,8 +87,7 @@ pub const ResourceStore = struct {
         return self.entries.contains(id);
     }
 
-    /// Clear the dirty bit on every resource. Called once per tick by the
-    /// interpreter after all rules have run.
+    /// Called once per tick, after every rule has run.
     pub fn tickBoundary(self: *ResourceStore) void {
         var it = self.entries.valueIterator();
         while (it.next()) |e| e.dirty = false;
@@ -170,8 +145,7 @@ test "resource buffers are chunk-aligned (M0.8 Option A)" {
     var store = ResourceStore.init();
     defer store.deinit(gpa);
 
-    // An odd-sized init slice from an arbitrary (1-byte-aligned) source —
-    // the stored buffer must still come back over-aligned.
+    // An odd-sized slice from a 1-byte-aligned source must still come back aligned.
     const bytes = [_]u8{ 1, 2, 3, 4, 5 };
     try store.addResource(gpa, 9, bytes[0..]);
     const got = store.getResource(9).?;

@@ -1,69 +1,20 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! / E5b system scheduler — phase pipeline + implicit DAG +
-//! concurrent intra-phase dispatch.
+//! Phase pipeline, implicit DAG, concurrent intra-phase dispatch, above
+//! `core/jobs/scheduler.zig`. A topological level's systems stage into ONE
+//! `JobBuilder` dispatched in a single wave, so workers interleave chunks from
+//! different systems.
 //!
-//! Sits above `core/jobs/scheduler.zig`. Owns the registry of
-//! `SystemDescriptor`s grouped by `Phase` plus the per-phase
-//! topological DAG built from `Reads(T)` / `Writes(T)` access
-//! declarations. `dispatchFrame` walks each phase, then each
-//! topological level inside that phase, collecting chunked work
-//! from every system in the level into a single `JobBuilder`. The
-//! resulting heterogeneous job batch is dispatched through the job
-//! system in **one wave** — workers pull chunks from any system in
-//! the level, so compatible systems share the worker pool at chunk
-//! granularity.
+//! THE DAG SEMANTIC IS FORWARD DATAFLOW: `Writes(X)` runs before `Reads(X)`
+//! whatever the registration order. Two writes on the same id in the same phase are
+//! a HARD registration error — there is no `runs_before`/`runs_after` to break the
+//! tie, so silent serialisation is deliberately not the model.
 //!
-//! Phase pipeline. Six canonical phases dispatched in declaration
-//! order: `pre_update`, `fixed_update`, `update`, `post_update`,
-//! `late_update`, `pre_render`. The end-of-phase barrier is
-//! implicit since `jobs.Scheduler.dispatchBatch` blocks until
+//! Edges are built incrementally at `registerSystem` and the levels are cached on
+//! first dispatch, so re-registering between frames is programmer error.
+//!
+//! The end-of-phase barrier is IMPLICIT: `dispatchBatch` blocks until
 //! `pending_count` reaches zero.
-//!
-//! DAG construction. Done **incrementally** at `registerSystem`:
-//! every new system's `Reads(T)` / `Writes(T)` set is compared
-//! against the already-registered systems in the same phase. The
-//! semantic is **forward dataflow** — `Writes(X)` always runs before
-//! `Reads(X)` regardless of registration order. The conflict matrix
-//! is:
-//!
-//!   |               | Reads(X)        | Writes(X)        |
-//!   |---------------|-----------------|------------------|
-//!   | Reads(X)      | no edge         | edge (W→R)       |
-//!   | Writes(X)     | edge (W→R)      | conflict → error |
-//!
-//! Two writes on the same component in the same phase are a hard
-//! registration error (`error.WriteWriteConflict`) — Bevy's silent
-//! serialization is explicitly not the model (cf. brief Notes).
-//! E5b does NOT introduce `runs_before` / `runs_after` declarative
-//! ordering — every conflict is unresolvable by construction, so
-//! the registration error is the only outcome. A later milestone
-//! can add explicit ordering if a real-world case requires it.
-//!
-//! Resource placeholders. `ReadsResource(R)` / `WritesResource(R)`
-//! share the DAG construction path with components — the resource
-//! API itself is out of scope, but the placeholders compile
-//! and contribute to conflict detection so the SystemDescriptor
-//! signature is stable across the → boundary.
-//!
-//! Topological levels. Computed lazily on first `dispatchFrame` via
-//! Kahn's algorithm and cached per phase. The DAG's edges are
-//! frozen after the first dispatch — re-registration between
-//! frames is a programmer error and asserts in debug.
-//!
-//! Concurrency. Within a level, every system stages chunks into a
-//! shared `JobBuilder`. The builder's arena owns a per-system args
-//! storage so each system's body has a stable `ctx_ptr` for the
-//! duration of the level's dispatch. Heterogeneous trampolines on
-//! every job let workers interleave chunks from different systems
-//! freely — this is the "multi-job concurrent intra-phase" pattern
-//! the E5b brief requires.
-//!
-//! What E5b does NOT include (per the brief Execution Steps):
-//! - No command buffers.
-//! - No observers.
-//! - No lazy query re-scan on archetype creation mid-frame.
-//! - No actual resource storage / lookup.
 
 const std = @import("std");
 const world_mod = @import("world.zig");
@@ -80,19 +31,7 @@ const TrampolineFn = worker_mod.TrampolineFn;
 const ComponentId = registry_mod.ComponentId;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
 
-/// Canonical Phase-0 phase pipeline. Dispatched once per
-/// `dispatchFrame` in declaration order:
-///
-/// 1. `pre_update`   — start-of-frame chores (input sampling, time
-///    advance hooks).
-/// 2. `fixed_update` — physics-rate fixed-step systems.
-/// 3. `update`       — variable-rate gameplay (the bench S1 system
-///    lives here).
-/// 4. `post_update`  — variable-rate gameplay cleanup.
-/// 5. `late_update`  — late-frame chores (transform propagation
-/// when lands).
-/// 6. `pre_render`   — final pass before render submission
-///    (camera matrix builds, culling preparation).
+/// The canonical phase pipeline, dispatched once per frame in DECLARATION ORDER.
 pub const Phase = enum(u8) {
     pre_update,
     fixed_update,
@@ -104,22 +43,14 @@ pub const Phase = enum(u8) {
     pub const count = std.meta.fields(@This()).len;
 };
 
-/// Kind tag distinguishing component reads/writes from resource
-/// reads/writes. Components and resources share the same DAG
-/// construction logic in E5b — the conflict matrix is identical,
-/// only the lookup namespace differs (and resources have no
-/// concrete API yet, so the placeholders just record the intent).
+/// Components and resources share one DAG path and one conflict matrix; only the
+/// lookup namespace differs.
 pub const AccessKind = enum { reads, writes, reads_resource, writes_resource };
 
-/// Closure that ensures the access's component / resource type is
-/// registered with the world's `Registry` and returns its
-/// `ComponentId`. Resolved at `registerSystem` time so the DAG can
-/// reason about access conflicts using stable runtime ids.
+/// Resolved at `registerSystem` time, so the DAG reasons about STABLE runtime ids.
 pub const AccessResolveFn = *const fn (world: *World, gpa: std.mem.Allocator) anyerror!ComponentId;
 
-/// One read/write access declaration on a system. The `type_name`
-/// is `@typeName(T)` from the factory function and is kept around
-/// for diagnostic messages on `WriteWriteConflict`.
+/// `type_name` survives for the `WriteWriteConflict` diagnostic.
 pub const AccessDescriptor = struct {
     kind: AccessKind,
     type_name: []const u8,
@@ -154,14 +85,11 @@ pub fn Writes(comptime T: type) AccessDescriptor {
     };
 }
 
-/// Placeholder `ReadsResource(R)` — wired into DAG construction but
-/// the resource lookup API itself lands in .
+/// Placeholder — the resource lookup API does not exist yet.
 pub fn ReadsResource(comptime R: type) AccessDescriptor {
     const Wrapper = struct {
         fn resolve(world: *World, gpa: std.mem.Allocator) anyerror!ComponentId {
-            // / E5b shares the component-id pool for resources
-            // so the DAG can reason about them. introduces a
-            // proper resource registry.
+            // Resources share the component-id pool so the DAG can reason about them.
             return try world.ensureComponentRegistered(gpa, R);
         }
     };
@@ -186,23 +114,14 @@ pub fn WritesResource(comptime R: type) AccessDescriptor {
     };
 }
 
-/// Per-frame state surfaced to every system. `dt` is the seconds
-/// elapsed since the previous frame (provided by `dispatchFrame`);
-/// `user` is an opaque pointer the caller can use to share custom
-/// per-frame state (the bench stashes its cached query + offsets
-/// here). E6 will extend this with the command buffer flush
-/// context.
+/// `dt` is seconds since the previous frame; `user` is an opaque pointer for the
+/// caller's own per-frame state.
 pub const FrameContext = struct {
     dt: f32,
     user: ?*anyopaque,
 };
 
-/// Argument bundle passed to every `SystemFn`. Holds the borrowed
-/// `World`, the per-frame allocator, the io handle, the job
-/// scheduler for chunked dispatch, the `FrameContext` shared
-/// across systems, the `JobBuilder` the system stages its chunked
-/// work into, and the per-system `CommandBuffer` for deferred
-/// structural mutations.
+/// Everything a `SystemFn` body receives, all of it BORROWED for the call.
 pub const SystemContext = struct {
     world: *World,
     gpa: std.mem.Allocator,
@@ -210,24 +129,16 @@ pub const SystemContext = struct {
     jobs: *jobs_sched_mod.Scheduler,
     frame: *FrameContext,
     builder: *JobBuilder,
-    /// Per-system command buffer. Owned by `SystemScheduler`; reset
-    /// between flushes (at the end of every phase). Recording is
-    /// single-threaded — only the `SystemFn` body (main thread)
-    /// records; worker trampolines do not receive a cmd buffer.
+    /// Recording is SINGLE-THREADED and main-thread only: a worker trampoline never
+    /// receives a buffer.
     cmd: *CommandBuffer,
 };
 
-/// Type-erased system entry point. The function stages chunked
-/// work into `ctx.builder` (via `builder.addJob`) instead of
-/// dispatching directly through `ctx.jobs` — `SystemScheduler`
-/// dispatches the accumulated batch at the end of the topological
-/// level. Errors propagate through `dispatchFrame`.
+/// Stages into `ctx.builder` rather than dispatching through `ctx.jobs` — the
+/// scheduler dispatches the accumulated batch at the end of the level.
 pub const SystemFn = *const fn (ctx: SystemContext) anyerror!void;
 
-/// System descriptor with access declarations for DAG construction.
-/// `accesses` defaults to empty — a system with no declared
-/// accesses is treated as having no conflicts with any other
-/// system and lands on topological level 0.
+/// A system with no declared access conflicts with nothing and lands on level 0.
 pub const SystemDescriptor = struct {
     phase: Phase,
     name: []const u8,
@@ -235,13 +146,9 @@ pub const SystemDescriptor = struct {
     accesses: []const AccessDescriptor = &.{},
 };
 
-/// Accumulator for the heterogeneous job batch dispatched at the
-/// end of a topological level. Owns an arena allocator that stores
-/// the per-system args alongside the `Job` array — each system's
-/// `ctx_ptr` points at args owned by this arena for the duration
-/// of the level's dispatch. Reset between levels via
-/// `resetRetainingCapacity` so the bench's 1000-iteration loop
-/// doesn't allocate after the first frame.
+/// Accumulator for one level's heterogeneous job batch. Its arena stores each
+/// system's args beside the `Job` array, so a body's `ctx_ptr` is stable for the
+/// level; reset with `retain_capacity`, hence no allocation after the first frame.
 pub const JobBuilder = struct {
     arena: std.heap.ArenaAllocator,
     jobs: std.ArrayListUnmanaged(Job) = .empty,
@@ -257,18 +164,14 @@ pub const JobBuilder = struct {
         self.* = undefined;
     }
 
-    /// Drop the current level's jobs + args without freeing the
-    /// arena's allocated chunks. The next level reuses the same
-    /// memory.
+    /// Drop this level's jobs and args; the arena's chunks stay for the next.
     pub fn reset(self: *JobBuilder) void {
         self.jobs.clearRetainingCapacity();
         _ = self.arena.reset(.retain_capacity);
     }
 
-    /// Stage the chunks of `query` into the builder with `Body`
-    /// as the trampoline target and `args` as the per-job context.
-    /// `args` is copied into the arena so its lifetime extends
-    /// until the next `reset` / `deinit`.
+    /// Stage `query`'s chunks with `Body` as the trampoline. `args` is COPIED into
+    /// the arena, so its lifetime runs to the next `reset`.
     pub fn addJob(
         self: *JobBuilder,
         query: anytype,
@@ -277,11 +180,8 @@ pub const JobBuilder = struct {
     ) !void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
-        // no job body receives a command buffer. This entry hands
-        // `args` to a body the worker pool runs, so it is one of the TWO real
-        // dispatch points; the bound lives on the TYPE
-        // (`command_buffer.refuseCommandBufferInArgs`) precisely so both reach
-        // it from their own imports rather than one of them carrying it alone.
+        // A real dispatch point: `args` reaches a body the worker pool runs. The
+        // bound lives on the TYPE so both dispatch points reach it independently.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const Trampoline = struct {
@@ -309,33 +209,15 @@ pub const JobBuilder = struct {
         }
     }
 
-    /// Stage the dense ranges of a sparse-driven query into the builder, one
-    /// job per range, with `Body` as the trampoline target.
+    /// Stage a sparse-driven query's dense ranges, one job per range.
     ///
-    /// **This is the entry that makes `engine-ecs-internals.md` §7's parity
-    /// real**: a chunk becomes a unit of work by being handed to `addJob`
-    /// above, and until this existed a dense range was split, bounded and
-    /// never dispatched — `forEachDenseRange` runs its bodies on the CALLING
-    /// thread, exactly like `Query.forEachChunk`. The split was delivered at
-    /// ; the consumption is here.
+    /// A `DenseRange` is two integers with no storage identity, unlike a chunk which
+    /// IS its own pointer — so the ranges are materialised into the builder's arena
+    /// and each job carries a pointer to one. The arena's lifetime is the level,
+    /// which is exactly the lifetime `args` already has.
     ///
-    /// Parity is EXACT on the property that matters, and inexact on one point
-    /// that is stated rather than implied. Exact: the same `Body` serves the
-    /// same-thread entry and this one, because `forEachDenseRange` calls it
-    /// with a `DenseRange` BY VALUE and this trampoline dereferences and
-    /// passes the same value — the way one chunk body serves `forEachChunk`,
-    /// `runChunkAt` and `addJob` alike. Inexact: a chunk is a heap allocation
-    /// and IS its own `chunk_ptr`, while a `DenseRange` is two integers with
-    /// no storage identity, so the ranges are materialised into the builder's
-    /// arena and the job carries a pointer to one of them. The arena's
-    /// lifetime is the level (`reset` is `.retain_capacity`), which is exactly
-    /// the lifetime `args` already has.
-    ///
-    /// `target` is the caller's, as it is on `forEachDenseRange` — the natural
-    /// granularity of a chunk query is `chunkCount()` and a dense array has
-    /// no equivalent given quantity. Overflow is caught where `addJob`'s is,
-    /// at `dispatchBatch`, which returns `error.TooManyChunks`; staging does
-    /// not check, and that is parity and not an omission.
+    /// `target` is the caller's, a dense array having no equivalent of `chunkCount()`.
+    /// Overflow is caught where `addJob`'s is, at `dispatchBatch`.
     pub fn addDenseRangeJobs(
         self: *JobBuilder,
         world: *world_mod.World,
@@ -345,8 +227,7 @@ pub const JobBuilder = struct {
         args: anytype,
     ) !void {
         const ArgsType = @TypeOf(args);
-        // The same bound as `addJob`, for the same reason: a worker owns its
-        // range and nothing else.
+        // The same bound as `addJob`: a worker owns its range and nothing else.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const n = sq.rangeCount(world, target);
@@ -379,17 +260,12 @@ pub const JobBuilder = struct {
     }
 };
 
-/// Per-phase access tracker: which already-registered systems read
-/// or write a given component / resource id. Used by
-/// `registerSystem` to compute the new system's incoming edges and
-/// to detect write-write conflicts on the same id.
+/// Who already reads or writes a given id in this phase — the input to the new
+/// system's incoming edges and to write-write detection.
 const PhaseAccessTracker = struct {
     /// `ComponentId → readers (system indices in by_phase[phase])`.
     readers: std.AutoHashMapUnmanaged(ComponentId, std.ArrayListUnmanaged(u32)) = .empty,
-    /// `ComponentId → writers (system indices)`. / E5b allows
-    /// at most one writer per id per phase, so this is effectively
-    /// `?u32` per id (stored as ArrayList for symmetry + future
-    /// growth when explicit ordering arrives).
+    /// At most ONE writer per id per phase, so effectively `?u32`; a list for symmetry.
     writers: std.AutoHashMapUnmanaged(ComponentId, std.ArrayListUnmanaged(u32)) = .empty,
 
     fn deinit(self: *PhaseAccessTracker, gpa: std.mem.Allocator) void {
@@ -403,8 +279,7 @@ const PhaseAccessTracker = struct {
     }
 };
 
-/// Topological level — list of system indices (in
-/// `by_phase[phase]`) that can be dispatched together.
+/// System indices that can be dispatched together.
 const Level = struct {
     system_indices: std.ArrayListUnmanaged(u32) = .empty,
 
@@ -416,18 +291,12 @@ const Level = struct {
 
 const PhaseState = struct {
     systems: std.ArrayListUnmanaged(SystemDescriptor) = .empty,
-    /// Per-system command buffer, parallel to `systems`. Indexed by
-    /// the same `u32` index used in `edges` / `tracker` / `levels`.
-    /// Lifetime tied to the phase — created on `registerSystem`,
-    /// deinit'd on the phase's own `deinit`.
+    /// Parallel to `systems` and indexed by the same `u32` as `edges` and `levels`.
     command_buffers: std.ArrayListUnmanaged(CommandBuffer) = .empty,
-    /// `edges[i]` lists the system indices that must run AFTER
-    /// system `i` (i.e. depend on `i`). Used by Kahn's algorithm
-    /// to compute topological levels.
+    /// `edges[i]` lists the systems that must run AFTER `i`.
     edges: std.ArrayListUnmanaged(std.ArrayListUnmanaged(u32)) = .empty,
     tracker: PhaseAccessTracker = .{},
-    /// Cached topological levels. `null` means "not computed yet"
-    /// — the first `dispatchFrame` populates it.
+    /// `null` means NOT COMPUTED YET; the first `dispatchFrame` fills it.
     levels: ?std.ArrayListUnmanaged(Level) = null,
 
     fn deinit(self: *PhaseState, gpa: std.mem.Allocator) void {
@@ -445,16 +314,9 @@ const PhaseState = struct {
     }
 };
 
-/// Errors surfaced by `SystemScheduler.registerSystem`. Currently
-/// limited to `WriteWriteConflict` (two writes on the same id in
-/// the same phase) plus the usual `OutOfMemory`. Promoted to a
-/// public alias so callers do not have to spell the error set out.
+/// A public alias so callers need not spell the error set out.
 pub const RegistrationError = error{
-    /// Two systems declare `Writes(T)` on the same component (or
-    /// resource) in the same phase, with no explicit ordering to
-    /// break the tie. / E5b rejects this at registration —
-    /// Bevy's silent serialization is explicitly not the model
-    /// (cf. brief Notes).
+    /// Two `Writes(T)` on one id in one phase, with no ordering to break the tie.
     WriteWriteConflict,
     OutOfMemory,
 };
@@ -463,12 +325,9 @@ pub const RegistrationError = error{
 /// intra-phase dispatch.
 pub const SystemScheduler = struct {
     phases: [Phase.count]PhaseState,
-    /// Cross-frame `JobBuilder` — owns the arena that backs every
-    /// system's per-level args storage. Created lazily on the first
-    /// `dispatchFrame` (so `init()` stays allocator-free) and reused
-    /// for the lifetime of the scheduler. The arena is reset with
-    /// `retain_capacity` between levels and between frames so the
-    /// bench's tight 1000-iteration loop pays for memory once.
+    /// Owns the arena backing every system's per-level args. Created lazily so
+    /// `init()` stays allocator-free, and reset with `retain_capacity` between
+    /// levels and frames, so a tight loop pays for memory once.
     builder: ?JobBuilder = null,
 
     pub fn init() SystemScheduler {
@@ -484,14 +343,8 @@ pub const SystemScheduler = struct {
         self.* = undefined;
     }
 
-    /// Register a system. Resolves the system's accesses against
-    /// the world's registry, then computes incoming edges + checks
-    /// for write-write conflicts against systems already registered
-    /// in the same phase. Returns `error.WriteWriteConflict` on a
-    /// conflict; the descriptor is NOT inserted in that case.
-    ///
-    /// Invalidates any cached topological levels for the affected
-    /// phase — the next `dispatchFrame` recomputes them.
+    /// On `WriteWriteConflict` the descriptor is NOT inserted. Invalidates the
+    /// affected phase's cached levels.
     pub fn registerSystem(
         self: *SystemScheduler,
         gpa: std.mem.Allocator,
@@ -508,9 +361,7 @@ pub const SystemScheduler = struct {
             resolved[i] = try access.resolve(world, gpa);
         }
 
-        // First pass — conflict detection. Two writes on the same
-        // id in the same phase = registration error. No state is
-        // mutated until we know the system is conflict-free.
+        // Nothing is mutated until the system is known conflict-free.
         for (desc.accesses, resolved) |access, cid| {
             if (access.kind == .writes or access.kind == .writes_resource) {
                 if (phase.tracker.writers.get(cid)) |writers| {
@@ -519,15 +370,9 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Second pass — compute the new system's edges. The DAG
-        // semantic is **forward dataflow** (W→R) regardless of
-        // registration order. For each access:
-        //   - Reads(X) : every existing writer of X is a predecessor
-        //                (writer runs before this reader).
-        //   - Writes(X): every existing reader of X is a successor
-        //                (this writer runs before existing readers).
-        //                Existing writers would have already raised
-        //                `WriteWriteConflict` in pass 1.
+        // Forward dataflow: `Reads(X)` takes every existing writer of X as a
+        // predecessor, `Writes(X)` takes every existing reader as a successor.
+        // An existing WRITER of X was already refused in pass 1.
         const new_idx: u32 = @intCast(phase.systems.items.len);
         var incoming = std.ArrayListUnmanaged(u32).empty;
         defer incoming.deinit(gpa);
@@ -548,14 +393,11 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Third pass — commit. Append the new system, extend edges,
-        // record accesses in the tracker, invalidate cached levels.
+        // Commit: nothing below may fail.
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
 
-        // E6 — allocate the per-system command buffer alongside the
-        // descriptor. The cmd buffer borrows `world` for type
-        // resolution and uses `gpa` as its backing allocator.
+        // The buffer borrows `world` for type resolution and `gpa` as its backing.
         try phase.command_buffers.append(gpa, CommandBuffer.init(gpa, world));
         errdefer {
             var popped_cb = phase.command_buffers.pop();
@@ -568,13 +410,9 @@ pub const SystemScheduler = struct {
             if (popped) |*p| p.deinit(gpa);
         }
 
-        // For each incoming dependency, append `new_idx` to that
-        // system's outgoing list (predecessor → new_idx).
         for (incoming.items) |dep| {
             try phase.edges.items[dep].append(gpa, new_idx);
         }
-        // For each outgoing dependency, append the successor to the
-        // new system's outgoing list (new_idx → successor).
         for (outgoing.items) |succ| {
             try phase.edges.items[new_idx].append(gpa, succ);
         }
@@ -608,10 +446,7 @@ pub const SystemScheduler = struct {
         return self.phases[@intFromEnum(phase)].systems.items;
     }
 
-    /// Returns the cached topological levels for `phase`, building
-    /// them on first access. Exposed for tests that want to inspect
-    /// the DAG structure directly (the "disjoint writes run
-    /// concurrently" acceptance test reads from here).
+    /// Builds them on first access. Exposed so a test can inspect the DAG.
     pub fn topologicalLevels(
         self: *SystemScheduler,
         gpa: std.mem.Allocator,
@@ -624,15 +459,8 @@ pub const SystemScheduler = struct {
         return self.phases[idx].levels.?.items;
     }
 
-    /// Open a new frame and run every registered system once, in
-    /// phase order. Within each phase, systems are batched by
-    /// topological level — all systems at level N stage their
-    /// chunks into a single `JobBuilder` and the batch is dispatched
-    /// in one wave (chunks from different systems share workers).
-    ///
-    /// The shared `JobBuilder` lives on the caller's stack frame and
-    /// is reset between levels so the inter-frame allocation footprint
-    /// is bounded by the largest level's job + args storage.
+    /// One frame: every phase in order, and inside a phase every topological level
+    /// staged into one builder and dispatched in a single wave.
     pub fn dispatchFrame(
         self: *SystemScheduler,
         world: *World,
@@ -645,8 +473,7 @@ pub const SystemScheduler = struct {
         world.beginFrame();
         var frame = FrameContext{ .dt = dt, .user = user };
 
-        // Lazy-init the cross-frame JobBuilder on first use so the
-        // arena is built only once per scheduler lifetime.
+        // Lazy so the arena is built once per scheduler lifetime.
         if (self.builder == null) self.builder = JobBuilder.init(gpa);
         const builder = &self.builder.?;
 
@@ -659,16 +486,12 @@ pub const SystemScheduler = struct {
                 }
                 try dispatchPhase(self, world, gpa, io, jobs, &frame, builder, phase_idx);
             }
-            // drain `.phase`-lifetime event queues at
-            // every phase transition (after every phase, including
-            // empty ones, so the cadence is invariant to the
-            // registered system topology).
+            // At EVERY phase transition, empty phases included, so the cadence does
+            // not depend on the registered system topology.
             world.event_bus.drainAtBoundary(.phase);
         }
-        // end-of-frame drains. Phase 0 collapses
-        // fixed-tick and render into a single dispatch, so `.tick`
-        // and `.frame` fire together. Kept distinct so the call
-        // sites can diverge in Phase 0.4+.
+        // `.tick` and `.frame` fire together today; kept distinct so the call sites
+        // can diverge.
         world.event_bus.drainAtBoundary(.tick);
         world.event_bus.drainAtBoundary(.frame);
     }
@@ -703,19 +526,13 @@ pub const SystemScheduler = struct {
             if (builder.jobs.items.len > 0) {
                 try jobs.dispatchBatch(builder.jobs.items);
             }
-            // End-of-level barrier is implicit — `dispatchBatch`
-            // blocks until pending_count reaches zero.
+            // The barrier is implicit — `dispatchBatch` blocks until nothing is pending.
         }
 
-        // phase-boundary command buffer flush. Iterate
-        // systems in **submission order** (the natural order of
-        // `phase.systems`), NOT in topological-level order — the
-        // contract guarantees deterministic application across
-        // re-orderable level layouts. Each per-system flush also
-        // drains the previous flush's observer-issued cmds (queued
-        // in `world.observer_registry.deferred`) so observers see
-        // their effects with one flush-point of latency, never
-        // re-entrantly.
+        // SUBMISSION order, never topological-level order: the contract is
+        // deterministic application across re-orderable layouts. Each flush also
+        // drains the previous one's observer-issued commands, so an observer sees its
+        // effects one flush-point later and never re-entrantly.
         for (phase.command_buffers.items) |*cb| {
             if (cb.commandCount() == 0 and !hasPendingDeferred(&world.observer_registry)) continue;
             try observers_mod.flushWithObservers(cb, &world.observer_registry);
@@ -727,8 +544,7 @@ pub const SystemScheduler = struct {
         return d.commandCount() > 0;
     }
 
-    /// Kahn's algorithm — compute topological levels for one phase
-    /// from the edges + per-node in-degree.
+    /// Kahn's algorithm over the edges and per-node in-degree.
     fn computeLevels(self: *SystemScheduler, gpa: std.mem.Allocator, phase_idx: usize) !void {
         const phase = &self.phases[phase_idx];
         const n = phase.systems.items.len;
@@ -756,14 +572,12 @@ pub const SystemScheduler = struct {
                 }
             }
             if (lvl.system_indices.items.len == 0) {
-                // Cycle in the DAG — should never happen since the
-                // conflict detection at registerSystem rejects the
-                // only construction path that creates one.
+                // Unreachable: conflict detection refuses the only construction path
+                // that could create a cycle.
                 lvl.deinit(gpa);
                 return error.WriteWriteConflict;
             }
-            // Mark these nodes as scheduled by setting their
-            // in_degree to a sentinel high enough to never reappear.
+            // A sentinel in-degree high enough that the node never reappears.
             for (lvl.system_indices.items) |idx| {
                 in_degree[idx] = std.math.maxInt(u32);
                 for (phase.edges.items[idx].items) |target| {
@@ -816,8 +630,7 @@ test "registerSystem with no accesses lands on level 0" {
     });
 
     const levels = try sched.topologicalLevels(gpa, .update);
-    // Both systems have no accesses → no edges → both land on
-    // level 0.
+    // No accesses means no edges, so both land on level 0.
     try testing.expectEqual(@as(usize, 1), levels.len);
     try testing.expectEqual(@as(usize, 2), levels[0].system_indices.items.len);
 }

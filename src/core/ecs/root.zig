@@ -1,91 +1,49 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5
 //!
-//! Public API surface of the ECS — canonical entry point for
-//! consumers (Tier 1 modules, the runtime executable, the editor IPC
-//! layer, the Etch codegen, end-user code).
-//!
-//! Importing convention:
-//!
-//! ```zig
-//! const ecs = @import("weld_core").ecs;
-//! var world = ecs.World.init();
-//! const eid = try world.spawn(gpa, ecs.Transform{}, ecs.Velocity{});
-//! ```
-//!
-//! Every type listed in `briefs/ecs-full.md` § Scope › Public API
-//! surface is re-exported here verbatim. The flat layout (`ecs.World`,
-//! `ecs.Query`, `ecs.CommandBuffer`, …) lets consumers reach the
-//! whole stable surface through a single import, while the
-//! per-implementation sub-modules (`ecs.world`, `ecs.query`,
-//! `ecs.command_buffer`, …) stay reachable for tests, the bench, and
-//! the rare consumer that needs an internal symbol the brief did not
-//! promote to the stable list.
-//!
-//! Modules NOT re-exported in this root (`ecs.chunk`, `ecs.archetype`,
-//! `ecs.registry`, `ecs.resources`, `ecs.entity` internals, …) are
-//! considered internals — they back the public API but are not part
-//! of the contract. Consumers reading from them outside of
-//! tests should expect breakage on later milestones.
+//! The flat names below are the CONTRACT. The sub-module re-exports stay reachable
+//! for tests and the bench, and reading from one is reading an internal.
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5
-/// Version of the frozen ECS Tier-0 public surface (World verbs,
-/// EntityId/ComponentId layout, Query/CommandBuffer/SystemScheduler
-/// signatures, and the byte-keyed `resources` store). Bumped on any
-/// breaking change — a tracked migration, not a freeze failure (the
-/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+/// Bumped on any breaking change of the surface — a tracked migration, not a fault.
 pub const WELD_ECS_PROTOCOL_VERSION: u32 = 1;
 
-// ─── Sub-module re-exports — keeps `weld_core.ecs.<file>.<symbol>` reachable ──
-
-/// E1 — generational identity store (`EntityIdentityStore`, `EntityId`).
+/// Generational identity store.
 pub const entity = @import("entity.zig");
-/// E1 — canonical POD components (`Transform`, `Velocity`).
+/// Canonical POD components.
 pub const components = @import("components.zig");
-/// E4 — world tick counter type.
+/// World tick counter type.
 pub const tick = @import("tick.zig");
-/// E4 — change-detection sidecars (dirty bitset, added/changed tick columns).
+/// Change-detection sidecars.
 pub const change_detection = @import("change_detection.zig");
-/// E2 — 16 KiB byte-level chunk + layout.
+/// 16 KiB byte-level chunk + layout.
 pub const chunk = @import("chunk.zig");
-/// E2 — byte-level archetype + transition cache.
+/// Byte-level archetype + transition cache.
 pub const archetype = @import("archetype.zig");
-/// E3 — comptime-typed query (With/Without/Predicate filters) + E4 Changed.
+/// Comptime-typed query and its filter specs.
 pub const query = @import("query.zig");
-/// E2/E4 — World root: archetype list, identity, registry, observer registry, tick.
+/// World root: archetypes, identity, registry, observers, tick.
 pub const world = @import("world.zig");
-/// E5a/E5b/E6 — system scheduler: phase pipeline, implicit DAG, cmd buffer wiring.
+/// System scheduler: phase pipeline, implicit DAG, command-buffer wiring.
 pub const scheduler = @import("scheduler.zig");
-/// S4 — runtime component registry (id assignment + per-type descriptor cache).
+/// Runtime component registry.
 pub const registry = @import("registry.zig");
 
-/// sparse-set component storage, the second backend of `ARCH-005`.
-/// Opt-in per component through `@storage(.sparse)`; `table` remains the
-/// default and the only mode the resolution funnel routes before G3.
+/// Sparse-set storage, opt-in per component; `table` stays the default.
 pub const sparse_storage = @import("sparse_storage.zig");
-/// the mixed-query planner and its DISTINCT iteration type. Additive
-/// to the ECS surface on the precedent written at `world.zig`'s `queryDynamic`:
-/// the C0.5 freeze covers the Tier-0 ↔ Tier-1 module interfaces, not internal
-/// `World` methods. `WELD_ECS_PROTOCOL_VERSION` stays at 1, and
-/// `tests/ecs/hybrid_query_test.zig` proves it by ENUMERATING this surface and
-/// reporting its size rather than by declaring the version unchanged.
+/// The mixed-query planner and its DISTINCT iteration type.
 pub const hybrid_query = @import("hybrid_query.zig");
-/// S4 — deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
+/// Deprecated re-export under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
-/// S4 — runtime, `ComponentId`-keyed byte resource store: the permanent Etch
-/// resource backend (interpreter + codegen + bridge), NOT superseded by the
-/// singleton-entity system in `src/core/resources/`. The two coexist as
-/// two models for two consumers (cf. the dual-resource doc on `World.resources`
-/// / `World.singleton_resources` in world.zig).
+/// The Etch resource backend; `src/core/resources/` is a DIFFERENT model, not a heir.
 pub const resources = @import("resources.zig");
-/// S5 — comptime-typed query consumed by the Etch → Zig codegen.
+/// Comptime-typed query consumed by the Etch → Zig codegen.
 pub const comptime_query = @import("comptime_query.zig");
-/// E6 — per-system command buffer for deferred structural mutations.
+/// Per-system command buffer for deferred structural mutations.
 pub const command_buffer = @import("command_buffer.zig");
-/// E6 — observer registry hooked into the per-phase cmd buffer flush.
+/// Observer registry, hooked into the per-phase flush.
 pub const observers = @import("observers.zig");
 
-/// Top-level ECS world. Owns archetypes, identities, registry,
-/// resources, observer registry, current tick.
+/// Top-level ECS world.
 pub const World = world.World;
 
 /// Generational entity handle: `packed struct(u64) { index: u32, generation: u32 }`.
@@ -94,10 +52,7 @@ pub const EntityId = world.EntityId;
 /// Runtime component / resource id assigned by the registry.
 pub const ComponentId = registry.ComponentId;
 
-/// Storage backend of a component — `table | sparse`, default `table`
-/// (`engine-ecs-internals.md` §2). Re-exported so the Etch front-end can
-/// validate `@storage`'s argument against the domain's single declaration
-/// instead of re-listing its spellings (`etch-resolver-types.md` §13.3.1).
+/// `table | sparse`; re-exported so the Etch front-end validates `@storage` here.
 pub const StorageKind = registry.StorageKind;
 
 /// Stable archetype handle (index into `World.archetypes`).
@@ -106,31 +61,25 @@ pub const ArchetypeId = world.ArchetypeId;
 /// Monotonic frame tick — `u32` incremented by `World.beginFrame()`.
 pub const Tick = tick.Tick;
 
-/// Canonical S1 archetype's Transform component (`pos`, `rot`, `scale`).
+/// Canonical `Transform` component (`pos`, `rot`, `scale`).
 pub const Transform = world.Transform;
 
-/// Canonical S1 archetype's Velocity component (`linear`, `angular`).
+/// Canonical `Velocity` component (`linear`, `angular`).
 pub const Velocity = world.Velocity;
 
-/// Byte-level archetype storage. Public for callers that walk
-/// archetypes directly (the bench, the Etch interpreter); typical
-/// consumers go through `World.queryFiltered` instead.
+/// Byte-level archetype storage, for a caller walking archetypes directly.
 pub const Archetype = world.Archetype;
 
-/// 16 KiB byte-level chunk. Surfaced by `Query.chunkAt(i)` and by
-/// the system body trampolines.
+/// 16 KiB byte-level chunk, surfaced by `Query.chunkAt(i)`.
 pub const Chunk = world.Chunk;
 
-/// `(archetype_idx, chunk_idx, slot)` location of an entity inside
-/// the world.
+/// `(archetype_idx, chunk_idx, slot)` location of an entity.
 pub const Location = world.Location;
 
 /// Errors returned by `World.despawn` and friends.
 pub const WorldError = world.WorldError;
 
-/// Comptime-typed query factory. `ecs.Query(components, filters)`
-/// returns the concrete query type; `World.query` / `World.queryFiltered`
-/// instantiate one against a world.
+/// Comptime query FACTORY — `ecs.Query(components, filters)` returns the type.
 pub const Query = query.Query;
 
 /// Filter spec: matching archetype must contain `T`.
@@ -142,12 +91,10 @@ pub const Without = query.Without;
 /// Filter spec: per-slot predicate evaluated by `query.slotPasses`.
 pub const Predicate = query.Predicate;
 
-/// Filter spec: matches slots where `T`'s `changed_tick` is strictly
-/// greater than the query's runtime `last_run_tick`.
+/// Filter spec: `T`'s `changed_tick` strictly after the query's `last_run_tick`.
 pub const Changed = query.Changed;
 
-/// Per-system command buffer for deferred structural mutations.
-/// Accessed by systems via `SystemContext.cmd`.
+/// Per-system command buffer, reached through `SystemContext.cmd`.
 pub const CommandBuffer = command_buffer.CommandBuffer;
 
 /// Tagged-union command kind hosted by `CommandBuffer`.
@@ -156,15 +103,13 @@ pub const Command = command_buffer.Command;
 /// Callback signature for observer hooks.
 pub const ObserverFn = observers.ObserverFn;
 
-/// Phase-based system registry + implicit DAG + concurrent
-/// intra-phase dispatch.
+/// Phase-based system registry with implicit DAG and intra-phase dispatch.
 pub const SystemScheduler = scheduler.SystemScheduler;
 
 /// System descriptor: phase, name, run function, access list.
 pub const SystemDescriptor = scheduler.SystemDescriptor;
 
-/// Canonical phase pipeline (`pre_update`, `fixed_update`, `update`,
-/// `post_update`, `late_update`, `pre_render`).
+/// The canonical phase pipeline, in order.
 pub const Phase = scheduler.Phase;
 
 /// Per-frame state surfaced to every system.
@@ -176,31 +121,25 @@ pub const SystemContext = scheduler.SystemContext;
 /// Type-erased system entry point.
 pub const SystemFn = scheduler.SystemFn;
 
-/// `Reads(T)` access descriptor — adds a read edge on `T` to the
-/// system's access list.
+/// Adds a READ edge on `T` to the system's access list.
 pub const Reads = scheduler.Reads;
 
-/// `Writes(T)` access descriptor — adds a write edge on `T` to the
-/// system's access list.
+/// Adds a WRITE edge on `T` to the system's access list.
 pub const Writes = scheduler.Writes;
 
-/// `ReadsResource(R)` access descriptor — placeholder for resource
-/// reads (lands the resource API).
+/// Placeholder — the resource access API does not exist yet.
 pub const ReadsResource = scheduler.ReadsResource;
 
-/// `WritesResource(R)` access descriptor — placeholder for resource
-/// writes (lands the resource API).
+/// Placeholder — the resource access API does not exist yet.
 pub const WritesResource = scheduler.WritesResource;
 
 /// One access entry on a `SystemDescriptor`.
 pub const AccessDescriptor = scheduler.AccessDescriptor;
 
-/// Discriminator for `AccessDescriptor.kind`
-/// (`reads` / `writes` / `reads_resource` / `writes_resource`).
+/// Discriminator for `AccessDescriptor.kind`.
 pub const AccessKind = scheduler.AccessKind;
 
-/// Heterogeneous job batch accumulator used by `SystemScheduler`
-/// during intra-phase dispatch. Surfaced via `SystemContext.builder`.
+/// Job batch accumulator, surfaced via `SystemContext.builder`.
 pub const JobBuilder = scheduler.JobBuilder;
 
 /// Error set returned by `SystemScheduler.registerSystem`.

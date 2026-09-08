@@ -1,37 +1,14 @@
-//! Tier 0 sparse-set component storage — the SECOND backend of `ARCH-005`,
-//! opt-in per component through `@storage(.sparse)`.
+//! Sparse-set component storage — the second backend of `ARCH-005`, opt-in through
+//! `@storage(.sparse)`: a dense entity array, a parallel component array, a sparse
+//! index keyed by entity INDEX, and the two tick sidecars. Add and remove are O(1)
+//! and neither migrates an archetype, which is the whole reason the mode exists.
 //!
-//! Shape, from `engine-ecs-internals.md` §1 *Architecture*: a dense entity
-//! array, a component array parallel to it, a sparse index keyed by entity
-//! index with a reserved absence marker, and `added_ticks` / `changed_ticks`
-//! parallel to dense. Add and remove are O(1) by swap-remove, and neither
-//! migrates an archetype — which is the whole reason the mode exists.
+//! `ChunkAlignment` is imported and not re-declared: two of them would be two bounds.
 //!
-//! Wired to the `World` since : it owns a `SparseStores` field, every
-//! resolution entry and structural mutator routes through it, and
-//! `World.storageOf` is the mode authority.
-//!
-//! The one thing read from `chunk.zig` is `ChunkAlignment`, a layout CONSTANT
-//! and not a dependency on chunk storage. **Importing it is the point** —
-//! re-declaring the bound here would give the engine two of them.
-//!
-//! The seven invariants of `engine-ecs-internals.md` §2 (*Invariants du backend
-//! sparse*), with the three that no test states written out:
-//!
-//! 1. **Swap-remove parity** — `remove`, minus the dirty bit by invariant 2.
-//! 2. **No bitset, so NO BLOCK SKIP** — this file allocates none and exposes no
-//!    skip entry. A sparse component is examined per entry, and nothing here may
-//!    be written as if a block-granularity skip existed.
-//! 3. **Despawn removes from every storage** — `SparseStores.removeEntity`.
-//! 4. **Observer order at despawn** — `SparseStores.forEachOf`, ascending
-//!    `ComponentId`, the same key the archetype's sorted list gives.
-//! 5. **ZERO-SIZED components** — `elem_size == 0` allocates no component buffer
-//!    ever and derives no pointer from one. A sparse tag is a dense entity array
-//!    and its two tick sidecars.
-//! 6. **`EntityId` GENERATION** — `sparse` is addressed by the entity INDEX and
-//!    never by the full handle; an entry whose generation no longer matches is
-//!    absence, so two entities of one index never share an entry.
-//! 7. **OOM rollback** — `add` is reserve-then-mutate (D3/D4).
+//! NO BITSET, so NO BLOCK SKIP — nothing here may be written as if a
+//! block-granularity skip existed. ZERO-SIZED components allocate no component
+//! buffer EVER. And `sparse` is addressed by the entity INDEX, never by the handle:
+//! an entry whose generation no longer matches IS absence.
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");
@@ -43,17 +20,12 @@ const EntityId = entity_mod.EntityId;
 const ComponentId = registry_mod.ComponentId;
 const Tick = tick_mod.Tick;
 
-/// Reserved value of a `sparse` slot meaning "this entity index carries no
-/// entry". `maxInt(u32)` is unreachable as a dense position for the same
-/// reason `EntityId.dead` is unreachable as an index: 4 G live rows would be
-/// needed to produce it.
+/// `maxInt(u32)` is unreachable as a dense position — that would take 4 G live rows.
 pub const absent: u32 = std.math.maxInt(u32);
 
-/// Errors this storage can raise. `add` on an entity already present is a
-/// programmer error and asserts rather than erroring, mirroring
-/// `World.addComponent`'s treatment of the same mistake — the add-on-present
-/// case is a REPLACEMENT, decided one layer up by the observer-dispatching
-/// apply, and a storage that silently accepted it would hide that decision.
+/// `add` on an entity already present ASSERTS rather than errors: add-on-present is
+/// a REPLACEMENT, decided one layer up by the observer-dispatching apply, and a
+/// storage that accepted it silently would hide that decision.
 pub const SparseError = error{
     OutOfMemory,
 };
@@ -76,61 +48,28 @@ pub const SparseSetStorage = struct {
     /// `added_tick` / `changed_tick`, parallel to `dense`, index for index.
     added_ticks: std.ArrayListUnmanaged(Tick) = .empty,
     changed_ticks: std.ArrayListUnmanaged(Tick) = .empty,
-    /// Entity INDEX → position in `dense`, or `absent`. Grown to cover the
-    /// largest index ever inserted; never indexed by a full handle.
-    ///
-    /// **Its size follows the largest entity INDEX, not the entry count** — and
-    /// the index space is bounded by the PEAK of CONCURRENTLY LIVE entities,
-    /// not by the total number ever spawned: `EntityIdentityStore.allocate`
-    /// recycles from `free_indices` before appending a slot, so reaching index
-    /// 10^6 takes 10^6 entities coexisting, which is a very different statement
-    /// from "one entry on an entity at index 10^6".
-    ///
-    /// The real residual is that this array **never shrinks back** after such a
-    /// peak. That is the sparse set's accepted trade-off and not a defect to
-    /// fix: shrinking on despawn would thrash the allocation against the very
-    /// churn the mode exists to serve. It is the price of O(1) membership with
-    /// no hash container, which the determinism discipline wants anyway.
+    /// Entity INDEX → position in `dense`, or `absent`. NEVER indexed by a handle.
+    /// Its size follows the largest INDEX, bounded by the PEAK of concurrently live
+    /// entities — and it NEVER SHRINKS back, shrinking on despawn being a thrash
+    /// against the very churn this mode serves.
     sparse: std.ArrayListUnmanaged(u32) = .empty,
 
-    /// Component rows, `elem_size` bytes each, parallel to `dense`.
+    /// Component rows, `elem_size` bytes each, parallel to `dense`. A raw
+    /// over-aligned buffer and not a byte `ArrayList`, the row alignment being a
+    /// RUNTIME value while Zig's aligned list takes a comptime one. Row `i` inherits
+    /// `ChunkAlignment` because `@sizeOf(T)` is a multiple of `@alignOf(T)`.
     ///
-    /// A raw over-aligned buffer rather than a byte `ArrayList`, because the
-    /// row alignment is a RUNTIME value from the registry and Zig's aligned
-    /// list takes a comptime one. It is allocated at `chunk_mod.ChunkAlignment`
-    /// — the engine's own named bound on component alignment, 16 bytes for
-    /// `@Vector(4, f32)` — and row `i` at offset `i * elem_size` inherits that
-    /// alignment because `@sizeOf(T)` is always a multiple of `@alignOf(T)`.
-    /// `init` asserts `elem_align <= ChunkAlignment` so a component past the
-    /// bound fails loud instead of landing mis-aligned.
-    ///
-    /// **Null forever when `elem_size == 0`** (invariant 5): a zero-sized
-    /// component allocates no buffer and no pointer is derived from one.
+    /// NULL FOREVER when `elem_size == 0`.
     rows: ?[]align(chunk_mod.ChunkAlignment) u8 = null,
     /// Rows the `rows` buffer can hold. Meaningless when `rows == null`.
     rows_capacity: usize = 0,
 
-    /// The exact field set, pinned.
+    /// The exact field SET, pinned — not the count, which swapping two fields for a
+    /// different pair leaves untouched.
     ///
-    /// `World.beginFrame` clears every archetype's dirty bitset and has NO
-    /// sparse arm, because a sparse store carries per-row `added`/`changed`
-    /// ticks and no chunk-granular bitset — a granularity a sparse set does not
-    /// have, so there would be nothing to clear (invariant 2). A comment saying
-    /// so is a claim; the block below is the guard. Add or reorder a field and
-    /// it breaks, which is the moment to go re-read the frame boundary and
-    /// decide whether it now owes the new field something.
-    ///
-    /// Pinned as the field SET and not the count: swapping two fields for a
-    /// different pair leaves the count untouched, and the message names the
-    /// field where the sets diverge.
-    ///
-    /// Here, beside the fields, because here is where a field gets added. It
-    /// spent one round at file scope on a FALSE diagnosis — both
-    /// counter-factuals had compiled clean and I read that as a struct-body
-    /// `comptime` block not being analysed, when in fact my two mutation
-    /// patterns omitted the fields' `= 0` / `= .empty` defaults and had
-    /// silently matched nothing. A struct-body block IS analysed, measured with
-    /// an always-false probe; the move is undone rather than re-justified.
+    /// `World.beginFrame` has NO sparse arm, there being no chunk-granular bitset
+    /// here to clear. A comment saying so is a claim; this block is the guard, and
+    /// breaking it is the moment to re-read the frame boundary.
     const field_set_pin = [_][]const u8{
         "component_id", "elem_size",   "elem_align",
         "dense",        "added_ticks", "changed_ticks",
@@ -152,14 +91,10 @@ pub const SparseSetStorage = struct {
 
     /// Create an empty storage for `component_id`.
     pub fn init(component_id: ComponentId, elem_size: u16, elem_align: u16) SparseSetStorage {
-        // A component past the engine's own alignment bound would be stored
-        // mis-aligned by the `i * elem_size` row arithmetic, silently. The
-        // bound is `chunk_mod.ChunkAlignment`, which the table backend already
-        // applies to every SoA column, so this asserts the SAME contract rather
-        // than inventing a second one.
+        // Past the bound, the `i * elem_size` row arithmetic would mis-align rows
+        // SILENTLY. The same contract the table backend applies to every column.
         std.debug.assert(elem_align <= chunk_mod.ChunkAlignment);
-        // `@sizeOf` is a multiple of `@alignOf` for every Zig type, so a
-        // non-zero size that is not a multiple of its alignment cannot come
+        // `@sizeOf` is a multiple of `@alignOf`, so a size that is not cannot come
         // from a real component and would break the row arithmetic.
         std.debug.assert(elem_align == 0 or elem_size % elem_align == 0);
         return .{ .component_id = component_id, .elem_size = elem_size, .elem_align = elem_align };
@@ -179,19 +114,14 @@ pub const SparseSetStorage = struct {
         return self.dense.items.len;
     }
 
-    /// The live entity list — the iteration order of a sparse-driven query.
-    /// Deterministic (a pure function of the operation sequence) and NOT
-    /// invariant: a swap-remove reorders it, which `ARCH-005` puts out of
-    /// contract explicitly.
+    /// The iteration order of a sparse-driven query: DETERMINISTIC and NOT invariant,
+    /// a swap-remove reordering it, which `ARCH-005` puts out of contract.
     pub fn entities(self: *const SparseSetStorage) []const EntityId {
         return self.dense.items;
     }
 
-    /// Dense position of `entity`, or null. **The generation check lives here
-    /// and nowhere else** (invariant 6): `sparse` is indexed by
-    /// `entity.index`, and the full handle stored in `dense` is what decides
-    /// whether the entry belongs to THIS entity or to a previous occupant of
-    /// the same index. One comparison, no second table.
+    /// THE GENERATION CHECK LIVES HERE AND NOWHERE ELSE: the full handle in `dense`
+    /// is what separates THIS entity from a previous occupant of the same index.
     pub fn positionOf(self: *const SparseSetStorage, entity: EntityId) ?u32 {
         if (entity.index >= self.sparse.items.len) return null;
         const pos = self.sparse.items[entity.index];
@@ -207,35 +137,24 @@ pub const SparseSetStorage = struct {
         return self.positionOf(entity) != null;
     }
 
-    /// Read-only bytes of `entity`'s row, or null when absent. An empty slice
-    /// for a zero-sized component — the correct answer, and one that derives
-    /// no pointer from an unallocated buffer (invariant 5).
+    /// An EMPTY SLICE for a zero-sized component — the correct answer, deriving no
+    /// pointer from an unallocated buffer.
     pub fn get(self: *const SparseSetStorage, entity: EntityId) ?[]const u8 {
         const pos = self.positionOf(entity) orelse return null;
         return self.rowConst(pos);
     }
 
-    /// Mutable bytes of `entity`'s row plus the change stamp, or null when
-    /// absent. Mirrors `World.getMut`'s auto-mark: every write through the
-    /// returned slice is observable by a change filter whose `last_run_tick`
-    /// is below `tick`.
+    /// Mirrors `World.getMut`'s auto-mark: every write through the returned slice is
+    /// observable by a change filter.
     pub fn getMut(self: *SparseSetStorage, entity: EntityId, tick: Tick) ?[]u8 {
         const pos = self.positionOf(entity) orelse return null;
         self.changed_ticks.items[pos] = tick;
         return self.row(pos);
     }
 
-    /// Mutable bytes of `entity`'s row WITHOUT the change stamp, or null when
-    /// absent.
-    ///
-    /// The distinction from `getMut` is not a convenience: `World.componentBytes`
-    /// is the byte-level surface `observers.zig` reads through to build its
-    /// `old_ptr` / `new_ptr` payloads, it hands out mutable bytes, and its table
-    /// arm does NOT stamp. Serving it from `getMut` would make every observer
-    /// dispatch register as a mutation of the component it is reporting on,
-    /// which a `Changed<T>` filter would then see one tick later — a change
-    /// nobody made, with no diagnostic. `markChanged` remains the entry whose
-    /// job the stamp is.
+    /// Mutable bytes WITHOUT the change stamp: `World.componentBytes` reads through
+    /// here to build the observers' old/new payloads, and stamping would make every
+    /// dispatch register as a mutation of the component it reports on.
     pub fn bytesMut(self: *SparseSetStorage, entity: EntityId) ?[]u8 {
         const pos = self.positionOf(entity) orelse return null;
         return self.row(pos);
@@ -258,19 +177,12 @@ pub const SparseSetStorage = struct {
         return self.changed_ticks.items[pos];
     }
 
-    /// Insert `entity` with `bytes` as its row, stamping both sidecars at
-    /// `tick`. `bytes.len` must equal `elem_size`; an empty slice is the
-    /// correct argument for a zero-sized component.
+    /// Insert `entity` with `bytes` as its row, stamping both sidecars at `tick`.
+    /// `bytes.len` must equal `elem_size`; an empty slice is correct for a tag.
     ///
-    /// **Reserve-then-mutate** (invariant 7): every fallible step runs before
-    /// the first observable mutation, so a failure leaves the storage exactly
-    /// as it was — no half-written entry, and no `sparse[index]` designating an
-    /// uninitialised dense row. This is the repository's named invariant from
-    /// HF1, applied rather than re-derived.
-    ///
-    /// Adding an entity that is already present is a programmer error and
-    /// asserts: add-on-present is a REPLACEMENT and the decision belongs to the
-    /// apply path above, not to the storage.
+    /// RESERVE-THEN-MUTATE: every fallible step precedes the first observable
+    /// mutation, so a failure leaves no `sparse[index]` on an uninitialised row.
+    /// An entity already present ASSERTS — that decision belongs to the apply path.
     pub fn add(
         self: *SparseSetStorage,
         gpa: std.mem.Allocator,
@@ -291,8 +203,8 @@ pub const SparseSetStorage = struct {
         try self.dense.ensureUnusedCapacity(gpa, 1);
         try self.added_ticks.ensureUnusedCapacity(gpa, 1);
         try self.changed_ticks.ensureUnusedCapacity(gpa, 1);
-        // The row buffer grows by doubling, and it is reserved BEFORE the dense
-        // append so a failure here cannot leave a dense entry without a row.
+        // Reserved BEFORE the dense append, so a failure cannot leave a dense
+        // entry without a row.
         if (self.elem_size != 0 and pos + 1 > self.rows_capacity) {
             const want = @max(@as(usize, 8), (pos + 1) * 2);
             const fresh = try gpa.alignedAlloc(u8, comptime .fromByteUnits(chunk_mod.ChunkAlignment), want * self.elem_size);
@@ -313,18 +225,13 @@ pub const SparseSetStorage = struct {
         self.sparse.items[entity.index] = pos;
     }
 
-    /// Remove `entity`'s entry. Returns the entity that was RELOCATED into the
-    /// freed position, or null when nothing moved (the entry was last, or was
-    /// absent). The caller needs the relocated handle for nothing today — the
-    /// sparse index is updated here — and it is returned because the table's
-    /// `Archetype.removeSwap` returns it and a divergent shape between the two
-    /// swap-removes would be one more thing to remember.
+    /// Remove `entity`'s entry, returning the entity RELOCATED into the freed
+    /// position, or null when nothing moved. Returned only because
+    /// `Archetype.removeSwap` returns it and two divergent swap-removes would be one
+    /// more thing to remember.
     ///
-    /// Swap-remove parity (invariant 1): the trailing row's bytes AND both of
-    /// its tick sidecars travel into the freed position, so a change filter
-    /// sees a relocated entity exactly as it would have seen it un-relocated.
-    /// There is no dirty bit to carry — invariant 2 — and that absence is the
-    /// only difference from the table's version.
+    /// The trailing row's bytes AND both sidecars travel, so a change filter sees a
+    /// relocated entity exactly as un-relocated. No dirty bit to carry.
     pub fn remove(self: *SparseSetStorage, entity: EntityId) ?EntityId {
         const pos = self.positionOf(entity) orelse return null;
         const last: u32 = @intCast(self.dense.items.len - 1);
@@ -351,8 +258,7 @@ pub const SparseSetStorage = struct {
         return moved;
     }
 
-    /// Row `pos` as mutable bytes. Empty — and derived from no pointer — for a
-    /// zero-sized component (invariant 5).
+    /// Empty, and derived from no pointer, for a zero-sized component.
     fn row(self: *SparseSetStorage, pos: u32) []u8 {
         if (self.elem_size == 0) return &.{};
         const off = @as(usize, pos) * self.elem_size;
@@ -368,19 +274,8 @@ pub const SparseSetStorage = struct {
 
 /// The set of sparse storages a world owns, keyed by `ComponentId`.
 ///
-/// **Why the set is part of G2 and not of the routing gate.** Two of the seven
-/// invariants are not expressible against a single storage: invariant 3 is a
-/// sweep over EVERY storage for one entity, and invariant 4 is an ORDER across
-/// storages. The smallest object that can carry either is a collection, so it
-/// belongs to the gate that proves the invariants. What stays out is the
-/// `World` — nothing here knows one.
-///
-/// A dense array indexed by `ComponentId`, not a hash map: component ids are
-/// small sequential integers assigned by the registry, so the array is O(1) and
-/// carries no hashed container, which the determinism discipline of
-/// `ARCH-031` and the broadphase precedent both ask for. Ascending index IS
-/// ascending `ComponentId`, which is what makes invariant 4 structural rather
-/// than a sort.
+/// A dense array and NOT a hash map, ids being small sequential integers. Ascending
+/// index IS ascending `ComponentId`, which makes the despawn order structural.
 pub const SparseStores = struct {
     /// `slots[cid]` is the storage for `cid`, or null when `cid` is a table
     /// component or is not registered.
@@ -394,10 +289,8 @@ pub const SparseStores = struct {
         self.* = undefined;
     }
 
-    /// Declare `component_id` sparse. Idempotent: a second call for the same id
-    /// keeps the existing storage, so a hot-reload re-compile does not discard
-    /// live rows (the treatment `compileResource` already gives a re-registered
-    /// resource).
+    /// IDEMPOTENT: a second call keeps the existing storage, so a hot-reload
+    /// re-compile does not discard live rows.
     pub fn ensure(
         self: *SparseStores,
         gpa: std.mem.Allocator,
@@ -430,14 +323,8 @@ pub const SparseStores = struct {
         return null;
     }
 
-    /// The smallest `ComponentId` at or above `from` whose storage holds
-    /// `entity`, or null when there is none.
-    ///
-    /// Ascending BY CONSTRUCTION: `slots` is indexed by `ComponentId`, so
-    /// walking it in index order walks the ids in ascending order — no sort and
-    /// no allocation. That is what lets the despawn path merge the two backends
-    /// into one ascending sequence with a two-pointer walk, which is the
-    /// normative firing order over the union.
+    /// The smallest `ComponentId` at or above `from` holding `entity`. ASCENDING BY
+    /// CONSTRUCTION, which is what lets despawn merge both backends by two pointers.
     pub fn nextContaining(self: *const SparseStores, from: ComponentId, entity: EntityId) ?ComponentId {
         var cid: usize = from;
         while (cid < self.slots.items.len) : (cid += 1) {
@@ -453,10 +340,8 @@ pub const SparseStores = struct {
         return self.getConst(component_id) != null;
     }
 
-    /// Call `cb(ctx, component_id)` for every sparse component `entity`
-    /// carries, in **ascending `ComponentId`** (invariant 4). The order is a
-    /// property of the container — ascending slot index is ascending id — not
-    /// of a sort, so it cannot be lost by a comparator.
+    /// In ASCENDING `ComponentId`, a property of the container and not of a sort, so
+    /// it cannot be lost by a comparator.
     pub fn forEachOf(
         self: *const SparseStores,
         entity: EntityId,
@@ -469,22 +354,14 @@ pub const SparseStores = struct {
         }
     }
 
-    /// Drop every sparse entry `entity` carries. The primitive the despawn path
-    /// calls once per entity (invariant 3): removing an entity from its
-    /// archetype does not remove its sparse components, and an entry that
-    /// outlives its entity is both a leak and a dangling index.
-    ///
-    /// Returns how many entries were dropped, so a caller can assert a sweep
-    /// actually swept — a sweep whose extent is not reported can cover less in
-    /// silence.
+    /// Removing an entity from its archetype does NOT remove its sparse components.
+    /// Returns the count, so a caller can assert the sweep actually swept.
     pub fn removeEntity(self: *SparseStores, entity: EntityId) usize {
         var dropped: usize = 0;
         for (self.slots.items) |*maybe| {
             const store = if (maybe.*) |*s| s else continue;
-            // The count comes from a membership test taken BEFORE the removal:
-            // `remove` returns the RELOCATED handle, which is null both when
-            // nothing moved and when the entity was absent, so its return value
-            // cannot serve as "was something dropped".
+            // Taken BEFORE the removal: `remove` returns the RELOCATED handle, null
+            // both when nothing moved and when the entity was absent.
             if (!store.contains(entity)) continue;
             _ = store.remove(entity);
             dropped += 1;
@@ -493,12 +370,8 @@ pub const SparseStores = struct {
     }
 };
 
-//
-// Each invariant gets its own test and its own counter-factual, and the
-// counter-factual changes the OBJECT rather than the expected constant
-// (`engine-development-workflow.md` §5.5). Where an invariant is an ABSENCE it
-// is paired with its positive witness, because an apparatus that produces
-// nothing satisfies a negative assertion on its own.
+// Every counter-factual changes the OBJECT rather than the expected constant, and an
+// invariant that is an ABSENCE is paired with a positive witness.
 
 const testing = std.testing;
 
@@ -514,28 +387,14 @@ fn e(index: u32, generation: u32) EntityId {
     return .{ .index = index, .generation = generation };
 }
 
-/// Allocator that fails exactly ONE **allocation** and then behaves normally.
-///
-/// `std.testing.FailingAllocator` cannot serve here: it does not advance its
-/// index on failure, so from `fail_index` onward EVERY allocation fails, and a
-/// test that asserts recovery after the induced failure would be proving the
-/// property OR exhaustion without distinguishing them
-/// (`engine-development-workflow.md` §5.5, measured at ). One shot is
-/// what makes the assertion after the failure mean something.
+/// Fails exactly ONE allocation, then behaves normally.
+/// `std.testing.FailingAllocator` does not advance its index on failure, so a
+/// recovery assertion under it cannot tell the property from exhaustion.
 const OneShotFail = struct {
     backing: std.mem.Allocator,
-    /// Allocation to fail, counted from zero over `alloc` ONLY. `null` fails
-    /// nothing, which is how the count is measured.
-    ///
-    /// **`resize` and `remap` are deliberately NOT counted, and that cost a
-    /// round.** Counting them looked more thorough and was wrong: an
-    /// `ArrayList` growing past its capacity first asks the allocator to extend
-    /// in place, and a refusal there is a ROUTINE MISS the list recovers from by
-    /// allocating a fresh block and copying. Failing it therefore induces no
-    /// OOM at all — the warm case of invariant 7 consumed its one shot on such
-    /// a resize and the add then SUCCEEDED, which is exactly the shape the test
-    /// read as the property failing. What this instrument must fail is the
-    /// allocation whose refusal ABORTS the operation, and that is `alloc`.
+    /// Counted over `alloc` ONLY. `resize` and `remap` are deliberately excluded: an
+    /// `ArrayList` past capacity first asks to extend in place, and a refusal there
+    /// is a ROUTINE MISS it recovers from — no OOM is induced at all.
     fail_at: ?usize,
     attempts: usize = 0,
 
@@ -604,8 +463,7 @@ test "invariant 1: swap-remove moves the trailing row AND both tick sidecars" {
     s.markChanged(e(1, 0), 2000);
     s.markChanged(e(2, 0), 3000);
 
-    // Remove a NON-LAST entry. This is the counter-factual shape the gate
-    // demands: removing the last one relocates nothing, so it would prove the
+    // A NON-LAST entry: removing the last relocates nothing, which would prove the
     // early-out and say nothing about parity.
     const relocated = s.remove(e(1, 0));
     try testing.expectEqual(@as(?EntityId, e(2, 0)), relocated);
@@ -627,9 +485,8 @@ test "invariant 1: swap-remove moves the trailing row AND both tick sidecars" {
 }
 
 test "invariant 1, counter-factual: removing the LAST entry relocates nothing" {
-    // The discriminating half. If `remove` reported a relocation here, the
-    // test above would be passing on a path that always copies, and its
-    // "relocation" would be an artefact.
+    // The discriminating half: a reported relocation here would mean the test above
+    // passes on a path that always copies.
     const gpa = testing.allocator;
     var s = SparseSetStorage.init(7, @sizeOf(Pair), @alignOf(Pair));
     defer s.deinit(gpa);
@@ -655,9 +512,8 @@ test "invariant 2: there is no bitset and no block-skip entry, and per-entry wor
         std.debug.assert(!@hasDecl(SparseSetStorage, "clearAllDirtyBitsets"));
     }
 
-    // The POSITIVE WITNESS, without which the absence above is satisfied by an
-    // apparatus that does nothing: a per-entry change scan over a mix returns
-    // exactly the changed entries, so examination-per-entry is real.
+    // THE POSITIVE WITNESS, without which the absence above is satisfied by an
+    // apparatus that does nothing.
     const gpa = testing.allocator;
     var s = SparseSetStorage.init(3, 0, 0);
     defer s.deinit(gpa);
@@ -733,9 +589,8 @@ test "invariant 4: the union enumerates in ascending ComponentId" {
     var stores = SparseStores{};
     defer stores.deinit(gpa);
 
-    // DECLARED in descending order. This is the counter-factual the gate asks
-    // for — permuting the declaration order must not change the firing order —
-    // and it is applied to the object rather than to an expected constant.
+    // DECLARED in descending order: permuting the declaration must not change the
+    // firing order.
     _ = try stores.ensure(gpa, 12, 0, 0);
     _ = try stores.ensure(gpa, 4, 0, 0);
     _ = try stores.ensure(gpa, 8, 0, 0);
@@ -777,9 +632,8 @@ test "invariant 5: a zero-sized component allocates no row buffer, ever" {
     try testing.expect(!tag.contains(e(17, 0)));
     try testing.expectEqual(@as(?[]align(chunk_mod.ChunkAlignment) u8, null), tag.rows);
 
-    // COUNTER-FACTUAL on the object: a sized component on the same code path
-    // DOES allocate, so the null above discriminates instead of being the
-    // constant answer of a storage that never allocates anything.
+    // COUNTER-FACTUAL on the object: a sized component on the same path DOES
+    // allocate, so the null above discriminates.
     var sized = SparseSetStorage.init(2, @sizeOf(Pair), @alignOf(Pair));
     defer sized.deinit(gpa);
     const p = Pair{ .a = 1, .b = 2 };
@@ -810,26 +664,10 @@ test "invariant 6: the sparse index is keyed by INDEX and generation decides" {
 }
 
 test "invariant 7: a failed add rolls back every fallible step, and a retry works" {
-    // TWO sweeps, because one state cannot exercise both halves of the
-    // invariant — and the first version of this test learned that from its own
-    // non-vacuity check rather than from an argument.
-    //
-    // What it did: built a warm storage with two entries, then swept the fail
-    // index over the THIRD add. `attempts` came back **zero** and
-    // `expect(attempts > 0)` fired. The measurement was right and the
-    // expectation was wrong: after two appends the dense array, both tick
-    // sidecars and the row buffer all hold spare capacity (the lists grow
-    // geometrically, `rows` doubles to 8 on the first add), and `sparse`
-    // already covers index 2 — so a warm add allocates NOTHING and there was
-    // no failure to induce. A sweep over zero attempts would have passed every
-    // assertion below by never entering the branch that carries them; the
-    // guard that says so is the only reason this is visible.
-    //
-    // (a) COLD sweep — the first add of a fresh storage, where every fallible
-    //     step must allocate. This is what covers all of them.
-    // (b) WARM case — prior state present and a target index far enough out to
-    //     force the sparse array to grow. This is what proves the prior state
-    //     survives, which a rollback to "empty" would satisfy vacuously.
+    // TWO sweeps, one state being unable to exercise both halves. COLD is the first
+    // add of a fresh storage, where every fallible step allocates — a WARM add
+    // allocates NOTHING and a sweep over zero attempts passes vacuously. WARM proves
+    // the prior state SURVIVES, which a rollback to "empty" would satisfy vacuously.
     const gpa = testing.allocator;
     const p = Pair{ .a = 30, .b = 31 };
 
@@ -857,9 +695,7 @@ test "invariant 7: a failed add rolls back every fallible step, and a retry work
         counter.fail_at = null; // disarm before asserting
 
         if (result) |_| {
-            // This index did not reach an allocation on this run; nothing to
-            // assert, and the induced count below is what keeps the sweep
-            // honest about how many did.
+            // No allocation on this index; the induced count below keeps it honest.
             continue;
         } else |err| {
             cold_induced += 1;
@@ -871,27 +707,20 @@ test "invariant 7: a failed add rolls back every fallible step, and a retry work
             try testing.expect(!s.contains(e(0, 0)));
             for (s.sparse.items) |slot| try testing.expectEqual(absent, slot);
 
-            // THE RECOVERY HALF, and the reason the allocator is one-shot: a
-            // storage left corrupt would also refuse this, so without recovery
-            // the test would prove the property OR exhaustion without telling
-            // them apart.
+            // THE RECOVERY HALF, and the reason the allocator is one-shot: a corrupt
+            // storage would refuse this too, and the test could not tell which.
             try s.add(a, e(0, 0), pairBytes(&p), 300);
             try testing.expectEqual(@as(usize, 1), s.len());
             try testing.expectEqual(@as(u8, 30), s.get(e(0, 0)).?[0]);
             try testing.expectEqual(@as(?Tick, 300), s.addedTick(e(0, 0)));
         }
     }
-    // Extent reported, not assumed — and asserted as an EQUALITY rather than a
-    // floor, which is the stronger claim and not a brittle one: every
-    // allocation the add path performs must have induced a rollback. A `>= 1`
-    // would pass with four of five allocations uncovered; an exact magic number
-    // would pin `ArrayList` internals. If this ever fails low, an allocation is
-    // happening on the add path that the rollback does not cover.
+    // An EQUALITY and not a floor: a `>= 1` would pass with four of five
+    // allocations uncovered. Failing low means an uncovered allocation on the add path.
     try testing.expectEqual(cold_allocs, cold_induced);
 
-    // ── (b) Prior state must survive. The target index is far out so the
-    //        sparse array has to grow whatever the lists' spare capacity — the
-    //        one fallible step a warm storage still reaches.
+    // (b) The target index is far out so `sparse` must grow whatever spare capacity
+    //     the lists hold — the one fallible step a warm storage still reaches.
     var counter = OneShotFail{ .backing = gpa, .fail_at = null };
     const a = counter.allocator();
     var s = SparseSetStorage.init(1, @sizeOf(Pair), @alignOf(Pair));

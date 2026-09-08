@@ -1,23 +1,10 @@
-//! Compatibility shim for the archetype consolidation.
-//!
-//! Before , the S1 comptime-typed `Archetype(Components)` lived in
-//! `archetype.zig` and the byte-level `DynamicArchetype` (Etch / runtime-
-//! query side) lived here. fuses them into a single byte-level
-//! `Archetype` in `archetype.zig`. This file is now a thin re-export so
-//! the Etch interpreter, the runtime query, and any other consumer that
-//! still imports `archetype_dynamic.DynamicArchetype` keep working without
-//! a coordinated rename.
-//!
-//! The aliases here are deprecated. New code should import the canonical
-//! names from `core/ecs/archetype.zig` and `core/ecs/chunk.zig`. A later
-//! milestone (Etch alignment cleanup) will retire this file once every
-//! caller has been migrated.
+//! Compatibility shim: DEPRECATED aliases for the consolidated `archetype.zig` and
+//! `chunk.zig` names, to be retired once the Etch consumers are migrated.
 
 const archetype_mod = @import("archetype.zig");
 const chunk_mod = @import("chunk.zig");
 
-/// Deprecated alias for `archetype.Archetype` — Etch + runtime-query
-/// still import this name pending a follow-up rename.
+/// Deprecated alias for `archetype.Archetype`.
 pub const DynamicArchetype = archetype_mod.Archetype;
 /// Deprecated alias for `chunk.Chunk`.
 pub const Chunk = chunk_mod.Chunk;

@@ -1,44 +1,13 @@
-//! Mixed-query planner — .
+//! Mixed-query planner: a query spanning both storage backends elects EXACTLY ONE
+//! driver — the member of smallest population, ties broken by DECLARATION ORDER —
+//! and reaches every other member by an O(1) membership test.
 //!
-//! A query whose members span both storage backends elects **exactly one
-//! driver** — the member of smallest population, ties broken by declaration
-//! order in the query — and reaches every other member by an O(1) membership
-//! test.
+//! Every entity-bound term reaches this file, all-table ones included; such a term
+//! is NOT elected, `elect` answering from the ABSENCE of a sparse form.
 //!
-//! **Every entity-bound term reaches this file, all-table ones included.**
-//! `interp.buildSelection` calls `plan` for each satisfiable term with no
-//! branch, so an all-table term is planned and walked here — its walk being
-//! `TableDrivenQuery`, which delegates to `DynamicQuery` and is therefore the
-//! archetype path unchanged. It is NOT elected: `QueryPlan.elect` answers from
-//! the absence of a sparse form, and believing otherwise is what put an
-//! O(t · A) cost on that path for two commits.
-//!
-//! **The contract is `engine-ecs-internals.md` §2, *Driving set des queries
-//! mixtes*, and it is a contract before it is a mechanism:**
-//!
-//! - Iteration order is **deterministic** — a pure function of world state, so
-//!   two machines in identical states visit in the same order. Comparing two
-//!   populations is itself a pure function of the state, which is what lets a
-//!   cardinality driver keep that promise.
-//! - **Non invariant** — two states with different populations may visit in
-//!   different orders. Already true before this file: an archetype migration or
-//!   a swap-remove changes the order from one tick to the next.
-//! - **Out of contract** — a rule sees each matching entity EXACTLY ONCE per
-//!   tick, in an order it must not read. A rule whose result depends on the
-//!   visit order is a defect of the rule.
-//!
-//! **This is a DISTINCT iteration type, not a second mode of `DynamicQuery`.**
-//! The chunk-based dispatch protocol has no meaning for a sparse-driven walk —
-//! there is no chunk — so a second mode would force every consumer to branch on
-//! which one it holds. It is additive to the `World` API on the precedent
-//! already written at `world.zig`'s `queryDynamic`: "The C0.5 freeze covers the
-//! Tier-0 ↔ Tier-1 module interfaces, not internal `World` methods, so this does
-//! not breach it." `WELD_ECS_PROTOCOL_VERSION` stays at 1 and the milestone
-//! PROVES it rather than asserting it (see `hybrid_query_test.zig`).
-//!
-//! The module-scope tail-rescan helper `query.rescanNewArchetypes` is reused
-//! rather than copied: it already serves the comptime `Query` and
-//! `DynamicQuery`, so a third caller costs a call.
+//! Iteration order is DETERMINISTIC and NOT invariant: two states with different
+//! populations may visit in different orders. A rule sees each matching entity
+//! exactly once per tick, in an order it must not read.
 
 const std = @import("std");
 const components = @import("components.zig");
@@ -55,14 +24,10 @@ const ComponentId = registry_mod.ComponentId;
 const EntityId = components.EntityId;
 const World = world_mod.World;
 
-/// Where an entity's component bytes live — storage-agnostic, and the argument
-/// the per-slot guards take instead of an `(archetype, chunk, slot)` triple.
-///
-/// The two arms are asymmetric deliberately, exactly as `ComponentRef`'s are
-///: the table arm keeps the direct triple so the delivered fast path
-/// pays nothing, and the sparse arm carries the ENTITY because a sparse lookup
-/// is an array index plus a generation compare, and because a row pointer would
-/// be invalidated by any swap-remove in that store.
+/// Where an entity's component bytes live, instead of an `(archetype, chunk, slot)`
+/// triple. The arms are asymmetric DELIBERATELY: the table arm keeps the direct
+/// triple so the fast path pays nothing, and the sparse arm carries the ENTITY,
+/// a row pointer being invalidated by any swap-remove in that store.
 pub const Locator = union(enum) {
     table: struct { arch: *Archetype, chunk: *Chunk, slot: u32 },
     sparse: EntityId,
@@ -75,12 +40,9 @@ pub const Locator = union(enum) {
         };
     }
 
-    /// The bytes of `cid` for this locator's entity, or null when absent.
-    ///
-    /// The table arm resolves through its own archetype when `cid` is one of
-    /// that archetype's columns — the direct path — and otherwise falls through
-    /// to the World, which is what makes a SPARSE member of a table-driven
-    /// query reachable without a second locator kind.
+    /// The table arm resolves through its own archetype when `cid` is one of its
+    /// columns and otherwise falls through to the World — which is what makes a
+    /// SPARSE member of a table-driven query reachable without a second arm.
     pub fn componentBytes(self: Locator, world: *World, cid: ComponentId) ?[]u8 {
         switch (self) {
             .table => |t| {
@@ -102,20 +64,9 @@ pub const Driver = union(enum) {
     sparse: ComponentId,
 };
 
-/// The population of `cid` — the number of live entities carrying it.
-///
-/// For a sparse member this is `dense.len`, an O(1) read. For a table member it
-/// is a sum over the archetypes carrying it, so O(archetypes), and
-/// `arch.hasComponent` is itself a walk of that archetype's signature.
-///
-/// **THIS PATH IS NOT COLD** — `QueryPlan.elect` runs at every walk, so one
-/// election costs O(t · A) in the table members of the with-set and the
-/// archetype count. The refusal of a per-component live count maintained on
-/// every migration therefore rests on a measurement and not on where the read
-/// sits: `bench/results/ecs_election.md` puts a mixed term at 808 ns and the
-/// worst declared shape at 8025 ns per election, against a 16.6 ms frame. What
-/// would reopen it is twenty or more terms each naming several table members in
-/// a world of hundreds of archetypes.
+/// `dense.len` for a sparse member, O(1); a sum over the carrying archetypes for a
+/// table one. NOT COLD — `QueryPlan.elect` runs it at every walk, and the refusal of
+/// a maintained live count rests on a measurement, not on where the read sits.
 pub fn population(world: *const World, cid: ComponentId) usize {
     if (world.storageOf(cid) == .sparse) {
         const store = world.sparse_stores.getConst(cid) orelse return 0;
@@ -128,40 +79,27 @@ pub fn population(world: *const World, cid: ComponentId) usize {
     return total;
 }
 
-/// Elect the driver of a query whose "must contain" set is `with_ids`.
-///
-/// **The member of smallest population drives, and a tie is broken by
-/// DECLARATION ORDER** — the position in `with_ids`, which is static, so the
-/// decision is stable across runs for a given query even though it is not
-/// stable across world states. That asymmetry is the contract, not an accident:
-/// deterministic, non-invariant, out of contract.
-///
-/// Returns `.table` when `with_ids` names no sparse component. `QueryPlan.elect`
-/// does not call this in that case — it answers from the absence of a sparse
-/// form — so the only callers reaching here with an all-table set are direct
-/// ones, tests among them.
+/// Smallest population drives; a tie breaks on POSITION in `with_ids`, which is
+/// static — so the decision is stable across runs for a given query, and not across
+/// world states. `.table` when no member is sparse, which `QueryPlan.elect` never
+/// asks for.
 pub fn electDriver(world: *const World, with_ids: []const ComponentId) Driver {
     var best: ?struct { cid: ComponentId, pop: usize, sparse: bool } = null;
     for (with_ids) |cid| {
         const is_sparse = world.storageOf(cid) == .sparse;
         const pop = population(world, cid);
-        // STRICTLY less: the first member of a tied population keeps the seat,
-        // which is what "ties broken by declaration order" means.
+        // STRICTLY less, which is what "ties broken by declaration order" means.
         if (best == null or pop < best.?.pop) {
             best = .{ .cid = cid, .pop = pop, .sparse = is_sparse };
         }
     }
     const b = best orelse return .table;
-    // A table member may legitimately win — a single-entity `Boss` against a
-    // 500-entity sparse `Burning` — and then the walk is the archetype walk,
-    // with the sparse members reached by membership from the locator.
+    // A table member may legitimately win — a one-entity `Boss` against 500 `Burning`.
     return if (b.sparse) .{ .sparse = b.cid } else .table;
 }
 
-/// A mixed query, driven by a sparse set.
-///
-/// Holds no archetype list: the walk is over the driver's dense array, and
-/// every other member is a membership test. `deinit` frees the owned id copies.
+/// A mixed query driven by a sparse set. Holds NO archetype list: the walk is over
+/// the driver's dense array and every other member is a membership test.
 pub const SparseDrivenQuery = struct {
     driver: ComponentId,
     /// The with-set MINUS the driver — each tested by membership per candidate.
@@ -174,30 +112,16 @@ pub const SparseDrivenQuery = struct {
         self.* = undefined;
     }
 
-    /// Walk the driver's dense array, yielding a `Locator` for every entity
-    /// that satisfies the whole query.
+    /// Walk the driver's dense array, yielding a `Locator` per admitted entity.
     ///
-    /// The iterator captures a SLICE, not a length: `dense` is an
-    /// `ArrayListUnmanaged` read once, here. A structural change to the driver
-    /// DURING the walk is unsound two ways, and neither is caught by a test —
-    /// GROWTH reallocates and the slice dangles (undefined in ReleaseFast);
-    /// SHRINK leaves the pointer valid and the length stale, so the tail reads
-    /// dead-but-allocated entries, silently, in every mode.
+    /// The iterator captures a SLICE, and a structural change to the driver during
+    /// the walk is unsound two ways, neither caught by a test: GROWTH reallocates and
+    /// the slice dangles; SHRINK leaves the pointer valid and the length stale.
     ///
-    /// What makes the capture sound is TWO INDEPENDENT guardians, and losing
-    /// either reopens its own half:
-    ///
-    ///   1. Remove, add and despawn are DEFERRED to the tick boundary
-    ///      (`observer_registry.deferred`, drained by `flushStructural`), so no
-    ///      rule body shrinks the array under a live walk. This one also covers
-    ///      the chunk pointer `ComponentRef`'s table arm holds.
-    ///   2. A spawn is IMMEDIATE on the `spawn_with` path and an APPEND is what
-    ///      reallocates. What keeps it out of a rule body is not deferral but
-    ///      the type-checker's surface gate: `test_world()` resolves only under
-    ///      `Checker.in_test_body`, E0102 otherwise. This one covers the dense
-    ///      slice ONLY — an append invalidates no chunk pointer — and is the
-    ///      more fragile: exposing world access to rule bodies would leave
-    ///      guardian 1 untouched and this walk unprotected.
+    /// Two INDEPENDENT guardians make it sound — remove/add/despawn are DEFERRED to
+    /// the tick boundary, and a spawn, which is what appends, is kept out of a rule
+    /// body only by the type-checker's `test_world()` gate. That second one is the
+    /// fragile half: world access in rule bodies would leave this walk unprotected.
     pub fn iterator(self: *const SparseDrivenQuery, world: *World) Iterator {
         const store = world.sparse_stores.getConst(self.driver);
         return .{
@@ -208,8 +132,7 @@ pub const SparseDrivenQuery = struct {
         };
     }
 
-    /// `dense` is CAPTURED, not re-read — the two failure modes and the two
-    /// guardians that keep them unreachable are on `iterator` above.
+    /// `dense` is CAPTURED, not re-read — the reasons are on `iterator` above.
     pub const Iterator = struct {
         q: *const SparseDrivenQuery,
         world: *World,
@@ -226,9 +149,7 @@ pub const SparseDrivenQuery = struct {
         }
     };
 
-    /// How many dense ranges the driver's population splits into, for a target
-    /// of `target` ranges. Never zero, and never more than the population: a
-    /// range is a unit of work, and an empty one is not one.
+    /// Never zero and never above the population: an empty range is not a unit of work.
     pub fn rangeCount(self: *const SparseDrivenQuery, world: *World, target: usize) usize {
         const store = world.sparse_stores.getConst(self.driver) orelse return 0;
         const n = store.len();
@@ -237,17 +158,8 @@ pub const SparseDrivenQuery = struct {
         return @min(t, n);
     }
 
-    /// The `i`-th of `rangeCount(target)` ranges.
-    ///
-    /// The split is EVEN with the remainder spread over the leading ranges, so
-    /// every range differs from every other by at most one — the property that
-    /// keeps a work-stealing scheduler from starving on a tail.
-    ///
-    /// *That beneficiary was NAMED here before it existed: from until
-    /// `JobBuilder.addDenseRangeJobs` landed, no dense range reached a worker
-    /// at all, and the sentence above justified a split by a consumer with no
-    /// producer. It is true as of that entry, and the note stays because the
-    /// claim is only as good as the path that consumes it.*
+    /// The `i`-th of `rangeCount(target)` ranges. The split is EVEN with the
+    /// remainder over the leading ranges, so no work-stealing worker starves on a tail.
     pub fn rangeAt(self: *const SparseDrivenQuery, world: *World, i: usize, target: usize) DenseRange {
         const total = blk: {
             const store = world.sparse_stores.getConst(self.driver) orelse break :blk 0;
@@ -262,10 +174,8 @@ pub const SparseDrivenQuery = struct {
         return .{ .from = from, .to = from + size };
     }
 
-    /// Dispatch `Body` over each dense range, passing `(range, ...args)`.
-    ///
-    /// The command-buffer bound is enforced HERE, at comptime, on this entry's
-    /// own `args` — see `refuseCommandBufferInArgs`.
+    /// Dispatch `Body` over each dense range as `(range, ...args)`. The
+    /// command-buffer bound is enforced HERE, at comptime, on this entry's `args`.
     pub fn forEachDenseRange(
         self: *const SparseDrivenQuery,
         world: *World,
@@ -286,11 +196,8 @@ pub const SparseDrivenQuery = struct {
         return store.entities();
     }
 
-    /// Whether `e` satisfies every member other than the driver.
-    ///
-    /// `not has T` on a sparse `T` is a PER-ENTITY membership test here, not an
-    /// archetype-level filter — which is the whole point: an archetype cannot
-    /// answer for a component it does not carry a column for.
+    /// Whether `e` satisfies every member other than the driver. `not has T` on a
+    /// sparse `T` is PER-ENTITY: an archetype cannot answer for a column it lacks.
     pub fn admits(self: *const SparseDrivenQuery, world: *World, e: EntityId) bool {
         for (self.other_with) |cid| {
             if (!world.hasComponentDyn(e, cid)) return false;
@@ -302,13 +209,8 @@ pub const SparseDrivenQuery = struct {
     }
 };
 
-/// A half-open range of the driver's dense array — the sparse-driven
-/// equivalent of a chunk, and the unit a worker takes.
-///
-/// A chunk is a unit because it is a contiguous allocation; a dense range is a
-/// unit for the same reason and nothing else. Both are index intervals over
-/// storage that no other worker touches, which is what makes the split safe
-/// WITHOUT a merge step.
+/// The sparse-driven equivalent of a chunk: an index interval no other worker
+/// touches, which is what makes the split safe WITHOUT a merge step.
 pub const DenseRange = struct {
     from: usize,
     to: usize,
@@ -339,15 +241,10 @@ pub fn planSparseDriven(
     };
 }
 
-/// A mixed query whose driver is a TABLE member — or which has no sparse member
-/// in its with-set at all.
-///
-/// The walk is the archetype walk, delegated to `DynamicQuery` over the TABLE
-/// subset of both sets; the SPARSE half of each set is applied PER ENTITY from
-/// the locator, which the contract requires: "`not has T` on a sparse `T`
-/// ceases to be an archetype-level filter and becomes a per-entity membership
-/// test." Not an optimisation — a sparse component is in NO archetype signature
-/// since G3, so a sparse exclusion handed to `DynamicQuery` excludes nothing.
+/// A mixed query driven by a TABLE member, or with no sparse member at all. The
+/// SPARSE half of each set is applied PER ENTITY from the locator — not an
+/// optimisation, a sparse component being in NO archetype signature, so a sparse
+/// exclusion handed to `DynamicQuery` excludes nothing.
 pub const TableDrivenQuery = struct {
     /// The archetype-level query, over the table subset of both sets.
     inner: query_mod.DynamicQuery,
@@ -411,9 +308,7 @@ pub const TableDrivenQuery = struct {
     }
 };
 
-/// Build the table-driven query: partition both sets by storage mode, hand the
-/// TABLE halves to `World.queryDynamic`, and keep the SPARSE halves for the
-/// per-entity test.
+/// Partition both sets by storage mode; the TABLE halves go to `World.queryDynamic`.
 pub fn planTableDriven(
     gpa: std.mem.Allocator,
     world: *World,
@@ -445,60 +340,33 @@ pub fn planTableDriven(
     };
 }
 
-/// Which form of one term the current tick walks.
-///
-/// `sparse` carries an INDEX into `QueryPlan.sparse` and not a `ComponentId`,
-/// because the form is what the walk needs and the id would have to be mapped
-/// back to it at every use.
+/// Which form of one term the current tick walks. `sparse` carries an INDEX into
+/// `QueryPlan.sparse`, an id having to be mapped back to it at every use.
 pub const Walk = union(enum) {
     table,
     sparse: usize,
 };
 
-/// One DNF term's plans — EVERY form the term can be walked in, built once,
-/// with the CHOICE of driver deferred to the walk.
+/// One DNF term's plans — every form it can be walked in, built ONCE, with the
+/// choice of driver deferred to the walk.
 ///
-/// **The FORM of a plan is static and the CHOICE of driver is not.**
-/// `planTableDriven` partitions the two sets by `storageOf`, a registry fact
-/// never mutated after registration; `electDriver` compares POPULATIONS, which
-/// move every tick. Building the forms once makes a driver change free, and
-/// **there is therefore no hysteresis to calibrate and no threshold to
-/// engrave** — measured, the flip count follows the number of population
-/// CROSSINGS and not the churn rate, so nothing is being smoothed.
+/// THE FORM IS STATIC AND THE CHOICE IS NOT: the partition comes from `storageOf`,
+/// never mutated after registration, while `electDriver` compares POPULATIONS. So a
+/// driver change is free and there is no hysteresis to calibrate.
 ///
-/// **Three preconditions.** A form dormant for N ticks and then elected must be
-/// as correct as one walked every tick, which rests on:
-///
-///   1. `world.archetypes` is APPEND-ONLY — one `append` in `World`, whose
-///      only `pop` is the `errdefer` that annuls it. `query.rescanNewArchetypes`
-///      walks `[last_seen, len)`, so a dormant table form's tail rescan is
-///      exact whatever its cursor's age. **The day a `swapRemove` reaches that
-///      list, this page is what must redden.**
-///   2. The table form's with/without split is derived from `storageOf`, so a
-///      form re-consulted after any number of dormant ticks carries the SAME
-///      sets it was built with. There is no with-set the cached archetypes were
-///      never examined against.
-///   3. `matching` holds `*Archetype` into individually allocated archetypes,
-///      stable for the world's lifetime, so growth of the list relocates
-///      nothing a dormant form still points at.
+/// A form dormant for N ticks must be as correct as one walked every tick, which
+/// rests on `world.archetypes` being APPEND-ONLY — THE DAY A `swapRemove` REACHES
+/// THAT LIST, THIS PAGE MUST REDDEN — on the split coming from `storageOf`, and on
+/// `matching` holding pointers into individually allocated archetypes.
 pub const QueryPlan = struct {
-    /// The with-set in DECLARATION ORDER.
-    ///
-    /// Kept whole even though both forms hold partitioned copies: `electDriver`
-    /// breaks a population tie on the POSITION in this slice, and a partition
-    /// loses the interleaving that position encodes.
+    /// The with-set in DECLARATION ORDER, kept whole even though both forms hold
+    /// partitioned copies: a tie breaks on POSITION here, which a partition loses.
     with_ids: []ComponentId,
-    /// The archetype walk. ALWAYS built — it serves any term, which is what
-    /// lets `elect` fall back on it rather than fail.
+    /// ALWAYS built — it serves any term, which is what lets `elect` fall back on it.
     table: TableDrivenQuery,
-    /// One sparse-driven form per SPARSE member of the with-set, in declaration
-    /// order. Empty when the with-set names no sparse component.
-    ///
-    /// One per member and not one shared form with a mutable driver: a form's
-    /// `other_with` is the with-set MINUS its own driver, so a shared form would
-    /// have to recompute that slice at every flip — an allocation on the very
-    /// path this design makes free — or test the driver against itself once per
-    /// entity on the hot walk.
+    /// One form per SPARSE member, in declaration order. One per member and NOT one
+    /// shared form with a mutable driver: `other_with` is the with-set minus its own
+    /// driver, so sharing would recompute that slice at every flip.
     sparse: []SparseDrivenQuery,
 
     pub fn deinit(self: *QueryPlan, gpa: std.mem.Allocator) void {
@@ -509,19 +377,11 @@ pub const QueryPlan = struct {
         self.* = undefined;
     }
 
-    /// Elect the form this walk uses, from the CURRENT populations.
-    ///
-    /// Called once per walk per term, and `population` is O(archetypes) for a
-    /// table member — the cost the milestone measures rather than assumes.
+    /// Called once per walk per term, and `population` is O(archetypes) per table member.
     pub fn elect(self: *const QueryPlan, world: *const World) Walk {
-        // NO sparse form means ONE possible election, and skipping it is the
-        // absence of a choice rather than a saving. Without this, a term of
-        // table members only pays `population` — O(archetypes) per member,
-        // measured at 8025 ns for eight members over 256 archetypes — on every
-        // tick, for a decision with one outcome. No test can see the difference:
-        // the elected walk is identical either way, so the guard against
-        // restoring the unconditional form is this sentence and
-        // `bench/ecs_election.zig`, nothing else.
+        // NO sparse form means ONE possible election. Without this guard a table-only
+        // term pays `population` per member every tick for a decision with one
+        // outcome — and no test can see it, the elected walk being identical.
         if (self.sparse.len == 0) return .table;
         switch (electDriver(world, self.with_ids)) {
             .table => return .table,
@@ -529,38 +389,27 @@ pub const QueryPlan = struct {
                 for (self.sparse, 0..) |*q, i| {
                     if (q.driver == cid) return .{ .sparse = i };
                 }
-                // Unreachable by the two facts above — a returned cid is a
-                // sparse member of `with_ids`, and this array holds one form per
-                // such member — so the fallback exists for the state that cannot
-                // occur rather than for one that can. It is the TABLE form and
-                // NOT `unreachable`: that form is total, so an impossible state
-                // costs a slower walk and never a wrong answer.
+                // Unreachable: a returned cid is a sparse member of `with_ids` and
+                // this array holds one form per such member. The TABLE form and NOT
+                // `unreachable`, being total — an impossible state costs a slower
+                // walk and never a wrong answer.
                 std.debug.assert(false);
                 return .table;
             },
         }
     }
 
-    /// Whether this term's admission is decided PER ENTITY, so a union
-    /// containing it cannot de-duplicate by archetype.
-    ///
-    /// True for a term carrying ANY sparse member, present or absent — read off
-    /// the table form, whose two sparse lists are a partition by `storageOf`.
-    /// **So the predicate is a function of storage modes ALONE and does not
-    /// enter the election**: making it answer from the elected form would send a
-    /// term with sparse members but a table election back through the archetype
-    /// merge, which is the P1-2 defect exactly.
-    ///
-    /// The merge runs `iterateArchetype` once per archetype under a SINGLE
-    /// owner, so every other term's `admits` is skipped, and the entity a
-    /// non-last term would have admitted is silently lost.
+    /// Whether admission is decided PER ENTITY, so a union containing this term
+    /// cannot de-duplicate by archetype. A function of STORAGE MODES ALONE, and it
+    /// must NOT enter the election: answering from the elected form sends a term with
+    /// sparse members but a table election back through the archetype merge, which
+    /// runs under a single owner and silently loses what another term would admit.
     pub fn needsEntityDedup(self: *const QueryPlan) bool {
         return self.table.sparse_with.len != 0 or self.table.sparse_without.len != 0;
     }
 };
 
-/// Build every form one term can be walked in. **No driver is elected here** —
-/// see `QueryPlan.elect`, which does it per walk from live populations.
+/// NO driver is elected here — `QueryPlan.elect` does that per walk.
 pub fn plan(
     gpa: std.mem.Allocator,
     world: *World,

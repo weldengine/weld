@@ -1,8 +1,7 @@
 //! FROZEN — see engine-phase-0-criteria.md C0.5. Every declaration below is.
 //!
-//! Fundamental C types of the Tier 3 plugin API and the plugin descriptor, laid out
-//! per `engine-c-api.md` §2 and §3. `extern` or C integer aliases, so a plugin built
-//! in any language matching that ABI links against them.
+//! `extern` or C integer aliases throughout, so a plugin built in any language
+//! matching that ABI links against them.
 
 const std = @import("std");
 
@@ -15,8 +14,7 @@ pub const WELD_API_VERSION_MINOR: u32 = 1;
 /// Patch version: a fix with no surface change.
 pub const WELD_API_VERSION_PATCH: u32 = 0;
 
-/// Opaque entity handle, ABI-equivalent to `uint64_t`. Encodes
-/// `index` (low 32 bits) + `generation` (high 32 bits).
+/// `index` in the low 32 bits, `generation` in the high 32.
 pub const WeldEntity = u64;
 /// Opaque asset handle, ABI-equivalent to `uint64_t`.
 pub const WeldAssetHandle = u64;
@@ -51,14 +49,12 @@ pub const WeldMat4 = extern struct { m: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 
 /// RGBA float color (linear space).
 pub const WeldColor = extern struct { r: f32 = 0, g: f32 = 0, b: f32 = 0, a: f32 = 1 };
 
-/// Non-owning UTF-8 view. ABI = `struct { const char* ptr;
-/// uint32_t len; }`. Not guaranteed NUL-terminated.
+/// Non-owning UTF-8 view, NOT guaranteed NUL-terminated.
 pub const WeldStr = extern struct {
     ptr: ?[*]const u8 = null,
     len: u32 = 0,
 
-    /// Builds a `WeldStr` from a Zig slice. The caller is
-    /// responsible for the lifetime of the pointed-to buffer.
+    /// THE CALLER owns the lifetime of the pointed-to buffer.
     pub fn fromSlice(s: []const u8) WeldStr {
         return .{ .ptr = s.ptr, .len = @intCast(s.len) };
     }
@@ -70,65 +66,44 @@ pub const WeldStr = extern struct {
     }
 };
 
-/// View over an arbitrary array (`const void* ptr; uint32_t
-/// count; uint32_t stride;`). Used for batched returns.
+/// `const void* ptr; uint32_t count; uint32_t stride;` — for batched returns.
 pub const WeldSlice = extern struct {
     ptr: ?*const anyopaque = null,
     count: u32 = 0,
     stride: u32 = 0,
 };
 
-/// Opaque handle to the ECS `World`. The plugin receives the
-/// pointer via `WeldAPI.world` and passes it to ECS callbacks.
+/// Received through `WeldAPI.world` and passed back to the ECS callbacks.
 pub const WeldWorldHandle = ?*anyopaque;
-/// Opaque handle to an ECS query built by
-/// `WeldEcsAPI.query_create`.
+/// Built by `WeldEcsAPI.query_create`.
 pub const WeldQueryHandle = ?*anyopaque;
 /// Opaque handle to a Weld allocator.
 pub const WeldAllocatorHandle = ?*anyopaque;
-/// Opaque handle to the editor context (`null` in runtime
-/// mode without an editor).
+/// `null` in runtime mode without an editor.
 pub const WeldEditorCtxHandle = ?*anyopaque;
 
-/// Result of a plugin API operation. `0 == WELD_OK`,
-/// negative reserved for future errors.
+/// `0 == WELD_OK`; negative is reserved.
 pub const WeldResult = enum(c_int) {
-    /// Operation succeeded.
     WELD_OK = 0,
-    /// Resource not found (dead entity, stale handle,
-    /// unregistered component, etc.).
+    /// A dead entity, a stale handle, an unregistered component.
     WELD_ERR_NOT_FOUND = 1,
-    /// Attempt to add a resource that is already present.
     WELD_ERR_ALREADY_EXISTS = 2,
-    /// Invalid `WeldEntity` (generation mismatch).
     WELD_ERR_INVALID_ENTITY = 3,
-    /// Unknown `WeldComponentId`.
     WELD_ERR_INVALID_COMPONENT = 4,
-    /// Unknown `WeldResourceId`.
     WELD_ERR_INVALID_RESOURCE = 5,
-    /// Type mismatch (between expected signature and provided
-    /// data).
+    /// Between the expected signature and the data provided.
     WELD_ERR_TYPE_MISMATCH = 6,
-    /// Allocation failed (allocator exhausted).
     WELD_ERR_OUT_OF_MEMORY = 7,
-    /// Capability not declared in `WeldPluginCaps`.
     WELD_ERR_PERMISSION_DENIED = 8,
-    /// Tier 1 service requested but not loaded (graceful
-    /// degradation on the plugin side).
+    /// Declared but not loaded — the plugin degrades gracefully.
     WELD_ERR_SERVICE_UNAVAILABLE = 9,
-    /// Incompatible API version.
     WELD_ERR_VERSION_MISMATCH = 10,
-    /// Feature declared but not yet wired — returns this
-    /// code for 100% of the callbacks of the 7 sub-APIs
-    /// (cf. brief § Out-of-scope, Phase 3 wiring).
+    /// What every callback of the seven sub-APIs returns today.
     WELD_ERR_NOT_IMPLEMENTED = 11,
 };
 
-/// Capabilities declared by the plugin at load time. READS
-/// these declarations and logs them; NO runtime check is
-/// performed — enforcement (refusing `component_get` on a
-/// component not declared in `reads_components`, etc.) is
-/// Phase 3 (brief § Out-of-scope).
+/// Declared at load time and LOGGED, never enforced: nothing refuses a
+/// `component_get` on a component absent from `reads_components`.
 pub const WeldPluginCaps = extern struct {
     // ECS
     reads_components: ?[*]const WeldStr = null,
@@ -153,54 +128,34 @@ pub const WeldPluginCaps = extern struct {
     _pad: [5]u8 = .{ 0, 0, 0, 0, 0 },
 };
 
-/// Plugin lifecycle callbacks. All optional (`null` =
-/// ignored). The stub plugin leaves all callbacks `null`.
+/// Lifecycle callbacks, all optional — `null` is ignored.
 ///
-/// The callbacks receive `*const anyopaque` rather than the
-/// concrete `*const WeldAPI` (defined in `api.zig`) — it is the
-/// opaque pointer to the API table that the plugin downcasts at
-/// entry via `@ptrCast`. This avoids the cyclic dependency
-/// `desc.zig ↔ api.zig` while preserving the ABI signature
-/// (at the C level, all pointers are `void*`).
+/// They take `*const anyopaque` and not `*const WeldAPI`, which would be a cyclic
+/// `desc.zig ↔ api.zig` dependency; the plugin downcasts at entry, and at the C
+/// level every pointer is `void*` anyway.
 pub const WeldPluginCallbacks = extern struct {
-    /// Called once at `loadPlugin`. The plugin registers its
-    /// components / resources / systems / events here.
+    /// Once, at `loadPlugin`: the plugin registers its own declarations here.
     on_load: ?*const fn (api: *const anyopaque) callconv(.c) WeldResult = null,
-    /// Called after ALL plugins are loaded. The plugin can now
-    /// query the services of the other modules.
+    /// After ALL plugins are loaded, so other modules' services are reachable.
     on_init: ?*const fn (api: *const anyopaque) callconv(.c) WeldResult = null,
-    /// Called every frame (only if the plugin declared it).
-    /// Most plugins don't need it — they use ECS systems.
+    /// Every frame, and only if declared — most plugins use ECS systems instead.
     on_update: ?*const fn (api: *const anyopaque, dt: f32) callconv(.c) void = null,
-    /// Called at `unloadPlugin`. The plugin frees its internal
-    /// resources (ECS components are managed by the engine).
+    /// At `unloadPlugin`: its own resources only, the engine owning the components.
     on_shutdown: ?*const fn (api: *const anyopaque) callconv(.c) void = null,
 };
 
-/// Descriptor returned by the plugin's single entry point
-/// (`weld_plugin_entry`). Identity + capabilities + callbacks.
+/// Returned by `weld_plugin_entry`: identity, capabilities, callbacks.
 pub const WeldPluginDesc = extern struct {
-    /// Short plugin name (`"advanced-animation-framework"`).
     name: WeldStr = .{},
-    /// Name displayed by the editor (`"Advanced Animation Framework"`).
     display_name: WeldStr = .{},
-    /// Plugin semver version (`"1.2.0"`).
     version: WeldStr = .{},
-    /// Minimum supported `WELD_API_VERSION_MAJOR`. The loader
-    /// refuses to load if this value exceeds the major version
-    /// compiled into Weld (`error.ApiVersionTooNew`).
+    /// Above Weld's own major version, the loader REFUSES with `ApiVersionTooNew`.
     api_version_min: u32 = 0,
     _pad: u32 = 0,
-    /// Declared capabilities (cf. `WeldPluginCaps`).
     caps: WeldPluginCaps = .{},
-    /// Lifecycle callbacks (cf. `WeldPluginCallbacks`).
     callbacks: WeldPluginCallbacks = .{},
 };
 
-/// Signature of the single entry point exported by the plugin.
-/// The loader resolves `dlsym("weld_plugin_entry")` and calls
-/// this function with an opaque pointer to the runtime `WeldAPI`
-/// (cf. `api.zig` for the concrete type). As with the
-/// callbacks, the plugin downcasts `*const anyopaque → *const
-/// WeldAPI` at entry.
+/// Resolved by `dlsym("weld_plugin_entry")` and called with an opaque pointer to
+/// the runtime `WeldAPI`, which the plugin downcasts at entry.
 pub const WeldPluginEntryFn = *const fn (api: *const anyopaque) callconv(.c) *const WeldPluginDesc;
