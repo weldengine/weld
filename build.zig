@@ -2273,6 +2273,11 @@ pub fn build(b: *std.Build) void {
     const lint_run = b.addRunArtifact(weld_lint_exe);
     lint_run.addArg("lint");
     if (b.args) |args| lint_run.addArgs(args);
+    // INHERITED, like the bindgen check beside it. Both this step and the
+    // dead-test guard below print a report a reader is meant to act on, and a
+    // captured stdout reaches nobody on success — measured: the rule pass's
+    // coverage report vanished entirely from `zig build lint` while the binary
+    // printed all of it when run directly.
     const lint_step = b.step(
         "lint",
         "Run weld_lint on the production tree (no @cImport / no usingnamespace / doc comments / *_c isolation)",
@@ -2320,6 +2325,13 @@ pub fn build(b: *std.Build) void {
         dead_tests_run.addArg(b.fmt("--expect-collected={d}", .{n}));
     }
 
+    // ORDERED AGAINST THE RULE PASS, and the reason is a MEASURED truncation, not
+    // tidiness. Both run steps write to the same stdout and the build runner may
+    // run them concurrently. While the rule pass printed nothing on a clean tree
+    // nothing collided; the moment it printed its coverage, the dead-test output
+    // came back cut mid-sentence with the conservation verdict missing entirely —
+    // a control whose verdict can be eaten is a control nobody can read.
+    dead_tests_run.step.dependOn(&lint_run.step);
     lint_step.dependOn(&dead_tests_run.step);
 
     const dead_tests_step = b.step(
@@ -2334,6 +2346,14 @@ pub fn build(b: *std.Build) void {
     // exist" into "how do I get under the threshold"
     // (`engine-zig-conventions.md` §12). `fingerprint --check` is the one that can
     // fail, and it compares token identity rather than any quantity.
+    const coverage_run = b.addRunArtifact(weld_lint_exe);
+    coverage_run.addArg("coverage");
+    const coverage_step = b.step(
+        "comment-coverage",
+        "Print the subtrees the comment rules do not report on yet (empty = whole perimeter read)",
+    );
+    coverage_step.dependOn(&coverage_run.step);
+
     const census_run = b.addRunArtifact(weld_lint_exe);
     census_run.addArg("census");
     if (b.args) |args| census_run.addArgs(args);

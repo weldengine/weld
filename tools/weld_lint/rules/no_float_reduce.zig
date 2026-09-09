@@ -6,7 +6,7 @@
 //! the order — the langref calls it "a sequential horizontal reduction" and
 //! states that on floats "the operation associativity is preserved, unless the
 //! float mode is set to `Optimized`" — but two Zig 0.16 backends were measured
-//! at M1.1.14 to disagree on the SAME `x86_64` target: LLVM folds a 3-lane f32
+//! to disagree on the SAME `x86_64` target: LLVM folds a 3-lane f32
 //! sum as `(p₀ + p₁) + p₂`, the self-hosted backend as `p₁ + (p₂ + p₀)`, under
 //! the default float mode and under an explicit `.strict` alike. Those two
 //! functions differ on 31.4% of random f32 triples, and in the determinism

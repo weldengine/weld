@@ -1,9 +1,9 @@
 //! Test root for the linter's own unit tests.
 //!
 //! A `test` block runs only if the compiler ANALYSES the file holding it, and
-//! Zig analyses declarations lazily. Two forms were tried at M1.1.14 and only
-//! one works — measured, by appending a deliberately failing test to a rule and
-//! watching for red:
+//! Zig analyses declarations lazily. Two forms were tried and only one works —
+//! measured, by appending a deliberately failing test to a rule and watching
+//! for red:
 //!
 //!   - `addTest` rooted at `main.zig`, which reaches the rules through plain
 //!     `const` imports: ran NOTHING and reported success.
@@ -34,6 +34,8 @@ comptime {
     _ = @import("rules/no_float_reduce.zig");
     _ = @import("rules/no_precision_crossing.zig");
     _ = @import("rules/conventional_commit.zig");
+    _ = @import("rules/comment_identifiers.zig");
+    _ = @import("rules/comment_tags.zig");
     // Shared machinery.
     // `main.zig` too: the lint subcommand's own path-coverage logic lives there, and a
     // helper nobody elaborates is a helper nobody tests.
@@ -42,4 +44,5 @@ comptime {
     _ = @import("scan.zig");
     _ = @import("diagnostic.zig");
     _ = @import("census.zig");
+    _ = @import("comment_scan.zig");
 }

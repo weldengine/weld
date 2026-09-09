@@ -31,6 +31,9 @@ const no_float_reduce = @import("rules/no_float_reduce.zig");
 const no_precision_crossing = @import("rules/no_precision_crossing.zig");
 const dead_tests = @import("dead_tests.zig");
 const census = @import("census.zig");
+const comment_identifiers = @import("rules/comment_identifiers.zig");
+const comment_tags = @import("rules/comment_tags.zig");
+const comment_scan = @import("comment_scan.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
 
@@ -65,6 +68,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (std.mem.eql(u8, sub, "dead-tests")) {
         return runDeadTests(arena, init.io, stdout, argv[2..]);
+    }
+    if (std.mem.eql(u8, sub, "coverage")) {
+        return runCoverage(arena, stdout);
     }
     if (std.mem.eql(u8, sub, "census")) {
         return runCensus(arena, init.io, argv[2..], stdout);
@@ -111,6 +117,8 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
         try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
+        try comment_identifiers.check(arena, file, source, &diags);
+        try comment_tags.check(arena, file, source, &diags);
     }
 
     // The second half of the bilateral control. It needs no notion of a "full scan": it
@@ -120,6 +128,37 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
+    }
+
+    // THE COMMENT RULES STATE THEIR OWN COVERAGE, unconditionally. A declared
+    // unread subtree is not an exemption, and a green run that did not say so
+    // would read as full coverage — which is the failure mode a silent
+    // declaration always takes. The list is empty when the pass closes.
+    if (comment_scan.pending.len != 0) {
+        try out.print(
+            "comment rules: {d} subtree(s) not read yet by the conservation pass, so a clean run above covers the rest only:\n",
+            .{comment_scan.pending.len},
+        );
+        // MEASURED, AND IT REFUTES WHAT THIS BLOCK WAS FIRST WRITTEN TO CLAIM:
+        // the build runner suppresses this step's captured stdout on success, so
+        // "printed on every run" is false under `zig build lint`. What is true:
+        // it prints when the step FAILS, when the binary is run directly, and on
+        // the `comment-coverage` step, which exists for exactly that reason.
+        // Each entry is CONFRONTED with the files this run walked. An entry that
+        // matches nothing is stale — the subtree was renamed or removed — and a
+        // stale entry silences a rule over a path nobody is watching, which is the
+        // defect a declared list exists to prevent rather than to create.
+        for (comment_scan.pending) |p| {
+            var hits: usize = 0;
+            for (files.items) |file| {
+                if (comment_scan.inPerimeter(file) and comment_scan.matchesPending(file, p.prefix)) hits += 1;
+            }
+            if (hits == 0) {
+                try out.print("  STALE: {s} matches no file this run walked\n", .{p.prefix});
+            } else {
+                try out.print("  unread: {s} ({d} file(s))\n", .{ p.prefix, hits });
+            }
+        }
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
 }
@@ -140,6 +179,24 @@ fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
+}
+
+/// `coverage` — the declared unread subtrees, on their own step.
+///
+/// The same list `lint` prints, reachable on a step of its own because the build
+/// runner drops a successful run step's stdout: a coverage statement nobody can
+/// read is the silent declaration the list exists to prevent.
+fn runCoverage(arena: std.mem.Allocator, out: *std.Io.Writer) !u8 {
+    _ = arena;
+    try out.print(
+        "comment rules: {d} subtree(s) not read yet by the conservation pass\n",
+        .{comment_scan.pending.len},
+    );
+    for (comment_scan.pending) |p| try out.print("  unread: {s}\n", .{p.prefix});
+    if (comment_scan.pending.len == 0) {
+        try out.writeAll("the pass has read the whole perimeter\n");
+    }
+    return 0;
 }
 
 /// `census` — per-file comment lines, code lines, density and block count.
@@ -527,6 +584,10 @@ const usage_text =
     \\      Validate the title of the commit message at <file> against
     \\      the Conventional Commits subset enforced by Weld. Exits 0
     \\      if valid, 1 otherwise.
+    \\
+    \\  weld_lint coverage
+    \\      Print the subtrees the comment rules do not report on yet.
+    \\      Empty means the conservation pass has read the whole perimeter.
     \\
     \\  weld_lint census [path]...
     \\      Report per-file code lines, comment lines, doc lines, comment
