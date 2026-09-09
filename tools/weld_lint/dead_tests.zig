@@ -695,9 +695,15 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // `invalid/` to `valid/` and adds no block either way, both corpus drivers
     // being one test over a declared list.
     // Re-derived from the SUITE: `2155/2174 tests passed (19 skipped)` on macOS.
+    // The comment pass adds SEVENTEEN in the new `tools/weld_lint/census.zig`: four on
+    // the line-counting convention, eight on the token fingerprint — four invariance,
+    // four discrimination — one on the diff reporter, and four on the baseline format
+    // and its path normalisation (2174 -> 2191). None carries platform dispatch, so
+    // Windows moves by the same seventeen.
+    // Re-derived from the SUITE: `2172/2191 tests passed (19 skipped)` on macOS.
     return switch (os) {
-        .windows => 2172,
-        else => 2174,
+        .windows => 2189,
+        else => 2191,
     };
 }
 

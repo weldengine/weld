@@ -41,4 +41,5 @@ comptime {
     _ = @import("dead_tests.zig");
     _ = @import("scan.zig");
     _ = @import("diagnostic.zig");
+    _ = @import("census.zig");
 }

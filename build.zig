@@ -2328,6 +2328,30 @@ pub fn build(b: *std.Build) void {
     );
     dead_tests_step.dependOn(&dead_tests_run.step);
 
+    // The two REPORTERS and the token oracle of the comment pass. They get their
+    // own steps and are deliberately NOT wired into `lint_step`: a comment ratio
+    // that can fail a build turns the question from "does this comment deserve to
+    // exist" into "how do I get under the threshold"
+    // (`engine-zig-conventions.md` §12). `fingerprint --check` is the one that can
+    // fail, and it compares token identity rather than any quantity.
+    const census_run = b.addRunArtifact(weld_lint_exe);
+    census_run.addArg("census");
+    if (b.args) |args| census_run.addArgs(args);
+    const census_step = b.step(
+        "census",
+        "Report per-file comment lines, blocks and density (zig build census -- [path]...)",
+    );
+    census_step.dependOn(&census_run.step);
+
+    const fingerprint_run = b.addRunArtifact(weld_lint_exe);
+    fingerprint_run.addArg("fingerprint");
+    if (b.args) |args| fingerprint_run.addArgs(args);
+    const fingerprint_step = b.step(
+        "fingerprint",
+        "Token fingerprint per file; --check <baseline> fails if any token moved",
+    );
+    fingerprint_step.dependOn(&fingerprint_run.step);
+
     const lint_commit_run = b.addRunArtifact(weld_lint_exe);
     lint_commit_run.addArg("commit-msg");
     if (b.args) |args| lint_commit_run.addArgs(args);
