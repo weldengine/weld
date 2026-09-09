@@ -5,9 +5,8 @@
 //! `src/interfaces/PhysicsModule.zig` lands (a later milestone) these become
 //! its canonical home and `api/` re-exports, touching zero call sites.
 //!
-//! Math types come from `foundation.math` (Notes decision 3d). Per the E1
-//! naming scheme the descriptor fields use the f32 aliases: `Vec3`
-//! (`math.Vec3`) and `Quatf` (`math.Quatf`).
+//! Math types come from `foundation.math`; the descriptor fields use the f32
+//! aliases `Vec3` (`math.Vec3`) and `Quatf` (`math.Quatf`).
 
 const std = @import("std");
 const math = @import("foundation").math;
@@ -17,21 +16,20 @@ const Vec3 = math.Vec3;
 const Quatf = math.Quatf;
 
 /// Generational ECS entity handle — re-export of `core.ecs.EntityId` so forge
-/// solvers reach the core entity type through `api/` (brief §E3), not via a
-/// direct `weld_core` import.
+/// solvers reach the core entity type through `api/` and not via a direct
+/// `weld_core` import.
 pub const EntityId = core.ecs.EntityId;
 
 /// Opaque physics-body handle. `u32` at the interface boundary
-/// (`engine-tier-interfaces.md` §1); internally `index:24 | generation:8`
-/// (Notes decision 4) — 16.7 M live bodies, a 256-generation ABA window.
-/// Pack/unpack via `PackedId`.
+/// (`engine-tier-interfaces.md` §1); internally `index:24 | generation:8` —
+/// 16.7 M live bodies, a 256-generation ABA window. Pack/unpack via `PackedId`.
 pub const BodyId = u32;
 
 /// Opaque collision-shape handle — same `u32` boundary and `index:24 |
 /// generation:8` packing as `BodyId`.
 pub const ShapeId = u32;
 
-/// Opaque character-controller handle (M1.1.12, `engine-physics-forge.md` §1.12) —
+/// Opaque character-controller handle (`engine-physics-forge.md` §1.12) —
 /// same `u32` boundary and `index:24 | generation:8` packing as `BodyId`.
 ///
 /// The GENERATION is not decoration here: §1.12 requires a typed error on a stale
@@ -44,8 +42,7 @@ pub const CharacterId = u32;
 /// The `index:24 | generation:8` bit layout shared by `BodyId`, `ShapeId` and
 /// `CharacterId` (index in the low 24 bits, generation in the high 8).
 /// Stale-handle detection for the free-list slot reuse in
-/// `ShapeStore`/`BodyManager` (M1.1.0 E3), and for the character store from
-/// M1.1.12.
+/// `ShapeStore`/`BodyManager`, and for the character store.
 pub const PackedId = packed struct(u32) {
     /// Slot index into the owning pool (low 24 bits).
     index: u24,
@@ -81,13 +78,10 @@ pub const BodyType = enum(u8) {
     dynamic,
 };
 
-/// Collision-shape kind. `u8`-backed (component tag). C1.1-complete set —
-/// the spec §1 enum is a subset; the extension (plane, tapered_cylinder,
-/// height_field, mutable_compound, empty) is additive and pre-freeze
-/// (Notes decision 3b). `createShape` constructs sphere/box/capsule (M1.1.0),
-/// plane (M1.1.11) and triangle_mesh (M1.1.11.1 — the twelfth and LAST shape of the
-/// C1.1 list); every other variant returns `error.UnsupportedShape` until its
-/// own sub-milestone.
+/// Collision-shape kind. `u8`-backed (component tag). The spec §1 enum is a
+/// SUBSET of this one — plane, tapered_cylinder, height_field,
+/// mutable_compound and empty extend it additively. `createShape` constructs sphere, box, capsule, plane
+/// and triangle_mesh; every other variant returns `error.UnsupportedShape`.
 pub const ShapeType = enum(u8) {
     /// Sphere (radius).
     sphere,
@@ -116,13 +110,10 @@ pub const ShapeType = enum(u8) {
 };
 
 /// Shape parameters, a tagged union discriminated by `ShapeType`. The spec §1
-/// flat struct self-describes as a simplification of a discriminated union;
-/// the union IS the specified design (Notes decision 3a).
-/// M1.1.0 carries payloads for sphere/box/capsule and M1.1.11 adds plane; the
-/// rest are `void` placeholders whose payloads land at their own sub-milestones —
-/// a pre-freeze extension of the union that `engine-tier-interfaces.md` §1
-/// explicitly permits, each payload-less variant receiving its payload at the
-/// sub-milestone that delivers the shape.
+/// flat struct self-describes as a simplification of a discriminated union, so
+/// the union IS the specified design. A `void` variant is one whose payload is
+/// not written yet, and filling one in later is the additive extension
+/// `engine-tier-interfaces.md` §1 permits.
 pub const ShapeDescriptor = union(ShapeType) {
     /// Sphere of `radius` metres.
     sphere: struct { radius: f32 = 0.5 },
@@ -137,8 +128,8 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// Placeholder — payload lands at the convex-hull sub-milestone.
     convex_hull: void,
     /// Solid half-space `n·x <= d`: `normal` unit, `distance` in metres, both in
-    /// the shape's local frame and transported by the body pose (M1.1.11,
-    /// `engine-physics-forge.md` §1.11.15).
+    /// the shape's local frame and transported by the body pose
+    /// (`engine-physics-forge.md` §1.11.15).
     ///
     /// The body carrying it must be STATIC: a half-space has neither a finite
     /// volume, nor an inertia tensor, nor a local AABB, so mass, inertia and sleep
@@ -167,7 +158,7 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// and not a tolerance, the same pattern the typed rejection of a `collision_layer`
     /// outside `[0, 32)` exists to close (§1.11.4).
     plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
-    /// Static triangle mesh (M1.1.11.1, `engine-physics-forge.md` §1.11.17). A
+    /// Static triangle mesh (`engine-physics-forge.md` §1.11.17). A
     /// SURFACE and not a solid, and that is CATEGORICAL rather than a setting:
     /// membership is false everywhere, `pointQuery` never returns a body carrying
     /// one, and `closestPoint` measures to the surface and is never zero by
@@ -200,10 +191,9 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// `collision_layer` already exists to close.
     ///
     /// `active_edge_cos_threshold` is the cosine below which a CONVEX edge is treated as
-    /// ACTIVE, and it is authored HERE because the flags are baked at creation: this is
-    /// the only path a caller has to them, and after the M1.1.15 freeze the field could
-    /// not land at all. Same pre-freeze window as `BackFaceMode`, and it closes at this
-    /// shape. A named PHYSICAL parameter of the same class as `restitution_threshold` and
+    /// ACTIVE, and it is authored HERE because the flags are baked at creation: this
+    /// descriptor is the only path a caller has to them. A named PHYSICAL parameter of the
+    /// same class as `restitution_threshold` and
     /// `penetration_slop` — it selects a modelling behaviour, not a numerical tolerance,
     /// so §1.11.2's `k · floatEps(T) · coordScale` discipline does not apply to it. It is
     /// `f32` like the rest of this surface (§1.11.8), so the same descriptor names the
@@ -230,11 +220,6 @@ pub const ShapeDescriptor = union(ShapeType) {
 /// Optional extensions a physics backend may declare
 /// (`engine-tier-interfaces.md` §1). The CORE joints are always supported;
 /// `advanced_joints` gates the three extension types of `JointType`.
-///
-/// Minted at M1.1.15.2 G8 with the delegated wrapper, which is the first thing
-/// that needs it: `hasCapability` is the one wrapper function that is not a bare
-/// delegation — it answers `false` for an implementation declaring none, which is
-/// why it is absent from the assert block and does not move the count of 32.
 pub const Capability = enum {
     destruction,
     soft_bodies,
@@ -258,7 +243,7 @@ pub const TriggerOverlap = struct {
 
 /// Everything needed to create one body (`engine-tier-interfaces.md` §1).
 /// `linear_damping` defaults to 0.05 to agree with the `RigidBody` component
-/// and Jolt (spec §1 says 0.01, §2 says 0.05 — Notes decision 3c).
+/// and Jolt (spec §1 says 0.01, §2 says 0.05).
 pub const BodyDescriptor = struct {
     /// Owning ECS entity.
     entity: EntityId,
@@ -290,8 +275,7 @@ pub const BodyDescriptor = struct {
     /// Continuous collision detection for fast movers.
     continuous: bool = false,
     /// Whether the body is allowed to fall asleep. Mirrors `RigidBody.can_sleep`
-    /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
-    /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
+    /// (`engine-physics-forge.md` §2).
     can_sleep: bool = true,
     /// SENSOR role: the body detects without responding (`engine-physics-solver.md`
     /// §1.13). It is inserted into the `trigger` broad class, whose matrix row and
@@ -304,10 +288,6 @@ pub const BodyDescriptor = struct {
     /// bodies sharing a sphere to share their nature (§1.13.1). The ECS authoring
     /// surface is `CollisionShape.is_trigger` (`engine-physics-forge.md` §2),
     /// translated here.
-    ///
-    /// PRE-FREEZE EXTENSION, second-to-last window: after the M1.1.15 freeze of
-    /// `PhysicsModule` this field could no longer land, and nothing would let a
-    /// caller declare a trigger at all.
     is_trigger: bool = false,
     /// OBJECT layers this trigger detects: a candidate passes when
     /// `(1 << candidate_layer) & trigger_layer_mask` is non-zero. Same mechanism
@@ -323,17 +303,14 @@ pub const BodyDescriptor = struct {
     /// would be reserving an object layer for triggers, which would make a
     /// technical class carry a gameplay policy. Same arbitrage as `back_face_mode`
     /// on `OverlapQuery` — an almost-inert field against a permanent dead end.
-    /// PRE-FREEZE EXTENSION, second-to-last window.
     trigger_layer_mask: u32 = 0xFFFFFFFF,
 };
 
 // --- Body pose and velocity entries ---
 //
-// The semantics of `setBodyTransform`, `moveKinematic` and `setAngularVelocity` were
-// recorded here while `src/interfaces/PhysicsModule.zig` did not exist, and that block
-// named this move as its destination. M1.1.15 CREATED the file and MOVED the block onto its
-// three declarations. It is not duplicated: two copies of a contract are two things that
-// can disagree, which was the whole subject of the block.
+// The semantics of `setBodyTransform`, `moveKinematic` and `setAngularVelocity` live on
+// their three declarations in `src/interfaces/PhysicsModule.zig` and are NOT repeated
+// here: two copies of a contract are two things that can disagree.
 
 /// Everything needed to create one character controller
 /// (`engine-physics-forge.md` §1.12). A controller is VIRTUAL: it takes part in no
@@ -366,9 +343,8 @@ pub const CharacterDescriptor = struct {
     ///
     /// The DEFAULT is `Vec3.zero`, and a base placed exactly tangent to a surface — which that default
     /// is, over a floor at `y = 0` — is served: `depenetrate` establishes the `padding` stand-off
-    /// §1.12.6 requires. An earlier version documented that configuration as a degenerate input the
-    /// caller had to avoid, which was a bug with an apology attached: a precondition the field's own
-    /// default violates is not a precondition.
+    /// §1.12.6 requires. It is NOT a degenerate input the caller must avoid: a precondition
+    /// the field's own default violates is not a precondition.
     position: Vec3 = Vec3.zero,
 
     /// Capsule radius (metres).
@@ -387,9 +363,9 @@ pub const CharacterDescriptor = struct {
     /// RADIANS here and DEGREES in the Etch components, the conversion belonging to the
     /// `@unit(.degrees)` annotation — the divergence is written down so that nobody
     /// "corrects" either side. The solver stores its COSINE, computed once at creation,
-    /// and tests `n · up >= cos_max_slope`: an `acos` per contact per frame is exactly
-    /// what M1.1.14 would have to make reproducible, `engine-phase-1-plan.md` naming
-    /// internal trigonometric functions among its determinism hazards (§1.12.5).
+    /// and tests `n · up >= cos_max_slope`: an `acos` per contact per frame is one more
+    /// trigonometric function to make reproducible, `engine-phase-1-plan.md` naming them
+    /// among its determinism hazards (§1.12.5).
     ///
     /// A value outside `[0, π/2]` is a DOMAIN ERROR and is never clamped: silently
     /// clamping would make a caller's mistake look like a modelling choice.
@@ -417,11 +393,10 @@ pub const CharacterDescriptor = struct {
     /// reference documents that a value of zero most likely gets the character stuck, the
     /// sliding direction no longer being computable (`mPredictiveContactDistance`).
     ///
-    /// THE ONE FIELD OF THIS DESCRIPTOR THE ALGORITHM HAS NOT YET JUSTIFIED. It ships
-    /// because the pre-freeze window closes at M1.1.15 and the only known production
-    /// realisation of this algorithm declares it load-bearing. The gate that writes
-    /// sliding CONSUMES it or DELETES it — both stay inside the window; leaving it inert
-    /// does not.
+    /// THE ONE FIELD OF THIS DESCRIPTOR THE ALGORITHM HAS NOT YET JUSTIFIED, and it is
+    /// inert today. It exists because the only known production realisation of this
+    /// algorithm declares it load-bearing. Whoever writes sliding CONSUMES it or REMOVES
+    /// it; leaving it inert is the one outcome that decides nothing.
     predictive_contact_distance: f32 = 0.1,
 
     /// What the character IS, read by others through the mask of THEIR queries.
@@ -496,10 +471,8 @@ pub const GroundState = enum(u8) {
 ///
 /// The former `collisions: u8` field is DELETED: a counter with no named consumer in the
 /// corpus, saturating at 255, and a counter belongs only to a shape that is allowed to
-/// fail. `CharacterMoveResult2D` carries the same field and SURVIVES this removal — the
-/// 2D symmetry is consigned for M1.8.11, where `PhysicsModule2D` freezes, on the M1.1.11
-/// precedent of listing a 2D symmetry in OUT with its freeze date rather than touching 2D
-/// from a 3D milestone.
+/// fail. `CharacterMoveResult2D` carries the same field and SURVIVES this removal: a 2D
+/// symmetry is not resolved from the 3D surface.
 ///
 /// **`ground_state` is the discriminator, and the two support handles carry an explicit
 /// "no support" value rather than relying on it.** `ground_entity` is `EntityId.dead` and
@@ -561,16 +534,16 @@ pub const CharacterMoveResult = struct {
 //
 // Mirrors `engine-tier-interfaces.md` §1 verbatim. The family is settled IN FULL
 // here even where the body is a Phase-1 stub: adding a method to a comptime
-// strategy interface after its freeze (M1.1.15) breaks every Tier 3 solver, so
-// deferring a signature is not admissible (`engine-physics-forge.md` §1.11.7).
+// strategy interface after its freeze breaks every Tier 3 solver, so deferring
+// a signature is not admissible (`engine-physics-forge.md` §1.11.7).
 //
 // These types are the f32 PUBLIC boundary, deliberately distinct from their
 // solver-side counterparts in `forge_3d/query.zig` (`Filter`, `RayQuery`,
 // `RayHit`) which carry the solver scalar. Two levels by design, not duplication:
 // §1.11.8 makes the public surface f32 — consistent with `BodyDescriptor`, the
 // interface `Transform` and the ECS `Transform` — and widening it is one decision
-// over all of them at once, at M1.1.15. The conversion between the two levels is
-// the interface tier's, and it is the only place that ever knows both.
+// over all of them at once and never over one alone. The conversion between the two
+// levels is the interface tier's, and it is the only place that ever knows both.
 
 /// Number of object layers a query mask can address. The mask is 32 bits, so a
 /// body on a layer outside `[0, collision_layer_count)` would be invisible to
@@ -606,9 +579,6 @@ pub const PhysicsQueryFilter = struct {
 /// Weld carries ONE field where the reference carries two — `RayCastSettings` and
 /// `ShapeCastSettings` each declare a triangle mode AND a convex mode, both at
 /// `IgnoreBackFaces`. The convex half is already settled here, and not by a setting.
-///
-/// PRE-FREEZE EXTENSION, last window: after the M1.1.15 freeze of `PhysicsModule` this
-/// field could not land at all.
 pub const BackFaceMode = enum(u8) {
     /// A triangle met from behind does not answer. The default, aligned with the
     /// reference and with the three real consumers — line of sight, ground probe,
@@ -688,9 +658,9 @@ pub const OverlapQuery = struct {
     /// **It exists anyway, and not for symmetry.** This entry returns BODIES, which is a Weld
     /// choice and not a fact of the world; the reference carries the same field on
     /// `CollideShapeSettings` precisely because its equivalent returns points and normals. The
-    /// day this entry gains a normal, the field becomes load-bearing — and after the M1.1.15
-    /// freeze of `PhysicsModule` it could not be added at all. So the cost is one nearly inert
-    /// field, against a dead end that would be permanent.
+    /// day this entry gains a normal, the field becomes load-bearing — and the surface being
+    /// frozen, it could not be added then. So the cost is one nearly inert field, against a
+    /// dead end that would be permanent.
     ///
     /// On the SWEEP (`ShapeCastQuery`) the mode is fully observable: a cast reaches a back face
     /// from a distance, and the two modes return different answers on the same geometry.
@@ -702,11 +672,10 @@ pub const OverlapQuery = struct {
 /// `subshape_id` is an OPAQUE PATH decoded by the ROOT shape, never a global index: its
 /// width is a property of the SHAPE and not of the value, and a shape with no sub-shape
 /// consumes ZERO BITS, so the `0` default is not read at all (§1.11.16). Sphere, box,
-/// capsule and plane all carry zero sub-shapes. That is NOT the same statement as the
-/// M1.1.9/M1.1.10 wording it replaces ("0 while one shape is one body"), and the
-/// difference is what makes the encoding forward-compatible: wrapping a shape in a
-/// compound shifts its index up and inserts the child's below, extending the encoding
-/// without reinterpreting any value already written.
+/// capsule and plane all carry zero sub-shapes. That is NOT "0 while one shape is one
+/// body", and the difference is what makes the encoding forward-compatible: wrapping a
+/// shape in a compound shifts its index up and inserts the child's below, extending the
+/// encoding without reinterpreting any value already written.
 ///
 /// The service derives `physics_material` from it, because the solver result carries the
 /// sub-shape identity and never the material itself (§1.11.7 — the same construction as
@@ -816,7 +785,7 @@ test "ShapeDescriptor payload defaults" {
     try testing.expectEqual(@as(f32, 0.3), c.capsule.radius);
     try testing.expectEqual(@as(f32, 0.5), c.capsule.half_height);
 
-    // The plane payload (M1.1.11), on the same footing as the other three: its
+    // The plane payload, on the same footing as the other three: its
     // default is `{x : y <= 0}`, a ground plane through the origin, and the default
     // normal is EXACTLY unit — which is what lets `.plane = .{}` pass the
     // creation-time domain assert of `forge_3d/shape.zig` unchanged.
@@ -825,7 +794,7 @@ test "ShapeDescriptor payload defaults" {
     try testing.expectEqual(@as(f32, 0), p.plane.distance);
     try testing.expectEqual(@as(f32, 1), p.plane.normal.lengthSq());
 
-    // The mesh payload (M1.1.11.1) carries NO default, and that is deliberate rather
+    // The mesh payload carries NO default, and that is deliberate rather
     // than an omission: both fields are BORROWED slices, an empty one would describe a
     // mesh with no triangle, and that is precisely what `createShape` refuses. So the
     // pin is on the field NAMES and the ELEMENT types — the public boundary is f32
@@ -858,8 +827,8 @@ test "BodyDescriptor defaults match the brief" {
     try testing.expect(d.position.eql(Vec3.zero));
     try testing.expect(d.rotation.approxEql(Quatf.identity, 0));
 
-    // The two SENSOR fields (M1.1.13), transcribed from `engine-tier-interfaces.md` §1
-    // at version 0.9 name for name and default for default. `is_trigger` defaults OFF —
+    // The two SENSOR fields, transcribed from `engine-tier-interfaces.md` §1 name for
+    // name and default for default. `is_trigger` defaults OFF —
     // the role is opt-in, and a default of `true` would make every body that forgot the
     // field stop responding physically. `trigger_layer_mask` defaults to ALL layers, the
     // same value and the same reason as `PhysicsQueryFilter.layer_mask`: a mask that
@@ -938,7 +907,7 @@ test "ShapeType and BodyType are u8-backed" {
 
 test "the frozen query family mirrors engine-tier-interfaces.md §1" {
     // Field NAMES and defaults are the contract: this is a verbatim mirror, and a
-    // rename here is a break for every Tier 3 solver after the M1.1.15 freeze.
+    // rename here is a break for every Tier 3 solver.
     const f = PhysicsQueryFilter{};
     try testing.expectEqual(@as(u32, 0xFFFFFFFF), f.layer_mask);
     try testing.expectEqual(@as(usize, 0), f.exclude.len);
@@ -986,9 +955,8 @@ test "the frozen query family mirrors engine-tier-interfaces.md §1" {
     };
     try testing.expectEqual(@as(u32, 0), closest.subshape_id);
 
-    // The public boundary is f32 (§1.11.8) — pinned, because widening it is a
-    // single decision over `BodyDescriptor`, the interface pose, the query results
-    // and the ECS `Transform` together, at M1.1.15, and never one of them alone.
+    // The public boundary is f32 (§1.11.8), pinned so a widening cannot land on this
+    // type alone.
     try testing.expectEqual(f32, @TypeOf(hit.distance));
     try testing.expectEqual(f32, @TypeOf(ray.max_distance));
     try testing.expectEqual(f32, @TypeOf(closest.distance));
@@ -1085,9 +1053,8 @@ test "CharacterDescriptor mirrors engine-tier-interfaces.md §1 field for field"
     try testing.expect(!@hasField(CharacterDescriptor, "max_speed"));
     try testing.expect(!@hasField(CharacterDescriptor, "friction"));
 
-    // The public surface is f32 (§1.11.8, §1.12.11) — pinned, because widening it is ONE
-    // decision over `BodyDescriptor`, the interface pose, the query results and the ECS
-    // `Transform` together, at M1.1.15, and never over one member of that set alone.
+    // The public surface is f32 (§1.11.8, §1.12.11), pinned so a widening cannot land on
+    // this type alone.
     try testing.expectEqual(f32, @TypeOf(d.radius));
     try testing.expectEqual(f32, @TypeOf(d.height));
     try testing.expectEqual(f32, @TypeOf(d.max_slope));
@@ -1141,8 +1108,7 @@ test "CharacterMoveResult mirrors engine-tier-interfaces.md §1 field for field"
 
     // `collisions: u8` is DELETED and its absence is pinned: an aggregated counter with no
     // named consumer in the corpus, saturating at 255. `CharacterMoveResult2D` still
-    // carries it, and that asymmetry is consigned for M1.8.11 rather than resolved from a
-    // 3D milestone.
+    // carries it, and that asymmetry is not resolved from the 3D surface.
     try testing.expect(!@hasField(CharacterMoveResult, "collisions"));
 
     // f32 boundary, same single decision as the descriptor above.

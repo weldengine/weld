@@ -2,9 +2,9 @@
 //!
 //! ECS component types (`engine-physics-forge.md` §2) and physics
 //! descriptor/handle types (`engine-tier-interfaces.md` §1). Type definitions
-//! only — no ECS registration, no `ModuleContext`, no interface instantiation
-//! (deferred to the milestone that wires forge_3d as a stepping module). The
-//! `forge_3d` solver (E3) and any Tier-3 backend depend on this surface;
+//! only — no ECS registration, no `ModuleContext`, no interface instantiation:
+//! those live with the module that wires the solver, never here. The `forge_3d`
+//! solver and any Tier-3 backend depend on this surface;
 //! `core.ecs.EntityId`/`Velocity` reach consumers through here.
 
 const components = @import("components.zig");
@@ -14,12 +14,12 @@ const types = @import("types.zig");
 /// one named crossing between it and a solver scalar (`engine-physics-queries.md` §1.11.8).
 pub const precision = @import("precision.zig");
 
-/// Who owns a body's pose and velocity (M1.1.15.2 G5b).
+/// Who owns a body's pose and velocity.
 pub const authority = @import("authority.zig");
 /// Who owns a body's pose and velocity: `.solver` by default, `.gameplay` declared.
 pub const PhysicsAuthority = authority.PhysicsAuthority;
 
-/// Joint type family (M1.1.15.2 G5a, `engine-tier-interfaces.md` §1). Its own
+/// Joint type family (`engine-tier-interfaces.md` §1). Its own
 /// file rather than more of `types.zig`: seven types with a correspondence table
 /// each, and the interface's three joint entries need all seven to be
 /// PRESENTABLE at all.
@@ -39,12 +39,10 @@ pub const JointMotor = joint.JointMotor;
 /// Everything `createJoint` needs. Flat, unlike the Etch authoring component.
 pub const JointDescriptor = joint.JointDescriptor;
 
-// --- ECS components (extern POD) ---
-
 /// Rigid-body material + simulation parameters.
 pub const RigidBody = components.RigidBody;
 /// A body whose island is ASLEEP — the zero-size marker the orchestrator adds and
-/// removes, and the only way a rule can ask whether a body is sleeping (M1.1.15).
+/// removes, and the only way a rule can ask whether a body is sleeping.
 pub const Sleeping = components.Sleeping;
 /// A collision shape attached to an entity.
 pub const CollisionShape = components.CollisionShape;
@@ -54,8 +52,6 @@ pub const ShapeParams = components.ShapeParams;
 pub const PhysicsForces = components.PhysicsForces;
 /// Linear + angular velocity (re-export of `core.ecs.components.Velocity`).
 pub const Velocity = components.Velocity;
-
-// --- Descriptor + handle types ---
 
 /// Generational ECS entity handle (re-export of `core.ecs.EntityId`).
 pub const EntityId = types.EntityId;
@@ -84,8 +80,6 @@ pub const Capability = types.Capability;
 /// Physics pose (position + rotation, no scale).
 pub const Transform = types.Transform;
 
-// --- Character controller (`engine-physics-forge.md` §1.12) ---
-
 /// Everything needed to create one character controller. A controller is VIRTUAL —
 /// it takes part in no solver pass, and its pose is written by `moveCharacter` alone.
 pub const CharacterDescriptor = types.CharacterDescriptor;
@@ -96,8 +90,6 @@ pub const GroundState = types.GroundState;
 /// quantities, of which `ground_state` is the discriminator.
 pub const CharacterMoveResult = types.CharacterMoveResult;
 
-// --- Queries (the complete frozen family, `engine-tier-interfaces.md` §1) ---
-
 /// Number of object layers a query mask can address; `addBody` rejects a body
 /// beyond this domain with `error.InvalidCollisionLayer`.
 pub const collision_layer_count = types.collision_layer_count;
@@ -105,7 +97,7 @@ pub const collision_layer_count = types.collision_layer_count;
 /// Distinct from the `QueryFilter` of §6 `AIModule`.
 pub const PhysicsQueryFilter = types.PhysicsQueryFilter;
 /// Which side of a mesh TRIANGLE an entry answers on. Carried only by the entries whose
-/// answer differs between the two modes; vacuous on every other shape (M1.1.11.1).
+/// answer differs between the two modes; vacuous on every other shape.
 pub const BackFaceMode = types.BackFaceMode;
 /// A world-space ray query.
 pub const RaycastQuery = types.RaycastQuery;
