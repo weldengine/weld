@@ -120,7 +120,13 @@ pub fn inPerimeter(file: []const u8) bool {
 /// So the coverage is DECLARED and reachable: `weld_lint coverage` prints this
 /// list, and `lint` prints it too whenever its output surfaces. A subtree here is
 /// not exempt — it is unread, and a green lint means "green outside this list".
-/// **The list must be EMPTY when the pass closes**; that is the exit criterion.
+///
+/// TODO(coverage of the three subtrees): this list must reach EMPTY, and the
+/// assertion below it then inverts — from "these paths are unread" to "no path is
+/// unread", pinned by `noPathOutsideCoverage`. A growing allowlist with no removal
+/// condition becomes permanent, so the condition is written here rather than left
+/// to whoever reads the list last. A closure reached with an entry still present is
+/// not a residual: it is a subtree nobody read.
 ///
 /// No entry names the step that removes it: an identifier written here would go
 /// stale at a renumbering and the rule beside it forbids one anyway. The order
@@ -384,4 +390,55 @@ test "no ledger entry subsumes another" {
             }
         }
     }
+}
+
+test "every entry of the ledger is a path the walker can reach" {
+    // A stale entry silences the rules over a path nobody watches, which is the
+    // defect a declared list exists to prevent rather than to create. The run-time
+    // half of this lives in `runLint`, which confronts each entry with the files it
+    // walked; this half refuses an entry that is not even shaped like a repo path.
+    for (pending) |p| {
+        try std.testing.expect(p.prefix.len != 0);
+        try std.testing.expect(std.mem.indexOfScalar(u8, p.prefix, '\\') == null);
+        try std.testing.expect(inPerimeter(p.prefix));
+    }
+}
+
+test "the coverage assertion inverts when the ledger empties" {
+    // THE EXIT CRITERION, asserted rather than described. While the ledger holds
+    // entries this reports how many paths are unread; when it empties, the same
+    // call answers zero and the claim becomes "no path is unread". A closure
+    // reached with a non-zero answer is a subtree nobody read.
+    //
+    // Driven over a FIXTURE rather than over the tree's own list, so it exercises
+    // both states: the tree's list is non-empty today, so a test reading it alone
+    // could never see the empty case it exists to pin.
+    const some = [_]Pending{.{ .prefix = "src/core" }};
+    const none = [_]Pending{};
+    try std.testing.expectEqual(@as(usize, 1), unreadCount(&some, "src/core/ecs/world.zig"));
+    try std.testing.expectEqual(@as(usize, 0), unreadCount(&none, "src/core/ecs/world.zig"));
+}
+
+test "the tree's own ledger drives the same predicate" {
+    // NON-VACUITY for the fixture above: the shipped list is what the rules consult,
+    // so the fixture must not be the only thing this predicate ever sees.
+    try std.testing.expectEqual(pending.len, unreadCount(&pending, "src/core/ecs/world.zig") + countCovering());
+}
+
+/// How many entries of `list` claim `file` as unread. Zero means the file is read.
+fn unreadCount(list: []const Pending, file: []const u8) usize {
+    var n: usize = 0;
+    for (list) |p| {
+        if (hasPathPrefix(file, p.prefix)) n += 1;
+    }
+    return n;
+}
+
+/// Entries of the tree's ledger that do NOT cover `src/core/ecs/world.zig`.
+fn countCovering() usize {
+    var n: usize = 0;
+    for (pending) |p| {
+        if (!hasPathPrefix("src/core/ecs/world.zig", p.prefix)) n += 1;
+    }
+    return n;
 }

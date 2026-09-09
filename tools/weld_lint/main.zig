@@ -416,13 +416,10 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
         if (u.only_on != null and u.only_on.? != os) continue;
         try out.print("  uncollected: {s} ({d} block(s)): {s}\n", .{ u.path, u.blocks, u.reason });
     }
-    // LAYER ONE — THE UNCONDITIONAL CONFRONTATION, and its absence was the fourth
-    // instance of "a control that exists and a path bypasses" in this milestone,
-    // after the lint step in no workflow, the witnesses with no reader, and the
-    // cache save outside its own size guard. This one was inside the tool built
-    // against that family: the loop below runs ONLY when `--expect-collected=N` is
-    // passed, and neither `build.zig` nor the CI passed it, so the tool printed its
-    // expectation and then printed `clean` having compared it to nothing.
+    // LAYER ONE — THE UNCONDITIONAL CONFRONTATION. Without it the loop below runs
+    // ONLY when `--expect-collected=N` is passed, and neither `build.zig` nor the
+    // CI passed it, so the tool printed its expectation and then printed `clean`
+    // having compared it to nothing: a control a path can bypass is not a control.
     //
     // `expected` is arithmetic on the closure and the declared gap; the number here
     // is written down by a human from the suite's own reported total. Equal, not
@@ -511,8 +508,7 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
 /// by two test targets is counted ONCE. The suite counts it once PER BINARY: two
 /// targets that both reach it compile it twice and run its tests twice. Comparing
 /// the global closure against the suite total is therefore comparing a set
-/// cardinality to a multiset cardinality — the same collected-versus-source unit
-/// error this milestone has now made three times, in its own instrument.
+/// cardinality to a multiset cardinality.
 ///
 /// The per-root sum counts with the SAME multiplicity the suite does, so the two
 /// numbers are finally the same kind of thing and their difference is a finding

@@ -4,10 +4,8 @@
 //! forbid `@cImport` everywhere in Weld. The replacement is the unified
 //! `.api.zig` bindgen system (`addTranslateC` + generated wrapper).
 //!
-//! Strategy: tokenize the source with `std.zig.Tokenizer` and report
-//! every `.builtin` token whose textual content is `@cImport`. The
-//! tokenizer skips comments and string literals so naive false
-//! positives are not possible.
+//! Detection is on TOKENS: the tokenizer skips comments and string literals,
+//! so a file naming the builtin in prose is not a finding.
 
 const std = @import("std");
 const diag = @import("../diagnostic.zig");

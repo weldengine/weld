@@ -103,9 +103,8 @@ pub const Dead = struct {
 /// What an analysis pass found, including the size of what it looked at.
 ///
 /// The counts are not decoration: this tool exists because a probe rendered a
-/// verdict over an object it had not measured, four times in one milestone. A
-/// report that says "0 dead" over 0 files examined is the same defect wearing
-/// the tool's own badge.
+/// verdict over an object it had not measured. A report that says "0 dead" over
+/// 0 files examined is the same defect wearing the tool's own badge.
 pub const Report = struct {
     /// Files reached from at least one root.
     in_closure: usize = 0,
@@ -240,16 +239,16 @@ pub const uncollected = [_]Uncollected{
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // RE-DERIVED FROM THE SUITE, never from the closure. `zig build test
-    // --summary all` reported `2228/2247 tests passed (19 skipped)` on macOS when
-    // these values were last set, and the closure arrives at 2247 independently
+    // --summary all` reported `2231/2250 tests passed (19 skipped)` on macOS when
+    // these values were last set, and the closure arrives at 2250 independently
     // from the table above. Bumping either to match the other is the repair the
     // failure message forbids: it turns two computations of one quantity into
     // arithmetic on itself, and the drift it was built to catch becomes invisible.
     //
     // Windows is two lower by the `only_on = .windows` entries above.
     return switch (os) {
-        .windows => 2245,
-        else => 2247,
+        .windows => 2248,
+        else => 2250,
     };
 }
 
@@ -647,9 +646,9 @@ pub fn analyze(
     return report;
 }
 
-// ---------------------------------------------------------------------------
-// Tests — the hostile fixtures the criterion is only believable with
-// ---------------------------------------------------------------------------
+// The fixtures below are HOSTILE by intention: the criterion is only believable
+// against inputs built to break it, and a friendly fixture agrees with the code
+// instead of judging it.
 
 const Fixture = struct {
     var files: std.StringHashMapUnmanaged([]const u8) = .empty;
@@ -797,10 +796,6 @@ test "countTests counts declarations and not prose" {
     try std.testing.expectEqual(@as(usize, 0), countTests("// test \"a\" {}\n/// test {}\n"));
     try std.testing.expectEqual(@as(usize, 0), countTests("const testing = 1;\ntesting_only();\n"));
 }
-
-// ---------------------------------------------------------------------------
-// Root discovery
-// ---------------------------------------------------------------------------
 
 /// Extracts every `addTest` root source path from `build_zig`.
 ///
@@ -1178,8 +1173,8 @@ test "a file referenced ONLY from outside the closure is DEAD" {
     defer Fixture.deinit(gpa);
 
     // One dead FILE, not two: only files holding `test` blocks are counted, and
-    // `outside.zig` holds none. Expecting two was my own error — the report
-    // counts dead TESTS' homes, never every unreached file.
+    // `outside.zig` holds none. The report counts dead TESTS' homes, never every
+    // unreached file.
     try std.testing.expectEqual(@as(usize, 1), r.dead.items.len);
     try std.testing.expectEqualStrings("m/victim.zig", r.dead.items[0].path);
     try std.testing.expectEqual(@as(usize, 0), r.live_tests);

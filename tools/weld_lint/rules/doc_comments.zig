@@ -152,7 +152,7 @@ fn isEntryPoint(tree: *const Ast, source: []const u8, decl: Ast.Node.Index) bool
     if (idx >= token_tags.len or token_tags[idx] != .identifier) return false;
 
     const start = token_starts[idx];
-    // The identifier ends at the first non-identifier byte.
+    // The token store carries starts only, so the identifier's end is computed.
     var end = start;
     while (end < source.len) : (end += 1) {
         const c = source[end];

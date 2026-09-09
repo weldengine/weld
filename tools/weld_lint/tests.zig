@@ -25,7 +25,6 @@
 //! and a rule wants both.
 
 comptime {
-    // Rules.
     _ = @import("rules/no_cimport.zig");
     _ = @import("rules/no_usingnamespace.zig");
     _ = @import("rules/doc_comments.zig");
@@ -36,9 +35,8 @@ comptime {
     _ = @import("rules/conventional_commit.zig");
     _ = @import("rules/comment_identifiers.zig");
     _ = @import("rules/comment_tags.zig");
-    // Shared machinery.
-    // `main.zig` too: the lint subcommand's own path-coverage logic lives there, and a
-    // helper nobody elaborates is a helper nobody tests.
+    // `main.zig` too: the lint subcommand's own logic lives there, and a helper
+    // nobody elaborates is a helper nobody tests.
     _ = @import("main.zig");
     _ = @import("dead_tests.zig");
     _ = @import("scan.zig");

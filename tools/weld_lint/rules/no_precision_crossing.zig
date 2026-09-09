@@ -346,8 +346,6 @@ fn hasMarkerOnItsLine(source: []const u8, offset: usize) bool {
     return std.mem.indexOf(u8, source[line_start..line_end], not_a_crossing_marker) != null;
 }
 
-// --- tests -------------------------------------------------------------------
-
 /// Runs the rule over `source` as if it were `path`, and returns how many diagnostics it
 /// produced. The path is a parameter because this rule is scoped by path, and a helper that
 /// hard-coded one would leave the scoping itself unmeasured.

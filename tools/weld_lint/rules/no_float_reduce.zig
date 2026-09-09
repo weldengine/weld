@@ -49,7 +49,7 @@ const name = "no_float_reduce";
 const integer_marker = "WELD_INTEGER_LANES";
 
 /// The reduction operations that are meaningful on floats, hence order- or
-/// NaN-sensitive. Kept as a table so a reader sees the whole flagged set at once.
+/// NaN-sensitive.
 const arithmetic_ops = [_][]const u8{ "Add", "Mul", "Min", "Max" };
 
 /// Hook called by `main.runLint` once per `.zig` file.
@@ -143,10 +143,6 @@ fn hasIntegerMarker(source: []const u8, offset: usize) bool {
     if (!std.mem.startsWith(u8, prev, "//")) return false;
     return std.mem.indexOf(u8, prev, integer_marker) != null;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// Runs the rule over `source` and returns how many diagnostics it produced.
 fn countOn(source: [:0]const u8) !usize {

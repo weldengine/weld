@@ -2,18 +2,12 @@
 //! from files explicitly marked as generated.
 //!
 //! Canonical formulation from `engine-c-bindings.md §9.2`: any
-//! `@import("<lib>_c")` outside a generated file fails the build. A
-//! "generated file" is one whose first line carries the AUTO-GENERATED
-//! marker (the brief spells the canonical text as
-//! `// AUTO-GENERATED — DO NOT EDIT`; we accept any line-comment-style
-//! prefix `//` or `//!` followed by the marker `AUTO-GENERATED`, to
-//! stay consistent with the looser §9.2 wording and with the existing
-//! `//! AUTO-GENERATED — do not edit.` header used by the Phase −1
-//! vk_gen / wayland_gen output).
+//! `@import("<lib>_c")` outside a generated file fails the build.
 //!
-//! Strategy: tokenize the source, find every `@import("..._c")`
-//! pattern, and only emit a diagnostic when the file's first line is
-//! not a generated-file marker.
+//! A "generated file" is one whose FIRST line carries the `AUTO-GENERATED`
+//! marker. Either comment prefix is accepted, `//` or `//!`, because the
+//! generators in the tree emit both spellings — a rule taking only one would
+//! flag half of them.
 
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
