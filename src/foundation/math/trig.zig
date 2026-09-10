@@ -5,7 +5,7 @@
 //! derived from one of them is divergent engine state. The substitute is an
 //! in-house implementation at a FIXED operation order, added **function by
 //! function on demonstrated need** — never as a replacement libm. This file
-//! carries exactly one function, and M1.1.14 added it for exactly one call
+//! carries exactly one function, added for exactly one call
 //! site: the `max_slope` conversion of the kinematic character controller
 //! (`engine-physics-queries.md` §1.12.5), whose result is STORED engine state
 //! and therefore sits in the compared bits from frame 0.
@@ -337,9 +337,8 @@ test "cos: the range stays in [-1, 1] across the whole declared domain" {
 // WHY THIS EXISTS. The test above compares against `@cos`, and its own comment
 // concedes what that can and cannot establish: it proves the function is STABLE,
 // it cannot prove the function is a COSINE. Two implementations of the same wrong
-// idea agree. M1.1.14's review named this: the milestone's first behavioural
-// change was replacing `@cos` at the `max_slope` conversion, and nothing pinned
-// the VALUE that replacement produces.
+// idea agree. And the `max_slope` conversion replaces `@cos`, so nothing
+// else pins the VALUE that replacement produces.
 //
 // THE ORACLE IS ARBITRARY-PRECISION AND EXTERNAL, and the recipe is here rather
 // than the tool, because this repository is Zig and `tools/` holds Zig — the same

@@ -1,8 +1,8 @@
 //! Cross-variant correctness harness (engine-simd.md §6).
 //!
 //! Every kernel variant available for the current target must produce
-//! bit-identical output to the scalar reference. M0.6 has only the portable
-//! `@Vector` variant (no ISA asm), so this compares the dispatched entry
+//! bit-identical output to the scalar reference. Only the portable `@Vector`
+//! variant exists (no ISA asm), so this compares the dispatched entry
 //! point and the explicit portable variant against the reference. When arch
 //! variants land, they are added to the comparison list here and validated
 //! by the same corpus.

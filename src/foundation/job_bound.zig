@@ -3,30 +3,27 @@
 //!
 //! **Why this lives in `foundation` and not beside the type it refuses.**
 //! `engine-ecs-internals.md` §7 states an absolute: no job body receives a
-//! command buffer. M1.B/G8 put that refusal on the TYPE rather than beside one
-//! dispatch entry, because a guard at one entry is the defect shape that
-//! milestone kept meeting. But placement on the type only makes the guard
-//! AVAILABLE; it does not make an entry CALL it — and M1.B/G10 measured a
-//! fourth arg-passing dispatch entry, `jobs.Scheduler.dispatch`, that did not.
+//! command buffer. The refusal sits on the TYPE rather than beside one dispatch
+//! entry, because a guard at one entry leaves every other entry open. But
+//! placement on the type only makes the guard AVAILABLE; it does not make an
+//! entry CALL it, and a dispatch entry added without that call has the hole
+//! back.
 //!
 //! Closing that by importing `ecs/command_buffer.zig` from `src/core/jobs/`
-//! was refused on a measurement: `command_buffer.zig` imports `world.zig`, so
+//! is refused: `command_buffer.zig` imports `world.zig`, so
 //! the job tier would acquire the whole World in its graph to guard an entry no
 //! production path uses. The existing `jobs/scheduler.zig` -> `ecs/archetype.zig`
 //! import is NOT a precedent for that — `archetype.zig` imports `chunk`,
 //! `registry`, `entity`, `tick` and `change_detection`, and no `world.zig`.
 //!
-//! So the dependency inverts one notch further than G8 took it: the type
+//! So the dependency inverts one notch further: the type
 //! declares its own refusal and the predicate interrogates the type it is
 //! handed. `src/core/jobs/` imports nothing from the ECS for this — it already
 //! imports `foundation` for the float environment — and the guard becomes
 //! reachable from any tier without moving a single import edge.
 //!
-//! The walk is ONE LEVEL DEEP on pointers and recurses on optionals, which is
-//! the shape M1.B/G8 shipped and documented; equivalence with the
-//! identity-comparing form it replaces was measured over 21 type cases with
-//! zero disagreements, `**T` and `[3]T` included (both refused by both forms,
-//! which is the stated limit and not an oversight).
+//! The walk is ONE LEVEL DEEP on pointers and recurses on optionals. `**T` and
+//! `[3]T` are refused, which is the stated limit and not an oversight.
 
 const std = @import("std");
 

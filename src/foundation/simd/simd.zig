@@ -1,8 +1,8 @@
 //! `foundation/simd` — public API of the batched-SIMD kernel module.
 //!
 //! Level-1 kernels (the default surface modules consume) take raw slices and
-//! resolve their best variant at comptime via `dispatch`. M0.6 stands up the
-//! infrastructure with one kernel — `adler32` — used by the Asset Pipeline
+//! resolve their best variant at comptime via `dispatch`. The infrastructure
+//! stands up with one kernel — `adler32` — used by the Asset Pipeline
 //! DEFLATE/zlib codec to verify the ADLER32 trailer.
 //!
 //! Boundary discipline (engine-simd.md §4): this module imports nothing but

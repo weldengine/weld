@@ -119,7 +119,7 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         /// the largest absolute component is zero exactly when every component is.
         ///
         /// **Why it lives here.** Three consumers need it and each arrived at it separately:
-        /// the query family's direction normalisation, which introduced the form at M1.1.9 for
+        /// the query family's direction normalisation, which introduced the form for
         /// exactly this overflow; a mesh triangle's face normal, which is a cross product of
         /// vertex differences and reaches `1e20` from vertices at `1e10`; and the ray↔triangle
         /// kernel, which normalises the same cross product. Same placement rule as
@@ -245,8 +245,8 @@ pub const Vec4 = Vec(4, f32);
 comptime {
     // The padded @Vector(3, f32) layout (12 bytes of data rounded to a 16-byte
     // lane) is what makes a `[]Vec3` bulk-sync-compatible with the ECS
-    // `Transform.pos` column (M1.1.15). If a target ever breaks this, the
-    // assert fires loudly — do NOT remove it (brief Notes decision 8).
+    // `Transform.pos` column. If a target ever breaks this, the
+    // assert fires loudly — do NOT remove it.
     std.debug.assert(@sizeOf(Vec3) == 16);
     std.debug.assert(@alignOf(Vec3) == 16);
 }
@@ -382,12 +382,11 @@ pub fn CrossOutcome(comptime T: type) type {
 /// and non-zero — `(2.81e14, NaN, −2.81e14)` is measured — while `maxAbsComponent` is NaN-IGNORING,
 /// so a largest-component guard would let that NaN through.
 ///
-/// That NaN-ignoring behaviour is now GUARANTEED rather than observed, and the difference is the
-/// point. Until M1.1.14 this paragraph read "`@reduce(.Max, @abs(…))` lowers to a NaN-ignoring
-/// maximum" — a claim about a LOWERING, which is a property of whichever code generator happened to
-/// be looked at and not of the language. `maxAbsComponent` folds `@max`, which the language
-/// specifies to return the non-NaN operand, so the behaviour this tier selection depends on is now
-/// owed by Zig and not lent by a backend.
+/// That NaN-ignoring behaviour is GUARANTEED rather than observed, and the difference is the
+/// point: a claim about a LOWERING is a property of whichever code generator was looked at and
+/// not of the language. `maxAbsComponent` folds `@max`, which the language specifies to return
+/// the non-NaN operand, so the behaviour this tier selection depends on is owed by Zig and not
+/// lent by a backend.
 ///
 /// Tiers 2 and 3 are COLD by construction. Every vertex component must be finite.
 pub fn triangleCross(

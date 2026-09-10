@@ -28,7 +28,7 @@ pub fn reference(prev: []const u8, curr: []u8, bpp: u8) void {
 }
 
 /// Portable `@Vector` form — parallelizes the `bpp` channels of each pixel.
-/// Falls back to `reference` for `bpp` outside 1..4 (M0.6 never exceeds 4).
+/// Falls back to `reference` for `bpp` outside 1..4.
 pub fn vectorized(prev: []const u8, curr: []u8, bpp: u8) void {
     std.debug.assert(prev.len == curr.len);
     switch (bpp) {
