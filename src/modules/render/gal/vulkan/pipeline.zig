@@ -1,10 +1,10 @@
-//! RenderPipeline + ComputePipeline Vulkan — Phase 0 / M0.4.
+//! RenderPipeline + ComputePipeline Vulkan.
 //!
-//! Phase 0:
-//! - One PipelineLayout per pipeline (no sharing). Phase 1+: layout cache.
-//! - No disk PipelineCache (inter-run load/save). Phase 1+:
-//!   serialization in `.weld-cache/pipelines/`.
-//! - Forced dynamic states: viewport + scissor (cf. S2 spike).
+//! Limits:
+//! - One PipelineLayout per pipeline (no sharing), and no layout cache.
+//! - No disk PipelineCache (inter-run load/save); nothing is serialized to
+//!   `.weld-cache/pipelines/`.
+//! - Forced dynamic states: viewport + scissor.
 //! - Ephemeral render pass created just-in-time at draw — for
 //!   PipelineCreateInfo compatibility which requires a VkRenderPass, we
 //!   create a "template" render pass from the descriptor's color/depth
@@ -37,7 +37,7 @@ pub const RenderEntry = struct {
 };
 
 /// Creates a RenderPipeline (graphics PSO) — pipeline layout + template
-/// render pass + graphics pipeline. Phase 0: dynamic viewport/scissor,
+/// render pass + graphics pipeline: dynamic viewport/scissor,
 /// no tessellation, no MSAA.
 pub fn createRender(
     device: *Device,
@@ -46,7 +46,7 @@ pub fn createRender(
     if (!descriptor.vertex_module.isValid()) return error.InvalidArgument;
     if (descriptor.sample_count > 1) return error.Unsupported;
 
-    // R8 (M1.1.1-HF3): bound the fixed [9] attachment arrays below (mirror of the
+    // Bound the fixed [9] attachment arrays below (mirror of the
     // `render_pass.begin` guard) AND honor the device's color-attachment limit —
     // an over-long `color_targets` would otherwise write past `attachments` /
     // `color_refs`, and one exceeding `maxColorAttachments` is invalid.
@@ -131,7 +131,7 @@ pub fn createRender(
     // dependency). This template render pass is used only for pipeline
     // compatibility; if its `dependencyCount` differs from the executing pass,
     // the draw trips VUID-vkCmdDrawIndexed-renderPass-02684 (render passes
-    // incompatible). Kept identical to render_pass.zig. Frozen by E7 (C0.5).
+    // incompatible). Kept identical to render_pass.zig. Frozen (C0.5).
     const external_dep: vk.SubpassDependency = .{
         .src_subpass = vk.SUBPASS_EXTERNAL,
         .dst_subpass = 0,
@@ -161,8 +161,7 @@ pub fn createRender(
     // an indeterminate value on Linux (Fedora 44 + Intel UHD 630
     // surfaced a `pStages[N].sType must be ...` validation warning
     // followed by a SIGSEGV inside the validation layer's logging
-    // path). S2 reference (/tmp/s2-ref/src/spike/vk_setup.zig
-    // createGraphicsPipeline) uses the same array-literal pattern.
+    // path).
     //
     // The fragment slot is always populated so the array literal stays
     // canonical; when `descriptor.fragment_module` is null the slot is
@@ -313,7 +312,7 @@ pub fn createRender(
     };
     var pipelines: [1]vk.Pipeline = .{.null};
     device.vk_device.createGraphicsPipelines(.null, &pipe_ci, null, &pipelines) catch return error.PipelineCreationFailed;
-    // R5c (M1.1.1-HF3): destroy the just-created pipeline if the registry `put`
+    // Destroy the just-created pipeline if the registry `put`
     // below fails — the layout + render-pass errdefers already cover their halves
     // of the tail, but the pipeline itself would otherwise leak.
     errdefer device.vk_device.destroyPipeline(pipelines[0], null);
@@ -336,8 +335,8 @@ pub fn destroyRender(device: *Device, handle: types.RenderPipelineHandle) void {
     }
 }
 
-/// Phase 0: ComputePipeline is in the GAL day-1 (escape hatch Phase 1+
-/// V-Buffer / GI compute). Unused in Phase 0, but must be creatable.
+/// ComputePipeline is in the GAL day 1 — an escape hatch for V-Buffer / GI
+/// compute. No caller uses it, but it must be creatable.
 pub fn createCompute(
     device: *Device,
     descriptor: types.ComputePipelineDescriptor,
@@ -374,13 +373,13 @@ pub fn createCompute(
     }};
     var pipelines: [1]vk.Pipeline = .{.null};
     device.vk_device.createComputePipelines(.null, &ci, null, &pipelines) catch return error.PipelineCreationFailed;
-    // R5c (M1.1.1-HF3): destroy the pipeline if the registry `put` below fails
+    // Destroy the pipeline if the registry `put` below fails
     // (the layout errdefer covers the layout; the pipeline would otherwise leak).
     errdefer device.vk_device.destroyPipeline(pipelines[0], null);
 
-    // Phase 0: we store in render_pipelines for simplicity — Phase 1+
-    // a dedicated compute_pipelines registry. The `render_pass` is `.null`
-    // for compute pipelines.
+    // Stored in render_pipelines for simplicity, with no dedicated
+    // compute_pipelines registry. The `render_pass` is `.null` for compute
+    // pipelines.
     const id = device.nextHandle();
     try device.render_pipelines.put(device.allocator, id, .{
         .pipeline = pipelines[0],
@@ -390,8 +389,8 @@ pub fn createCompute(
     return .{ .inner = id };
 }
 
-/// Frees a ComputePipeline + its layout. Phase 0 shares the
-/// `render_pipelines` map with the RenderPipelines (unified registry).
+/// Frees a ComputePipeline + its layout. Shares the `render_pipelines` map
+/// with the RenderPipelines (unified registry).
 pub fn destroyCompute(device: *Device, handle: types.ComputePipelineHandle) void {
     if (handle.inner == 0) return;
     if (device.render_pipelines.fetchRemove(handle.inner)) |kv| {

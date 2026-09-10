@@ -1,13 +1,11 @@
-//! Vulkan backend Device — Phase 0 / M0.4.
+//! Vulkan backend Device.
 //!
 //! Root of the Vulkan GAL backend. Implements the 33 methods required by
-//! `interface.checkBackend` (cf. `gal/interface.zig`). Progressive port of the
-//! S2 spike code (`src/spike/vk_setup.zig` + `src/spike/vk_frame.zig`)
-//! to the GAL surface.
+//! `interface.checkBackend` (cf. `gal/interface.zig`).
 //!
-//! **Multi-GPU + multi-driver selection** (brief §Scope + §Notes decision 11):
-//! - `--gpu-prefer=<discrete|integrated|index:N>` unchanged vs S2.
-//! - `--vulkan-driver=<auto|hardware|software>` new in M0.4: `auto` =
+//! **Multi-GPU + multi-driver selection**:
+//! - `--gpu-prefer=<discrete|integrated|index:N>`.
+//! - `--vulkan-driver=<auto|hardware|software>`: `auto` =
 //!   enumerates all devices and applies `--gpu-prefer`; `hardware` =
 //!   filters out `device_type = CPU` before `--gpu-prefer`; `software` =
 //!   forces lavapipe (filters on `device_type = CPU`), ignores `--gpu-prefer`.
@@ -119,7 +117,7 @@ pub const Device = struct {
             createDebugMessenger(device.vk_instance) catch null
         else
             null;
-        // R5e (M1.1.1-HF3): the messenger lives on the instance; without this a
+        // The messenger lives on the instance; without this a
         // later init failure would run only the instance-teardown errdefer and
         // leak it. Declared after the instance errdefer, so it runs first (LIFO)
         // — the messenger is destroyed before the instance it belongs to.
@@ -154,7 +152,7 @@ pub const Device = struct {
         while (bit.next()) |entry| entry.destroy(self.vk_device);
         self.buffers.deinit(self.allocator);
 
-        // R5f (M1.1.1-HF3): destroy image VIEWS before their source images
+        // Destroy image VIEWS before their source images
         // (reverse dependency order) — a `VkImageView` outliving its `VkImage` is
         // invalid. The previous order destroyed `textures` (images) first.
         var vit = self.texture_views.valueIterator();
@@ -189,8 +187,8 @@ pub const Device = struct {
 
     pub fn supports(self: *Device, feature: escape.Feature) bool {
         _ = self;
-        // Phase 0: no optional feature exposed by default on the Vulkan side.
-        // Phase 1+: query at load and expose `timeline_semaphore`, etc.
+        // No optional feature is exposed by default on the Vulkan side;
+        // nothing queries at load or exposes `timeline_semaphore`.
         return switch (feature) {
             else => false,
         };
@@ -204,7 +202,7 @@ pub const Device = struct {
     }
 
     // ====================================================================
-    // Surface (M0.4 § Scope — Post-Review Complement)
+    // Surface
     // ====================================================================
 
     /// Build a `SurfaceHandle` from an already-open Tier 0 window. The
@@ -342,7 +340,7 @@ pub const Device = struct {
         // not guarantee alignment of the embedded slice, so callers that
         // pass an embedded `.spv` directly would otherwise fail
         // `InvalidArgument` here (observed on Fedora 44 + Intel UHD 630
-        // during the M0.4 stabilization run). When the caller-provided
+        // during stabilization). When the caller-provided
         // slice is misaligned we copy into a temporary aligned buffer;
         // Vulkan's spec lets us free the source after `vkCreateShaderModule`
         // returns since the driver owns its internal copy from that
@@ -354,8 +352,6 @@ pub const Device = struct {
         // pointer used as the array base, with `code_size` providing
         // the element count). `@ptrCast(@alignCast(...))` casts a
         // `[*]const u8` many-pointer to that single-pointer form —
-        // matching the S2 pattern in
-        // /tmp/s2-ref/src/spike/vk_setup.zig.
         const code_ptr: *const u32 = blk: {
             if (std.mem.isAligned(@intFromPtr(descriptor.code.ptr), 4)) {
                 break :blk @ptrCast(@alignCast(descriptor.code.ptr));
@@ -518,7 +514,7 @@ pub const Device = struct {
     }
 
     /// Frees a CommandEncoder. A required GAL interface method
-    /// (`interface.required_methods`, E7/M0.9), paired with
+    /// (`interface.required_methods`), paired with
     /// `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *cmd_mod.CommandEncoder) void {
         cmd_mod.destroy(self, encoder);
@@ -544,8 +540,8 @@ pub const Device = struct {
     }
 
     /// Read back a rendered color texture and write it as a binary PPM
-    /// file. Thin delegation to the backend-agnostic `gal.capture` helper
-    /// (M0.5 item 2); see `gal/capture.zig` for the caller contract
+    /// file. Thin delegation to the backend-agnostic `gal.capture` helper;
+    /// see `gal/capture.zig` for the caller contract
     /// (texture in transfer-source layout, rendering already complete).
     pub fn captureFrameToPPM(
         self: *Device,
@@ -708,7 +704,7 @@ fn pickPhysicalDevice(
         else => .other,
     };
 
-    // Find a graphics queue family (Phase 0: a single queue, fused
+    // Find a graphics queue family (a single queue, fused
     // graphics + compute + transfer + present).
     const families = device.physical_device.getPhysicalDeviceQueueFamilyProperties(allocator) catch return error.NotInitialized;
     defer allocator.free(families);
