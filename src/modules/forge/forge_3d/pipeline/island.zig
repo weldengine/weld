@@ -18,7 +18,7 @@
 //!   - **Purity.** The partition is a function of the SET of links alone, never of
 //!     the order they arrive in — union by size with a fixed tie-break, path
 //!     compression, no hash container, no address-dependent enumeration
-//!     (determinism by construction, M1.1.14). The REPRESENTATIVE is not: only the
+//!     (determinism by construction). The REPRESENTATIVE is not: only the
 //!     partition is set-invariant. Which element ends up a group's root depends on
 //!     the link sequence, so a root is never a group identity — see `find`.
 //!

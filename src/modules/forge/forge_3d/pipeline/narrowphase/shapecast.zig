@@ -1,5 +1,4 @@
-//! `forge_3d/pipeline/narrowphase/shapecast.zig` — the GJK shape-cast kernel
-//! (M1.1.10).
+//! `forge_3d/pipeline/narrowphase/shapecast.zig` — the GJK shape-cast kernel.
 //!
 //! **A cast is a raycast against the Minkowski difference of the two cores,
 //! inflated by `r_a + r_b`** (`engine-physics-forge.md` §1.11.11). Shape A swept
@@ -14,7 +13,7 @@
 //! and it has a structural consequence worth stating: a sphere cast against a box is
 //! a ray against a ROUNDED box, precisely the shape `raycast.zig` does not cover —
 //! its asserted precondition `raySupportsShape` is false there (a typed
-//! `error.UnsupportedShape` until M1.1.11, when the refusal moved to the query entries
+//! `error.UnsupportedShape` once, until the refusal moved to the query entries
 //! a caller can provoke it from, §1.11.7). A cast is not expressible over the ray
 //! kernels — hence this file. And because a support map covers every BOUNDED convex, this kernel has
 //! no shape to reject and so **no error channel at all**: the frozen signature
@@ -26,7 +25,7 @@
 //!
 //! **Everything is in A's frame**, the frozen narrowphase discipline: `shape_a` is
 //! untransformed, B arrives through a `RelativePose`, and the returned witness and
-//! normal are A-frame vectors the caller rotates to world (E4's `castShapeBody`, the
+//! normal are A-frame vectors the caller rotates to world (`castShapeBody`, the
 //! mirror of `raycastBody`). A is the CAST shape, so its frame is a constant of the
 //! whole query rather than something that changes per candidate body.
 //!
@@ -39,7 +38,7 @@
 //! THE CURRENT PARAMETER. Returning a miss on exhaustion would fabricate a false
 //! negative, hence tunnelling; returning the current parameter fabricates a contact
 //! announced EARLY, never a missed one, which is the safe failure direction for the
-//! character controller of M1.1.12.
+//! character controller.
 //!
 //! **Threshold discipline.** The "no longer approaching" guard is at TRUE ZERO — the
 //! reference's absolute `-1.0e-18f` is deliberately not reproduced and the argument
@@ -74,7 +73,7 @@ const minkowskiSupport = support.minkowskiSupport;
 
 /// Named iteration ceiling for the cast march, sibling of `max_gjk_iterations` and
 /// `max_epa_iterations`. **Obligatory, not a tuning knob**: the reference's
-/// `CastRay` has no ceiling at all (`for (;;)`), which the M1.1.14 determinism
+/// `CastRay` has no ceiling at all (`for (;;)`), which the determinism
 /// freeze forbids. Its semantics are normative — exhaustion returns a hit at the
 /// current parameter (§1.11.11) — and `castShapeBounded` exists so that semantics is
 /// OBSERVED by a test rather than asserted by a comment.
@@ -92,7 +91,7 @@ const unit_dir_k: comptime_int = 16;
 /// proximity into a contact.
 const noise_k: comptime_int = 2;
 
-/// One cast hit, in A's frame. Defined in `support.zig` since M1.1.11, for the reason
+/// One cast hit, in A's frame. Defined in `support.zig`, for the reason
 /// `LocalHit` is: `plane.zig` produces the same type from a closed form and
 /// `BodyManager.castShapeBody` dispatches between the two by the hit body's class.
 const CastHit = support.CastHit;
@@ -165,7 +164,7 @@ pub fn castShape(
 ///
 /// The ceiling is a parameter for ONE reason: the normative fallback of §1.11.11 —
 /// exhaustion returns a hit at the current parameter — is unreachable in practice on
-/// the three cores the store builds — still three since M1.1.11, a half-space having
+/// the three cores the store builds — still three, a half-space having
 /// no core at all and never reaching this kernel — which converge in a handful of
 /// iterations. A
 /// guard never observed to fire is a comment with extra syntax, so a test drives a

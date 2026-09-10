@@ -7,10 +7,10 @@
 //! rotation (4×f32, matching the element layout of
 //! `core.ecs.components.Transform.rot`) — so element-wise copy to/from the ECS
 //! `Transform` is layout-clean (Notes decision 7). Caveat: `Quatr` is align-4
-//! (the E1-frozen `Quat` storage), so the rotation column matches
+//! (the frozen `Quat` storage), so the rotation column matches
 //! `Transform.rot`'s 16-byte stride but not its 16-byte alignment; see the
 //! Execution-log note flagging this against decision 7. Id allocation is
-//! deterministic (no hash-map on the path — M1.1.14). World AABBs are computed
+//! deterministic (no hash-map on the path). World AABBs are computed
 //! exactly per primitive on demand.
 //!
 //! Velocity/force/torque mutators (`setLinearVelocity`/`setAngularVelocity`,
@@ -19,10 +19,10 @@
 //! `addForce`/`addTorque` accumulate into the per-tick `force`/`torque` columns
 //! (cleared by `integrate`); `addImpulse` is an immediate `Δv = impulse·inv_mass`
 //! (a natural no-op on static/kinematic bodies, `inv_mass == 0`). The pose
-//! mutators `setPosition`/`setRotation` (M1.1.7, written by the NGS position
-//! solver) validate the handle the same way. `addTorque`, `setAngularVelocity`,
+//! mutators `setPosition`/`setRotation` validate the handle the same way.
+//! `addTorque`, `setAngularVelocity`,
 //! `setPosition` and `setRotation` are INTERNAL — the public `PhysicsModule` 3D
-//! interface (frozen M1.1.15) carries no angular and no pose mutators.
+//! interface carries no angular and no pose mutators.
 //!
 //! Those mutators split into two INTENTS, and the split is a contract, not an
 //! implementation detail (`engine-physics-forge.md` §1.8.4). The four setters
@@ -34,7 +34,7 @@
 //! come from outside the simulation and are ACTIVATING: they wake and restart the
 //! window, even on an already-awake body. `wakeBody` and `setCanSleep` are the two
 //! explicit primitives. Composing a wake with a write for the gameplay-facing
-//! setters is the interface boundary's job at M1.1.15 — the Jolt split between
+//! setters is the interface boundary's job — the Jolt split between
 //! `Body::SetLinearVelocity` and `BodyInterface::SetLinearVelocity`.
 
 const std = @import("std");
@@ -43,7 +43,7 @@ const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
 const narrowphase = @import("pipeline/narrowphase/root.zig");
-// M1.1.9 — only for the `Ray` type `raycastBody` takes; the broadphase itself is
+// Only for the `Ray` type `raycastBody` takes; the broadphase itself is
 // the caller's, not this store's.
 const broadphase_mod = @import("pipeline/broadphase.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
@@ -61,7 +61,7 @@ const EntityId = api.EntityId;
 /// importing `shape.zig` directly (import-discipline boundary).
 pub const ShapeStore = shape_mod.ShapeStore;
 const Shape = shape_mod.Shape;
-/// The owned triangle-mesh payload, for the mesh arms below (M1.1.11.1).
+/// The owned triangle-mesh payload, for the mesh arms below.
 const MeshData = @import("mesh.zig").MeshData;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
@@ -147,7 +147,7 @@ pub const BodyManager = struct {
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
         // TWO CATEGORIES FORCE A STATIC BODY, and the refusal is a TYPED error. It is a
-        // DISPATCH on the class and not an `if` on one variant of it (M1.1.11.1): the
+        // DISPATCH on the class and not an `if` on one variant of it: the
         // question "may this shape move" has an answer for every category, so a fourth
         // one is a compile error here and must give it.
         //
@@ -169,8 +169,8 @@ pub const BodyManager = struct {
         // build and, in ReleaseFast where that dispatch compiles out, would silently
         // store a NaN inverse inertia.
         //
-        // The error is named for the INVARIANT rather than for the shape, at M1.1.11 and
-        // precisely so that M1.1.11.1 could reuse it instead of minting a second one.
+        // The error is named for the INVARIANT rather than for the shape,
+        // precisely so a second shape under the same constraint reuses it instead of
         const must_be_static = switch (shape.class()) {
             .convex => false,
             .half_space, .triangle_soup => true,
@@ -190,8 +190,8 @@ pub const BodyManager = struct {
         // under the level, and nothing here removes it.
         //
         // Named on the INVARIANT rather than on the shape, like `ShapeMustBeStatic` above, so
-        // the next surface-like category — `HeightField` joins `.triangle_soup` at its own
-        // sub-milestone — reuses it instead of minting a second error. The test is on the
+        // the next surface-like category — `HeightField` belongs to `.triangle_soup` —
+        // reuses it instead of minting a second error. The test is on the
         // CLASS for the same reason.
         //
         // Ordered with the other creation refusals and BEFORE any derived computation. It is
@@ -207,7 +207,7 @@ pub const BodyManager = struct {
         // descriptor-validation policy for degenerate mass and geometry, which
         // stays a debug assert below.
         if (desc.collision_layer >= api.collision_layer_count) return error.InvalidCollisionLayer;
-        // Material domain guards (debug-only; the M1.1.0 `mass > 0` precedent).
+        // Material domain guards (debug-only; the `mass > 0` precedent).
         // Friction is a non-negative Coulomb coefficient; restitution is a [0, 1]
         // ratio. Both must be finite. Typed-error descriptor validation is a later
         // milestone; this guards the otherwise-unchecked material path.
@@ -337,14 +337,14 @@ pub const BodyManager = struct {
     }
 
     /// Safe getter: the Coulomb friction coefficient, or null if `id` is
-    /// stale/invalid. Consumed by the Sequential Impulses contact solver (M1.1.6).
+    /// stale/invalid. Consumed by the contact solver.
     pub fn friction(self: *const BodyManager, id: BodyId) ?Real {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.friction)[idx];
     }
 
     /// Safe getter: the restitution / bounciness, or null if `id` is
-    /// stale/invalid. Consumed by the Sequential Impulses contact solver (M1.1.6).
+    /// stale/invalid. Consumed by the contact solver.
     pub fn restitution(self: *const BodyManager, id: BodyId) ?Real {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.restitution)[idx];
@@ -432,7 +432,7 @@ pub const BodyManager = struct {
     /// accumulated, indefinitely, while the sensor pass reported it as a trigger. It would be
     /// a body that both detects and responds, which §1.13.1 states does not exist.
     ///
-    /// What M1.1.15 must orchestrate the day it opens that direction, ATOMICALLY: purge the
+    /// What `PhysicsWorld` must orchestrate the day it opens that direction, ATOMICALLY:
     /// body's retained pairs, re-place its proxy in the new class, and wake the bodies that
     /// lose their support by it. All three belong to the owner of the retained set, which is
     /// `PhysicsWorld` and is not this store.
@@ -444,7 +444,7 @@ pub const BodyManager = struct {
     /// that must be woken are those already OVERLAPPING it at that instant. They are not
     /// discoverable from this call — the store has no candidate set to consult.
     ///
-    /// **THIS IS NOT A RECIPE, IT IS THE CONTENT OF AN ATOMIC OPERATION M1.1.15 OWES**, and it
+    /// **THIS IS NOT A RECIPE, IT IS THE CONTENT OF AN ATOMIC OPERATION `PhysicsWorld` OWES**, and it
     /// is written as such because it grew a third branch under review. What the caller must do
     /// by hand — three branches for one role change — is the signal that the composition
     /// belongs to the orchestrator, exactly like the purge and the proxy replacement this entry
@@ -466,8 +466,8 @@ pub const BodyManager = struct {
     ///      leaves that pair deferred forever and the newly solid body interpenetrated. Wake the
     ///      modified body itself; the `build` fixpoint propagates to its neighbours from there.
     ///
-    /// No query entry is added for any of this: the family freezes at M1.1.15, two milestones
-    /// away, and every branch already has a path.
+    /// No query entry is added for any of this: the family is FROZEN, and every branch
+    /// already has a path.
     ///
     /// Until the caller composes all three, a sleeping body in or around the new solid STAYS
     /// asleep and interpenetrated: no pass will notice, a sleeper emitting nothing in
@@ -496,11 +496,11 @@ pub const BodyManager = struct {
 
     /// Safe getter: the body's simulation class, or null if `id` is stale/invalid.
     ///
-    /// The column has existed since M1.1.0 and was never exposed. What needs it is
-    /// M1.1.12: §1.12.2 states normatively that a character's presence is a KINEMATIC body,
+    /// The column has existed from the start and was never exposed. What needs it is the
+    /// character presence: §1.12.2 states normatively that it is a KINEMATIC body,
     /// and `motionProperties` cannot answer that — a static and a kinematic body both carry
     /// an inverse mass of exactly zero. A normative property nothing can assert is one that
-    /// regresses silently, which is the same argument that exposed `entity` at M1.1.10.
+    /// regresses silently, which is the same argument that exposed `entity`.
     pub fn bodyType(self: *const BodyManager, id: BodyId) ?api.BodyType {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.body_type)[idx];
@@ -526,7 +526,7 @@ pub const BodyManager = struct {
     /// would silently keep an inertia tensor belonging to the old geometry, so that case is refused
     /// rather than half-handled.
     ///
-    /// Added at M1.1.12 for `resizeCharacter`, which MUST keep the presence's handle (§1.12.2) — a
+    /// Added for `resizeCharacter`, which MUST keep the presence's handle (§1.12.2) — a
     /// resize is not a re-creation, and an exclusion the caller memorised survives it.
     /// Destroy-and-add is the only alternative and it changes the `BodyId`.
     ///
@@ -561,7 +561,7 @@ pub const BodyManager = struct {
     /// Safe getter: the ECS entity owning this body, or null if `id` is
     /// stale/invalid.
     ///
-    /// The column has existed since M1.1.0 and was never exposed, because nothing
+    /// The column has existed from the start and was never exposed, because nothing
     /// needed it: the solver's identity is the BODY. What needs it is the query
     /// ORDER (`engine-physics-forge.md` §1.11.14). `BodyId` is a slot index, so it
     /// encodes creation order and cannot rank a result without making the answer a
@@ -687,7 +687,7 @@ pub const BodyManager = struct {
     /// every tick, so treating those writes as external mutations would mean no
     /// body in contact ever sleeps. Composing the wake with the write for the
     /// gameplay-facing setters is the interface boundary's job
-    /// (`PhysicsModule`/`PhysicsWorld`, frozen M1.1.15) — exactly Jolt's
+    /// (`PhysicsModule`/`PhysicsWorld`, frozen) — exactly Jolt's
     /// `Body::SetLinearVelocity` (inert) versus `BodyInterface::SetLinearVelocity`
     /// (activating).
     pub fn setLinearVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
@@ -697,7 +697,7 @@ pub const BodyManager = struct {
 
     /// Set the world-space angular velocity. No-op on a stale/invalid handle.
     /// Internal to `BodyManager`: the public `PhysicsModule` 3D interface has no
-    /// angular-velocity mutator (frozen decision at M1.1.15).
+    /// angular-velocity mutator (a frozen decision).
     ///
     /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setAngularVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
@@ -707,9 +707,8 @@ pub const BodyManager = struct {
 
     /// Set the world-space position. No-op on a stale/invalid handle. INTERNAL to
     /// `forge_3d` (like `addTorque`/`setAngularVelocity`): the day-1
-    /// `PhysicsModule` 3D surface carries no pose mutator — flagged for the M1.1.15
-    /// freeze review. The NGS position solver (M1.1.7) writes its corrected poses
-    /// through it.
+    /// `PhysicsModule` 3D surface carries no pose mutator. NO SOLVER PASS CALLS IT —
+    /// the substepped solver re-integrates poses itself and has no position pass.
     ///
     /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`. Teleporting a body
     /// from gameplay is `wakeBody` composed with this call, never this call alone.
@@ -733,9 +732,9 @@ pub const BodyManager = struct {
     /// Invalidate the cached world box of a NON-DYNAMIC body whose pose has just been
     /// written — see `Body.world_aabb`.
     ///
-    /// Gated on the body type so the hot path pays nothing that matters: the two pose
-    /// setters are called every tick by the NGS pass, and always on DYNAMIC bodies, whose
-    /// cache is NaN already and is left untouched. A non-dynamic body reaching here means an
+    /// Gated on the body type because a DYNAMIC body's cache is NaN by construction —
+    /// a mesh forces a static body, so no dynamic row ever carries a cached box — and
+    /// there is nothing to invalidate. A non-dynamic body reaching here means an
     /// external teleport, which is the one thing that can stale the cache; poisoning it makes
     /// the mesh arm fall back to the O(V) pass, which is correct and merely slower.
     fn poisonCachedBox(self: *BodyManager, idx: u24) void {
@@ -791,7 +790,7 @@ pub const BodyManager = struct {
     pub fn addImpulse(self: *BodyManager, id: BodyId, impulse: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         // **THE THIRD IMPULSE PATH, and the guard lives HERE rather than at the
-        // interface** (M1.1.15.2 G15, `engine-physics-forge.md` § *Autorité
+        // interface** (`engine-physics-forge.md` § *Autorité
         // d'écriture* clause 2). "Every impulse path" is normative there: a path that
         // does not consult the flag is a defect OF THAT PATH. Contacts consult it in
         // `contact_constraint.resolutionMotion` and the character controller in
@@ -823,7 +822,7 @@ pub const BodyManager = struct {
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         // The same precondition `worldAabb` carries, re-stated at the BODY grain — this
         // is where a caller holds a `BodyId` and can be told which body it asked about.
-        // A DISPATCH on the class and not an assert on one variant of it (M1.1.11.1):
+        // A DISPATCH on the class and not an assert on one variant of it:
         // both bounded categories have a box, and a body carrying a half-space is asked
         // a PREDICATE ("do you overlap this box") instead, never a box (§1.11.15).
         switch (shape.class()) {
@@ -840,7 +839,7 @@ pub const BodyManager = struct {
     /// `collidePair`: unpack a `queryRay` candidate's `user_data` as a `BodyId`
     /// and call this per candidate.
     ///
-    /// **No error channel since M1.1.11.** It carried `error.UnsupportedShape` from
+    /// **No error channel.** It carried `error.UnsupportedShape` from
     /// the kernel's rounded-box latch, and no path could reach it: `supportShape`
     /// gives every stored box `radius = 0`, so a `SupportShape` built from a body is
     /// never a rounded box. The kernel's refusal is an asserted precondition now
@@ -918,8 +917,8 @@ pub const BodyManager = struct {
         // **PRECONDITION, ASSERTED AT THIS SITE: both bodies carry BOUNDED CONVEXES.** It was
         // inherited in silence from `supportShape` three levels down, which meant a half-space or
         // a mesh reaching here panicked in a safe build and was UNDEFINED BEHAVIOUR in ReleaseFast
-        // — the FIFTH hole in the `ShapeClass` net, of the same class as the four closed at the
-        // start of M1.1.11.1, and open for a half-space since M1.1.11.
+        // — the FIFTH hole in the `ShapeClass` net, of the same class as the four closed
+        // alongside it.
         //
         // A precondition and not an error channel, because neither refused shape has an answer to
         // give: a mesh has no single GJK result — one per contacting triangle, which is what
@@ -1253,7 +1252,7 @@ pub const BodyManager = struct {
     }
 
     /// Whether the solid of a HALF-SPACE body meets the solid of a NON-CONVEX body — the two
-    /// kernels the sensor pass needs once no side can be a convex probe (M1.1.13, §1.13.6).
+    /// kernels the sensor pass needs once no side can be a convex probe (§1.13.6).
     /// Null when either handle or its shape is stale.
     ///
     /// **PRECONDITION, asserted: `plane_body` carries a half-space and `other` is NOT convex.**
@@ -1314,7 +1313,7 @@ pub const BodyManager = struct {
     /// included. Null on a stale/invalid handle or shape — distinct from `false`, which
     /// is a real answer.
     ///
-    /// **A SIXTH adapter, and item 6 of E5 is why it exists.** `overlapAabb`'s collector
+    /// **A SIXTH adapter, and this is why it exists.** `overlapAabb`'s collector
     /// used to call `bodyAabb` on every candidate, which is correct for a bounded convex
     /// and PANICS on a half-space — the class assert — and in ReleaseFast, where that
     /// assert is compiled out, would fall through to `worldAabb`'s `unreachable`. Putting
@@ -1440,9 +1439,9 @@ pub const BodyManager = struct {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
 
-        // A DISPATCH on the class, exhaustive and with no `else` arm (M1.1.11.1). It was
+        // A DISPATCH on the class, exhaustive and with no `else` arm. It was
         // an `if` on the half-space falling through to the convex path, and that was the
-        // most dangerous of the four holes in the M1.1.11 safety net: a third-category
+        // most dangerous of the four holes in the `ShapeClass` safety net: a third-category
         // shape did not fail here, it FELL THROUGH into `supportShape`, which panics in
         // a safe build and is undefined behaviour in ReleaseFast. The convex arm is
         // written as an empty arm followed by the body of the function, so the
@@ -1526,7 +1525,7 @@ pub const BodyManager = struct {
     /// The pipeline is driven in a canonical BODY-ID order (`min(a, b)` first), negating the
     /// normal for the `a > b` caller. That makes the whole narrowphase order-independent even
     /// for the measure-zero case `collide`'s pose key cannot break — two bodies with
-    /// bit-identical shape AND pose — and gives the body-id-keyed order M1.1.6 warm-starting
+    /// bit-identical shape AND pose — and gives the body-id-keyed order warm-starting
     /// needs.
     pub fn collidePairEach(
         self: *const BodyManager,
@@ -1750,12 +1749,12 @@ pub const BodyManager = struct {
                 // **The motive is a PRECONDITION OF THIS ADAPTER, not a property of the
                 // engine.** It presumes its pair came from `computePairs` under a correct layer
                 // assignment, and a static↔static pair is a programming error at the call site.
-                // It is NOT that `BodyType` determines the broad layer: no
-                // `BodyType → BroadphaseLayer` wiring exists — the layer is an insertion
-                // argument, and `gjk_test.zig` inserts static bodies into `.dynamic` — and that
-                // wiring arrives with `PhysicsWorld` at M1.1.15. Justifying the assertion by a
-                // property the code does not carry would be the costliest defect class there
-                // is: the one that survives review by resembling an argument.
+                // It is NOT that `BodyType` determines the broad layer HERE: the
+                // `BodyType → BroadphaseLayer` derivation runs in `PhysicsWorld`, and the layer
+                // reaches this store as an INSERTION ARGUMENT it never derives on the
+                // caller's behalf. Justifying the assertion by a property the code does not
+                // carry would be the costliest defect class there is: the one that
+                // survives review by resembling an argument.
                 .half_space, .triangle_soup => unreachable,
             },
             .triangle_soup => switch (shape_b.class()) {
@@ -1876,7 +1875,7 @@ const MeshRayCollector = struct {
 };
 
 /// The candidate box a mesh traversal must offer the exact kernel, inflated so the filter is
-/// CONSERVATIVE with respect to GJK's own contact margin (M1.1.11.1 closure, finding F1).
+/// CONSERVATIVE with respect to GJK's own contact margin.
 ///
 /// **Why an unhardened box is a wrong answer and not merely a tight one.** The exact predicate of
 /// §1.11.12 is "the GJK regime is not `separated`", and that regime's boundary sits at
@@ -2287,7 +2286,7 @@ const MeshCastCollector = struct {
                     self.relpose.rot_rel,
                 ) orelse return;
                 // **THE INTERNAL-EDGE CORRECTION, ON THIS PATH TOO.** The contact path has consumed
-                // the flags baked at creation since M1.1.11.1; this one called `collideOrdered`
+                // the flags baked at creation; this one called `collideOrdered`
                 // directly and bypassed the consumer, so a capsule DEEP under a flat quad received
                 // the normal of the quad's internal diagonal — horizontal, and OPPOSITE on the two
                 // triangles sharing it. The slide read the pair as a crease, then a third plane as a
@@ -2433,7 +2432,7 @@ const MeshClosestPointCollector = struct {
 };
 
 /// Closest point on ONE convex core's surface to `point`, with the distance to that
-/// surface — the kernel `closestPointBody` runs on a whole convex and, since M1.1.11.1, on
+/// surface — the kernel `closestPointBody` runs on a whole convex and on
 /// each candidate triangle of a mesh.
 ///
 /// **PRECONDITION: `point` is OUTSIDE the solid**, which the CALLER establishes — by the
@@ -2538,8 +2537,8 @@ fn deepCoreWitness(simplex: []const narrowphase.Simplex(Real).Vertex) Vec3r {
 ///
 /// **Deliberately NOT merged with `worldAabb`.** Its convex arms compute the same
 /// quantities, but not by the same operation order — the capsule arm merges two transported
-/// end-cap boxes where this one adds the radius to a transported half-extent — and M1.1.9 /
-/// M1.1.10 pin exact world AABBs for those shapes. Unifying them would be a behaviour
+/// end-cap boxes where this one adds the radius to a transported half-extent — and the query
+/// suites pin exact world AABBs for those shapes. Unifying them would be a behaviour
 /// change measured in ULPs on inherited envelopes, for no gain; the two grains are also
 /// genuinely different, `worldAabb`'s mesh arm bounding a WHOLE mesh where this one bounds
 /// ONE triangle.
@@ -2580,12 +2579,12 @@ pub fn supportShapeAabb(shape: narrowphase.SupportShape(Real), pos: Vec3r, rot: 
 
 /// Exact world-space AABB of a shape at pose (`pos`, `rot`).
 ///
-/// `pub` since M1.1.10 / E5: a shape CAST needs the initial world AABB of a shape
+/// `pub` because a shape CAST needs the initial world AABB of a shape
 /// that is not a body — the query's own — to size the swept traversal
 /// (`engine-physics-forge.md` §1.11.10). `bodyAabb` is the body-level wrapper.
 ///
 /// **PRECONDITION: the shape is BOUNDED**, which is a DISPATCH on the class and not an
-/// assert on one variant of it (M1.1.11.1) — a mesh has an answer here and it is not
+/// assert on one variant of it — a mesh has an answer here and it is not
 /// the half-space's. A half-space has no world AABB at all, and an infinite box does
 /// not degrade the BVH, it destroys it: its centre is `(−inf + inf)·0.5`, i.e. NaN,
 /// which is the ray origin a shape cast derives from a box; its surface area is
@@ -2657,18 +2656,17 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
             for (data.vertices[1..]) |v| box = box.expand(pos.add(rot.rotateVec3(v)));
             return box;
         },
-        // The store admits sphere/box/capsule, the plane since M1.1.11 and the triangle
-        // mesh since M1.1.11.1, and rejects every other variant with
+        // The store admits sphere, box, capsule, the plane and the triangle
+        // mesh, and rejects every other variant with
         // `error.UnsupportedShape`. The plane is excluded by the class dispatch above,
         // so the four arms are exhaustive over what can reach here.
         else => unreachable,
     }
 }
 
-// --- tests -------------------------------------------------------------------
 // The bulk of the `BodyManager` acceptance suite lives in
 // `tests/body_manager_test.zig`; the pose mutators are covered inline here
-// (M1.1.7) because their contract is exactly the handle validation of this file.
+// because their contract is exactly the handle validation of this file.
 
 const testing = std.testing;
 

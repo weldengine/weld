@@ -1,5 +1,5 @@
 //! `forge_3d/pipeline/narrowphase/fast_paths.zig` — the analytic per-pair
-//! narrowphase fast paths (M1.1.4).
+//! narrowphase fast paths.
 //!
 //! **Seed architecture (Guy-approved, brief Scope).** A fast path NEVER
 //! re-implements manifold assembly. Each kernel computes only the `ContactSeed`
@@ -18,10 +18,10 @@
 //! (fixed order), so `collide`'s pose canonicalization and `collidePair`'s
 //! BodyId order wrap the fast paths identically to the generic path.
 //!
-//! **Status.** E1 laid the foundation (`ContactSeed`, `FastResult`, a no-op
-//! dispatcher). E2 wired the point-core pairs — **sphere/sphere** and
-//! **sphere/box** (both orders). E3 added **box/box** via a separating-axis test
-//! (15 candidate axes → the least-overlap axis → seed). E4 added
+//! **What is wired.** The foundation is `ContactSeed`, `FastResult` and the
+//! dispatcher; then the point-core pairs — **sphere/sphere** and
+//! **sphere/box** (both orders); **box/box** via a separating-axis test
+//! (15 candidate axes → the least-overlap axis → seed); and
 //! **capsule/capsule** via closest-segment analytics. capsule/box and
 //! sphere/capsule stay on the generic path; a rounded box returns `.not_handled`.
 //!
@@ -88,8 +88,8 @@ pub fn FastResult(comptime T: type) type {
 /// closest-point ownership follow that order, so `generateManifold`'s feature_id
 /// halves swap with the order exactly as on the generic path.
 ///
-/// Wired: sphere/sphere, sphere/box (E2), box/box SAT (E3), and capsule/capsule
-/// (E4), all orders. `.not_handled` for capsule/box + sphere/capsule (stay
+/// Wired: sphere/sphere, sphere/box, box/box SAT and capsule/capsule, all
+/// orders. `.not_handled` for capsule/box + sphere/capsule (stay
 /// generic), and any box core with `radius > 0` (a rounded box — the kernels are
 /// radius-0-box only).
 pub fn fastSeed(
@@ -125,7 +125,7 @@ pub fn fastSeed(
             // capsule/capsule.
             .segment => |hb| return capsuleCapsule(T, pos_a, rot_a, ha, shape_a.radius, pos_b, rot_b, hb, shape_b.radius),
             // The three remaining pairs, each stated EXPLICITLY like the fifteen others of
-            // this function. They carried an `else` until M1.1.11.1, and the answer was
+            // this function. They carried an `else` once, and the answer was
             // right but it had not been DECIDED — `.segment × .triangle` passed through it
             // without anyone choosing, which is exactly the failure mode the no-`else` rule
             // exists to prevent. The outer switch caught the case anyway; that is luck, not
@@ -138,7 +138,7 @@ pub fn fastSeed(
         // GJK/EPA path serves it exactly, which is the whole return on making the triangle
         // a core rather than a family of kernels; a swept or contact fast path against one
         // would owe a geometric-equivalence proof against that generic path, which is the
-        // M1.1.4 pattern and not this milestone's work.
+        // established fast-path pattern and not this file's work.
         .triangle => return .not_handled,
     }
 }
@@ -171,7 +171,7 @@ fn sphereSphere(comptime T: type, ca: math.Vec(3, T), ra: T, cb: math.Vec(3, T),
     // `normalize(d)` is scale-EQUIVARIANT, so the only thing to guard is 0/0. The
     // fallback fires ONLY at true coincidence (`dist² ≤ floatMin` — the type's
     // underflow floor, NOT a geometric scale): translation- and scale-invariant by
-    // construction (E8, class A).
+    // construction (class A).
     const normal = if (dist_sq > std.math.floatMin(T)) d.scale(1.0 / dist) else math.Vec(3, T).unit_x;
     return .{ .contact = .{
         .normal = normal,
@@ -231,7 +231,7 @@ fn sphereBox(
         // Normal from the box surface toward the sphere centre; on the surface
         // (dist ≈ 0, the shallow↔deep seam) fall back to the least-penetration
         // face axis. `normalize(delta)` is scale-equivariant, so the fallback fires
-        // ONLY at true coincidence (`dist² ≤ floatMin`, E8 class A).
+        // ONLY at true coincidence (`dist² ≤ floatMin`).
         const n_local = if (dist_sq > std.math.floatMin(T)) delta.scale(1.0 / dist) else fallbackLocalNormal(T, c_local);
         n_bs = box_rot.rotateVec3(n_local);
         base_penetration = r_sum - dist;
@@ -458,7 +458,7 @@ fn contactEdge(comptime T: type, c: math.Vec(3, T), ax: [3]math.Vec(3, T), he: [
 /// (project its point onto segment 2); if only segment 2, `t = 0`, `s = clamp(−c/a)`
 /// (project its point onto segment 1). The test is EXACT zero — never an absolute
 /// metric floor — so a genuinely resolvable but tiny segment (e.g. `a = 6.4e-11`)
-/// takes the general branch (E7); a `half_height == 0` capsule gives `a == 0`
+/// takes the general branch; a `half_height == 0` capsule gives `a == 0`
 /// exactly and takes the point branch. Every sub-branch's denominator is
 /// guarded (`a > 0`, `e > 0`, `denom > 0`) + clamped.
 fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: math.Vec(3, T), q2: math.Vec(3, T)) [2]math.Vec(3, T) {
@@ -508,7 +508,7 @@ fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: m
 /// `gjk.zig`, `coord_scale = |Δcentres| + half_height_a + half_height_b`). The
 /// THREE contact regimes are produced by the unchanged `generateManifold` from
 /// the segments' supporting features — end-on (a count-1 endpoint → 1 point),
-/// crossed / non-parallel (1 witness, via the E1 generator fix), and parallel
+/// crossed / non-parallel (1 witness, via the generator), and parallel
 /// projection overlap (2 points via `clipSegment`) — so the kernel only supplies
 /// `(normal, closest points, depth)`, skipping the GJK descent.
 fn capsuleCapsule(
@@ -536,7 +536,7 @@ fn capsuleCapsule(
     if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
     // `normalize(d)` is scale-equivariant ⇒ guard only 0/0: the fallback (radial /
     // mutual-perpendicular) fires ONLY at true coincidence (`dist² ≤ floatMin`,
-    // e.g. collinear cores whose closest points coincide exactly) — E8 class A.
+    // e.g. collinear cores whose closest points coincide exactly).
     const normal = if (dist_sq > std.math.floatMin(T)) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
     return .{ .contact = .{
         .normal = normal,
@@ -562,7 +562,7 @@ fn capsuleFallbackNormal(comptime T: type, axis_a: math.Vec(3, T), axis_b: math.
     if (cr2 > sin2_floor) return cr.scale(1.0 / @sqrt(cr2)); // crossed ⇒ mutual perpendicular
     // Parallel axes: strip the axial component of `dcentre` → the radial direction.
     // Collinear ⟺ the lateral fraction `lat2/dc2 = sin²(∠(dcentre, axis))` is
-    // negligible — a DIMENSIONLESS ratio (not an absolute length floor, E7). A
+    // negligible — a DIMENSIONLESS ratio (not an absolute length floor). A
     // pure collinear or coincident pair (`lat2 == 0`) picks a fixed perpendicular.
     const lateral = dcentre.sub(axis_a.scale(dcentre.dot(axis_a)));
     const lat2 = lateral.dot(lateral);
@@ -606,9 +606,9 @@ test "fastSeed dispatch routing (E3 handles sphere and box pairs)" {
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, box, near, Q.identity) == .contact);
     try testing.expect(fastSeed(T, box, V.zero, Q.identity, sphere, near, Q.identity) == .contact);
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, box, far, Q.identity) == .separated);
-    try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, near, Q.identity) == .contact); // box/box (E3)
+    try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, near, Q.identity) == .contact); // box/box
     try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, far, Q.identity) == .separated);
-    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, near, Q.identity) == .contact); // capsule/capsule (E4)
+    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, near, Q.identity) == .contact); // capsule/capsule
     try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, far, Q.identity) == .separated);
 
     // Unsupported pairs → not_handled (fall through to generic).

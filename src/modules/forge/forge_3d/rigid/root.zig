@@ -2,8 +2,8 @@
 //! substepping; `engine-physics-forge.md` §1.2). It carries the contact constraint
 //! setup (combine rules, tangent basis, soft coefficients, `ContactConstraint`,
 //! build/prepare), the warm-start cache, the shared `solver_config.zig`, the
-//! substepped solver and the island manager. The M1.1.6 velocity pass and the M1.1.7
-//! NGS position pass were merged into `solver.zig` at M1.1.13.1 and their files are
+//! substepped solver and the island manager. The velocity pass and the
+//! NGS position pass were merged into `solver.zig` and their files are
 //! gone; joints follow the same additive-sibling way.
 //!
 //! Re-exported at `Real` by `forge_3d/root.zig`. The comptime pin analyses the
@@ -32,10 +32,10 @@ pub const tangentBasis = contact_constraint.tangentBasis;
 /// Build a deterministically-ordered constraint array from canonical pairs.
 pub const build = contact_constraint.build;
 
-/// The Sequential Impulses warm-start cache (double-buffered, sorted flat).
+/// The contact warm-start cache (double-buffered, sorted flat).
 pub const ContactCache = contact_cache.ContactCache;
 /// The TOTAL orders the two constraint sorts run on — `(pair_key, subshape_id)` here and
-/// `(rank, pair_key, subshape_id)` for the island permutation. `pub` since the M1.1.11.1 closure:
+/// `(rank, pair_key, subshape_id)` for the island permutation. `pub`:
 /// with several constraints per pair, totality is the property that keeps the ordering from
 /// resting on `std.sort.block`'s tie-handling, and totality is a claim about the COMPARATOR that
 /// only a caller of it can check (closure finding F4).

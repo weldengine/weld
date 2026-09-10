@@ -101,7 +101,6 @@ pub const JointLimits = union(enum) {
         swing_z_radians: f32,
         /// Minimum torsion about `axis_a`.
         twist_min_radians: f32,
-        /// Maximum torsion.
         twist_max_radians: f32,
     },
 

@@ -10,16 +10,13 @@
 //! happens once per thread, at creation, and once per process, at entry
 //! (`foundation/math/float_env.zig`, which states the RULE and deliberately
 //! enumerates nothing — this sentence used to say "Tier 0's job" and "its three
-//! call sites", and M1.1.14 measured both false: the set is ten and three of them
+//! call sites", and both were measured false: the set is ten and three of them
 //! are inside modules, a thread born in a module being a thread all the same).
 //!
-//! **Where the entry point is, today and tomorrow.** There is no
-//! `PhysicsWorld.step()` yet — the orchestration lands at M1.1.15. What exists
-//! is a per-tick driver in the acceptance harness, and the determinism harness
-//! of this milestone. Both call `assertFloatEnvironment` when they open a
-//! world; `step()` inherits the same call and nothing else moves. Naming the
-//! seam before its production consumer exists is the pattern this repository
-//! already used for the `on_attach` dispatch seam at M1.0.6.
+//! **Where the entry point is.** `PhysicsWorld.init` asserts the environment once,
+//! where a world begins, and the acceptance and determinism harnesses do the same
+//! when they open one. Naming the seam before its production consumer existed is
+//! the pattern this repository already used for the `on_attach` dispatch seam.
 //!
 //! Note that the check is not decorative even inside a single process: the job
 //! system installs the environment on the threads it creates, and a `forge_3d`
@@ -55,8 +52,6 @@ pub fn checkFloatEnvironment() ?float_env.State {
 pub fn assertFloatEnvironment() void {
     std.debug.assert(checkFloatEnvironment() == null);
 }
-
-// --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
 

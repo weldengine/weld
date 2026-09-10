@@ -5,13 +5,13 @@
 //! its `Shape`. Static and kinematic bodies have zero inverse mass and inertia
 //! (infinite effective mass). `Body` is the SoA row `BodyManager` stores. The
 //! `friction`/`restitution` columns are the per-body material coefficients the
-//! Sequential Impulses contact solver reads (M1.1.6).
+//! contact solver reads.
 //!
 //! The `force`/`torque` columns are world-space per-tick accumulators (N, N·m):
-//! `BodyManager.addForce`/`addTorque` add into them and `integrate` (E2) reads
+//! `BodyManager.addForce`/`addTorque` add into them and `integrate` reads
 //! then clears them each fixed tick (the `engine-physics-forge.md` §2 per-tick
 //! reset contract). Being independent SoA columns, they leave the
-//! position/rotation bulk-sync layout invariant (M1.1.15) untouched.
+//! position/rotation bulk-sync layout invariant untouched.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -72,7 +72,7 @@ pub const BodyFlags = packed struct(u8) {
 pub const MotionProperties = struct {
     /// 1/mass, or 0 for static/kinematic.
     inv_mass: Real,
-    /// Inverse of the local inertia tensor (diagonal for M1.1.0 shapes), or the
+    /// Inverse of the local inertia tensor (diagonal for the primitive shapes), or the
     /// zero matrix for static/kinematic.
     local_inv_inertia: Mat3r,
     /// Linear velocity damping per second.
@@ -94,7 +94,7 @@ pub const Body = struct {
     /// (`engine-physics-forge.md` §1.11.8), and an `f32`-unit quaternion widened
     /// to `f64` is off by `|q|² − 1 ≈ 3e-8`, so the widened value is normalised at
     /// creation — and both integrators maintain it, each re-normalising after its
-    /// first-order orientation step. Before M1.1.9 the invariant held by accident
+    /// first-order orientation step. It once held by accident
     /// for a dynamic body from its first tick and NEVER for a static or kinematic
     /// one, which are never integrated: a static collider's frame was scaled by
     /// `1 ± 3e-8`, which at 10 km — the regime `-Dphysics_f64` exists for — is
@@ -115,19 +115,17 @@ pub const Body = struct {
     /// Derived inverse mass/inertia + damping/gravity.
     motion: MotionProperties,
     /// Coulomb friction coefficient (>= 0), stored from the descriptor. Consumed
-    /// by the Sequential Impulses contact solver (M1.1.6); the M1.1.5 `addBody`
-    /// dropped it.
+    /// by the contact solver.
     friction: Real,
     /// Restitution / bounciness in [0, 1], stored from the descriptor. Consumed
-    /// by the Sequential Impulses contact solver (M1.1.6); the M1.1.5 `addBody`
-    /// dropped it.
+    /// by the contact solver.
     restitution: Real,
     /// Collision-shape handle (into a `ShapeStore`).
     shape: ShapeId,
     /// Simulation class.
     body_type: BodyType,
     /// Object collision-layer index (stored from the descriptor). Read by the query
-    /// family's object-layer mask (§1.11.5) and, since M1.1.13, by the sensor pass,
+    /// family's object-layer mask (§1.11.5) and by the sensor pass,
     /// which tests it against the TRIGGER's `trigger_layer_mask` (§1.13.5). The
     /// object-layer pair filtering / `CollisionConfig` matrix is still unwired.
     collision_layer: u8,
@@ -186,9 +184,8 @@ pub const Body = struct {
     ///
     /// **Why it needs no invalidation LOGIC.** A mesh forces a STATIC body
     /// (`error.ShapeMustBeStatic`), whose pose no solver pass writes: both integrators skip
-    /// a non-dynamic body, and the NGS position pass guards its pose writes at EXACT ZERO
-    /// precisely so a non-dynamic body stays bit-unchanged. So the cached box cannot go
-    /// stale from inside the simulation.
+    /// a non-dynamic body, so the cached box cannot go stale from inside the
+    /// simulation.
     ///
     /// **What it does instead of invalidating: it POISONS.** The only way the pose can move
     /// is an external teleport, and `setPosition` / `setRotation` set this field back to NaN
@@ -209,7 +206,7 @@ pub const Body = struct {
 /// at once. Computed once, at body creation: it is pose-invariant.
 ///
 /// **PRECONDITION: the shape has a local AABB.** This reads `local_aabb`, so it is a
-/// DISPATCH on the class and not an assert on one variant of it (M1.1.11.1): a bounded
+/// DISPATCH on the class and not an assert on one variant of it: a bounded
 /// convex and a triangle soup both have a valid local box and the same formula answers
 /// both, a half-space has none at all — the field is NaN there.
 ///
@@ -258,7 +255,7 @@ pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
 
     // The dynamic path reads `unit_inertia`, which NEITHER a half-space NOR a mesh has
     // (NaN in both). A DISPATCH on the class rather than an assert on one variant of it
-    // (M1.1.11.1), so a fourth category is a compile error here and must state whether
+    // so a fourth category is a compile error here and must state whether
     // it has an inertia tensor. Both non-convex arms are unreachable from `addBody`,
     // which rejects a dynamic body carrying either with `error.ShapeMustBeStatic` before
     // building the `Body` — this is what makes that rejection's ORDERING load-bearing

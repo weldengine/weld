@@ -1,62 +1,60 @@
 //! `forge_3d` — the native Zig 3D physics solver (Tier 1, in-tree per
-//! `ARCH-017`). M1.1.0 laid the foundations: the `Real` scalar, the
-//! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
-//! `BodyManager`. M1.1.1 added the shared `pipeline/broadphase.zig` (a dynamic
-//! multi-layer AABB tree — BVH); M1.1.2 added `pipeline/narrowphase/`
-//! (distance-based GJK convex detection), promoted to a package at M1.1.3 with
-//! EPA + contact manifold as sibling files. All re-exported here at `Real`. No
-//! stepping, island manager, scheduler, or `PhysicsModule` instantiation yet —
-//! those are later M1.1 sub-milestones. Depends only on `foundation/math` and
+//! `ARCH-017`). It owns the `Real` scalar, the `ShapeStore`, per-body
+//! `MotionProperties` with analytic inertia and the SoA `BodyManager`; the shared
+//! broadphase (a dynamic multi-layer AABB tree) and narrowphase (GJK, EPA and the
+//! contact manifold); the rigid branch, the island partition, sleep detection, the
+//! sensor traversal, the spatial queries, the character store and `PhysicsWorld`,
+//! which owns the per-tick cycle. All re-exported here at `Real`.
+//!
+//! Depends only on `foundation/math` and
 //! `src/modules/forge/api/` (core entity/component types reach here through
 //! `api/`).
 
 const config = @import("config.zig");
 const shape = @import("shape.zig");
-// M1.1.11.1 — the owned triangle-mesh payload a `.triangle_mesh` shape holds.
+// The owned triangle-mesh payload a `.triangle_mesh` shape holds.
 // Re-exported below; the comptime pin analyses its acceptance suite.
 const mesh_mod = @import("mesh.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
-// M1.1.2/3 — narrowphase package (GJK convex detection; EPA + manifold M1.1.3).
+// Narrowphase package: GJK convex detection, EPA and the contact manifold.
 // Re-exported at `Real` below; the comptime pin analyses its acceptance tests
 // (engine-zig-conventions.md §13 lazy-analysis guard — an unreferenced module's
 // tests are silently skipped).
 const narrowphase = @import("pipeline/narrowphase/root.zig");
-// M1.1.5 — semi-implicit Euler integration over the `BodyManager` SoA store.
+// Semi-implicit Euler integration over the `BodyManager` SoA store.
 // Re-exported at `Real` below; the comptime pin analyses its acceptance tests.
 const integration = @import("pipeline/integration.zig");
-// M1.1.6 — rigid-body branch (Sequential Impulses contact solver). Re-exported
+// The rigid-body branch (TGS Soft, substepped). Re-exported
 // as the `rigid` namespace below; the comptime pin analyses its inline tests.
 const rigid_mod = @import("rigid/root.zig");
-// M1.1.8 — branch-neutral island partition core (union-find over opaque element
+// Branch-neutral island partition core (union-find over opaque element
 // indices). Scalar-free, so it is re-exported as a namespace rather than bound to
 // `Real`; the comptime pin analyses its acceptance tests.
 const island_mod = @import("pipeline/island.zig");
-// M1.1.8 — sleep detection (displacement window sweep + eligibility + transition)
+// Sleep detection (displacement window sweep + eligibility + transition)
 // over the `BodyManager` SoA store, at the same pipeline level as integration.
 // Re-exported as the `sleep` namespace below; the comptime pin analyses its tests.
 const sleep_mod = @import("pipeline/sleep.zig");
-// M1.1.13 — the sensor traversal: which bodies each trigger currently overlaps.
+// The sensor traversal: which bodies each trigger currently overlaps.
 // A pipeline-level sweep like `sleep.zig`, deliberately independent of the solver
 // and of `computePairs`. Re-exported as the `sensor` namespace below; the comptime
 // pin analyses its acceptance suite.
 const sensor_mod = @import("pipeline/sensor.zig");
-// M1.1.9 — `Real`-bound spatial queries (stateless orchestration over the
+// `Real`-bound spatial queries (stateless orchestration over the
 // broadphase ray traversal + the exact kernels). Re-exported as the `query`
 // namespace below; the comptime pin analyses its acceptance tests.
 const query_mod = @import("query/root.zig");
-// M1.1.12 — the kinematic character controller's store. Re-exported below; the
+// The kinematic character controller's store. Re-exported below; the
 // comptime pin analyses its acceptance suite.
 const character_mod = @import("character.zig");
-// M1.1.14 — the module's entry-point check on the floating-point execution
+// The module's entry-point check on the floating-point execution
 // state (`ARCH-031` rule 5). Scalar-free; re-exported as two functions below.
 const determinism_mod = @import("determinism.zig");
-// M1.1.15 — `PhysicsWorld`, the sole owner of the per-tick cycle. Re-exported below;
+// `PhysicsWorld`, the sole owner of the per-tick cycle. Re-exported below;
 // the comptime pin analyses its acceptance suite.
 const world_mod = @import("world.zig");
-
-// --- Solver scalar + math aliases ---
 
 /// Solver scalar (`f32`, or `f64` under `-Dphysics_f64=true`).
 pub const Real = config.Real;
@@ -74,24 +72,20 @@ pub const Mat3r = config.Mat3r;
 /// Axis-aligned bounding box at solver precision.
 pub const Aabbr = config.Aabbr;
 
-// --- Shapes ---
-
 /// Immutable per-shape data (geometry + local AABB + unit-mass inertia).
 pub const Shape = shape.Shape;
-/// The narrowphase CATEGORY of a shape — bounded convex or half-space (M1.1.11,
+/// The narrowphase CATEGORY of a shape — bounded convex or half-space (
 /// `engine-physics-forge.md` §1.11.15). Scalar-free, so re-exported as-is.
 pub const ShapeClass = shape.ShapeClass;
 /// Generational store of collision shapes.
 pub const ShapeStore = shape.ShapeStore;
 /// The OWNED triangle-mesh data a `.triangle_mesh` shape holds — vertices and indices
-/// at solver precision (M1.1.11.1, `engine-physics-forge.md` §1.11.17). The store owns
+/// at solver precision (`engine-physics-forge.md` §1.11.17). The store owns
 /// it: `createShape` copies the borrowed descriptor arrays, `destroyShape` releases.
 pub const MeshData = mesh_mod.MeshData;
 /// The five ways a triangle-mesh descriptor can be malformed, each refused by its own
 /// typed error and never sanitised away.
 pub const MeshError = mesh_mod.MeshError;
-
-// --- Bodies ---
 
 /// Derived inverse mass/inertia + damping/gravity for a body.
 pub const MotionProperties = body.MotionProperties;
@@ -104,7 +98,7 @@ pub const BodyManager = body_manager.BodyManager;
 
 /// Exact world AABB of a shape at a pose — the body-free form `BodyManager.bodyAabb` wraps.
 /// Re-exported at `Real` for the mesh bench, which measures its O(V) pass against the
-/// per-body cache that could replace it (M1.1.11.1).
+/// per-body cache that could replace it.
 pub const worldAabb = body_manager.worldAabb;
 
 // --- Pipeline (shared by both solver branches) ---
@@ -123,8 +117,6 @@ pub const BroadphaseConfig = broadphase.BroadphaseConfig(Real);
 /// and the exact kernels.
 pub const Ray = broadphase.Ray(Real);
 
-// --- Narrowphase (GJK convex detection) ---
-
 /// A convex support shape (core + inflation radius) at solver precision.
 pub const SupportShape = narrowphase.SupportShape(Real);
 /// Shape-B-relative-to-A pose precompute at solver precision.
@@ -142,8 +134,6 @@ pub const max_gjk_iterations = narrowphase.max_gjk_iterations;
 pub fn gjk(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) GjkResult {
     return narrowphase.gjk(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
-
-// --- Narrowphase (EPA penetration + contact manifold) ---
 
 /// EPA penetration result (world normal A→B, core depth, world closest points)
 /// at solver precision.
@@ -173,22 +163,20 @@ pub fn collide(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: Suppo
 /// `collide` for a FIXED shape order (no pose canonicalization) at solver
 /// precision — the `BodyId`-ordered path `BodyManager.collidePair` drives so the
 /// `feature_id` reference/incident ownership stays frame-stable. Dispatches the
-/// M1.1.4 analytic fast paths, falling through to `collideOrderedGeneric`.
+/// analytic fast paths, falling through to `collideOrderedGeneric`.
 pub fn collideOrdered(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
     return narrowphase.collideOrdered(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
 /// `collideOrdered` with the fast-path dispatcher bypassed (the generic GJK/EPA
 /// oracle) at solver precision — the differential oracle + bench baseline for the
-/// M1.1.4 fast paths.
+/// fast paths.
 pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
     return narrowphase.collideOrderedGeneric(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
-
-// --- Half-space kernels (M1.1.11) ---
 
 /// A solid half-space `{ x : n·x <= d }` at solver precision — the geometry a `.plane`
 /// shape carries, and the input to every kernel of the `plane` namespace below.
@@ -201,8 +189,6 @@ pub const HalfSpace = narrowphase.plane.HalfSpace(Real);
 /// re-exported as a namespace; `BodyManager`'s five adapters bind it at `Real`.
 pub const plane = narrowphase.plane;
 
-// --- Ray kernels + queries ---
-
 /// A ray hit on one shape in that shape's LOCAL frame (distance + outward
 /// normal) at solver precision — what `BodyManager.raycastBody` returns.
 pub const LocalHit = narrowphase.LocalHit(Real);
@@ -214,7 +200,7 @@ pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) ?L
     return narrowphase.rayShape(Real, support_shape, origin, direction);
 }
 
-/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
+/// The analytic ray↔triangle kernel and the shared back-face predicate (
 /// `engine-physics-forge.md` §1.11.17): `rayTriangle`, `isBackFace`, and `localHit`, which
 /// is where the back-face normal FLIP lives. Scalar-generic, so re-exported as a namespace;
 /// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
@@ -225,7 +211,7 @@ pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) ?L
 pub const triangle = narrowphase.triangle;
 
 /// Whether the ray kernels cover `support_shape` — `rayShape`'s asserted
-/// precondition at solver precision (M1.1.11). Every box the `ShapeStore` converts
+/// precondition at solver precision. Every box the `ShapeStore` converts
 /// carries `radius = 0`, so this is false only for a `SupportShape` a caller built by
 /// hand.
 pub fn raySupportsShape(support_shape: SupportShape) bool {
@@ -237,8 +223,6 @@ pub fn raySupportsShape(support_shape: SupportShape) bool {
 /// `raycast` / `raycastAny` / `raycastAll`. Stateless — each entry takes
 /// `(bp, bm, store)`.
 pub const query = query_mod;
-
-// --- Character controller (M1.1.12) ---
 
 /// Generational store of character controllers (`engine-physics-forge.md` §1.12). A
 /// controller is VIRTUAL: it takes part in no solver pass, and its pose is written by
@@ -301,24 +285,18 @@ pub const sleep = sleep_mod;
 /// — it reads no sleep state and consults no pair matrix.
 pub const sensor = sensor_mod;
 
-// --- Integration (semi-implicit Euler) ---
-
 /// Advance every live body one fixed tick of `dt` under world-space `gravity`
 /// (m/s²) with semi-implicit Euler + gravity·gravity_factor + clamped-linear
 /// damping — the `Real`-bound entry. Free-flight only (no contacts); called by
-/// the `step` orchestrator at M1.1.15.
+/// the `step` orchestrator.
 pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     return integration.integrate(bm, dt, gravity);
 }
 
-// --- Rigid solver (Sequential Impulses contact solver) ---
-
 /// The rigid-body branch: contact constraint setup + material combine rules +
-/// tangent basis (M1.1.6), with the contact cache + velocity solver as additive
+/// tangent basis, with the contact cache and the substepped solver as additive
 /// siblings. Bound to `Real` through the package's `../config.zig` import.
 pub const rigid = rigid_mod;
-
-// --- Determinism (M1.1.14) ---
 
 /// Read the float-environment state of the calling thread when it is NOT the
 /// engine's, `null` otherwise — the module's entry-point check of `ARCH-031`
@@ -326,10 +304,8 @@ pub const rigid = rigid_mod;
 /// two are different verbs is in `determinism.zig`.
 pub const checkFloatEnvironment = determinism_mod.checkFloatEnvironment;
 /// Assert that the calling thread carries the engine float environment. Called
-/// by whatever drives a tick; `PhysicsWorld.step()` inherits the call at M1.1.15.
+/// where a world begins: `PhysicsWorld.init` asserts it once.
 pub const assertFloatEnvironment = determinism_mod.assertFloatEnvironment;
-
-// --- Orchestration (M1.1.15) ---
 
 /// The physics world: the SOLE OWNER of the per-tick cycle
 /// (`engine-physics-solver.md` §1.7). It holds the shape store, the body store, the
@@ -392,7 +368,7 @@ comptime {
     _ = @import("tests/character_test.zig");
     _ = @import("tests/sensor_test.zig");
     _ = @import("tests/world_test.zig");
-    // M1.1.14 — the determinism instrument: canonical scenario + artifacts.
+    // The determinism instrument: canonical scenario + artifacts.
     _ = @import("tests/determinism/scenario.zig");
     _ = @import("tests/determinism/trace.zig");
     _ = @import("tests/determinism/run.zig");

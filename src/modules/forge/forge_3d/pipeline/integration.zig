@@ -7,14 +7,14 @@
 //! position and orientation from the CURRENT velocity. `integrate` is their exact
 //! composition.
 //!
-//! `integrateVelocities` is ITSELF a composition since M1.1.13.1 —
+//! `integrateVelocities` is ITSELF a composition —
 //! `integrateVelocitiesNoReset` then `resetForceAccumulators` — because a substepped
 //! solver calls the velocity half once per substep and must not have the
 //! accumulators consumed out from under it on the first one. The decomposition is
-//! exact and the fused entries keep their behaviour bit-for-bit, so every M1.1.5 pin
-//! reads the same values it did (the same move M1.1.5 made when it split `integrate`
+//! exact and the fused entries keep their behaviour bit-for-bit, so every inherited pin
+//! reads the same values it did (the same move made when `integrate` was split
 //! itself; see `integrateVelocitiesNoReset` for the arithmetic that forces it). The split exists because the Sequential Impulses contact solver
-//! (M1.1.6) must run BETWEEN the two — it corrects velocities after gravity but
+//! must run BETWEEN the two — it corrects velocities after gravity but
 //! before positions advance. Solving around the fused pass would leave the
 //! per-tick `g·dt` residual advancing positions (a resting body would sink
 //! ≈ g·dt² per tick). With no solve in between, the two halves reproduce the
@@ -22,10 +22,10 @@
 //!
 //! Each pass is one pure per-tick sweep in ascending slot-index order
 //! (deterministic — no hash container on the path, the `BodyManager` discipline;
-//! M1.1.14). The store does not compact, so each walks `0..bodies.len` and filters
+//! determinism). The store does not compact, so each walks `0..bodies.len` and filters
 //! liveness with `IdAllocator.isAliveIndex`. This is FREE-FLIGHT integration:
 //! broadphase and narrowphase exist but are NOT invoked here, and contact response
-//! is the solver's job (M1.1.6) — under gravity alone a dynamic body follows an
+//! is the solver's job — under gravity alone a dynamic body follows an
 //! unobstructed trajectory.
 //!
 //! Semi-implicit Euler: velocity is integrated first, position from the *new*
@@ -36,14 +36,14 @@
 //! `force`/`torque` accumulators are reset every fixed tick for ALL live bodies
 //! (`engine-physics-forge.md` §2) by the velocity pass. `integrateVelocities`
 //! applies damping exactly once with the `dt` it is given and has no opinion on
-//! substeps — call cadence is the orchestrator's concern (M1.1.15).
+//! substeps — call cadence is the orchestrator's concern.
 //!
 //! Angular integration mirrors the linear half: the torque is mapped through the
 //! world-space inverse inertia `I_world_inv = R · I_local_inv · Rᵀ`, `ω` is
 //! integrated then clamp-damped (velocity pass), and the orientation advances by
 //! the first-order (linearized) rule `q ← normalize(q + ½·dt·(ω_quat ⊗ q))` with
 //! the world-space `ω` on the LEFT (position pass). That form divides by no `|ω|`,
-//! so it is singularity-free at `ω = 0` (no zero guard needed — the M1.1.4
+//! so it is singularity-free at `ω = 0` (no zero guard needed — the
 //! threshold discipline is honoured). The gyroscopic term `ω × (I·ω)` is dropped
 //! (Jolt/PhysX/Bevy default; its explicit integration injects energy).
 
@@ -99,7 +99,7 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
 /// Gravity and damping, by contrast, want the per-substep call and get it: gravity
 /// accumulates to `g·dt` over the `n` slices, exactly as §1.7 step 3 requires of any
 /// constant force, and damping becomes `(1 − d·h)^n` — substep-count-sensitive,
-/// which M1.1.5 recorded as the orchestrator's decision and §1.7 step 6 now takes.
+/// which is the orchestrator's decision, and §1.7 step 6 takes it.
 ///
 /// The reset therefore runs ONCE, after the LAST substep (`resetForceAccumulators`),
 /// never before the first: clearing an accumulator before anything consumes it
@@ -126,13 +126,13 @@ pub fn integrateVelocitiesNoReset(bm: *BodyManager, dt: Real, gravity: Vec3r) vo
 
         // A sleeper is not simulated (§1.8.6).
         //
-        // **AND NEITHER IS A PILOTED BODY** (M1.1.15.2 G13, § *Autorité d'écriture*
+        // **AND NEITHER IS A PILOTED BODY** (§ *Autorité d'écriture*
         // clause 1). A body under gameplay authority does not integrate — no gravity,
         // no velocity integration, no damping — because its velocity is what `syncIn`
         // posed and nothing else may make it evolve. All three live in this pass, so
         // one skip carries the whole clause.
         //
-        // **Measured at the opening of G13, and it is why this line exists**: the
+        // **Measured, and it is why this line exists**: the
         // authority flag had exactly ONE reader in the repository, the contact
         // resolution's, so a `.gameplay` dynamic body fell under gravity while
         // `syncOut` published nothing — the solver collided at a pose gameplay could
@@ -205,7 +205,7 @@ pub fn integratePositions(bm: *BodyManager, dt: Real) void {
         if (!bm.alloc.isAliveIndex(i)) continue;
         if (body_types[i] != .dynamic) continue;
         if (flags[i].sleeping) continue; // a sleeper's pose is frozen (§1.8.6)
-        // A PILOTED body's pose is gameplay's (M1.1.15.2 G13). Skipping the velocity
+        // A PILOTED body's pose is gameplay's. Skipping the velocity
         // pass alone would not be enough: a body that had a velocity when the authority
         // flipped would keep advancing on it forever, since nothing damps it either.
         if (flags[i].gameplay_authority) continue;
@@ -225,8 +225,8 @@ pub fn integratePositions(bm: *BodyManager, dt: Real) void {
 /// Advance every live body one fixed tick of `dt` seconds under world-space
 /// `gravity` (m/s²): the exact composition of `integrateVelocities` then
 /// `integratePositions`, with no contact solve between (free flight). Existing
-/// M1.1.5 call sites and tests use this fused form unchanged; the full pipeline
-/// (M1.1.15) calls the two halves directly with the solver in between.
+/// Inherited call sites and tests use this fused form unchanged; the full pipeline
+/// calls the two halves directly with the solver in between.
 pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     integrateVelocities(bm, dt, gravity);
     integratePositions(bm, dt);

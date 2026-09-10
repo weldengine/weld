@@ -121,11 +121,8 @@ pub const ShapeDescriptor = union(ShapeType) {
     box: struct { half_extents: Vec3 = Vec3.splat(0.5) },
     /// Capsule of `radius` and cylinder `half_height` (metres), Y axis.
     capsule: struct { radius: f32 = 0.3, half_height: f32 = 0.5 },
-    /// Placeholder — payload lands at the cylinder sub-milestone.
     cylinder: void,
-    /// Placeholder — payload lands at the tapered-cylinder sub-milestone.
     tapered_cylinder: void,
-    /// Placeholder — payload lands at the convex-hull sub-milestone.
     convex_hull: void,
     /// Solid half-space `n·x <= d`: `normal` unit, `distance` in metres, both in
     /// the shape's local frame and transported by the body pose
@@ -207,13 +204,10 @@ pub const ShapeDescriptor = union(ShapeType) {
         /// `mActiveEdgeCosThresholdAngle` default.
         active_edge_cos_threshold: f32 = 0.99619472,
     },
-    /// Placeholder — payload lands at the height-field sub-milestone.
     height_field: void,
-    /// Placeholder — payload lands at the compound sub-milestone.
     compound: void,
-    /// Placeholder — payload lands at the mutable-compound sub-milestone.
     mutable_compound: void,
-    /// Placeholder — the empty shape carries no parameters.
+    /// The empty shape carries no parameters.
     empty: void,
 };
 
@@ -245,9 +239,7 @@ pub const TriggerOverlap = struct {
 /// `linear_damping` defaults to 0.05 to agree with the `RigidBody` component
 /// and Jolt (spec §1 says 0.01, §2 says 0.05).
 pub const BodyDescriptor = struct {
-    /// Owning ECS entity.
     entity: EntityId,
-    /// Simulation class.
     body_type: BodyType,
     /// Collision shape (created via `ShapeStore.createShape`).
     shape: ShapeId,
@@ -259,7 +251,6 @@ pub const BodyDescriptor = struct {
     mass: f32 = 1.0,
     /// Coulomb friction coefficient.
     friction: f32 = 0.5,
-    /// Restitution (bounciness).
     restitution: f32 = 0.3,
     /// Linear velocity damping per second.
     linear_damping: f32 = 0.05,
@@ -329,7 +320,6 @@ pub const BodyDescriptor = struct {
 /// displacement already computed; and `friction` has no meaning on a body that never
 /// reaches the contact solver, ground braking being `MovementConfig.ground_friction`.
 pub const CharacterDescriptor = struct {
-    /// Owning ECS entity.
     entity: EntityId,
 
     /// Position of the capsule's BASE, NEVER its centre (§1.12.3). A body's pose is the
@@ -533,7 +523,7 @@ pub const CharacterMoveResult = struct {
 // --- Queries (the complete family, frozen before the interface freeze) ---
 //
 // Mirrors `engine-tier-interfaces.md` §1 verbatim. The family is settled IN FULL
-// here even where the body is a Phase-1 stub: adding a method to a comptime
+// here even where the body is still a stub: adding a method to a comptime
 // strategy interface after its freeze breaks every Tier 3 solver, so deferring
 // a signature is not admissible (`engine-physics-forge.md` §1.11.7).
 //
@@ -599,7 +589,6 @@ pub const BackFaceMode = enum(u8) {
 pub const RaycastQuery = struct {
     /// Ray origin (metres).
     origin: Vec3,
-    /// Ray direction.
     direction: Vec3,
     /// Maximum distance; finite and `>= 0`, and `0` degenerates to a point test.
     max_distance: f32,
@@ -614,15 +603,11 @@ pub const RaycastQuery = struct {
 /// `engine-physics-forge.md` §13 are wrappers over it (§1.11.7). Symmetric with
 /// `ShapeCastQuery2D`.
 pub const ShapeCastQuery = struct {
-    /// The shape being cast.
     shape: ShapeId,
     /// Start position of the cast shape (metres).
     origin: Vec3,
-    /// Orientation of the cast shape.
     rotation: Quatf = Quatf.identity,
-    /// Sweep direction.
     direction: Vec3,
-    /// Maximum sweep distance.
     max_distance: f32,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
@@ -635,11 +620,9 @@ pub const ShapeCastQuery = struct {
 /// An overlap test of an arbitrary shape. Same construction as the cast: the
 /// sphere and box overlaps of §13 are wrappers over this one entry.
 pub const OverlapQuery = struct {
-    /// The shape being tested.
     shape: ShapeId,
     /// Its position (metres).
     position: Vec3,
-    /// Its orientation.
     rotation: Quatf = Quatf.identity,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
@@ -683,7 +666,6 @@ pub const OverlapQuery = struct {
 pub const RaycastHit = struct {
     /// Entity owning the body hit.
     entity: EntityId,
-    /// The body hit.
     body: BodyId,
     /// Sub-shape hit — an opaque path, zero bits wide for a shape with no sub-shape,
     /// so the `0` is not read (§1.11.16; the type doc above carries the reasoning).
@@ -701,7 +683,6 @@ pub const RaycastHit = struct {
 pub const ShapeCastHit = struct {
     /// Entity owning the body hit.
     entity: EntityId,
-    /// The body hit.
     body: BodyId,
     /// Sub-shape of the body that was hit.
     subshape_id: u32 = 0,
@@ -720,7 +701,6 @@ pub const ShapeCastHit = struct {
 pub const ClosestPointResult = struct {
     /// Entity owning the collider.
     entity: EntityId,
-    /// The body.
     body: BodyId,
     /// Sub-shape carrying the closest point.
     subshape_id: u32 = 0,
@@ -879,8 +859,8 @@ test "BodyDescriptor defaults match the brief" {
         }
     }
     // Five of the twelve variants carry a payload today: sphere, box, capsule, plane and
-    // triangle_mesh. The other seven are `void` until their own sub-milestone, at which
-    // point this total rises with them.
+    // triangle_mesh. The other seven are `void`, and this total rises with each
+    // payload that lands.
     //
     // COUNTER-FACTUAL MEASURED, by changing the UNION and not the expected count: giving
     // `cylinder` a payload reports `expected 5, found 6` here while the variant total

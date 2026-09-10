@@ -1,10 +1,9 @@
-//! `forge_3d/pipeline/narrowphase/plane.zig` — the analytic half-space kernels
-//! (M1.1.11).
+//! `forge_3d/pipeline/narrowphase/plane.zig` — the analytic half-space kernels.
 //!
 //! A `Plane` is the **solid half-space** `{ x : n·x <= d }`, `n` unit and `d` in
 //! metres (`engine-physics-forge.md` §1.11.15). It is not a bounded convex: its
 //! support map diverges in every direction but `−n`, so it traverses neither GJK,
-//! nor EPA, nor the M1.1.10 cast kernel, and it is never converted into a
+//! nor EPA, nor the cast kernel, and it is never converted into a
 //! `SupportShape`. The category is chosen upstream, by `Shape.class()`.
 //!
 //! **Closed forms, and therefore CHEAPER than GJK rather than costlier.** Every
@@ -113,7 +112,7 @@ pub fn HalfSpace(comptime T: type) type {
         }
 
         /// Domain assertion: the normal is UNIT and the distance is FINITE. Renamed from
-        /// `assertUnit` at M1.1.11/E7-J2, when the second half was added — a name that
+        /// `assertUnit` when the second half was added — a name that
         /// promised one check while performing two would be worse than either.
         ///
         /// Neither half is cosmetic. Every kernel treats the normal as unit when it
@@ -357,14 +356,14 @@ pub fn closestPoint(comptime T: type, plane: HalfSpace(T), p: math.Vec(3, T)) Pr
 /// `foundation/math`: it is pure box geometry with no threshold and no physical
 /// semantics, and the broadphase — which imports only `foundation` — needs the same
 /// formula this table row does. Written twice, the two copies would drift; this row
-/// therefore names the kernel and delegates to it. RD-1 of the milestone records the
+/// therefore names the kernel and delegates to it. A recorded deviation carries the
 /// placement.
 pub fn aabbOverlaps(comptime T: type, plane: HalfSpace(T), box: math.Aabb(T)) bool {
     plane.assertDomain();
     return box.overlapsHalfSpace(plane.normal, plane.distance);
 }
 
-/// Do two half-space SOLIDS meet? Analytic, no iteration, no threshold (M1.1.13).
+/// Do two half-space SOLIDS meet? Analytic, no iteration, no threshold.
 ///
 /// Two half-spaces intersect ALWAYS, with one exception: their normals exactly opposite AND
 /// their boundaries disjoint. The derivation is one line — with `A = {n·x <= d_a}` and
@@ -386,7 +385,7 @@ pub fn halfSpacesOverlap(comptime T: type, a: HalfSpace(T), b: HalfSpace(T)) boo
     return a.distance + b.distance >= 0;
 }
 
-/// Does any point of a triangulated SURFACE lie in a half-space solid? (M1.1.13.)
+/// Does any point of a triangulated SURFACE lie in a half-space solid?
 ///
 /// **A vertex test is EXACT here, and that is a property of convexity rather than a
 /// simplification.** A triangle is the convex hull of its three vertices and a half-space is a

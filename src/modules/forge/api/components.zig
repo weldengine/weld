@@ -39,7 +39,6 @@ pub const Sleeping = extern struct {};
 /// (`engine-physics-forge.md` §2). Position/rotation live on the ECS
 /// `Transform`; velocity on `Velocity`; accumulated forces on `PhysicsForces`.
 pub const RigidBody = extern struct {
-    /// Simulation class.
     body_type: BodyType = .dynamic,
     /// Mass (kg).
     mass: f32 = 1.0,
@@ -49,13 +48,11 @@ pub const RigidBody = extern struct {
     angular_damping: f32 = 0.05,
     /// Coulomb friction coefficient.
     friction: f32 = 0.5,
-    /// Restitution (bounciness).
     restitution: f32 = 0.3,
     /// Per-body gravity multiplier.
     gravity_scale: f32 = 1.0,
     /// Continuous collision detection for fast movers.
     continuous_collision: bool = false,
-    /// Whether the body may go to sleep when at rest.
     can_sleep: bool = true,
     /// Who owns this body's pose and velocity. `.solver` for
     /// EVERY `body_type` — no type-dependent default, because the point of the

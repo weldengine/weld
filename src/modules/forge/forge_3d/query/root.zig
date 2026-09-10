@@ -1,5 +1,5 @@
 //! `forge_3d/query/root.zig` — the `Real`-bound spatial-query orchestration
-//! (M1.1.9; moved into the `query/` package unchanged at M1.1.10 / E5).
+//! moved into the `query/` package unchanged.
 //!
 //! **Owns no state.** It takes `(bp, bm, store)` as parameters, the shape of
 //! `rigid.build`. A query mutates nothing, wakes nobody, and appears nowhere in
@@ -27,15 +27,15 @@
 //! §1.11.6 claims.
 //!
 //! **Only the two entries taking a caller-supplied SHAPE HANDLE carry an error**
-//! (§1.11.7, M1.1.11): `shapeCast` and `overlapShape`. They separate a stale handle,
+//! (§1.11.7): `shapeCast` and `overlapShape`. They separate a stale handle,
 //! an inadmissible probe and a real miss — three outcomes a single `null` conflated.
 //! The other six take no handle and are TOTAL. The three RAY entries carried
-//! `error{UnsupportedShape}` until M1.1.11, latched per collector and surfaced by the
+//! `error{UnsupportedShape}` once, latched per collector and surfaced by the
 //! entry; the kernel's rounded-box refusal became an asserted precondition and the
 //! latch went with it, since no body's shape could ever reach it.
 //!
 //! **Precision.** Everything here is at the solver scalar. The public surface
-//! stays `f32` (§1.11.8); that boundary lives at the interface tier (M1.1.15),
+//! stays `f32` (§1.11.8); that boundary lives at the interface tier,
 //! not in this file.
 
 const std = @import("std");
@@ -43,8 +43,8 @@ const config = @import("../config.zig");
 const broadphase_mod = @import("../pipeline/broadphase.zig");
 const body_manager_mod = @import("../body_manager.zig");
 const api = @import("weld_forge");
-// The ray collectors, split out at M1.1.10/E5 and moved unchanged. Aliased here so
-// every construction site below stays textually identical to the M1.1.9 code.
+// The ray collectors, split out and moved unchanged. Aliased here so
+// every construction site below stays textually identical to what it was.
 const ray_mod = @import("ray.zig");
 const cast_mod = @import("cast.zig");
 const overlap_mod = @import("overlap.zig");
@@ -85,7 +85,7 @@ pub const layer_bits: u8 = api.collision_layer_count;
 ///     destroying a shape and casting with its id; same name and same meaning as
 ///     `addBody`'s, not a second vocabulary for one situation.
 ///   - `UnsupportedShape` — the probe is a shape the exact kernel cannot express.
-///     Reachable by passing a plane handle or, since M1.1.11.1, a MESH handle: the
+///     Reachable by passing a plane handle or a MESH handle: the
 ///     cast kernel is a ray march on the Minkowski difference of the two cores
 ///     (§1.11.11) and the shape overlap is GJK on those cores (§1.11.12), so a
 ///     half-space is not bounded there and a mesh is not convex (§1.11.7's fourth
@@ -94,7 +94,7 @@ pub const layer_bits: u8 = api.collision_layer_count;
 /// A real miss is `null` / `0`, and a ZERO DIRECTION is a miss too — a degenerate
 /// query with an empty answer, not a malformed one (§1.11.11's domain table).
 ///
-/// This is a RESHAPING, not an extension. Before E3 the set was
+/// This is a RESHAPING, not an extension. The set was
 /// `error{UnsupportedShape}` on the three RAY entries, where it came from the
 /// kernel's rounded-box latch and was reachable through no store shape at all; it
 /// now lives on the two handle-taking entries, where a caller can cause both
@@ -158,7 +158,7 @@ pub const RayQuery = struct {
     direction: Vec3r,
     max_distance: Real,
     filter: Filter = .{},
-    /// Which side of a mesh TRIANGLE answers (M1.1.11.1, `engine-physics-forge.md`
+    /// Which side of a mesh TRIANGLE answers (`engine-physics-forge.md`
     /// §1.11.17). Vacuous on every other shape: a convex is SOLID and has no back, and
     /// neither has a half-space. Under `.collide` the returned normal is FLIPPED on a
     /// back-face hit, because §1.11.4 declares `normal · direction <= 0` on EVERY hit.
@@ -167,7 +167,7 @@ pub const RayQuery = struct {
 
 /// One ray hit at solver precision — the mirror of the public `RaycastHit`
 /// (`engine-tier-interfaces.md` §1) at `Real`. Converting to that f32 form is the
-/// interface tier's business (M1.1.15); nothing in this milestone does it.
+/// interface tier's business; nothing in this milestone does it.
 pub const RayHit = struct {
     /// The body hit.
     body: BodyId,
@@ -328,9 +328,9 @@ pub fn raycastAll(
     return written;
 }
 
-// --- The rest of the family, implemented at `Real` (M1.1.10 / E5) ---
+// --- The rest of the family, implemented at `Real` ---
 //
-// These five carried FROZEN `f32` signatures and `@panic` bodies since M1.1.9,
+// These five carried FROZEN `f32` signatures and `@panic` bodies,
 // because a comptime strategy interface cannot gain a method after its freeze.
 // They now take the SOLVER scalar and return `[]BodyId`, for the reason
 // `engine-physics-forge.md` §1.11.8 gives as a structural corollary: an entry typed
@@ -338,7 +338,7 @@ pub fn raycastAll(
 // `-Dphysics_f64`, a time of impact and a contact point narrowed to `f32` before
 // even leaving the kernel and widened again at the interface tier, two conversions
 // of which one is invisible, and the loss of exactly what the flag buys. The
-// boundary is single and lives at the interface tier (M1.1.15).
+// boundary is single and lives at the interface tier.
 //
 // The PUBLIC types of `api/types.zig` and `engine-tier-interfaces.md` §1 are
 // untouched by that move: they are the frozen surface, and `raycast_test.zig` still
@@ -356,7 +356,7 @@ pub fn raycastAll(
 /// AABB's CENTRE — not at `query.origin`. The two coincide for the three bounded
 /// convexes the store builds, whose local AABB is centred on the origin, but that is a
 /// property of those shapes and not of the model, so the centre is what is computed.
-/// (The store also builds a plane since M1.1.11, which has no world AABB at all and is
+/// (The store also builds a plane, which has no world AABB at all and is
 /// refused as a probe above, before this box is ever built.) The AABB is a constant of
 /// the query: a sweep is a pure translation.
 pub fn shapeCast(
@@ -581,7 +581,7 @@ fn entityKey(e: EntityId) u64 {
 /// order; retaining the smallest retains the bodies created FIRST, which is the
 /// inverse of the invariance §1.11.6 claims for the family. The only identity stable
 /// under a permutation of creation order is the scene's, that is the owning entity
-/// (§1.11.14). MEASURED on `main` at the M1.1.9 tag, at f32: two unit spheres at
+/// (§1.11.14). MEASURED on `main`, at f32: two unit spheres at
 /// `(20, ±0.5, 0)` against a ray from the origin along +X both return
 /// `19.133974075`, bit-identical because the squared perpendicular offset is `0.25`
 /// on either side, and exchanging the two creation orders exchanged the entity
@@ -672,7 +672,7 @@ fn assertFiniteVec(vector: Vec3r) void {
 
 /// A rotation is UNIT. Not cosmetic: every one of these rotations is used as an
 /// inverse BY CONJUGATION, and the conjugate is the inverse only for a unit
-/// quaternion. M1.1.9 burned on exactly this — an f32-unit quaternion widened to f64
+/// quaternion. This engine burned on exactly this — an f32-unit quaternion widened to f64
 /// is off by `3.4e-8`, which scaled a static collider's frame by that factor, 0.34 mm
 /// at 10 km, the regime `-Dphysics_f64` exists for.
 fn assertUnitRotation(rotation: Quatr) void {
@@ -697,7 +697,7 @@ fn assertUnitRotation(rotation: Quatr) void {
 /// the defect reappears at the other end of the range. The `scale == 0` test is at
 /// TRUE ZERO — the largest absolute component is zero exactly when all three are.
 pub fn unitDirection(direction: Vec3r) ?Vec3r {
-    // `foundation`'s shared form since the M1.1.11.1 closure — the same three operations in the
+    // `foundation`'s shared form — the same three operations in the
     // same order, so this is BIT-IDENTICAL to the body it replaces, and the reasoning above is
     // now stated once at the declaration instead of at each of its three consumers.
     return direction.normalizeScaled();

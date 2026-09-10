@@ -1,8 +1,8 @@
 //! `forge_3d/query/ray.zig` — the three ray collectors and the per-candidate test
-//! they share (M1.1.10 / E5).
+//! they share.
 //!
 //! **Moved out of `query.zig` TEXTUALLY UNCHANGED.** Everything below this prelude is
-//! the M1.1.9 code as delivered, including the E1 ordering-key edit: the only
+//! the code as delivered, including the ordering-key edit: the only
 //! alterations are the three `pub` markers the split requires, so that `root.zig` can
 //! name the collectors it constructs. Nothing was reworded, renamed or reflowed —
 //! the point of splitting in its own commit is that the diff can be read at `-M` and
@@ -34,7 +34,7 @@ const BackFaceMode = api.BackFaceMode;
 /// world-space assembly. `null` means "no hit to offer" — a filtered candidate, a
 /// stale handle, or a genuine miss.
 ///
-/// **Total since M1.1.11.** It returned `Error!?RayHit` because the kernel could
+/// **Total.** It returned `Error!?RayHit` because the kernel could
 /// answer `error.UnsupportedShape`, and each collector latched that error in a field
 /// for its entry to surface. The kernel's rounded-box refusal is an asserted
 /// precondition now, and it was reachable through no body anyway — every stored box
@@ -65,7 +65,7 @@ fn evaluate(
         .entity = owner,
         // The SUB-SHAPE the kernel hit — a mesh's triangle index, and `0` for every other
         // shape, which consumes zero bits of the path (§1.11.16). Filled for the FIRST
-        // time here: until M1.1.11.1 nothing wrote it and the default WAS the value.
+        // time here: before the mesh nothing wrote it and the default WAS the value.
         .subshape_id = local.subshape_id,
         .position = ray.origin.add(ray.direction.scale(local.distance)),
         // The kernel answers in the body's local frame; the distance is invariant

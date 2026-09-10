@@ -5,7 +5,7 @@
 //! meaning for the rigid branch: it projects the awake dynamic bodies onto
 //! `0..count`, links the pairs its contact constraints couple, ranks the resulting
 //! groups, reorders the constraint array into one contiguous range per island —
-//! the range shape the solver's stage entries have taken since M1.1.6 —
+//! the range shape the solver's stage entries take —
 //! and arbitrates the two decisions the model makes per island: activation at step
 //! 5 of the normative cycle (§1.7) and the sleep transition at step 11.
 //!
@@ -30,7 +30,7 @@
 //!     membership partitions the awake dynamic set, so that minimum is unique per
 //!     island.
 //!
-//! Determinism by construction (M1.1.14). No hash container anywhere: the reverse
+//! Determinism by construction. No hash container anywhere: the reverse
 //! `BodyId` → dense-index direction is a scratch array indexed by slot, members are
 //! sorted ascending by `BodyId`, ranks are assigned by walking members in that
 //! order, and constraints are ordered by the COMPOSITE key
@@ -39,7 +39,7 @@
 //! of two inputs: the awake dynamic set, and the pair-key-sorted constraint array.
 //!
 //! That key is a TRIPLET and not a pair, and the third term is what makes the
-//! sentence above true: since M1.1.11.1 a mesh pair contributes one constraint per
+//! sentence above true: a mesh pair contributes one constraint per
 //! contacting triangle, all sharing `rank` and `pair_key`, and on those two alone
 //! their relative order would be `std.sort.block`'s internal tie-handling — which is
 //! UNSTABLE. `lessByCompositeKey` is the authority.
@@ -90,7 +90,7 @@ pub const ConstraintKey = struct {
     rank: u32,
     pair_key: u64,
     /// The constraint's SUB-SHAPE — the third term of the composite key, and load-bearing since
-    /// M1.1.11.1 (closure finding F4). A mesh pair contributes one constraint per contacting
+    /// A mesh pair contributes one constraint per contacting
     /// triangle, all sharing `rank` and `pair_key`; on those two alone their relative order would
     /// be `std.sort.block`'s internal behaviour, which is UNSTABLE, and this file's own docstring
     /// promises the opposite — that the ordering "never leans on the sort algorithm being stable".
@@ -239,11 +239,11 @@ pub const IslandManager = struct {
         while (slot < slot_count) : (slot += 1) {
             if (body_types[slot] != .dynamic) continue;
             if (flags[slot].sleeping) continue;
-            // **A PILOTED BODY LEAVES ITS ISLAND** (M1.1.15.2 G15,
+            // **A PILOTED BODY LEAVES ITS ISLAND** (
             // `engine-physics-forge.md` § *Autorité d'écriture* clause 3, corrected).
             // It follows the KINEMATIC regime, and a kinematic is a member of no island
             // — this collection excludes it on `body_type` two lines above, for the
-            // reason M1.1.8 wrote down: a constraint cannot affect an infinite-mass
+            // stated reason: a constraint cannot affect an infinite-mass
             // body's velocity, and linking through one would fuse the scene. A piloted
             // body presents exactly that infinite mass (clause 2), so admitting it would
             // link islands that are otherwise independent.
@@ -463,7 +463,7 @@ fn lessByBodyId(_: void, x: Member, y: Member) bool {
 /// Total, and not merely a grouping: two constraints of one pair cannot share a `subshape_id`,
 /// the sub-shape being the triangle index and each triangle being offered at most once. That is
 /// what lets the permutation below be a function of the keys alone rather than of the sort's
-/// tie-handling — the invariant M1.1.8 wrote down and several constraints per pair had annulled.
+/// tie-handling — the written invariant that several constraints per pair had annulled.
 pub fn lessByCompositeKey(_: void, x: ConstraintKey, y: ConstraintKey) bool {
     if (x.rank != y.rank) return x.rank < y.rank;
     if (x.pair_key != y.pair_key) return x.pair_key < y.pair_key;

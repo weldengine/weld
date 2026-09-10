@@ -2,7 +2,7 @@
 //! Catto lineage: Solver2D → Box2D v3), executing steps 6 and 7 of the normative
 //! per-tick cycle (`engine-physics-solver.md` §1.7).
 //!
-//! It replaces the M1.1.6 Sequential Impulses velocity pass and the M1.1.7 NGS
+//! It replaces the Sequential Impulses velocity pass and the NGS
 //! position pass, which it merges into one loop: **there is no position pass**.
 //! Position error enters the solve as a bounded VELOCITY BIAS derived from soft
 //! constraints, and each substep re-integrates the poses, so the separation the next
@@ -27,10 +27,10 @@
 //! by construction. No early-out, no convergence predicate, no iteration budget.
 //!
 //! **Friction runs in relax only**, after every normal point of its constraint —
-//! source parity. Its mechanics are unchanged from M1.1.6: two independent tangent
+//! source parity. Its mechanics are inherited: two independent tangent
 //! axes driven to zero, a CIRCULAR clamp `‖(λ_t1, λ_t2)‖ ≤ μ·λₙ` against the point's
 //! current accumulated normal impulse, the vector rescaled and never per-axis, and no
-//! bias of any kind — position error is normal by construction. The M1.1.6 comment
+//! bias of any kind — position error is normal by construction. The earlier comment
 //! claiming normal-first as a divergence from the references retires with this file:
 //! the pinned source is normal-first too.
 //!
@@ -44,7 +44,7 @@
 //! Import discipline: `foundation`, `weld_forge`, `../config.zig`,
 //! `../body_manager.zig`, the `rigid/` siblings — and `../pipeline/integration.zig`,
 //! which is the THIRD and last pipeline import of this branch (after the narrowphase
-//! facade and, since M1.1.8, `sleep.zig`). It is required rather than convenient: the
+//! facade and `sleep.zig`). It is required rather than convenient: the
 //! substep loop IS the interleaving of integration with the constraint stages, and
 //! splitting that order across two files would leave the normative sequence written
 //! down in neither.

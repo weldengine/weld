@@ -1,9 +1,9 @@
 //! `forge_3d/pipeline/narrowphase/support.zig` — the shared geometry base of
 //! the narrowphase package: the convex support shapes, the frame-of-A relative
-//! pose, the Minkowski-difference support sample, and (M1.1.3) the supporting
+//! pose, the Minkowski-difference support sample, and the supporting
 //! feature used by the contact-manifold clipper.
 //!
-//! Relocated verbatim from the single-file `narrowphase.zig` at M1.1.3/E1
+//! Relocated verbatim from the single-file `narrowphase.zig`
 //! (`SupportShape(T)`, `RelativePose(T)`, and the `minkowskiSupport` free
 //! function — promoted to `pub` here because the GJK loop, EPA, and the manifold
 //! generator all consume it). GJK's own machinery (`Simplex`, the descent loop,
@@ -24,7 +24,7 @@
 //! **Computation in the frame of A (brief Notes).** B is pre-transformed
 //! relative to A once per pair (`RelativePose`); A's support runs untransformed.
 //! Better precision far from the world origin and half the per-iteration
-//! transforms. Frozen (M1.1.14): changing the computation frame would break
+//! transforms. Frozen: changing the computation frame would break
 //! validated bit-exactness.
 
 const std = @import("std");
@@ -51,7 +51,7 @@ pub fn Vertex(comptime T: type) type {
 /// A hit on ONE shape, in that shape's local frame: how far along the (unit) query
 /// direction, and the outward unit surface normal there.
 ///
-/// **Shared vocabulary, which is why it lives here** (M1.1.11). Two kernel files
+/// **Shared vocabulary, which is why it lives here**. Two kernel files
 /// produce it — `raycast.zig` for the bounded convexes and `plane.zig` for the
 /// half-space — and the `BodyId`-level adapter that dispatches between them by shape
 /// CLASS must return ONE type, not two structurally identical ones. `plane.zig` may
@@ -102,13 +102,13 @@ pub fn CastHit(comptime T: type) type {
 /// edge / vertex) whose points maximize `dir · p` on the core, in the core's
 /// local frame, radius excluded. Up to 4 vertices (a box face); `count` gives
 /// the valid prefix (point → 1, segment → 1 or 2, box → 4). The contact-manifold
-/// clipper (M1.1.3) takes `supportingFace(+n)` on A and `supportingFace(−n)` on
+/// clipper takes `supportingFace(+n)` on A and `supportingFace(−n)` on
 /// B — where `n` is the contact normal A→B — and clips one against the other.
 ///
 /// `face_id` and `vert_ids` carry STABLE, translation-invariant local feature
 /// identities (a box vertex id is its sign-pattern 0..7, a box face id is
 /// `axis·2 + sign`) so the manifold's `feature_id` survives a small pose change
-/// for M1.1.6 warm-starting (frame-stability is the point — a clip-buffer index
+/// for warm-starting (frame-stability is the point — a clip-buffer index
 /// is not stable).
 pub fn Face(comptime T: type) type {
     return struct {
@@ -128,7 +128,7 @@ pub fn Face(comptime T: type) type {
 /// A convex support shape: a convex **core** (point / segment / box) plus an
 /// inflation `radius` around it (the Jolt convex-radius architecture). GJK/EPA
 /// run on the core alone and never see the inflated surface. `radius` is 0 for a
-/// box in M1.1.2/3. Future shapes (cylinder, convex hull) are new `Core` cases,
+/// box. Future shapes (cylinder, convex hull) are new `Core` cases,
 /// purely additive.
 pub fn SupportShape(comptime T: type) type {
     return struct {
@@ -137,7 +137,7 @@ pub fn SupportShape(comptime T: type) type {
 
         /// The convex core geometry, in the shape's own local frame.
         core: Core,
-        /// Inflation radius around the core (0 for box in M1.1.2/3).
+        /// Inflation radius around the core (0 for a box).
         radius: T,
 
         /// The convex core of a support shape, in its local frame.
@@ -371,7 +371,7 @@ pub fn RelativePose(comptime T: type) type {
 /// Support point of the Minkowski difference of the two cores in direction
 /// `dir` (A's frame): `support_A(dir) − support_B(−dir)`, keeping both supports
 /// so the closest points on A and B stay reconstructible. `pub` because both the
-/// GJK descent (`gjk.zig`) and the EPA / manifold generators (M1.1.3) consume it.
+/// GJK descent (`gjk.zig`) and the EPA / manifold generators consume it.
 pub fn minkowskiSupport(
     comptime T: type,
     shape_a: SupportShape(T),

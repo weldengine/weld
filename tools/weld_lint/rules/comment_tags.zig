@@ -215,8 +215,15 @@ fn matchingParen(text: []const u8, open: usize) ?usize {
 
 /// Length of a phase mention starting at `i`, or null.
 ///
-/// The word, then whitespace, then an optional minus and a digit. The minus is
-/// what makes the pre-zero phase reachable.
+/// The word, then a SEPARATOR, then a digit. The separator is whitespace, a
+/// hyphen, or whitespace then a hyphen, so `Phase <n>`, the pre-zero archive's
+/// `Phase -<n>` and the compound `Phase-<n>` are one mention in three
+/// orthographies. The compound escaped this predicate while the separator had
+/// to BEGIN with whitespace, and 43 of them were standing in the tree when that
+/// was measured. With no separator at all there is no mention.
+///
+/// The digits are written `<n>` above on purpose: spelled out, this doc comment
+/// would be a phase mention and the rule would report itself.
 fn matchPhase(text: []const u8, i: usize) ?usize {
     const word = if (hasPrefix(text, i, "Phase"))
         "Phase"
@@ -226,10 +233,10 @@ fn matchPhase(text: []const u8, i: usize) ?usize {
         return null;
     var j = i + word.len;
     if (!comment_scan.atRightBoundary(text, j)) return null;
-    const space_start = j;
+    const sep_start = j;
     while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
-    if (j == space_start) return null;
     if (j < text.len and text[j] == '-') j += 1;
+    if (j == sep_start) return null;
     if (j >= text.len or text[j] < '0' or text[j] > '9') return null;
     j += 1;
     return j - i;
@@ -314,6 +321,13 @@ test "a capitalised phase mention is rejected" {
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// Phase 2 will do X\n"));
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// PHASE 1 transfer note\n"));
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// the pre-zero Phase -1 archive\n"));
+    // The COMPOUND form is the same mention and was escaping: the separator used to
+    // have to begin with whitespace, so a hyphen alone fell through.
+    try std.testing.expectEqual(@as(usize, 1), try phaseCount("// this `const` is the Phase-1 default\n"));
+    try std.testing.expectEqual(@as(usize, 1), try phaseCount("// PHASE-2 lowering\n"));
+    // …and a separator is still REQUIRED, so a bare compound word is not a mention.
+    try std.testing.expectEqual(@as(usize, 0), try phaseCount("// Phase1 is not a spelling anyone uses\n"));
+    try std.testing.expectEqual(@as(usize, 0), try phaseCount("// a Phase-locked loop\n"));
 }
 
 test "a lower-case phase is ordinary language and is accepted" {
