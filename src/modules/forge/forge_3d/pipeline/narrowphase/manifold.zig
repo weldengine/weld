@@ -33,7 +33,7 @@
 //! normal in both orders there rather than a negated pair; `BodyManager.collidePair`
 //! restores full order-independence for real bodies via a canonical body-id order.
 //!
-//! **Dependency discipline (brief Notes).** Imports `foundation` (math) and the
+//! **Dependency discipline.** Imports `foundation` (math) and the
 //! sibling `support.zig` / `gjk.zig` / `epa.zig` ONLY — never `weld_forge`,
 //! `body*.zig`, `config.zig`, or `broadphase.zig`. The scalar is the comptime
 //! `T`; `forge_3d` instantiates it at `config.Real`.
@@ -49,7 +49,7 @@ const fast_paths = @import("fast_paths.zig");
 const plane_mod = @import("plane.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
-/// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
+/// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention;
 /// produced by the supporting-face clipper.
 pub fn ContactManifold(comptime T: type) type {
     return struct {
@@ -63,7 +63,7 @@ pub fn ContactManifold(comptime T: type) type {
     };
 }
 
-/// One contact point of a `ContactManifold`. FROZEN convention (brief Notes).
+/// One contact point of a `ContactManifold`. FROZEN convention.
 pub fn ContactPoint(comptime T: type) type {
     return struct {
         /// World-space point on the contact plane (midpoint of the two

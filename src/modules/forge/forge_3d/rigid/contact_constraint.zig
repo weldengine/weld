@@ -22,7 +22,7 @@
 //!     the two body-local surface anchors, the softness selection, and the warm-start
 //!     SEEDING).
 //!
-//! Import discipline (brief): `foundation`, `weld_forge` (handle types),
+//! Import discipline: `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
 //! and `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
 //! so it needs the awake predicate; `rigid/island_manager.zig` already depends on

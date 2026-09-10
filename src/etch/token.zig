@@ -32,12 +32,12 @@ pub const TokenKind = enum {
     float_literal,
     bool_literal, // true / false
     string_literal, // simple-quote only in S3 (no interpolation)
-    time_literal, // DD:DD in-game time (M0.8 E4 routine triggers, §1.4)
-    duration_literal, // FLOAT "s" duration (M0.8 E4 gate fix, §1.4 — greedy-contiguous)
-    color_literal, // "#" + 6 or 8 hex (M0.8 E5, §1.4 l.211 — the DURATION_LIT-precedent literal lift)
-    multiline_string_literal, // triple-quote `"""…"""` (M0.9 E2-A, §1.4 — newline-spanning, DURATION/COLOR greedy-lift precedent; common indent stripped at parse)
+    time_literal, // DD:DD in-game time (routine triggers, §1.4)
+    duration_literal, // FLOAT "s" duration (gate fix, §1.4 — greedy-contiguous)
+    color_literal, // "#" + 6 or 8 hex (§1.4 l.211 — the DURATION_LIT-precedent literal lift)
+    multiline_string_literal, // triple-quote `"""…"""` (§1.4 — newline-spanning, DURATION/COLOR greedy-lift precedent; common indent stripped at parse)
 
-    // ── Keywords (S3 subset) ──
+    // ── Keywords ──
     kw_let,
     kw_mut,
     kw_component,
@@ -51,73 +51,73 @@ pub const TokenKind = enum {
     kw_changed,
     kw_get,
     kw_get_mut,
-    kw_as, // cast operator (M0.8 v0.6 foundations)
-    kw_type, // top-level type alias (M0.8 v0.6 foundations)
-    kw_assert, // assert statement (M0.8 v0.6 foundations)
-    kw_match, // match expression (M0.8 v0.6 foundations)
-    kw_for, // for-in loop (M0.8 v0.6 foundations)
-    kw_in, // for-in loop (M0.8 v0.6 foundations)
-    kw_loop, // loop expression (M0.8 loop/break)
-    kw_break, // break [label] [value] (M0.8 loop/break)
-    kw_continue, // continue [label] (M0.8 loop/break)
-    kw_if, // if/else expression + statement (M0.8 control-flow completion)
+    kw_as, // cast operator
+    kw_type, // top-level type alias
+    kw_assert, // assert statement
+    kw_match, // match expression
+    kw_for, // for-in loop
+    kw_in, // for-in loop
+    kw_loop, // loop expression
+    kw_break, // break [label] [value]
+    kw_continue, // continue [label]
+    kw_if, // if/else expression + statement
     kw_else,
-    kw_while, // while loop statement (M0.8 control-flow completion)
-    kw_throw, // throw expression (M0.8 error handling)
-    kw_try, // try { } catch (M0.8 error handling)
-    kw_catch, // try { } catch IDENT { } (M0.8 error handling)
-    kw_fn, // top-level fn declaration (M0.8 E2 call mechanism)
-    kw_return, // return [expr] (M0.8 E2 call mechanism)
-    kw_throws, // fn throws marker (M0.8 E2 call mechanism)
+    kw_while, // while loop statement
+    kw_throw, // throw expression
+    kw_try, // try { } catch
+    kw_catch, // try { } catch IDENT { }
+    kw_fn, // top-level fn declaration
+    kw_return, // return [expr]
+    kw_throws, // fn throws marker
     kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
-    kw_await, // await <target> (M0.8 E3 sub-slice B; interp-only, codegen Phase 2)
-    kw_struct, // struct declaration (M0.8 E2 block 3 declaration layer)
-    kw_impl, // impl block (M0.8 E2 block 3 declaration layer)
-    kw_enum, // enum declaration (M0.8 E2 block 3 tranche B)
-    kw_trait, // trait declaration (M0.8 E2 block 3 tranche C)
-    kw_event, // event declaration (M0.8 E3 ECS layer)
-    kw_emit, // emit statement (M0.8 E3 ECS layer)
-    kw_tags, // tags hierarchical declaration (M0.8 E3 ECS layer)
-    kw_has_tag, // tag query operator (M0.8 E3 ECS layer)
-    kw_has_no_tag, // tag query operator (M0.8 E3 ECS layer)
-    kw_has_any_tag, // tag query operator (M0.8 E3 ECS layer)
-    kw_has_all_tags, // tag query operator (M0.8 E3 ECS layer)
-    kw_has_no_tags, // tag query operator (M0.8 E3 ECS layer)
-    kw_add_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
-    kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
-    kw_data, // data table declaration (M0.8 E4 Level B gameplay)
-    kw_routine, // routine declaration (M0.8 E4 Level B gameplay)
-    kw_behavior, // behavior tree declaration (M0.8 E4 Level B gameplay)
-    kw_quest, // quest declaration (M0.8 E4 Level B gameplay)
-    kw_dialogue, // dialogue declaration (M0.8 E4 Level B gameplay)
-    kw_ability, // ability declaration (M0.8 E4 Level B gameplay)
-    kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
-    kw_sequence, // behavior composite type (M0.8 E4) + the E6 top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
+    kw_await, // await <target>
+    kw_struct, // struct declaration
+    kw_impl, // impl block
+    kw_enum, // enum declaration
+    kw_trait, // trait declaration
+    kw_event, // event declaration
+    kw_emit, // emit statement
+    kw_tags, // tags hierarchical declaration
+    kw_has_tag, // tag query operator
+    kw_has_no_tag, // tag query operator
+    kw_has_any_tag, // tag query operator
+    kw_has_all_tags, // tag query operator
+    kw_has_no_tags, // tag query operator
+    kw_add_tag, // tag mutation
+    kw_remove_tag, // tag mutation
+    kw_data, // data table declaration
+    kw_routine, // routine declaration
+    kw_behavior, // behavior tree declaration
+    kw_quest, // quest declaration
+    kw_dialogue, // dialogue declaration
+    kw_ability, // ability declaration
+    kw_branch, // quest/dialogue branch
+    kw_sequence, // behavior composite type + the E6 top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
-    kw_theme, // theme declaration (M0.8 E5 Level B presentation)
-    kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)
-    kw_input_mapping, // input_mapping declaration (M0.8 E5 Level B presentation — STRICT, no execution)
-    kw_widget, // widget declaration (M0.8 E5 Level B presentation — recursive UI tree)
-    kw_locale, // locale declaration (M0.8 E5 Level B presentation — translation table)
+    kw_theme, // theme declaration
+    kw_motion, // motion declaration
+    kw_input_mapping, // input_mapping declaration
+    kw_widget, // widget declaration
+    kw_locale, // locale declaration
     kw_effect, // effect declaration (M0.8 E6 Level B VFX — emitters + event handlers, VFX-only since v0.6)
-    kw_audio_graph, // audio_graph declaration (M0.8 E6 Level B audio — DSP node graph, mandatory output sink)
-    kw_audio_score, // audio_score declaration (M0.8 E6 Level B audio — adaptive music, STRING-named, sections + stems)
-    kw_anim_graph, // anim_graph declaration (M0.8 E6 Level B animation — skeletal state machine, states + layers)
-    kw_shader, // shader declaration (M0.8 E6 Level B render — vertex/fragment stages, shader-mode body validation)
-    kw_scene, // scene declaration (M0.8 E7 Level C — STRING-named scene graph, entity/instance decls)
-    kw_prefab, // prefab declaration (M0.8 E7 Level C — STRING-named, of/extends relation, requires + on_attach/on_detach hooks)
-    kw_import, // import directive (M1.0.7 cross-file import — module path + optional alias / selective items; graduated from non_s3_keywords)
-    kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
-    kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
-    kw_test, // top-level `test "name" { ... }` block (M1.0.8 graduated it; M1.0.15 executes it end-to-end via the test runner)
-    kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10, §3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (M1.0.12, §4.2 spawn_stmt) — disambiguated by the next token
-    kw_race, // race statement `race { race_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 race_stmt)
-    kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
-    kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
-    kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
-    kw_measure, // `measure { block }` expression (M1.0.15 — §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
+    kw_audio_graph, // audio_graph declaration
+    kw_audio_score, // audio_score declaration
+    kw_anim_graph, // anim_graph declaration
+    kw_shader, // shader declaration
+    kw_scene, // scene declaration
+    kw_prefab, // prefab declaration
+    kw_import, // import directive
+    kw_const, // top-level `const` declaration (— graduated from non_s3_keywords; top-level only per part1 §4.5)
+    kw_private, // `private` visibility modifier prefix on a declaration_body (— graduated from non_s3_keywords; grammar §5.1)
+    kw_test, // top-level `test "name" { ... }` block
+    kw_spawn, // structural spawn expr `spawn(C{…})` (§3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (§4.2 spawn_stmt) — disambiguated by the next token
+    kw_race, // race statement `race { race_branch* }` (— graduated from non_s3_keywords; §4.2 race_stmt)
+    kw_sync, // sync statement `sync { sync_branch* }` (— graduated from non_s3_keywords; §4.2 sync_stmt)
+    kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (— graduated from non_s3_keywords; §4.3 timer_stmt)
+    kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (— graduated from non_s3_keywords; §4.3 timer_stmt)
+    kw_measure, // `measure { block }` expression (— §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
     /// `service NAME { fn … }` — the `.d.etch`-only construct of
-    /// `etch-grammar.md` §20.4 (M1.1.15.2 G1).
+    /// `etch-grammar.md` §20.4.
     ///
     /// This is a keyword **ADDITION**, not a graduation: `service` has never
     /// been a member of `non_s3_keywords` (that list is `{ override, quantize }`),
@@ -159,24 +159,24 @@ pub const TokenKind = enum {
     gt_eq,
     fat_arrow, // => (match arm, M0.8 v0.6 foundations)
     arrow, // -> (fn return type, M0.8 E2 call mechanism)
-    dotdot, // .. exclusive range (M0.8 v0.6 foundations)
-    dotdot_eq, // ..= inclusive range (M0.8 v0.6 foundations)
+    dotdot, // .. exclusive range
+    dotdot_eq, // ..= inclusive range
     lparen,
     rparen,
     lbrace,
     rbrace,
-    lbracket, // [ — array / map literals, indexing (M0.8 collections)
+    lbracket, // [ — array / map literals, indexing
     rbracket, // ]
-    semicolon, // ; — array fill literal `[v; n]` (M0.8 collections)
-    pipe, // | — closure delimiter `|a| e` (M0.8 closures; bitwise-or is out of E1)
+    semicolon, // ; — array fill literal `[v; n]`
+    pipe, // | — closure delimiter `|a| e`
     colon,
     comma,
     dot,
     at,
-    question, // ? — optional type suffix `T?` (M0.8 E2 block 5)
-    question_dot, // ?. — optional chain (M0.8 E3-C tranche 4, part1 §6.6)
-    question_question, // ?? — null coalesce (M0.8 E3-C tranche 4, part1 §6.6)
-    bang, // ! postfix — force unwrap (M0.8 E3-C tranche 4, part1 §6.6)
+    question, // ? — optional type suffix `T?`
+    question_dot, // ?. — optional chain (tranche 4, part1 §6.6)
+    question_question, // ?? — null coalesce (tranche 4, part1 §6.6)
+    bang, // ! postfix — force unwrap (tranche 4, part1 §6.6)
 
     // ── End / error ──
     eof,
@@ -202,7 +202,7 @@ pub const Token = struct {
 
 /// True when `k` is a keyword token (the contiguous `kw_let`…`kw_f64`
 /// block). Tag-path segments and tag-namespace names accept keywords
-/// CONTEXTUALLY (M0.8 E4): graduating a construct keyword (`quest`,
+/// CONTEXTUALLY: graduating a construct keyword (`quest`,
 /// `data`, …) must never break a tag hierarchy that uses the same word
 /// (`.quest.merchant_intro_done`).
 pub fn isKeywordToken(k: TokenKind) bool {

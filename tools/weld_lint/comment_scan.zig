@@ -344,18 +344,38 @@ test "a leading dot segment is skipped rather than taken for the subtree" {
     try std.testing.expect(inPerimeter("./src/core/x.zig"));
 }
 
+/// An in-perimeter path the ledger currently declares UNREAD, or null once it is
+/// empty. Tests that need the silenced state take their example from HERE rather
+/// than writing one down: the ledger SHRINKS by construction, so a hard-coded path
+/// is made covered by the gate that reads its subtree, and the test then fails for
+/// something that is not a defect. Null is the milestone's exit state, and a caller
+/// that ignores it asserts a state that no longer exists.
+pub fn anUnreadExample(buf: []u8) ?[]const u8 {
+    if (pending.len == 0) return null;
+    const prefix = pending[0].prefix;
+    if (std.mem.endsWith(u8, prefix, ".zig")) return prefix;
+    return std.fmt.bufPrint(buf, "{s}/x.zig", .{prefix}) catch prefix;
+}
+
 test "a declared unread subtree silences the rules and the rest of the perimeter does not" {
     // BOTH DIRECTIONS on the ledger. A path under a declared entry is not
-    // covered; the subtree that carries the rules is.
-    try std.testing.expect(!isCovered("src/etch/interp.zig"));
+    // covered; the subtree that carries the rules is. The unread example comes
+    // from the ledger itself — see `anUnreadExample`.
+    var buf: [256]u8 = undefined;
+    if (anUnreadExample(&buf)) |unread| {
+        try std.testing.expect(!isCovered(unread));
+    }
     try std.testing.expect(isCovered("tools/weld_lint/main.zig"));
 }
 
 test "an unread entry is still inside the perimeter" {
     // The two questions are distinct and conflating them would turn the ledger
     // into an exemption: an unread subtree is unread, not out of scope.
-    try std.testing.expect(inPerimeter("src/etch/interp.zig"));
-    try std.testing.expect(isPending("src/etch/interp.zig"));
+    var buf: [256]u8 = undefined;
+    if (anUnreadExample(&buf)) |unread| {
+        try std.testing.expect(inPerimeter(unread));
+        try std.testing.expect(isPending(unread));
+    }
 }
 
 test "a prefix matches whole segments only" {

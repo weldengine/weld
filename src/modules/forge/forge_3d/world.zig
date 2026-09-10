@@ -413,7 +413,7 @@ pub const PhysicsWorld = struct {
         self.chars.setPresenceProxy(id, proxy);
 
         // AND REGISTERED IN THIS WORLD'S OWN BODY LIST, which is a SECOND fact and not a
-        // restatement of the insertion — the defect found by the W4 test at gate C lived
+        // restatement of the insertion — the defect the W4 test found lived
         // exactly in the gap between the two. `pairStillOverlaps` resolves a retained
         // pair's endpoints through `proxyOf`, which searches this list; an unregistered
         // presence resolves to `null`, so step 2 pruned EVERY pair involving it on EVERY

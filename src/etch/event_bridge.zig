@@ -1,5 +1,5 @@
 //! Typed bridge from a Tier 0 `EventQueue(T)` into the interpreter's per-tick
-//! event store (M1.1.15.2 G4).
+//! event store.
 //!
 //! **The deliverable is the ORDER, not the adapter.** The interpreter's store
 //! has a `Lifetime.tick` and is cleared at the head of every tick; a bridge that

@@ -1,7 +1,7 @@
 //! `forge_3d/pipeline/narrowphase/fast_paths.zig` — the analytic per-pair
 //! narrowphase fast paths.
 //!
-//! **Seed architecture (Guy-approved, brief Scope).** A fast path NEVER
+//! **Seed architecture (approved).** A fast path NEVER
 //! re-implements manifold assembly. Each kernel computes only the `ContactSeed`
 //! the generic path's GJK/EPA block already computes — `(normal, closest_a,
 //! closest_b, base_penetration)` — and feeds the UNCHANGED `generateManifold`.
@@ -37,7 +37,7 @@
 //! `.not_handled` so it stays on the generic path (the SAT/clamp kernels are
 //! radius-0-box only).
 //!
-//! **Dependency discipline (brief Notes).** Imports `foundation` (math) and the
+//! **Dependency discipline.** Imports `foundation` (math) and the
 //! sibling `support.zig` ONLY — never `manifold.zig` (that would be a cycle:
 //! `manifold.zig` imports THIS file, never the reverse), never `weld_forge`,
 //! `body*.zig`, `config.zig`, or `broadphase.zig`. The scalar is the comptime

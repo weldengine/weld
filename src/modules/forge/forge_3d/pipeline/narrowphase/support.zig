@@ -9,7 +9,7 @@
 //! generator all consume it). GJK's own machinery (`Simplex`, the descent loop,
 //! `GjkResult`) lives in the sibling `gjk.zig`.
 //!
-//! **Dependency discipline (brief Notes).** This file imports `foundation`
+//! **Dependency discipline.** This file imports `foundation`
 //! (math) ONLY — never `weld_forge`, never `body*.zig`, never `config.zig`,
 //! never `broadphase.zig`. The scalar arrives as the comptime parameter `T`;
 //! `forge_3d` instantiates it at `config.Real`. The `Shape → SupportShape`
@@ -21,7 +21,7 @@
 //! inflation `radius` is applied downstream (touch test in `gjk.zig`; contact
 //! point placement in `manifold.zig`).
 //!
-//! **Computation in the frame of A (brief Notes).** B is pre-transformed
+//! **Computation in the frame of A.** B is pre-transformed
 //! relative to A once per pair (`RelativePose`); A's support runs untransformed.
 //! Better precision far from the world origin and half the per-iteration
 //! transforms. Frozen: changing the computation frame would break
@@ -177,7 +177,7 @@ pub fn SupportShape(comptime T: type) type {
         /// the local frame: the core point that maximizes `dir · p`. `dir` need
         /// not be normalized.
         ///
-        /// Tie-breaks are fixed for determinism (brief Notes): a capsule
+        /// Tie-breaks are fixed for determinism: a capsule
         /// direction with `dir.y == 0` selects the `+Y` endpoint; a box
         /// direction component `== 0` selects the `+half_extent` corner
         /// component. Both fall out of the `>= 0` comparisons below.
@@ -330,7 +330,7 @@ pub fn RelativePose(comptime T: type) type {
         /// Precompute B-relative-to-A from the two world poses. Uses the
         /// conjugate (the unit-quaternion inverse) throughout — never
         /// `inverse()`, which divides by the squared norm on the hot path
-        /// (brief Notes).
+        ///.
         pub fn init(pos_a: Vec3T, rot_a: QuatT, pos_b: Vec3T, rot_b: QuatT) Self {
             const inv_a = rot_a.conjugate();
             return .{

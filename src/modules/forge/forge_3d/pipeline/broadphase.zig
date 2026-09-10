@@ -8,9 +8,9 @@
 //! against Weld conventions, not ported. It is the proven shape for the plan's
 //! acceptance (incremental insert/remove/update with O(log n) queries); Jolt's
 //! 4-wide batch-rebuilt tree targets massive parallel rebuilds and is a poor
-//! fit here (brief Notes).
+//! fit here.
 //!
-//! **Dependency discipline (brief Notes).** This file imports `foundation`
+//! **Dependency discipline.** This file imports `foundation`
 //! (math) only — never `weld_forge`, never `body*.zig`, never `config.zig`.
 //! The scalar arrives as the comptime parameter `T`; `forge_3d` instantiates it
 //! at `config.Real`. `user_data` is an opaque `u32` to the tree; only the

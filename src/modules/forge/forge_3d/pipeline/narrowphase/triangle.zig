@@ -88,7 +88,7 @@ pub fn isBackFace(comptime T: type, normal: math.Vec(3, T), direction: math.Vec(
 /// predicate is right for a box and wrong for a sphere and a capsule by exactly the
 /// radius — which is the failure the term exists to prevent.
 ///
-/// **RECORDED DEVIATION on the sign.** §1.11.17 and the milestone brief both write this as
+/// **RECORDED DEVIATION on the sign.** §1.11.17 writes this as
 /// `n · support_probe(n) − r_probe < n · v₀`, with the radius SUBTRACTED. That contradicts
 /// their own normative sentence one line later — "a probe straddling the plane touches from
 /// the front and counts in both modes" — and the contradiction is decidable on the case

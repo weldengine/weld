@@ -304,7 +304,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .shader_decl => try list.append(gpa, .{ .shader = try buildShader(gpa, arena, arena.shader_decls.items[datas[i]]) }),
             .scene_decl => try list.append(gpa, .{ .scene = try buildScene(gpa, arena, arena.scene_decls.items[datas[i]]) }),
             .prefab_decl => try list.append(gpa, .{ .prefab = try buildPrefab(gpa, arena, arena.prefab_decls.items[datas[i]]) }),
-            // M1.1.15.2 G1 — `service_decl` reaches this `else` and that is the
+            // `service_decl` reaches this `else` and that is the
             // decision, not an oversight: a `service` exists only in a `.d.etch`
             // (`etch-grammar.md` §20.4), and a declaration file is never cooked into a descriptor.
             // The switch is `else`-terminated, so the compiler could not have
@@ -487,7 +487,7 @@ fn buildTheme(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Them
     return .{ .name = name, .entries = try entries.toOwnedSlice(gpa) };
 }
 
-/// Build a `motion` descriptor (M0.8 E5): states with canonical-rendered
+/// Build a `motion` descriptor: states with canonical-rendered
 /// property fields + transitions with flat-text animators. Mirrors `buildData`
 /// (states ↔ entries+fields) and `buildRoutine` (transitions ↔ interrupts).
 fn buildMotion(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.MotionDecl) BuildError!types.Motion {
@@ -653,13 +653,13 @@ fn renderMotionFieldsBody(gpa: std.mem.Allocator, arena: *const AstArena, fields
 }
 
 /// Render an optional expression: `""` when absent, else the shared canonical
-/// rendering (M0.8 E5 input_mapping properties / bind options / combo fields).
+/// rendering.
 fn renderOptExprAlloc(gpa: std.mem.Allocator, arena: *const AstArena, node: NodeId) BuildError![]u8 {
     if (node.isNone()) return try gpa.dupe(u8, "");
     return try renderExprAlloc(gpa, arena, node);
 }
 
-/// Build an `input_mapping` descriptor (M0.8 E5 Level B STRICT): properties +
+/// Build an `input_mapping` descriptor: properties +
 /// actions (binds) + combos. `output_mapping` (a closure) is presence-marked
 /// `"<closure>"` — the renderer rejects closures (the data-closure precedent),
 /// so the body is structurally noted, never silently-wrong.
@@ -743,7 +743,7 @@ fn buildInputCombo(gpa: std.mem.Allocator, arena: *const AstArena, combo: ast_mo
     return .{ .name = name, .type_name = type_name, .sequence = sequence, .window = window };
 }
 
-// ── widget (M0.8 E5 Level B) ──────────────────────────────────────────────
+// ── widget ──────────────────────────────────────────────
 
 fn freeWidget(gpa: std.mem.Allocator, w: types.Widget) void {
     gpa.free(w.name);
@@ -766,7 +766,7 @@ fn freeUiNode(gpa: std.mem.Allocator, node: types.UiNodeDesc) void {
     gpa.free(node.else_children);
 }
 
-/// Build a `widget` descriptor (M0.8 E5): placement annotations + params +
+/// Build a `widget` descriptor: placement annotations + params +
 /// optional when clause + the recursive `ui_tree`. Mirrors `buildMotion`
 /// (multi-slice) + `buildBTNode` (recursive tree).
 fn buildWidget(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.WidgetDecl) BuildError!types.Widget {
@@ -935,7 +935,7 @@ pub fn renderUiCallAlloc(gpa: std.mem.Allocator, arena: *const AstArena, call_no
     return try buf.toOwnedSlice(gpa);
 }
 
-// ── locale (M0.8 E5 Level B) ──────────────────────────────────────────────
+// ── locale ──────────────────────────────────────────────
 
 fn freeLocale(gpa: std.mem.Allocator, l: types.Locale) void {
     gpa.free(l.name);
@@ -946,7 +946,7 @@ fn freeLocale(gpa: std.mem.Allocator, l: types.Locale) void {
     gpa.free(l.entries);
 }
 
-/// Build a `locale` descriptor (M0.8 E5): flat `key = value` string entries (the
+/// Build a `locale` descriptor: flat `key = value` string entries (the
 /// `buildTheme` precedent, both sides decoded string-literal content).
 fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.LocaleDecl) BuildError!types.Locale {
     var entries: std.ArrayListUnmanaged(types.LocaleEntryDesc) = .empty;
@@ -979,10 +979,7 @@ pub fn renderFieldTypeAlloc(gpa: std.mem.Allocator, arena: *const AstArena, type
     // function, …) has no descriptor-construct surface: fail loud. Collections in
     // particular type-check ONLY on `resource` (cooked via `interp.compileTypeDecl`,
     // not this path), so a collection type node is unreachable here for a valid
-    // program — the rejection is the cook's defensive fail-loud contract (M1.0.17
-    // E5: a collection-specific error was weighed and rejected — it would ripple
-    // through ~15 codegen `BuildError` switches for zero behavioral gain, both
-    // mapping to `UnsupportedConstruct`).
+    // program — the rejection is the cook's defensive fail-loud contract.
     if (arena.typeNodeKind(type_node) != .named) return error.UnsupportedDescriptorExpr;
     return try gpa.dupe(u8, arena.strings.slice(arena.named_types.items[arena.typeNodeData(type_node)].name));
 }
@@ -1029,7 +1026,7 @@ fn freeEffect(gpa: std.mem.Allocator, e: types.Effect) void {
     gpa.free(e.handlers);
 }
 
-/// Build an `effect` descriptor (M0.8 E6): optional annotated params, emitters
+/// Build an `effect` descriptor: optional annotated params, emitters
 /// of bare `name: value` properties, and `on Emitter.event { body }` handlers.
 /// All values flow through the shared canonical renderer (byte-identical with
 /// the codegen emit side).
@@ -1137,7 +1134,7 @@ fn freeAudioGraph(gpa: std.mem.Allocator, ag: types.AudioGraph) void {
     gpa.free(ag.output);
 }
 
-/// Build an `audio_graph` descriptor (M0.8 E6): optional annotated params, the
+/// Build an `audio_graph` descriptor: optional annotated params, the
 /// DSP statements rendered "; "-joined, and the mandatory output sink — all
 /// through the shared canonical renderers (byte-identical with the emit side).
 fn buildAudioGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AudioGraphDecl) BuildError!types.AudioGraph {
@@ -1228,7 +1225,7 @@ fn freeAudioScore(gpa: std.mem.Allocator, asc: types.AudioScore) void {
     gpa.free(asc.stems);
 }
 
-/// Build an `audio_score` descriptor (M0.8 E6): score properties, sections
+/// Build an `audio_score` descriptor: score properties, sections
 /// (plain props + can_transition_to targets + on_finish), and stems — all
 /// rendered through the shared canonical renderers (byte-identical with emit).
 fn buildAudioScore(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AudioScoreDecl) BuildError!types.AudioScore {
@@ -1356,7 +1353,7 @@ fn freeSequence(gpa: std.mem.Allocator, seq: types.Sequence) void {
     gpa.free(seq.tracks);
 }
 
-/// Build a `sequence` descriptor (M0.8 E6): properties, on_start/on_finish
+/// Build a `sequence` descriptor: properties, on_start/on_finish
 /// emits, and tracks of keyframes — all through the shared canonical renderers
 /// (byte-identical with the codegen emit side).
 fn buildSequence(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.SequenceDecl) BuildError!types.Sequence {
@@ -1551,7 +1548,7 @@ fn buildComponentInstanceRun(gpa: std.mem.Allocator, arena: *const AstArena, sta
     return try list.toOwnedSlice(gpa);
 }
 
-/// Build the `extensions:` clause names (M1.0.6 E5) as an owned `[]const []const u8`.
+/// Build the `extensions:` clause names as an owned `[]const []const u8`.
 fn buildExtensionsRun(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]const []const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
@@ -1637,7 +1634,7 @@ fn buildSceneInstance(gpa: std.mem.Allocator, arena: *const AstArena, inst: ast_
     return .{ .prefab = prefab, .name = name, .uuid = uuid, .extensions = extensions, .components = try comps.toOwnedSlice(gpa), .overrides = try overs.toOwnedSlice(gpa) };
 }
 
-/// Build a `scene` descriptor (M0.8 E7 Level C): version, metadata, resources,
+/// Build a `scene` descriptor: version, metadata, resources,
 /// then entities + instances iterated in `scene_children` declaration order.
 fn buildScene(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.SceneDecl) BuildError!types.Scene {
     const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
@@ -1676,7 +1673,7 @@ fn buildScene(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Scen
     };
 }
 
-/// Build a `prefab` descriptor (M0.8 E7 Level C): relation, requires, version,
+/// Build a `prefab` descriptor: relation, requires, version,
 /// metadata, entities, on_attach/on_detach (rendered statement runs).
 fn buildPrefab(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.PrefabDecl) BuildError!types.Prefab {
     const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
@@ -1810,7 +1807,7 @@ fn freeAnimGraph(gpa: std.mem.Allocator, ag: types.AnimGraph) void {
     gpa.free(ag.layers);
 }
 
-/// Build an `anim_graph` descriptor (M0.8 E6): params, states (rendered body +
+/// Build an `anim_graph` descriptor: params, states (rendered body +
 /// transitions + on_finish), and layers — all through the shared canonical
 /// renderers (byte-identical with the codegen emit side).
 fn buildAnimGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AnimGraphDecl) BuildError!types.AnimGraph {
@@ -1993,7 +1990,7 @@ fn freeShader(gpa: std.mem.Allocator, sh: types.Shader) void {
     gpa.free(sh.fragment);
 }
 
-/// Build a `shader` descriptor (M0.8 E6): uniforms + the optional vertex +
+/// Build a `shader` descriptor: uniforms + the optional vertex +
 /// mandatory fragment stages, each rendered through the shared
 /// `renderShaderStageAlloc` (byte-identical with the codegen emit side).
 fn buildShader(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.ShaderDecl) BuildError!types.Shader {
@@ -2407,7 +2404,7 @@ pub fn renderAbilityRuleAlloc(gpa: std.mem.Allocator, arena: *const AstArena, ru
     return try out.toOwnedSlice(gpa);
 }
 
-/// Render a quest handler payload (M0.8 E4): on_start/on_complete carry an
+/// Render a quest handler payload: on_start/on_complete carry an
 /// emit or a block; on_fail renders `<cond> -> <action>[(branch)]`.
 pub fn renderQuestHandlerPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, h: ast_mod.QuestHandler) BuildError![]u8 {
     return renderQuestHandlerPayload(gpa, arena, h);
@@ -2440,8 +2437,8 @@ fn renderQuestHandlerPayload(gpa: std.mem.Allocator, arena: *const AstArena, h: 
     return try buf.toOwnedSlice(gpa);
 }
 
-/// Render one statement to canonical text (M0.8 E4 — quest handler blocks
-/// and stage statements). Bounded to the script-shaped kinds (`let` /
+/// Render one statement to canonical text. Bounded to the script-shaped
+/// kinds (`let` /
 /// `emit` / expression / assignment); anything else fails loud.
 pub fn renderStmtAlloc(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId) BuildError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2526,7 +2523,7 @@ fn renderBlock(gpa: std.mem.Allocator, arena: *const AstArena, block: NodeId, ou
     try out.appendSlice(gpa, " }");
 }
 
-/// Render a behavior leaf payload (M0.8 E4): the item-2 PATCHED action
+/// Render a behavior leaf payload: the item-2 PATCHED action
 /// forms — `let <name> = <expr>` / `emit T { f: v, … }` / an expression —
 /// plus the plain condition expression.
 pub fn renderBTPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, node: ast_mod.BTNode) BuildError![]u8 {
@@ -2569,8 +2566,7 @@ pub fn renderBTPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, node
     return try buf.toOwnedSlice(gpa);
 }
 
-/// Render a §6 when tree to its canonical text (M0.8 E4 — behavior
-/// composite when clauses; the ONE canonical renderer family). Composites
+/// Render a §6 when tree to its canonical text. Composites
 /// parenthesize; leaves render their structured form.
 pub fn renderWhenAlloc(gpa: std.mem.Allocator, arena: *const AstArena, when_idx: u32) BuildError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;

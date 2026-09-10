@@ -1134,7 +1134,7 @@ pub const BodyManager = struct {
         // NOT transport to a squeeze.
         //
         // So at zero the input is the MANIFOLD's normal, which is the same source `slideNormal` has used
-        // since gate C and for the same stated reason. The other two arms need none of this: the mesh
+        // for the same stated reason. The other two arms need none of this: the mesh
         // tests `faceNormal` and the half-space its stored plane, both valid at every distance.
         if (skip_non_opposing and shape.class() == .convex) {
             const opposing_normal = if (hit.distance > 0) hit.normal else blk: {

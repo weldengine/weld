@@ -118,8 +118,7 @@ pub const Character = struct {
     radius: Real,
     /// Total capsule height, base to top (metres).
     height: Real,
-    /// Tallest riser the controller climbs rather than being blocked by (metres). Consumed
-    /// at gate E.
+    /// Tallest riser the controller climbs rather than being blocked by (metres).
     step_height: Real,
     /// `cos(max_slope)`. The ground test is `n · up >= cos_max_slope`, so a LARGER cosine is
     /// a STRICTER slope limit — worth knowing before comparing two of these.
@@ -129,23 +128,22 @@ pub const Character = struct {
     /// §1.11.2's `k · floatEps(T) · coordScale` discipline does NOT govern it.
     padding: Real,
     /// How far outside the shape to sweep for contacts not yet touching (metres). Same
-    /// parameter class as `padding`. Its FIRST consumer is the ground probe of gate C, which
+    /// parameter class as `padding`. Its FIRST consumer is the ground probe, which
     /// bounds its downward sweep at `padding + predictive_contact_distance`.
     predictive_contact_distance: Real,
     /// What the character IS, read by others through the mask of THEIR queries. Also the
     /// presence's layer, with no dedicated field (§1.12.2).
     collision_layer: u8,
-    /// What the character SEES, read by itself alone in its own sweeps (§1.12.4). Consumed
-    /// from gate C.
+    /// What the character SEES, read by itself alone in its own sweeps (§1.12.4).
     layer_mask: u32,
-    /// Mass serving the push impulse (kg). Consumed at gate F.
+    /// Mass serving the push impulse (kg).
     mass: Real,
-    /// Ceiling on the push force (N); zero disables pushing. Consumed at gate F.
+    /// Ceiling on the push force (N); zero disables pushing.
     max_push_force: Real,
     /// The capsule in the `ShapeStore`, owned by this character for its whole life.
     shape: ShapeId,
     /// The presence, or null when the descriptor asked for none. Its `BodyId` is STABLE and
-    /// stays so across a resize (gate F): a resize is not a re-creation, and an exclusion
+    /// stays so across a resize: a resize is not a re-creation, and an exclusion
     /// the caller memorised survives it.
     inner_body: ?BodyId,
     /// The ground verdict LAST REPORTED by a `moveCharacter` (§1.12.8).
@@ -257,7 +255,7 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     // precision: a NaN entered by the caller would live in the store, indistinguishable from
     // the DELIBERATE poison NaN this repository writes on purpose into fields that have no
     // meaning for a shape. That ambiguity is what cost the mesh shape several rounds — not the NaN
-    // itself. If gate D deletes the field, this guard leaves with it: one line.
+    // itself. If the field ever goes, this guard leaves with it: one line.
     if (!std.math.isFinite(desc.predictive_contact_distance) or
         desc.predictive_contact_distance < 0) return error.InvalidDimensions;
 
@@ -386,7 +384,7 @@ const GroundCollector = struct {
             .ignore,
         ) orelse return;
 
-        // **THE TWO PATHS, and the whole reason gate B delivered two entries.**
+        // **THE TWO PATHS, and the whole reason there are two entries.**
         //
         // A sweep that TRAVELLED returns the outward normal of the surface it met
         // (§1.11.11), which is exactly what `ground_normal` means — no sign work at all.
@@ -479,7 +477,7 @@ const ManifoldSink = struct {
 /// How far down the ground probe looks: `padding + predictive_contact_distance`.
 ///
 /// **This is `predictive_contact_distance`'s FIRST consumer**, which settles in advance the
-/// question the brief left to gate D. The two terms are the two reasons the ground is not at
+/// open question. The two terms are the two reasons the ground is not at
 /// distance zero when a character rests on it: `padding` is how far the capsule is held OFF
 /// surfaces, so a resting character is at least that far above its floor; and
 /// `predictive_contact_distance` is, by its own definition, how far outside the shape to look
@@ -626,7 +624,7 @@ const PendingPushes = struct {
 pub const MoveResult = struct {
     /// The resolved BASE position (§1.12.3) — what gameplay writes into `Transform.position`.
     position: Vec3r,
-    /// The ground verdict at that NEW pose, by the same probe gate C delivered.
+    /// The ground verdict at that NEW pose, by the same probe.
     ground: GroundInfo,
 };
 
@@ -1209,7 +1207,7 @@ fn plannedPush(
 ///   good side of at the ENTRY of the call.
 ///
 /// Written that way the failure direction of an unresolvable squeeze is sayable, which is what the
-/// brief requires of a guarantee: the character keeps the pose it came in with, and a residual
+/// a guarantee requires: the character keeps the pose it came in with, and a residual
 /// overlap, and does not tunnel. Enforced by reverting to the entry pose the moment a contact is
 /// found whose plane the BASE has crossed since entry — resolving further would be tunnelling and
 /// not depenetration. The base and not the centre: it is the reference point gameplay writes
@@ -1525,7 +1523,7 @@ pub const CharacterStore = struct {
     ///
     /// **A DISPLACEMENT, not a velocity** (§1.12.1). The kinematics belong to the caller
     /// (`engine-movement.md`) and the geometry to the engine, and `dt` serves only the DERIVED
-    /// terms — the support velocity, and the push impulse at gate F — never to integrate the
+    /// terms — the support velocity, and the push impulse — never to integrate the
     /// character. It is accepted here so the signature is the frozen one and the derived terms have
     /// their input the day they land.
     ///

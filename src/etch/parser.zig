@@ -33,8 +33,8 @@ const Lexer = lexer_mod.Lexer;
 /// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
-/// Which grammatical subset the parser accepts (M1.1.15.2 G1,
-/// `etch-grammar.md` §20.3). RE-EXPORT: the mode is a property of the parsed
+/// Which grammatical subset the parser accepts (`etch-grammar.md` §20.3).
+/// RE-EXPORT: the mode is a property of the parsed
 /// UNIT, not of the parser, so it is declared next to `AstArena` and travels
 /// with the arena into the type-checker, the interpreter and the cook — none of
 /// which would otherwise be able to tell a declaration file from a source file.
@@ -79,7 +79,7 @@ pub const ParseResult = struct {
     }
 };
 
-/// Result of `parseStmtBlock` (M1.0.9 E1): a bare statement-run fragment parsed
+/// Result of `parseStmtBlock`: a bare statement-run fragment parsed
 /// into its own `AstArena`. `body_start` / `body_len` index the parsed run in
 /// `ast.extra` using the same encoding rule / `fn` bodies use (a slice of raw
 /// `StmtId` values), so the interpreter walks it with the existing
@@ -106,8 +106,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     return parseWithMode(gpa, source, .standard);
 }
 
-/// `parse` with an explicit grammatical subset (M1.1.15.2 G1, `etch-grammar.md`
-/// §20.3). Callers that know the file's path pass `modeForPath(path)`; callers
+/// `parse` with an explicit grammatical subset (`etch-grammar.md` §20.3).
+/// Callers that know the file's path pass `modeForPath(path)`; callers
 /// that hold only a buffer keep using `parse`, which is this function at
 /// `.standard`.
 ///
@@ -161,8 +161,8 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
     try parser.parseFile();
 
     // Transfer the lexer's source-ordered comment / doc-comment slabs into
-    // the arena, then bucket them onto top-level items (M0.8 D-S3-trivia /
-    // D-S3-doccomment). `lexer.deinit` is the LAST statement so the armed
+    // the arena, then bucket them onto top-level items. `lexer.deinit` is
+    // the LAST statement so the armed
     // `errdefer lexer.deinit` never double-frees: every fallible op (the
     // appendSlices, `attachTrivia`, `toOwnedSlice`) runs before the lexer is
     // explicitly torn down.
@@ -174,7 +174,7 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
     return .{ .ast = arena, .diagnostics = diags };
 }
 
-/// Parse a bare statement-run fragment (M1.0.9 E1) into a fresh `AstArena`.
+/// Parse a bare statement-run fragment into a fresh `AstArena`.
 /// The fragment is the canonical text a cooked extension hook body carries
 /// (`descriptor.renderStmtRunAlloc`): zero or more statements separated by a
 /// `";"`, with NO enclosing braces. This is a new ENTRY POINT over the same
@@ -221,7 +221,7 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
 }
 
 /// Bucket the arena's source-ordered comment / doc-comment slabs onto the
-/// top-level items they precede (M0.8 D-S3-trivia / D-S3-doccomment).
+/// top-level items they precede.
 ///
 /// Both slabs and `arena.items` are in source order, so two forward cursors
 /// suffice. For each item, comments lying inside the *previous* item's span
@@ -283,13 +283,13 @@ pub const Parser = struct {
     /// to `parseFile`), so each broken construct contributes exactly one
     /// entry before the parser resyncs to the next top-level keyword.
     diagnostics: std.ArrayListUnmanaged(Diagnostic) = .empty,
-    /// Stack of loop labels currently in scope (M0.8 loop/break). `break IDENT`
+    /// Stack of loop labels currently in scope. `break IDENT`
     /// treats IDENT as a label only when it names an enclosing loop — this
     /// resolves the `break [IDENT] [expression]` ambiguity without a statement
     /// separator (an IDENT that is not an active label starts the break value).
     active_labels: std.ArrayListUnmanaged(StringId) = .empty,
-    /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal (M0.8
-    /// E2 block 3). Set while parsing the head expression of `if` / `while` /
+    /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal. Set
+    /// while parsing the head expression of `if` / `while` /
     /// `for` / `match` (where the `{` opens the body / arms, not a struct
     /// literal — the classic struct-literal-vs-block ambiguity, resolved as in
     /// Rust). Reset inside delimited contexts (`( … )`, `[ … ]`, a `{ … }`
@@ -374,7 +374,7 @@ pub const Parser = struct {
         return self.recordOwnedDiag(span, .parse_error, owned);
     }
 
-    /// Record a diagnostic under an explicit code and unwind (M1.1.15.2 G1).
+    /// Record a diagnostic under an explicit code and unwind.
     /// Every parser diagnostic funnels through `recordOwnedDiag`, so a coded one
     /// takes the same ownership and cleanup path as an `E0001` — there is one
     /// emission site, not two.
@@ -463,7 +463,7 @@ pub const Parser = struct {
     }
 
     /// Whether the (quote-trimmed) string body contains an unescaped `{` —
-    /// i.e. the literal is interpolated (M0.8 E3-C tranche 1c).
+    /// i.e. the literal is interpolated.
     fn hasUnescapedBrace(body: []const u8) bool {
         var i: usize = 0;
         while (i < body.len) {
@@ -478,8 +478,8 @@ pub const Parser = struct {
     }
 
     /// Parse a `string_literal` token into either a plain `string_lit` or,
-    /// when the body holds an unescaped `{`, a `string_interp` node (M0.8
-    /// E3-C tranche 1c, `etch-grammar.md` §1.4 `simple_string = '"' {
+    /// when the body holds an unescaped `{`, a `string_interp` node
+    /// (tranche 1c, `etch-grammar.md` §1.4 `simple_string = '"' {
     /// string_char | interpolation } '"'`). Approach (a) of the resume
     /// marker: the lexer keeps one token; the embedded `{expr}` spans are
     /// sub-parsed here, at parse time, into the same arena.
@@ -576,7 +576,7 @@ pub const Parser = struct {
 
     /// Parse a `multiline_string_literal` token (`"""…"""`) into a `string_lit`
     /// or `string_interp` node — the triple-quote counterpart of
-    /// `parseStringLiteralExpr` (M0.9 E2-A, `etch-grammar.md` §1.4). Two
+    /// `parseStringLiteralExpr` (`etch-grammar.md` §1.4). Two
     /// differences from the single-line form: the body is the span minus the
     /// `"""` fences, and the §1.4 common indentation is stripped from each line
     /// as the literal segments are emitted. Interpolation reuses the exact
@@ -727,7 +727,7 @@ pub const Parser = struct {
     fn parseOneTopLevel(self: *Parser) ParseError!void {
         try self.surfaceTokenErrors();
         const annotations = try self.parseAnnotations();
-        // M1.0.8 — optional `private` visibility prefix (grammar §5.1:
+        // optional `private` visibility prefix (grammar §5.1:
         // `{ annotation } ( ... | visibility_modifier , declaration_body )`).
         // `private` is consumed AFTER annotations and BEFORE the construct
         // dispatch, and applies ONLY to a declaration_body — never to a bare
@@ -760,11 +760,10 @@ pub const Parser = struct {
     /// cannot loop. The stop-set MUST list every top-level starter the
     /// parser accepts, in lockstep with `parseTopLevel` — otherwise a valid
     /// construct following a parse error is silently skipped. Current set:
-    /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
-    /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
-    /// declaration layer) + `enum` / `trait` (E2 block 3 tranches B/C) +
-    /// `event` / `tags` (E3 ECS layer) + `import` (M1.0.7) + `const` / `test`
-    /// (M1.0.8). `private` is NOT a stop-set member — it is a prefix consumed
+    /// S3 (`component` / `resource` / `rule`) + `type` + `fn` /
+    /// `async` + `struct` / `impl` + `enum` / `trait` +
+    /// `event` / `tags` + `import` + `const` / `test`
+    ///. `private` is NOT a stop-set member — it is a prefix consumed
     /// before dispatch, and the declaration_body it precedes already is one.
     /// M1.1.15.2 G1 adds `service`: it is a stop-set member in BOTH modes, not
     /// only in `.d.etch`. A `service` in a standard `.etch` is refused by
@@ -788,7 +787,7 @@ pub const Parser = struct {
             .error_utf8 => return self.parseErr(self.peekSpan(), "invalid UTF-8 sequence"),
             .error_unknown_keyword => {
                 const lexeme = self.sliceOf(self.peekSpan());
-                // §4.3 `quantize_stmt` stays reserved (M1.0.13): its beat/bar
+                // §4.3 `quantize_stmt` stays reserved: its beat/bar
                 // musical clock (Sequencer / Pulse) is absent from the Phase-1
                 // runtime — explicit fail-loud pointing at the milestone that
                 // owns it, instead of the generic reserved-keyword message.
@@ -838,7 +837,7 @@ pub const Parser = struct {
             .kw_prefab => try self.parsePrefabDecl(annotations),
             .kw_service => try self.parseServiceDecl(annotations),
             .kw_async => {
-                // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
+                // `async fn` and `async rule`:
                 // the two top-level `async` constructs. `kw_async` is already in
                 // the `recoverToTopLevel` stop-set; `kw_rule`/`kw_fn` likewise —
                 // so `async rule` adds no new stop-set member (LOCKSTEP no-op).
@@ -854,7 +853,7 @@ pub const Parser = struct {
         }
     }
 
-    /// Parse a top-level `type Name = Type` alias (M0.8 v0.6 foundations).
+    /// Parse a top-level `type Name = Type` alias.
     /// `Name` is a PascalCase type identifier; `Type` is any type node. The
     /// `kw_type` starter is mirrored in `recoverToTopLevel`'s stop-set.
     fn parseTypeAliasDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -871,7 +870,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse a top-level `const` declaration (M1.0.8, `etch-grammar.md` §4.1):
+    /// Parse a top-level `const` declaration (`etch-grammar.md` §4.1):
     ///   `const_stmt = "const" ( IDENT | TYPE_IDENT ) ":" type "=" const_expression`.
     /// The name accepts BOTH `.ident` and `.type_ident` — a canonical
     /// `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT` (the case rule is a
@@ -902,7 +901,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end });
     }
 
-    /// Parse a top-level `test` block (M1.0.8, `etch-grammar.md` §17):
+    /// Parse a top-level `test` block (`etch-grammar.md` §17):
     ///   `test_decl = "test" STRING_LITERAL block`.
     /// The body reuses the ordinary block/statement parser (`parseBlockExpr`).
     /// `@tag` / `@skip` / `@only` annotations flow through `parseAnnotations`
@@ -1071,8 +1070,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E3,
-    /// `etch-grammar.md` §5.10). Same shape as `parseComponentDecl` /
+    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (`etch-
+    /// grammar.md` §5.10). Same shape as `parseComponentDecl` /
     /// `parseResourceDecl` — an event is a POD struct of fields. `kw_event`
     /// is mirrored in `parseTopLevel` AND `recoverToTopLevel`'s stop-set.
     fn parseEventDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -1106,8 +1105,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `tags "{" { tag_namespace } "}"` (M0.8 E3, `etch-grammar.md`
-    /// §5.11). The top-level body is zero-or-more `tag_namespace`s (leaves
+    /// Parse `tags "{" { tag_namespace } "}"` (`etch-grammar.md` §5.11).
+    /// The top-level body is zero-or-more `tag_namespace`s (leaves
     /// cannot sit directly under `tags`). Namespaces + leaves are appended to
     /// the shared `tag_namespaces` / `tag_leaves` slabs in pre-order (= the
     /// depth-first declaration order the global tag-table pass relies on); the
@@ -1170,8 +1169,7 @@ pub const Parser = struct {
             }
         } else {
             // Leaf mode: `tag_leaf { "," tag_leaf } [ "," ]`. Leaf names
-            // accept keywords contextually, like namespace names (M0.8 E4 —
-            // graduated construct keywords stay legal tag words).
+            // accept keywords contextually, like namespace names.
             while (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
                 const leaf_tok = try self.advance();
                 try self.arena.tag_leaves.append(self.gpa, .{
@@ -1206,7 +1204,7 @@ pub const Parser = struct {
     // ─── Type ────────────────────────────────────────────────────────────
 
     fn parseType(self: *Parser) ParseError!NodeId {
-        // Map sugar `[K : V]` (M0.8 collections, `etch-grammar.md` §278): a
+        // Map sugar `[K : V]` (collections, `etch-grammar.md` §278): a
         // type beginning with `[` is always a map type — array / slice are the
         // postfix `T[...]` form handled below.
         if (self.peek() == .lbracket) {
@@ -1228,7 +1226,7 @@ pub const Parser = struct {
                 .byte_end = closing.span.byte_end,
             });
         }
-        // Optional suffix `T?` (M0.8 E2 block 5, `etch-grammar.md` §267).
+        // Optional suffix `T?` (block 5, `etch-grammar.md` §267).
         if (self.peek() == .question) {
             const q = try self.advance();
             const base_span = self.arena.typeNodeSpan(base);
@@ -1257,8 +1255,8 @@ pub const Parser = struct {
             .ident,
             => {
                 const tok = try self.advance();
-                // Qualified type path `alias.Member` (M1.0.16, `etch-grammar.md`
-                // §2.1 `qualified_path = IDENT , "." , TYPE_IDENT`). Only a
+                // Qualified type path `alias.Member` (`etch-grammar.md` §2.1
+                // `qualified_path = IDENT , "." , TYPE_IDENT`). Only a
                 // lowercase IDENT alias followed by `.` then a TYPE_IDENT — a
                 // TYPE_IDENT/primitive receiver followed by `.` is the separate
                 // (out-of-scope) `Type.CONST` associated-access gap, left alone.
@@ -1276,8 +1274,8 @@ pub const Parser = struct {
                     const name = self.sliceOf(tok.span);
                     if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
                     if (std.mem.eql(u8, name, "Map")) return try self.parseMapGeneric(tok.span);
-                    // General `Name<T, …>` generic type (M0.8 E2 block 4,
-                    // `etch-grammar.md` §270).
+                    // General `Name<T, …>` generic type (block 4, `etch-
+                    // grammar.md` §270).
                     return try self.parseGenericTypeApp(try self.internSlice(tok.span), tok.span);
                 }
                 const name_id = try self.internSlice(tok.span);
@@ -1325,8 +1323,8 @@ pub const Parser = struct {
         });
     }
 
-    /// `Name < type , … >` — a generic type application in type position (M0.8
-    /// E2 block 4, `etch-grammar.md` §270). The caller has consumed `Name`
+    /// `Name < type , … >` — a generic type application in type position
+    /// (block 4, `etch-grammar.md` §270). The caller has consumed `Name`
     /// (span passed in) and confirmed `peek() == <`. `Set` / `Map` keep their
     /// dedicated nodes (handled by the caller before this).
     fn parseGenericTypeApp(self: *Parser, name_id: StringId, name_span: SourceSpan) ParseError!NodeId {
@@ -1344,7 +1342,7 @@ pub const Parser = struct {
         });
     }
 
-    // ─── Generic parameters (M0.8 E2 block 4) ────────────────────────────────
+    // ─── Generic parameters ────────────────────────────────
 
     /// One type parameter being parsed; its bounds (inline `<T: A + B>` and/or
     /// `where`) accumulate here before being committed contiguously to the
@@ -1463,7 +1461,7 @@ pub const Parser = struct {
     fn parseRuleDecl(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!void {
         // On entry the current token is `rule` (an optional `async` was already
         // consumed by `parseTopLevel`). `is_async` marks an `async rule` whose
-        // body may `await` (M0.8 E3 sub-slice B).
+        // body may `await`.
         const kw_span = self.current.span;
         const parsed = try self.parseRuleDeclInner(annotations, is_async);
         _ = try self.arena.addItem(self.gpa, .rule_decl, parsed.idx, .{
@@ -1473,7 +1471,7 @@ pub const Parser = struct {
     }
 
     /// Parse a `rule` declaration into the `rule_decls` slab WITHOUT adding a
-    /// top-level item (M0.8 E4 §8.5: the ability-embedded rule is construct
+    /// top-level item (§8.5: the ability-embedded rule is construct
     /// STRUCTURE — validated through the normal rule path but never
     /// registered for ticking; the top-level wrapper adds the item).
     fn parseRuleDeclInner(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!struct { idx: u32, end_byte: u32 } {
@@ -1525,7 +1523,7 @@ pub const Parser = struct {
         return .{ .idx = data_idx, .end_byte = closing.span.byte_end };
     }
 
-    // ─── Functions (M0.8 E2 call mechanism) ──────────────────────────────
+    // ─── Functions ──────────────────────────────
 
     /// Parse a top-level `fn` (no `async` prefix). `kw_fn` is the lockstep
     /// stop-set member added to `recoverToTopLevel` in the same commit.
@@ -1533,8 +1531,8 @@ pub const Parser = struct {
         return self.parseFnDeclFrom(annotations, is_async, self.current.span);
     }
 
-    /// Parse a top-level `fn` and add it as a `.fn_decl` item (M0.8 E2 call
-    /// mechanism). On entry the current token is `fn` (the optional `async` was
+    /// Parse a top-level `fn` and add it as a `.fn_decl` item. On entry the
+    /// current token is `fn` (the optional `async` was
     /// already consumed by the caller, its span passed as `start_span`). Shares
     /// the signature/body machinery with `impl` methods via `parseFnLike`; a
     /// top-level `fn` takes no `self` receiver (`allow_self = false`).
@@ -1554,12 +1552,12 @@ pub const Parser = struct {
     /// current token is `fn`. The body is a value-block: the trailing bare
     /// expression is the implicit return (`etch-grammar.md` §4.1 l.645).
     /// `allow_self` lets the first parameter be a `self` / `mut self` receiver
-    /// (M0.8 E2 block 3 `impl` methods); a top-level `fn` passes `false`.
+    ///; a top-level `fn` passes `false`.
     /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected.
     /// `async` is parsed (interp E3, codegen Phase 2); `throws` is parsed
     /// (codegen folds into the E3 gate).
     ///
-    /// M1.1.15.2 G1 — the bodyless `.d.etch` form is NO LONGER out of scope
+    /// the bodyless `.d.etch` form is NO LONGER out of scope
     /// (this sentence used to say it was). Under `ParseMode.declaration_file`
     /// every `fn` is signature-only, and one that carries a body is refused with
     /// `E1900` at its opening brace.
@@ -1568,7 +1566,7 @@ pub const Parser = struct {
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
         const name_id = try self.internSlice(name_tok.span);
 
-        // Generic parameters `<T: bound, …>` (M0.8 E2 block 4). Buffered so the
+        // Generic parameters `<T: bound, …>`. Buffered so the
         // `where` clause (after the return type) can extend their bounds.
         var temp_generics: std.ArrayListUnmanaged(TempGenericParam) = .empty;
         defer self.deinitTempGenerics(&temp_generics);
@@ -1614,7 +1612,7 @@ pub const Parser = struct {
             sig_end_span = self.arena.typeNodeSpan(return_type);
         }
 
-        // `where T: bound, …` (M0.8 E2 block 4) — `where` is a plain identifier,
+        // `where T: bound, …` — `where` is a plain identifier,
         // detected by lexeme; it extends the buffered params' bounds.
         if (self.atWhere()) {
             try self.parseWhereInto(&temp_generics);
@@ -1625,7 +1623,7 @@ pub const Parser = struct {
         // tranche C) ends without a body. Outside a trait, a missing body is the
         // existing "expected '{'" error.
         //
-        // M1.1.15.2 G1 — in a `.d.etch` EVERY `fn` is signature-only, whatever
+        // in a `.d.etch` EVERY `fn` is signature-only, whatever
         // the caller's own rule (`etch-grammar.md` §20.1: `function_decl_no_body`
         // covers the top-level form, the `impl_member_no_body` form and the
         // `service_decl` form alike). The mode widens the caller's permission; it
@@ -1654,7 +1652,7 @@ pub const Parser = struct {
             };
         }
 
-        // M1.1.15.2 G1 — `E1900 DeclarationFileBodyNotAllowed`. Reaching this
+        // `E1900 DeclarationFileBodyNotAllowed`. Reaching this
         // line in `.d.etch` mode means a `{` follows the signature (the
         // `signature_only` branch above already returned otherwise), so the body
         // is refused HERE, at its opening brace, and NOTHING is built. This
@@ -1699,7 +1697,7 @@ pub const Parser = struct {
     }
 
     /// Recognise and consume a leading `self` / `mut self` method receiver
-    /// (M0.8 E2 block 3, `etch-grammar.md` §5.3 `self_param = [mut] self`).
+    /// (block 3, `etch-grammar.md` §5.3 `self_param = [mut] self`).
     /// `self` is a plain identifier (not a keyword), so the receiver is detected
     /// by lexeme. Returns `.none` (consuming nothing) when the first parameter
     /// is an ordinary `IDENT : type`.
@@ -1721,8 +1719,8 @@ pub const Parser = struct {
         return .none;
     }
 
-    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E2 block 3,
-    /// `etch-grammar.md` §5.7). Same field machinery as a component / resource;
+    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (block 3, `etch-
+    /// grammar.md` §5.7). Same field machinery as a component / resource;
     /// a struct is a by-value type (not registered with the world). Generics
     /// (`<...>`) are block 4 and rejected here.
     fn parseStructDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -1754,7 +1752,7 @@ pub const Parser = struct {
 
     /// Parse an optional `< generic_param, … >` (no `where` — only `fn`/methods
     /// have a where clause) and commit it, returning the `(start, len)` run.
-    /// `(0, 0)` when there are no generic parameters (M0.8 E2 block 4).
+    /// `(0, 0)` when there are no generic parameters.
     fn parseOptionalGenerics(self: *Parser) ParseError!GenericsRange {
         if (self.peek() != .lt) return .{ .start = 0, .len = 0 };
         var temp: std.ArrayListUnmanaged(TempGenericParam) = .empty;
@@ -1764,7 +1762,7 @@ pub const Parser = struct {
     }
 
     /// Parse `enum TYPE_IDENT "{" enum_variant {"," enum_variant} [","] "}"`
-    /// (M0.8 E2 block 3 tranche B, `etch-grammar.md` §5.8). C-like variants
+    /// (block 3 tranche B, `etch-grammar.md` §5.8). C-like variants
     /// (`easy`) are the supported end-to-end form; struct-like
     /// (`Physical { amount: float }`) and tuple-like (`ok(T)`) variants are
     /// parsed so the grammar is accepted, with their data recorded for a
@@ -1839,8 +1837,8 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `data TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"` (M0.8 E4
-    /// Level B, `etch-grammar.md` §14). `data_entry = IDENT ":"
+    /// Parse `data TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"` (Level
+    /// B, `etch-grammar.md` §14). `data_entry = IDENT ":"
     /// struct_literal_body [","]` — the body reuses the §3.2 `field_init`
     /// forms INCLUDING the spread `".." expression` (l.491): the E2 spread
     /// deferral is homed here (data-table inheritance); general struct
@@ -1891,8 +1889,8 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (M0.8 E5 Level B,
-    /// `etch-grammar.md` §10.2). The name is a string literal (the grammar
+    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (Level B, `etch-
+    /// grammar.md` §10.2). The name is a string literal (the grammar
     /// shape — E5 ruling 1, NOT the validation-ecs §16.1 TYPE_IDENT); entries
     /// are `IDENT ":" expression` pairs. `no_struct_lit` is cleared for the
     /// body so an inline `.{ … }` style value parses. Theme slabs are fed
@@ -1932,7 +1930,7 @@ pub const Parser = struct {
     }
 
     /// Parse `motion TYPE_IDENT "{" [motion_states] motion_transitions "}"`
-    /// (M0.8 E5 Level B, `etch-grammar.md` §10.3). `states` / `transitions`
+    /// (Level B, `etch-grammar.md` §10.3). `states` / `transitions`
     /// are contextual sub-keywords (the S3 sub-construct doctrine — never
     /// reserved): the `states { … }` block is OPTIONAL, `transitions { … }`
     /// is mandatory. State bodies reuse `parseDataEntryBody`
@@ -1945,8 +1943,7 @@ pub const Parser = struct {
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.lbrace, "expected '{' to start the motion body");
 
-        // Optional `states { motion_state }` block (E5 ruling 2: states are
-        // optional, E1660 RESERVED).
+        // Optional `states { motion_state }` block.
         const states_start: u32 = @intCast(self.arena.motion_states.items.len);
         if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "states")) {
             _ = try self.advance(); // 'states'
@@ -2130,10 +2127,10 @@ pub const Parser = struct {
     }
 
     /// Parse `input_mapping STRING_LITERAL "{" {property} {action} {combo} "}"`
-    /// (M0.8 E5 Level B STRICT — NO input execution, `etch-grammar.md` §16).
+    /// (Level B STRICT — NO input execution, `etch-grammar.md` §16).
     /// `context`/`priority`/`consume_input`/`action`/`combo` are CONTEXTUAL
     /// sub-keywords (the S3 sub-construct doctrine — never reserved); `context`
-    /// is a PROPERTY (E5 ruling 7, NOT a named block). Dispatched on the head
+    /// is a PROPERTY. Dispatched on the head
     /// ident; the strict EBNF grouping (`{property} {action} {combo}`) is
     /// accepted as a superset (any order) — no code enforces the grouping.
     /// STRING-named → no symbol (the theme precedent). Slabs are fed only from
@@ -2339,9 +2336,9 @@ pub const Parser = struct {
         return try self.internSlice(self.arena.typeNodeSpan(ty));
     }
 
-    /// Parse a `widget` declaration (M0.8 E5 Level B presentation,
-    /// `etch-grammar.md` §10.1: `widget_decl = "widget" TYPE_IDENT "(" [param_list]
-    /// ")" [when_clause] "{" ui_tree "}"`). TYPE_IDENT-named (the motion
+    /// Parse a `widget` declaration (Level B presentation, `etch-grammar.md` §10.1:
+    /// `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")" [when_clause] "{"
+    /// ui_tree "}"`). TYPE_IDENT-named (the motion
     /// precedent). The optional `[when_clause]` mirrors `impl`'s optional when
     /// (default `when_brace_is_filter` — the body `{` is NOT a filter, resolved
     /// by `braceOpensWhenFilter`'s matching-brace scan). The recursive `ui_tree`
@@ -2535,9 +2532,9 @@ pub const Parser = struct {
         return .{ .kind = .for_, .index = idx };
     }
 
-    /// Parse a `locale` declaration (M0.8 E5 Level B presentation,
-    /// `etch-grammar.md` §10.4: `locale_decl = "locale" IDENT "{" {locale_entry}
-    /// "}"`, `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named →
+    /// Parse a `locale` declaration (Level B presentation, `etch-grammar.md`
+    /// §10.4: `locale_decl = "locale" IDENT "{" {locale_entry} "}"`,
+    /// `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named →
     /// registers a symbol. Entries are flat key/value string pairs (the theme
     /// precedent, with a STRING key + `=` + STRING value). The `kw_locale`
     /// starter is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
@@ -2573,7 +2570,7 @@ pub const Parser = struct {
     }
 
     /// `effect_decl = "effect" TYPE_IDENT "{" [params_block] {emitter_decl}
-    /// {effect_event_handler} "}"` (M0.8 E6, `etch-grammar.md` §9.2). VFX-only
+    /// {effect_event_handler} "}"` (`etch-grammar.md` §9.2). VFX-only
     /// since v0.6. `params`/`emitter`/`on` are CONTEXTUAL idents (matched by
     /// lexeme — `effect` is the only graduated keyword). The optional params
     /// block reuses `parseField` (the canonical `annotated_field` consumer)
@@ -2699,7 +2696,7 @@ pub const Parser = struct {
     }
 
     /// `audio_graph_decl = "audio_graph" TYPE_IDENT "{" [params_block]
-    /// {statement} audio_output "}"` (M0.8 E6, `etch-grammar.md` §12.2). The
+    /// {statement} audio_output "}"` (`etch-grammar.md` §12.2). The
     /// DSP node-building statements run until the MANDATORY `output(expr)` sink
     /// (`output` is a contextual ident, the sink recognised by the `output (`
     /// two-token lookahead). A missing sink is a parse error (E1700 RESERVED);
@@ -2762,7 +2759,7 @@ pub const Parser = struct {
     }
 
     /// `audio_score_decl = "audio_score" STRING_LITERAL "{" {audio_score_element}
-    /// "}"` (M0.8 E6, `etch-grammar.md` §12.1). STRING-named (the
+    /// "}"` (`etch-grammar.md` §12.1). STRING-named (the
     /// `theme`/`input_mapping` precedent). `score_property`s (`tempo`/`IDENT ":"
     /// expression`, STRICT no annotation) are BUFFERED and committed contiguously
     /// at the end — sections/stems also write `struct_lit_fields` during the
@@ -2910,7 +2907,7 @@ pub const Parser = struct {
     }
 
     /// `sequence_decl = "sequence" TYPE_IDENT "{" {sequence_property}
-    /// {sequence_track} "}"` (M0.8 E6, `etch-grammar.md` §13). `sequence` is the
+    /// {sequence_track} "}"` (`etch-grammar.md` §13). `sequence` is the
     /// graduated `kw_sequence` (it doubles as the E4 behavior composite) —
     /// matched at top level by TOKEN KIND (the input_combo precedent). COMPLETE:
     /// `on_start` / `on_finish` are emit statements (the §13 patched form, ruling
@@ -3048,7 +3045,7 @@ pub const Parser = struct {
     }
 
     /// `anim_graph_decl = "anim_graph" TYPE_IDENT "{" [params_block] {anim_state}
-    /// {anim_layer} "}"` (M0.8 E6, §11). The grammar shape wins (state-nested
+    /// {anim_layer} "}"` (§11). The grammar shape wins (state-nested
     /// transitions, additive-only layers). `state`/`layer` are CONTEXTUAL idents.
     fn parseAnimGraphDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
@@ -3330,7 +3327,7 @@ pub const Parser = struct {
     }
 
     /// `shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn]
-    /// fragment_fn "}"` (M0.8 E6, §9.1). NO compute (the ruling). `fragment` is
+    /// fragment_fn "}"` (§9.1). NO compute (the ruling). `fragment` is
     /// parser-mandatory; `vertex` optional. `params`/`vertex`/`fragment` are
     /// CONTEXTUAL idents.
     fn parseShaderDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -3618,7 +3615,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse a top-level `import` directive (M1.0.7, `etch-grammar.md` §5.2):
+    /// Parse a top-level `import` directive (`etch-grammar.md` §5.2):
     ///   `import_decl = "import" module_path [ import_spec ]`. Four forms:
     ///     import a.b              (whole module — implicit alias = last segment)
     ///     import a.b as m         (whole module, explicit alias)
@@ -3711,7 +3708,7 @@ pub const Parser = struct {
     /// Appends one `SceneEntity`, returns its index. Components append directly
     /// (the body closes before the next sibling — contiguous run).
     /// Parse the optional `extensions: [ STRING_LITERAL {, STRING_LITERAL} [,] ]`
-    /// clause (M1.0.6 E5, Claude.ai amendment). Active-extension prefab names, by
+    /// clause. Active-extension prefab names, by
     /// name; trailing comma tolerated; empty list allowed. Appends each name to
     /// `arena.scene_extensions` and returns the `(start, len)` run.
     fn parseExtensionsClause(self: *Parser) ParseError!struct { start: u32, len: u32 } {
@@ -3911,8 +3908,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (M0.8 E4 Level B,
-    /// `etch-grammar.md` §8.2). Elements are segments (`segment Name { … }`)
+    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (Level B, `etch-
+    /// grammar.md` §8.2). Elements are segments (`segment Name { … }`)
     /// and interrupts (`on_xxx -> target`), dispatched on the head
     /// identifier: `segment` is a contextual keyword (the S3 sub-construct
     /// doctrine); an interrupt head is lexically one IDENT starting `on_`
@@ -4069,8 +4066,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `dialogue TYPE_IDENT "{" {dialogue_element} "}"` (M0.8 E4
-    /// Level B, `etch-grammar.md` §8.4 PATCHED — items 10/11). `speaker` /
+    /// Parse `dialogue TYPE_IDENT "{" {dialogue_element} "}"` (Level B,
+    /// `etch-grammar.md` §8.4 PATCHED — items 10/11). `speaker` /
     /// `line` / `choice` / `end` are contextual identifiers; `branch` is
     /// the graduated keyword.
     fn parseDialogueDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -4276,7 +4273,7 @@ pub const Parser = struct {
     }
 
     /// Parse `ability TYPE_IDENT "{" {ability_property} [rule_decl] "}"`
-    /// (M0.8 E4 Level B, `etch-grammar.md` §8.5 — items 12-15 ruling: the
+    ///  (Level B, `etch-grammar.md` §8.5 — items 12-15 ruling: the
     /// grammar shape WINS over the validation-ecs §12 handler shape; no
     /// handlers, no property annotations). `cost` takes a
     /// `struct_literal_body`, `tags_required` / `tags_blocked` take an
@@ -4375,7 +4372,7 @@ pub const Parser = struct {
     }
 
     /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
-    /// (M0.8 E4 Level B, `etch-grammar.md` §8.3 PATCHED — items 7/8).
+    /// (Level B, `etch-grammar.md` §8.3 PATCHED — items 7/8).
     /// Properties come first (`IDENT ":" expression`, incl. `requires`);
     /// stages follow (`[async] stage IDENT { elements }`). `stage` /
     /// `objective` / the handler heads are contextual identifiers (the S3
@@ -4613,8 +4610,8 @@ pub const Parser = struct {
         return idx;
     }
 
-    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (M0.8 E4 Level B,
-    /// `etch-grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
+    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (Level B, `etch-
+    /// grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
     /// bt_condition | bt_action`, item-1 ruling) — `E1500` enforces the
     /// composite root at validation. `selector` / `condition` / `action`
     /// are contextual identifiers (the S3 sub-construct doctrine);
@@ -4838,8 +4835,8 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(temp.items.len) };
     }
 
-    /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (M0.8 E2 block 3 tranche
-    /// C, `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
+    /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (block 3 tranche C,
+    /// `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
     /// — no body, `has_body = false`) `| function_decl` (default body). Members
     /// reuse `parseFnLike` (`allow_self = true`, `allow_signature_only = true`)
     /// and are stored in `arena.impl_methods`. Generics (`<...>`) are block 4.
@@ -4878,8 +4875,8 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (M1.1.15.2 G1,
-    /// `etch-grammar.md` §20.4). A service declares the calling surface of a
+    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (`etch-
+    /// grammar.md` §20.4). A service declares the calling surface of a
     /// Tier 1 module to Etch; its `.d.etch` is generated from the module's Zig
     /// `bindgen.ServiceSpec` and is never hand-written (`engine-c-bindings.md`
     /// §8.4).
@@ -4889,7 +4886,7 @@ pub const Parser = struct {
     /// constraint — deliberately NOT `E1901`, whose canonical name is
     /// `ConstructNotAllowedInDeclarationFile` and which says the opposite thing.
     /// Minting a code for the reverse direction is not warranted: the `private
-    /// import` refusal (M1.0.8) set the precedent that a positional constraint
+    /// import` refusal set the precedent that a positional constraint
     /// with one clear message needs no code of its own.
     ///
     /// The body is the trait body verbatim — a run of bodyless `FnDecl`s in
@@ -4936,7 +4933,7 @@ pub const Parser = struct {
     }
 
     /// Parse `impl TYPE_IDENT [when_clause] "{" {fn_method} "}"` — an inherent
-    /// impl (M0.8 E2 block 3 tranche A, `etch-grammar.md` §5.9). The trait form
+    /// impl (block 3 tranche A, `etch-grammar.md` §5.9). The trait form
     /// `impl Trait for Type` lands in tranche C; a `for` after the first type
     /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
     /// `allow_self = true` and are stored in `arena.impl_methods`.
@@ -4944,7 +4941,7 @@ pub const Parser = struct {
         _ = annotations; // inherent impl carries no annotations in this subset
         const kw_span = self.current.span;
         _ = try self.advance(); // 'impl'
-        // Optional impl-level generic params `impl<T> …` (M0.8 E2 block 4); in
+        // Optional impl-level generic params `impl<T> …`; in
         // scope for every method body.
         const impl_generics = try self.parseOptionalGenerics();
         const first_tok = try self.expect(.type_ident, "expected type or trait name (TYPE_IDENT) after 'impl'");
@@ -5007,7 +5004,7 @@ pub const Parser = struct {
     }
 
     /// Consume an optional `< type { "," type } >` generic-argument list,
-    /// returning whether one was present (M0.8 E2 block 4). The arguments are
+    /// returning whether one was present. The arguments are
     /// parsed (and land in the arena) but erased — M0.8 has no monomorphisation
     /// codegen, so trait-arg / type-arg tracking is Phase 2.
     fn skipGenericArgs(self: *Parser) ParseError!bool {
@@ -5126,8 +5123,8 @@ pub const Parser = struct {
                 kind = .resource_changed;
                 end_byte = changed_tok.span.byte_end;
             } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
-                // `resource T { expression }` (M0.8 E4 — §6 general resource
-                // filter; mutually exclusive with `changed`, like `has`). The
+                // `resource T { expression }` (— §6 general resource filter;
+                // mutually exclusive with `changed`, like `has`). The
                 // resource's fields are in scope inside the braces. The
                 // brace-vs-body ambiguity is resolved by the matching-brace
                 // scan (`braceOpensWhenFilter`).
@@ -5151,7 +5148,7 @@ pub const Parser = struct {
             try self.arena.when_nodes.append(self.gpa, node);
             return idx;
         }
-        // §6 last arm: a bare boolean expression condition (M0.8 E4). The
+        // §6 last arm: a bare boolean expression condition. The
         // structured `entity has …` / `entity tag_op …` arms are gated by
         // lookahead — anything else (including an identifier followed by a
         // postfix chain, a literal, `get(R)`, a paren that is not a when
@@ -5178,8 +5175,8 @@ pub const Parser = struct {
         // `entity has T [{ filter }]` or `entity tag_op tag_operand`.
         const entity_tok = try self.expect(.ident, "expected entity binding in when clause");
         const entity_name = try self.internSlice(entity_tok.span);
-        // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (M0.8 E3 tag
-        // filter, `etch-grammar.md` §6 l.945). The tag op stands where `has`
+        // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (tag filter,
+        // `etch-grammar.md` §6 l.945). The tag op stands where `has`
         // would; dispatch before the `has` path.
         if (isTagOp(self.peek())) {
             return try self.parseTagFilterWhen(entity_name, entity_tok.span);
@@ -5192,7 +5189,7 @@ pub const Parser = struct {
         var field_name: StringId = 0;
         var filter_value: NodeId = NodeId.none;
         var end_byte = type_tok.span.byte_end;
-        // `entity has T changed` (M0.8 E3) — change-detection filter, the exact
+        // `entity has T changed` — change-detection filter, the exact
         // mirror of `resource T changed` (`etch-grammar.md` §6, patched). Tested
         // before the `{ filter }` form: the two are mutually exclusive (the EBNF
         // `has T changed` carries no field filter).
@@ -5210,9 +5207,9 @@ pub const Parser = struct {
             end_byte = closing.span.byte_end;
             kind = .has_with_filter;
         } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
-            // `has T { expression }` (M0.8 E4 — §6 general field filter; the
-            // narrow `{ field == value }` fast path above keeps the delivered
-            // E3 representation byte-for-byte). T's fields are in scope
+            // `has T { expression }` (— §6 general field filter; the narrow
+            // `{ field == value }` fast path above keeps the delivered E3
+            // representation byte-for-byte). T's fields are in scope
             // inside the braces. The brace-vs-body ambiguity is resolved by
             // the matching-brace scan (`braceOpensWhenFilter`).
             _ = try self.advance(); // '{'
@@ -5237,8 +5234,7 @@ pub const Parser = struct {
     }
 
     /// Expect an identifier-LIKE token: a plain ident or any keyword used
-    /// contextually as a word (M0.8 E4 — tag segments / namespace names may
-    /// spell graduated construct keywords like `quest` or `data`).
+    /// contextually as a word.
     fn expectWord(self: *Parser, comptime msg: []const u8) ParseError!token_mod.Token {
         if (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
             return try self.advance();
@@ -5248,7 +5244,7 @@ pub const Parser = struct {
 
     /// Whether the `{` at the current token opens a §6 when-filter
     /// expression rather than the construct body that follows the when
-    /// clause (M0.8 E4). Disambiguated by scanning a SCRATCH lexer from the
+    /// clause. Disambiguated by scanning a SCRATCH lexer from the
     /// brace to its matching `}` and checking the next token: a filter
     /// brace is always followed by `{` (the body / a composite's children),
     /// `and`, or `or`; a body brace is followed by anything else (next
@@ -5278,7 +5274,7 @@ pub const Parser = struct {
         }
     }
 
-    /// True when `k` is one of the five tag query operator keywords (M0.8 E3).
+    /// True when `k` is one of the five tag query operator keywords.
     fn isTagOp(k: token_mod.TokenKind) bool {
         return switch (k) {
             .kw_has_tag, .kw_has_no_tag, .kw_has_any_tag, .kw_has_all_tags, .kw_has_no_tags => true,
@@ -5297,8 +5293,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse a `TAG_PATH = "." IDENT {"." IDENT}` (M0.8 E3, `etch-grammar.md`
-    /// §1.3) into a `tag_path` expression. Parsed only in tag-operand position,
+    /// Parse a `TAG_PATH = "." IDENT {"." IDENT}` (`etch-grammar.md` §1.3) into
+    /// a `tag_path` expression. Parsed only in tag-operand position,
     /// so the leading `.` never collides with the `.variant` enum shorthand.
     fn parseTagPathExpr(self: *Parser) ParseError!NodeId {
         const dot = try self.expect(.dot, "expected '.' to start a tag path");
@@ -5338,8 +5334,8 @@ pub const Parser = struct {
         return .{ .start = start, .len = @as(u32, @intCast(self.arena.tag_operands.items.len)) - start };
     }
 
-    /// Parse `entity tag_op tag_operand` into a `.tag_filter` when-node (M0.8
-    /// E3). The receiver `entity` ident is already consumed; the current token
+    /// Parse `entity tag_op tag_operand` into a `.tag_filter` when-node. The
+    /// receiver `entity` ident is already consumed; the current token
     /// is the tag op.
     fn parseTagFilterWhen(self: *Parser, entity_name: StringId, entity_span: token_mod.SourceSpan) ParseError!u32 {
         const op_tok = try self.advance(); // the tag op keyword
@@ -5411,8 +5407,8 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len) };
     }
 
-    /// Parse a brace-less statement run terminated by EOF (M1.0.9 E1, used by
-    /// `parseStmtBlock`). Like `parseStmtRun` but: (a) the run ends at `.eof`
+    /// Parse a brace-less statement run terminated by EOF. Like
+    /// `parseStmtRun` but: (a) the run ends at `.eof`
     /// (there is no closing `}`), and (b) a single `.semicolon` separator is
     /// skipped after each statement — the cooked hook text
     /// (`descriptor.renderStmtRunAlloc`) joins statements with `"; "`, whereas
@@ -5441,12 +5437,12 @@ pub const Parser = struct {
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
             .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return, .kw_emit => true,
-            // The concurrency statements (M1.0.12 E2, §4.2) — never a block's
+            // The concurrency statements (§4.2) — never a block's
             // trailing value. `spawn` only in its `spawn {` task form; the
             // structural `spawn (` stays on the expression path.
             .kw_race, .kw_sync, .kw_branch => true,
             .kw_spawn => self.peekNext() == .lbrace,
-            // The §4.3 timer statements (M1.0.13 E3) — never a block's
+            // The §4.3 timer statements — never a block's
             // trailing value.
             .kw_after, .kw_every, .kw_after_unscaled => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
@@ -5454,8 +5450,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse a value-block body `{ statement } [ expression ]` (M0.8 control
-    /// flow, `etch-grammar.md` §4.1 l.645). Returns the statement run plus the
+    /// Parse a value-block body `{ statement } [ expression ]` (control flow,
+    /// `etch-grammar.md` §4.1 l.645). Returns the statement run plus the
     /// trailing expression that is the block's value (`NodeId.none` when
     /// value-less). Etch has no statement separator, so the last expression-led
     /// item immediately before `}` — not an assignment, not a keyword statement
@@ -5477,7 +5473,7 @@ pub const Parser = struct {
             const expr_start = self.current.span;
             const expr = try self.parseExpr(0);
             // A `tag_mutation_stmt` (`entity.add_tag(.x)`) parses as a
-            // `.stmt`-category node inside `continuePostfix` (M0.8 E3); it is a
+            // `.stmt`-category node inside `continuePostfix`; it is a
             // statement, never a block's trailing value.
             if (expr.category == .stmt) {
                 try stmts.append(self.gpa, expr.raw());
@@ -5501,7 +5497,7 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len), .value = value };
     }
 
-    /// Parse a block expression `{ ... }` in expression position (M0.8 control
+    /// Parse a block expression `{ ... }` in expression position (control
     /// flow, `etch-grammar.md` §3.2 l.520 — `block_expr = block`). The block's
     /// value is its trailing expression (or `unit` when value-less). Used
     /// directly (`let x = { ...; v }`), as `if` / `match` arm bodies, and as
@@ -5516,7 +5512,7 @@ pub const Parser = struct {
         });
     }
 
-    /// `measure { block }` (M1.0.15, §17 erratum). Reuses the ordinary block-body
+    /// `measure { block }` (§17 erratum). Reuses the ordinary block-body
     /// parser (statement run + optional trailing value); the `measure` keyword
     /// tags the node so the type-checker types it as `Duration` (test-body only,
     /// E0910 elsewhere) and the interpreter times the block on the wall clock.
@@ -5531,7 +5527,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `if cond block {else if cond block} [else block]` (M0.8 control
+    /// Parse `if cond block {else if cond block} [else block]` (control
     /// flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). Parsed as an
     /// if-expression in `parsePrimary`; in statement position it is wrapped as
     /// an expr-statement (mirroring `loop`). The condition is an ordinary
@@ -5540,8 +5536,8 @@ pub const Parser = struct {
     /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
     fn parseIf(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'if'
-        // `if let <name> = <optional> { … } [else { … }]` (M0.8 E2 block 5,
-        // `etch-grammar.md` §501) — unwraps an optional, binding `<name>` to its
+        // `if let <name> = <optional> { … } [else { … }]` (block 5, `etch-
+        // grammar.md` §501) — unwraps an optional, binding `<name>` to its
         // payload in the then-block.
         var let_binding: StringId = 0;
         if (self.peek() == .kw_let) {
@@ -5554,7 +5550,7 @@ pub const Parser = struct {
         return try self.finishIf(kw_span, let_binding, cond);
     }
 
-    /// Finish an `if` whose condition is already parsed (M1.0.12 E2 split): the
+    /// Finish an `if` whose condition is already parsed: the
     /// then-block, the else-if chain, and the node. Lets the `race`/`sync`
     /// branch parser resolve `if expr =>` (conditional branch guard) vs
     /// `if expr { … }` (an if-statement branch) AFTER the expression — the two
@@ -5576,8 +5572,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `for IDENT [, IDENT] in iterable { body }` (M0.8 v0.6
-    /// foundations, `etch-grammar.md` §621). E1 iterates ranges; array / map
+    /// Parse `for IDENT [, IDENT] in iterable { body }` (v0.6 foundations,
+    /// `etch-grammar.md` §621). E1 iterates ranges; array / map
     /// iterables arrive with collections.
     fn parseForStmt(self: *Parser) ParseError!NodeId {
         const for_span = (try self.advance()).span; // 'for'
@@ -5610,8 +5606,8 @@ pub const Parser = struct {
     /// `while let` Optional-destructuring form lands with the Optional tranche.
     fn parseWhileStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'while'
-        // `while let <name> = <optional> { … }` (M0.8 E2 block 5,
-        // `etch-grammar.md` §623) — re-evaluates the optional each iteration,
+        // `while let <name> = <optional> { … }` (block 5, `etch-grammar.md`
+        // §623) — re-evaluates the optional each iteration,
         // binding `<name>` to its payload in the body; stops on `none`.
         var let_binding: StringId = 0;
         if (self.peek() == .kw_let) {
@@ -5632,7 +5628,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `loop { body }` (M0.8 loop/break, `etch-grammar.md` §522/§624).
+    /// Parse `loop { body }` (loop/break, `etch-grammar.md` §522/§624).
     /// `label` is `0` for an unlabeled loop; a labeled loop pushes its label so
     /// nested `break`/`continue` can target it.
     fn parseLoop(self: *Parser, label: StringId) ParseError!NodeId {
@@ -5648,7 +5644,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `IDENT ":" loop { ... }` (M0.8 loop/break). Only `loop` can be
+    /// Parse `IDENT ":" loop { ... }`. Only `loop` can be
     /// labeled in E1 (labeled `for` is a later refinement).
     fn parseLabeledLoop(self: *Parser) ParseError!NodeId {
         const label_tok = try self.advance(); // IDENT
@@ -5664,7 +5660,7 @@ pub const Parser = struct {
         return try self.arena.addExprStmt(self.gpa, loop_node, self.arena.exprSpan(loop_node));
     }
 
-    /// Parse `break [label] [value]` (M0.8 loop/break, `etch-grammar.md` §632).
+    /// Parse `break [label] [value]` (loop/break, `etch-grammar.md` §632).
     /// A leading IDENT is the label only when it names an active loop label
     /// (else it begins the value expression).
     fn parseBreakStmt(self: *Parser) ParseError!NodeId {
@@ -5687,7 +5683,7 @@ pub const Parser = struct {
         return try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
     }
 
-    /// Parse `continue [label]` (M0.8 loop/break, `etch-grammar.md` §633).
+    /// Parse `continue [label]` (loop/break, `etch-grammar.md` §633).
     fn parseContinueStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'continue'
         var label: StringId = 0;
@@ -5703,7 +5699,7 @@ pub const Parser = struct {
         return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
     }
 
-    /// Parse `throw expression` (M0.8 error handling, `etch-grammar.md` §641).
+    /// Parse `throw expression` (error handling, `etch-grammar.md` §641).
     fn parseThrowStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'throw'
         const value = try self.parseExpr(0);
@@ -5713,8 +5709,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `return [expression]` (M0.8 E2 call mechanism, `etch-grammar.md`
-    /// §4.1 l.630). Etch has no statement separator, so a `return` immediately
+    /// Parse `return [expression]` (call mechanism, `etch-grammar.md` §4.1
+    /// l.630). Etch has no statement separator, so a `return` immediately
     /// before `}` (or EOF) is a bare/void return; otherwise the following
     /// expression is the return value. Dead-code `return` mid-block (followed by
     /// more statements) is not in the block-2 surface.
@@ -5730,7 +5726,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `try { ... } catch IDENT { ... }` (M0.8 error handling,
+    /// Parse `try { ... } catch IDENT { ... }` (error handling,
     /// `etch-grammar.md` §640). Both bodies are statement runs.
     fn parseTryCatchStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'try'
@@ -5752,8 +5748,8 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `emit TYPE_IDENT "{" {field_init} "}"` (M0.8 E3, `etch-grammar.md`
-    /// §4.1 `emit_stmt` + §5.10). `field_init = IDENT ":" expression`; the
+    /// Parse `emit TYPE_IDENT "{" {field_init} "}"` (`etch-grammar.md` §4.1
+    /// `emit_stmt` + §5.10). `field_init = IDENT ":" expression`; the
     /// field-init loop mirrors `parseStructLiteral` (an event is a POD struct).
     /// The spread form `..base` is rejected. Field initializers are stored in a
     /// `(start, len)` run of `arena.struct_lit_fields`.
@@ -5827,10 +5823,10 @@ pub const Parser = struct {
         }
     }
 
-    /// Parse `race "{" { race_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
-    /// §4.2 `race_stmt`). An empty body parses (zero admitted branches — the
+    /// Parse `race "{" { race_branch } "}"` (`etch-grammar.md` §4.2
+    /// `race_stmt`). An empty body parses (zero admitted branches — the
     /// parent continues immediately, E4); async-context legality is the
-    /// type-checker's job (E3).
+    /// type-checker's job.
     fn parseRaceStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'race'
         _ = try self.expect(.lbrace, "expected '{' to open the race body");
@@ -5844,8 +5840,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `sync "{" { sync_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
-    /// §4.2 `sync_stmt`). Same branch grammar as `race`.
+    /// Parse `sync "{" { sync_branch } "}"` (`etch-grammar.md` §4.2
+    /// `sync_stmt`). Same branch grammar as `race`.
     fn parseSyncStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'sync'
         _ = try self.expect(.lbrace, "expected '{' to open the sync body");
@@ -5859,7 +5855,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `branch block` (M1.0.12 E2, `etch-grammar.md` §4.2 `branch_stmt`)
+    /// Parse `branch block` (`etch-grammar.md` §4.2 `branch_stmt`)
     /// — the fire-and-forget task statement. The body is a statement run (the
     /// rule-body layout). Only reached from statement position; the
     /// quest/dialogue `branch` sub-constructs are parsed inside their own
@@ -5875,7 +5871,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `spawn block` (M1.0.12 E2, `etch-grammar.md` §4.2 `spawn_stmt`),
+    /// Parse `spawn block` (`etch-grammar.md` §4.2 `spawn_stmt`),
     /// the async task statement. `binding` is the `let` name for the bound form
     /// `let h = spawn { }` (dispatched from `parseLetStmt`; `0` = discarded
     /// handle); `start_span` is the statement's first token (`let` or `spawn`).
@@ -5892,7 +5888,7 @@ pub const Parser = struct {
         }, .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// True when `kind` heads a §4.3 timer statement (M1.0.13 E3).
+    /// True when `kind` heads a §4.3 timer statement.
     fn isTimerKindToken(kind: TokenKind) bool {
         return switch (kind) {
             .kw_after, .kw_every, .kw_after_unscaled => true,
@@ -5900,15 +5896,15 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse `timer_kind "(" expression ")" block` (M1.0.13 E3,
-    /// `etch-grammar.md` §4.3 `timer_stmt`). `binding` is the `let` name for
+    /// Parse `timer_kind "(" expression ")" block` (`etch-grammar.md` §4.3
+    /// `timer_stmt`). `binding` is the `let` name for
     /// the bound form `let t = after(d) { }` (dispatched from `parseLetStmt`;
     /// `0` = discarded handle); `start_span` is the statement's first token
     /// (`let` or the timer keyword). The duration argument is a FULL
     /// expression, evaluated once at scheduling time (E5) — not restricted to
-    /// a literal, unlike `await wait` (M1.0.11). The body is a statement run
+    /// a literal, unlike `await wait`. The body is a statement run
     /// (the branch/spawn layout); its synchronous-context enforcement (`await`
-    /// inside → `E0901`) is the type-checker's job (E4).
+    /// inside → `E0901`) is the type-checker's job.
     fn parseTimerStmt(self: *Parser, binding: StringId, start_span: SourceSpan) ParseError!NodeId {
         const kw = try self.advance(); // 'after' / 'every' / 'after_unscaled'
         const kind: ast_mod.TimerKind = switch (kw.kind) {
@@ -5934,7 +5930,7 @@ pub const Parser = struct {
 
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_branch) {
-            // The async `branch { }` statement (M1.0.12 E2, §4.2 branch_stmt).
+            // The async `branch { }` statement (§4.2 branch_stmt).
             // The quest/dialogue `branch` sub-constructs never reach here —
             // they are parsed inside their own construct parsers.
             return try self.parseBranchStmt();
@@ -5945,15 +5941,15 @@ pub const Parser = struct {
         if (self.peek() == .kw_sync) {
             return try self.parseSyncStmt();
         }
-        // `spawn {` at statement head is the async task statement (M1.0.12 E2,
-        // §4.2 spawn_stmt, binding-less form). `spawn (` falls through to the
+        // `spawn {` at statement head is the async task statement (§4.2
+        // spawn_stmt, binding-less form). `spawn (` falls through to the
         // expression path (structural spawn, §3.2); the bound form
         // `let h = spawn { }` is dispatched inside `parseLetStmt`.
         if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
             return try self.parseSpawnStmt(0, self.peekSpan());
         }
         if (isTimerKindToken(self.peek())) {
-            // §4.3 timer statement, unbound form (M1.0.13 E3) — the bound form
+            // §4.3 timer statement, unbound form — the bound form
             // `let t = after(d) { }` is dispatched inside `parseLetStmt`. The
             // routine-trigger `after Segment` context is parsed inside the
             // routine construct parser and never reaches statement position.
@@ -5989,7 +5985,7 @@ pub const Parser = struct {
         if (self.peek() == .kw_emit) {
             return try self.parseEmitStmt();
         }
-        // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
+        // Labeled loop: `IDENT ":" loop { ... }`.
         if (self.peek() == .ident and self.peekNext() == .colon) {
             return try self.parseLabeledLoop();
         }
@@ -5997,7 +5993,7 @@ pub const Parser = struct {
         const expr_start = self.current.span;
         const expr = try self.parseExpr(0);
         // `entity.add_tag(.x)` / `entity.remove_tag(.x)` parse as a complete
-        // statement inside `continuePostfix` (M0.8 E3) — a `.stmt`-category
+        // statement inside `continuePostfix` — a `.stmt`-category
         // node. Return it directly; it is neither an assignment target nor an
         // expression statement to be wrapped.
         if (expr.category == .stmt) return expr;
@@ -6033,8 +6029,8 @@ pub const Parser = struct {
             type_annotation = try self.parseType();
         }
         _ = try self.expect(.eq, "expected '=' in let binding");
-        // `let h = spawn { }` — the bound spawn task statement (M1.0.12 E2,
-        // §4.2 `spawn_stmt = [ "let" IDENT "=" ] "spawn" block`): the binding
+        // `let h = spawn { }` — the bound spawn task statement (§4.2
+        // `spawn_stmt = [ "let" IDENT "=" ] "spawn" block`): the binding
         // is PART of the spawn statement, not a let-stmt whose initializer is
         // a spawn. The grammar admits neither `mut` nor a type annotation on
         // this form (the handle types as the builtin `TaskHandle`, E3).
@@ -6075,8 +6071,8 @@ pub const Parser = struct {
         }, span);
     }
 
-    /// Parse `assert ( cond [, "message"] )` (M0.8 v0.6 foundations,
-    /// `etch-reference-part1.md` §10.3). The optional message is a string
+    /// Parse `assert ( cond [, "message"] )` (v0.6 foundations, `etch-
+    /// reference-part1.md` §10.3). The optional message is a string
     /// literal dev diagnostic; the condition is checked to be `bool` by the
     /// type-checker.
     fn parseAssertStmt(self: *Parser) ParseError!NodeId {
@@ -6123,7 +6119,7 @@ pub const Parser = struct {
     }
 
     /// Parse an expression with struct literals suppressed at the top level
-    /// (M0.8 E2 block 3) — used for `if` / `while` / `for` / `match` head
+    /// — used for `if` / `while` / `for` / `match` head
     /// expressions, where a trailing `{` opens the body, not a `TYPE_IDENT {`
     /// struct literal. Delimited sub-contexts re-enable struct literals.
     fn parseExprNoStruct(self: *Parser, min_bp: u8) ParseError!NodeId {
@@ -6200,8 +6196,8 @@ pub const Parser = struct {
         return self.continueCast(after_postfix);
     }
 
-    /// Continue a left-associative `expr as Type` cast chain (M0.8 v0.6
-    /// foundations). `as` binds tighter than the binary operators and
+    /// Continue a left-associative `expr as Type` cast chain. `as`
+    /// binds tighter than the binary operators and
     /// looser than the `.field` / `.get` postfix chain, so `a.b as f32 + c`
     /// parses as `((a.b) as f32) + c`.
     fn continueCast(self: *Parser, expr_in: NodeId) ParseError!NodeId {
@@ -6243,7 +6239,7 @@ pub const Parser = struct {
                             expr = try self.parseGetCall(expr, .method_get_mut);
                         },
                         // `entity.add_tag(.path)` / `entity.remove_tag(.path)`
-                        // (M0.8 E3, `etch-grammar.md` §4.4 l.697). These are
+                        // (`etch-grammar.md` §4.4 l.697). These are
                         // keywords, not idents, so they never form a
                         // `method_call`; the whole form is a `tag_mutation_stmt`
                         // (a statement, not an expression — it has no value). The
@@ -6260,7 +6256,7 @@ pub const Parser = struct {
                             return try self.parseTagMutation(expr, .remove);
                         },
                         // `world.emit(T {…})` — the test-world event method
-                        // (M1.0.15). `emit` is a keyword, so the `.ident` arm below
+                        //. `emit` is a keyword, so the `.ident` arm below
                         // never sees it; route it explicitly to a `method_call`
                         // (`parseMethodCall` interns the token slice → "emit"). Only
                         // valid as a call form.
@@ -6272,8 +6268,8 @@ pub const Parser = struct {
                         },
                         .ident => {
                             // `recv.method(args)` → the reserved `method_call`
-                            // kind (M0.8 E2 call mechanism, `etch-grammar.md`
-                            // postfix_op §421); `recv.field` (no `(`) stays a
+                            // kind (call mechanism, `etch-grammar.md` postfix_op §421);
+                            // `recv.field` (no `(`) stays a
                             // field access. The 4-kind method dispatch
                             // (`etch-resolver-types.md §5`) is exercised in block
                             // 3 once `impl` provides methods — block 2 only
@@ -6293,14 +6289,14 @@ pub const Parser = struct {
                         else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
                     }
                 },
-                // Index / slice access `receiver[index]` (M0.8 collections,
-                // `etch-grammar.md` postfix_op §425). A range index expression
+                // Index / slice access `receiver[index]` (collections, `etch-
+                // grammar.md` postfix_op §425). A range index expression
                 // (`arr[0..3]`) lowers to a slice; any other index to a single
                 // element — disambiguated downstream from the index expr kind.
                 .lbracket => {
                     _ = try self.advance(); // '['
-                    // A bracketed index re-enables struct literals (M0.8 E2
-                    // block 3) even inside an `if`/`while`/`for`/`match` head.
+                    // A bracketed index re-enables struct literals even inside an
+                    // `if`/`while`/`for`/`match` head.
                     const saved = self.no_struct_lit;
                     self.no_struct_lit = false;
                     const index = try self.parseExpr(0);
@@ -6312,12 +6308,12 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
-                // Call `callee(args)` (M0.8 closures, `etch-grammar.md`
-                // postfix_op §424). E1 resolves calls on closure-typed locals;
-                // named arguments per §3.3 (M0.8 E4, item-16 ruling).
+                // Call `callee(args)` (closures, `etch-grammar.md` postfix_op
+                // §424). E1 resolves calls on closure-typed locals;
+                // named arguments per §3.3.
                 .lparen => {
                     _ = try self.advance(); // '('
-                    // Call arguments re-enable struct literals (M0.8 E2 block 3)
+                    // Call arguments re-enable struct literals
                     // even inside an `if`/`while`/`for`/`match` head.
                     const saved = self.no_struct_lit;
                     self.no_struct_lit = false;
@@ -6332,8 +6328,8 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
-                // `recv?.method(args)` / `recv?.field` — optional chain (M0.8
-                // E3-C tranche 4, part1 §6.6): `none` short-circuits, `some`
+                // `recv?.method(args)` / `recv?.field` — optional chain
+                // (tranche 4, part1 §6.6): `none` short-circuits, `some`
                 // dispatches on the payload. `?.get` / `?.get_mut` (optional
                 // ECS access) are out of the M0.8 subset — fail loud at parse.
                 .question_dot => {
@@ -6385,8 +6381,8 @@ pub const Parser = struct {
                         .byte_end = end_byte,
                     });
                 },
-                // Postfix `!` — force unwrap, panic on `none` (M0.8 E3-C
-                // tranche 4, part1 §6.6). `!=` lexes as one token (maximal
+                // Postfix `!` — force unwrap, panic on `none` (tranche 4,
+                // part1 §6.6). `!=` lexes as one token (maximal
                 // munch), so this never splits a comparison.
                 .bang => {
                     const bang_tok = try self.advance();
@@ -6402,8 +6398,8 @@ pub const Parser = struct {
         return expr;
     }
 
-    /// Buffered call-argument lists (M0.8 E4 named arguments, §3.3 —
-    /// item-16 ruling). `names` runs parallel to `args` (`0` = positional);
+    /// Buffered call-argument lists (named arguments, §3.3 — item-16
+    /// ruling). `names` runs parallel to `args` (`0` = positional);
     /// `any_named` selects whether the add-helper stores a names run.
     const CallArgsBuf = struct {
         args: std.ArrayListUnmanaged(u32) = .empty,
@@ -6421,7 +6417,7 @@ pub const Parser = struct {
     };
 
     /// Parse a §3.3 `arg_list` into `out` — `arg = expression | IDENT ":"
-    /// expression` (M0.8 E4, item-16 ruling). The label lookahead is
+    /// expression`. The label lookahead is
     /// `(IDENT | soft keyword) ':'` — unambiguous, `:` heads no expression
     /// continuation. Soft keywords double as labels per the S3 contextual
     /// doctrine (item 6: minimum `type` — the §8.2 `type: .work` form).
@@ -6459,16 +6455,16 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `receiver.method(args)` into the reserved `method_call` kind (M0.8
-    /// E2 call mechanism, `etch-grammar.md` postfix_op §421). On entry the
+    /// Parse `receiver.method(args)` into the reserved `method_call` kind (call
+    /// mechanism, `etch-grammar.md` postfix_op §421). On entry the
     /// current token is the method-name identifier and the next is `(`.
-    /// Named arguments per §3.3 (M0.8 E4, item-16 ruling). The dispatch
+    /// Named arguments per §3.3. The dispatch
     /// (`etch-resolver-types.md §5`) lands in block 3 with `impl`.
     fn parseMethodCall(self: *Parser, receiver: NodeId) ParseError!NodeId {
         const name_tok = try self.advance(); // method name
         const method_name = try self.internSlice(name_tok.span);
         _ = try self.advance(); // '('
-        // Method-call arguments re-enable struct literals (M0.8 E2 block 3).
+        // Method-call arguments re-enable struct literals.
         const saved = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved;
@@ -6508,8 +6504,8 @@ pub const Parser = struct {
     fn parsePattern(self: *Parser) ParseError!ParsedPattern {
         switch (self.peek()) {
             .ident => {
-                // `none` / `some(v)` optional patterns (M0.8 E3-C tranche 4,
-                // part1 §7.6). Like the literals, `some` / `none` are detected
+                // `none` / `some(v)` optional patterns (tranche 4, part1
+                // §7.6). Like the literals, `some` / `none` are detected
                 // by lexeme (not keywords); a bare `some` with no `(` stays an
                 // ordinary binding.
                 const lexeme = self.sliceOf(self.peekSpan());
@@ -6541,8 +6537,8 @@ pub const Parser = struct {
                 return .{ .kind = .literal, .payload = lit.raw() };
             },
             .dot => {
-                // Enum-variant shorthand pattern `.variant` (M0.8 E2 block 3
-                // tranche B, `etch-grammar.md` §3.2 l.510). Type-driven from the
+                // Enum-variant shorthand pattern `.variant` (block 3 tranche B,
+                // `etch-grammar.md` §3.2 l.510). Type-driven from the
                 // scrutinee enum at resolve time (`type_name = 0`).
                 _ = try self.advance(); // '.'
                 const variant_tok = try self.expect(.ident, "expected enum variant name after '.'");
@@ -6552,8 +6548,8 @@ pub const Parser = struct {
                 return .{ .kind = .enum_variant, .payload = idx };
             },
             .type_ident => {
-                // Qualified enum-variant pattern `Difficulty.easy` (M0.8 E2 block
-                // 3 tranche B, `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
+                // Qualified enum-variant pattern `Difficulty.easy` (block 3
+                // tranche B, `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
                 // struct-destructure pattern (l.512) and a bare `TYPE_IDENT` are
                 // the post-Phase-1 advanced pattern set — rejected with a pointer.
                 const type_tok = try self.advance();
@@ -6579,8 +6575,8 @@ pub const Parser = struct {
         return .{ .pattern_kind = pat.kind, .pattern_payload = pat.payload, .body = body };
     }
 
-    /// Parse `match scrutinee { pattern => expr, ... }` (M0.8 v0.6
-    /// foundations). Arm bodies are expressions in the E1 subset.
+    /// Parse `match scrutinee { pattern => expr, ... }`. Arm bodies
+    /// are expressions in the E1 subset.
     fn parseMatch(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'match'
         const scrutinee = try self.parseExprNoStruct(0);
@@ -6603,13 +6599,13 @@ pub const Parser = struct {
     }
 
     /// Parse `[ ... ]` in expression position — disambiguated into an array
-    /// literal or a map literal (M0.8 collections, `etch-grammar.md`
+    /// literal or a map literal (collections, `etch-grammar.md`
     /// §493-498). `[]` is an empty array; `[:]` an empty map; a first
     /// expression followed by `:` is a map, by `;` a fill array, otherwise a
     /// comma array.
     fn parseArrayOrMapLiteral(self: *Parser) ParseError!NodeId {
         const open = try self.advance(); // '['
-        // Array / map elements re-enable struct literals (M0.8 E2 block 3).
+        // Array / map elements re-enable struct literals.
         const saved_nsl = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved_nsl;
@@ -6663,7 +6659,7 @@ pub const Parser = struct {
         return try self.arena.addArrayLit(self.gpa, elems.items, false, NodeId.none, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `|a, b| expr` / `|| expr` closure (M0.8 closures, `etch-grammar.md`
+    /// Parse `|a, b| expr` / `|| expr` closure (closures, `etch-grammar.md`
     /// §524). E1 takes an expression body; a `{ block }` body arrives with
     /// block expressions (loop/break tranche).
     fn parseClosure(self: *Parser) ParseError!NodeId {
@@ -6691,8 +6687,8 @@ pub const Parser = struct {
     }
 
     /// Parse the `{ field_init {"," field_init} [","] }` body of a struct
-    /// literal `TYPE_IDENT { … }` (M0.8 E2 block 3, `etch-grammar.md` §3.2
-    /// l.486). `field_init = IDENT ":" expression`. The spread form `..base`
+    /// literal `TYPE_IDENT { … }` (block 3, `etch-grammar.md` §3.2 l.486).
+    /// `field_init = IDENT ":" expression`. The spread form `..base`
     /// (data-table inheritance, E4) is rejected. The caller has consumed the
     /// type name and confirmed `peek() == {`. Field values re-enable struct
     /// literals (a `no_struct_lit` head context does not propagate inside).
@@ -6749,7 +6745,7 @@ pub const Parser = struct {
         return .{ .start = start, .len = len };
     }
 
-    /// Parse `await <target>` (M0.8 E3 sub-slice B, `etch-grammar.md` §4.2
+    /// Parse `await <target>` (sub-slice B, `etch-grammar.md` §4.2
     /// `await_target`). `wait` / `wait_unscaled` / `entity_event` /
     /// `global_event` are contextual builtins recognised by lexeme when
     /// followed by `(` (they are NOT keywords); anything else is the
@@ -6783,8 +6779,8 @@ pub const Parser = struct {
                 _ = try self.expect(.comma, "expected ',' between entity and event type in entity_event(...)");
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in entity_event(...)");
                 const event_type = try self.internSlice(ty.span);
-                // Optional `entity_event(e, T { … })` payload filter (M1.0.14,
-                // §4.2): a field-equality predicate run into `struct_lit_fields`.
+                // Optional `entity_event(e, T { … })` payload filter (§4.2): a
+                // field-equality predicate run into `struct_lit_fields`.
                 var filter_start: u32 = 0;
                 var filter_len: u32 = 0;
                 if (self.peek() == .lbrace) {
@@ -6807,8 +6803,8 @@ pub const Parser = struct {
                 _ = try self.advance(); // '('
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in global_event(...)");
                 const event_type = try self.internSlice(ty.span);
-                // Optional `global_event(T { … })` payload filter (M1.0.14, §4.2
-                // erratum aligning the grammar on the §9.4 example).
+                // Optional `global_event(T { … })` payload filter (§4.2 erratum
+                // aligning the grammar on the §9.4 example).
                 var filter_start: u32 = 0;
                 var filter_len: u32 = 0;
                 if (self.peek() == .lbrace) {
@@ -6852,9 +6848,9 @@ pub const Parser = struct {
     ///               sub-expression position, which the grammar does not admit
     ///               (spawn_stmt is a statement) → precise parse error.
     /// Statement-position only (no body handle, §4.5) is enforced by the
-    /// type-checker (M1.0.10 E2); the parser produces the node in any expression
+    /// type-checker; the parser produces the node in any expression
     /// position. The prefab form parses + is recognized but is refused at
-    /// type-check in Phase 1 (E2).
+    /// type-check in Phase 1.
     fn parseStructuralSpawn(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'spawn'
         if (self.peek() == .lbrace) {
@@ -6921,7 +6917,7 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .float_lit, id, tok.span);
             },
             .duration_literal => {
-                // DURATION_LIT (M0.8 E4 gate fix, §1.4 / §3.2 literal). The
+                // DURATION_LIT (gate fix, §1.4 / §3.2 literal). The
                 // expr carries the full lexeme (`3.0s`); it types as
                 // `Duration`. EVALUATION is fail-loud in BOTH backends (the
                 // tag_query precedent) — duration runtime semantics are
@@ -6931,8 +6927,8 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .duration_lit, id, tok.span);
             },
             .time_literal => {
-                // TIME_LITERAL (M0.8 E7 gate, §1.4 / §3.2 literal — the
-                // DURATION_LIT-precedent lift; builtin `Time` §2.2). The expr
+                // TIME_LITERAL (gate, §1.4 / §3.2 literal — the DURATION_LIT-
+                // precedent lift; builtin `Time` §2.2). The expr
                 // carries the full `HH:MM` lexeme; it types as `Time`.
                 // EVALUATION is fail-loud in BOTH backends (the duration/color
                 // precedent) — time runtime semantics are Tier-1/E5+ material;
@@ -6943,8 +6939,8 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .time_lit, id, tok.span);
             },
             .color_literal => {
-                // COLOR_LITERAL (M0.8 E5, §1.4 l.211 / §3.2 literal — the
-                // DURATION_LIT-precedent lift, E5 ruling). The expr carries the
+                // COLOR_LITERAL (§1.4 l.211 / §3.2 literal — the DURATION_LIT-
+                // precedent lift, E5 ruling). The expr carries the
                 // full `#RRGGBB[AA]` lexeme; it types as `Color`. EVALUATION is
                 // fail-loud in BOTH backends — colour runtime semantics are
                 // UI Phase 1, Level B needs only the canonical text.
@@ -6966,8 +6962,8 @@ pub const Parser = struct {
                 return try self.parseMultilineStringLiteralExpr(tok);
             },
             .ident => {
-                // `none` / `some(x)` optional literals (M0.8 E2 block 5,
-                // `etch-grammar.md` §480-481). `none` / `some` are not keywords
+                // `none` / `some(x)` optional literals (block 5, `etch-
+                // grammar.md` §480-481). `none` / `some` are not keywords
                 // (they appear in identifier positions in annotations) — detected
                 // by lexeme. `some(` opens a some-literal; a bare `some` / `none`
                 // identifier elsewhere stays a plain ident (`none` → `none_lit`).
@@ -6992,7 +6988,7 @@ pub const Parser = struct {
             },
             .type_ident => {
                 // A TYPE_IDENT in expression position is either a struct literal
-                // `T { f: v }` (M0.8 E2 block 3) or a path-like value (an
+                // `T { f: v }` or a path-like value (an
                 // associated-fn receiver `T.assoc()`, an enum scrutinee, an
                 // annotation arg). The `{` lookahead picks the struct literal —
                 // suppressed inside an `if`/`while`/`for`/`match` head, where the
@@ -7007,7 +7003,7 @@ pub const Parser = struct {
             .lparen => {
                 _ = try self.advance();
                 // A parenthesized sub-expression re-enables struct literals even
-                // inside an `if`/`while`/`for`/`match` head (M0.8 E2 block 3).
+                // inside an `if`/`while`/`for`/`match` head.
                 const saved = self.no_struct_lit;
                 self.no_struct_lit = false;
                 const inner = try self.parseExpr(0);
@@ -7029,8 +7025,8 @@ pub const Parser = struct {
                 // the surrounding context. Tag path literals with
                 // multiple segments (`.foo.bar`) remain out-of-scope.
                 const dot_span = (try self.advance()).span;
-                // Anonymous struct literal `.{ f: v, … }` (M0.8 E3-C tranche
-                // 8, `etch-grammar.md` §3.2): `type_name == 0` is the anon
+                // Anonymous struct literal `.{ f: v, … }` (tranche 8, `etch-
+                // grammar.md` §3.2): `type_name == 0` is the anon
                 // sentinel — the resolver supplies the type from the expected
                 // context (check mode, resolver-types §4). The dot prefix
                 // makes the form unambiguous in `if`/`while`/`for`/`match`
@@ -7050,7 +7046,7 @@ pub const Parser = struct {
             },
             .kw_event => {
                 // `event` in expression position is the implicit event binding
-                // of an `@on_event(T)` observer rule (M0.8 E3) — self-style, like
+                // of an `@on_event(T)` observer rule — self-style, like
                 // `self` in a method (resolver-types §12, the ruling: `event`
                 // stays a keyword, the observer payload is an implicit binding
                 // named `event`, NOT a declared param). Lex it as an `.ident`
@@ -7208,7 +7204,7 @@ test "parser handles binary expression precedence per grammar subset" {
 
 test "parser rejects unsupported top-level construct with E0001" {
     const gpa = std.testing.allocator;
-    // `behavior` is still out of scope (E4); `fn` graduated with the M0.8 E2
+    // `behavior` is still out of scope; `fn` graduated with the M0.8 E2
     // call mechanism, so it no longer rejects here.
     var result = try parse(gpa,
         \\behavior Foo {}
@@ -7291,7 +7287,7 @@ test "parse test block" {
     try std.testing.expectEqual(ast_mod.ItemKind.test_decl, result.ast.items.items(.kind)[0]);
     const td = result.ast.test_decls.items[result.ast.items.items(.data)[0]];
     try std.testing.expectEqualStrings("math works", result.ast.strings.slice(td.name));
-    // M1.0.15 — the annotation range is preserved (no longer discarded): the
+    // the annotation range is preserved (no longer discarded): the
     // single `@tag(.unit)` is reachable through the decl's annotation slab.
     try std.testing.expectEqual(@as(u32, 1), td.annotations_len);
     const annot = result.ast.annot_pool.items[td.annotations_extra];
@@ -7343,7 +7339,7 @@ test "parser recovers at top level and returns partial AST" {
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     // First component should be parsed; the trailing broken annotation is
-    // recovered from at the top-level sync-point (M0.8) rather than
+    // recovered from at the top-level sync-point rather than
     // aborting the whole file.
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
     try std.testing.expectEqual(ast_mod.ItemKind.component_decl, result.ast.items.items(.kind)[0]);
@@ -7678,8 +7674,8 @@ test "spawn { } in a sub-expression position is a parse error (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 0), spawns);
 }
 
-/// Collect the statement kinds of the first rule's body run (M1.0.12 E2 test
-/// helper) — the rule body is a `(start, len)` statement run in `arena.extra`.
+/// Collect the statement kinds of the first rule's body run — the rule body is
+/// a `(start, len)` statement run in `arena.extra`.
 fn firstRuleBodyKinds(result: *const ParseResult, buf: []ast_mod.StmtKind) []ast_mod.StmtKind {
     var rule: ast_mod.RuleDecl = undefined;
     var found = false;
@@ -7822,7 +7818,7 @@ test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
 test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
     const gpa = std.testing.allocator;
     // Token-based disambiguation (§3.2 note): `spawn (` → structural expr
-    // (M1.0.10 surface untouched), `spawn {` → async task statement.
+    //, `spawn {` → async task statement.
     var result = try parse(gpa,
         \\component Pos { x: int = 0 }
         \\rule r() {

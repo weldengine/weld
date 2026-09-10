@@ -11,7 +11,7 @@ const std = @import("std");
 const value_mod = @import("value.zig");
 
 const weld_core = @import("weld_core");
-// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+// persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
 const persistent = weld_core.memory.persistent;
 const RegistryNS = weld_core.ecs.registry;
 const Registry = RegistryNS.Registry;
@@ -24,7 +24,7 @@ const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
-// M1.0.9 — runtime extension resolution (name → cooked `.prefab.bin` bytes), the
+// runtime extension resolution (name → cooked `.prefab.bin` bytes), the
 // same interface the scene loader receives. Held (optional, borrowed) by the
 // bridge so a name-only Etch `entity.activate_extension("X")` resolves at runtime.
 const ExtensionResolver = weld_core.scene.loader.ExtensionResolver;
@@ -45,7 +45,7 @@ comptime {
     // `StringSlot` layout (`persistent.zig`) the bridge reads/writes — one
     // source of truth across the Tier-0 / Etch boundary.
     std.debug.assert(@sizeOf(persistent.StringSlot) == FieldKind.string_.sizeBytes());
-    // Same one-source-of-truth guard for the collection slot stride (M1.0.17):
+    // Same one-source-of-truth guard for the collection slot stride:
     // `CollectionSlot { ptr }` must match `.array_`/`.map_`/`.set_` sizeBytes.
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.array_.sizeBytes());
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.map_.sizeBytes());
@@ -75,7 +75,7 @@ pub const Bridge = struct {
     /// Etch resource name → registry id.
     resources: std.StringHashMapUnmanaged(ComponentId) = .empty,
 
-    /// M1.0.9 — optional runtime extension resolver (name → cooked `.prefab.bin`
+    /// optional runtime extension resolver (name → cooked `.prefab.bin`
     /// bytes). Borrowed, not owned — set when the interpreter is bound, used by
     /// `entity.activate_extension` / `deactivate_extension`. Absent → those
     /// methods fail with `error.MissingExtensionResolver`.
@@ -241,7 +241,7 @@ pub const Bridge = struct {
         const bytes = store.getResource(resource_id) orelse return BridgeError.UnknownResource;
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        // Enum read (M1.0.3 E3): rebuild a typed `enum_value` from the slot's
+        // Enum read: rebuild a typed `enum_value` from the slot's
         // discriminant + the declared enum type's interned id on `FieldDesc`
         // (the byte-only `readBytesAsValue` has no access to the latter). The
         // `type_name` id matches the rest of the interpreter's enum machinery
@@ -305,7 +305,7 @@ pub const Bridge = struct {
     }
 
     /// Swap a resource collection field's slot to a freshly-built persistent
-    /// container block (M1.0.17 E2, whole-field reassignment `get_mut(R).xs =
+    /// container block.xs =
     /// [...]`). The interpreter builds `new_block` (a `type_array` block whose
     /// elements are deep-copied, strings promoted — it owns the collections store
     /// + string helpers this needs); the bridge does only the slot mechanics, in
@@ -374,7 +374,7 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(f64)]);
             break :blk .{ .float_ = v };
         },
-        // Borrowed read (M1.0.3 E2, resource-only): decode the `{ptr,len}` slot
+        // Borrowed read: decode the `{ptr,len}` slot
         // into a `string_persistent` view without incref'ing the block. `ptr==0`
         // ⇔ empty string (the no-default / empty-write representation).
         .string_ => blk: {
@@ -387,7 +387,7 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
         // delegating here, and components never carry `.enum_` (validator-gated).
         // Proven invariant: this arm is never reached.
         .enum_ => unreachable,
-        // Collection read (M1.0.17 E2): decode the `CollectionSlot { ptr }` into a
+        // Collection read: decode the `CollectionSlot { ptr }` into a
         // borrowed `.array_persistent` view over the owned container block (no
         // incref — the resource, hence the block, outlives the rule body). `ptr`
         // is never 0 for a live field (the empty collection is a real block
@@ -399,19 +399,19 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
             break :blk .{ .array_persistent = cs.ptr };
         },
-        // Map read (M1.0.17 E3): same borrowed-view decode as `.array_`.
+        // Map read: same borrowed-view decode as `.array_`.
         .map_ => blk: {
             var cs: persistent.CollectionSlot = undefined;
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
             break :blk .{ .map_persistent = cs.ptr };
         },
-        // Set read (M1.0.17 E4): same borrowed-view decode.
+        // Set read: same borrowed-view decode.
         .set_ => blk: {
             var cs: persistent.CollectionSlot = undefined;
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
             break :blk .{ .set_persistent = cs.ptr };
         },
-        // Entity field (M1.0.6 E4): decode the 8-byte `EntityId` (`value.zig`'s
+        // Entity field: decode the 8-byte `EntityId` (`value.zig`'s
         // `EntityId` is a `u64` that shares the bit pattern of core `EntityId`,
         // packed `struct(u64)`; `invalid_entity`/`dead` == all-ones). The runtime
         // interp read path returns it as `Value.entity_id`.
@@ -482,7 +482,7 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
         // `promoteResourceString`; components never carry `.string_` (validator-
         // gated). Reaching here is a bug, surfaced as a typed error, never a panic.
         .string_ => return error.TypeMismatch,
-        // Enum write (M1.0.3 E3): store the variant's declaration-order index as
+        // Enum write: store the variant's declaration-order index as
         // the `u32` discriminant. POD — self-contained in the `enum_value`, so
         // (unlike `.string_`) it goes through the generic write path.
         .enum_ => {
@@ -492,7 +492,7 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
             };
             @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&disc));
         },
-        // Entity field (M1.0.6 E4): store the 8-byte `EntityId` (u64 bit pattern).
+        // Entity field: store the 8-byte `EntityId` (u64 bit pattern).
         // The interp runtime write path (e.g. `entity.get_mut(Comp).ref = other`)
         // routes here; the scene cook does NOT (it writes `dead` + a cross-ref
         // side entry, never an immediate value).
@@ -506,7 +506,7 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
         // A collection write is a persistent promotion (alloc + deep-copy +
         // decref of the previous slot), needing an allocator and the old slot —
         // the POD byte-encoder has neither. Resource collection writes route
-        // through `promoteResourceCollection` (M1.0.17 E2+); components never
+        // through `promoteResourceCollection`; components never
         // carry a collection kind (validator-gated). Reaching here is a bug,
         // surfaced as a typed error, never a panic — the `.string_` precedent.
         .array_, .map_, .set_ => return error.TypeMismatch,
@@ -548,8 +548,7 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     // Float kinds (.float_/.f64_/.f32_) intentionally accept an int Value via
     // `@floatFromInt` (see `writeValueAsBytes` above), so an int is NOT an
     // incompatible tag for `.f64_` — probe it with a genuinely incompatible tag
-    // (`.bool_`). (M1.0.1 wire-in: this assertion previously used `.int_ = 7`,
-    // which the int→float coercion accepts, so it never matched the impl.)
+    // (`.bool_`).
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));

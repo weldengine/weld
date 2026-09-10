@@ -9,7 +9,7 @@
 //! - No HIR — walks the AST directly.
 //! - No bytecode VM.
 //! - Structural mutation (`spawn`, `despawn`, `add(T)`, `remove(T)`) is a
-//!   DEFERRED change (M1.0.10): a rule / observer / hook body enqueues a Tier-0
+//!   DEFERRED change: a rule / observer / hook body enqueues a Tier-0
 //!   `CommandBuffer` command onto `world.observer_registry.deferred`; it applies
 //!   at the tick boundary via `applyWithObservers` (firing observers per op),
 //!   never mid-`iterateArchetype`.
@@ -33,7 +33,7 @@ const descriptor_mod = @import("descriptor.zig");
 const services_mod = @import("services.zig");
 
 const weld_core = @import("weld_core");
-// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+// persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
 const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
@@ -49,7 +49,7 @@ const DynamicQuery = weld_core.ecs.world.DynamicQuery;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
 const initial_tick = weld_core.ecs.tick.initial_tick;
-// M1.0.9 — the Tier-0 scene loader (extension activate/deactivate runtime
+// the Tier-0 scene loader (extension activate/deactivate runtime
 // entries + the `ExtensionResolver` type). `weld_etch` depends on `weld_core`,
 // so this is the legal direction (core never imports etch).
 const scene_loader = weld_core.scene.loader;
@@ -76,7 +76,7 @@ pub const RuntimeReport = struct {
     rules_matched: u64 = 0,
     runtime_errors: u64 = 0,
     /// Typed payload of the most recent runtime failure that carried one
-    /// (M0.8 E3-D, D-S4-runtime-report). Null when no failure occurred, or
+    ///. Null when no failure occurred, or
     /// when the failing site has no typed conversion yet — residual untyped
     /// sites still bump `runtime_errors` and leave the previous payload in
     /// place. Interp-only / informational, like the counters above: the
@@ -84,12 +84,12 @@ pub const RuntimeReport = struct {
     /// differential-parity obligation.
     last_error: ?RuntimeError = null,
     /// Root predicate evaluations against archetypes during matching-set
-    /// rescans (M1.0.0 — generalised from the M0.8 D-S4-or-archetype counter).
+    /// rescans.
     /// The observable proving the cached selection: every entity-bound rule
     /// evaluates each archetype once (at rescan, when it first appears), not
     /// once per archetype per tick.
     predicate_archetype_evals: u64 = 0,
-    /// Terms walked by a SPARSE form this tick (M1.B/P2-1) — the observable
+    /// Terms walked by a SPARSE form this tick — the observable
     /// that the driver is elected AT THE WALK and not at compile.
     ///
     /// It has to exist, and the reason is the finding P2-1 rests on: the answer
@@ -118,8 +118,8 @@ const FieldFilter = struct {
     expected_value: Value,
 };
 
-/// One field binding captured at lower time for a §6 general filter (M0.8
-/// E4): name + layout, so the guard evaluator can bind the field's current
+/// One field binding captured at lower time for a §6 general filter: name
+/// + layout, so the guard evaluator can bind the field's current
 /// value into the filter expression's scope.
 const BoundField = struct {
     name: StringId,
@@ -127,7 +127,7 @@ const BoundField = struct {
     kind: FieldKind,
 };
 
-/// One `has T { expression }` general filter (M0.8 E4 — item-4 ruling).
+/// One `has T { expression }` general filter.
 /// Flat-AND with the other per-entity guards, mirroring the documented S4
 /// model the narrow field filters follow.
 const ExprFilter = struct {
@@ -136,7 +136,7 @@ const ExprFilter = struct {
     fields: []BoundField,
 };
 
-/// One `resource T { expression }` filter (M0.8 E4) — gates the whole rule
+/// One `resource T { expression }` filter — gates the whole rule
 /// evaluation, like the resource deps it rides with.
 const ResourceExprFilter = struct {
     resource_id: ComponentId,
@@ -145,7 +145,7 @@ const ResourceExprFilter = struct {
 };
 
 /// A per-entity tag query predicate compiled from a `.tag_filter` when-node
-/// (M0.8 E3). `bits` is the resolved leaf-bit set of the operand(s) — a single
+///. `bits` is the resolved leaf-bit set of the operand(s) — a single
 /// bit for `has_tag`/`has_no_tag`, the union of operand bits (leaves + expanded
 /// category masks) for the multi operators. Evaluated against the entity's
 /// `TagSet` at iteration time (an entity without `TagSet` reads as all-zero).
@@ -158,7 +158,7 @@ const TagPredicate = struct {
     }
 };
 
-/// A deferred tag mutation (M0.8 E3, `etch-grammar.md` §4.4). Enqueued by
+/// A deferred tag mutation (`etch-grammar.md` §4.4). Enqueued by
 /// `add_tag`/`remove_tag` during a tick, applied at the tick boundary (after
 /// every rule has run) — never mid-archetype-walk. Applying may add the
 /// `TagSet` component to an entity that lacks one (an archetype transition),
@@ -169,7 +169,7 @@ const PendingTag = struct {
     set: bool,
 };
 
-/// A deferred extension activate/deactivate (M1.0.9 B1 round-trip). Enqueued by
+/// A deferred extension activate/deactivate. Enqueued by
 /// the Etch `entity.activate_extension`/`deactivate_extension` methods during a
 /// tick — the extension bytes are resolved AT THE CALL — and applied at the tick
 /// boundary (after every rule has run, so never mid-`iterateArchetype`-walk;
@@ -212,7 +212,7 @@ const PredicateNode = struct {
 const RuleDesc = struct {
     rule_idx: u32,
     name: StringId,
-    /// M1.0.0 — the rule's archetype selection: one Tier-0 `DynamicQuery`
+    /// the rule's archetype selection: one Tier-0 `DynamicQuery`
     /// per conjunctive term of the `when` clause's DNF (`has T` → `with`,
     /// `not entity has T` → `without`). The rule's matched-archetype set is
     /// the UNION of the terms' results. A pure-`and` `when` yields one term;
@@ -227,8 +227,7 @@ const RuleDesc = struct {
     selection: []QueryPlan,
     resource_deps: []ResourceDep,
     /// Per-entity field filters, one per `has T { field == value }` clause
-    /// (M0.8 E3-D, D-S4-multifilter — was a single overwrite-on-collision
-    /// slot). Flat-AND model: every filter must pass, regardless of its
+    /// . Flat-AND model: every filter must pass, regardless of its
     /// position under `or`/`not` (the documented S4 imprecision, same as
     /// `tag_predicates`).
     field_filters: []FieldFilter,
@@ -243,36 +242,36 @@ const RuleDesc = struct {
     /// one component and a parameter of type Entity is present). False if
     /// the rule runs once per tick (resource-only or no-when).
     is_entity_bound: bool,
-    /// `@on_event(T)` observer (M0.8 E3): the event type name `T`, or null for
+    /// `@on_event(T)` observer: the event type name `T`, or null for
     /// a non-observer rule. When set, the rule fires once per event of type `T`
     /// in the per-tick `EventStore`, with the implicit `event` binding injected
     /// self-style (resolver-types §12). Takes precedence over entity/global
     /// dispatch in `runRule`.
     event_type: ?StringId,
     /// `@on_added/removed/replaced/spawned/despawned` structural-observer routing
-    /// (M1.0.2 E2): the lifecycle kind, or null for a non-observer rule. Recorded
+    ///: the lifecycle kind, or null for a non-observer rule. Recorded
     /// at descriptor build, mirroring `event_type`. The Tier-0 ObserverRegistry
     /// bridge + dispatch exclusion are E3 — in E2 the field is populated but not
     /// yet consumed by `runRule` / world bind.
     observer_kind: ?ast_mod.ObserverKind,
     /// The resolved target `ComponentId` of an `@on_added/removed/replaced(T)`
-    /// observer (M1.0.2 E2), or null for `@on_spawned` / `@on_despawned` and for a
+    /// observer, or null for `@on_spawned` / `@on_despawned` and for a
     /// non-observer rule. Resolved against the world registry at descriptor build.
     observer_component: ?ComponentId,
-    /// `entity has T changed` change-detection filters (M0.8 E3): component ids
+    /// `entity has T changed` change-detection filters: component ids
     /// that must have changed since `last_run_tick` for the entity to match.
     /// Per-entity, ANDed after the field filter and tag predicates (same flat
     /// model). Empty for a rule with no `changed` filter.
     changed_filters: []ComponentId,
-    /// `has T { expression }` general filters (M0.8 E4 — §6, item-4 ruling).
+    /// `has T { expression }` general filters (— §6, item-4 ruling).
     /// Per-entity, evaluated AFTER the changed filters (fixed order, mirrored
     /// by the codegen guards), fields-only scope. Flat-AND.
     expr_filters: []ExprFilter,
-    /// Bare expression conditions (M0.8 E4 — the §6 last arm). Per-entity for
+    /// Bare expression conditions (— the §6 last arm). Per-entity for
     /// an entity-bound rule (rule params in scope, entity bound); evaluated
     /// once per tick for a global rule. Flat-AND, after `expr_filters`.
     expr_conds: []NodeId,
-    /// `resource T { expression }` filters (M0.8 E4) — gate the whole rule
+    /// `resource T { expression }` filters — gate the whole rule
     /// evaluation, alongside the resource deps.
     resource_expr_filters: []ResourceExprFilter,
     /// The `current_tick` at which this rule last ran (`engine-ecs-internals.md`
@@ -280,13 +279,13 @@ const RuleDesc = struct {
     /// last_run_tick`. Updated after each evaluation in `stepOnce`. Starts at
     /// `initial_tick` (0).
     last_run_tick: Tick,
-    /// `async rule` (M0.8 E3 sub-slice B): the rule suspends at `await` and
+    /// `async rule`: the rule suspends at `await` and
     /// resumes a later tick via its task in the `async_tasks` pool (the M0.8
     /// `AsyncSlot` lineage), instead of running to completion every tick.
     /// Dispatched by `runAsyncRule` in `stepOnce`.
     is_async: bool,
-    /// Entities this rule matched in the most recent tick it ran (M1.0.0
-    /// observable). Reset at the top of `runRule`'s entity-bound path,
+    /// Entities this rule matched in the most recent tick it ran. Reset
+    /// at the top of `runRule`'s entity-bound path,
     /// incremented per matched entity in `iterateArchetype`.
     /// `RuntimeReport.entities_iterated` is the program-wide sum; this is the
     /// per-rule breakdown surfaced by `Interpreter.ruleMatchedEntities`.
@@ -341,14 +340,14 @@ const Locals = struct {
     }
 };
 
-/// One `key: value` entry of a runtime map (M0.8 collections).
+/// One `key: value` entry of a runtime map.
 const MapPair = struct { key: Value, value: Value };
 
-/// Per-rule-body heap store for Etch collection values (M0.8 collections).
+/// Per-rule-body heap store for Etch collection values.
 /// Arrays are `ArrayListUnmanaged(Value)` addressed by the `u32` handle carried
 /// in `Value.array_ref`; maps are `ArrayListUnmanaged(MapPair)` (insertion
-/// order, keys unique) addressed by `Value.map_ref`; sets (M0.8 E3-C tranche
-/// 3bis) are `ArrayListUnmanaged(Value)` (insertion order, elements unique)
+/// order, keys unique) addressed by `Value.map_ref`; sets are
+/// `ArrayListUnmanaged(Value)` (insertion order, elements unique)
 /// addressed by `Value.set_ref` — the same insertion-ordered policy as maps,
 /// so the codegen mirror is byte-exact by construction. Reset at each
 /// rule-body boundary so collections created inside a body do not leak across
@@ -392,8 +391,7 @@ const CollectionStore = struct {
         return idx;
     }
 
-    /// Allocate a fresh empty set, returning its handle (M0.8 E3-C tranche
-    /// 3bis).
+    /// Allocate a fresh empty set, returning its handle.
     fn newSet(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
         const idx: u32 = @intCast(self.sets.items.len);
         try self.sets.append(gpa, .empty);
@@ -401,7 +399,7 @@ const CollectionStore = struct {
     }
 };
 
-/// A runtime closure value (M0.8 closures): the closure-expression node plus a
+/// A runtime closure value: the closure-expression node plus a
 /// by-value snapshot of the environment captured at the definition site
 /// (§5.6 — value types copied). E1 closures are short-lived (invoked in the
 /// same rule body), so capturing component refs is sound; long-lived closures
@@ -434,10 +432,10 @@ const ClosureStore = struct {
     }
 };
 
-/// One field of a runtime `struct` value (M0.8 E2 block 3).
+/// One field of a runtime `struct` value.
 const StructField = struct { name: StringId, value: Value };
 
-/// One value crossing INTO the interpreter from Zig (M1.1.15.2 G4). Deliberately
+/// One value crossing INTO the interpreter from Zig. Deliberately
 /// a small POD union and not a `Value`: the bridge must not need to know how the
 /// interpreter represents a string, and this way it cannot.
 pub const ExternalValue = union(enum) {
@@ -454,7 +452,7 @@ pub const ExternalField = struct {
     value: ExternalValue,
 };
 
-/// A registered producer of external events (M1.1.15.2 G4). `drain` is called
+/// A registered producer of external events. `drain` is called
 /// once per tick, at a fixed point, and returns how many events it pushed.
 pub const ExternalEventSource = struct {
     ctx: *anyopaque,
@@ -468,7 +466,7 @@ const StructVal = struct {
     fields: std.ArrayListUnmanaged(StructField) = .empty,
 };
 
-/// Per-rule-body store for struct values (M0.8 E2 block 3), addressed by
+/// Per-rule-body store for struct values, addressed by
 /// `Value.struct_ref`. Reset at the body boundary like the collection / closure
 /// stores (rule-arena semantics). A struct is a by-value type; in the
 /// interpreter the handle is shared (reference-like), which is sound for the
@@ -495,8 +493,8 @@ const StructStore = struct {
     }
 };
 
-/// One emitted event instance in the interpreter's dynamic event store (M0.8
-/// E3). Reuses `StructField` for its `(name, value)` payload — an event is a
+/// One emitted event instance in the interpreter's dynamic event store.
+/// Reuses `StructField` for its `(name, value)` payload — an event is a
 /// POD struct of fields (ABI §3.1); field values are POD scalars (the resolver
 /// enforces POD event fields), so they are stored by value.
 const EventVal = struct {
@@ -504,7 +502,7 @@ const EventVal = struct {
     fields: std.ArrayListUnmanaged(StructField) = .empty,
 };
 
-/// Dynamic per-tick event queue for the interpreter (M0.8 E3). The
+/// Dynamic per-tick event queue for the interpreter. The
 /// comptime-typed `World.event_bus` (`register`/`emit` are `comptime T: type`)
 /// cannot be driven by the dynamic tree-walker, so `emit` accumulates events
 /// here, each tagged by its type name; `@on_event` observers drain them. The
@@ -513,7 +511,7 @@ const EventVal = struct {
 /// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
 const EventStore = struct {
     list: std.ArrayListUnmanaged(EventVal) = .empty,
-    /// Store-owned deep copies of NON-AST string event field bytes (M1.0.14 E4):
+    /// Store-owned deep copies of NON-AST string event field bytes:
     /// a `.string_run` (per-body `run_strings`, freed at the body boundary, its
     /// handle reusable) OR a borrowed `.string_persistent` (a view over resource
     /// storage, released when the resource string field is reassigned — M1.0.3).
@@ -548,7 +546,7 @@ const EventStore = struct {
     /// `.string_persistent` view over the copy (freed at `clear`). Stabilizes a
     /// non-AST string event field value (a per-body `.string_run` or a borrowed
     /// `.string_persistent`) that would otherwise dangle when the emitter's body
-    /// ends or the source resource string is reassigned (M1.0.14 E4).
+    /// ends or the source resource string is reassigned.
     fn ownEscapingString(self: *EventStore, gpa: std.mem.Allocator, bytes: []const u8) !Value {
         const dup = try gpa.dupe(u8, bytes);
         errdefer gpa.free(dup);
@@ -566,8 +564,8 @@ const EventStore = struct {
     }
 };
 
-/// Compose the inherent-method map key from a type name and a method name (M0.8
-/// E2 block 3) — same packing as `types.methodKey`.
+/// Compose the inherent-method map key from a type name and a method name —
+/// same packing as `types.methodKey`.
 fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
@@ -575,11 +573,11 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
 /// Upper bound on call-argument count for the stack-allocated source-order
-/// evaluation buffer (M0.8 E4 named args). Far above any real signature;
+/// evaluation buffer. Far above any real signature;
 /// exceeding it fails loud.
 const max_call_args: usize = 64;
 
-/// Control-flow signal raised by `break` / `continue` (M0.8 loop/break).
+/// Control-flow signal raised by `break` / `continue`.
 /// Carried on the interpreter (not as a return value) so it can cross
 /// expression↔statement boundaries — e.g. a `break` inside a `match` arm block
 /// nested in a loop body. The enclosing loop consumes it; `none` is the
@@ -600,10 +598,10 @@ const LoopAction = enum { again, stop, propagate };
 const async_fixed_dt_hz: f64 = 60.0;
 
 /// Seconds per fixed tick — the `dt` the time subsystem publishes each
-/// `stepOnce` (M1.0.13 E5, `engine-gameplay-systems.md` "Les trois temps").
+/// `stepOnce` (`engine-gameplay-systems.md` "Les trois temps").
 const fixed_dt_secs: f64 = 1.0 / async_fixed_dt_hz;
 
-/// Resolved runtime handles of the three builtin time resources (M1.0.13 E5):
+/// Resolved runtime handles of the three builtin time resources:
 /// registry ids plus the byte offsets of every field `advanceTime` writes.
 /// Resolved once in `compile`, right after the Pass-A registration from
 /// `types.builtin_resources` (the ids and offsets are layout-stable for the
@@ -625,7 +623,7 @@ const TimeResources = struct {
     real_since_startup: u16,
 };
 
-/// One scheduled timer (M1.0.13 E6, `etch-reference-part1.md` §9.10/§9.12) —
+/// One scheduled timer (`etch-reference-part1.md` §9.10/§9.12) —
 /// a heap record in the `Interpreter.timers` registry, DISTINCT from the task
 /// pool (a timer is not a task: no join, no frames, no wake condition). The
 /// registry has the same monotone pointer-stable + husk discipline as the
@@ -660,8 +658,7 @@ const TimerEntry = struct {
     firing: bool = false,
 };
 
-/// Read an `f64` resource field at `off` (M1.0.13 E5 population helpers —
-/// unaligned-safe byte copies, the resource store guarantees nothing better).
+/// Read an `f64` resource field at `off`.
 fn readF64At(bytes: []const u8, off: u16) f64 {
     var x: f64 = undefined;
     @memcpy(std.mem.asBytes(&x), bytes[off..][0..8]);
@@ -677,14 +674,14 @@ fn writeI64At(bytes: []u8, off: u16, v: i64) void {
 }
 
 /// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
-/// minimal Duration→seconds path `await wait` needs (M1.0.11 E3). `null` if the
+/// minimal Duration→seconds path `await wait` needs. `null` if the
 /// lexeme is malformed. General `Duration` arithmetic stays out of scope.
 fn durationLiteralSeconds(text: []const u8) ?f64 {
     if (text.len < 2 or text[text.len - 1] != 's') return null;
     return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
 }
 
-// ─── Async suspension core (M1.0.11, `etch-reference-part1.md §9.12`) ─────────
+// ─── Async suspension core (`etch-reference-part1.md §9.12`) ─────────
 //
 // Phase 1 is the tree-walker; it reproduces the §9 observable async semantics
 // WITHOUT the Phase-2 compiled state machine (`etch-bytecode.md §9`). A suspended
@@ -698,7 +695,7 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
 //     at its cursor — a prefix statement is NEVER re-run, so `emit` and structural
 //     mutations don't double-fire. `wait(Duration)` resolves against the GAME
 //     clock accumulator and `wait_unscaled(Duration)` against the UNSCALED one
-//     (M1.0.13 E5 — both via the fixed 1/60 tick conversion); `global_event`
+//; `global_event`
 //     against the per-tick event store; the direct-call `future` (`await f()`)
 //     is frame inlining (below).
 //   - Frame kinds cover every EBNF v0.6 statement block (C1.6): `run` (rule/`fn`
@@ -716,24 +713,24 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
 //     M1.0.13 the time subsystem advances unconditionally — the builtin time
 //     resources are ambient state every program can read.)
 
-/// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
+/// The condition that resumes a suspended `async rule`.
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
 /// A `(start, len)` window into `Interpreter.captured_filters` — an event
-/// await target's payload filter, captured by value at suspension (M1.0.14 E4).
+/// await target's payload filter, captured by value at suspension.
 /// `len == 0` means no filter body.
 const FilterRange = struct { start: u32, len: u32 };
 
 const WakeCond = union(enum) {
     /// Resume once the GAME clock accumulator reaches this deadline, in
-    /// tick units (M1.0.13 E5): `await wait(d)` reached with the game clock
+    /// tick units: `await wait(d)` reached with the game clock
     /// at G sets it to `G + round(seconds(d) * 60)`. The game clock advances
     /// by `time_scale` per tick and freezes under `paused`, so the wait
     /// scales and pauses with game time. At `time_scale = 1` the clock sums
     /// stay exact integer-valued f64 and the wake ticks are byte-identical
-    /// to the pre-M1.0.13 `async_tick` conversion (M1.0.11 E3).
+    /// to the pre-M1.0.13 `async_tick` conversion.
     wait_until: f64,
-    /// `await wait_unscaled(d)` (M1.0.13 E5): the same conversion against
+    /// `await wait_unscaled(d)`: the same conversion against
     /// the UNSCALED clock, which advances by 1 per tick unconditionally —
     /// the wait keeps running under `paused` and ignores `time_scale`.
     wait_until_unscaled: f64,
@@ -750,22 +747,22 @@ const WakeCond = union(enum) {
     /// the filter values are captured ONCE at suspension (§9.4); the designated
     /// field is the compile-time decision from `resolveEventEntityTarget`.
     entity_event: struct { type_name: StringId, entity: EntityId, field_name: StringId, filter: FilterRange },
-    /// A `race` parent (M1.0.12 E1): fires when at least one child in
+    /// A `race` parent: fires when at least one child in
     /// `task_children[start .. start+len]` is `.done` (a winner exists) — OR when
     /// no child remains `.suspended` (every branch failed/canceled: no winner,
     /// the race completes and the parent resumes after the statement, E4).
     /// A range into the shared `Interpreter.task_children` list, kept small.
     children_any: struct { start: u32, len: u32 },
-    /// A `sync` parent (M1.0.12 E1): fires when no child in the range remains
+    /// A `sync` parent: fires when no child in the range remains
     /// `.suspended` — failed (canceled) children do not block the join.
     children_all: struct { start: u32, len: u32 },
-    /// A handle-await parent (M1.0.12 E1, `await h`): fires when the target task
+    /// A handle-await parent: fires when the target task
     /// is no longer `.suspended`. The pool is monotonic (no slot reuse), so a
     /// bare pool index is a stable identity — no generation needed in Phase 1.
     task_done: u32,
 };
 
-/// One frame of an `AsyncTask`'s resume stack (M1.0.11 E1). The tree-walker is
+/// One frame of an `AsyncTask`'s resume stack. The tree-walker is
 /// its own runtime (`etch-reference-part1.md §9.12`): rather than a compiled
 /// state machine (Phase-2 bytecode), a suspended task is a heap record holding a
 /// STACK of frames — each a `(block, statement cursor)` position plus the control
@@ -778,7 +775,7 @@ const WakeCond = union(enum) {
 /// — so a statement-head `await` can suspend inside ANY of them. This generalizes
 /// the M0.8 single-top-level-cursor `AsyncSlot` to nested blocks (the stack reaches
 /// depth > 1). The frame set is COMPLETE for EBNF v0.6's statement blocks (C1.6):
-/// no body kind falls through to a fail-loud await. `call` (M1.0.11 E2) is the
+/// no body kind falls through to a fail-loud await. `call` is the
 /// inlined body of an `async fn`/`async method` reached by a direct `await f()`; it
 /// OWNS a heap-boxed scope (freed on pop — see `deinitFrame`), so teardown is not a
 /// bare `frames.deinit`. The other frame kinds are pure indices.
@@ -792,7 +789,7 @@ const AsyncFrame = union(enum) {
     single: SingleFrame,
 };
 
-/// A length-1 statement run (M1.0.12 E4): the root frame of a `race`/`sync`
+/// A length-1 statement run: the root frame of a `race`/`sync`
 /// child task whose branch is a single NON-block statement (`await wait(1.0s)`
 /// or a guarded `if cond => stmt` — the branch statement is a bare `NodeId` in
 /// `arena.concurrency_branches`, not an `arena.extra` run, so `RunFrame`'s
@@ -849,12 +846,12 @@ const ForIter = union(enum) {
     range: struct { next: i64, end: i64, inclusive: bool },
     array: struct { handle: u32, len: usize, idx: usize },
     map: struct { handle: u32, len: usize, idx: usize },
-    /// A resource `T[]` iterated in an async body (M1.0.17 E2). Carries the
+    /// A resource `T[]` iterated in an async body. Carries the
     /// `type_array` block pointer (stable across suspend, unlike a rule-arena
     /// handle) + a snapshotted length + cursor — same index-based semantics as
     /// the `.array` variant.
     array_persistent: struct { ptr: u64, len: usize, idx: usize },
-    /// A resource `[K: V]` iterated in an async body (M1.0.17 E3), mirror of
+    /// A resource `[K: V]` iterated in an async body, mirror of
     /// `.map` on a `type_map` block pointer.
     map_persistent: struct { ptr: u64, len: usize, idx: usize },
 };
@@ -888,7 +885,7 @@ const TryFrame = struct {
 };
 
 /// Where an `await`'s resolved value is delivered at the caller's await site
-/// (M1.0.11 E2). Set from the statement that carries the `await`: a bare
+///. Set from the statement that carries the `await`: a bare
 /// expr-statement discards it; a `let x = await …` binds a fresh local; an
 /// `x = await …` assigns an existing local; a `return await …` returns it from
 /// the enclosing `async fn` / rule.
@@ -900,7 +897,7 @@ const RetTarget = union(enum) {
 };
 
 /// The inlined body of an `async fn` / `async method` reached by a direct
-/// `await f()` (M1.0.11 E2, `etch-reference-part1.md §9.12`): `f`'s body runs as
+/// `await f()` (`etch-reference-part1.md §9.12`): `f`'s body runs as
 /// frames on the CALLER's task, so `f`'s own `await` suspends the whole task and
 /// `f`'s `return` resolves at the caller's await site. Owns a heap-boxed `scope`
 /// (f's params/locals — freed when the frame pops); `value_expr` is f's trailing
@@ -914,7 +911,7 @@ const CallFrame = struct {
     ret: RetTarget,
 };
 
-/// A suspendable task (M1.0.11 E1) — the dynamic-pool replacement for the M0.8
+/// A suspendable task — the dynamic-pool replacement for the M0.8
 /// per-rule `AsyncSlot`. Holds the resume frame-stack (`frames`, innermost last),
 /// the wake condition it is blocked on, and the locals retained across
 /// suspension. Since M1.0.12 E1 each task is a HEAP record (`gpa.create`) in the
@@ -942,15 +939,15 @@ const AsyncTask = struct {
     /// frame, else this). POD-only across a suspend (the M0.8 caveat).
     locals: Locals = .{},
     /// The delivery target for a wake-condition `await` used in a value position
-    /// (`let x = await wait(…)`): the (unit) value is bound on resume (M1.0.11
-    /// E2). `.discard` for a bare `await wait/global_event` (the common form).
+    /// (`let x = await wait(…)`): the (unit) value is bound on resume.
+    /// `.discard` for a bare `await wait/global_event` (the common form).
     pending_bind: RetTarget = .discard,
     /// The async rule descriptor index that transitively created this task
-    /// (M1.0.12 E1). Drive-by-origin schedules every task at ITS RULE's position
+    ///. Drive-by-origin schedules every task at ITS RULE's position
     /// in the rule order — events emitted by child tasks interleave there,
     /// deterministically, including for detached tasks outliving their parent.
     origin_rule: u32 = 0,
-    /// Pool index of the task that created this one (M1.0.12 E1); `null` for
+    /// Pool index of the task that created this one; `null` for
     /// rule roots — and for detached (`branch`/`spawn`) tasks after creation
     /// bookkeeping. Cancellation is NON-transitive (Phase 1): this link is
     /// lineage bookkeeping, not a cancellation channel.
@@ -962,7 +959,7 @@ const AsyncTask = struct {
     /// pending `return` value (with `returned` set, E4) — re-raised at the
     /// race site if this child wins; discarded otherwise.
     result: Value = .{ .unit = {} },
-    /// True when the task completed via a task-level `return` (M1.0.12 E4):
+    /// True when the task completed via a task-level `return`:
     /// `result` then holds the returned value. Only a `race` branch may
     /// return (E0906), so this drives winner-return propagation (§9.5);
     /// meaningless-but-harmless on other tasks.
@@ -981,10 +978,10 @@ const AsyncTask = struct {
     }
 };
 
-/// Outcome of one `driveTask` pass over a task's frame-stack (M1.0.11 E1).
+/// Outcome of one `driveTask` pass over a task's frame-stack.
 const AsyncOutcome = enum { suspended, completed };
 
-/// Result of stepping one body statement in `stepBodyStmt` (M1.0.11 E1).
+/// Result of stepping one body statement in `stepBodyStmt`.
 const StepAction = enum {
     /// A plain statement ran and the cursor advanced.
     advanced,
@@ -998,7 +995,7 @@ const StepAction = enum {
 };
 
 /// Per-observer-rule context handed to the Tier-0 `ObserverRegistry` as the
-/// opaque `ctx` pointer (M1.0.2 E3). Points back at the interpreter + the
+/// opaque `ctx` pointer. Points back at the interpreter + the
 /// descriptor index so the trampoline can run the right rule body. Allocated
 /// once per binding in `bindToWorld`, freed at `deinit` — the interpreter must
 /// outlive any flush that fires its observers.
@@ -1014,72 +1011,70 @@ pub const Interpreter = struct {
     ast: *const AstArena,
     bridge: Bridge,
     rule_descs: []RuleDesc,
-    /// Top-level `fn` declarations keyed by name (M0.8 E2 call mechanism), for
+    /// Top-level `fn` declarations keyed by name, for
     /// resolving a free-function call `f(args)` whose callee names a `fn`.
     fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty,
     /// Inherent `impl` methods keyed by `methodKey(type_name, method_name)`
-    /// (M0.8 E2 block 3), for `recv.method()` / `Type.assoc()` dispatch.
+    ///, for `recv.method()` / `Type.assoc()` dispatch.
     methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
-    /// `struct` declarations keyed by name (M0.8 E2 block 3), for materializing
+    /// `struct` declarations keyed by name, for materializing
     /// a struct literal (field order + declared defaults for omitted fields).
     struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty,
-    /// `enum` declarations keyed by name (M0.8 E2 block 3 tranche B), for
+    /// `enum` declarations keyed by name, for
     /// resolving enum values + match-arm variant indices.
     enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty,
-    /// Declared events keyed by name (M1.0.14 E4) — resolves an await event
+    /// Declared events keyed by name — resolves an await event
     /// target's designated field + enum field types at suspension, and enum
     /// event field values at `emit`. Mirrors `enum_decls`.
     event_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EventDecl) = .empty,
-    /// Trait-impl methods keyed by `methodKey(type_name, method_name)` (M0.8 E2
-    /// block 3 tranche C), each resolved to the impl-provided method or the
+    /// Trait-impl methods keyed by `methodKey(type_name, method_name)`, each
+    /// resolved to the impl-provided method or the
     /// trait's default. Consulted AFTER `methods` (inherent) per §5.5.
     trait_methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
-    /// Heap store backing collection values created in rule bodies (M0.8).
+    /// Heap store backing collection values created in rule bodies.
     collections: CollectionStore = .{},
-    /// Store backing closure values created in rule bodies (M0.8 closures).
+    /// Store backing closure values created in rule bodies.
     closures: ClosureStore = .{},
-    /// Store backing struct values created in rule / fn / method bodies (M0.8
-    /// E2 block 3).
+    /// Store backing struct values created in rule / fn / method bodies.
     structs: StructStore = .{},
-    /// Dynamic per-tick event queue (M0.8 E3). `emit` enqueues here; `@on_event`
+    /// Dynamic per-tick event queue. `emit` enqueues here; `@on_event`
     /// observers drain it (observer side deferred to resolver-types §12). Cleared
     /// at the start of each tick. NOT a rule-body store — events outlive the body
     /// (they cross to observers), so it is not reset at the body boundary.
     events: EventStore = .{},
-    /// Store backing optional values created in rule bodies (M0.8 E2 block 5).
+    /// Store backing optional values created in rule bodies.
     /// Each entry is `?Value` — `null` = `none`, else the `some` payload.
     /// Reset at the rule-body boundary (rule-arena semantics).
     optionals: std.ArrayListUnmanaged(?Value) = .empty,
-    /// Level-B descriptors built at compile (M0.8 E4 — the interpreter's
-    /// build-structure side of the serialized-IR differential). No runtime
+    /// Level-B descriptors built at compile. No runtime
     /// role: Level B never executes against the world (proof contract,
     /// brief journal 2026-06-10).
     descriptors: descriptor_mod.Descriptors = .{},
-    /// Store backing runtime-produced strings (M0.8 sub-slice C tranche 1b):
+    /// Store backing runtime-produced strings:
     /// concat (and, 1c, interpolation) results, addressed by `Value
     /// .string_run`. Each entry is gpa-owned bytes. Reset at the rule-body
     /// boundary like `collections` (rule-arena semantics — the codegen
     /// counterpart is the per-tick frame arena, observably identical since
     /// strings never enter the POD world state).
     run_strings: std.ArrayListUnmanaged([]u8) = .empty,
-    /// Active control-flow signal (M0.8 loop/break). Set by `break`/`continue`,
+    /// Active control-flow signal. Set by `break`/`continue`,
     /// consumed by the enclosing loop.
     control: Control = .none,
     /// The value carried by the active `break` (`unit` for valueless breaks).
     break_value: Value = .{ .unit = {} },
     /// The label targeted by the active `break`/`continue` (`0` = unlabeled).
     control_label: StringId = 0,
-    /// Whether a `throw` is in flight, awaiting a `catch` (M0.8 error handling).
+    /// Whether a `throw` is in flight, awaiting a `catch`.
     thrown: bool = false,
     /// The value carried by the in-flight `throw`.
     thrown_value: Value = .{ .unit = {} },
-    /// Span of the in-flight `throw`'s value expression (M0.8 E3-D) —
+    /// Span of the in-flight `throw`'s value expression —
     /// harvested into an `UncaughtThrow` report entry when the throw reaches
     /// the rule top level uncaught. Irrelevant once a `catch` consumes the
     /// throw.
     thrown_span: SourceSpan = .{ .byte_start = 0, .byte_end = 0 },
-    /// In-flight typed runtime-error payload (M0.8 E3-D,
-    /// D-S4-runtime-report). Zig errors carry no payload, so the typed
+    /// In-flight typed runtime-error payload. Zig errors carry no
+    /// payload, so the typed
     /// `RuntimeError` rides on `self` — the same sideband pattern as
     /// `thrown_value` — set by `fail` at the raise site and harvested into
     /// `RuntimeReport.last_error` at the body choke points. Raise sites
@@ -1092,7 +1087,7 @@ pub const Interpreter = struct {
     /// identifier would.
     services: ?*const services_mod.Registry = null,
     /// External event sources drained at a FIXED point of the tick
-    /// (M1.1.15.2 G4). Borrowed records; each is a Tier 0 queue plus the erased
+    ///. Borrowed records; each is a Tier 0 queue plus the erased
     /// function that moves its payloads through `pushExternalEvent`.
     ///
     /// The list lives here, and the drain runs inside `stepOnce`, because the
@@ -1102,19 +1097,19 @@ pub const Interpreter = struct {
     /// red anywhere.
     event_sources: std.ArrayListUnmanaged(ExternalEventSource) = .empty,
     pending_error: ?RuntimeError = null,
-    /// Human-readable message accompanying the in-flight failure (M1.0.15): the
+    /// Human-readable message accompanying the in-flight failure: the
     /// `assert(cond, "msg")` literal, or an assertion-family builtin's formatted
     /// compared-values string. Rides alongside `pending_error` so `runTestBody`
     /// can report it as the per-test failure message. Points at AST-stable bytes
     /// (assert literal) or into `test_msg_buf` (formatted messages); `null` ⇒ the
     /// runner derives a message from the error kind. Read only on the test path.
     pending_message: ?[]const u8 = null,
-    /// Owned scratch for a formatted assertion-failure message (M1.0.15). The
-    /// assertion-family builtins (E4) write here; `pending_message` then points
+    /// Owned scratch for a formatted assertion-failure message. The
+    /// assertion-family builtins write here; `pending_message` then points
     /// into it. Overwritten per failure, freed at `deinit`; the runner copies the
     /// message out before the next test runs.
     test_msg_buf: std.ArrayListUnmanaged(u8) = .empty,
-    /// One-shot: skip the next `stepOnce` head event-store clear (M1.0.15). The
+    /// One-shot: skip the next `stepOnce` head event-store clear. The
     /// test-world `world.tick(n)` sets it when events were emitted BEFORE the tick
     /// (by the test body's `world.emit`, or by observers fired during
     /// `world.spawn_with`) so those events survive the first tick's head-clear and
@@ -1122,12 +1117,12 @@ pub const Interpreter = struct {
     /// first `stepOnce`; `runFor` never sets it (identical to the pre-M1.0.15 path).
     suppress_event_clear: bool = false,
     /// Monotonic-clock provider for the wall-clock `measure { … }` expression
-    /// (M1.0.15). Zig 0.16 clocks live under `std.Io.Clock`, which needs an `io`;
+    ///. Zig 0.16 clocks live under `std.Io.Clock`, which needs an `io`;
     /// the test runner sets this before `runTestBody`. `null` on every non-test
     /// path — and `measure` is E0910 outside a test, so it is never evaluated
     /// there; a null here at a `measure` site is a fail-loud belt.
     io: ?std.Io = null,
-    /// Whether a `test` body is currently executing (M1.0.15). Gates the runtime
+    /// Whether a `test` body is currently executing. Gates the runtime
     /// interception of the TEST-SCOPED builtins `test_world` / `tick_until` in
     /// `evalBuiltinCall`, mirroring the type-checker's `in_test_body` gate — so a
     /// user top-level `fn test_world()` / `fn tick_until()` called OUTSIDE a test
@@ -1136,7 +1131,7 @@ pub const Interpreter = struct {
     /// panic/todo/unreachable resolve regardless (symmetric with the checker).
     in_test_body: bool = false,
     /// While TRUE, the per-body value-store resets (`resetBodyStores`) are no-ops
-    /// (M1.0.15). A `test` body OUTLIVES the rule / guard / timer / observer /
+    ///. A `test` body OUTLIVES the rule / guard / timer / observer /
     /// hook bodies that `world.tick(n)` drives; those bodies' per-body resets
     /// would free heap-backed values (arrays / structs / closures / `.string_run`)
     /// still held by the test body's locals — a use-after-free (the M1.0.14
@@ -1145,13 +1140,13 @@ pub const Interpreter = struct {
     /// `runTestBody`'s own end-defers (raw resets, NOT `resetBodyStores`) free
     /// everything at once. `false` on every production path — no behavior change.
     suppress_body_store_resets: bool = false,
-    /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
+    /// Whether a `return` is unwinding to the enclosing `fn` boundary.
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
     returning: bool = false,
     /// The value carried by the in-flight `return` (`unit` for a bare return).
     return_value: Value = .{ .unit = {} },
-    /// Merged global tag table (M0.8 E3) — built identically to the resolver's
+    /// Merged global tag table — built identically to the resolver's
     /// (`tags.zig` is the shared algorithm). Consulted at exec time to resolve
     /// a `tag_mutation_stmt` path to its leaf bit.
     tag_table: tags_mod.TagTable,
@@ -1159,27 +1154,27 @@ pub const Interpreter = struct {
     /// program declares no tags. `TagSet` is `[words]u64` of bits.
     tagset_id: ?ComponentId = null,
     /// Deferred tag mutations queued during a tick, flushed at the tick boundary
-    /// (M0.8 E3) — never applied mid-archetype-walk.
+    /// — never applied mid-archetype-walk.
     pending_tags: std.ArrayListUnmanaged(PendingTag) = .empty,
     /// M1.0.9 B1 — deferred extension activate/deactivate, drained at the tick
     /// boundary (after iteration). Mirror of `pending_tags`.
     pending_extensions: std.ArrayListUnmanaged(PendingExtension) = .empty,
-    /// True iff any rule carries a `changed` filter (M0.8 E3). Gates the whole
+    /// True iff any rule carries a `changed` filter. Gates the whole
     /// tick-based change-detection path: only then does `runFor` advance
     /// `current_tick` (`beginFrame`) and a component write `markChanged`s — so
     /// a `changed`-free program is byte-identical to the pre-E3 runtime (no
     /// tick churn, no marking overhead).
     has_changed: bool = false,
-    /// True iff any rule is `async` (M0.8 E3 sub-slice B). Gates the
+    /// True iff any rule is `async`. Gates the
     /// task-record dispatch in `stepOnce`; a sync-only program allocates no
     /// task and never drives the pool.
     has_async: bool = false,
     /// Frame counter — incremented once per `stepOnce`; backs the builtin
-    /// `GameTime.frame` / `GameTime.fixed_frame` fields (M1.0.13 E5).
+    /// `GameTime.frame` / `GameTime.fixed_frame` fields.
     /// DEMOTED from its M1.0.11 role: it no longer drives `await wait` —
     /// the two clock accumulators below do.
     async_tick: u64 = 0,
-    /// The time subsystem's two internal clock accumulators (M1.0.13 E5) —
+    /// The time subsystem's two internal clock accumulators —
     /// the sources of truth for `await wait` / `await wait_unscaled`
     /// deadlines and for the published `total` fields. They advance in TICK
     /// units (game: `+= time_scale`, 0 under `paused`; unscaled: `+= 1`)
@@ -1193,15 +1188,15 @@ pub const Interpreter = struct {
     game_clock_ticks: f64 = 0,
     unscaled_clock_ticks: f64 = 0,
     /// Resolved ids + field offsets of the three builtin time resources
-    /// (M1.0.13 E5), cached at `compile` so the per-tick population in
+    ///, cached at `compile` so the per-tick population in
     /// `advanceTime` is plain offset writes.
     time_res: TimeResources,
-    /// Runtime timer registry (M1.0.13 E6, §9.10) — heap records, monotone
+    /// Runtime timer registry (§9.10) — heap records, monotone
     /// pointer-stable + husk (see `TimerEntry`). Scanned by `fireTimers` at
     /// the head of `stepOnce`, in registration order (deterministic); a
     /// `Value.timer_handle` is an index into it.
     timers: std.ArrayListUnmanaged(*TimerEntry) = .empty,
-    /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
+    /// Dynamic pool of suspendable tasks — the growable replacement
     /// for the M0.8 per-rule `AsyncSlot` slice. POINTER-STABLE since M1.0.12 E1:
     /// each element is a heap record (`gpa.create`), because `race`/`sync`/
     /// `branch`/`spawn` create sibling tasks MID-DRIVE and an append must not
@@ -1211,7 +1206,7 @@ pub const Interpreter = struct {
     /// task identity (Phase-1 `TaskHandle`, no generations). Empty when
     /// `!has_async`.
     async_tasks: std.ArrayListUnmanaged(*AsyncTask) = .empty,
-    /// Shared child-set storage (M1.0.12 E1): a `race`/`sync` parent appends its
+    /// Shared child-set storage: a `race`/`sync` parent appends its
     /// admitted children's pool indices here and suspends on a `WakeCond` range
     /// `{start, len}` into it — keeps `WakeCond` small. Append-only within a
     /// program run (ranges stay valid for the parent's whole suspension).
@@ -1221,7 +1216,7 @@ pub const Interpreter = struct {
     /// of its task. A non-async rule's entry stays `null`.
     rule_tasks: []?u32 = &.{},
     /// Per-rule `(entity → live task index)` map for ENTITY-BOUND async rules
-    /// (M1.0.14 E3; parallel to `rule_descs`, allocated iff `has_async`). An
+    ///. An
     /// entry records the last task spawned for that `(rule, entity)` pair; a
     /// LIVE task is `.suspended` — a terminal-state entry (husk) does not block
     /// re-arming (ruling 1). A non-entity-bound rule's map stays empty.
@@ -1231,7 +1226,7 @@ pub const Interpreter = struct {
     /// shared selection walk (`iterateSelection` collect mode).
     entity_spawn_buf: std.ArrayListUnmanaged(EntityId) = .empty,
     /// Append-only store of event payload-filter values captured by value at
-    /// await suspension (M1.0.14 E4); a suspended `global_event`/`entity_event`
+    /// await suspension; a suspended `global_event`/`entity_event`
     /// wake owns a `{start,len}` window (`FilterRange`). Never compacted (husk
     /// discipline, like `task_children`); freed wholesale in deinit. POD filter
     /// values (`.int_`/`.float_`/`.bool_`/`.string_id`/`.enum_value`/
@@ -1242,12 +1237,12 @@ pub const Interpreter = struct {
     /// over the copy (which also enforces capture-once §9.4).
     captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
     /// Buffer-owned deep copies of non-AST (`.string_run` / borrowed
-    /// `.string_persistent`) filter-value bytes (M1.0.14 E4). Parallel to
+    /// `.string_persistent`) filter-value bytes. Parallel to
     /// `captured_filters`, same husk lifetime: freed wholesale in deinit (never
     /// per-tick — a suspended wake keeps its window).
     captured_filter_strings: std.ArrayListUnmanaged([]u8) = .empty,
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
-    /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
+    ///. Resized to the term count of the rule being iterated; capacity
     /// is retained across rules/ticks so the union path allocates at most once.
     /// Untouched by single-term rules (the common case iterates directly).
     merge_cursors: std.ArrayListUnmanaged(usize) = .empty,
@@ -1262,26 +1257,26 @@ pub const Interpreter = struct {
     /// straight out of the chunk.
     merge_seen: std.AutoHashMapUnmanaged(CoreEntityId, void) = .empty,
     /// Per-observer-rule contexts registered into the world's `ObserverRegistry`
-    /// at `bindToWorld` (M1.0.2 E3). One entry per rule with `observer_kind`
+    /// at `bindToWorld`. One entry per rule with `observer_kind`
     /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
     /// `deinit` (the interpreter must outlive any observer-firing flush).
     observer_ctxs: []ObserverCtx = &.{},
     /// Set once observers have been registered (idempotent `bindToWorld`).
     observers_bound: bool = false,
-    /// Non-null while an observer body runs (M1.0.2 E3): the registry's deferred
+    /// Non-null while an observer body runs: the registry's deferred
     /// command buffer. Structural mutations issued by the body (tag mutations)
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
     /// never re-entrantly during the current one (the no-recursion contract).
     observer_deferred: ?*CommandBuffer = null,
     /// The world this program was compiled against (`compile`), borrowed for the
-    /// persistent-string teardown in `deinit` (M1.0.3 E2). The interpreter is
+    /// persistent-string teardown in `deinit`. The interpreter is
     /// already lifecycle-coupled to the world (its observer ctxs are registered
     /// into the world's `ObserverRegistry`), so storing it here is consistent;
     /// the world MUST outlive the interpreter (the existing contract — `deinit`
     /// before `world.deinit`). `null` only before `compile` returns.
     world: ?*World = null,
     /// Immortal persistent-heap blocks holding compile-time `string` field
-    /// defaults (M1.0.3 E2). Allocated in `compileTypeDecl` via `allocImmortal`
+    /// defaults. Allocated in `compileTypeDecl` via `allocImmortal`
     /// (sentinel refcount, so slot decref never frees them) and `destroy`'d here
     /// at `deinit` — they have no slot-owner to reclaim them, so the interpreter
     /// (their allocator) does. Freed AFTER the per-slot decref so an un-overwritten
@@ -1289,8 +1284,7 @@ pub const Interpreter = struct {
     persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty,
 
     pub fn deinit(self: *Interpreter) void {
-        // Uniform resource-payload teardown (M1.0.3 E2 origin, generalized to
-        // Tier-0 ownership in M1.1.1-HF2 C4). The decref walk over every
+        // Uniform resource-payload teardown. The decref walk over every
         // resource's `.string_`/`.array_`/`.map_`/`.set_` slots now lives on
         // `World.releaseResourcePayloads`; run it here BEFORE destroying the
         // immortal `persistent_literals` below. Ordering is load-bearing: the
@@ -1330,7 +1324,7 @@ pub const Interpreter = struct {
             self.gpa.destroy(task);
         }
         self.async_tasks.deinit(self.gpa);
-        // Timer registry teardown (M1.0.13 E6): husks (fired/canceled) had
+        // Timer registry teardown: husks (fired/canceled) had
         // their snapshot freed at husk time — only armed entries still own one.
         for (self.timers.items) |t| {
             if (t.state == .armed) t.snapshot.deinit(self.gpa);
@@ -1391,7 +1385,7 @@ pub const Interpreter = struct {
         var bridge = Bridge.init();
         errdefer bridge.deinit(gpa);
 
-        // Build the merged global tag table (M0.8 E3) — same algorithm as the
+        // Build the merged global tag table — same algorithm as the
         // resolver / codegen (`tags.zig`). The program is already type-checked,
         // so `build` reports no new diagnostics; collect them into a throwaway
         // list and drop it.
@@ -1403,8 +1397,8 @@ pub const Interpreter = struct {
         var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
         errdefer tag_table.deinit(gpa);
 
-        // Immortal blocks backing compile-time `string` field defaults (M1.0.3
-        // E2). Filled by `compileTypeDecl`; moved into the returned interpreter,
+        // Immortal blocks backing compile-time `string` field defaults. Filled
+        // by `compileTypeDecl`; moved into the returned interpreter,
         // which `destroy`s them at `deinit`. On a compile error path they are
         // reclaimed here so no default literal leaks.
         var persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty;
@@ -1448,13 +1442,13 @@ pub const Interpreter = struct {
         // ordinary error is the honest answer rather than a second diagnostic.
         try world.registry.finalizeRequires(gpa);
 
-        // Register the builtin `TagSet` component (M0.8 E3) when the program
+        // Register the builtin `TagSet` component when the program
         // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
         // carrying tags. It has no named scalar fields; the runtime reads/writes
         // its raw bytes as bits.
         var tagset_id: ?ComponentId = null;
         if (tag_table.leaf_count > 0) {
-            // Idempotent on a hot-reload re-compile (M0.8 E7): reuse the
+            // Idempotent on a hot-reload re-compile: reuse the
             // already-registered `TagSet` instead of erroring DuplicateComponent.
             if (world.registry.idOf("TagSet")) |existing| {
                 try bridge.mapComponent(gpa, "TagSet", existing);
@@ -1476,7 +1470,7 @@ pub const Interpreter = struct {
             }
         }
 
-        // Register the three builtin engine time resources (M1.0.13 E5) from
+        // Register the three builtin engine time resources from
         // the `types.zig` descriptor table — the same injection point as the
         // builtin `TagSet` (after the user-decl registration loop). Idempotent
         // on a hot-reload re-compile: the existing registration and the live
@@ -1581,7 +1575,7 @@ pub const Interpreter = struct {
         }
 
         // Pass C — index top-level `fn` declarations by name for free-call
-        // resolution (M0.8 E2 call mechanism).
+        // resolution.
         var fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty;
         errdefer fns.deinit(gpa);
         i = 0;
@@ -1595,8 +1589,7 @@ pub const Interpreter = struct {
 
         // Pass D — index inherent `impl` methods by `(type_name, method_name)`
         // for `recv.method()` / `Type.assoc()` dispatch, plus `struct`
-        // declarations by name for struct-literal materialization (M0.8 E2
-        // block 3).
+        // declarations by name for struct-literal materialization.
         var methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty;
         errdefer methods.deinit(gpa);
         var struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty;
@@ -1607,7 +1600,7 @@ pub const Interpreter = struct {
         errdefer event_decls.deinit(gpa);
         var trait_methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty;
         errdefer trait_methods.deinit(gpa);
-        // Trait declarations by name (M0.8 E2 block 3 tranche C) — a local index
+        // Trait declarations by name — a local index
         // used to resolve a trait impl's defaults; not stored on the interpreter.
         var trait_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.TraitDecl) = .empty;
         defer trait_decls.deinit(gpa);
@@ -1649,7 +1642,7 @@ pub const Interpreter = struct {
 
         // Pass D2 — trait impls: key each (type, method) to the impl-provided
         // method, or the trait's default when the impl does not override it
-        // (M0.8 E2 block 3 tranche C). Inherent (`methods`) wins at dispatch.
+        //. Inherent (`methods`) wins at dispatch.
         i = 0;
         while (i < ast.items.len) : (i += 1) {
             if (ast.items.items(.kind)[i] != .impl_decl) continue;
@@ -1675,7 +1668,7 @@ pub const Interpreter = struct {
 
         const slice = try rule_descs.toOwnedSlice(gpa);
         // Enable the tick-based change-detection path iff some rule filters by
-        // `changed` (M0.8 E3) — keeps `changed`-free programs free of tick churn.
+        // `changed` — keeps `changed`-free programs free of tick churn.
         var any_changed = false;
         for (slice) |rd| {
             if (rd.changed_filters.len > 0) {
@@ -1683,8 +1676,8 @@ pub const Interpreter = struct {
                 break;
             }
         }
-        // Allocate the per-rule task-handle map iff any rule is `async` (M1.0.11
-        // E1). The task pool itself starts empty and grows on first spawn; a
+        // Allocate the per-rule task-handle map iff any rule is `async`. The
+        // task pool itself starts empty and grows on first spawn; a
         // sync-only program keeps an empty map + pool.
         var any_async = false;
         for (slice) |rd| {
@@ -1699,15 +1692,14 @@ pub const Interpreter = struct {
             break :blk map;
         } else &.{};
         // Per-rule `(entity → live task)` maps for entity-bound async rules
-        // (M1.0.14 E3), parallel to `rule_descs`. Empty for non-entity-bound rules.
+        //, parallel to `rule_descs`. Empty for non-entity-bound rules.
         const entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = if (any_async) blk: {
             const maps = try gpa.alloc(std.AutoHashMapUnmanaged(EntityId, u32), slice.len);
             for (maps) |*m| m.* = .empty;
             break :blk maps;
         } else &.{};
 
-        // Pass E — build the Level-B descriptors (M0.8 E4, build-structure
-        // side of the serialized-IR differential). Fail-loud on any
+        // Pass E — build the Level-B descriptors. Fail-loud on any
         // expression the canonical renderer does not support.
         var descriptors = try descriptor_mod.build(gpa, ast);
         errdefer descriptors.deinit(gpa);
@@ -1755,7 +1747,7 @@ pub const Interpreter = struct {
         return report;
     }
 
-    /// Outcome of running one `test` block body (M1.0.15). `pass` = the body ran
+    /// Outcome of running one `test` block body. `pass` = the body ran
     /// to completion with no failure; `fail` carries the failing source position
     /// and a message (the `assert` reason, an assertion-family formatted string,
     /// or a kind-derived default). The message is borrowed — from AST-stable
@@ -1772,7 +1764,7 @@ pub const Interpreter = struct {
         message: []const u8,
     };
 
-    /// Execute one `test` block body to completion (M1.0.15, §32 normative). The
+    /// Execute one `test` block body to completion (§32 normative). The
     /// body is a SYNC context (the type-checker rejected `await`), so nothing
     /// suspends — the statements run once. A failed `assert*`, an uncaught
     /// `throw`, or any runtime failure becomes a `.fail` outcome carrying the
@@ -1836,7 +1828,7 @@ pub const Interpreter = struct {
     }
 
     /// Build a `.fail` outcome from the in-flight `pending_error`/`pending_message`
-    /// (M1.0.15). Message = `pending_message` when set, else a stable default
+    ///. Message = `pending_message` when set, else a stable default
     /// derived from the error kind.
     fn testFailure(self: *Interpreter) TestBodyOutcome {
         const span = if (self.pending_error) |pe| pe.span else SourceSpan{ .byte_start = 0, .byte_end = 0 };
@@ -1846,7 +1838,7 @@ pub const Interpreter = struct {
     }
 
     /// `.fail` outcome for an uncaught `throw` reaching the test top level
-    /// (M1.0.15): consume the flag, record the typed payload, then convert.
+    ///: consume the flag, record the typed payload, then convert.
     fn testThrow(self: *Interpreter) TestBodyOutcome {
         self.thrown = false;
         self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
@@ -1854,7 +1846,7 @@ pub const Interpreter = struct {
         return self.testFailure();
     }
 
-    /// M1.0.9 — give the interpreter a runtime extension resolver (name → cooked
+    /// give the interpreter a runtime extension resolver (name → cooked
     /// `.prefab.bin` bytes, the same interface the scene loader receives) so an
     /// Etch `entity.activate_extension("X")` / `deactivate_extension("X")`
     /// resolves the extension at runtime. Absent → those methods fail with
@@ -1864,7 +1856,7 @@ pub const Interpreter = struct {
     }
 
     /// Register this program's observer rules into `world`'s `ObserverRegistry`
-    /// (M1.0.2 E3). Idempotent: the first call allocates one `ObserverCtx` per
+    ///. Idempotent: the first call allocates one `ObserverCtx` per
     /// observer rule and registers a trampoline keyed on the rule's lifecycle
     /// kind + target component; later calls no-op. Called lazily by `runFor`, or
     /// explicitly by a test that drives a Tier-0 flush before any tick.
@@ -1872,7 +1864,7 @@ pub const Interpreter = struct {
         if (self.observers_bound) return;
         self.observers_bound = true;
 
-        // M1.0.9 — register the extension hook seams so the loader's
+        // register the extension hook seams so the loader's
         // `dispatchOnAttach` / runtime `deactivate_extension` reach `execHookText`.
         // Registered unconditionally (before the observer-rule early-return): the
         // callbacks only fire when an extension actually activates / deactivates,
@@ -1904,7 +1896,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Top-level trampoline matching `observers.ObserverFn` (M1.0.2 E3): unpack
+    /// Top-level trampoline matching `observers.ObserverFn`: unpack
     /// the `ObserverCtx` and run the observer rule body with `entity` + the
     /// lifecycle value(s) bound.
     fn observerTrampoline(
@@ -1921,7 +1913,7 @@ pub const Interpreter = struct {
         try ctx.interp.runObserverBody(world, ctx.rule_desc_idx, entity, old_value, new_value, deferred);
     }
 
-    /// Run an observer rule body (M1.0.2 E3): bind `entity` and the lifecycle
+    /// Run an observer rule body: bind `entity` and the lifecycle
     /// value(s) on the rule's declared params, then execute the body. The value
     /// bindings (`value`/`old`/`new`) are materialised as struct values over the
     /// raw component bytes (`readBytesAsValue` per field) — the same shape as the
@@ -2002,7 +1994,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Execute a cooked extension hook body (M1.0.9 E2). `hook_text` is the
+    /// Execute a cooked extension hook body. `hook_text` is the
     /// canonical Etch statement run a `.prefab.bin` carries for an `on_attach` /
     /// `on_detach` hook (`descriptor.renderStmtRunAlloc`): statements joined by
     /// `"; "`, no braces. Parse it into a transient `AstArena`, rebind `self.ast`
@@ -2079,7 +2071,7 @@ pub const Interpreter = struct {
         self.pending_error = null;
     }
 
-    /// Top-level trampoline matching `World.ExtensionAttachFn` (M1.0.9 E2):
+    /// Top-level trampoline matching `World.ExtensionAttachFn`:
     /// recover the `*Interpreter` from `ctx` and execute the cooked `on_attach`
     /// hook text. `null` text (an extension with no `on_attach`) is a no-op.
     fn extensionAttachTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, text: ?[]const u8) anyerror!void {
@@ -2088,7 +2080,7 @@ pub const Interpreter = struct {
         if (text) |t| try self.execHookText(world, entity, t);
     }
 
-    /// Top-level trampoline matching `World.ExtensionDetachFn` (M1.0.9 E3): same
+    /// Top-level trampoline matching `World.ExtensionDetachFn`: same
     /// shape as the attach trampoline, for the `on_detach` hook text.
     fn extensionDetachTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, text: ?[]const u8) anyerror!void {
         _ = name;
@@ -2097,7 +2089,7 @@ pub const Interpreter = struct {
     }
 
     /// Materialise an observer value binding (`value`/`old`/`new`) as a struct
-    /// value over the component's raw bytes (M1.0.2 E3). Mirrors the `@on_event`
+    /// value over the component's raw bytes. Mirrors the `@on_event`
     /// payload binding: one `StructField` per declared field that is referenced
     /// in the source (so its name is interned), read via `readBytesAsValue`.
     fn observerValueStruct(self: *Interpreter, world: *World, cid: ComponentId, bytes_ptr: *const anyopaque) !Value {
@@ -2115,20 +2107,18 @@ pub const Interpreter = struct {
         return Value{ .struct_ref = handle };
     }
 
-    /// Number of compiled rules in the program (M1.0.0 observable — pairs with
-    /// `ruleName` / `ruleMatchedEntities` to log a per-rule matched-entity
-    /// breakdown).
+    /// Number of compiled rules in the program.
     pub fn ruleCount(self: *const Interpreter) usize {
         return self.rule_descs.len;
     }
 
-    /// Source name of rule `idx` (M1.0.0 observable).
+    /// Source name of rule `idx`.
     pub fn ruleName(self: *const Interpreter, idx: usize) []const u8 {
         return self.ast.strings.slice(self.rule_descs[idx].name);
     }
 
-    /// Entities matched by rule `idx` in the most recent tick it ran (M1.0.0
-    /// observable). `RuntimeReport.entities_iterated` is the program-wide sum;
+    /// Entities matched by rule `idx` in the most recent tick it ran.
+    /// `RuntimeReport.entities_iterated` is the program-wide sum;
     /// this is the per-rule breakdown. Interp-only / informational.
     pub fn ruleMatchedEntities(self: *const Interpreter, idx: usize) u64 {
         return self.rule_descs[idx].matched_entities;
@@ -2144,7 +2134,7 @@ pub const Interpreter = struct {
         // calls `beginFrame` at the same point. A `changed`-free program never
         // advances the tick (byte-identical to the pre-E3 runtime).
         if (self.has_changed) world.beginFrame();
-        // Advance the time subsystem (M1.0.13 E5) — the tree-walker
+        // Advance the time subsystem — the tree-walker
         // equivalent of the `pre_update` refresh, fixed timestep 1/60
         // (`engine-gameplay-systems.md` "Les trois temps"): read the controls
         // from `GameTime`, advance the two clock accumulators (game freezes
@@ -2155,7 +2145,7 @@ pub const Interpreter = struct {
         self.advanceTime(world);
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3). The test-world
-        // `tick(n)` suppresses exactly this first clear (M1.0.15) so events
+        // `tick(n)` suppresses exactly this first clear so events
         // emitted before the tick (`world.emit`, or a `spawn_with` observer)
         // survive into it — §32's `emit; tick(1)`.
         if (self.suppress_event_clear) {
@@ -2177,12 +2167,12 @@ pub const Interpreter = struct {
         // in THIS tick's store, visible to every rule of the tick.
         try self.fireTimers(world, report);
         for (self.rule_descs, 0..) |*rd, i| {
-            // Observer rules (M1.0.2 E3) never run in the per-tick dispatch:
+            // Observer rules never run in the per-tick dispatch:
             // they fire at the Tier-0 command-buffer flush via the
             // `ObserverRegistry` (registered in `bindToWorld`), not here.
             if (rd.observer_kind != null) continue;
             report.rules_evaluated += 1;
-            // `async rule` (M0.8 E3 sub-slice B): drive its suspend/resume task
+            // `async rule`: drive its suspend/resume task
             // at this position in the rule order, so events it emits/consumes
             // interleave with the other rules exactly like the observer drain
             // (the producer-before-consumer ordering — Guy's ruling).
@@ -2193,24 +2183,24 @@ pub const Interpreter = struct {
             if (!resourceDepsSatisfied(world, rd.*)) continue;
             try self.runRule(world, rd, report);
             // Record the tick at which this rule ran — the baseline its next
-            // `changed` filter compares against (M0.8 E3). `runRule` was passed
+            // `changed` filter compares against. `runRule` was passed
             // the pre-update value, so the filter saw the correct baseline.
             if (self.has_changed) rd.last_run_tick = world.current_tick;
         }
         // Apply deferred tag mutations at the tick boundary — after every rule
-        // has run, never mid-archetype-walk (M0.8 E3, `etch-grammar.md` §4.4).
+        // has run, never mid-archetype-walk (`etch-grammar.md` §4.4).
         try self.flushPendingTags(world);
         // Apply deferred extension activate/deactivate at the same boundary
-        // (M1.0.9 B1) — same never-mid-walk discipline.
+        // — same never-mid-walk discipline.
         try self.flushPendingExtensions(world);
         // Apply deferred structural mutations (spawn/despawn/add/remove) last, so
         // any extension hook's structural change (enqueued just above) drains in
-        // the same boundary, with observers firing per op (M1.0.10 E3).
+        // the same boundary, with observers firing per op.
         try self.flushStructural(world);
     }
 
     /// Advance the two clock accumulators and publish the three builtin time
-    /// resources (M1.0.13 E5) — called at the start of every `stepOnce`,
+    /// resources — called at the start of every `stepOnce`,
     /// before rule dispatch. `GameTime.dt = fixed_dt * time_scale` (0 under
     /// `paused`); `UnscaledTime`/`RealTime` are affected by neither control.
     /// The published `total` fields derive from the tick accumulators
@@ -2238,7 +2228,7 @@ pub const Interpreter = struct {
         writeF64At(real, tr.real_since_startup, self.unscaled_clock_ticks * fixed_dt_secs);
     }
 
-    /// Schedule one timer statement (M1.0.13 E6, §9.10): evaluate the
+    /// Schedule one timer statement (§9.10): evaluate the
     /// Duration argument ONCE (a full expression — unlike `await wait`'s
     /// literal-only path), snapshot the scheduling scope, and append a
     /// registry entry. Returns the entry's index — the `TimerHandle`.
@@ -2270,7 +2260,7 @@ pub const Interpreter = struct {
         return idx;
     }
 
-    /// Fire every due timer (M1.0.13 E6) — called at the head of `stepOnce`,
+    /// Fire every due timer — called at the head of `stepOnce`,
     /// AFTER the clock advance and BEFORE rule dispatch, in registration
     /// order (deterministic). An entry is due when its deadline has been
     /// reached on ITS clock. One-shots (`after`/`after_unscaled`) park as
@@ -2307,7 +2297,7 @@ pub const Interpreter = struct {
     }
 
     /// Execute a timer callback body run-to-completion against its snapshot
-    /// (M1.0.13 E6) — the timer body is a synchronous context (§9.10, E4);
+    /// — the timer body is a synchronous context (§9.10, E4);
     /// runtime failures and uncaught throws are harvested into the report
     /// exactly like a rule body (`execBody`); a top-level `return` /
     /// `break` / `continue` ends the callback. The per-body arena stores are
@@ -2347,7 +2337,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// `TimerHandle.cancel()` (M1.0.13 E6, §9.10) — IDEMPOTENT: cancels an
+    /// `TimerHandle.cancel()` (§9.10) — IDEMPOTENT: cancels an
     /// armed timer (husk: snapshot freed), a no-op on one already fired or
     /// already canceled. A self-cancel from inside the entry's own firing
     /// callback marks the state only; the fire scan frees the snapshot after
@@ -2364,7 +2354,7 @@ pub const Interpreter = struct {
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
-        // `resource T { expression }` gates (M0.8 E4 — §6, item-4 ruling):
+        // `resource T { expression }` gates (— §6, item-4 ruling):
         // checked once per rule evaluation, alongside the resource deps the
         // filters ride with (the codegen emits the same rule-top gate).
         if (rd.resource_expr_filters.len > 0 and !(try self.resourceExprFiltersPass(world, rd.*))) return;
@@ -2376,7 +2366,7 @@ pub const Interpreter = struct {
             return;
         }
         if (!rd.is_entity_bound) {
-            // Bare expression conditions on a GLOBAL rule (M0.8 E4): evaluated
+            // Bare expression conditions on a GLOBAL rule: evaluated
             // once per tick, rule params in scope (no entity binding).
             if (rd.expr_conds.len > 0 and !(try self.exprGuardsPass(world, rd.*, null, null))) return;
             try self.execBody(world, rd.*, null, null, report);
@@ -2384,11 +2374,11 @@ pub const Interpreter = struct {
             return;
         }
         var rule_matched = false;
-        // Per-rule matched-entity count for this tick (M1.0.0 observable) — the
+        // Per-rule matched-entity count for this tick — the
         // per-rule breakdown of `report.entities_iterated`. Reset before the
         // walk; incremented per matched entity in `iterateArchetype`.
         rd.matched_entities = 0;
-        // M1.0.0 — entity selection is driven by the rule's DNF of dynamic
+        // entity selection is driven by the rule's DNF of dynamic
         // queries (one `DynamicQuery` per conjunctive term). Each query lazily
         // re-scans the `world.archetypes` tail through the SAME shared matcher
         // + rescan as the comptime `Query` (`query.archetypeMatches` +
@@ -2411,7 +2401,7 @@ pub const Interpreter = struct {
     }
 
     /// Iterate the archetypes a rule's `when` clause selects, dispatching the
-    /// body on every matching entity (M1.0.0). The selection is the union of
+    /// body on every matching entity. The selection is the union of
     /// the rule's DNF terms (`rd.selection`, one `DynamicQuery` each):
     ///
     /// - 0 terms — a non-entity-bound rule reaches here only by mistake (the
@@ -2563,9 +2553,9 @@ pub const Interpreter = struct {
     }
 
     /// Walk one archetype's chunks/slots for an entity-bound rule — the
-    /// per-archetype body of the cached-matching-set selection (M1.0.0). When
+    /// per-archetype body of the cached-matching-set selection. When
     /// `collect` is non-null, matched entities are gathered instead of run
-    /// (M1.0.14 E3, entity-bound async spawn).
+    ///.
     /// The per-entity guard chain and body, shared by BOTH walks.
     ///
     /// Extracted at M1.B/G7 because the sparse arm needs the same chain and a
@@ -2583,15 +2573,15 @@ pub const Interpreter = struct {
         // Per-entity tag predicates (M0.8 E3) — applied after the structural
         // predicate, like the field filter.
         if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) return;
-        // Per-entity `changed` filters (M0.8 E3) — the component's
+        // Per-entity `changed` filters — the component's
         // `changedTick(T)` must exceed the rule's `last_run_tick`.
         if (rd.changed_filters.len > 0 and !changedFiltersPass(world, loc, rd.changed_filters, rd.last_run_tick)) return;
-        // §6 general filters + bare conditions (M0.8 E4): evaluated LAST in the
+        // §6 general filters + bare conditions: evaluated LAST in the
         // per-entity guard order (fixed, mirrored by the codegen guards).
         if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
             !(try self.exprGuardsPass(world, rd.*, entity_id, loc))) return;
         if (collect) |buf| {
-            // Entity-bound async spawn (M1.0.14 E3): gather the matched entity
+            // Entity-bound async spawn: gather the matched entity
             // in selection order; the caller spawns its task.
             try buf.append(self.gpa, entity_id);
         } else {
@@ -2645,7 +2635,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Evaluate the `resource T { expression }` gates of a rule (M0.8 E4):
+    /// Evaluate the `resource T { expression }` gates of a rule:
     /// each filter binds its resource's fields by name and must evaluate to
     /// `true`. Rule-arena stores touched by the evaluation are reset before
     /// returning (guard values never outlive the guard).
@@ -2672,7 +2662,7 @@ pub const Interpreter = struct {
         return pass;
     }
 
-    /// Evaluate a rule's per-entity §6 guards (M0.8 E4): the general
+    /// Evaluate a rule's per-entity §6 guards: the general
     /// `has T { expression }` filters (fields-only scope) then the bare
     /// expression conditions (rule params in scope; `entity_id` bound for an
     /// entity-bound rule, absent for a global one). Flat-AND; fixed order.
@@ -2682,7 +2672,7 @@ pub const Interpreter = struct {
         defer locals.deinit(self.gpa);
         for (rd.expr_filters) |ef| {
             locals.map.clearRetainingCapacity();
-            // The FOURTH per-slot guard to take the locator (M1.B/G7). Its
+            // The FOURTH per-slot guard to take the locator. Its
             // previous form asked the archetype for a column, which answers
             // null for a sparse id — so a `component T { expression }` guard on
             // a sparse member failed CLOSED and the rule silently matched
@@ -2753,7 +2743,7 @@ pub const Interpreter = struct {
     /// expressions may allocate (strings, collections); nothing they create
     /// outlives the guard verdict, and the body starts from a clean arena
     /// (its own boundary resets are unchanged). Routed through `resetBodyStores`
-    /// so a test body suppresses it too (M1.0.15).
+    /// so a test body suppresses it too.
     fn resetGuardStores(self: *Interpreter) void {
         self.resetBodyStores();
     }
@@ -2775,7 +2765,7 @@ pub const Interpreter = struct {
         if (matched) report.rules_matched += 1;
     }
 
-    /// Create a task record in the pool (M1.0.12 E1). Heap-allocated so live
+    /// Create a task record in the pool. Heap-allocated so live
     /// `*AsyncTask` pointers survive pool growth (children are created
     /// mid-drive); monotonic — the returned index is a stable task identity.
     fn newTask(self: *Interpreter, origin_rule: u32, parent: ?u32) !u32 {
@@ -2786,7 +2776,7 @@ pub const Interpreter = struct {
         return @intCast(self.async_tasks.items.len - 1);
     }
 
-    /// Cancel a task (M1.0.12 E1): free its frames + locals — the same teardown
+    /// Cancel a task: free its frames + locals — the same teardown
     /// as `finishTaskDone` — and park it `.canceled` so it is never scheduled
     /// again. Idempotent: a `.done`/`.canceled` task is left untouched (§9.8
     /// amended, `h.cancel()`). NON-transitive (Phase 1, `etch-bytecode.md §9.5`):
@@ -2804,7 +2794,7 @@ pub const Interpreter = struct {
     }
 
     /// Drive an `async rule`'s tasks at its position in the rule order. Spawns
-    /// the rule-root task on first reach; then (M1.0.12 E1, drive-by-origin)
+    /// the rule-root task on first reach; then
     /// drives, in task-CREATION order, every ready task in the pool whose
     /// `origin_rule` is this rule — not just the root. This preserves the M0.8
     /// producer-before-consumer ruling: events emitted by child tasks interleave
@@ -2817,13 +2807,13 @@ pub const Interpreter = struct {
     ///
     /// Dispatch by rule shape: the §9.2 parameterless, non-entity-bound shape
     /// gets one root task; an entity-bound async rule (single `Entity` param)
-    /// gets one task per matching entity (M1.0.14 E3); any other parameter
+    /// gets one task per matching entity; any other parameter
     /// shape fails loud (counted once, then parked `.done`).
     fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
         const rd = &self.rule_descs[idx];
         const rule = self.ast.rule_decls.items[rd.rule_idx];
         if (rd.is_entity_bound and rule.params_len == 1) {
-            // Entity-bound async rule (M1.0.14 E3): the clean single-`Entity`-param
+            // Entity-bound async rule: the clean single-`Entity`-param
             // shape (`async rule r(e: Entity) when e has T`). One root task per (rule,
             // matched entity). Each selected entity with no LIVE (`.suspended`)
             // task spawns a task — the entity bound into its root locals — in
@@ -2869,7 +2859,7 @@ pub const Interpreter = struct {
     }
 
     /// Spawn one root task per matched entity for an ENTITY-BOUND async rule
-    /// (M1.0.14 E3). Reuses the SYNC entity selection (collect mode) so the
+    ///. Reuses the SYNC entity selection (collect mode) so the
     /// order and `when` semantics are identical. Two passes: collect the
     /// matched entities in selection order (nothing runs), then spawn a task
     /// for each entity whose `(rule, entity)` map slot has no LIVE
@@ -2896,9 +2886,9 @@ pub const Interpreter = struct {
         }
     }
 
-    /// The active scope for the top frame (M1.0.11 E2): the nearest enclosing
+    /// The active scope for the top frame: the nearest enclosing
     /// `async fn` call frame's own scope, or the task's root locals if none. The
-    /// `&task.locals` fallback is stable across pool growth (M1.0.12 E1): the
+    /// `&task.locals` fallback is stable across pool growth: the
     /// task is a heap record, so sibling tasks created MID-DRIVE never move it.
     fn currentScope(task: *AsyncTask) *Locals {
         var i = task.frames.items.len;
@@ -2912,7 +2902,7 @@ pub const Interpreter = struct {
         return &task.locals;
     }
 
-    /// Free a frame's owned resources (M1.0.11 E2): only a `call` frame owns heap
+    /// Free a frame's owned resources: only a `call` frame owns heap
     /// (its `async fn` scope). Called for every frame removal.
     fn deinitFrame(self: *Interpreter, frame: *AsyncFrame) void {
         switch (frame.*) {
@@ -2924,7 +2914,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Pop the top frame, freeing its owned resources (M1.0.11 E2).
+    /// Pop the top frame, freeing its owned resources.
     fn popFrame(self: *Interpreter, task: *AsyncTask) void {
         if (task.frames.pop()) |f| {
             var fr = f;
@@ -2932,13 +2922,13 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Pop every frame, freeing owned resources (M1.0.11 E2) — the task-teardown
+    /// Pop every frame, freeing owned resources — the task-teardown
     /// path (completion / fail-loud), replacing a bare `clearRetainingCapacity`.
     fn clearFrames(self: *Interpreter, task: *AsyncTask) void {
         while (task.frames.items.len > 0) self.popFrame(task);
     }
 
-    /// Deliver a resolved `await` value to its site (M1.0.11 E2). `return_` is
+    /// Deliver a resolved `await` value to its site. `return_` is
     /// NOT handled here (it routes through the returning-unwind); this covers the
     /// value-delivering targets.
     fn deliverAwaitValue(self: *Interpreter, task: *AsyncTask, ret: RetTarget, v: Value) StmtError!void {
@@ -2953,11 +2943,11 @@ pub const Interpreter = struct {
     }
 
     /// Classify a statement as a statement-head `await` and its delivery target
-    /// (M1.0.11 E2): a bare expr-stmt (discard), a `let x = await …` (bind), a
+    ///: a bare expr-stmt (discard), a `let x = await …` (bind), a
     /// simple `x = await …` (assign a local), or a `return await …`. A destructuring
     /// `let`, a compound/complex-lvalue assignment, or any non-`await` RHS returns
     /// `null` (handled elsewhere / by the sync executor). Sub-expression `await`
-    /// is not statement-head — it reaches `evalExpr` and fails loud (E0904, E3).
+    /// is not statement-head — it reaches `evalExpr` and fails loud.
     const AwaitSite = struct { await_id: NodeId, ret: RetTarget };
     fn stmtHeadAwait(self: *Interpreter, stmt: NodeId) ?AwaitSite {
         switch (self.ast.stmtKind(stmt)) {
@@ -2986,7 +2976,7 @@ pub const Interpreter = struct {
     }
 
     /// Evaluate a call's arguments in the caller's scope and bind them (parameter
-    /// order, named-arg aware) into `dest` (M1.0.11 E2). Shared by the fn and
+    /// order, named-arg aware) into `dest`. Shared by the fn and
     /// method call-frame setup; mirrors the arg handling of `callFn`/`callMethod`.
     fn bindAsyncParams(self: *Interpreter, world: *World, caller: *Locals, dest: *Locals, fndecl: ast_mod.FnDecl, args_start: u32, args_len: u32, names_start: u32) StmtError!void {
         if (fndecl.params_len != args_len) return error.RuntimeFailure;
@@ -3005,7 +2995,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Begin a direct `await f()` on an `async fn` / `async method` (M1.0.11 E2):
+    /// Begin a direct `await f()` on an `async fn` / `async method`:
     /// resolve the callee, evaluate its args in the caller's scope, create a fresh
     /// heap-boxed scope (params + `self`), advance the caller cursor PAST the await,
     /// and push a `call` frame carrying `ret` (where `f`'s return value lands). `f`
@@ -3073,8 +3063,8 @@ pub const Interpreter = struct {
     }
 
     /// Drive `task` over its resume frame-stack until it suspends at the next
-    /// `await` or runs to completion (M1.0.11 E1). Resets the per-body signal
-    /// state, delivers a pending value-await binding on resume (E2), runs
+    /// `await` or runs to completion. Resets the per-body signal
+    /// state, delivers a pending value-await binding on resume, runs
     /// `driveLoop`, and routes a fail-loud into `finishTaskFailed`.
     fn driveTask(self: *Interpreter, world: *World, task: *AsyncTask, report: *RuntimeReport) !void {
         self.control = .none;
@@ -3082,7 +3072,7 @@ pub const Interpreter = struct {
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
-        // A handle-await resume (M1.0.12 E5, §9.8 amended) first checks its
+        // A handle-await resume (§9.8 amended) first checks its
         // target: canceled WHILE awaited → fail-loud runtime error (no silent
         // unit); done → its parked result (unit in Phase 1) is the value
         // delivered at the await site below.
@@ -3102,9 +3092,7 @@ pub const Interpreter = struct {
         // A wake-condition `await` used in a value position (`let x = await wait(…)`)
         // resolves to `unit` — or, for a handle-await, to the parked result;
         // deliver it into the resuming scope now (M1.0.11 E2). A `return await
-        // <wake-target>` re-raises the RETURN at resume instead (M1.0.12 E5
-        // fix-as-you-go: `deliverAwaitValue` no-ops on `.return_`, so M1.0.11
-        // silently dropped the return and fell through past the statement).
+        // <wake-target>` re-raises the RETURN at resume instead.
         if (@as(std.meta.Tag(RetTarget), task.pending_bind) == .return_) {
             task.pending_bind = .discard;
             self.returning = true;
@@ -3132,7 +3120,7 @@ pub const Interpreter = struct {
             task.pending_bind = .discard;
         }
         // A parent suspended on a race/sync child set resolves the construct
-        // FIRST (M1.0.12 E4): winner selection + loser cancellation, and — on
+        // FIRST: winner selection + loser cancellation, and — on
         // a returning winner — the §9.5 winner-return re-raise at the race
         // site: the parent unwinds as if the race statement itself returned
         // the value (to the enclosing `async fn`'s await site via its call
@@ -3165,8 +3153,8 @@ pub const Interpreter = struct {
         }
     }
 
-    /// The iterative frame-stack machine (M1.0.11 E1, `etch-reference-part1.md
-    /// §9.12`). Processes the innermost frame's next statement; a statement-head
+    /// The iterative frame-stack machine (`etch-reference-part1.md §9.12`).
+    /// Processes the innermost frame's next statement; a statement-head
     /// `await` suspends the whole task (stack retained, no re-run on resume); a
     /// nested `if`/`match`/`loop`/`while`/`block` pushes a child frame; everything
     /// else runs through the sync `execStmt`. Returns `.suspended` (stack persists
@@ -3176,7 +3164,7 @@ pub const Interpreter = struct {
         drive: while (task.frames.items.len > 0) {
             const ti = task.frames.items.len - 1;
             // The active scope is the nearest enclosing `async fn` call frame's
-            // own scope (M1.0.11 E2), else the task root — recomputed each pass so
+            // own scope, else the task root — recomputed each pass so
             // a pushed/popped call frame flips it for the next statement.
             const scope = currentScope(task);
             switch (task.frames.items[ti]) {
@@ -3272,7 +3260,7 @@ pub const Interpreter = struct {
                     }
                 },
                 .single => {
-                    // Length-1 run (M1.0.12 E4) — a race/sync child whose
+                    // Length-1 run — a race/sync child whose
                     // branch is a single non-block statement.
                     if (task.frames.items[ti].single.cursor >= 1) {
                         self.popFrame(task);
@@ -3321,24 +3309,24 @@ pub const Interpreter = struct {
         return .completed;
     }
 
-    /// Step one statement of the current frame's body (M1.0.11 E1). `cursor`
+    /// Step one statement of the current frame's body. `cursor`
     /// points at the active frame's statement cursor; this advances it (for a
     /// plain run / a pushed child / a resumed-after `await`) BEFORE any frame push
     /// (a push reallocates `task.frames`, so the pointer is used first). Returns
     /// the action for `driveLoop` to route.
     fn stepBodyStmt(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, stmt: NodeId) StmtError!StepAction {
-        // (1) statement-head `await` (M1.0.11 E1/E2) — in an expr-stmt (discard),
+        // (1) statement-head `await` — in an expr-stmt (discard),
         // a `let` initializer (bind), an assignment RHS (assign), or a `return`
         // operand. A `future` (`await f()`) inlines `f`'s body as a call frame
-        // (E2); a wake-condition target (`wait` / `global_event`) suspends the
+        //; a wake-condition target (`wait` / `global_event`) suspends the
         // task, delivering its (unit) value to the site on resume via `pending_bind`.
         if (self.stmtHeadAwait(stmt)) |site| {
             const aw = self.ast.awaitExpr(site.await_id);
             switch (aw.target_kind) {
                 .future => {
-                    // A direct call inlines the callee's body (M1.0.11 E2);
-                    // any other expression is the HANDLE-AWAIT form (M1.0.12
-                    // E5, §9.8): evaluate it to a `TaskHandle` and join.
+                    // A direct call inlines the callee's body;
+                    // any other expression is the HANDLE-AWAIT form (§9.8):
+                    // evaluate it to a `TaskHandle` and join.
                     const ak = self.ast.exprKind(aw.arg_expr);
                     if (ak == .fn_call or ak == .method_call) {
                         return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret);
@@ -3392,13 +3380,13 @@ pub const Interpreter = struct {
             }
         }
         const sk = self.ast.stmtKind(stmt);
-        // (1b) `race` / `sync` statement (M1.0.12 E4) → admit branches (guards
+        // (1b) `race` / `sync` statement → admit branches (guards
         // in the live parent scope), create one child task per admitted branch,
         // and suspend the parent on the child set.
         if (sk == .race_stmt or sk == .sync_stmt) {
             return try self.beginRaceSync(world, task, scope, cursor, stmt, sk == .race_stmt);
         }
-        // (1c) `branch { }` / `[let h =] spawn { }` (M1.0.12 E5, §9.7-§9.8) →
+        // (1c) `branch { }` / `[let h =] spawn { }` (§9.7-§9.8) →
         // create a DETACHED child task (snapshot scope, same origin_rule,
         // no parent link) and continue immediately — the parent never waits
         // on it. `spawn` additionally yields a `TaskHandle` (the child's pool
@@ -3518,7 +3506,7 @@ pub const Interpreter = struct {
         return .advanced;
     }
 
-    /// Enter a `race`/`sync` statement during a drive (M1.0.12 E4, §9.5-§9.6).
+    /// Enter a `race`/`sync` statement during a drive (§9.5-§9.6).
     /// Two passes: (1) evaluate every `if cond =>` guard SYNCHRONOUSLY in the
     /// parent's live current scope — guards decide admission, and evaluating
     /// them all before creating any child means a failing guard leaves no
@@ -3532,7 +3520,7 @@ pub const Interpreter = struct {
     /// on the child set (`children_any` for race, `children_all` for sync).
     /// A block branch frames its statement run; any other single statement
     /// frames a length-1 `single` run. ZERO admitted branches → no suspension,
-    /// the parent continues immediately (E4). Resolution at the parent's
+    /// the parent continues immediately. Resolution at the parent's
     /// resume is `resolveChildWake`.
     fn beginRaceSync(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, stmt: NodeId, is_race: bool) StmtError!StepAction {
         const data = self.ast.stmtData(stmt);
@@ -3628,7 +3616,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Snapshot-copy `src` locals into `dest` (M1.0.12 E4, §9.8 normative): a
+    /// Snapshot-copy `src` locals into `dest` (§9.8 normative): a
     /// child task's root scope is a per-branch COPY of the parent's current
     /// scope, taken at construct entry after guard evaluation. Value-level
     /// copy: rebinding a local inside the branch is invisible outside; a
@@ -3641,7 +3629,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Push a `block_expr`'s body as a `.run` frame (M1.0.11 E1), carrying its
+    /// Push a `block_expr`'s body as a `.run` frame, carrying its
     /// trailing value expression (evaluated for effect on pop).
     fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId) StmtError!void {
         const blk = self.ast.block_exprs.items[self.ast.exprData(block_expr_id)];
@@ -3652,7 +3640,7 @@ pub const Interpreter = struct {
         } });
     }
 
-    /// Unwind the frame-stack for a pending control signal (M1.0.11 E1). A
+    /// Unwind the frame-stack for a pending control signal. A
     /// `return` ends the task (`false`, stack cleared — rules have no return
     /// value). A `throw` routes to the nearest enclosing `try` still in its try
     /// phase — binding the caught value and switching that frame to its `catch`
@@ -3665,7 +3653,7 @@ pub const Interpreter = struct {
     fn unwindControl(self: *Interpreter, task: *AsyncTask) StmtError!bool {
         if (self.returning) {
             // `return v` unwinds to the nearest enclosing `async fn` call frame,
-            // which returns `v` to ITS await site (M1.0.11 E2). `return await g()`
+            // which returns `v` to ITS await site. `return await g()`
             // chains: that call frame's own `ret` is `return_`, so we loop and the
             // enclosing fn returns `v` too. With no enclosing call frame, the
             // `return` is in the rule body — end the task (rules have no value).
@@ -3677,7 +3665,7 @@ pub const Interpreter = struct {
                     }
                 }
                 if (task.frames.items.len == 0) {
-                    // Task-level `return` (M1.0.12 E4): park it in the husk —
+                    // Task-level `return`: park it in the husk —
                     // a race parent re-raises the WINNER's return at the race
                     // site (§9.5); unused for any other task (a rule has no
                     // return value; sync/branch/spawn bodies reject `return`,
@@ -3788,11 +3776,11 @@ pub const Interpreter = struct {
         return false;
     }
 
-    /// Complete a task normally (M1.0.11 E1): surface an uncaught `throw` as a
+    /// Complete a task normally: surface an uncaught `throw` as a
     /// counted runtime error, clear the residual signal state, free the frames +
     /// retained locals, and park the task — `.done` on a clean completion,
-    /// `.canceled` when it ended on an uncaught `throw` (M1.0.12 E4: a FAILED
-    /// task terminated without a result — never a race winner, never blocks a
+    /// `.canceled` when it ended on an uncaught `throw` (: a FAILED task
+    /// terminated without a result — never a race winner, never blocks a
     /// `sync` join, `await`ing it fails loud; §9.8 amended).
     fn finishTaskDone(self: *Interpreter, task: *AsyncTask, report: *RuntimeReport) void {
         var failed = false;
@@ -3814,7 +3802,7 @@ pub const Interpreter = struct {
         task.locals = .{};
     }
 
-    /// Complete a fail-loud task (M1.0.11 E1): harvest the typed error into the
+    /// Complete a fail-loud task: harvest the typed error into the
     /// report and park the task `.canceled` (M1.0.12 E4 — failed, no result;
     /// was `.done` before the child-task distinction became observable),
     /// freeing its frames + retained locals.
@@ -3833,7 +3821,7 @@ pub const Interpreter = struct {
     }
 
     /// Resolve an `if`/`else if`/`else` chain to the `block_expr` of the taken
-    /// branch (or `null` when none is), binding an `if let` payload (M1.0.11 E1).
+    /// branch (or `null` when none is), binding an `if let` payload.
     /// Conditions are evaluated synchronously — an `await` in a condition is a
     /// sub-expression and fails loud. Mirrors the sync `if_expr` arm of `evalExpr`.
     fn asyncIfBranch(self: *Interpreter, world: *World, locals: *Locals, ife_id: NodeId) StmtError!?NodeId {
@@ -3858,7 +3846,7 @@ pub const Interpreter = struct {
     }
 
     /// Select a `match`'s winning arm and return its body expression, binding a
-    /// pattern capture (M1.0.11 E1). The scrutinee + patterns are evaluated
+    /// pattern capture. The scrutinee + patterns are evaluated
     /// synchronously. Mirrors the sync `match_expr` arm of `evalExpr`; a
     /// fall-through is a runtime failure (exhaustiveness proven at type-check).
     fn matchArmBody(self: *Interpreter, world: *World, locals: *Locals, m_id: NodeId) StmtError!NodeId {
@@ -3901,7 +3889,7 @@ pub const Interpreter = struct {
         return error.RuntimeFailure;
     }
 
-    /// Evaluate a `while [let x =] cond` at the top of an iteration (M1.0.11 E1):
+    /// Evaluate a `while [let x =] cond` at the top of an iteration:
     /// `true` = enter the body, `false` = stop the loop. Mirrors the sync
     /// `while_stmt` arm of `execStmt`.
     fn whileCondEnter(self: *Interpreter, world: *World, locals: *Locals, wid: NodeId) StmtError!bool {
@@ -3919,7 +3907,7 @@ pub const Interpreter = struct {
     }
 
     /// Advance a `for` frame's iterator by one element, binding the loop
-    /// variable(s) (M1.0.11 E1): `true` = a body iteration was entered, `false` =
+    /// variable(s): `true` = a body iteration was entered, `false` =
     /// the iterator is exhausted (the `for` ends). Mirrors the sync `for_stmt`
     /// arms of `execStmt`. A `range` is self-contained; an `array`/`map` handle is
     /// bounds-checked against the (possibly reset) collection store and fails loud
@@ -3946,7 +3934,7 @@ pub const Interpreter = struct {
                 return true;
             },
             .array_persistent => {
-                // Resource `T[]` in an async body (M1.0.17 E2): the block pointer
+                // Resource `T[]` in an async body: the block pointer
                 // is stable across suspend; bounds-check the snapshotted length
                 // against the (possibly mutated) container, same as `.array`.
                 const a = &ff.iter.array_persistent;
@@ -3984,7 +3972,7 @@ pub const Interpreter = struct {
     }
 
     /// Evaluate an event field / payload-filter value with enum-field awareness
-    /// (M1.0.14 E4): a bare `.variant` shorthand resolves against the event
+    ///: a bare `.variant` shorthand resolves against the event
     /// field's declared enum type (the struct-literal precedent), else via
     /// `evalExpr`. Shared by `emit` execution and payload-filter capture so both
     /// sides of an enum equality produce the same `.enum_value`.
@@ -4018,7 +4006,7 @@ pub const Interpreter = struct {
             // captured filter is re-scanned at later-tick polls — deep-copy into
             // `captured_filter_strings`, which ALSO enforces capture-once §9.4
             // (the value cannot move under a later mutation). `.string_id` (AST
-            // table) and POD values are copy-stable (M1.0.14 E4).
+            // table) and POD values are copy-stable.
             const v = if (stringNeedsOwning(v0)) blk: {
                 const dup = try self.gpa.dupe(u8, self.stringBytes(v0).?);
                 errdefer self.gpa.free(dup);
@@ -4031,7 +4019,7 @@ pub const Interpreter = struct {
     }
 
     /// Build the wake condition for an `await global_event` / `entity_event`
-    /// target (M1.0.14 E4). The entity operand (entity_event) and the payload
+    /// target. The entity operand (entity_event) and the payload
     /// filter are evaluated ONCE, here, in the live scope — never re-evaluated
     /// at later polls (§9.4). The designated entity field is the compile-time
     /// decision from `resolveEventEntityTarget` (§9.4), matched BY NAME at poll.
@@ -4055,7 +4043,7 @@ pub const Interpreter = struct {
     }
 
     /// An entity gate for `entity_event` wake matching: the designated field's
-    /// name and the awaited entity (M1.0.14 E4).
+    /// name and the awaited entity.
     const EntityGate = struct { name: StringId, id: EntityId };
 
     /// The value of `ev`'s field named `name`, or null if absent — a linear scan
@@ -4069,7 +4057,7 @@ pub const Interpreter = struct {
 
     /// True iff some queued event of `type_name` this tick satisfies the payload
     /// `filter` and (for `entity_event`) has its designated field == the gate
-    /// entity (M1.0.14 E4). The matched event is NOT consumed — observers and
+    /// entity. The matched event is NOT consumed — observers and
     /// other awaiters see it too.
     fn anyEventMatches(self: *const Interpreter, type_name: StringId, filter: FilterRange, gate: ?EntityGate) bool {
         for (self.events.list.items) |ev| {
@@ -4093,7 +4081,7 @@ pub const Interpreter = struct {
         return true;
     }
 
-    /// Equality for an event-field comparison (M1.0.14 E4). Strings compare by
+    /// Equality for an event-field comparison. Strings compare by
     /// BYTES (a filter literal is `.string_id`, but an emitted string may be
     /// `.string_run` / `.string_persistent` — `Value.eql` only matches same tag
     /// + same pool index); every other admitted kind (int/float/bool/entity/
@@ -4106,7 +4094,7 @@ pub const Interpreter = struct {
         return a.eql(b);
     }
 
-    /// Resolve a wake-condition `await` target to a `WakeCond` (M1.0.11 E3). Only
+    /// Resolve a wake-condition `await` target to a `WakeCond`. Only
     /// `wait` / `wait_unscaled` reach here (`global_event` / `entity_event` build
     /// their wake via `evalEventWake`; `future` via `beginAsyncCall`). `wait` and
     /// `wait_unscaled` take a `Duration`
@@ -4115,8 +4103,8 @@ pub const Interpreter = struct {
     /// unscaled clock (`wait_unscaled` — M1.0.13 E5, fires under pause). Both
     /// keep the M1.0.11 literal-only restriction: a non-literal Duration (const /
     /// arithmetic) fails loud — only the TIMER family evaluates a full Duration
-    /// expression (E6). `global_event` / `entity_event` build their wake in the
-    /// live scope via `evalEventWake` (M1.0.14 E4 — filter/entity capture) and
+    /// expression. `global_event` / `entity_event` build their wake in the
+    /// live scope via `evalEventWake` and
     /// never reach this resolver; `future` is unrealized. All three are a
     /// defensive fail-loud here.
     fn evalAwaitTarget(self: *Interpreter, await_id: NodeId) StmtError!WakeCond {
@@ -4137,13 +4125,13 @@ pub const Interpreter = struct {
     }
 
     /// True iff a suspended task's wake condition is satisfied this tick. The
-    /// child-set variants (M1.0.12 E1) POLL the pool states — no notification
+    /// child-set variants POLL the pool states — no notification
     /// machinery; the pool is small and the poll runs at the rule's position.
     fn asyncWakeFired(self: *const Interpreter, wake: WakeCond) bool {
         return switch (wake) {
             .wait_until => |t| self.game_clock_ticks >= t,
             .wait_until_unscaled => |t| self.unscaled_clock_ticks >= t,
-            // M1.0.14 E4 — a queued event of the type this tick that also
+            // a queued event of the type this tick that also
             // satisfies the payload filter (global_event) and the designated
             // entity field (entity_event). The event is NOT consumed.
             .global_event => |g| self.anyEventMatches(g.type_name, g.filter, null),
@@ -4164,7 +4152,7 @@ pub const Interpreter = struct {
                 break :blk any_done or !any_suspended;
             },
             // Sync parent: join when no child remains `.suspended` — failed
-            // (canceled) children do not block the join (E4).
+            // (canceled) children do not block the join.
             .children_all => |r| blk: {
                 for (self.task_children.items[r.start .. r.start + r.len]) |ci| {
                     if (self.async_tasks.items[ci].state == .suspended) break :blk false;
@@ -4178,7 +4166,7 @@ pub const Interpreter = struct {
     }
 
     /// Evaluate a rule's per-entity tag predicates against `entity`'s `TagSet`
-    /// (M0.8 E3). An entity without a `TagSet` component reads as all-zero, so
+    ///. An entity without a `TagSet` component reads as all-zero, so
     /// `has_no_tag`/`has_no_tags` pass and the positive operators fail.
     fn tagPredicatesPass(self: *Interpreter, world: *World, entity: EntityId, preds: []const TagPredicate) bool {
         const tid = self.tagset_id orelse return false;
@@ -4205,8 +4193,8 @@ pub const Interpreter = struct {
         return true;
     }
 
-    /// Apply every queued `add_tag`/`remove_tag` (M0.8 E3, `etch-grammar.md`
-    /// §4.4). A `set` on an entity that already has `TagSet` flips the bit in
+    /// Apply every queued `add_tag`/`remove_tag` (`etch-grammar.md` §4.4). A
+    /// `set` on an entity that already has `TagSet` flips the bit in
     /// place; on one that lacks it, `TagSet` is added (archetype transition)
     /// with the bit set. Clearing a bit on an entity without `TagSet` is a
     /// no-op. The location is looked up fresh per mutation so a transition from
@@ -4284,7 +4272,7 @@ pub const Interpreter = struct {
         // (`resetBodyStores` no-ops; M1.0.15, the outlives-UAF fix).
         defer self.resetBodyStores();
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
-        // `@on_event(T)` observer (M0.8 E3): inject the implicit `event` payload
+        // `@on_event(T)` observer: inject the implicit `event` payload
         // self-style (like `self` in `callMethod`). The event is materialised as
         // a struct value from the per-tick store — `EventVal` and `StructVal`
         // share the `(type_name, fields)` shape, so the existing struct-ref
@@ -4342,7 +4330,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Raise a typed runtime failure (M0.8 E3-D, D-S4-runtime-report): record
+    /// Raise a typed runtime failure: record
     /// the `(kind, span)` payload on the sideband and return the unwinding
     /// error. Usage: `return self.fail(.DivisionByZero, self.ast.exprSpan(id))`.
     /// Install the Tier 1 service registry (`etch-abi-zig.md` §8.4). Borrowed:
@@ -4351,7 +4339,7 @@ pub const Interpreter = struct {
         self.services = reg;
     }
 
-    /// Register an external event source (M1.1.15.2 G4). Borrowed: the source's
+    /// Register an external event source. Borrowed: the source's
     /// context must outlive this interpreter.
     pub fn addEventSource(self: *Interpreter, source: ExternalEventSource) !void {
         try self.event_sources.append(self.gpa, source);
@@ -4510,14 +4498,14 @@ pub const Interpreter = struct {
     }
 
     /// Harvest a runtime failure into the report at a body choke point
-    /// (M0.8 E3-D): bump the counter and surface the typed payload when the
+    ///: bump the counter and surface the typed payload when the
     /// raise site recorded one. An untyped site leaves the previous
     /// `last_error` in place (the counter still moves).
     fn harvestError(self: *Interpreter, report: *RuntimeReport) void {
         report.runtime_errors += 1;
         if (self.pending_error) |pe| report.last_error = pe;
         self.pending_error = null;
-        // Clear the assert-message sideband too (M1.0.15 review fix): a rule-body
+        // Clear the assert-message sideband too: a rule-body
         // assertion failure harvested during a test's `tick(n)` must not leave a
         // stale `pending_message` for a LATER `fail()`-routed test-body failure
         // (division-by-zero, etc.) to mis-report as the rule's assert text.
@@ -4567,7 +4555,7 @@ pub const Interpreter = struct {
         switch (kind) {
             .let_stmt => {
                 const let = self.ast.let_stmts.items[data];
-                // Anonymous `.{ … }` initializer (M0.8 E3-C tranche 8): the
+                // Anonymous `.{ … }` initializer: the
                 // let annotation supplies the struct type — the same logical
                 // point as the resolver's check mode and the codegen's
                 // qualified emission. The resolver guarantees a named struct
@@ -4612,7 +4600,7 @@ pub const Interpreter = struct {
                 // `assert(cond)` — a false condition is a runtime failure (the
                 // dev-build panic of `etch-reference-part1.md` §10.3). Raised via
                 // `fail(.AssertFailed, span)` so the failure carries the source
-                // position (M1.0.15): a rule-body assert still counts into the
+                // position: a rule-body assert still counts into the
                 // report; a test-body assert becomes the per-test failure. The
                 // optional message literal rides on `pending_message`.
                 const a = self.ast.assert_stmts.items[data];
@@ -4623,7 +4611,7 @@ pub const Interpreter = struct {
                 }
             },
             .for_stmt => {
-                // `for v in range/array/map { body }` (M0.8). The loop variable
+                // `for v in range/array/map { body }`. The loop variable
                 // is rebound each iteration; `break`/`continue` (unlabeled, or a
                 // label that escapes — `for` carries no label in E1) is handled
                 // via `handleLoopControl(0)`.
@@ -4662,8 +4650,8 @@ pub const Interpreter = struct {
                         }
                     },
                     .array_persistent => |ptr| {
-                        // `for x in get(R).xs` over a resource collection (M1.0.17
-                        // E2). The block pointer is stable; snapshot len and re-
+                        // `for x in get(R).xs` over a resource collection. The block
+                        // pointer is stable; snapshot len and re-
                         // fetch the list each iteration (a body push to the SAME
                         // collection reallocs its internal buffer, not the block).
                         const len = persistentArrayOf(ptr).items.len;
@@ -4681,8 +4669,8 @@ pub const Interpreter = struct {
                         }
                     },
                     .map_ref => |handle| {
-                        // `for k, v in m` — bind key then value per entry (M0.8
-                        // collections). Iteration order is insertion order in
+                        // `for k, v in m` — bind key then value per entry. Iteration
+                        // order is insertion order in
                         // the interpreter (maps are unordered by contract, so a
                         // differential reads it only through an order-invariant
                         // reduction such as a sum).
@@ -4702,7 +4690,7 @@ pub const Interpreter = struct {
                         }
                     },
                     .map_persistent => |ptr| {
-                        // `for k, v in get(R).m` over a resource map (M1.0.17 E3):
+                        // `for k, v in get(R).m` over a resource map:
                         // insertion order, block pointer stable, re-fetch per step.
                         const len = persistentMapOf(ptr).items.len;
                         var k: usize = 0;
@@ -4723,11 +4711,11 @@ pub const Interpreter = struct {
                 }
             },
             .while_stmt => {
-                // `while cond { body }` (M0.8 control flow). Re-evaluate the
+                // `while cond { body }`. Re-evaluate the
                 // condition each iteration; run the body run; an unlabeled
                 // `break`/`continue` is consumed via `handleLoopControl(0)`; a
                 // labeled signal for an outer loop, or a `throw`, propagates.
-                // `while let x = <optional> { body }` (M0.8 E2 block 5): the
+                // `while let x = <optional> { body }`: the
                 // optional is re-evaluated each iteration; `some` binds `x` and
                 // runs the body, `none` stops the loop.
                 const wh = self.ast.while_stmts.items[data];
@@ -4752,7 +4740,7 @@ pub const Interpreter = struct {
                 }
             },
             .break_stmt => {
-                // `break [label] [value]` (M0.8 loop/break) — raise the signal
+                // `break [label] [value]` — raise the signal
                 // for the enclosing loop to consume.
                 const b = self.ast.break_stmts.items[data];
                 self.break_value = if (b.value.isNone()) Value{ .unit = {} } else try self.evalExpr(world, locals, b.value);
@@ -4765,12 +4753,12 @@ pub const Interpreter = struct {
                 self.control = .continue_;
             },
             .throw_stmt => {
-                // `throw expression` (M0.8 error handling) — raise the throw
+                // `throw expression` — raise the throw
                 // signal carrying the evaluated value, to unwind to a `catch`.
                 const t = self.ast.throw_stmts.items[data];
                 self.thrown_value = try self.evalExpr(world, locals, t.value);
                 self.thrown = true;
-                // Recorded for the uncaught-throw report entry (M0.8 E3-D);
+                // Recorded for the uncaught-throw report entry;
                 // irrelevant when a `catch` consumes the throw.
                 self.thrown_span = self.ast.exprSpan(t.value);
             },
@@ -4787,7 +4775,7 @@ pub const Interpreter = struct {
                 }
             },
             .return_stmt => {
-                // `return [expr]` (M0.8 E2 call mechanism) — evaluate the value
+                // `return [expr]` — evaluate the value
                 // (or `unit` for a bare return) and raise the `returning` signal
                 // to unwind to the enclosing fn-call boundary (mirrors `throw`).
                 const value: NodeId = @bitCast(data);
@@ -4795,15 +4783,15 @@ pub const Interpreter = struct {
                 self.returning = true;
             },
             .emit_stmt => {
-                // `emit EventType { field: value, … }` (M0.8 E3). Shared with the
-                // test-world `world.emit(T {…})` method form (M1.0.15) via
+                // `emit EventType { field: value, … }`. Shared with the
+                // test-world `world.emit(T {…})` method form via
                 // `enqueueEvent`.
                 const em = self.ast.emit_stmts.items[data];
                 try self.enqueueEvent(world, locals, em.event_type, em.fields_start, em.fields_len);
             },
             .tag_mutation_stmt => {
-                // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (M0.8 E3,
-                // `etch-grammar.md` §4.4) — a deferred structural change. Resolve
+                // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (`etch-
+                // grammar.md` §4.4) — a deferred structural change. Resolve
                 // the receiver to an entity + the path to its leaf bit, then
                 // queue the mutation; the flush at the tick boundary applies it
                 // (adding `TagSet` if absent), never mid-archetype-walk.
@@ -4816,7 +4804,7 @@ pub const Interpreter = struct {
                 const bit = self.tagPathLeafBit(tm.path) orelse return error.RuntimeFailure;
                 const set = tm.kind == .add;
                 if (self.observer_deferred) |dbuf| {
-                    // Inside an observer body (M1.0.2 E3): route to the registry's
+                    // Inside an observer body: route to the registry's
                     // deferred Tier-0 buffer so the mutation applies at the NEXT
                     // flush, never re-entrantly during the current one.
                     const tid = self.tagset_id orelse return error.RuntimeFailure;
@@ -4838,7 +4826,7 @@ pub const Interpreter = struct {
         }
     }
 
-    /// `target op= value` (M0.8).
+    /// `target op= value`.
     ///
     /// **`assignRhsThrew`** — after every evaluation of the right-hand side, an
     /// in-flight `throw` abandons the write and lets `execStmtRun` unwind to the
@@ -4859,7 +4847,7 @@ pub const Interpreter = struct {
             const name_id: StringId = self.ast.exprData(assign.target);
             const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const rhs = try self.evalExpr(world, locals, assign.value);
-            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+            if (self.thrown) return; // see `assignRhsThrew`
             const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
             ptr.* = new_v;
@@ -4875,11 +4863,11 @@ pub const Interpreter = struct {
                     const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+                    if (self.thrown) return; // see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
-                    // Change detection (M0.8 E3): stamp `changed_tick = current_tick`
+                    // Change detection: stamp `changed_tick = current_tick`
                     // so an `entity has T changed` rule sees this write. Gated on
                     // `has_changed` — a `changed`-free program never marks. Same
                     // logical point as the codegen's post-write `markChanged`.
@@ -4888,8 +4876,8 @@ pub const Interpreter = struct {
                 },
                 .resource_ref => |rref| {
                     if (!rref.mutable) return error.RuntimeFailure;
-                    // A `.string_` slot write is a persistent promotion (M1.0.3
-                    // E2), not a byte-block overwrite. Resolve the incoming
+                    // A `.string_` slot write is a persistent promotion, not a
+                    // byte-block overwrite. Resolve the incoming
                     // string's bytes (literal / rule-arena) here, then hand them
                     // to `promoteResourceString`, which allocs the fresh block,
                     // writes the new slot, and decrefs the previous value (order
@@ -4899,14 +4887,14 @@ pub const Interpreter = struct {
                         if (field.kind == .string_) {
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
-                            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+                            if (self.thrown) return; // see `assignRhsThrew`
                             const bytes = self.stringBytes(rhs) orelse return error.RuntimeFailure;
                             Bridge.promoteResourceString(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, bytes) catch |e|
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                             return;
                         }
                         if (field.kind == .enum_) {
-                            // Enum slot write (M1.0.3 E3): resolve the RHS `.variant`
+                            // Enum slot write: resolve the RHS `.variant`
                             // shorthand against the field's declared enum type (the
                             // assignment position carries no expected-type context to
                             // `evalExpr`), then store its discriminant. Only `=`.
@@ -4918,14 +4906,14 @@ pub const Interpreter = struct {
                         }
                         if (field.kind == .array_ or field.kind == .map_ or field.kind == .set_) {
                             // Whole-field reassignment `get_mut(R).xs = [...]`
-                            // (M1.0.17 E2/E3/E4): build a fresh persistent container
+                            //: build a fresh persistent container
                             // from the RHS (deep-copy entries, promote strings),
                             // then swap the slot and decref the previous block
                             // (order enforced in `promoteResourceCollection`).
                             // Only `=`.
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
-                            if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+                            if (self.thrown) return; // see `assignRhsThrew`
                             const new_block = switch (field.kind) {
                                 .array_ => try self.buildPersistentArrayFrom(rhs),
                                 .map_ => try self.buildPersistentMapFrom(rhs),
@@ -4940,13 +4928,13 @@ pub const Interpreter = struct {
                     const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+                    if (self.thrown) return; // see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     return;
                 },
-                // Struct field write (M0.8 E2 block 3) — `self.x = …` in a `mut
+                // Struct field write — `self.x = …` in a `mut
                 // self` method, or `v.x = …` on a `let mut v`. The field index
                 // is resolved before evaluating the rhs, then written back by
                 // index (the rhs eval may move the outer store, never the
@@ -4962,7 +4950,7 @@ pub const Interpreter = struct {
                     const k = fi orelse return error.RuntimeFailure;
                     const cur = self.structs.list.items[handle].fields.items[k].value;
                     const rhs = try self.evalExpr(world, locals, assign.value);
-                    if (self.thrown) return; // M1.1.15.2 G2 — see `assignRhsThrew`
+                    if (self.thrown) return; // see `assignRhsThrew`
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     self.structs.list.items[handle].fields.items[k].value = new_v;
                     return;
@@ -4980,7 +4968,7 @@ pub const Interpreter = struct {
     /// value is the implicit return. `async fn` interpretation is E3 (fail loud).
     fn callFn(self: *Interpreter, world: *World, caller_locals: *Locals, fndecl: ast_mod.FnDecl, call: ast_mod.CallExpr) StmtError!Value {
         // An `async fn` executes via the await call-frame path (`beginAsyncCall`),
-        // not this synchronous path (M1.0.11 E2). Reaching here for an async fn is
+        // not this synchronous path. Reaching here for an async fn is
         // a direct (non-`await`) call — a function-coloring violation the E4
         // type-checker rejects (E0901); until then it degrades to a fail-loud.
         if (fndecl.is_async) return error.RuntimeFailure;
@@ -4988,9 +4976,7 @@ pub const Interpreter = struct {
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
         // Evaluate arguments in SOURCE order, then bind in parameter order
-        // (M0.8 E4 named arguments — the 2026-06-10 evaluation-order
-        // ruling: written order keeps the call site self-contained; the
-        // codegen emits the same source-order temporaries).
+        // .
         var values: [max_call_args]Value = undefined;
         if (call.args_len > max_call_args) return error.RuntimeFailure;
         var j: u32 = 0;
@@ -5020,14 +5006,14 @@ pub const Interpreter = struct {
         return try self.evalExpr(world, &frame, fndecl.value);
     }
 
-    /// Invoke an inherent `impl` method or associated fn (M0.8 E2 block 3).
+    /// Invoke an inherent `impl` method or associated fn.
     /// Mirrors `callFn` but, for an instance method, binds `self` to the
     /// receiver value first (`mut self` shares the struct handle, so mutation
     /// propagates back). `self_value == null` is an associated fn (no receiver).
     /// A `return` inside the body unwinds to *this* boundary (the method's own
     /// frame), never the caller's — `returning` is consumed here.
     /// Declaration-order index of `variant` within `edecl`, or `null` if the
-    /// enum has no such variant (M0.8 E2 block 3 tranche B).
+    /// enum has no such variant.
     fn enumVariantIndexOf(self: *Interpreter, edecl: ast_mod.EnumDecl, variant: StringId) ?u32 {
         var i: u32 = 0;
         while (i < edecl.variants_len) : (i += 1) {
@@ -5038,7 +5024,7 @@ pub const Interpreter = struct {
 
     /// Resolve a bare `.variant` (1-segment `tag_path`) field value against
     /// a declared enum-typed struct field at struct-literal evaluation
-    /// (M0.8 E3-C tranche 4, part1 §10.2) — the same declared-type lookup
+    /// (tranche 4, part1 §10.2) — the same declared-type lookup
     /// as the resolver's check mode and the codegen's qualified emission.
     /// `null` when the field is not enum-typed or the variant is unknown
     /// (the resolver has already rejected those programs).
@@ -5054,8 +5040,8 @@ pub const Interpreter = struct {
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
     }
 
-    /// Resolve an enum assignment RHS against a known enum type id (M1.0.3 E3,
-    /// resource enum write). A bare `.variant` shorthand resolves to a typed
+    /// Resolve an enum assignment RHS against a known enum type id. A bare
+    /// `.variant` shorthand resolves to a typed
     /// `enum_value` against `enum_type_name_id`; any other form (a variable, a
     /// qualified `Type.variant`) is evaluated normally — its tag already carries
     /// the type. The `type_name` id matches `enum_decls`'s keying, so the stored
@@ -5071,7 +5057,7 @@ pub const Interpreter = struct {
     }
 
     /// The declared-struct name of a field's `.named` type node, or null when
-    /// the field is not struct-typed (M0.8 E3-C tranche 8) — the same
+    /// the field is not struct-typed — the same
     /// declared-type lookup as `enumFieldShorthand`, for the anonymous
     /// `.{ … }` field-value resolution.
     fn structFieldTypeName(self: *Interpreter, f: ast_mod.Field) ?StringId {
@@ -5103,8 +5089,8 @@ pub const Interpreter = struct {
             while (li < sl.fields_len) : (li += 1) {
                 const flit = self.ast.struct_lit_fields.items[sl.fields_start + li];
                 if (flit.name == f.name) {
-                    // Bare `.variant` in field-value position (M0.8
-                    // E3-C tranche 4, part1 §10.2): resolved against
+                    // Bare `.variant` in field-value position (tranche 4, part1
+                    // §10.2): resolved against
                     // the declared field type — the decl's field
                     // list is in hand at this site.
                     if (self.ast.exprKind(flit.value) == .tag_path) {
@@ -5113,8 +5099,8 @@ pub const Interpreter = struct {
                             break;
                         }
                     }
-                    // Anonymous `.{ … }` in field-value position (M0.8
-                    // E3-C tranche 8): resolved against the declared
+                    // Anonymous `.{ … }` in field-value position: resolved against
+                    // the declared
                     // struct field type, recursively.
                     if (self.ast.exprKind(flit.value) == .struct_lit) {
                         const inner = self.ast.struct_lits.items[self.ast.exprData(flit.value)];
@@ -5141,7 +5127,7 @@ pub const Interpreter = struct {
         return Value{ .struct_ref = handle };
     }
 
-    /// M1.0.9 — extract the single string argument of an extension method
+    /// extract the single string argument of an extension method
     /// (`activate_extension` / `deactivate_extension` / `has_extension`) as raw
     /// bytes. Borrowed from the current AST arena / run-string store — valid for
     /// the synchronous resolve / lookup that immediately follows.
@@ -5166,7 +5152,7 @@ pub const Interpreter = struct {
         try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
     }
 
-    /// M1.0.10 E3 — the Tier-0 `CommandBuffer` that a body's structural
+    /// the Tier-0 `CommandBuffer` that a body's structural
     /// mutations (`spawn` / `despawn` / `add` / `remove`) enqueue onto. Inside an
     /// observer / hook body `observer_deferred` is already bound to it; in a
     /// plain rule body it is the world's shared observer-deferred buffer (lazily
@@ -5181,16 +5167,15 @@ pub const Interpreter = struct {
         return &world.observer_registry.deferred.?;
     }
 
-    /// M1.0.10 E3 — resolve a component literal `T { f: v, … }` to its registry id
+    /// resolve a component literal `T { f: v, … }` to its registry id
     /// + a freshly built payload (component defaults overwritten by the provided
     /// fields, evaluated EAGERLY now). Bytes are allocated in `alloc` (the
     /// deferred buffer's arena) so they survive until the tick-boundary drain.
     /// Components are POD-strict (no heap fields), so `writeValueAsBytes` covers
-    /// every valid field kind. The type-checker (E2) has already validated the
+    /// every valid field kind. The type-checker has already validated the
     /// type is a declared component and the fields exist + type-match.
     /// Evaluate an event field-init run and enqueue the event into the per-tick
-    /// `EventStore` (M0.8 E3; shared by the `emit` statement and the test-world
-    /// `world.emit(T {…})` method form, M1.0.15). Enum-shorthand field values
+    /// `EventStore`` method form, M1.0.15). Enum-shorthand field values
     /// resolve against the declared event (main-arena events only); non-AST
     /// strings are deep-copied into the store so the enqueued event outlives the
     /// body (observers / cross-tick awaiters), per the M1.0.14 E4 discipline.
@@ -5214,7 +5199,7 @@ pub const Interpreter = struct {
         try self.events.enqueue(self.gpa, event_type, fields);
     }
 
-    /// M1.0.15 — evaluate `world.spawn_with([C {…}, …])`: build each component
+    /// evaluate `world.spawn_with([C {…}, …])`: build each component
     /// literal's payload eagerly, then spawn IMMEDIATELY through the shared
     /// observer-firing primitive (`world.spawnWithObservers` — on_spawned +
     /// on_add), returning the live `Entity` handle (usable same-tick, §32). The
@@ -5245,7 +5230,7 @@ pub const Interpreter = struct {
         return Value{ .entity_id = @bitCast(eid) };
     }
 
-    /// M1.0.15 — evaluate `world.emit(T {…})`: the `emit` statement semantics on
+    /// evaluate `world.emit(T {…})`: the `emit` statement semantics on
     /// the test world's per-tick EventStore (shared `enqueueEvent`).
     fn evalWorldEmit(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!void {
         if (mc.args_len != 1) return error.RuntimeFailure;
@@ -5255,7 +5240,7 @@ pub const Interpreter = struct {
         try self.enqueueEvent(world, locals, sl.type_name, sl.fields_start, sl.fields_len);
     }
 
-    /// M1.0.15 — evaluate `world.tick(n)`: advance the test world by `n` ticks
+    /// evaluate `world.tick(n)`: advance the test world by `n` ticks
     /// (`n >= 1`), each a `stepOnce` + `world.tickBoundary()` — the canonical tick
     /// runFor drives. Rule-tick runtime errors are counted into a throwaway
     /// report (they do not fail the test — a test fails on its OWN body's
@@ -5302,7 +5287,7 @@ pub const Interpreter = struct {
     }
 
     /// Append a Value as human-readable text for an assertion-failure message
-    /// (M1.0.15). Scalars + strings + Duration render faithfully; a richer value
+    ///. Scalars + strings + Duration render faithfully; a richer value
     /// falls back to a placeholder (assert messages target the comparable cases).
     fn msgValue(self: *Interpreter, v: Value) StmtError!void {
         switch (v) {
@@ -5318,7 +5303,7 @@ pub const Interpreter = struct {
     }
 
     /// Raise an assertion failure whose message has already been written into
-    /// `test_msg_buf` (M1.0.15): point `pending_message` at it and fail. The
+    /// `test_msg_buf`: point `pending_message` at it and fail. The
     /// runner copies the message out; outside a test the failure is harvested
     /// into the report (like the `assert` statement).
     fn raiseAssert(self: *Interpreter, span: SourceSpan) error{RuntimeFailure} {
@@ -5328,7 +5313,7 @@ pub const Interpreter = struct {
     }
 
     /// Call a zero-argument closure Value to completion and return its result
-    /// (M1.0.15 — the `tick_until` predicate). Mirrors the `fn_call` closure
+    ///. Mirrors the `fn_call` closure
     /// invocation: frame from the captured env, evaluate the body, consume a
     /// `return`. Fails loud on a non-closure or a nonzero arity.
     fn callZeroArgClosure(self: *Interpreter, world: *World, cv: Value) StmtError!Value {
@@ -5352,7 +5337,7 @@ pub const Interpreter = struct {
         return result;
     }
 
-    /// `tick_until(pred: () -> bool, timeout: Duration) -> bool` (M1.0.15): tick
+    /// `tick_until(pred: () -> bool, timeout: Duration) -> bool`: tick
     /// the world, evaluating `pred` after each tick, until it is true or the
     /// budget (`round(secs · 60)` ticks, the `wait` conversion) is exhausted.
     fn evalTickUntil(self: *Interpreter, world: *World, locals: *Locals, call: ast_mod.CallExpr) StmtError!Value {
@@ -5374,7 +5359,7 @@ pub const Interpreter = struct {
             world.tickBoundary();
             const r = try self.callZeroArgClosure(world, pred);
             // A predicate `throw` / control signal stops the loop and surfaces as
-            // the test failure (M1.0.15 review fix) — do NOT keep ticking on a
+            // the test failure — do NOT keep ticking on a
             // latched throw. `callZeroArgClosure` consumes `return`; only a throw
             // or a stray control signal can remain set here.
             if (self.thrown) {
@@ -5389,7 +5374,7 @@ pub const Interpreter = struct {
         return Value{ .bool_ = false };
     }
 
-    /// Evaluate a builtin free-function call by name (M1.0.15). Returns the value
+    /// Evaluate a builtin free-function call by name. Returns the value
     /// when `name` is a builtin, else null (the caller falls to the user-fn
     /// lookup). Mirrors `synthBuiltinCall`'s name set. An assertion failure
     /// formats a message into `test_msg_buf` and raises `fail(.AssertFailed)`;
@@ -5400,7 +5385,7 @@ pub const Interpreter = struct {
         const span = self.ast.exprSpan(id);
 
         // Test-scoped builtins are intercepted ONLY inside a test body — mirrors
-        // the type-checker's `in_test_body` gate (M1.0.15 review fix), so a user
+        // the type-checker's `in_test_body` gate, so a user
         // fn of the same name outside a test resolves to the user fn (the checker
         // bound it there), not the builtin.
         if (self.in_test_body) {
@@ -5413,7 +5398,7 @@ pub const Interpreter = struct {
             if (call.args_len < 2) return error.RuntimeFailure;
             const a = try self.evalArg(world, locals, call, 0);
             const b = try self.evalArg(world, locals, call, 1);
-            // String-aware equality (M1.0.15 review fix): `Value.eql` compares
+            // String-aware equality: `Value.eql` compares
             // strings only by pool identity (`.string_run` is always unequal, and
             // a `.string_id` literal never matches a `.string_persistent` /
             // `.string_run`), which would false-fail `assert_eq` and — worse —
@@ -5486,7 +5471,7 @@ pub const Interpreter = struct {
 
     /// Append the leading part of an assertion-failure message into `test_msg_buf`:
     /// the user's custom message argument (a string at `msg_idx`) if present, else
-    /// the builtin name (M1.0.15). The caller appends the specifics.
+    /// the builtin name. The caller appends the specifics.
     fn msgAssertPrefix(self: *Interpreter, world: *World, locals: *Locals, call: ast_mod.CallExpr, msg_idx: u32, name: []const u8) StmtError!void {
         if (msg_idx < call.args_len) {
             const m = try self.evalArg(world, locals, call, msg_idx);
@@ -5518,7 +5503,7 @@ pub const Interpreter = struct {
         return .{ .cid = cid, .bytes = buf };
     }
 
-    /// M1.0.10 E3 — drain the deferred structural commands at the tick boundary,
+    /// drain the deferred structural commands at the tick boundary,
     /// applying each via `applyWithObservers` so observers fire per op (spawn →
     /// `on_spawned` + `on_add`; despawn → `on_remove` + `on_despawned`;
     /// add-on-present → `on_replaced`; add → `on_add`; remove → `on_remove`).
@@ -5541,12 +5526,12 @@ pub const Interpreter = struct {
     /// value — §5.5 order: inherent / trait on user types, then the builtin
     /// string / collection subsets. Split from the `.method_call` arm so the
     /// optional chain `recv?.method()` dispatches the same way on the
-    /// unwrapped payload (M0.8 E3-C tranche 4) — same logical point as the
+    /// unwrapped payload — same logical point as the
     /// resolver's `dispatchMethodOnType` split.
     fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value) StmtError!Value {
         switch (recv) {
             .world_handle => {
-                // M1.0.15 — the test World surface (§32). The mono-world handle
+                // the test World surface (§32). The mono-world handle
                 // operates on the `world` already threaded here (the test's fresh
                 // world). Type-check gated the shapes; the fail-loud belt stays.
                 const mname = self.ast.strings.slice(mc.method_name);
@@ -5562,7 +5547,7 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .task_handle => |ti| {
-                // M1.0.12 E5 — the TaskHandle's single method (§9.8):
+                // the TaskHandle's single method (§9.8):
                 // `h.cancel()` is IDEMPOTENT — cancels a suspended task, a
                 // no-op on `.done`/`.canceled` (`cancelTask` gates on state).
                 // Non-transitive: tasks the target launched keep running.
@@ -5575,11 +5560,10 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .timer_handle => |ti| {
-                // M1.0.13 E6 — the TimerHandle's single method (§9.10):
+                // the TimerHandle's single method (§9.10):
                 // `t.cancel()` is IDEMPOTENT — cancels an armed timer, a
                 // no-op on one already fired or already canceled. A timer is
-                // not a task: no `await t`, no other method (E4 rejects them
-                // at check; the fail-loud below is the runtime belt).
+                // not a task: no `await t`, no other method.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "cancel")) {
                     if (mc.args_len != 0) return error.RuntimeFailure;
@@ -5596,7 +5580,7 @@ pub const Interpreter = struct {
             },
             .entity_id => |eid| {
                 const mname = self.ast.strings.slice(mc.method_name);
-                // M1.0.9 — runtime extension API on an entity receiver. Checked
+                // runtime extension API on an entity receiver. Checked
                 // before the `impl Trait for Entity` lookup (these are builtin
                 // methods, not user traits). activate/deactivate route through the
                 // shared loader entries; a missing resolver / unknown extension /
@@ -5626,7 +5610,7 @@ pub const Interpreter = struct {
                     }
                     return Value{ .array_ref = handle };
                 }
-                // M1.0.10 — structural mutation methods on an Entity receiver
+                // structural mutation methods on an Entity receiver
                 // (`etch-grammar.md` §4.5). Each ENQUEUES a Tier-0 `CommandBuffer`
                 // command onto the deferred buffer (never an immediate mutation —
                 // we may be mid-`iterateArchetype`); the tick-boundary
@@ -5671,8 +5655,7 @@ pub const Interpreter = struct {
                 return try self.callMethod(world, locals, method, mc, recv);
             },
             .string_id, .string_run, .string_persistent => {
-                // Builtin string methods (M0.8 sub-slice C tranche 1 —
-                // minimal faithful subset). `len` → byte length, on a
+                // Builtin string methods. `len` → byte length, on a
                 // literal (`string_id`), a runtime-produced string
                 // (`string_run`, tranche 1b), or a borrowed resource-string
                 // view (`string_persistent`, M1.0.3 E2); any other §12 method
@@ -5686,8 +5669,8 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .array_ref => |handle| {
-                // Builtin dynamic-array methods (M0.8 E3-C tranches 3-4 —
-                // minimal faithful subset of stdlib §13.2). `push` appends
+                // Builtin dynamic-array methods (tranches 3-4 — minimal
+                // faithful subset of stdlib §13.2). `push` appends
                 // (mut receiver enforced by the resolver), `len` is the
                 // element count, `pop` removes and returns the last element
                 // as `T?` (tranche 4, unlocked by the Optional ops); any
@@ -5716,7 +5699,7 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .array_persistent => |ptr| {
-                // Persistent resource `T[]` methods (M1.0.17 E2), mirroring the
+                // Persistent resource `T[]` methods, mirroring the
                 // rule-arena `.array_ref` arm but on the owned container block: the
                 // block pointer is stable across `append`, and a string element is
                 // promoted into an owned persistent string before storage (POD
@@ -5735,7 +5718,7 @@ pub const Interpreter = struct {
                     return Value{ .int_ = @intCast(persistentArrayOf(ptr).items.len) };
                 }
                 if (std.mem.eql(u8, mname, "pop")) {
-                    // `pop() -> T?` (M1.0.17 E2, mirror of the `.array_ref` arm).
+                    // `pop() -> T?`.
                     // A string element is DEMOTED to a body-scoped rule-arena copy
                     // (the reverse of the push-side promotion): deep-copy its bytes
                     // into a `.string_run`, then decref the owned persistent block.
@@ -5766,7 +5749,7 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .map_persistent => |ptr| {
-                // Persistent resource `[K: V]` methods (M1.0.17 E3), mirroring the
+                // Persistent resource `[K: V]` methods, mirroring the
                 // rule-arena `.map_ref` arm: `insert(k, v)` (last-write-wins, keys
                 // + values promoted, old value released on replace) and `len()`.
                 // `get`/`contains` are NOT map methods (type-check-rejected) —
@@ -5788,7 +5771,7 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .set_persistent => |ptr| {
-                // Persistent resource `Set<T>` methods (M1.0.17 E4), mirroring the
+                // Persistent resource `Set<T>` methods, mirroring the
                 // rule-arena `.set_ref` arm: `insert(x)` (unique — dedup by byte/
                 // value equality, string promoted), `contains(x) -> bool`, `len()`.
                 // No index and no for-in (set for-in is type-check-rejected, out of
@@ -5817,8 +5800,8 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .set_ref => |handle| {
-                // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
-                // faithful subset of stdlib §15.2). `insert` is the same
+                // Builtin set methods (tranche 3bis — minimal faithful subset
+                // of stdlib §15.2). `insert` is the same
                 // scan-skip-or-append as the `Set.from` seeding (its `bool`
                 // return is out of the subset — statement use only, the
                 // value here is unit); `contains` scans with `Value.eql`;
@@ -5848,8 +5831,8 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .map_ref => |handle| {
-                // Builtin map methods (M0.8 E3-C tranche 3 — minimal
-                // faithful subset of stdlib §14.2). `insert` is
+                // Builtin map methods (tranche 3 — minimal faithful subset of
+                // stdlib §14.2). `insert` is
                 // last-write-wins through the same scan-replace-or-
                 // append as the map literal (its `V?` return is out of
                 // the subset — statement use only, the value here is
@@ -5887,8 +5870,8 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Evaluate a `Set.assoc(...)` builtin associated call (M0.8 E3-C tranche
-    /// 3bis, stdlib §15.1 — minimal faithful subset). `new` materializes an
+    /// Evaluate a `Set.assoc(...)` builtin associated call (tranche 3bis,
+    /// stdlib §15.1 — minimal faithful subset). `new` materializes an
     /// empty set in the store; `from` seeds one from an array argument element
     /// by element through the same scan-skip-or-append as `insert` (duplicates
     /// collapse), so the insertion order the codegen mirrors is fixed by
@@ -5920,7 +5903,7 @@ pub const Interpreter = struct {
         return error.RuntimeFailure;
     }
 
-    /// Scan-skip-or-append insert into the set store (M0.8 E3-C tranche 3bis):
+    /// Scan-skip-or-append insert into the set store:
     /// the single mechanics shared by the `Set.from` seeding and `s.insert(x)`,
     /// mirrored by the codegen's `__etchSetInsert` helper — element order is
     /// byte-exact across the two backends by construction.
@@ -5933,7 +5916,7 @@ pub const Interpreter = struct {
 
     fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
         // As in `callFn`: an `async method` runs via the await call-frame path
-        // (M1.0.11 E2); a direct sync call is a coloring violation (E0901, E4).
+        //; a direct sync call is a coloring violation.
         if (method.is_async) return error.RuntimeFailure;
         if (method.params_len != mc.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
@@ -5979,7 +5962,7 @@ pub const Interpreter = struct {
     }
 
     /// Whether a string `Value`'s bytes must be deep-copied to outlive the
-    /// current body OR survive a mutation of their source (M1.0.14 E4). Only
+    /// current body OR survive a mutation of their source. Only
     /// `.string_id` (the immortal AST string table) is stable; a `.string_run`
     /// (per-body `run_strings`, freed at the body boundary) and a NON-EMPTY
     /// borrowed `.string_persistent` (a view over resource storage, released when
@@ -6009,7 +5992,7 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Promote a value for storage in a persistent collection (M1.0.17): any
+    /// Promote a value for storage in a persistent collection: any
     /// string (AST literal / rule-arena / borrowed persistent) is deep-copied
     /// into a fresh persistent `type_string` block owned by the collection
     /// (returned as `.string_persistent`, refcount 1) — this is the load-bearing
@@ -6021,7 +6004,7 @@ pub const Interpreter = struct {
         return v;
     }
 
-    /// Append a promoted element to a persistent container leak-safely (M1.0.17):
+    /// Append a promoted element to a persistent container leak-safely:
     /// reserve first, promote second, `appendAssumeCapacity` third — so a
     /// promotion allocation never dangles on an append-time OOM.
     fn pushPromoted(self: *Interpreter, list: *PersistentArray, v: Value) !void {
@@ -6031,7 +6014,7 @@ pub const Interpreter = struct {
     }
 
     /// Build a fresh persistent `type_array` block from a source collection value
-    /// (M1.0.17 E2, whole-field reassignment): deep-copy every element into a new
+    ///: deep-copy every element into a new
     /// owned container (strings promoted). The source is a rule-arena `.array_ref`
     /// (an array literal `[...]`) or another `.array_persistent`. Returns the new
     /// block (refcount 1); the caller hands it to `promoteResourceCollection`.
@@ -6047,7 +6030,7 @@ pub const Interpreter = struct {
         return block;
     }
 
-    /// Collection key equality (M1.0.17 E3): string keys compared BY BYTES (a
+    /// Collection key equality: string keys compared BY BYTES (a
     /// stored key is always a promoted `.string_persistent`, an incoming key may
     /// be `.string_id`/`.string_run` — `Value.eql` would false-mismatch across
     /// tags), POD keys by value. Load-bearing for the `[K:V]` unique-key policy.
@@ -6059,7 +6042,7 @@ pub const Interpreter = struct {
     }
 
     /// Insert `(k, v)` into a persistent map with the unique-key / last-write-wins
-    /// policy (M1.0.17 E3). On an existing key: promote the new value, decref the
+    /// policy. On an existing key: promote the new value, decref the
     /// OLD owned string value, replace (the key stays). On a new key: promote key
     /// AND value, append. Leak-safe (reserve → promote → commit).
     fn mapInsertPromoted(self: *Interpreter, list: *PersistentMap, k: Value, v: Value) !void {
@@ -6082,8 +6065,8 @@ pub const Interpreter = struct {
         list.appendAssumeCapacity(.{ .key = pk, .value = pv });
     }
 
-    /// Build a fresh persistent `type_map` block from a source map value (M1.0.17
-    /// E3, whole-field reassignment): deep-copy every pair (key + value promoted)
+    /// Build a fresh persistent `type_map` block from a source map value: deep-
+    /// copy every pair (key + value promoted)
     /// with the unique-key policy. Source is a rule-arena `.map_ref` or a
     /// `.map_persistent`.
     fn buildPersistentMapFrom(self: *Interpreter, src: Value) ![*]u8 {
@@ -6098,8 +6081,8 @@ pub const Interpreter = struct {
         return block;
     }
 
-    /// Insert `v` into a persistent set with the unique-element policy (M1.0.17
-    /// E4): skip if already present (byte/value equality — same cross-representation
+    /// Insert `v` into a persistent set with the unique-element policy: skip if
+    /// already present (byte/value equality — same cross-representation
     /// subtlety as map keys), else promote + append. Leak-safe.
     fn setInsertPromoted(self: *Interpreter, list: *PersistentSet, v: Value) !void {
         for (list.items) |existing| {
@@ -6110,8 +6093,8 @@ pub const Interpreter = struct {
         list.appendAssumeCapacity(owned);
     }
 
-    /// Build a fresh persistent `type_set` block from a source set value (M1.0.17
-    /// E4, whole-field reassignment): deep-copy every element (promoted, deduped).
+    /// Build a fresh persistent `type_set` block from a source set value: deep-
+    /// copy every element (promoted, deduped).
     /// Source is a rule-arena `.set_ref` or a `.set_persistent`.
     fn buildPersistentSetFrom(self: *Interpreter, src: Value) ![*]u8 {
         const block = try allocEmptySetBlock(self.gpa);
@@ -6152,17 +6135,17 @@ pub const Interpreter = struct {
                 return Value{ .bool_ = std.mem.eql(u8, text, "true") };
             },
             .duration_lit => {
-                // `1.5s` → seconds (M1.0.13 E6) — the runtime Duration value,
+                // `1.5s` → seconds — the runtime Duration value,
                 // carried so a timer argument can be a full expression
                 // (`after(d)`). `await wait` keeps its own literal-only path
-                // in `evalAwaitTarget` (M1.0.11 restriction).
+                // in `evalAwaitTarget`.
                 const secs = durationLiteralSeconds(self.ast.strings.slice(data)) orelse return error.RuntimeFailure;
                 return Value{ .duration = secs };
             },
             .string_lit => return Value{ .string_id = data },
             .string_interp => {
-                // Interpolation (M0.8 E3-C tranche 1c, stdlib §12.5:
-                // compile-time lowering to segment ++ Display(expr) concat).
+                // Interpolation (tranche 1c, stdlib §12.5: compile-time
+                // lowering to segment ++ Display(expr) concat).
                 // Pieces are formatted with the SAME `std.fmt` specs the
                 // codegen's `allocPrint` uses (`{d}` for ints and floats,
                 // literal true/false for bools, raw bytes for strings) —
@@ -6198,7 +6181,7 @@ pub const Interpreter = struct {
                 try out.appendSlice(self.gpa, self.ast.strings.slice(last_seg));
                 return try self.newRunString(try out.toOwnedSlice(self.gpa));
             },
-            // `none` / `some(x)` optional literals (M0.8 E2 block 5) →
+            // `none` / `some(x)` optional literals →
             // materialise an entry in the optional store, return its handle.
             .none_lit => {
                 const handle: u32 = @intCast(self.optionals.items.len);
@@ -6219,7 +6202,7 @@ pub const Interpreter = struct {
             },
             .field_access => {
                 const fa = self.ast.field_accesses.items[data];
-                // Enum value `Difficulty.hard` (M0.8 E2 block 3 tranche B): a
+                // Enum value `Difficulty.hard`: a
                 // `.path` receiver naming a declared enum + a variant field.
                 if (self.ast.exprKind(fa.receiver) == .path) {
                     const path_name = self.ast.exprData(fa.receiver);
@@ -6237,7 +6220,7 @@ pub const Interpreter = struct {
                         self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
                     .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
                         self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
-                    // Struct field read (M0.8 E2 block 3) — `self.x` / `v.x`.
+                    // Struct field read — `self.x` / `v.x`.
                     .struct_ref => |handle| {
                         for (self.structs.list.items[handle].fields.items) |f| {
                             if (f.name == fa.field_name) return f.value;
@@ -6266,7 +6249,7 @@ pub const Interpreter = struct {
             },
             .binary => {
                 const b = self.ast.binary_exprs.items[data];
-                // `expr ?? default` (M0.8 E3-C tranche 4, stdlib §16.2):
+                // `expr ?? default` (tranche 4, stdlib §16.2):
                 // unwrap-or-default. The default is NOT evaluated when the
                 // lhs is `some` — short-circuit, the same semantics as the
                 // codegen's Zig `orelse` (byte-exact by construction).
@@ -6279,8 +6262,8 @@ pub const Interpreter = struct {
                 const lhs = try self.evalExpr(world, locals, b.lhs);
                 const rhs = try self.evalExpr(world, locals, b.rhs);
                 // `string + string` → concatenation into the per-body
-                // runtime-string store (M0.8 sub-slice C tranche 1b, stdlib
-                // §12.4). Same logical point as the codegen's frame-arena
+                // runtime-string store (sub-slice C tranche 1b, stdlib §12.4).
+                // Same logical point as the codegen's frame-arena
                 // `std.mem.concat` on the binary `.add` — byte-exact by
                 // construction. A string mixed with a non-string operand is
                 // resolver-rejected; fail loud if one slips through.
@@ -6319,8 +6302,8 @@ pub const Interpreter = struct {
                         .bool_ => |x| Value{ .bool_ = !x },
                         else => error.RuntimeFailure,
                     },
-                    // `expr!` — force unwrap, panic on none (M0.8 E3-C
-                    // tranche 4, stdlib §16.2). The interp's panic is
+                    // `expr!` — force unwrap, panic on none (tranche 4, stdlib
+                    // §16.2). The interp's panic is
                     // RuntimeFailure, same observable as the codegen's `.?`
                     // null-unwrap panic.
                     .force_unwrap => {
@@ -6331,7 +6314,7 @@ pub const Interpreter = struct {
             },
             .range => {
                 // `start..end` / `start..=end` → an integer range value
-                // (M0.8 v0.6 foundations). Consumed by `for-in`.
+                //. Consumed by `for-in`.
                 const r = self.ast.ranges.items[data];
                 const start_v = try self.evalExpr(world, locals, r.start);
                 const end_v = try self.evalExpr(world, locals, r.end);
@@ -6339,7 +6322,7 @@ pub const Interpreter = struct {
                 return Value{ .range = .{ .start = start_v.int_, .end = end_v.int_, .inclusive = r.inclusive } };
             },
             .match_expr => {
-                // First matching arm wins (M0.8 v0.6 foundations). Wildcard
+                // First matching arm wins. Wildcard
                 // and binding always match; a binding binds the scrutinee for
                 // its arm body. The type-checker has proven exhaustiveness, so
                 // a fall-through is a real runtime failure.
@@ -6361,7 +6344,7 @@ pub const Interpreter = struct {
                         },
                         .enum_variant => {
                             // Compare the scrutinee's enum value against the
-                            // pattern's variant (M0.8 E2 block 3 tranche B). The
+                            // pattern's variant. The
                             // pattern carries the variant name; resolve it to the
                             // declaration-order index of the scrutinee's enum.
                             if (scrut != .enum_value) return error.RuntimeFailure;
@@ -6370,8 +6353,8 @@ pub const Interpreter = struct {
                             const vidx = self.enumVariantIndexOf(edecl, pat.variant) orelse return error.RuntimeFailure;
                             if (scrut.enum_value.variant == vidx) return try self.evalExpr(world, locals, arm.body);
                         },
-                        // `some(v)` / `none` optional patterns (M0.8 E3-C
-                        // tranche 4, part1 §7.6): `some` binds the payload
+                        // `some(v)` / `none` optional patterns (tranche 4, part1
+                        // §7.6): `some` binds the payload
                         // for its arm body.
                         .optional_some => {
                             if (scrut != .optional) return error.RuntimeFailure;
@@ -6391,7 +6374,7 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .cast => {
-                // `operand as Type` (M0.8 v0.6 foundations). Runtime values
+                // `operand as Type`. Runtime values
                 // carry int as i64 and float as f64; a cast only flips the
                 // numeric domain (int↔float). Integer width narrowing is a
                 // storage concern handled on write, not in the Value.
@@ -6408,8 +6391,8 @@ pub const Interpreter = struct {
             },
             .array_lit => {
                 // `[a, b, c]` / `[v; n]` → materialize a fresh array in the
-                // rule-body collection store, return its handle (M0.8
-                // collections). E1 elements are builtin scalars (the
+                // rule-body collection store, return its handle. E1 elements
+                // are builtin scalars (the
                 // type-checker rejects non-builtin / nested-array elements).
                 const al = self.ast.array_lits.items[data];
                 const handle = try self.collections.newArray(self.gpa);
@@ -6436,7 +6419,7 @@ pub const Interpreter = struct {
             },
             .map_lit => {
                 // `[k: v, ...]` → materialize a fresh map in the rule-body
-                // store (M0.8 collections). Duplicate keys are last-write-wins
+                // store. Duplicate keys are last-write-wins
                 // — the same scan-replace-or-append the tranche-3 codegen
                 // emits (`__etchMapInsert`), so the two backends agree on
                 // iteration order by construction.
@@ -6461,7 +6444,7 @@ pub const Interpreter = struct {
             },
             .index => {
                 // `receiver[index]` — slice if the index is a range, else a
-                // single element (M0.8 collections). Out-of-bounds is a
+                // single element. Out-of-bounds is a
                 // runtime error (the debug panic of `etch-stdlib.md` §13.3).
                 const ix = self.ast.index_exprs.items[data];
                 const recv = try self.evalExpr(world, locals, ix.receiver);
@@ -6483,7 +6466,7 @@ pub const Interpreter = struct {
                     return Value{ .optional = oh };
                 }
                 if (recv == .map_persistent) {
-                    // `m[k] -> V?` on a resource map (M1.0.17 E3): byte/value key
+                    // `m[k] -> V?` on a resource map: byte/value key
                     // match (keys are promoted `.string_persistent`); the found
                     // value is a borrowed view (the map owns it, outlives the body).
                     const key_v = try self.evalExpr(world, locals, ix.index);
@@ -6499,8 +6482,8 @@ pub const Interpreter = struct {
                     return Value{ .optional = oh };
                 }
                 if (recv == .array_persistent) {
-                    // Single-element read `xs[i]` on a resource collection (M1.0.17
-                    // E2). Slicing a persistent array (`xs[0..3]`) is out of the E2
+                    // Single-element read `xs[i]` on a resource collection. Slicing
+                    // a persistent array (`xs[0..3]`) is out of the E2
                     // surface (it would need a fresh rule-arena copy).
                     if (self.ast.exprKind(ix.index) == .range) return error.RuntimeFailure;
                     const list = persistentArrayOf(recv.array_persistent);
@@ -6537,7 +6520,7 @@ pub const Interpreter = struct {
             },
             .closure => {
                 // `|a| body` → snapshot the locals as the captured env (value
-                // capture, §5.6) and return a closure handle (M0.8 closures).
+                // capture, §5.6) and return a closure handle.
                 var captured: std.AutoHashMapUnmanaged(StringId, Value) = .empty;
                 errdefer captured.deinit(self.gpa);
                 var it = locals.map.iterator();
@@ -6548,12 +6531,12 @@ pub const Interpreter = struct {
             .fn_call => {
                 // `callee(args)` — two callee shapes: a top-level `fn` (free
                 // call, M0.8 E2) when the callee is an ident naming a `fn` and
-                // not a local binding; otherwise a closure-typed local (E1).
+                // not a local binding; otherwise a closure-typed local.
                 const call = self.ast.call_exprs.items[data];
                 if (self.ast.exprKind(call.callee) == .ident) {
                     const callee_name = self.ast.exprData(call.callee);
                     if (locals.get(callee_name) == null) {
-                        // Builtin free functions (M1.0.15): assertion family +
+                        // Builtin free functions: assertion family +
                         // panic/todo/unreachable + test_world/tick_until. Resolved
                         // before the user-fn lookup (the type-checker already gated
                         // scope), mirroring `synthBuiltinCall`.
@@ -6589,8 +6572,8 @@ pub const Interpreter = struct {
                     const av = try self.evalExpr(world, locals, arg);
                     try frame.put(self.gpa, p.name, av, false);
                 }
-                // The closure call boundary consumes `returning` (E2 forward
-                // note, executed at E3-C tranche 6): a `return` inside the
+                // The closure call boundary consumes `returning`: a `return`
+                // inside the
                 // body exits the CLOSURE — it becomes the call's value — never
                 // the enclosing fn. Same boundary-consume as `callFn` /
                 // `callMethod`; `thrown` and `break`/`continue` keep
@@ -6625,7 +6608,7 @@ pub const Interpreter = struct {
                 const mc = self.ast.method_calls.items[data];
                 if (self.ast.exprKind(mc.receiver) == .path) {
                     const type_name = self.ast.exprData(mc.receiver);
-                    // Builtin-type associated calls (M0.8 E3-C tranche 3bis):
+                    // Builtin-type associated calls:
                     // `Set.new()` / `Set.from([...])` route to the set store
                     // BEFORE the user `impl` lookup — `Set` is a builtin
                     // stdlib type and is not user-overridable (stdlib §2.6).
@@ -6653,8 +6636,8 @@ pub const Interpreter = struct {
                     }
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
-                // `recv?.method(args)` — optional chain (M0.8 E3-C tranche 4,
-                // part1 §6.6): `none` short-circuits to a fresh `none` without
+                // `recv?.method(args)` — optional chain (tranche 4, part1
+                // §6.6): `none` short-circuits to a fresh `none` without
                 // dispatching; `some(p)` dispatches on the payload and
                 // re-wraps the result in an optional.
                 if (mc.opt_chain) {
@@ -6674,7 +6657,7 @@ pub const Interpreter = struct {
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
                 // targeting this loop fires; the loop's value is that break's
-                // value (M0.8 loop/break). A labeled break / continue for an
+                // value. A labeled break / continue for an
                 // outer loop propagates (control left set, unit returned).
                 const lp = self.ast.loop_exprs.items[data];
                 while (true) {
@@ -6707,7 +6690,7 @@ pub const Interpreter = struct {
                 // signal (`break`/`continue`) or an in-flight `throw` raised in
                 // the body unwinds out of the block: it is left set on `self`
                 // for the enclosing loop / `try` to interpret, and the block
-                // yields `unit` (M0.8 control flow).
+                // yields `unit`.
                 const blk = self.ast.block_exprs.items[data];
                 try self.execStmtRun(world, locals, blk.body_start, blk.body_len);
                 if (self.control != .none or self.thrown or self.returning) return Value{ .unit = {} };
@@ -6733,8 +6716,8 @@ pub const Interpreter = struct {
             },
             .if_expr => {
                 const ife = self.ast.if_exprs.items[data];
-                // `if let x = <optional> { then } [else { else }]` (M0.8 E2 block
-                // 5): unwrap the optional — `some` binds `x` to the payload and
+                // `if let x = <optional> { then } [else { else }]`: unwrap the
+                // optional — `some` binds `x` to the payload and
                 // runs the then-block; `none` runs the else (or yields unit).
                 if (ife.let_binding != 0) {
                     const opt = try self.evalExpr(world, locals, ife.cond);
@@ -6746,8 +6729,8 @@ pub const Interpreter = struct {
                     if (ife.else_branch.isNone()) return Value{ .unit = {} };
                     return try self.evalExpr(world, locals, ife.else_branch);
                 }
-                // `if cond { then } [else if ...] [else { else }]` (M0.8 control
-                // flow). Evaluate the condition; run the matching branch (a
+                // `if cond { then } [else if ...] [else { else }]`. Evaluate the
+                // condition; run the matching branch (a
                 // block expression, or a nested `if` for `else if`). An `if`
                 // with no `else` and a false condition yields `unit`. Branch
                 // evaluation propagates any control / throw signal raised in it.
@@ -6758,8 +6741,8 @@ pub const Interpreter = struct {
                 return try self.evalExpr(world, locals, ife.else_branch);
             },
             .spawn_struct => {
-                // Structural `spawn(C1 {…}, …)` (M1.0.10, `etch-grammar.md` §3.2 /
-                // §4.5) — a statement-position expression (the type-checker rejects
+                // Structural `spawn(C1 {…}, …)` (`etch-grammar.md` §3.2 / §4.5) — a
+                // statement-position expression (the type-checker rejects
                 // value use, E0304). Resolve each component literal's bytes EAGERLY
                 // now, enqueue a single deferred `.spawn` command, and yield `unit`
                 // (no body handle, v0.6). The prefab form is refused at type-check
@@ -6795,8 +6778,8 @@ fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     return true;
 }
 
-/// Whether every per-rule field filter passes for `(chunk, slot)` (M0.8 E3-D,
-/// D-S4-multifilter): flat-AND over the rule's `field_filters`. Trivially
+/// Whether every per-rule field filter passes for `(chunk, slot)`: flat-AND
+/// over the rule's `field_filters`. Trivially
 /// true for a filter-free rule.
 /// Whether every field filter passes for `loc`.
 ///
@@ -6818,7 +6801,7 @@ fn filterPasses(world: *World, loc: Locator, ff: FieldFilter) bool {
     return v.eql(ff.expected_value);
 }
 
-/// Whether every `changed` filter passes for `loc` (M0.8 E3): each listed
+/// Whether every `changed` filter passes for `loc`: each listed
 /// component's `changedTick` must exceed `last_run_tick`
 /// (`engine-ecs-internals.md` §5).
 ///
@@ -6836,7 +6819,7 @@ fn changedFiltersPass(world: *World, loc: Locator, cids: []const ComponentId, la
     return true;
 }
 
-/// Whether bit `bit` of `entity`'s `TagSet` is set (M0.8 E3). An entity with no
+/// Whether bit `bit` of `entity`'s `TagSet` is set. An entity with no
 /// `TagSet` component reads as all-zero.
 fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit: u32) bool {
     const core_id: CoreEntityId = @bitCast(entity);
@@ -6890,7 +6873,7 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
     };
 }
 
-/// Map a bridge failure to a typed report kind (M0.8 E3-D): a bridge
+/// Map a bridge failure to a typed report kind: a bridge
 /// `TypeMismatch` keeps its identity in the report (the D-S4-ecs-bridge-panic
 /// letter — the bridge returns the error, the report carries the kind);
 /// every other bridge cause stays the generic UnsupportedExpr. OOM keeps the
@@ -6904,7 +6887,7 @@ fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
 }
 
 /// Stable default message for a test failure with no `pending_message`
-/// (M1.0.15) — a runtime failure (division-by-zero, overflow, …) or an uncaught
+/// — a runtime failure (division-by-zero, overflow, …) or an uncaught
 /// throw. All returned strings are static, so the `.fail` outcome can borrow
 /// them until the runner copies the message out.
 fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
@@ -6918,8 +6901,8 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
     };
 }
 
-/// Classify a `binaryArith` failure into a typed report kind (M0.8 E3-D,
-/// D-S4-runtime-report). Integer `/` and `%` fail on a zero divisor
+/// Classify a `binaryArith` failure into a typed report kind. Integer
+/// `/` and `%` fail on a zero divisor
 /// (DivisionByZero) or on `i64.min / -1` (IntegerOverflow — the only other
 /// null path of `intDiv`); checked `+`/`-`/`*` fail on overflow only. Any
 /// operand-shape mismatch that slipped past the resolver stays the generic
@@ -6992,7 +6975,7 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
         };
         return Value{ .bool_ = r };
     }
-    // Duration ordering (M1.0.15) — `elapsed < 0.1s`, `measure { … } > 0.0s`.
+    // Duration ordering — `elapsed < 0.1s`, `measure { … } > 0.0s`.
     // The type-checker already types `Duration <op> Duration` as bool
     // (`synthBinary` matching-builtin arm); this is the runtime half.
     if (a == .duration and b == .duration) {
@@ -7078,7 +7061,7 @@ fn compileResource(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    // On a hot-reload re-compile (M0.8 E7) the resource is already registered
+    // On a hot-reload re-compile the resource is already registered
     // AND already lives in the resource store with its current value — adding
     // it again would reset it to defaults. Seed the store only on first compile.
     const pre_existing = world.registry.idOf(name) != null;
@@ -7123,7 +7106,7 @@ fn allocEmptyArrayBlock(gpa: std.mem.Allocator) std.mem.Allocator.Error![*]u8 {
 }
 
 /// Deep-copy `bytes` into a fresh persistent `type_string` block owned by a
-/// collection (M1.0.17), returned as `.string_persistent` (refcount 1). The
+/// collection, returned as `.string_persistent` (refcount 1). The
 /// empty string is the `ptr == 0` sentinel — no allocation, no drop cost.
 fn ownBytesAsPersistentString(gpa: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!Value {
     if (bytes.len == 0) return Value{ .string_persistent = .{ .ptr = 0, .len = 0 } };
@@ -7132,7 +7115,7 @@ fn ownBytesAsPersistentString(gpa: std.mem.Allocator, bytes: []const u8) std.mem
     return Value{ .string_persistent = .{ .ptr = @intFromPtr(block), .len = @intCast(bytes.len) } };
 }
 
-/// Registered `type_array` drop (M1.0.17): release the container's owned string
+/// Registered `type_array` drop: release the container's owned string
 /// elements (each an owned `.string_persistent`, refcount 1) then deinit the
 /// container, before `persistent` frees the block. POD elements own nothing. The
 /// interpreter registers this at init; Tier-0 `persistent` only dispatches it.
@@ -7182,7 +7165,7 @@ fn allocEmptyMapBlock(gpa: std.mem.Allocator) std.mem.Allocator.Error![*]u8 {
     return block;
 }
 
-/// Registered `type_map` drop (M1.0.17 E3): release each pair's owned string key
+/// Registered `type_map` drop: release each pair's owned string key
 /// AND string value before deiniting the container.
 fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     _ = size;
@@ -7198,7 +7181,7 @@ fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     list.deinit(gpa);
 }
 
-/// Const-evaluate a literal-default collection entry for storage (M1.0.17): a
+/// Const-evaluate a literal-default collection entry for storage: a
 /// string literal is deep-copied into an owned persistent string; any other
 /// const expression is `evalConst`'d (POD inline). Errors on a non-const entry.
 fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) !Value {
@@ -7207,7 +7190,7 @@ fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: Node
 }
 
 /// Build a `type_array` container for a resource field: empty, or a literal-array
-/// default (`= [...]`) with elements deep-copied (M1.0.17 E2).
+/// default (`= [...]`) with elements deep-copied.
 fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
     const block = try allocEmptyArrayBlock(gpa);
     errdefer persistent.decref(gpa, block);
@@ -7228,7 +7211,7 @@ fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field
 }
 
 /// Build a `type_map` container for a resource field: empty, or a literal-map
-/// default (`= [k: v, …]`) with keys+values deep-copied (M1.0.17 E3). Entries are
+/// default (`= [k: v, …]`) with keys+values deep-copied. Entries are
 /// appended in order; a degenerate duplicate key in the literal yields duplicate
 /// pairs (runtime `insert` is the last-write-wins path).
 fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
@@ -7253,7 +7236,7 @@ fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) 
 }
 
 /// Initialize a resource's collection fields right after the resource is seeded
-/// into the store (M1.0.17, first compile only): `.array_` → `type_array`,
+/// into the store: `.array_` → `type_array`,
 /// `.map_` → `type_map`. Each field gets a fresh container written into its
 /// `CollectionSlot` (empty or a literal default), so a live collection field's
 /// slot is never `ptr == 0` (the read path relies on this). Registry field order
@@ -7332,20 +7315,20 @@ pub fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         var enum_type_id: u32 = 0;
         const kind: FieldKind = kb: {
-            // M1.0.17 E2 — a resource `T[]` field is a `.slice` type node (NOT
+            // a resource `T[]` field is a `.slice` type node (NOT
             // `.named`): map it to `.array_` (a CollectionSlot) BEFORE the named-
             // type decode below, which would mis-index `named_types`. Resource-
             // only (validator-gated). Fixed `T[N]` (`.array`) and `.map_type` /
-            // `.set_type` are out of the E2 surface (E3/E4 add map/set).
+            // `.set_type` are out of the E2 surface.
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .map_type) break :kb .map_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .set_type) break :kb .set_;
             const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-            // Resolve through any top-level `type` alias chain (M0.8 foundations).
+            // Resolve through any top-level `type` alias chain.
             const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
             const tname = ast.strings.slice(resolved_name_id);
             if (fieldKindFromTypeName(tname, reg_kind)) |k| break :kb k;
-            // Enum resource field (M1.0.3 E3): a declared enum type, resource-only
+            // Enum resource field: a declared enum type, resource-only
             // (mirrors the `string` gate; components reject enum at the validator).
             // `enum_decls` is not built yet in this pass, so match the AST enum
             // slab directly. The declared enum type's id rides on the FieldDesc.
@@ -7376,7 +7359,7 @@ pub fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        // M1.0.17 — a collection field's container is allocated at `addResource`
+        // a collection field's container is allocated at `addResource`
         // (initResourceCollections), not here: the default slot stays `{ptr=0}`
         // (zeroed), overwritten with the real block pointer then.
         if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
@@ -7431,7 +7414,7 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    // Idempotent re-registration (M0.8 E7 hot-reload). A second Interpreter
+    // Idempotent re-registration. A second Interpreter
     // compiled on the SAME world — an AST swap, e.g. edit a rule body and
     // re-compile — re-visits the unchanged component/resource decls. Reuse the
     // existing id instead of erroring `DuplicateComponent`, so the live world
@@ -7470,14 +7453,14 @@ fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
     if (std.mem.eql(u8, name, "u32")) return .u32_;
     if (std.mem.eql(u8, name, "f32")) return .f32_;
     if (std.mem.eql(u8, name, "f64")) return .f64_;
-    // `string` is resource-only (M1.0.3 E2): components are POD-strict (the
+    // `string` is resource-only: components are POD-strict (the
     // validator rejects `string` on them), so this kind is emitted only for the
     // `.resource` origin. Components reaching here with `string` fall to `null`
     // → `error.InvalidProgram` (a validator-passed program never does). Enum
     // field types are not builtin names, so they resolve in `compileTypeDecl`
     // against the AST enum slab (see `findEnumDecl`), not here.
     if (reg_kind == .resource and std.mem.eql(u8, name, "string")) return .string_;
-    // `Entity` is component-only (M1.0.6 D-A): the exact mirror of the `string`
+    // `Entity` is component-only: the exact mirror of the `string`
     // gate above, opposite origin. A `.entity_` field is a POD 8-byte slot; an
     // unassigned/dangling value is `EntityId.dead`, and an entity→entity reference
     // is resolved by the scene loader's cross-reference pass. Resource→entity refs
@@ -7506,7 +7489,7 @@ fn enumVariantIndex(ast: *const AstArena, edecl: ast_mod.EnumDecl, variant: Stri
     return null;
 }
 
-// ─── when → DNF of archetype-selection terms (M1.0.0) ──────────────────────
+// ─── when → DNF of archetype-selection terms ──────────────────────
 //
 // `lowerWhen` lowers a `when` clause's structural skeleton to a boolean tree
 // of `has` literals over `arch.hasComponent` (the `PredicateNode` pool). The
@@ -7622,7 +7605,7 @@ fn crossProduct(gpa: std.mem.Allocator, lhs: Dnf, rhs: Dnf) !Dnf {
 }
 
 /// Build a rule's archetype selection: one `DynamicQuery` per satisfiable DNF
-/// term of its `when` predicate (M1.0.0). `predicate_root == null` (no
+/// term of its `when` predicate. `predicate_root == null` (no
 /// structural predicate — a negative-tag-only / resource-only `when`) yields a
 /// single empty term matching every archetype, with the per-entity filters
 /// carrying the selection. Unsatisfiable terms (`has T` ∧ `not has T`) are
@@ -7734,7 +7717,7 @@ fn compileRule(
     }
     const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
-    // `@on_event(T)` observer (M0.8 E3): the event type name, or null. A
+    // `@on_event(T)` observer: the event type name, or null. A
     // malformed annotation (caught + reported E1203 by the resolver) yields
     // null here → the rule degrades to a global/entity rule, no observer drain.
     const event_type: ?StringId = if (ast.onEventAnnotation(rule)) |annot|
@@ -7742,7 +7725,7 @@ fn compileRule(
     else
         null;
 
-    // M1.0.2 E2 — structural-observer routing (mirrors `event_type` above): the
+    // structural-observer routing (mirrors `event_type` above): the
     // lifecycle kind + the resolved target ComponentId (null for spawn/despawn,
     // or when the component is unregistered — the resolver already reported the
     // malformed cases E12xx). Surface only here; the ObserverRegistry bridge,
@@ -7756,7 +7739,7 @@ fn compileRule(
         }
     }
 
-    // M1.0.0 — the rule's selection (DNF → one plan per term). Built only for
+    // the rule's selection (DNF → one plan per term). Built only for
     // entity-bound rules; the global / resource-only / event paths never select
     // entities, so they keep an empty selection.
     //
@@ -7811,7 +7794,7 @@ const LowerWhenCtx = struct {
 };
 
 /// Capture the field bindings of a component/resource declaration for a §6
-/// general filter (M0.8 E4): every declared field's `(name, offset, kind)`
+/// general filter: every declared field's `(name, offset, kind)`
 /// resolved through the registry. The declaration is located by name in the
 /// AST slab (`is_resource` picks the slab).
 fn captureBoundFields(ctx: *LowerWhenCtx, type_name: StringId, id: ComponentId, is_resource: bool) error{ OutOfMemory, InvalidProgram }![]BoundField {
@@ -7892,8 +7875,8 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             const fname = ast.strings.slice(node.field_name);
             const fd = ctx.registry.findField(id, fname) orelse return error.InvalidProgram;
             const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
-            // One filter per `has T { … }` clause (M0.8 E3-D,
-            // D-S4-multifilter) — append, never overwrite.
+            // One filter per `has T { … }` clause — append, never
+            // overwrite.
             try ctx.filters.append(ctx.gpa, .{
                 .component_id = id,
                 .field_offset = fd.offset,
@@ -7906,7 +7889,7 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             return idx;
         },
         .has_changed => {
-            // `entity has T changed` (M0.8 E3, `engine-ecs-internals.md` §5):
+            // `entity has T changed` (`engine-ecs-internals.md` §5):
             // a `has T` archetype predicate (the entity must own T) PLUS a
             // per-entity change-detection filter — the slot's `changedTick(T)`
             // must exceed the rule's `last_run_tick`. The component id joins
@@ -7933,7 +7916,7 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             return PredicateNode.no_child;
         },
         .has_expr_filter => {
-            // `has T { expression }` (M0.8 E4 — §6 general filter): the same
+            // `has T { expression }` (— §6 general filter): the same
             // `has T` archetype predicate as the narrow form, plus a
             // per-entity expression guard with T's fields bound (fields-only
             // scope, resolver-checked).
@@ -7948,7 +7931,7 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             return idx;
         },
         .resource_filter => {
-            // `resource T { expression }` (M0.8 E4 — §6): a resource dep plus
+            // `resource T { expression }` (— §6): a resource dep plus
             // a rule-level expression gate with T's fields bound.
             const tname = ast.strings.slice(node.type_name);
             const rid = ctx.bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
@@ -7959,14 +7942,14 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             return PredicateNode.no_child;
         },
         .expr_cond => {
-            // Bare expression condition (M0.8 E4 — the §6 last arm). No
+            // Bare expression condition (— the §6 last arm). No
             // archetype contribution; evaluated per entity (entity-bound
             // rule) or once per tick (global rule).
             try ctx.expr_conds.append(ctx.gpa, node.filter_value);
             return PredicateNode.no_child;
         },
         .tag_filter => {
-            // `entity has_tag .path` (M0.8 E3). Resolve operand paths → leaf
+            // `entity has_tag .path`. Resolve operand paths → leaf
             // bits (a leaf → its bit, a category namespace → its mask) into a
             // per-entity `TagPredicate`. A tag filter makes the rule
             // entity-bound; a positive op additionally requires the entity to
@@ -9586,8 +9569,7 @@ test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§
     // codegen stays UnsupportedConstruct (so this is interp-reference, not a
     // codegen differential — consistent with block 4).
     //
-    // (M1.0.1 wire-in: the method previously compared the generic `T`
-    // (`v >= self.min`), which the M0.8 minimal subset rejects — comparison
+    // , which the M0.8 minimal subset rejects — comparison
     // requires matching primitive operands (`types.zig` §`.eq/.lt/...`), and an
     // unbounded `T` is not a primitive. Rewritten to a generic field accessor,
     // which is the delivered generic-dispatch capability this test exercises.)
@@ -10236,8 +10218,7 @@ test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)
     // caller (the struct handle is shared — reference semantics for `mut self`).
     // The interpreter is the reference for `mut self`; its codegen is deferred
     // (pointer receiver), so this has no differential. c.n: 10 → +5 → 15.
-    // (M1.0.1 wire-in: the accessor was named `get`, a reserved ECS builtin
-    // keyword — `fn get(...)` is a parse error. Renamed to `value`; the subject
+    // ` is a parse error. Renamed to `value`; the subject
     // under test is the `mut self` mutation, not the accessor's name.)
     const source =
         \\struct Counter { n: int = 0 }
@@ -10287,8 +10268,8 @@ test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
     defer world.deinit(gpa);
 
     // The throw aborts the rest of the try body (x never reaches 3) and is
-    // caught, binding the thrown `Error` into `err` (M0.8 E3-C tranche 2:
-    // the thrown value is statically the builtin Error, part1 §10.2); x ends
+    // caught, binding the thrown `Error` into `err` (tranche 2: the thrown
+    // value is statically the builtin Error, part1 §10.2); x ends
     // at `"boom".len()` = 4.
     const source =
         \\component Acc { out: int = 0 }
@@ -10693,7 +10674,7 @@ test "event string payload survives to drain and not past tick boundary (M1.0.2 
 // ── M1.0.2 E2 — observer-surface validation test helpers ──
 
 /// Parse + type-check `source` and report whether any diagnostic carries
-/// `code` (M1.0.2 E2 observer-surface validation tests). Asserts the parse is
+/// `code`. Asserts the parse is
 /// clean — the observer programs under test are syntactically valid; their
 /// errors are semantic (caught by the type-checker).
 fn observerProgramHasCode(gpa: std.mem.Allocator, source: []const u8, code: anytype) !bool {
@@ -10712,8 +10693,7 @@ fn observerProgramHasCode(gpa: std.mem.Allocator, source: []const u8, code: anyt
     return false;
 }
 
-/// Parse + type-check `source` and return the diagnostic count (M1.0.2 E2 —
-/// positive control: a well-formed observer program reports zero).
+/// Parse + type-check `source` and return the diagnostic count.
 fn observerProgramDiagCount(gpa: std.mem.Allocator, source: []const u8) !usize {
     var pr = try parser_mod.parse(gpa, source);
     defer pr.deinit(gpa);
@@ -12550,8 +12530,7 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
 
     // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at game clock
     // 1, the task wakes at tick 61 — not before. This pins the Duration→tick
-    // conversion (M1.0.13 swapped the wake onto the game clock without changing
-    // the result at time_scale = 1 — this test IS the byte-identity witness).
+    // conversion.
     const source =
         \\resource Out { n: int = 0 }
         \\async rule sec()
@@ -13338,7 +13317,7 @@ test "a borrowed resource-string filter is captured once and survives reassignme
     defer world.deinit(gpa);
     // The filter value `get(Cfg).s` is a BORROWED `.string_persistent` view over
     // the resource string, captured at suspension. `bump` reassigns `Cfg.s`
-    // during the suspension — which RELEASES the old bytes (M1.0.3). Without the
+    // during the suspension — which RELEASES the old bytes. Without the
     // E4 deep-copy the captured view would dangle (use-after-free) AND drift to
     // the new value; with it, the poll matches the OLD captured "old"
     // (capture-once §9.4). `producer` always emits "old", so a match proves the
@@ -14970,7 +14949,7 @@ test "the cached matching set replaces the per-tick walk at any archetype count 
     const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
     try std.testing.expectEqual(@as(usize, 3), world.archetypes.items.len);
 
-    // M1.0.0 — the dynamic-query selection is universal, at ANY archetype
+    // the dynamic-query selection is universal, at ANY archetype
     // count: tick 1 scans all 3 archetypes once per DNF term (`Counter and
     // (A or B)` → 2 terms → 6 evaluations), then steady-state ticks re-evaluate
     // nothing. (This small-world case re-walked the predicate every tick under

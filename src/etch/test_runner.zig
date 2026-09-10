@@ -1,4 +1,4 @@
-//! Etch `test` runner (M1.0.15, `etch-reference-part2.md` §32 normative block).
+//! Etch `test` runner (`etch-reference-part2.md` §32 normative block).
 //!
 //! Orchestration only: iterate the `test` blocks of a type-checked AST in
 //! declaration order, run each in FULL ISOLATION (a fresh `World` + fresh
@@ -19,7 +19,7 @@
 //! `RunReport` OWNS its strings (an internal arena); the caller need only keep
 //! `ast` alive for the duration of `run`. The `weld test` CLI
 //! (`engine-platform.md` § "Build System — CLI `weld`") will consume this same
-//! library — the `etch_test` shim (E5) is its Phase-1 driver.
+//! library — the `etch_test` shim is its Phase-1 driver.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -68,7 +68,7 @@ pub const RunReport = struct {
     }
 };
 
-/// Run every `test` block in a type-checked `ast` (M1.0.15, §32). Declaration
+/// Run every `test` block in a type-checked `ast` (§32). Declaration
 /// order; a fresh World + Interpreter per test (full isolation, mono-world);
 /// `@skip` reported skipped with its reason (body not run); `@only` focusing (if
 /// any `@only` test exists in the set, only those run, the rest reported
@@ -113,7 +113,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
         defer world.deinit(gpa);
         var interp = try Interpreter.compile(gpa, ast, &world);
         defer interp.deinit();
-        interp.io = io; // wall-clock provider for `measure { … }` (M1.0.15)
+        interp.io = io; // wall-clock provider for `measure { … }`
         try interp.bindToWorld(&world);
 
         const t0 = Io.Clock.now(.awake, io);

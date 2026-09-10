@@ -295,7 +295,7 @@ test "a milestone must show a dot component" {
 }
 
 test "a lower-case milestone citation fires, a field access written in prose does not" {
-    // The reason the dot component is shape-restricted rather than free: brief
+    // The reason the dot component is shape-restricted rather than free: milestone
     // filenames are cited in lower case, and manifold locals are discussed in
     // prose with a dotted field.
     try std.testing.expect(fires("m1.1.14"));
@@ -418,6 +418,9 @@ test "the rule speaks on a read file and is silent on the two silenced kinds" {
     const src: [:0]const u8 = "// see M1.B\n";
     try std.testing.expectEqual(@as(usize, 1), try countOn("tools/weld_lint/x.zig", src));
     try std.testing.expectEqual(@as(usize, 0), try countOn("tests/x.zig", src));
-    try std.testing.expectEqual(@as(usize, 0), try countOn("src/etch/x.zig", src));
+    var buf: [256]u8 = undefined;
+    if (comment_scan.anUnreadExample(&buf)) |unread| {
+        try std.testing.expectEqual(@as(usize, 0), try countOn(unread, src));
+    }
     try std.testing.expectEqual(@as(usize, 0), try countOn("bench/x.zig", src));
 }

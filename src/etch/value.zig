@@ -81,7 +81,7 @@ pub const ResourceRef = struct {
     mutable: bool,
 };
 
-/// A `start..end` / `start..=end` range value (M0.8 v0.6 foundations).
+/// A `start..end` / `start..=end` range value.
 /// Integer bounds; `for-in` iterates `[start, end)` (exclusive) or
 /// `[start, end]` (inclusive).
 pub const RangeVal = struct {
@@ -97,8 +97,8 @@ pub const Value = union(enum) {
     float_: f64,
     bool_: bool,
     string_id: u32,
-    /// Handle into the interpreter's per-rule-body runtime-string store (M0.8
-    /// sub-slice C tranche 1b). A string PRODUCED at runtime (concat — and,
+    /// Handle into the interpreter's per-rule-body runtime-string store. A
+    /// string PRODUCED at runtime (concat — and,
     /// 1c, interpolation) cannot be a `string_id` (the AST string table is
     /// immutable input), so it lives as owned bytes in `Interpreter
     /// .run_strings`, reset at the rule-body boundary (rule-arena semantics,
@@ -108,37 +108,37 @@ pub const Value = union(enum) {
     component_ref: ComponentRef,
     resource_ref: ResourceRef,
     range: RangeVal,
-    /// Handle into the interpreter's per-rule-body collection store (M0.8
-    /// collections). Arrays / maps / sets are heap-managed and cannot live
+    /// Handle into the interpreter's per-rule-body collection store.
+    /// Arrays / maps / sets are heap-managed and cannot live
     /// inline in this stack union, so a runtime collection value is a `u32`
     /// index resolved against `Interpreter.collections`. Invalidated at the
     /// rule-body boundary (rule-arena semantics).
     array_ref: u32,
-    /// Handle into the interpreter's per-rule-body map store (M0.8
-    /// collections). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body map store. Same
+    /// lifetime rules as `array_ref`.
     map_ref: u32,
-    /// Handle into the interpreter's per-rule-body set store (M0.8 E3-C
-    /// tranche 3bis). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body set store. Same
+    /// lifetime rules as `array_ref`.
     set_ref: u32,
-    /// Handle into the interpreter's per-rule-body closure store (M0.8
-    /// closures). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body closure store. Same
+    /// lifetime rules as `array_ref`.
     closure: u32,
-    /// Handle into the interpreter's per-rule-body struct store (M0.8 E2 block
-    /// 3). A struct value is a by-value aggregate; the handle resolves against
+    /// Handle into the interpreter's per-rule-body struct store. A struct
+    /// value is a by-value aggregate; the handle resolves against
     /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
     /// rule-body boundary).
     struct_ref: u32,
-    /// Handle into the interpreter's per-rule-body optional store (M0.8 E2 block
-    /// 5). An `Optional<T>` value resolves against `Interpreter.optionals` to a
+    /// Handle into the interpreter's per-rule-body optional store. An
+    /// `Optional<T>` value resolves against `Interpreter.optionals` to a
     /// `?Value` (`null` = `none`, else the `some` payload). Same lifetime rules
     /// as `array_ref` (reset at the rule-body boundary).
     optional: u32,
-    /// A C-like enum value (M0.8 E2 block 3 tranche B). Carries the enum type
+    /// A C-like enum value. Carries the enum type
     /// name (interned `StringId`) and the variant's declaration-order index.
     /// Value-typed: compared by `(type_name, variant)` equality.
     enum_value: EnumValue,
     /// A borrowed view over a resource `string` field's persistent-heap bytes
-    /// (M1.0.3 E2). The read path returns this without incref'ing the block —
+    ///. The read path returns this without incref'ing the block —
     /// safe for the rule body because the resource (hence the bytes) outlives it
     /// (`etch-memory-model.md` §11 Phase 1; scope-bound incref is Phase 2). Self-
     /// contained `{ptr,len}` so `readBytesAsValue` can build it with no allocator
@@ -146,7 +146,7 @@ pub const Value = union(enum) {
     /// not disturb `string_id` (AST pool) / `string_run` (rule-arena) semantics.
     string_persistent: StrView,
     /// A borrowed view over a resource `T[]` field's persistent-heap container
-    /// block (M1.0.17 E2). The `u64` is the block's exposed payload pointer (a
+    /// block. The `u64` is the block's exposed payload pointer (a
     /// `persistent` `type_array` block whose payload is the owned
     /// `ArrayListUnmanaged(Value)`). Mirrors `.string_persistent`'s persistent-vs-
     /// rule-arena split against `.array_ref`: the zone is known at the tag, no
@@ -157,38 +157,38 @@ pub const Value = union(enum) {
     /// as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
     /// A borrowed view over a resource `[K: V]` field's persistent-heap container
-    /// block (M1.0.17 E3). The `u64` is a `persistent` `type_map` block whose
+    /// block. The `u64` is a `persistent` `type_map` block whose
     /// payload is the owned insertion-ordered pair list. Same persistent-vs-rule-
     /// arena split as `.map_ref`; the read path borrows it without incref (the
     /// resource outlives the body). String keys and values are stored as owned
     /// `.string_persistent`, POD inline. Never `0` for a live field.
     map_persistent: u64,
     /// A borrowed view over a resource `Set<T>` field's persistent-heap container
-    /// block (M1.0.17 E4). The `u64` is a `persistent` `type_set` block whose
+    /// block. The `u64` is a `persistent` `type_set` block whose
     /// payload is the owned insertion-ordered unique-element list (same
     /// `ArrayListUnmanaged(Value)` shape as `array_persistent`; the drop is
     /// shared). Same persistent-vs-rule-arena split as `.set_ref`; borrowed on
     /// read. String elements owned as `.string_persistent`, POD inline. Never `0`.
     set_persistent: u64,
-    /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
+    /// A `TaskHandle` (`etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
     /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
     /// so no generation is needed in Phase 1. Copyable/storable as a value;
     /// its operations are `h.cancel()` (idempotent) and `await h` (§9.8).
     task_handle: u32,
-    /// A `TimerHandle` (M1.0.13 E6, `etch-grammar.md` §2.2): the registry
+    /// A `TimerHandle` (`etch-grammar.md` §2.2): the registry
     /// index of a scheduled timer in `Interpreter.timers`. Safe as a bare
     /// index — the registry is MONOTONIC (no slot reuse; a fired one-shot or
     /// a canceled timer parks as a husk). Copyable/storable as a value; its
     /// ONLY operation is `t.cancel()` (idempotent, §9.10) — a timer is not a
     /// task and is not awaitable.
     timer_handle: u32,
-    /// A `Duration` in seconds (M1.0.13 E6): the runtime shape of a
+    /// A `Duration` in seconds: the runtime shape of a
     /// `DURATION_LIT` (`1.5s`), carried so a timer argument can be a full
     /// expression (`after(d)` with `d` a Duration local). Duration
     /// arithmetic stays out of the M1.0.13 surface.
     duration: f64,
-    /// The current test's World handle (M1.0.15): returned by `test_world()`,
+    /// The current test's World handle: returned by `test_world()`,
     /// receiver of `spawn_with`/`emit`/`tick`. v0.6 is MONO-WORLD — the payload
     /// is a marker (`void`); the interpreter operates on the `world` already
     /// threaded through `execStmt`, so repeated `test_world()` calls denote the
@@ -261,13 +261,13 @@ pub const Value = union(enum) {
     }
 };
 
-/// Payload of a C-like enum `Value` (M0.8 E2 block 3 tranche B).
+/// Payload of a C-like enum `Value`.
 pub const EnumValue = struct {
     type_name: u32,
     variant: u32,
 };
 
-/// Borrowed view over persistent-heap string bytes (M1.0.3 E2). `ptr` is the
+/// Borrowed view over persistent-heap string bytes. `ptr` is the
 /// raw address of the bytes (`0` for the empty string); `len` the byte count.
 pub const StrView = struct {
     ptr: u64 = 0,
@@ -288,15 +288,12 @@ pub const RuntimeErrorKind = enum {
     DivisionByZero,
     IntegerOverflow,
     UnsupportedExpr,
-    /// Bridge-level type incoherence (M0.8 E3-D, D-S4-runtime-report —
-    /// the typed-report home of `BridgeError.TypeMismatch`, closing the
-    /// D-S4-ecs-bridge-panic letter: the bridge returns the error, the
-    /// report carries the kind).
+    /// Bridge-level type incoherence.
     TypeMismatch,
-    /// An Etch `throw` that reached the rule top level uncaught (M0.8
-    /// E3-D). The span covers the thrown value expression.
+    /// An Etch `throw` that reached the rule top level uncaught. The
+    /// span covers the thrown value expression.
     UncaughtThrow,
-    /// A failed `assert(...)` / assertion-family builtin (M1.0.15). The span
+    /// A failed `assert(...)` / assertion-family builtin. The span
     /// covers the failing condition; the message (compared values, custom
     /// reason) travels alongside via the interpreter's `pending_message`.
     AssertFailed,

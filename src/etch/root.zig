@@ -28,12 +28,12 @@ pub const types = @import("types.zig");
 /// `DiagnosticCode`s) without pulling the internals directly.
 pub const diagnostics = @import("diagnostics.zig");
 /// Tier 1 service registry and the Phase 1 tree-walker invocation path
-/// (M1.1.15.2 G2, `etch-abi-zig.md` §8.7). Exposed at the module surface
+/// (`etch-abi-zig.md` §8.7). Exposed at the module surface
 /// because a Tier 1 module declares its `ServiceSpec` and registers it from
 /// outside `src/etch/`.
 pub const services = @import("services.zig");
 /// Typed bridge from a Tier 0 `EventQueue(T)` into the interpreter's per-tick
-/// event store (M1.1.15.2 G4). Exposed because a Tier 1 module owns the queue.
+/// event store. Exposed because a Tier 1 module owns the queue.
 pub const event_bridge = @import("event_bridge.zig");
 
 // S4 interpreter surface.
@@ -56,21 +56,21 @@ comptime {
     _ = @import("ecs_bridge.zig");
     // M1.0.5 — `persistent.zig` moved to Tier 0 (`src/core/memory`); it is now
     // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
-    // M1.0.4 — pull the scene cook driver into the test import graph (§13).
+    // pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
-    // M1.1.15.2 G2 — the service registry's inline tests. The `pub const
+    // the service registry's inline tests. The `pub const
     // services` re-export above pulls its DECLARATIONS, not its `test` blocks
     // (§13, and the four-case experiment recorded below).
     _ = @import("services.zig");
     _ = @import("event_bridge.zig");
-    // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
+    // the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
-    // M1.0.17 — explicit wire-in of `types.zig`'s inline tests (E0101,
+    // explicit wire-in of `types.zig`'s inline tests (E0101,
     // scene/prefab/const validation, the M1.0.17 resource-collection acceptance
     // tests, …), consistent with the sibling entries above.
     //
-    // M1.1.14 — THIS LINE IS LOAD-BEARING, and the note that said otherwise was
+    // THIS LINE IS LOAD-BEARING, and the note that said otherwise was
     // wrong on its MECHANISM while right on its observation. It claimed "a public
     // re-export of the root module is force-analyzed, tests included", which
     // directly contradicts the paragraph above this block, in this same file. A
@@ -83,7 +83,7 @@ comptime {
     // true measurement into a false general rule, and the rule is what a later
     // reader would have acted on.
     _ = @import("types.zig");
-    // M1.1.14 — `zig_codegen/root.zig` carries the correct reference guard for its
+    // `zig_codegen/root.zig` carries the correct reference guard for its
     // own three test files, and nothing ever ran it: the only path to it was
     // `pub const codegen_zig`, the form that does not analyse. Thirty-seven test
     // blocks — including `lower_test.zig`'s twenty-six — had never executed.
@@ -112,7 +112,7 @@ pub const scene_cook = @import("scene_cook.zig");
 /// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
 
-/// Level-B descriptor surface (M0.8 E4) — typed domain descriptors
+/// Level-B descriptor surface — typed domain descriptors
 /// (`etch-ast-ir.md` §3.5) + the canonical serializer backing the
 /// serialized-IR differential. The interpreter builds them at compile
 /// (`Interpreter.descriptors`); the differential harness serializes both
@@ -144,7 +144,7 @@ pub const Interpreter = interp.Interpreter;
 /// interpreter internals.
 pub const RuntimeReport = interp.RuntimeReport;
 
-/// Etch `test` runner (M1.0.15) — iterates a type-checked program's `test`
+/// Etch `test` runner — iterates a type-checked program's `test`
 /// blocks in isolation and reports pass/fail/skip. Exposed at the module
 /// surface so the `etch_test` shim (and, later, `weld test`) drive it without
 /// reaching into the internal path. Also roots the module for its inline tests
@@ -265,7 +265,7 @@ pub const ProjectFile = struct {
 ///     compiler's global declaration table (`etch-abi-zig.md` §8.3), never
 ///     through the per-module export index, so it is never named in an `import`.
 /// Either way the label only identifies the file as a node in the dependency
-/// graph (M1.0.7 E4).
+/// graph.
 fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
     var s = name;
     if (std.mem.startsWith(u8, s, "src/")) s = s["src/".len..];
@@ -287,7 +287,7 @@ fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
 }
 
 /// The dotted module path an `ImportDecl` references (`import a.b.c` → `"a.b.c"`),
-/// joined from its `import_path_segs` run. `gpa`-owned (M1.0.7 E4).
+/// joined from its `import_path_segs` run. `gpa`-owned.
 fn joinImportPath(gpa: std.mem.Allocator, a: *const Ast, decl: ast.ImportDecl) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(gpa);
@@ -299,7 +299,7 @@ fn joinImportPath(gpa: std.mem.Allocator, a: *const Ast, decl: ast.ImportDecl) !
     return try buf.toOwnedSlice(gpa);
 }
 
-/// Build module `a`'s public exports table (M1.0.7 E5): every top-level
+/// Build module `a`'s public exports table: every top-level
 /// symbol-bearing declaration (component / resource / struct / enum / trait /
 /// event / fn / type-alias) keyed by its interned name's bytes →
 /// `{ kind, visibility, arena_index, item_id }`. All-public until `private`
@@ -319,17 +319,17 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
             .event_decl => .{ .name = a.event_decls.items[datas[i]].name, .kind = .event_ },
             .fn_decl => .{ .name = a.fn_decls.items[datas[i]].name, .kind = .fn_ },
             .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
-            // M1.0.8 — a top-level `const` is exportable (always public — a
+            // a top-level `const` is exportable (always public — a
             // const cannot carry a `private` prefix). `test` blocks are NOT
-            // listed: they live in a dedicated test-name namespace (M1.0.15,
-            // `TypeChecker.test_symbols`) and are never exported.
+            // listed: they live in a dedicated test-name namespace and are
+            // never exported.
             .const_decl => .{ .name = a.const_decls.items[datas[i]].name, .kind = .const_ },
             else => null,
         };
         if (nk) |e| {
             // Last decl wins on a same-name dup (an intra-file dup is E0101 in
             // pass 1); the exports table only needs a single resolvable entry.
-            // M1.0.8 — read the item's visibility: a `private` declaration_body
+            // read the item's visibility: a `private` declaration_body
             // is recorded `.private`, which makes the dormant `E0107` check in
             // `bindImports` reachable when another module imports it.
             const vis: TypeChecker.Visibility = switch (a.itemVisibility(item_id)) {
@@ -346,7 +346,7 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
     }
 }
 
-/// Cross-file scene/prefab validation (M0.9 E2-B). Parses every project file,
+/// Cross-file scene/prefab validation. Parses every project file,
 /// builds the byte-keyed global prefab-name index and a shared cross-scene
 /// UUID tracker, then type-checks each file with that project context so the
 /// three cross-file diagnostics resolve across the whole set:
@@ -430,7 +430,7 @@ pub fn validateProject(
 
     // Build the directed import-dependency graph: edge importer → imported, for
     // each import whose target module resolves to a file in the set. Targets that
-    // resolve to no file are an E5 concern (E0103/E0104), not a cycle edge.
+    // resolve to no file are an E5 concern, not a cycle edge.
     const Edge = struct { to: usize, span: SourceSpan };
     var adj: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Edge)) = .empty;
     defer {
@@ -511,7 +511,7 @@ pub fn validateProject(
         }
     }
 
-    // Per-module exports tables (M1.0.7 E5): one byte-keyed table per file, so
+    // Per-module exports tables: one byte-keyed table per file, so
     // `import a.b { X }` resolves X in module `a.b`'s exports SPECIFICALLY — two
     // modules exporting the same name never collide (unlike the flat global
     // `prefabs` index, whose names are project-global by design).
@@ -529,7 +529,7 @@ pub fn validateProject(
     }
 
     // Check each file with the project context. Acyclic → topological order so a
-    // module's dependencies are checked first (M1.0.7 E6 exports collection);
+    // module's dependencies are checked first;
     // on a cycle, fall back to input order (the graph has no valid linearization).
     const ctx: TypeChecker.ProjectContext = .{
         .prefabs = &prefabs,

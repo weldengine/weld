@@ -15,8 +15,8 @@
 //!   current in-tree consumer — the bench harness and the build-graph
 //!   cooks consume the CONSOLIDATED pipeline below.
 //! - `consolidate.cookConsolidated(gpa, named_sources, &out)` — render N
-//!   in-memory sources into one consolidated `.zig` (M0.8 E3-D,
-//!   D-S5-etchcook-inproc). The `etch_cook` CLI is a thin shim over it;
+//!   in-memory sources into one consolidated `.zig`. The `etch_cook`
+//! CLI is a thin shim over it;
 //!   the bench harness calls it in-process.
 
 const std = @import("std");
@@ -35,8 +35,7 @@ pub const errors = @import("errors.zig");
 pub const type_map = @import("type_map.zig");
 /// Low-level Zig output writer used by `lower`.
 pub const emit = @import("emit.zig");
-/// Consolidated N-sources → one-file cook (M0.8 E3-D, D-S5-etchcook-inproc
-/// — the library home of the `etch_cook` pipeline).
+/// Consolidated N-sources → one-file cook.
 pub const consolidate = @import("consolidate.zig");
 
 // Pull the dedicated `tests/` files into the module's import graph so

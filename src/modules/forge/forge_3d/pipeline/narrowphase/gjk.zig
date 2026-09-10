@@ -6,7 +6,7 @@
 //! live in the sibling `support.zig`; EPA (`epa.zig`) seeds off the `.deep`
 //! terminal simplex `GjkResult` carries.
 //!
-//! **Dependency discipline (brief Notes).** This file imports `foundation`
+//! **Dependency discipline.** This file imports `foundation`
 //! (math) and the sibling `support.zig` ONLY — never `weld_forge`, never
 //! `body*.zig`, never `config.zig`, never `broadphase.zig`. The scalar arrives
 //! as the comptime parameter `T`; `forge_3d` instantiates it at `config.Real`.
@@ -20,7 +20,7 @@
 //! (`dist(cores) <= r_a + r_b`). Fast convergence, no simplex degeneracy near
 //! contact.
 //!
-//! **Computation in the frame of A (brief Notes).** B is pre-transformed
+//! **Computation in the frame of A.** B is pre-transformed
 //! relative to A once per pair (`support.RelativePose`); A's support runs
 //! untransformed. Better precision far from the world origin (avoids
 //! large-coordinate cancellation) and half the per-iteration transforms. Frozen
@@ -299,7 +299,7 @@ pub fn Simplex(comptime T: type) type {
     };
 }
 
-/// Named iteration ceiling for the GJK descent (brief Notes, anticipates the
+/// Named iteration ceiling for the GJK descent (anticipates the
 /// determinism freeze): the loop always terminates within this many
 /// support queries. 32 is generous — a well-formed pair converges in a handful;
 /// the bound only backstops adversarial near-parallel configurations.
@@ -347,10 +347,10 @@ pub fn GjkResult(comptime T: type) type {
 /// descending on the Minkowski difference `support_A(d) − support_B(−d)` toward
 /// the origin with the Voronoi solver. The search direction is never
 /// normalized — squared distances throughout, a single `sqrt` for the reported
-/// distance (brief Notes). See the file header for the cores + inflation model
+/// distance. See the file header for the cores + inflation model
 /// and the frozen frame-of-A choice.
 ///
-/// Classification (brief Notes): if the terminal simplex encloses the origin the
+/// Classification: if the terminal simplex encloses the origin the
 /// cores intersect → `.deep`; otherwise the converged core distance `dist` gives
 /// `.deep` iff `dist ≤ the contact margin` (the witness band — a
 /// Minkowski point at noise distance from the origin; the terminal is NOT

@@ -350,7 +350,7 @@ test "a phase mention inside a tag parenthesis is exempt" {
 }
 
 test "the tag rule accepts a well-formed line the identifier rule also accepts" {
-    // The brief's paired case: a tag naming a feature textually, on a line that
+    // The paired case: a tag naming a feature textually, on a line that
     // must be clean under both rules at once.
     try std.testing.expectEqual(@as(usize, 0), try tagCount("// TODO(soft-body LOD)\n"));
     try std.testing.expectEqual(@as(usize, 0), try phaseCount("// TODO(soft-body LOD)\n"));
@@ -361,7 +361,10 @@ test "both rules speak on a read file and are silent on the two silenced kinds" 
     try std.testing.expectEqual(@as(usize, 1), try countRule(tags_name, "tools/weld_lint/x.zig", src));
     try std.testing.expectEqual(@as(usize, 1), try countRule(phase_name, "tools/weld_lint/x.zig", src));
     try std.testing.expectEqual(@as(usize, 0), try countRule(tags_name, "tests/x.zig", src));
-    try std.testing.expectEqual(@as(usize, 0), try countRule(phase_name, "src/etch/x.zig", src));
+    var buf: [256]u8 = undefined;
+    if (comment_scan.anUnreadExample(&buf)) |unread| {
+        try std.testing.expectEqual(@as(usize, 0), try countRule(phase_name, unread, src));
+    }
     try std.testing.expectEqual(@as(usize, 0), try countRule(tags_name, "bench/x.zig", src));
 }
 

@@ -1,4 +1,4 @@
-//! `CodegenError` path tests (S5).
+//! `CodegenError` path tests.
 
 const std = @import("std");
 const ast_mod = @import("../../ast.zig");

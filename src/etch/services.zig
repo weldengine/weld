@@ -1,5 +1,5 @@
-//! Tier 1 service registry and the tree-walker invocation path (M1.1.15.2 G2,
-//! `etch-abi-zig.md` §8 and §8.7).
+//! Tier 1 service registry and the tree-walker invocation path (`etch-abi-
+//! zig.md` §8 and §8.7).
 //!
 //! §8.7 records that the rest of §4, §6 and §8 describes invocation THROUGH THE
 //! VM — `CALL_SERVICE`, `VMContext`, `callconv(.c)` trampolines, `service_ref_pool`
@@ -162,7 +162,7 @@ pub const DefaultValue = union(enum) {
     entity_null,
 };
 
-/// An event type a Tier 1 module publishes to Etch (M1.1.15.2 G4). Declared in
+/// An event type a Tier 1 module publishes to Etch. Declared in
 /// a `.d.etch` — which `etch-grammar.md` §20.1 admits since this milestone's G1
 /// amendment, and for exactly this reason: a rule can only observe an event
 /// whose type Etch knows, and a hand-written duplicate of a Zig shape is a

@@ -1,4 +1,4 @@
-//! Per-file content-hash cache tests (S5).
+//! Per-file content-hash cache tests.
 
 const std = @import("std");
 const cache = @import("../cache.zig");

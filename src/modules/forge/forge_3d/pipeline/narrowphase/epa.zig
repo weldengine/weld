@@ -10,14 +10,14 @@
 //! world closest points. Depth/normal here are on the CORES; the inflation radii
 //! and per-point depth are applied downstream by the manifold generator.
 //!
-//! **Frame of A + world mapping (brief Notes).** EPA computes in A's frame, then
+//! **Frame of A + world mapping.** EPA computes in A's frame, then
 //! maps the normal and closest points to world via `rot_a` / `pos_a` (the GJK
 //! closest-point pattern, `gjk.zig`). The signature therefore carries `pos_a` /
 //! `rot_a` in addition to the frozen `relpose`: the frozen
 //! `EpaResult` fields are documented world-space "mapped via rot_a", which is not
 //! expressible without them.
 //!
-//! **Low-dimensional seeds (brief flag-6 contract).** A `simplex_count < 4` seed
+//! **Low-dimensional seeds (the flag-6 contract).** A `simplex_count < 4` seed
 //! (coincident cores, point-on-segment, crossing segments) is tetra-expanded to a
 //! non-degenerate tetrahedron around the seed before the loop — origin-enclosing
 //! for a genuine deep seed; a rounding-band seed may expand to a
@@ -27,7 +27,7 @@
 //! returns the best lower-dimensional feature: a unit separation normal and depth
 //! 0 (the deep↔shallow boundary; the manifold's deep depth is then `0 + r_sum`).
 //!
-//! **Dependency discipline (brief Notes).** Imports `foundation` (math) + the
+//! **Dependency discipline.** Imports `foundation` (math) + the
 //! sibling `support.zig` / `gjk.zig` ONLY. Determinism by construction: no hash
 //! containers, no trigonometry (dot/cross only), fixed face-evaluation order,
 //! bounded iterations (`max_epa_iterations`), every division guarded (never a NaN;
@@ -38,7 +38,7 @@ const math = @import("foundation").math;
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 
-/// Named iteration ceiling for the EPA expansion (brief Notes, anticipates the
+/// Named iteration ceiling for the EPA expansion (anticipates the
 /// determinism freeze): the loop always terminates within this many
 /// support queries. A well-formed penetration converges in a handful; the bound
 /// backstops adversarial near-tangent configurations.

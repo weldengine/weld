@@ -1,4 +1,4 @@
-//! Global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2).
+//! Global tag table (`etch-validation-ecs.md` §5.2).
 //!
 //! A `tags { ... }` block declares a hierarchy of namespaces and leaves. The
 //! whole compilation set is merged into ONE hierarchy, then each leaf is

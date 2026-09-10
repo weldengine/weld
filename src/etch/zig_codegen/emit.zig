@@ -14,8 +14,8 @@ pub const Writer = struct {
     gpa: std.mem.Allocator,
     indent: u32 = 0,
     /// Set by `lower.zig` whenever an emitted expression allocates from the
-    /// rule's threaded frame-arena allocator (`fa`) — string concat (M0.8
-    /// E3-C tranche 1b). Consumed by the rule-classification two-pass: a
+    /// rule's threaded frame-arena allocator (`fa`) — string concat.
+    /// Consumed by the rule-classification two-pass: a
     /// rule fn takes the conditional `fa` param iff its body emission set
     /// this (Zig rejects both an unused param and a pointless discard, so
     /// the classification must be exact — hence flag-on-emission, not a

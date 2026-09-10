@@ -26,10 +26,10 @@ pub const Lexer = struct {
     pos: u32 = 0,
     /// Byte spans of every plain `//` line comment and `/* */` block
     /// comment encountered, in source order. Consumed by the parser's
-    /// `TriviaMap` post-pass (M0.8 D-S3-trivia).
+    /// `TriviaMap` post-pass.
     comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
     /// Byte spans of every `///` doc comment, in source order. Kept
-    /// separate from `comment_spans` (M0.8 D-S3-doccomment) so the parser
+    /// separate from `comment_spans` so the parser
     /// can attach them to declaration nodes as semantic doc comments rather
     /// than discardable trivia.
     doc_comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
@@ -107,8 +107,8 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .bang_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
                     }
-                    // Bare `!` — the postfix force-unwrap operator (M0.8 E3-C
-                    // tranche 4, part1 §6.6). `!=` is handled above by maximal
+                    // Bare `!` — the postfix force-unwrap operator (tranche 4,
+                    // part1 §6.6). `!=` is handled above by maximal
                     // munch, so this never splits a comparison.
                     return .{ .kind = .bang, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
@@ -141,8 +141,8 @@ pub const Lexer = struct {
                 },
                 '@' => return self.consumeOne(.at),
                 // `?` / `?.` / `??` — the optional type suffix `T?` plus the
-                // optional-chain and null-coalesce operators (M0.8 E3-C
-                // tranche 4, part1 §6.6). Maximal munch: `?.` and `??` never
+                // optional-chain and null-coalesce operators (tranche 4, part1
+                // §6.6). Maximal munch: `?.` and `??` never
                 // appear in type positions, so the longest match is safe.
                 '?' => {
                     self.pos += 1;
@@ -158,8 +158,8 @@ pub const Lexer = struct {
                 },
                 '#' => return self.lexColor(start),
                 '"' => {
-                    // Triple-quote `"""…"""` multiline string (M0.9 E2-A,
-                    // `etch-grammar.md` §1.4): three contiguous quotes open a
+                    // Triple-quote `"""…"""` multiline string (`etch-grammar.md`
+                    // §1.4): three contiguous quotes open a
                     // newline-spanning literal closed by the next `"""` — the
                     // DURATION/COLOR greedy-contiguous precedent. A lone or
                     // double `"` falls through to the single-line `lexString`.
@@ -213,7 +213,7 @@ pub const Lexer = struct {
     fn skipLineComment(self: *Lexer, gpa: std.mem.Allocator) !void {
         const start = self.pos;
         // Distinguish a `///` doc comment from a plain `//` line comment
-        // (M0.8 D-S3-doccomment): exactly three slashes followed by a
+        //: exactly three slashes followed by a
         // non-slash is a doc comment; `////`+ is a plain comment (Rust
         // convention). Doc spans feed the per-node doc map, plain comments
         // the trivia slab.
@@ -257,7 +257,7 @@ pub const Lexer = struct {
         const lexeme = self.source[start..self.pos];
         const span: SourceSpan = .{ .byte_start = start, .byte_end = self.pos };
 
-        // Keyword lookup (S3 subset first).
+        // Keyword lookup.
         for (token.s3_keywords) |kw| {
             if (std.mem.eql(u8, kw.lexeme, lexeme)) {
                 return .{ .kind = kw.kind, .span = span };
@@ -293,8 +293,8 @@ pub const Lexer = struct {
             const c = self.source[self.pos];
             if (!((c >= '0' and c <= '9') or c == '_')) break;
         }
-        // TIME_LITERAL `DD:DD` (M0.8 E4 routine triggers, `etch-grammar.md`
-        // §1.4): exactly two digits, ':', exactly two digits, contiguous —
+        // TIME_LITERAL `DD:DD` (routine triggers, `etch-grammar.md` §1.4):
+        // exactly two digits, ':', exactly two digits, contiguous —
         // the §1.4 greedy-lexer rule (like DURATION_LIT). `06:003` stays
         // INT ':' INT; `6:00` (one digit) stays INT ':' INT.
         if (self.pos - start == 2 and isDigit(self.source[start]) and isDigit(self.source[start + 1]) and
@@ -319,7 +319,7 @@ pub const Lexer = struct {
                 }
             }
         }
-        // DURATION_LIT `FLOAT "s"` (M0.8 E4 gate fix, `etch-grammar.md` §1.4):
+        // DURATION_LIT `FLOAT "s"` (gate fix, `etch-grammar.md` §1.4):
         // the greedy-lexer rule — a float immediately followed by a lone `s`
         // (no identifier character after it) is one duration token. FLOAT
         // only per the EBNF: `3s` stays INT + IDENT; `0.3 s` (space) stays
@@ -368,7 +368,7 @@ pub const Lexer = struct {
     /// (unlike `lexString`) until the next contiguous `"""`. The greedy-
     /// contiguous open/close mirrors the DURATION_LIT / COLOR_LITERAL lift.
     /// The lexer keeps the full raw span; the parser owns escape decoding,
-    /// interpolation, and the §1.4 common-indent strip (M0.9 E2-A).
+    /// interpolation, and the §1.4 common-indent strip.
     fn lexMultilineString(self: *Lexer, start: u32) Token {
         self.pos += 3; // opening """
         while (self.pos < self.source.len) {
@@ -397,7 +397,7 @@ pub const Lexer = struct {
 
     /// `COLOR_LITERAL = "#" HEX_DIGIT{6} [HEX_DIGIT{2}]` (`etch-grammar.md`
     /// §1.4 l.211) — exactly 6 (RGB) or 8 (RGBA) hex digits; the
-    /// DURATION_LIT-precedent §1.4 literal lift (M0.8 E5). A `#` followed by
+    /// DURATION_LIT-precedent §1.4 literal lift. A `#` followed by
     /// any other count of hex digits is `error_byte` over the run (the parser
     /// surfaces it); a color followed by a non-hex char lexes as the color
     /// then that char (e.g. `#FFFFFFz` → color + ident).

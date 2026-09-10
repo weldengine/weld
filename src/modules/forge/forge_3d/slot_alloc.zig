@@ -3,11 +3,11 @@
 //! A deterministic generational slot allocator: LIFO intrusive free-list +
 //! per-slot generation bumped on free, keyed by the `api.PackedId`
 //! `index:24 | generation:8` packing. `ShapeStore` and `BodyManager` both
-//! embed one so their "generation packing identical to `ShapeStore`" (brief
+//! embed one so their "generation packing identical to `ShapeStore`"
 //! holds by construction — the payload lives in the caller's own columns,
 //! indexed by the allocator's slot index.
 //!
-//! File split from the brief's listed set, justified: it is the single shared
+//! A separate file, justified: it is the single shared
 //! mechanism both stores require; duplicating it would risk the two drifting.
 //! Determinism: no hash-map anywhere — the free-list is a plain
 //! index stack, allocation appends sequentially, so an identical op sequence

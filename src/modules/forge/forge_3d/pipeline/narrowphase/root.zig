@@ -7,7 +7,7 @@
 //! consumers change only their import path (`pipeline/narrowphase.zig` →
 //! `pipeline/narrowphase/root.zig`).
 //!
-//! **Dependency discipline (brief Notes).** The whole package imports
+//! **Dependency discipline.** The whole package imports
 //! `foundation` (math) ONLY — never `weld_forge`, never `body*.zig`, never
 //! `config.zig`, never `broadphase.zig`. The scalar arrives as the comptime
 //! parameter `T`; `forge_3d` instantiates it at `config.Real`.

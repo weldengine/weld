@@ -10,7 +10,7 @@
 //!   forge-determinism --write-witness DIR generate the witnesses into DIR
 //!
 //! Regeneration is a DECLARED ACT — it is a separate flag, never a side effect of
-//! a mismatch, and the brief requires it to be stated in the PR body with its
+//! a mismatch, and it must be stated in the PR body with its
 //! motive. A witness silently regenerated to make a cell green destroys exactly
 //! the property it carries.
 //!
