@@ -1038,7 +1038,7 @@ test "a capsule over the void is in_air on all five quantities" {
     // is a contact between the probe and a body BIT-IDENTICAL to it at the same pose, whose
     // normal §3 declares geometrically UNDEFINED — and empirically that normal never qualifies
     // as ground. So the mechanism is required by §1.12.2 and implemented, but it is not
-    // not observable here; it becomes observable in the slide suite, where the same contact would
+    // observable here; it becomes observable in the slide suite, where the same contact would
     // block motion outright. Asserting it here would mean asserting on a value the narrowphase
     // documents as undefined.
     var desc = baseDescriptor();

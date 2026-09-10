@@ -219,8 +219,7 @@ pub const Scheduler = struct {
         self.* = undefined;
     }
 
-    /// Total worker count actually in flight. Replaces an earlier
-    /// `pub const worker_count` constant for callers.
+    /// Total worker count actually in flight.
     pub fn workerCount(self: *const Scheduler) usize {
         return self.workers.len;
     }
@@ -554,7 +553,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // Debug assertion at the unique
             // over-decrement site (located by static
             // analysis). Captures full scheduler state at the panic
-            // for diagnosis (discriminate R1/R2/R3 from
+            // for diagnosis (discriminate R1/R2/R3).
             // Active in Debug + ReleaseSafe via
             // `std.debug.runtime_safety`, stripped in ReleaseFast.
             const prev = sched.pending_count.fetchSub(1, .acq_rel);

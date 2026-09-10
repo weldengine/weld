@@ -24,7 +24,7 @@
 //!
 //! Import discipline: `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
-//! and `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
+//! `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
 //! so it needs the awake predicate; `rigid/island_manager.zig` already depends on
 //! the same file. NEVER `broadphase.zig`: candidate pairs are consumed as data
 //! (packed `u64` keys), never re-derived.

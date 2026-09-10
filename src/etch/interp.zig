@@ -903,7 +903,7 @@ const CallFrame = struct {
 };
 
 /// A suspendable task — the dynamic-pool replacement for the per-rule
-/// per-rule `AsyncSlot`. Holds the resume frame-stack (`frames`, innermost last),
+/// `AsyncSlot`. Holds the resume frame-stack (`frames`, innermost last),
 /// the wake condition it is blocked on, and the locals retained across
 /// suspension. Each task is a HEAP record (`gpa.create`) in the
 /// `Interpreter.async_tasks` pointer pool: `race`/`sync`/`branch`/`spawn` create
@@ -6208,7 +6208,7 @@ pub const Interpreter = struct {
                 const mg = self.ast.method_gets.items[data];
                 const type_name = self.ast.strings.slice(mg.type_name);
                 const mutable = (kind == .method_get_mut);
-                // Receiver-less `get(T)` / `get_mut(T)` — resource access
+                // Receiver-less `get(T)` / `get_mut(T)` — resource access.
                 // The type-checker has already
                 // proven `T` is a resource present in the when clause.
                 if (mg.receiver.isNone()) {
@@ -13294,7 +13294,7 @@ test "a borrowed resource-string filter is captured once and survives reassignme
     // The filter value `get(Cfg).s` is a BORROWED `.string_persistent` view over
     // the resource string, captured at suspension. `bump` reassigns `Cfg.s`
     // during the suspension — which RELEASES the old bytes. Without the
-    // the deep-copy the captured view would dangle (use-after-free) AND drift to
+    // deep-copy the captured view would dangle (use-after-free) AND drift to
     // the new value; with it, the poll matches the OLD captured "old"
     // (capture-once §9.4). `producer` always emits "old", so a match proves the
     // captured value stuck to "old" (a re-evaluation would want "new" ≠ "old").

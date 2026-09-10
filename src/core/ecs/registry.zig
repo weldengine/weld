@@ -21,7 +21,7 @@
 
 const std = @import("std");
 
-/// `EntityId` (`packed struct(u64)`) — the storage type of a `.entity_` field
+/// `EntityId` (`packed struct(u64)`) — the storage type of a `.entity_` field.
 /// Imported only for `FieldKind.fromZigType`; `entity.zig` imports
 /// nothing of `registry.zig`, so this is acyclic.
 const EntityId = @import("entity.zig").EntityId;

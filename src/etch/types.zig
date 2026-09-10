@@ -6013,7 +6013,7 @@ pub const TypeChecker = struct {
                         if (ak == .fn_call or ak == .method_call) return t;
                         // Non-call target: the handle-await form (§9.8) — the target
                         // must be a TaskHandle. The result is
-                        // unit (spawn bodies have no value channel —
+                        // unit (spawn bodies have no value channel);
                         // `unknown` ≈ unit, the house convention.
                         if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
                         // A `TimerHandle` is NOT awaitable (§9.10):

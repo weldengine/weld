@@ -431,7 +431,7 @@ fn makeFace(comptime T: type, verts: *const [max_verts]support.Vertex(T), ia: u3
 
 /// Build a fan face — a silhouette edge `ia→ib` closed to the new vertex, whose
 /// index will be `ic` and whose position is `cpos` (passed explicitly because the
-/// transactional expansion validates ALL fan faces BEFORE the vertex is appended,
+/// transactional expansion validates ALL fan faces BEFORE the vertex is appended).
 /// PRESERVES the inherited horizon winding: the silhouette edges
 /// come from consistently outward-wound removed faces, so `(ia, ib, new)` is
 /// already outward-CCW and the fan is winding-consistent with the kept neighbours

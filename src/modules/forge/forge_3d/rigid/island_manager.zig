@@ -89,7 +89,7 @@ const Member = struct {
 pub const ConstraintKey = struct {
     rank: u32,
     pair_key: u64,
-    /// The constraint's SUB-SHAPE — the third term of the composite key, and load-bearing since
+    /// The constraint's SUB-SHAPE — the third term of the composite key, and load-bearing.
     /// A mesh pair contributes one constraint per contacting
     /// triangle, all sharing `rank` and `pair_key`; on those two alone their relative order would
     /// be `std.sort.block`'s internal behaviour, which is UNSTABLE, and this file's own docstring

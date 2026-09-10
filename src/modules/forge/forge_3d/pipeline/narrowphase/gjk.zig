@@ -474,7 +474,7 @@ pub fn gjk(
         // duplicate support before the enclosing tetrahedron forms (near-parallel
         // search directions repeat a corner on a flat box). Reliable to a
         // moderate aspect ratio; beyond it, exact box `.deep` is the domain of the
-        // the analytic box/box and point/box fast paths, and EPA. Deferred
+        // analytic box/box and point/box fast paths, and EPA. Deferred
         // by scope decision — not chased with generic f32 GJK here (diminishing
         // returns, overlaps EPA, still imperfect in f32).
         if (res.count == 4 or degenerateOriginReached(T, verts[0..count], closest, mach_eps)) return deepResult(T, verts, count);

@@ -55,7 +55,7 @@ pub fn computeSchemaHash(comptime T: type) SchemaHash {
 
 /// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Direct hash entry point used by `computeSchemaHash` and the
-/// the registry tests. Hashes the tuple `(type_name,
+/// registry tests. Hashes the tuple `(type_name,
 /// [(field.name, kind, count, offset) for each field])` with
 /// `XxHash64(seed=0)`. Exposed so callers can verify field-order
 /// sensitivity without going through the comptime builder.

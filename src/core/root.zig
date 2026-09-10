@@ -94,7 +94,7 @@ pub const ipc = struct {
 /// `src/core/rtti/root.zig` (consistent with the `ecs/root.zig` pattern).
 pub const rtti = @import("rtti/root.zig");
 
-/// Resources namespace — Tier 0 singleton-entity resource subsystem
+/// Resources namespace — Tier 0 singleton-entity resource subsystem.
 /// Public API for `setResource` / `getResource` /
 /// `getResourceMut` / `hasResource` / `removeResource` /
 /// `resourceChanged`. Single canonical entry point at

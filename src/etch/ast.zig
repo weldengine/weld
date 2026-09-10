@@ -1636,7 +1636,7 @@ pub const MotionDecl = struct {
 /// values are STRUCTURAL — rendered canonically, never resolved/typed
 /// (E1662 StateFieldTypeInvalid / E1663 StateFieldInconsistent RESERVED —
 /// field typing + cross-state interpolation consistency are a Kinesis
-/// Kinesis semantic, not a declarative validation; ruling 2).
+/// semantic, not a declarative validation; ruling 2).
 pub const MotionState = struct {
     name: StringId,
     fields_start: u32, // index into `arena.struct_lit_fields`

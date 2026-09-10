@@ -122,8 +122,8 @@ pub const contact_margin_conv_k = gjk_mod.contact_margin_conv_k;
 /// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
 /// Precondition: `raySupportsShape` (no error channel).
 pub const rayShape = raycast_mod.rayShape;
-/// The analytic ray↔triangle kernel and the shared back-face predicate,
-/// `engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
+/// The analytic ray↔triangle kernel and the shared back-face predicate
+/// (`engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
 /// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
 pub const triangle = triangle_mod;
 /// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed

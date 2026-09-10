@@ -329,8 +329,7 @@ pub fn RelativePose(comptime T: type) type {
 
         /// Precompute B-relative-to-A from the two world poses. Uses the
         /// conjugate (the unit-quaternion inverse) throughout — never
-        /// `inverse()`, which divides by the squared norm on the hot path
-        ///.
+        /// `inverse()`, which divides by the squared norm on the hot path.
         pub fn init(pos_a: Vec3T, rot_a: QuatT, pos_b: Vec3T, rot_b: QuatT) Self {
             const inv_a = rot_a.conjugate();
             return .{

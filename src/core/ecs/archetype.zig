@@ -154,7 +154,7 @@ pub const Archetype = struct {
     /// Initialise the archetype with the given sorted component list.
     /// Asserts the list is non-empty (an empty archetype is the
     /// no-component archetype, reachable via `World.spawnEmpty` once
-    /// once something exposes it).
+    /// something exposes it).
     pub fn init(
         gpa: std.mem.Allocator,
         registry: *const Registry,

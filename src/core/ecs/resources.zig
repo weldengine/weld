@@ -100,7 +100,7 @@ pub const ResourceStore = struct {
     /// not a public runtime / Etch / plugin API: the scene loader's rollback path
     /// (a different Zig file — hence `pub`) restores the pre-load dirty state
     /// after a rejected transaction, because `getMutResource` (called during both
-    /// the failed load and the rollback) unconditionally sets `dirty = true`
+    /// the failed load and the rollback) unconditionally sets `dirty = true`.
     /// No-op if the resource is absent.
     pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
         const e = self.entries.getPtr(id) orelse return;

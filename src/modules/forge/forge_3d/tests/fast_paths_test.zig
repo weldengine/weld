@@ -459,7 +459,7 @@ test "box/box SAT differential vs generic (<=30:1)" {
                     try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
                     compared += 1;
                 } else {
-                    // A residual inconsistency is classified, never silently skipped
+                    // A residual inconsistency is classified, never silently skipped.
                     // UNCONDITIONAL: null-ness AND depth must always agree —
                     // a null-ness or depth divergence is the frame-dependence class
                     // and fails, tie or not. The residual (normal not negated, or a
@@ -686,7 +686,7 @@ test "degenerate-segment capsule pair is symmetric (P1-1)" {
 test "SAT tests every edge axis for separation (P1-2)" {
     // P1-2: a near-parallel edge×edge axis can be THE separating axis. Pre-fix the
     // `par_eps = 1e-6` skip dropped it ⇒ a false contact (visible at f32). This
-    // This config separates on A.x×B.x with overlap ≈ −0.003 ⇒ must be `null`
+    // config separates on A.x×B.x with overlap ≈ −0.003 ⇒ must be `null`
     // (separated) in both orders.
     const a = boxShape(100, 0.5, 1);
     const b = boxShape(80, 0.4, 0.8);
