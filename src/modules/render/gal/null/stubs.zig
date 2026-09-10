@@ -7,7 +7,7 @@
 //! 2. **API discipline** — forces the GAL contract to materialize day 1.
 //!    The Null backend's existence makes impossible the drift "I implement
 //!    Vulkan first, I'll abstract later" which is the explicit anti-pattern
-//!    listed in the brief §Notes known pitfalls.
+//!    listed among the known pitfalls.
 //!
 //! The no-op methods return handles whose `inner` is a simple monotonic
 //! counter (incremented on each allocation). No ownership tracking on the

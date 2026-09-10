@@ -3,7 +3,7 @@
 //! Parses the JSON with `std.json` (no hand-rolled JSON parser, no cgltf C
 //! binding) and extracts the first mesh primitive's POSITION / NORMAL /
 //! TEXCOORD_0 attributes and indices. Static only — no skinning, no
-//! animation, no morph targets (brief §Out-of-scope).
+//! animation, no morph targets.
 //!
 //! Buffers must be embedded base64 `data:` URIs (the cooked path);
 //! external `.bin` files and `.glb` containers are deferred.
@@ -26,7 +26,7 @@ pub const Error = error{
     Truncated,
     /// A table index (accessor / bufferView / buffer), a stride, an offset/size
     /// computation, or an index value is out of range. Covers
-    /// every case that used to panic in safe builds or read out of bounds in
+    /// every case that would otherwise panic in safe builds or read out of bounds in
     /// ReleaseFast: a bad `accessors[i]`/`bufferViews[i]`/`buffers[i]` index, a
     /// stride below the element size, an accessor span past its bufferView, a
     /// bufferView past its buffer, an arithmetic overflow, or a mesh index ≥

@@ -1,9 +1,9 @@
-//! ADLER32 throughput baseline (brief §Acceptance ▸ Benchmarks).
+//! ADLER32 throughput baseline.
 //!
 //! Records the portable `@Vector` and scalar-reference throughput on a fixed
 //! buffer. **Baseline only — no parity target.** ADLER32 sits on a cold
 //! path (it runs once at cook time; the runtime mmaps the cooked `.bin`), so
-//! a zlib-ng parity target is explicitly out of scope (brief §Notes —
+//! a zlib-ng parity target is explicitly out of scope (—
 //! cold-path principle). The number exists to track gross regressions, not
 //! to chase a reference.
 //!

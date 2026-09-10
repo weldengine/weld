@@ -22,13 +22,13 @@
 //!
 //! **NOT WIRED INTO A RUNNING ENGINE, and that is this milestone's boundary.** `init` stores
 //! the allocator and opens the world; it registers no system and publishes nothing. The
-//! `world` and `system_scheduler` the context carries are for M1.1.15.2, which brings the
-//! Tier 1 service, the Etch wrappers and the system registration — `forge/sync.zig` already
-//! holds the registration and is driven by its own tests today. A `ModuleRegistry` populated
-//! from `weld.toml` is that milestone's too.
+//! `world` and `system_scheduler` the context carries are for the Tier 1 service, the
+//! Etch wrappers and the system registration — `forge/sync.zig` already holds the
+//! registration and is driven by its own tests. A `ModuleRegistry` populated from
+//! `weld.toml` belongs there too.
 //!
 //! **NOT FROZEN.** `src/interfaces/PhysicsModule.zig` carries no comptime assert block and
-//! no `WELD_PHYSICS_PROTOCOL_VERSION`; both are M1.1.15.2's. This file presents the frozen
+//! no `WELD_PHYSICS_PROTOCOL_VERSION`; both belong to the freeze. This file presents the frozen
 //! SHAPE so the slice that follows is written against a surface that no longer moves, but
 //! nothing here is guarded by comptime yet.
 
@@ -66,18 +66,15 @@ pub const default_gravity = Vec3r.fromArray(.{ 0, -9.81, 0 });
 /// `dt`, which is the frozen entry's parameter; this is only what the world opens with.
 pub const default_timestep: Real = 1.0 / 60.0;
 
-/// **THE JOINT ENTRIES ARE PRESENT SINCE M1.1.15.2 G5a, and the flag that recorded
-/// their absence is gone with the absence.**
+/// **THE JOINT ENTRIES ARE PRESENT.** The seven types are declared at
+/// `forge/api/joint.zig` — `JointId`, `JointDescriptor`, `JointType`, `JointLimits`,
+/// `JointMotor` among them — and a typed stub needs its parameter type to exist, so
+/// that is what makes `createJoint`, `destroyJoint` and `setJointMotor` PRESENTABLE.
+/// They are declared below as typed stubs.
 ///
-/// At M1.1.15.1 this file carried `joint_entries_absent = true` with the measurement
-/// behind it: not one of `JointId`, `JointDescriptor`, `JointType`, `JointLimits` or
-/// `JointMotor` was declared anywhere in the repository, so the entries could not be
-/// presented even as typed stubs — a stub needs its parameter type to exist. G5a mints
-/// the seven types at `forge/api/joint.zig`, which is what makes `createJoint`,
-/// `destroyJoint` and `setJointMotor` PRESENTABLE, and they are declared below as typed
-/// stubs. The flag is DELETED rather than flipped to `false`: a constant that records a
-/// state the tree left is a second declarant of something the declarations already say,
-/// and its only reader asserted the absence it no longer describes.
+/// Do NOT reintroduce a flag recording their ABSENCE: a constant that records a state
+/// the tree has left is a second declarant of what the declarations already say, and
+/// its only reader would assert an absence it no longer describes.
 pub const joint_entries_present = true;
 
 /// The Tier 1 physics module: `forge_3d` behind the frozen `PhysicsModule` shape.
@@ -144,7 +141,7 @@ pub const Forge3DModule = struct {
     /// **Why the channel exists at all.** Eight allocation sites live in the cycle — pair
     /// generation, the retained candidate set, the constraint array, the island partition,
     /// the warm-start cache, the sensor pass, and the two the substep loop reaches. The
-    /// reservation seam of M1.1.15.1 closed exactly one of them, step 10's proxy update.
+    /// reservation seam closes exactly one of them, step 10's proxy update.
     /// The other seven grow structures whose size follows the scene, and no up-front
     /// reservation bounds them without bounding the scene itself. A `void` signature would
     /// have only two exits and both are refused: swallow the failure, and return a tick
@@ -177,7 +174,7 @@ pub const Forge3DModule = struct {
     }
 
     /// TELEPORTATION: writes the pose and derives no velocity. `void`, and that is
-    /// conditional on the moved-log uniqueness invariant of M1.1.15.1 — see
+    /// conditional on the moved-log uniqueness invariant — see
     /// `Broadphase.update`. If that invariant falls, THIS signature has to change; the
     /// implementation must not start panicking instead.
     pub fn setBodyTransform(self: *Forge3DModule, id: BodyId, position: Vec3, rotation: Quat) void {
@@ -198,12 +195,12 @@ pub const Forge3DModule = struct {
     /// and returning a value separates the dead handle from the real result — `shapeCast`,
     /// `moveCharacter`, `getCharacterInnerBody` all do (§1.11.7) — and this one cannot,
     /// because it has nowhere to put the distinction. Adding that channel is a change to the
-    /// frozen surface and belongs to M1.1.15.2, which still has the window; it is recorded
+    /// frozen surface and belongs to the freeze, which still has the window; it is recorded
     /// there rather than taken here.
-    /// The body's pose, or `error.StaleBodyHandle` (M1.1.15.2 G5a).
+    /// The body's pose, or `error.StaleBodyHandle`.
     ///
     /// The error channel is `engine-tier-interfaces.md` 0.12's first decision, and
-    /// the defect it closes is precise: a stale handle used to answer the IDENTITY
+    /// the defect it closes is precise: a stale handle would otherwise answer the IDENTITY
     /// pose, which is indistinguishable from a live body sitting at the origin, on
     /// an interface where every other handle-taking entry already separates the
     /// dead handle from the result. `anyerror!` and not `?`, on the
@@ -218,7 +215,7 @@ pub const Forge3DModule = struct {
         };
     }
 
-    /// The current trigger overlap set, copied into `out` (M1.1.15.2 G5a,
+    /// The current trigger overlap set, copied into `out` (
     /// `engine-physics-solver.md` §1.13.11).
     ///
     /// **Truncation is REFUSED, and that is where this entry parts from the query
@@ -231,12 +228,12 @@ pub const Forge3DModule = struct {
     /// deduplicated at step 10 bis, and this copies it.
     pub fn getTriggerOverlaps(self: *Forge3DModule, out: []api.TriggerOverlap) anyerror!u32 {
         const pairs = self.world.sensors.current.items;
-        // THE SECOND HALF OF §12's CONTRACT, and G8 is where it lands: "le compte
-        // requis obtenable en passant une tranche vide". An EMPTY slice is a SIZE
+        // THE SECOND HALF OF §12's CONTRACT: « le compte requis obtenable en passant
+        // une tranche vide ». An EMPTY slice is a SIZE
         // QUERY and not a failed read — a caller that has no buffer yet is asking
         // how big one must be, and answering `BufferTooSmall` to that leaves it with
         // the same question it came with. The first half — refusal rather than
-        // truncation — was transcribed at G5a and this was not.
+        // truncation — was transcribed and this was not.
         //
         // Placed BEFORE the fit test, or an empty slice against a non-empty state
         // would take the refusal branch, which is exactly the defect.
@@ -248,18 +245,18 @@ pub const Forge3DModule = struct {
         return @intCast(pairs.len);
     }
 
-    // --- Joints (M1.1.15.2 G5a) — TYPED STUBS ---
+    // --- Joints — TYPED STUBS ---
     //
     // The seven types of `api.joint` are minted so these three are PRESENTABLE:
     // a typed stub needs its parameter type to exist, so without them these
     // entries could not be written at all, bodyless or otherwise. Constraint
-    // SOLVING is M1.1.16 through M1.1.18 (`engine-phase-1-plan.md`).
+    // SOLVING is not implemented here (`engine-phase-1-plan.md`).
     //
     // They FAIL LOUD rather than returning a plausible value. `createJoint`
     // returning a handle no solver knows would put a dead id into a caller's
     // state, and `setJointMotor` returning `void` would report a write that never
     // happened — the same class the multi-result query entries closed at
-    // M1.1.15.1. `destroyJoint` is `void` by the frozen signature and cannot
+    // closed. `destroyJoint` is `void` by the frozen signature and cannot
     // report; it is a no-op because no id can exist for it to destroy, every path
     // that could mint one having failed first.
 
@@ -304,7 +301,7 @@ pub const Forge3DModule = struct {
     }
 
     /// The allocator does NOT appear on this entry, and the frozen signature is unchanged
-    /// since M1.1.11.1 made the shape store own memory: the interface tier holds the
+    /// since the shape store owns its memory: the interface tier holds the
     /// allocator and supplies it, which is precisely what this adapter is.
     pub fn destroyShape(self: *Forge3DModule, id: ShapeId) void {
         self.world.store.destroyShape(self.gpa, id);
@@ -312,9 +309,9 @@ pub const Forge3DModule = struct {
 
     // --- Queries ---
     //
-    // THE EIGHT ENTRIES ARE WRAPPED HERE AND NOWHERE ELSE. M1.1.10 moved the solver-side
-    // family to the solver scalar and left `api/types.zig` untouched, recording that the
-    // two halves would be joined in ONE place. This is that place: the translation is
+    // THE EIGHT ENTRIES ARE WRAPPED HERE AND NOWHERE ELSE. The solver-side family
+    // moved to the solver scalar while `api/types.zig` stayed untouched, on the record
+    // that the two halves would be joined in ONE place. This is that place: the translation is
     // field-for-field and the only arithmetic in it is the named precision crossing.
 
     pub fn raycast(self: *Forge3DModule, q: api.RaycastQuery) ?api.RaycastHit {
@@ -334,7 +331,7 @@ pub const Forge3DModule = struct {
     /// §1.11.14's mandatory deduplication governs the tier that DISCARDS the body — the
     /// three `[]EntityId` entries — and this entry does not discard it.
     ///
-    /// **FALLIBLE since M1.1.15.1.** Staging above `stack_hits` allocates, and an entry that
+    /// **FALLIBLE.** Staging above `stack_hits` allocates, and an entry that
     /// allocates and cannot report returns, under exhaustion, a truncated success
     /// indistinguishable from a complete answer — the §0 prohibition in its disguised form.
     pub fn raycastAll(self: *Forge3DModule, q: api.RaycastQuery, out: []api.RaycastHit) anyerror!u32 {
@@ -443,7 +440,7 @@ pub const Forge3DModule = struct {
 
     /// **KEEPS ITS ERROR CHANNEL, and it is the one pose-adjacent entry that cannot join the
     /// three `void` ones.** It CREATES a capsule shape, and that allocation has nothing to do
-    /// with the moved log the M1.1.15.1 reservation seam bounded. Three outcomes a bare
+    /// with the moved log the reservation seam bounds. Three outcomes a bare
     /// `bool` would conflate: a typed error for the caller's fault, `false` for a target
     /// volume that is occupied — a legitimate gameplay answer — and `true` for success. The
     /// allocator comes from the adapter, which is exactly why it must live on the `Impl` and
@@ -497,8 +494,8 @@ pub const Forge3DModule = struct {
     /// `root.keyLess`, which is ENTITY-MAJOR with `BodyId` only as the final tie-break, so
     /// every body of one entity forms one contiguous run. The ACTIVE check below states
     /// that dependency where it is relied on: it runs in every mode and returns
-    /// `error.UnorderedProjection`, a `std.debug.assert` having been what the guard used to
-    /// be and what ReleaseFast compiled to nothing.
+    /// `error.UnorderedProjection`. Do NOT make it a `std.debug.assert` — ReleaseFast
+    /// compiles that to nothing, in the one mode a game ships.
     /// **THIS FUNCTION DOES NOT SEE THE RUN — it sees the window it is handed.** Adjacent
     /// deduplication is exact only under entity-major order, and a first window can be
     /// internally ordered, fill the slice and return before a smaller element ever reaches a
@@ -536,15 +533,14 @@ pub const Forge3DModule = struct {
     /// above it. Allocation failure PROPAGATES, and there is no longer a variant that does
     /// not.
     ///
-    /// **ALL FOUR CALLERS REPORT SINCE M1.1.15.1, and the absorbing twin is deleted rather
-    /// than left unused.** This path had one form that reported and one that returned a
-    /// shorter slice, because three of the four frozen entries were `u32` with nowhere to put
-    /// a failure. That was the §0 rule's own prohibition — an entry that ALLOCATES AND HAS NO
+    /// **ALL FOUR CALLERS REPORT, and there is no absorbing twin.** A second form that
+    /// returned a shorter slice instead of reporting would be the §0 rule's own
+    /// prohibition — an entry that ALLOCATES AND HAS NO
     /// CHANNEL — wearing a different return type: `void` was its obvious shape, a `u32` that
     /// truncates in silence is its disguised one, and a truncated success is indistinguishable
     /// from a complete answer to a caller who sized the slice precisely to tell them apart.
-    /// `engine-tier-interfaces.md` §1 now types the three `anyerror!u32`, decided at
-    /// M1.1.15.1 and not at the freeze, whose exit criterion is that the surface be FINAL.
+    /// `engine-tier-interfaces.md` §1 types the three `anyerror!u32`, decided before the
+    /// freeze, whose exit criterion is that the surface be FINAL.
     fn stageBodiesFallible(self: *Forge3DModule, n: usize, stack: []BodyId) ![]BodyId {
         if (n <= stack.len) return stack[0..n];
         try self.scratch_bodies.resize(self.gpa, n);
@@ -576,8 +572,8 @@ pub const Forge3DModule = struct {
             // solver, `want` doubling past a `buf` that never grows, and neither exit
             // reached. Measured, not deduced — a counter-factual that restored the absorbing
             // form HUNG here rather than failing an assertion. So the fallible staging is
-            // what makes this loop finite, and the pre-M1.1.15.1 form needed a third exit on
-            // `buf.len < want` for exactly that reason.
+            // what makes this loop finite, and an absorbing form would need a third exit
+            // on `buf.len < want` for exactly that reason.
             const buf = try self.stageBodiesFallible(want, &stack);
             const found = try filler.fill(buf);
             const n = try self.dedupEntities(buf[0..found], out);

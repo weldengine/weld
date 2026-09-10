@@ -260,7 +260,7 @@ test "batcher: produces under 100 drawcalls for 100k entities on 100 distinct me
     }
     try b.finalize(.{ 50, 50, 50 });
 
-    // Strict assertion brief §Acceptance criteria > Tests.
+    // Strict assertion, per the perf target above.
     try std.testing.expect(b.stats.buckets <= 100);
     try std.testing.expectEqual(@as(u32, 100_000), b.stats.entities);
 }

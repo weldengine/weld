@@ -1,7 +1,7 @@
 //! Shader hot-reload.
 //!
 //! Filewatch on `assets/shaders/` + recompile in a dedicated thread +
-//! pipeline recreate via GAL. Target latency < 200 ms (brief §Scope).
+//! pipeline recreate via GAL. Target latency < 200 ms.
 //!
 //! A polling-based watcher (stat every N ms). Switching
 //! to inotify/FSEvents/ReadDirectoryChangesW depending on OS via `std.fs.Watch`
@@ -9,8 +9,8 @@
 //!
 //! If `glslc` is absent from PATH when the watcher starts, we log a warn
 //! (`glslc not found, hot-reload disabled, runtime continues with cached
-//! .spv`) and `start` returns without starting the thread (cf. brief §Observable
-//! behavior + §Notes decision 7).
+//! .spv`) and `start` returns without starting the thread (see
+//! the compiler's keeper policy).
 
 const std = @import("std");
 const foundation = @import("foundation");

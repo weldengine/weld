@@ -1,7 +1,7 @@
-//! The Forge-side translation of M1.1.13's two sensor deltas into
-//! `TriggerEnter` / `TriggerExit` on the Tier 0 event bus (M1.1.15.2 G6).
+//! The Forge-side translation of the solver's two sensor deltas into
+//! `TriggerEnter` / `TriggerExit` on the Tier 0 event bus.
 //!
-//! **M1.1.13 delivered the lower half by design and said so**: `forge_3d`
+//! **The solver delivers the lower half BY DESIGN**: `forge_3d`
 //! imports only `foundation/math` and `forge/api/` — a C1.1 exit metric — so the
 //! solver produces an overlap STATE and two DELTAS, and the translation into
 //! typed events belongs above it. This file is that upper half, and it lives in
@@ -41,8 +41,8 @@ pub const TriggerPair = extern struct {
 };
 
 /// The default of both fields, and **not `0`**: zero is a LIVE handle to slot 0
-/// generation 0, the mistake `CharacterMoveResult.ground_body` made before
-/// M1.1.12. The emitted declaration renders whatever this is, so a `0` here would
+/// generation 0, the mistake `CharacterMoveResult.ground_body` once made.
+/// The emitted declaration renders whatever this is, so a `0` here would
 /// put a live handle in the `.d.etch` as the "absent" value and every reader of
 /// that file would inherit it.
 const dead_entity: u64 = @bitCast(core.ecs.EntityId.dead);

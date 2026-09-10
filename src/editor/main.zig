@@ -5,7 +5,7 @@
 //!
 //! Lifecycle:
 //!   1. Create the shm region (`/weld-shm-viewport-<pid>`).
-//!   2. Open the Vulkan-capable window at the brief's resolution.
+//!   2. Open the Vulkan-capable window at the configured resolution.
 //!   3. Initialise the blit renderer (instance, device, swapchain,
 //!      sampled image bound to the viewport, fullscreen pipeline).
 //!   4. Listen on the IPC socket, spawn the runtime (unless

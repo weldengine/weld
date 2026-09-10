@@ -7,7 +7,7 @@
 //!
 //! No GAL call site references a `vk.*` type directly — everything goes
 //! through the helpers in this file. This discipline is enforced by the
-//! linter rule brief §CI: no `vk.device_dispatch` access outside the
+//! linter rule: no `vk.device_dispatch` access outside the
 //! `gal/vulkan/` module.
 
 const std = @import("std");

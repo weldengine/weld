@@ -1,7 +1,7 @@
 //! Audio cooker — intermediate → `.audio.bin`.
 //!
 //! The payload is raw PCM: no Opus, the Opus keeper not being wired,
-//! brief §Out-of-scope). Metadata section: `sample_rate` u32,
+//! see the note above. Metadata section: `sample_rate` u32,
 //! `channels` u16, `bits_per_sample` u16 (LE).
 
 const std = @import("std");

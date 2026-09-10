@@ -6,7 +6,7 @@
 //! already-unfiltered previous scanline (all zeros for the first row);
 //! `prev.len == curr.len`.
 //!
-//! Same discipline as `adler32` (brief §Notes — inaugural SIMD kernels):
+//! Same discipline as `adler32`:
 //! scalar `reference` oracle + portable `@Vector` `vectorized`, **no
 //! ISA-specific asm**, baseline only. The Paeth recurrence is sequential
 //! along pixels (each pixel's left neighbour is a just-computed output), so

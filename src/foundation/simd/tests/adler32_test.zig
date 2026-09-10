@@ -1,4 +1,4 @@
-//! ADLER32 kernel tests (brief §Acceptance ▸ Tests).
+//! ADLER32 kernel tests.
 //!
 //! - `test "adler32 portable equals reference"` — the dispatched `@Vector`
 //!   path matches the scalar oracle on a large, varied corpus.

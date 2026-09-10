@@ -99,8 +99,8 @@ fn laneTerms(
 /// Exact value of one determinant as `(m, e)`, or `null` when it is EXACTLY zero.
 ///
 /// **ALL EIGHT TERMS ARE ALWAYS RETAINED. There is no truncation window, and removing it is the
-/// point.** An earlier version dropped terms it judged negligible, first against the largest term and
-/// then — after that was measured wrong — against the accumulated sum. Both are unsound here, and the
+/// point.** Dropping terms judged negligible is unsound here, whether against the largest
+/// term or against the accumulated sum, and the
 /// second fails on exactly the case that matters most: three proportional points give a determinant
 /// that is exactly zero, which is TOTAL cancellation, so the accumulated sum tends to zero and a
 /// window calibrated on it has nothing left to calibrate against. The short-circuit then discards a

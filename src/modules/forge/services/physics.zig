@@ -1,12 +1,12 @@
-//! The Tier 1 physics service, callable from Etch (M1.1.15.2 G6,
-//! `etch-abi-zig.md` §8, calling surface `engine-physics-forge.md` §13).
+//! The Tier 1 physics service, callable from Etch (`etch-abi-zig.md` §8,
+//! calling surface `engine-physics-forge.md` §13).
 //!
 //! **THE SIGNATURES ARE COMPONENTWISE, and it is a measurement that forced it,
 //! not a preference.** §13 writes `physics_raycast(origin, direction, ...)` with
 //! `Vec3` arguments and a struct result. Measured in the tree: `Vec3` is a type
 //! the CHECKER knows (`types.BuiltinType.vec3`) and there is NO `vec3` variant in
 //! `etch/value.zig` and ZERO `.vec3` handling in `etch/interp.zig` — a `Vec3`
-//! value is not executable in the Phase 1 tree-walker at all, independently of
+//! value is not executable in the tree-walker at all, independently of
 //! anything this service does. So §13's shape is unreachable from a rule today,
 //! and the expressible form is scalar. Recorded as a deviation with that
 //! measurement; the aggregate form returns when the tree-walker carries an
@@ -15,8 +15,8 @@
 //! **PRECISION.** Every declared type here is `f64`, `i64`, `bool` or `u64` —
 //! never `Real`, never `WorldReal`. That is what makes the emitted `.d.etch`
 //! INVARIANT under `-Dphysics_f64`, and it is asserted below rather than left to
-//! a reader to notice: the `bindgen-check` premise recorded in the milestone
-//! brief expires at this gate, and this is the half of the answer that lives in
+//! a reader to notice: the `bindgen-check` single-cell premise has expired, and
+//! this is the half of the answer that lives in
 //! code. The other half is the measurement — the committed artifact, emitted at
 //! f32, checked again under f64.
 
@@ -40,7 +40,7 @@ const Velocity = api.Velocity;
 const RigidBody = api.RigidBody;
 
 /// The service's context: the module the calls reach, plus what a MUTATION needs
-/// and a query does not (M1.1.15.2 G11).
+/// and a query does not.
 ///
 /// **The ECS and the journal are here because the mutation half of this service
 /// is a Tier 1 operation and not an interface entry.** `PhysicsModule` is frozen
@@ -112,7 +112,7 @@ pub fn raycastAny(
 /// **`dead` and not a sentinel of this service's invention**: the pattern is
 /// already reserved as "no handle" across the whole surface, and `0` is a LIVE
 /// handle to slot 0 generation 0 — the mistake `CharacterMoveResult.ground_body`
-/// made before M1.1.12.
+/// once made.
 pub fn raycastEntity(
     ctx: *Ctx,
     origin_x: f64,
@@ -177,7 +177,7 @@ pub fn pointQueryCount(
 }
 
 // ---------------------------------------------------------------------------
-// THE MUTATION HALF (M1.1.15.2 G11)
+// THE MUTATION HALF
 //
 // `engine-movement.md` §9, §10 and §11 spell these `physics_move_character`,
 // `physics_resize_character` and `physics_set_character_position`, and marks the
@@ -186,7 +186,7 @@ pub fn pointQueryCount(
 // the explicit kinematic displacement. The prefix is dropped because the SERVICE
 // carries it: the tree-walker dispatches by RECEIVER, so `physics.move_character`
 // is what a rule writes and `physics_move_character` has no implementation to bind
-// to — the same mapping G6 already applied to `physics_raycast_any`.
+// to — the same mapping already applied to `physics_raycast_any`.
 //
 // **RESOLUTION IS THIS LAYER'S, and it is not an interface entry.** An entity is
 // an ECS notion; `PhysicsModule` is frozen at thirty-two entries, takes handles,
@@ -248,7 +248,7 @@ pub fn moveKinematic(
 ) !void {
     const body = try bodyOf(ctx, entity);
     // **THE SUBJECT IS CHECKED BEFORE THE ARGUMENTS, AND BOTH BEFORE ANY MUTATION**
-    // (M1.1.15.2 G14). This entry DERIVES both velocities from a target pose, which is
+    // This entry DERIVES both velocities from a target pose, which is
     // meaningful for a kinematic body and for no other: a static is not moved by the
     // solver at all, and a dynamic one owns its velocities through integration or
     // through the contact solver. Applying it to either would write a pose and a pair
@@ -262,13 +262,13 @@ pub fn moveKinematic(
     // return.
     const kind = ctx.m.world.bm.bodyType(body) orelse return error.StaleBodyHandle;
     if (kind != .kinematic) return error.NotKinematic;
-    // **AND THE SUBJECT MUST BE UNDER GAMEPLAY AUTHORITY** (M1.1.15.2 G21,
-    // `engine-physics-forge.md` § *Autorite d'ecriture*). The document states that a
+    // **AND THE SUBJECT MUST BE UNDER GAMEPLAY AUTHORITY**
+    // (`engine-physics-forge.md` § *Autorite d'ecriture*). The document states that a
     // kinematic body moved through the API is `.gameplay` — and **that is a guarantee
     // only if something imposes it**. Until this gate nothing did: this entry read
     // neither `RigidBody.authority` nor wrote it, and succeeded on an entity carrying no
     // `RigidBody` at all. The sentence was an intention written in the grammar of a
-    // guarantee, and the reasoning that removed the kinematic short-circuit at G19 rested
+    // guarantee, and the reasoning that removed the kinematic short-circuit rested
     // on it.
     //
     // **A MISSING COMPONENT IS A REFUSAL**, since its absence IS the `.solver` default —
@@ -299,7 +299,7 @@ pub fn moveKinematic(
     });
     // The rotation is used by CONJUGATION to derive the angular velocity, and a
     // conjugate inverts a unit quaternion alone — the domain assert class
-    // M1.1.10 established on every rotation reaching a kernel. Refused rather
+    // established on every rotation reaching a kernel. Refused rather
     // than normalised: normalising would serve an intent the caller did not
     // express, and `(0,0,0,0)` has no direction to recover.
     const q = rot.toArray();
@@ -338,7 +338,7 @@ pub fn setAuthority(ctx: *Ctx, entity: u64, authority: i64) !void {
 ///
 /// **THE RESOLVED POSE IS MIRRORED HERE, where `engine-movement.md` §10 writes it
 /// in the rule.** §10 spells `entity.get_mut(Transform).position = result.position`
-/// because its `result` is a record; the Phase 1 tree-walker carries no aggregate
+/// because its `result` is a record; the tree-walker carries no aggregate
 /// value, so a componentwise entry cannot return one and the assignment has no
 /// right-hand side. Moving the mirror INTO the call is the move the corpus itself
 /// makes for `physics_move_kinematic`, and it is strictly safer: the pose and the
@@ -404,14 +404,14 @@ pub fn setCharacterPosition(ctx: *Ctx, entity: u64, x: f64, y: f64, z: f64) !voi
 /// Drive a joint's motor from a rule — `engine-physics-forge.md` §5's `open_door`,
 /// which is the reason the thirty-second interface entry exists at all.
 ///
-/// **COMPONENTWISE, and RD-2's scope reaches further here than anywhere else.** §5
+/// **COMPONENTWISE, and the reason reaches further here than anywhere else.** §5
 /// writes `physics.set_joint_motor(hinge.joint_id, hinge.joint.joint_type.motor)`
 /// — two arguments, of which the second is an aggregate. Neither crosses the
-/// Phase 1 tree-walker: `JointId` is a packed handle with no Etch scalar spelling,
+/// tree-walker: `JointId` is a packed handle with no Etch scalar spelling,
 /// and `?JointMotor` is a struct whose `target` is itself a tagged union. So the
 /// RECEIVER FORM is what §5 fixes and what resolves — `physics.set_joint_motor`,
 /// dispatched on the service — while the arguments take the scalar decomposition
-/// RD-2 already imposes on the query half.
+/// the query half already imposes.
 ///
 /// `enabled` carries the OPTIONAL: §5 says an absent or `null` motor means no
 /// motor, and a `bool` is the only way an optional crosses a surface whose scalar
@@ -423,9 +423,9 @@ pub fn setCharacterPosition(ctx: *Ctx, entity: u64, x: f64, y: f64, z: f64) !voi
 /// variants carrying several modes and several values. §5's own example is the
 /// scalar one, and it is what `hinge`, `prismatic` and `distance` need. The
 /// multi-axis targets reach Etch when the tree-walker carries an aggregate, which
-/// is the same condition RD-2 already states.
+/// is the same condition the query half already states.
 ///
-/// **It fails loud, exactly as the three joint entries of G5a do.** `Forge3DModule`
+/// **It fails loud, exactly as the three joint entries do.** `Forge3DModule`
 /// answers `error.JointsNotImplemented` and this wrapper propagates it; a stub
 /// that returned success would be the truncated-success class this milestone has
 /// closed three times.
@@ -536,6 +536,6 @@ pub const spec = services.ServiceSpec{
     },
 };
 
-/// The emitted `physics.d.etch`. Embedded, never hand-written — G3's emitter
+/// The emitted `physics.d.etch`. Embedded, never hand-written — the emitter
 /// produces it and `bindgen-check` guards it.
 pub const declaration_source = @embedFile("physics.d.etch");

@@ -5,9 +5,9 @@
 //! (`createSampler`/`destroySampler` methods) to avoid the dispatch cost
 //! of a dedicated file with 0 helpers.
 //!
-//! This file stays present to follow the brief §Files split plan
+//! This file stays present to follow the file split plan
 //! and to expose an extension point for presets of common
-//! samplers — anisotropic, point, linear — accessible by name).
+//! samplers — anisotropic, point, linear — accessible by name.
 
 const std = @import("std");
 const types = @import("../types.zig");

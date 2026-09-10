@@ -7,7 +7,7 @@
 //! escape hatches pre-wired day 1 for `TimelineSemaphore`, `BarrierExplicit`,
 //! `DescriptorIndexing`).
 //!
-//! **Absolute isolation rule (brief §Notes known pitfalls)**: no native
+//! **Absolute isolation rule**: no native
 //! Vulkan type (`vk.VkBuffer`, etc.) must appear here. The GAL types are
 //! opaque on the caller side — each backend maps to its native types via
 //! its own `conv.zig` (cf. `gal/vulkan/conv.zig`).
@@ -359,7 +359,7 @@ pub const TextureDescriptor = struct {
     depth_or_array_layers: u32 = 1,
     mip_levels: u32 = 1,
     /// `sample_count` > 1 returns `error.Unsupported`
-    /// (cf. brief §Out-of-scope MSAA).
+    /// (no MSAA).
     sample_count: u32 = 1,
     usage: TextureUsage,
 };
@@ -557,7 +557,7 @@ pub const ComputePassDescriptor = struct {
 };
 
 // ============================================================================
-// Device selection (consistent with --gpu-prefer / --vulkan-driver, brief §Scope)
+// Device selection (consistent with --gpu-prefer / --vulkan-driver)
 // ============================================================================
 
 /// Hardware selection preference.

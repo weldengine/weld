@@ -1,7 +1,7 @@
 //! Texture cooker — intermediate → `.texture.bin`.
 //!
 //! The payload is raw RGBA8: no mipmaps, no GPU block compression (see the
-//! §Out-of-scope). Metadata section: `width` u32, `height` u32 (LE).
+//! note above). Metadata section: `width` u32, `height` u32 (LE).
 
 const std = @import("std");
 const format = @import("../format/root.zig");

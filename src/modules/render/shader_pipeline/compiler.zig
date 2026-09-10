@@ -1,12 +1,12 @@
 //! Shader compiler.
 //!
 //! Compiles GLSL shaders into SPIR-V by spawning the `glslc` CLI (consistent
-//! with brief §Notes decision 7: no shaderc/glslang binding, the keeper count
+//! with the keeper policy: no shaderc/glslang binding, the keeper count
 //! stays at 7).
 //!
-//! Consistent with brief §Notes ("glslc is a peer dependency only
+//! Consistent with "glslc is a peer dependency only
 //! for `zig build shaders` (regeneration) or for the dev runtime hot-reload.
-//! The standard `zig build` build does not depend on `glslc`."). If
+//! The standard `zig build` build does not depend on `glslc`." If
 //! `glslc` is absent from PATH, `compile` returns `error.GlslcNotFound`.
 //!
 //! Zig 0.16 API: `std.process.run` (which takes `io: Io`) — not
@@ -17,7 +17,7 @@ const std = @import("std");
 /// Global counter to generate unique temp file names.
 var unique_id: std.atomic.Value(u64) = .init(0);
 
-/// The supported shader stages. Geometry, tessellation
+/// The supported shader stages (geometry, tessellation
 /// raygen/closesthit/miss for RT).
 pub const Stage = enum {
     vertex,
@@ -34,7 +34,7 @@ pub const Stage = enum {
 };
 
 /// Compilation errors. `GlslcNotFound` is the expected error when
-/// the tool is not installed (cf. brief §Observable behavior).
+/// the tool is not installed.
 pub const CompileError = error{
     GlslcNotFound,
     GlslcCrashed,

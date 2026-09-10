@@ -1,6 +1,6 @@
 //! Vulkan frame cycle.
 //!
-//! Absorbs the role of the `vk_frame.zig` spike (removed, brief §Removals).
+//! Creates and submits the frame's command buffers.
 //! What is exposed is a submission helper (`submit`) that takes a finished
 //! CommandEncoder and a sync pair (wait/signal semaphore + fence) and
 //! submits to the graphics queue.

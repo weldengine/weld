@@ -1,4 +1,4 @@
-//! Paeth-filter-decode kernel tests (brief §Acceptance ▸ Tests:
+//! Paeth-filter-decode kernel tests (
 //! `test "paeth portable equals reference"`).
 
 const std = @import("std");

@@ -6,7 +6,7 @@
 //! - `vectorized` — a portable `@Vector` form using the standard
 //!   weighted-sum decomposition over NMAX-bounded blocks.
 //!
-//! Per the brief (§Notes — inaugural SIMD kernels): `@Vector` plus a scalar
+//! Inaugural SIMD kernels: `@Vector` plus a scalar
 //! reference, **no ISA-specific asm**, **no zlib-ng parity chasing**. The
 //! point is to validate the `foundation/simd` infrastructure (scalar-vs-
 //! `@Vector` test pattern, dispatch layering), not to be fast — ADLER32 runs

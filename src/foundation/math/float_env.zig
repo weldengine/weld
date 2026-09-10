@@ -36,9 +36,8 @@
 //! writer would put ONE register layout in two places: the drift shape this
 //! repository has already paid for once (`contactMargin`, duplicated in
 //! `fast_paths.zig` while both copies were private). One definition, however
-//! many callers — the number is not a property this file gets to fix, and the
-//! sentence that used to end «three callers» went false the moment the set grew
-//! (see `install`).
+//! many callers — the number is not a property this file gets to fix, and a
+//! sentence ending in a COUNT goes false the moment the set grows (see `install`).
 //!
 //! `ARCH-031`'s own *Sources de vérité* line splits the same way, which is the
 //! corroboration rather than the argument: `engine-coordinate-system.md` §2 —

@@ -24,7 +24,7 @@
 //!
 //! The Tier 0 Chase-Lev job system is deliberately NOT used: its public
 //! surface is ECS-chunk-shaped and using it here would require widening it
-//! (a Case 2 blocker per the brief). `std.Io` async is the §8-prescribed,
+//! (a design blocker). `std.Io` async is the §8-prescribed,
 //! surface-neutral mechanism.
 
 const std = @import("std");

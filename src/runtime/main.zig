@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (snapshot.read(io, args.snapshot)) |snap| start_frame = snap.frame_id;
     }
 
-    // Spawn the dedicated IPC reader thread per brief § Scope —
+    // Spawn the dedicated IPC reader thread —
     // the main loop renders the mire at ~60 Hz while the reader
     // drains the socket and replies to transactional messages.
     var reader_state = ReaderState{

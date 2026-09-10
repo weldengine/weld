@@ -1,5 +1,5 @@
 //! The INWARD half of the ECS seam — gameplay's pose and velocity into the
-//! solver (M1.1.15.2 G5b). `sync.zig` is the outward half and this file mirrors
+//! solver. `sync.zig` is the outward half and this file mirrors
 //! its discipline rather than inventing one.
 //!
 //! **Authority is DECLARED, never detected**, and the model's motive is on
@@ -16,11 +16,9 @@
 //! | `kinematic` | `.gameplay` | pose + velocity, on change | NOTHING         | pose imposed |
 //! | `static`    | either      | pose only, on change       | nothing         | not integrated |
 //!
-//! **The "during `step`" column REFERS and does not summarise**, which is the correction
-//! the owner document made to its own copy of this table and which this one had to make
-//! too. It read "integrated, inverse mass set to zero" — the superseded formulation,
-//! left standing after its replacement. A table cell that paraphrases a rule is a second
-//! declarant of it, and two declarants diverge. What a piloted body does is stated once,
+//! **The "during `step`" column REFERS and does not summarise.** A table cell that
+//! paraphrases a rule is a second declarant of it, and two declarants diverge. What
+//! a piloted body does is stated once,
 //! by `weld_forge`'s `PhysicsAuthority`: it does not integrate, it presents an infinite
 //! mass to every impulse path, and it keeps its identity while leaving its island.
 //!
@@ -47,7 +45,7 @@
 //! UNCONDITIONALLY — itself, W4 on retained partners, `refreshProxy` — and the
 //! velocity setters wake before writing. Without the change-driven guard every
 //! `.gameplay` entity would stay awake forever and feed the broadphase for
-//! nothing, which is the defect the load-bearing test of this gate pins.
+//! nothing.
 //!
 //! **Normative tick order**, on which the whole model depends:
 //!
@@ -92,7 +90,7 @@ const WorldQuat = api.precision.WorldQuat;
 /// application.
 pub const Journal = struct {
     /// Keyed by the COMPLETE `BodyId` — index AND generation — and never by a
-    /// position (M1.1.15.2 G9).
+    /// position.
     ///
     /// **It was keyed by registration position, and `removeBody` shifts.**
     /// `PhysicsWorld.removeBody` uses `orderedRemove` deliberately — its own
@@ -117,7 +115,7 @@ pub const Journal = struct {
     entries: std.AutoHashMapUnmanaged(api.BodyId, Entry) = .empty,
 
     /// **THE DIAGNOSTIC'S DURABLE RECORD, and it is here because the production path
-    /// DISCARDS the pass's result** (M1.1.15.2 G15, P1-a). `stepAndPublishSystem` writes
+    /// DISCARDS the pass's result.** `stepAndPublishSystem` writes
     /// `_ = try in.syncIn(...)`: the registered system has nowhere to return a
     /// `SyncInResult` to, so until this gate the only reader of `forbidden_mutations`
     /// was a test calling `syncIn` by hand. A diagnostic no production path can observe
@@ -154,7 +152,7 @@ pub const Journal = struct {
         /// Tick at which an EXPLICIT WRAPPER applied an operation to this body.
         ///
         /// **DISTINCT FROM `consumed_tick`, and conflating them was a defect**
-        /// (M1.1.15.2 G16). The restore branch asks "does a wrapper own this tick",
+        /// The restore branch asks "does a wrapper own this tick",
         /// and it read `consumed_tick == now` — a value `syncIn` ALSO writes, at the
         /// end of its own pass. So a second `syncIn` call within one tick took the
         /// first call's own bookkeeping for a wrapper's mark and restored the mirror:
@@ -234,7 +232,7 @@ pub const SyncInResult = struct {
     /// other says a body was found in a state its regime forbids.
     woke_for_invariant: u32 = 0,
     /// **« Mutation ECS interdite sous autorité `.solver` »** — how many bodies this
-    /// pass caught in that state (M1.1.15.2 G12).
+    /// pass caught in that state.
     ///
     /// **The wording is the owner's and the wording is the contract.** § *Autorité
     /// d'écriture* formulates it as a property of the STATE and never as "a rule
@@ -252,7 +250,7 @@ pub const SyncInResult = struct {
 /// Was `T`'s slot for `entity` stamped AT `tick` exactly?
 ///
 /// **The question the diagnostic needs, and the one a baseline cannot answer on a
-/// body's first pass** (M1.1.15.2 G17). `changedSince` takes `?Tick` and returns TRUE
+/// body's first pass.** `changedSince` takes `?Tick` and returns TRUE
 /// unconditionally when it is null, because "never consumed" gives it nothing to filter
 /// by — so the diagnostic had to suppress its first observation, and the FIRST forbidden
 /// mutation of every body was lost: the baseline advanced, `syncOut` repaired the
@@ -260,17 +258,17 @@ pub const SyncInResult = struct {
 ///
 /// This asks the decidable question instead. The normative tick order puts gameplay
 /// writes before `syncIn` in the SAME tick, so a forbidden mutation is stamped at
-/// exactly `now` — no baseline required, and the third instance of the G5b sentinel
-/// (`null` conflating "never consumed" with "no change") stops mattering here.
+/// exactly `now` — no baseline required, and the `?Tick` sentinel that conflates
+/// "never consumed" with "no change" stops mattering here.
 ///
 /// It is not weaker than `changedSince` for this use: for a `.solver` body the pass
 /// advances the baseline every tick, so `changedTick > now - 1` and `changedTick == now`
 /// are the same predicate everywhere except on the first pass, which is the case that
 /// was wrong.
 fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
-    // Routed through `World.changedTickOf` since M1.B/G5, which carries the
-    // storage decision so this site carries none. The previous body reached the
-    // archetype directly and therefore answered for the TABLE half only —
+    // Routed through `World.changedTickOf`, which carries the
+    // storage decision so this site carries none. Reaching the archetype directly
+    // would answer for the TABLE half only —
     // unreachable today, since `registerComponent(T)` never sets a mode and
     // every `T` here is a Zig-registered physics component, but that is a
     // PREMISE about another module's registration path and this removes the
@@ -332,8 +330,8 @@ pub fn syncIn(
         // composes no wake, which is why writing it every tick costs nothing.
         pw.setBodyAuthorityIsGameplay(body, auth == .gameplay);
 
-        // **AN INVARIANT IS MAINTAINED, IT IS NOT TRIGGERED** (M1.1.15.2 G20,
-        // `engine-physics-forge.md` § *Autorite d'ecriture*). `gameplay` and `sleeping`
+        // **AN INVARIANT IS MAINTAINED, IT IS NOT TRIGGERED**
+        // (`engine-physics-forge.md` § *Autorite d'ecriture*). `gameplay` and `sleeping`
         // are incompatible: that is a PROPERTY of the regime, and it must not be carried
         // by the code that detects the TRANSITION to `.gameplay`. The two are distinct —
         // a transition is an event, an invariant holds whether or not one occurred — and
@@ -344,8 +342,8 @@ pub fn syncIn(
         // whose `seen` is false so no transition is ever detected on it; a journal
         // REPLACED on a running world, since `attachSyncInJournal` has no precondition on
         // the state of its bodies; and a body ALREADY ASLEEP at the moment the authority
-        // is declared. The G18 form — `if (to_gameplay) wakeBody` — covered the third and
-        // only when a previous pass had recorded the authority.
+        // is declared. An `if (to_gameplay) wakeBody` form covers the third only when a
+        // previous pass has recorded the authority.
         //
         // It costs one flag read per registration and wakes nothing in steady state: a
         // piloted body cannot fall asleep at all, being excluded from the island
@@ -359,7 +357,7 @@ pub fn syncIn(
         // TRANSITION, detected here because `authority` is a PUBLIC field: a rule
         // writes it directly, so no wrapper can be the guardian of the invariant.
         //
-        // **REALISED PER REGISTRATION AND NOT PER ELECTION** (M1.1.15.2 G18). Same
+        // **REALISED PER REGISTRATION AND NOT PER ELECTION.** Same
         // reasoning as the authority mirror above, applied to the other thing the flip
         // must do: the election governs which body carries the POSE, and sleep governs
         // the pose and not the regime. A multi-body entity flipped to `.gameplay` while
@@ -379,7 +377,7 @@ pub fn syncIn(
 
         // **`.solver → .gameplay` PUBLISHES FIRST, then flips**, and the direction of
         // information flow on this one tick is the OPPOSITE of every other `.gameplay`
-        // tick. G5b instead SEEDED FROM THE ECS on the reasoning that `syncOut` had
+        // tick. SEEDING FROM THE ECS would rest on the reasoning that `syncOut` had
         // already published, which is a claim about `syncOut` having run for this body
         // — and `syncOut` skips a SLEEPING body and withholds from a `.gameplay` one.
         // Where it has not run, the ECS `Transform` is the pose of the last published
@@ -401,12 +399,12 @@ pub fn syncIn(
         }
 
         // **AN EXPLICIT WRAPPER ALREADY APPLIED THIS TICK — the pass restores the
-        // mirror and consumes nothing** (M1.1.15.2 G11). `applied_tick` has exactly ONE
+        // mirror and consumes nothing.** `applied_tick` has exactly ONE
         // writer, `Journal.markApplied`, called by a Tier 1 mutation wrapper during the
         // gameplay phase.
         //
-        // **It read `consumed_tick` until G16, and that was a second declarant of a
-        // different fact.** The pass writes `consumed_tick` itself, at its own end, so a
+        // **Do NOT read `consumed_tick` here — it is a second declarant of a different
+        // fact.** The pass writes `consumed_tick` itself, at its own end, so a
         // second `syncIn` call within one tick read its own bookkeeping as a wrapper's
         // mark and restored the mirror — publishing, on a KINEMATIC `.solver` body, a
         // pose `syncOut` deliberately withholds because gameplay owns a kinematic pose.
@@ -437,11 +435,11 @@ pub fn syncIn(
         }
 
         // **THE DIAGNOSTIC, and it is detected BEFORE the pass decides to consume
-        // anything** (M1.1.15.2 G12). § *Autorité d'écriture* declares it word for word
-        // — "mutation ECS interdite sous autorité `.solver`" — and nothing produced it:
-        // the `continue` below left before any tick was ever consulted for a `.solver`
-        // body, so the one authority under which an ECS write is a defect was the one
-        // authority the pass never looked at.
+        // anything.** § *Autorité d'écriture* declares it word for word; the counter
+        // above quotes it. The `continue` below must NOT precede this: a `.solver`
+        // body would leave before any tick was consulted, so the one authority under
+        // which an ECS write is a defect would be the one authority the pass never
+        // looked at.
         //
         // **THE TICK IS THE SIGNAL, and the value comparison only removes a certain
         // false positive.** `changed_tick` is stamped by `World.getMut` and by nothing
@@ -450,12 +448,11 @@ pub fn syncIn(
         // `getMut` that changed nothing, which is why the value is consulted wherever
         // the solver's own value is authoritative.
         //
-        // **THE VALUE COMPARISON IS SIGNIFICANT FOR EVERY BODY TYPE, and the exception
-        // that stood here was derived from the wrong fact** (M1.1.15.2 G19,
-        // `engine-physics-forge.md` § *Autorite d'ecriture*). G12 short-circuited it on a
-        // kinematic body, reasoning — correctly — that `syncOut` publishes a kinematic's
-        // velocity and never its pose, so the two sides may legitimately differ and
-        // comparing them says nothing.
+        // **THE VALUE COMPARISON IS SIGNIFICANT FOR EVERY BODY TYPE, and a
+        // short-circuit on the kinematic case would rest on the wrong fact**
+        // (`engine-physics-forge.md` § *Autorite d'ecriture*). The tempting reasoning
+        // is that `syncOut` publishes a kinematic's velocity and never its pose, so
+        // the two sides may legitimately differ and comparing them says nothing.
         //
         // **The relevant fact was a different one: a kinematic `.solver` body is piloted
         // by NOBODY.** A kinematic moved through the API is `.gameplay`, and it is the
@@ -496,18 +493,17 @@ pub fn syncIn(
                         !std.mem.eql(WorldReal, &v.angular, &out.angular)) forbidden = true;
                 }
             }
-            // **THE FIRST OBSERVATION IS REPORTED, and suppressing it lost every
-            // body's FIRST forbidden mutation** (M1.1.15.2 G17). The trap was real —
-            // with a null baseline `changedSince` returns true unconditionally — but the
-            // treatment was wrong twice: it suppressed the report, and then the baseline
-            // advanced and `syncOut` repaired the divergence, so that first mutation was
-            // lost DEFINITIVELY. Nothing would ever report it again.
+            // **THE FIRST OBSERVATION IS REPORTED, and suppressing it would lose every
+            // body's FIRST forbidden mutation.** The trap is real — with a null
+            // baseline `changedSince` returns true unconditionally — but suppressing
+            // the report is wrong twice: it loses the observation, and the baseline
+            // then advances while `syncOut` repairs the divergence, so that first
+            // mutation is lost DEFINITIVELY and nothing ever reports it again.
             //
             // The repair is not to establish the baseline earlier but to stop needing
             // one: `changedAt(..., now)` asks whether the component was stamped in THIS
             // tick, which is decidable with no history at all. "Never consumed" and "not
-            // changed" are two different facts and the `?Tick` conflated them — the G5b
-            // sentinel, third instance.
+            // changed" are two different facts and a `?Tick` conflates them.
             //
             // **The residual is named**: an entity spawned and its body created in the
             // SAME tick as this pass, at disagreeing poses, is reported. That is not a
@@ -531,7 +527,7 @@ pub fn syncIn(
             e.consumed_tick = now;
         }
 
-        // **A STATIC TAKES ITS POSE UNDER EITHER AUTHORITY** (M1.1.15.2 G12, F2). The
+        // **A STATIC TAKES ITS POSE UNDER EITHER AUTHORITY.** The
         // matrix row is `static | l'un ou l'autre | pose seule, sur changement`, and the
         // predicate excluded a static `.solver` — **the default case**, since `.solver`
         // is the default for every body type. A static is skipped by `syncOut` too
