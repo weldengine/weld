@@ -2,19 +2,18 @@
 //! names cross-version, and on-demand `(line, column)` computation from a
 //! `LineIndex` built once per source.
 //!
-//! The S3 subset emits the codes listed in `briefs/S3-etch-parser-subset.md`
-//! Scope / Diagnostics typed API. Codes are stable cross-version per the
-//! reference catalogue in `etch-diagnostics.md` §1; new variants may be
-//! added in later phases without renumbering existing ones.
+//! Codes are stable cross-version per the reference catalogue in
+//! `etch-diagnostics.md` §1; new variants may be added without renumbering
+//! existing ones.
 
 const std = @import("std");
 const token = @import("token.zig");
 
 const SourceSpan = token.SourceSpan;
 
-/// Severity classes recognised by the S3 type-checker. The brief carves
+/// Severity classes the type-checker recognises. It carves
 /// `error_` and `warning`; the wider catalogue (`note`, `hint`) is
-/// documented for forward compatibility but unused in S3.
+/// documented for forward compatibility and emitted by nothing.
 pub const Severity = enum {
     error_,
     warning,
@@ -23,8 +22,8 @@ pub const Severity = enum {
 /// Stable cross-version diagnostic codes. The variant name (e.g.
 /// `parse_error`) maps to the canonical short code (`E0001`) via
 /// `code()` and to the canonical PascalCase name (`ParseError`) via
-/// `name()`. S3 emits only the variants commented `S3`; the others are
-/// reserved here so the enum can be extended additively in later phases.
+/// `name()`. The enum is exhaustive for API stability: a variant may exist
+/// that nothing emits yet.
 pub const DiagnosticCode = enum {
     // ── Parse / lex errors (E0001-E0099) ──
     parse_error, // E0001 ParseError
@@ -35,14 +34,14 @@ pub const DiagnosticCode = enum {
     not_a_module, // E0103 NotAModule (import path resolves to no module)
     unknown_export, // E0104 UnknownExport (item absent from target's exports)
     enum_variant_not_found, // E0105 EnumVariantNotFound
-    import_private_item, // E0107 ImportPrivateItem (activated M1.0.8: buildExports sets .private from Item.visibility)
+    import_private_item, // E0107 ImportPrivateItem (buildExports sets .private from Item.visibility)
     import_cycle, // E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
     private_type_in_public_impl, // W0902 PrivateTypeInPublicImpl (visibility §10.2, warning)
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // E0200 TypeMismatch
-    arg_count_mismatch, // E0203 ArgCountMismatch (unfolded from E0200, E3 gate flag 5; also named-arg binding failures)
-    return_type_mismatch, // E0204 ReturnTypeMismatch (unfolded from E0200, E3 gate flag 5)
+    arg_count_mismatch, // E0203 ArgCountMismatch (unfolded from E0200; also named-arg binding failures)
+    return_type_mismatch, // E0204 ReturnTypeMismatch (unfolded from E0200)
     struct_field_missing, // E0208 StructFieldMissing
     ambiguous_type, // E0210 AmbiguousType
     ambiguous_trait_method, // E0211 AmbiguousTraitMethod
@@ -59,25 +58,25 @@ pub const DiagnosticCode = enum {
     resource_field_unknown, // E0303 ResourceFieldUnknown (scene `resources` block field check)
     // structural-mutation refusals (structural-ECS family, §4.5).
     spawn_handle_unavailable, // E0304 SpawnHandleUnavailable (structural spawn result bound/used in a body; statement-position only, no body handle v0.6)
-    prefab_spawn_not_executable, // E0305 PrefabSpawnNotExecutable (spawn("Name") recognized but gated on the prefab runtime; not executable Phase 1)
-    structural_component_field_unknown, // M1.0.10 E2 (completion) — E0306 StructuralComponentFieldUnknown (spawn/add component-literal field absent from the component decl)
-    structural_component_field_type_invalid, // M1.0.10 E2 (completion) — E0307 StructuralComponentFieldTypeInvalid (spawn/add component-literal field value type mismatch)
+    prefab_spawn_not_executable, // E0305 PrefabSpawnNotExecutable (spawn("Name") recognized but gated on the prefab runtime; not executable)
+    structural_component_field_unknown, // E0306 StructuralComponentFieldUnknown (spawn/add component-literal field absent from the component decl)
+    structural_component_field_type_invalid, // E0307 StructuralComponentFieldTypeInvalid (spawn/add component-literal field value type mismatch)
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // E0502 AnnotationMisapplied
-    // M1.B/G1 — the two argument-schema codes `etch-resolver-types.md` §13.3
-    // steps 3 and 4 specify. NEITHER existed in the tree before this gate:
+    // The two argument-schema codes `etch-resolver-types.md` §13.3
+    // steps 3 and 4 specify. NEITHER existed in the tree before they were minted:
     // the whole E05xx range held `annotation_misapplied` alone, and
     // `types.zig`'s own doc comment declared argument validation out of the
-    // M0.8 debt's scope. `engine-phase-1-plan.md` row M1.B.0 says the check
-    // is "activated", which presupposed an existence it did not have — so
+    // scope of the debt that preceded them. The plan says the check
+    // is "activated", which presupposed an existence they did not have — so
     // these are MINTED here, not enabled. `E0501 UnknownAnnotation` stays
     // out: its activation is gated on sorting the thirty-three corpus names
     // that have no enum variant (§13.3.1, binding order of operations).
-    annotation_arg_mismatch, // M1.B/G1 — E0503 AnnotationArgMismatch (arity, name or value outside the declared domain)
-    annotation_arg_not_const, // M1.B/G1 — E0504 AnnotationArgNotConst (well-formed argument expression that is not const-evaluable)
-    requires_cycle, // M1.B/G9 — E0505 RequiresCycle (`@requires` closure is not a DAG)
-    unknown_requisite, // M1.B/G9 — E0506 UnknownRequisite (`@requires` names a component that does not exist)
+    annotation_arg_mismatch, // E0503 AnnotationArgMismatch (arity, name or value outside the declared domain)
+    annotation_arg_not_const, // E0504 AnnotationArgNotConst (well-formed argument expression that is not const-evaluable)
+    requires_cycle, // E0505 RequiresCycle (`@requires` closure is not a DAG)
+    unknown_requisite, // E0506 UnknownRequisite (`@requires` names a component that does not exist)
 
     // ── Generics (E0600-E0699) ──
     bound_not_satisfied, // E0601 BoundNotSatisfied
@@ -102,12 +101,12 @@ pub const DiagnosticCode = enum {
     non_exhaustive_match, // E1230 NonExhaustiveMatch
     // structural-observer rule validations (annotation-routed:
     // @on_added / @on_removed / @on_replaced / @on_spawned / @on_despawned).
-    // Codes allocated in-code beyond E1207; `etch-diagnostics.md` §14 patched
-    // by Claude.ai to match.
+    // Codes allocated in-code beyond E1207; `etch-diagnostics.md` §14 carries
+    // the same allocation.
     observer_signature_mismatch, // E1208 ObserverSignatureMismatch (param shape ≠ lifecycle kind)
     observer_component_invalid, // E1209 ObserverComponentInvalid (annotation component arg arity / not a declared component)
     observer_rule_conflict, // E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
-    // M1.B/P5 — E1216 RequisiteRemovalRefused is RETIRED, and the number stays
+    // E1216 RequisiteRemovalRefused is RETIRED, and the number stays
     // reserved rather than freed: a later E1216 on another subject would be a
     // collision of meaning for anyone re-reading this milestone, its brief or
     // its corpus. The static check refused correct code five times in three
@@ -115,9 +114,9 @@ pub const DiagnosticCode = enum {
     // removal guarantee lives on the runtime channel alone
     // (`World.requiresRefusesRemoval`). Same shape as E1642 / E1643 below —
     // a variant with its code and name arms and no emitter.
-    requisite_removal_refused, // M1.B/P2-2 → P5 — E1216 RequisiteRemovalRefused (RETIRED: the static form refused correct code; runtime-only)
+    requisite_removal_refused, // E1216 RequisiteRemovalRefused (RETIRED: the static form refused correct code; runtime-only)
 
-    // ── behavior (500-E1519, M0.8 E4 — etch-validation-ecs.md §8) ──
+    // ── behavior (500-E1519, etch-validation-ecs.md §8) ──
     behavior_root_missing, // E1500 BehaviorRootMissing
     behavior_empty_composite, // E1501 BehaviorEmptyComposite
     behavior_invalid_leaf, // E1502 BehaviorInvalidLeaf (unknown behavior/routine referenced by a leaf intrinsic)
@@ -126,7 +125,7 @@ pub const DiagnosticCode = enum {
     behavior_when_clause_not_bool, // E1505 BehaviorWhenClauseNotBool
     behavior_recursion, // E1506 BehaviorRecursion
 
-    // ── quest (540-E1559, M0.8 E4 — etch-validation-ecs.md §10) ──
+    // ── quest (540-E1559, etch-validation-ecs.md §10) ──
     quest_empty_stages, // E1540 QuestEmptyStages
     duplicate_stage_name, // E1541 DuplicateStageName
     quest_requires_not_bool, // E1542 QuestRequiresNotBool
@@ -140,7 +139,7 @@ pub const DiagnosticCode = enum {
     event_reference_not_found, // E1550 EventReferenceNotFound
     no_main_objective, // W1541 NoMainObjective (warning)
 
-    // ── routine (520-E1539, M0.8 E4 — etch-validation-ecs.md §9) ──
+    // ── routine (520-E1539, etch-validation-ecs.md §9) ──
     routine_empty_segments, // E1520 RoutineEmptySegments
     duplicate_segment_name, // E1521 DuplicateSegmentName
     trigger_invalid, // E1522 TriggerInvalid
@@ -150,17 +149,17 @@ pub const DiagnosticCode = enum {
     interrupt_target_invalid, // E1526 InterruptTargetInvalid
     action_invalid_return, // E1527 ActionInvalidReturn
 
-    // ── dialogue (560-E1579, M0.8 E4 — etch-validation-ecs.md §11) ──
+    // ── dialogue (560-E1579, etch-validation-ecs.md §11) ──
     dialogue_empty, // E1560 DialogueEmpty
     duplicate_branch_label, // E1561 DuplicateBranchLabel
     branch_reference_not_found, // E1562 BranchReferenceNotFound
-    speaker_not_found, // E1563 SpeakerNotFound (vacuous in E4: scene/prefab context is E7; any string is referencable — recorded)
+    speaker_not_found, // E1563 SpeakerNotFound (vacuous: with no scene or prefab context, any string is referencable — recorded)
     choice_target_not_found, // E1564 ChoiceTargetNotFound
     line_condition_not_bool, // E1565 LineConditionNotBool
     choice_condition_not_bool, // E1566 ChoiceConditionNotBool
     dialogue_event_type_unknown, // E1567 EventTypeUnknown (dialogue emit)
 
-    // ── ability (580-E1599, M0.8 E4 — etch-validation-ecs.md §12, the
+    // ── ability (580-E1599, etch-validation-ecs.md §12, the
     // items 12-15 ruling transposition onto the §8.5 grammar shape; E1585
     // HandlerInvalidReturn and W1580 DuplicateHandler are RESERVED — the
     // ruled shape has no handlers) ──
@@ -171,7 +170,7 @@ pub const DiagnosticCode = enum {
     blocked_tags_unknown, // E1584 RequiresNotTagsUnknown (keyed on the §8.5 name `tags_blocked`)
     tags_required_blocked_conflict, // E1586 TagsRequiredBlockedConflict
 
-    // ── data tables (760-E1779, M0.8 E4 — etch-validation-ecs.md §22) ──
+    // ── data tables (760-E1779, etch-validation-ecs.md §22) ──
     data_empty_entries, // E1760 DataEmptyEntries
     duplicate_entry_id, // E1761 DuplicateEntryId
     entry_type_mismatch, // E1762 EntryTypeMismatch
@@ -182,7 +181,7 @@ pub const DiagnosticCode = enum {
     spread_cycle, // E1767 SpreadCycle
     id_invalid_format, // E1768 IdInvalidFormat
 
-    // ── theme (E1640-E1645, M0.8 E5 — etch-grammar.md §10.2; the E5 ruling 1:
+    // ── theme (E1640-E1645, etch-grammar.md §10.2; ruling 1:
     // the grammar `theme STRING_LITERAL { IDENT ":" expression }` shape WINS
     // over the validation-ecs §16.1 typed-token shape, so E1642
     // TokenTypeInvalid / E1643 TokenDefaultMissing are RESERVED — the grammar
@@ -192,34 +191,34 @@ pub const DiagnosticCode = enum {
     token_type_invalid, // E1642 TokenTypeInvalid (RESERVED: no typed tokens in the grammar shape)
     token_default_missing, // E1643 TokenDefaultMissing (RESERVED: no token defaults in the grammar shape)
 
-    // ── motion (E1660-E1668, M0.8 E5 — etch-grammar.md §10.3; E5 ruling 2:
+    // ── motion (E1660-E1668, etch-grammar.md §10.3; ruling 2:
     // the grammar `motion TYPE_IDENT { [states {…}] transitions {…} }` shape
     // WINS over the validation-ecs §17 shape. RESERVED with rationale:
     // E1660 (the grammar makes the `states` block optional, so the relaxed
     // ≥1 check would reject a grammar-valid stateless motion), E1662/E1663
     // (state-field typing + cross-state interpolation consistency are a
-    // Kinesis Phase-1 semantic, not a declarative M0.8 validation — part2's
+    // Kinesis semantic, not a declarative validation — part2's
     // own canonical example violates E1663), E1667/E1668 (the grammar has no
-    // `initial` clause). W1660/W1661 (heuristic Phase-3 warnings) are
+    // `initial` clause). W1660/W1661 (heuristic warnings) are
     // DEFERRED per validation-ecs §27, not reserved (the W1640 precedent) ──
     motion_empty_states, // E1660 MotionEmptyStates (RESERVED: states block optional in the grammar)
     motion_duplicate_state_name, // E1661 DuplicateStateName (duplicate state name)
-    state_field_type_invalid, // E1662 StateFieldTypeInvalid (RESERVED: field typing needs resolution — Kinesis Phase-1)
-    state_field_inconsistent, // E1663 StateFieldInconsistent (RESERVED: cross-state consistency — Kinesis Phase-1)
+    state_field_type_invalid, // E1662 StateFieldTypeInvalid (RESERVED: field typing needs resolution — a Kinesis concern)
+    state_field_inconsistent, // E1663 StateFieldInconsistent (RESERVED: cross-state consistency — a Kinesis concern)
     transition_state_not_found, // E1664 TransitionStateNotFound (source/target not a declared state)
     transition_duration_invalid, // E1665 TransitionDurationInvalid (non-numeric or negative-literal duration)
     transition_easing_unknown, // E1666 TransitionEasingUnknown (easing not in the part2 §22 catalog)
     initial_state_not_found, // E1667 InitialStateNotFound (RESERVED: no `initial` clause in the grammar)
     motion_initial_missing, // E1668 MotionInitialMissing (RESERVED: no `initial` clause in the grammar)
 
-    // ── input_mapping (800-E1808 + W1801, M0.8 E5 — etch-grammar.md §16,
-    // Level-B STRICT; E5 rulings 7/8: the grammar shape WINS (context is a
+    // ── input_mapping (800-E1808 + W1801, etch-grammar.md §16,
+    // Level-B STRICT; rulings 7/8: the grammar shape WINS (context is a
     // PROPERTY, not a named block). RESERVED with rationale: E1802
     // DuplicateContextName + W1801 EmptyContext (no context BLOCKS in the
     // grammar — context is a property), E1807 ComboActionRefNotFound (the §16
     // `sequence: [tokens]` shape has NO `.previous_action(.x)` action-ref form
     // — the ability E1585 precedent; sequence tokens are structural input
-    // tokens, their catalogue = Input module Phase 1, consistent with the
+    // tokens, their catalogue = the Input module, consistent with the
     // E1803 deferral). E1803 InvalidBinding is DEFERRED (input_source catalogue
     // = engine-input-system.md, not attached — ruling 8) — not added ──
     mapping_empty, // E1800 MappingEmpty (no action and no combo)
@@ -232,7 +231,7 @@ pub const DiagnosticCode = enum {
     combo_timing_invalid, // E1808 ComboTimingInvalid (window not a positive duration)
     empty_context, // W1801 EmptyContext (RESERVED: context is a property, not a block)
 
-    // ── widget (620-E1628, M0.8 E5 — etch-grammar.md §10.1; E5 rulings 9/10:
+    // ── widget (620-E1628, etch-grammar.md §10.1; rulings 9/10:
     // the grammar+part2 shape WINS (annotations are OPTIONAL — 2v1 over
     // validation-ecs §15.2). Deliver E1620 WidgetEmptyTree + E1621
     // ScreenWorldspaceConflict (the only enforced annotation rule — `@screen`
@@ -254,7 +253,7 @@ pub const DiagnosticCode = enum {
     widget_screen_worldspace_conflict, // E1621 WidgetScreenWorldspaceConflict (@screen and @worldspace both present)
     widget_missing_screen_or_worldspace, // E1622 WidgetMissingScreenOrWorldspace (RESERVED: placement annotation is optional, ruling 9)
 
-    // ── locale (820-E1822, M0.8 E5 — etch-grammar.md §10.4; E5 rulings 4/5/6:
+    // ── locale (820-E1822, etch-grammar.md §10.4; rulings 4/5/6:
     // the grammar shape WINS (IDENT name, flat `STRING = STRING` entries).
     // Deliver E1820 LocaleEmpty + E1821 LocaleCodeInvalid (an ISO-639 FORM
     // check — 2-3 lowercase letters + an optional `_XX` / `-XX` regional
@@ -263,41 +262,41 @@ pub const DiagnosticCode = enum {
     // deferred — Level B is declaration + IR only). DEFERRED (no enum variant,
     // the input_mapping-E1803 precedent): E1823 InterpolationVariableMismatch +
     // E1824 PluralRuleInvalid + E1825 PluralOtherMissing (ICU plurals /
-    // interpolation = validation-ecs §27 Phase 3, ruling 6). Their slots are
+    // interpolation = validation-ecs §27, ruling 6). Their slots are
     // reserved in the catalogue (never reused) ──
     locale_empty, // E1820 LocaleEmpty (no entries)
     locale_code_invalid, // E1821 LocaleCodeInvalid (name is not a well-formed ISO-639 code)
     locale_duplicate_key, // E1822 DuplicateKey (duplicate translation key)
 
-    // ── effect (E1600/E1601/E1604, M0.8 E6 — etch-grammar.md §9.2, Level-B
+    // ── effect (E1600/E1601/E1604, etch-grammar.md §9.2, Level-B
     //    VFX. The structural checks DELIVER; the Ember-semantic ones are
     //    DEFERRED-no-variant: E1602 ParamTypeInvalid / E1603 SpawnRateInvalid /
     //    E1605 EmitterEventUnknown / E1606 RendererInvalid / W1600
     //    EffectNoRenderer / W1601 NestedEffectDepth all need the Ember catalogue
     //    (renderers, particle-event names, GPU param types) which is not
-    //    attached — Phase 2+.) ──
+    //    attached.) ──
     effect_empty_emitters, // E1600 EffectEmptyEmitters (no emitter)
     duplicate_emitter_name, // E1601 DuplicateEmitterName
     emitter_ref_not_found, // E1604 EmitterRefNotFound (on X.event where X is not an emitter of this effect)
 
-    // ── audio_graph (700/E1701, M0.8 E6 — etch-grammar.md §12.2, Level-B
+    // ── audio_graph (700/E1701, etch-grammar.md §12.2, Level-B
     // audio. Both RESERVED-with-variant: the grammar's single mandatory
     // `output(...)` sink makes "no output" a parse error and "multiple
     //    outputs" impossible, so neither check ever fires. The DSP-semantic
     //    codes E1702-E1706/W1700 (node catalogue, connection types, asset refs,
     //    feedback DAG) are DEFERRED-no-variant — the Pulse catalogue is not
-    //    attached, Phase 2+.) ──
+    //    attached.) ──
     audio_graph_no_output, // E1700 AudioGraphNoOutput (RESERVED: output is parser-mandatory)
     audio_graph_multiple_outputs, // E1701 MultipleOutputs (RESERVED: the grammar has a single sink)
 
-    // ── audio_score (E1720-E1728, M0.8 E6 — etch-grammar.md §12.1, Level-B
+    // ── audio_score (E1720-E1728, etch-grammar.md §12.1, Level-B
     //    audio. The validation-ecs §20 codes are reshaped onto the grammar
     //    shape: E1720 means "no section AND no stems", E1726 is rekeyed onto
     //    can_transition_to / on_finish section targets. E1724 StemActiveUnknown
     //    (no `stems_active` in this shape) + E1725 SectionDurationInvalid (no
     //    `duration` prop) are RESERVED-with-variant. E1723 StemAssetInvalid /
     //    E1727 TransitionPointInvalid / W1720 / W1721 are DEFERRED-no-variant
-    //    (asset + transition-point catalogues, heuristics — Phase 2+). ──
+    //    (asset + transition-point catalogues, heuristics). ──
     score_no_sections, // E1720 ScoreNoSections (reshaped: no section AND no stems)
     duplicate_section_name, // E1721 DuplicateSectionName
     duplicate_stem_name, // E1722 DuplicateStemName
@@ -306,12 +305,12 @@ pub const DiagnosticCode = enum {
     score_transition_from_not_found, // E1726 TransitionFromNotFound (rekeyed onto can_transition_to / on_finish targets)
     tempo_invalid, // E1728 TempoInvalid (tempo must be a positive int)
 
-    // ── sequence (740-E1750 + W1740, M0.8 E6 — etch-grammar.md §13, Level-B
+    // ── sequence (740-E1750 + W1740, etch-grammar.md §13, Level-B
     // cinematic. DELIVER the structural + keyframe-time checks (DURATION_LIT
     // seconds parsed at validation time). E1748 SubSequenceRefInvalid is
     //    RESERVED-with-variant: the grammar §13 sequence_track has no
     //    sub-sequence-ref production (grammar-wins), so it can never fire. E1743
-    //    TrackTargetNotFound (scene/binding = E7), E1747 AnimationTrackClipInvalid
+    //    TrackTargetNotFound (scene/binding), E1747 AnimationTrackClipInvalid
     //    (asset), W1741 OverlappingTracks (heuristic) are DEFERRED-no-variant. ──
     sequence_no_tracks, // E1740 SequenceNoTracks
     duplicate_track_name, // E1741 DuplicateTrackName
@@ -324,7 +323,7 @@ pub const DiagnosticCode = enum {
     sequence_duration_invalid, // E1750 DurationInvalid (duration must be positive)
     empty_track, // W1740 EmptyTrack (track with no keyframe)
 
-    // ── anim_graph (680-E1695 + W1680-W1682, M0.8 E6 — etch-grammar.md §11,
+    // ── anim_graph (680-E1695 + W1680-W1682, etch-grammar.md §11,
     // Level-B animation. The grammar 2-against-1 shape (state-nested
     // transitions, additive-only layers) makes several codes RESERVED: E1688
     //    TransitionFromNotFound (from = enclosing state), E1691
@@ -349,7 +348,7 @@ pub const DiagnosticCode = enum {
     anim_deadend_state, // W1681 DeadendState
     anim_redundant_wildcard_transition, // W1682 RedundantWildcardTransition (RESERVED: no `*` in §11)
 
-    // ── shader (400 + E0420/E0421 + E1610/E1611, M0.8 E6 — etch-grammar.md
+    // ── shader (400 + E0420/E0421 + E1610/E1611, etch-grammar.md
     // §9.1 + resolver §15, Level-B render. E0400 ShaderModeViolation is the
     // single representative for the whole §15.2 GPU-incompatible family
     // (DELIVER). E0420 ShaderRecursion (call-graph DFS) + E0421
@@ -363,7 +362,7 @@ pub const DiagnosticCode = enum {
     non_shader_fn_called_from_shader, // E0421 NonShaderFnCalledFromShader (RESERVED: GPU-builtin table deferred)
     shader_stage_missing, // E1610 ShaderStageMissing (RESERVED: fragment is parser-mandatory)
     shader_fragment_requires_vertex, // E1611 ShaderFragmentRequiresVertex (RESERVED: fragment-without-vertex is the normal minimal shader)
-    // ── M0.8 E7 Level C — scene (§23) + prefab (§24) validations ──
+    // ── Level C — scene (§23) + prefab (§24) validations ──
     scene_empty_entities, // E1780 SceneEmptyEntities
     duplicate_entity_name, // E1781 DuplicateEntityName
     duplicate_uuid, // E1782 DuplicateUUID (intra-file)
@@ -381,14 +380,14 @@ pub const DiagnosticCode = enum {
     prefab_component_type_unknown, // E1793 PrefabComponentTypeUnknown
     prefab_component_field_unknown, // E1794 PrefabComponentFieldUnknown
     prefab_component_field_type_invalid, // E1795 PrefabComponentFieldTypeInvalid
-    prefab_component_redefined, // E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is M0.9 runtime)
+    prefab_component_redefined, // E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is a runtime concern)
     prefab_remove_base_component, // W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
-    extension_additive_conflict, // M1.0.18 → M1.1.1-HF4 — E1797 ExtensionAdditiveConflict (fatal cook error, strictly-additive `extends` → reject: (a) two extensions declare the same component, (b) an extension declares a component already carried by the base/an earlier extension, (c) the same extension is listed twice; guarantees `cooked ⇒ loadable`; runtime backstops `error.ExtensionComponentConflict` (a/b) / `error.ExtensionAlreadyActive` (c))
+    extension_additive_conflict, // E1797 ExtensionAdditiveConflict (fatal cook error, strictly-additive `extends` → reject: (a) two extensions declare the same component, (b) an extension declares a component already carried by the base/an earlier extension, (c) the same extension is listed twice; guarantees `cooked ⇒ loadable`; runtime backstops `error.ExtensionComponentConflict` (a/b) / `error.ExtensionAlreadyActive` (c))
 
-    // ── async / effects (9xx, M1.0.11 — etch-resolver-types.md §9.2) ──
+    // ── async / effects (9xx, etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)
     unhandled_throws_call, // E0902 UnhandledThrowsCall (a call to a `throws` fn or service method with no enclosing `try`/`catch` and no `throws` on the caller)
-    await_not_statement_head, // E0904 AwaitNotStatementHead (Phase-1 tree-walker: `await` must be a statement's full RHS)
+    await_not_statement_head, // E0904 AwaitNotStatementHead (the tree-walker requires `await` to be a statement's full RHS)
     unconsumed_async_effect, // E0905 UnconsumedAsyncEffect (bare async call in an async context: neither awaited nor launched via spawn/branch/race/sync)
     illegal_return_in_concurrency_branch, // E0906 IllegalReturnInConcurrencyBranch (return in a sync branch or a branch/spawn body; legal only in a race branch)
     control_flow_escapes_task_branch, // E0907 ControlFlowEscapesTaskBranch (break/continue targeting a loop outside the concurrency construct)
@@ -396,7 +395,7 @@ pub const DiagnosticCode = enum {
     ambiguous_event_entity_target, // E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
     measure_outside_test, // E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
 
-    // ── Declaration files `.d.etch` (900-E1919, M1.1.15.2 G1 —    `etch-
+    // ── Declaration files `.d.etch` (900-E1919, `etch-
     // validation-ecs.md` §28, `etch-grammar.md` §20). The E19xx block
     //    was empty before this milestone. The two codes split by WHERE they are
     //    decided, and the split is the settled arbitration of `etch-grammar.md`
@@ -410,13 +409,13 @@ pub const DiagnosticCode = enum {
     //        path would duplicate a twenty-construct list; `scene_cook.zig` sets
     //        the precedent of deciding this after the parse.
     //    E1902 confronts a declared signature with its Zig implementation, so
-    //    it was allocated at G3, which is the first gate that HAS both. What
+    //    it was allocated once both existed. What
     //    reports it is `zig build bindgen-check`, not the type-checker: a
     //    `.d.etch` is a derived artifact (`engine-c-bindings.md` §8.4.1) and
-    //    the only confrontation Phase 1 can make is between the committed file
+    //    the only confrontation available is between the committed file
     //    and what the emitter produces on the current Zig `ServiceSpec`. The
     //    load-time signature check `etch-grammar.md` §20.3 describes keys on a
-    //    `.etchc`, which does not exist before Phase 2. ──
+    //    `.etchc`, which does not exist. ──
     declaration_file_body_not_allowed, // E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
     declaration_file_implementation_mismatch, // E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
@@ -885,7 +884,7 @@ pub const LineIndex = struct {
     /// 1-indexed (line, column). Column counts bytes from the start of
     /// the line; for ASCII / single-byte spans this matches the visual
     /// column. Multi-byte UTF-8 in string literals is reported by its
-    /// leading byte offset, which is sufficient for S3 diagnostics.
+    /// leading byte offset, which is sufficient for these diagnostics.
     pub const LineColumn = struct {
         line: u32,
         column: u32,

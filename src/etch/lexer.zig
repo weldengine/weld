@@ -1,14 +1,14 @@
-//! S3 Etch lexer — UTF-8 byte stream tokenizer producing the subset of
-//! tokens listed in `briefs/S3-etch-parser-subset.md` Scope / Lexer.
+//! Etch lexer — UTF-8 byte stream tokenizer producing the token kinds
+//! `token.zig` declares.
 //!
 //! Behaviour summary:
 //! - Identifiers and keywords are ASCII-only (per `etch-grammar.md` §1.2).
 //! - String literals (simple-quote) accept arbitrary UTF-8 verbatim.
 //! - Comments (`//`, `/* */`, `///`) are skipped; their byte spans are
-//!   collected in `comment_spans` for future Phase 0.2 trivia attachment.
+//!   collected in `comment_spans`; nothing attaches them to nodes.
 //! - Invalid UTF-8 emits an `error_utf8` token; the parser maps it to
 //!   `E0001 ParseError`.
-//! - Unknown Etch keywords outside the S3 subset are tokenised as
+//! - Etch keywords outside `s3_keywords` are tokenised as
 //!   `error_unknown_keyword`; parser raises `E0001` at the use site.
 
 const std = @import("std");
@@ -20,7 +20,7 @@ const SourceSpan = token.SourceSpan;
 
 /// Etch lexer — produces a stream of `Token`s and accumulates a
 /// parallel slab of comment spans for the future `TriviaMap`
-/// (Phase 0.2). Owns no heap memory beyond `comment_spans`.
+/// Owns no heap memory beyond `comment_spans`.
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,
@@ -70,7 +70,7 @@ pub const Lexer = struct {
                 },
                 '+' => return self.singleOrCompound(start, .plus, .plus_eq),
                 '-' => {
-                    // `-` / `-=` / `->` (fn return type arrow, M0.8 E2).
+                    // `-` / `-=` / `->` (fn return type arrow).
                     self.pos += 1;
                     if (self.pos < self.source.len) {
                         if (self.source[self.pos] == '=') {
@@ -87,7 +87,7 @@ pub const Lexer = struct {
                 '*' => return self.singleOrCompound(start, .star, .star_eq),
                 '%' => return self.singleOrCompound(start, .percent, .percent_eq),
                 '=' => {
-                    // `=` / `==` / `=>` (fat arrow for match arms, M0.8).
+                    // `=` / `==` / `=>` (fat arrow for match arms).
                     self.pos += 1;
                     if (self.pos < self.source.len) {
                         if (self.source[self.pos] == '=') {
@@ -107,7 +107,7 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .bang_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
                     }
-                    // Bare `!` — the postfix force-unwrap operator (tranche 4,
+                    // Bare `!` — the postfix force-unwrap operator (a later slice,
                     // part1 §6.6). `!=` is handled above by maximal
                     // munch, so this never splits a comparison.
                     return .{ .kind = .bang, .span = .{ .byte_start = start, .byte_end = self.pos } };
@@ -125,7 +125,7 @@ pub const Lexer = struct {
                 ':' => return self.consumeOne(.colon),
                 ',' => return self.consumeOne(.comma),
                 '.' => {
-                    // `.` / `..` / `..=` (range operators, M0.8). `lexNumber`
+                    // `.` / `..` / `..=` (range operators). `lexNumber`
                     // only treats `.` as a decimal point when a digit follows,
                     // so `0..10` already lexes the `0` as an int before here.
                     self.pos += 1;
@@ -141,7 +141,7 @@ pub const Lexer = struct {
                 },
                 '@' => return self.consumeOne(.at),
                 // `?` / `?.` / `??` — the optional type suffix `T?` plus the
-                // optional-chain and null-coalesce operators (tranche 4, part1
+                // optional-chain and null-coalesce operators (part1
                 // §6.6). Maximal munch: `?.` and `??` never
                 // appear in type positions, so the longest match is safe.
                 '?' => {
@@ -175,7 +175,7 @@ pub const Lexer = struct {
                 else => {
                     // Anything else is either invalid UTF-8 (continuation
                     // byte without leader, or malformed sequence) or a
-                    // byte outside the S3 lexicon. Either way: error
+                    // byte outside the lexicon. Either way: error
                     // token covering exactly one byte (or the full bad
                     // UTF-8 run). The parser will surface `E0001`.
                     if (c < 0x80) {
@@ -212,8 +212,8 @@ pub const Lexer = struct {
 
     fn skipLineComment(self: *Lexer, gpa: std.mem.Allocator) !void {
         const start = self.pos;
-        // Distinguish a `///` doc comment from a plain `//` line comment
-        //: exactly three slashes followed by a
+        // Distinguish a `///` doc comment from a plain `//` line comment:
+        // exactly three slashes followed by a
         // non-slash is a doc comment; `////`+ is a plain comment (Rust
         // convention). Doc spans feed the per-node doc map, plain comments
         // the trivia slab.
@@ -354,7 +354,7 @@ pub const Lexer = struct {
             // Validate UTF-8 byte-by-byte: arbitrary continuation bytes are
             // allowed inside the literal but a malformed sequence still
             // surfaces as an error token via lexUtf8 from the outer loop.
-            // For S3 we accept all non-newline bytes verbatim inside the
+            // All non-newline bytes are accepted verbatim inside the
             // string literal — explicit UTF-8 validation is only enforced
             // outside string literals (per brief).
             self.pos += 1;
@@ -435,14 +435,12 @@ pub const Lexer = struct {
             }
         }
         // UTF-8 outside an identifier / string literal isn't part of the
-        // S3 lexicon (identifiers ASCII-only, no character literals). It's
+        // lexicon (identifiers ASCII-only, no character literals). It's
         // an error token regardless.
         self.pos = start + expected_len;
         return .{ .kind = .error_utf8, .span = .{ .byte_start = start, .byte_end = self.pos } };
     }
 };
-
-// ──────────────────────────── tests ─────────────────────────────────────
 
 test "lexer tokenizes minimal component declaration" {
     const gpa = std.testing.allocator;
@@ -525,12 +523,10 @@ test "lexer disambiguates integer vs float literal" {
 
 test "lexer flags unknown Etch keyword from full grammar as error_unknown_keyword" {
     const gpa = std.testing.allocator;
-    // `fn` graduated with the M0.8 E2 call mechanism, `ability` with its E4
-    // Level-B slice; the whole E6 render/anim/audio/cinematic family graduated,
-    // `scene`/`prefab` graduated with the E7 Level-C scene slice, `import` with
-    // M1.0.7 cross-file import, and `const`/`private`/`test` with M1.0.8. The
-    // single remaining reserved top-level keyword is `override` (M1.0.8 keeps it
-    // reserved until a Tier-1 overridable module exists).
+    // `fn` and `ability` lex to their own kinds. `override` is the SINGLE
+    // remaining reserved top-level keyword, and it stays reserved until a
+    // Tier-1 overridable module exists — which is what makes the third
+    // expectation `error_unknown_keyword`.
     var lex = Lexer.init("fn ability override");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_fn);
@@ -540,8 +536,8 @@ test "lexer flags unknown Etch keyword from full grammar as error_unknown_keywor
 
 test "lexer promotes const/private/test" {
     const gpa = std.testing.allocator;
-    // M1.0.8: the three reserved keywords now lex to their own kinds (the
-    // identifier→keyword logic is unchanged — only the keyword tables moved).
+    // The three formerly reserved keywords lex to their own kinds; the
+    // identifier→keyword logic is unchanged, only the keyword tables moved.
     var lex = Lexer.init("const private test");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_const);

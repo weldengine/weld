@@ -1,6 +1,6 @@
-//! Token types for the S3 Etch lexer. Keywords / operators / punctuation
+//! Token types for the Etch lexer. Keywords / operators / punctuation
 //! mirror the brief's "Keywords recognized" and "Operators / punctuation
-//! recognized" subsections of `briefs/S3-etch-parser-subset.md`. Any other
+//! recognized" surface the lexer implements. Any other
 //! keyword from EBNF v0.6 is lexed as an `error_unknown_keyword` token so
 //! the parser can emit `E0001 ParseError` with a precise span at the use
 //! site (Scope: "Any other Etch keyword listed in `etch-grammar.md` §1.3
@@ -22,8 +22,8 @@ pub const SourceSpan = struct {
 };
 
 /// Closed enum of Etch token kinds produced by the lexer. The
-/// S3 subset is implemented; future kinds are added as the grammar
-/// expands.
+/// enum is exhaustive for API stability; a kind may exist that the lexer
+/// never produces.
 pub const TokenKind = enum {
     // ── Literals ──
     ident, // any identifier starting with [a-z_]
@@ -31,7 +31,7 @@ pub const TokenKind = enum {
     int_literal,
     float_literal,
     bool_literal, // true / false
-    string_literal, // simple-quote only in S3 (no interpolation)
+    string_literal, // simple-quote only (no interpolation)
     time_literal, // DD:DD in-game time (routine triggers, §1.4)
     duration_literal, // FLOAT "s" duration (gate fix, §1.4 — greedy-contiguous)
     color_literal, // "#" + 6 or 8 hex (§1.4 l.211 — the DURATION_LIT-precedent literal lift)
@@ -69,7 +69,7 @@ pub const TokenKind = enum {
     kw_fn, // top-level fn declaration
     kw_return, // return [expr]
     kw_throws, // fn throws marker
-    kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
+    kw_async, // async fn (parsed and interpreted; codegen rejects it loudly)
     kw_await, // await <target>
     kw_struct, // struct declaration
     kw_impl, // impl block
@@ -92,14 +92,14 @@ pub const TokenKind = enum {
     kw_dialogue, // dialogue declaration
     kw_ability, // ability declaration
     kw_branch, // quest/dialogue branch
-    kw_sequence, // behavior composite type + the E6 top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
-    kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
+    kw_sequence, // behavior composite type + the top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
+    kw_after, // routine trigger `after Segment` (the §4.3 timer statement is a distinct parse error)
     kw_theme, // theme declaration
     kw_motion, // motion declaration
     kw_input_mapping, // input_mapping declaration
     kw_widget, // widget declaration
     kw_locale, // locale declaration
-    kw_effect, // effect declaration (M0.8 E6 Level B VFX — emitters + event handlers, VFX-only since v0.6)
+    kw_effect, // effect declaration (emitters + event handlers, VFX-only since v0.6)
     kw_audio_graph, // audio_graph declaration
     kw_audio_score, // audio_score declaration
     kw_anim_graph, // anim_graph declaration
@@ -107,15 +107,15 @@ pub const TokenKind = enum {
     kw_scene, // scene declaration
     kw_prefab, // prefab declaration
     kw_import, // import directive
-    kw_const, // top-level `const` declaration (— graduated from non_s3_keywords; top-level only per part1 §4.5)
-    kw_private, // `private` visibility modifier prefix on a declaration_body (— graduated from non_s3_keywords; grammar §5.1)
+    kw_const, // top-level `const` declaration (top-level only per part1 §4.5)
+    kw_private, // `private` visibility modifier prefix on a declaration_body (grammar §5.1)
     kw_test, // top-level `test "name" { ... }` block
     kw_spawn, // structural spawn expr `spawn(C{…})` (§3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (§4.2 spawn_stmt) — disambiguated by the next token
-    kw_race, // race statement `race { race_branch* }` (— graduated from non_s3_keywords; §4.2 race_stmt)
-    kw_sync, // sync statement `sync { sync_branch* }` (— graduated from non_s3_keywords; §4.2 sync_stmt)
-    kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (— graduated from non_s3_keywords; §4.3 timer_stmt)
-    kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (— graduated from non_s3_keywords; §4.3 timer_stmt)
-    kw_measure, // `measure { block }` expression (— §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
+    kw_race, // race statement `race { race_branch* }` (§4.2 race_stmt)
+    kw_sync, // sync statement `sync { sync_branch* }` (§4.2 sync_stmt)
+    kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (§4.3 timer_stmt)
+    kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (§4.3 timer_stmt)
+    kw_measure, // `measure { block }` expression (§17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
     /// `service NAME { fn … }` — the `.d.etch`-only construct of
     /// `etch-grammar.md` §20.4.
     ///
@@ -157,8 +157,8 @@ pub const TokenKind = enum {
     gt,
     lt_eq,
     gt_eq,
-    fat_arrow, // => (match arm, M0.8 v0.6 foundations)
-    arrow, // -> (fn return type, M0.8 E2 call mechanism)
+    fat_arrow, // => (match arm)
+    arrow, // -> (fn return type)
     dotdot, // .. exclusive range
     dotdot_eq, // ..= inclusive range
     lparen,
@@ -174,9 +174,9 @@ pub const TokenKind = enum {
     dot,
     at,
     question, // ? — optional type suffix `T?`
-    question_dot, // ?. — optional chain (tranche 4, part1 §6.6)
-    question_question, // ?? — null coalesce (tranche 4, part1 §6.6)
-    bang, // ! postfix — force unwrap (tranche 4, part1 §6.6)
+    question_dot, // ?. — optional chain (part1 §6.6)
+    question_question, // ?? — null coalesce (part1 §6.6)
+    bang, // ! postfix — force unwrap (part1 §6.6)
 
     // ── End / error ──
     eof,
@@ -215,14 +215,14 @@ pub fn isKeywordToken(k: TokenKind) bool {
 }
 
 /// Map `[]const u8` → `TokenKind` for keywords. The lookup is a linear
-/// scan over a small static table — adequate for the S3 corpus (<200 LOC
+/// scan over a small static table — adequate for the corpus (<200 LOC
 /// per file, every identifier hit is amortised by the parser's main work).
 pub const KeywordEntry = struct { lexeme: []const u8, kind: TokenKind };
 
-/// S3 keyword table — the lexer scans identifiers against this slice
+/// The keyword table — the lexer scans identifiers against this slice
 /// to promote them to `KeywordEntry.kind`. Each entry is `(lexeme,
 /// kind)`; entries are matched in order, so the table doubles as the
-/// canonical S3 keyword set.
+/// canonical keyword set.
 pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "let", .kind = .kw_let },
     .{ .lexeme = "mut", .kind = .kw_mut },
@@ -314,8 +314,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "f64", .kind = .kw_f64 },
 };
 
-/// Etch keywords that introduce **constructs explicitly out of S3 scope**
-/// (`briefs/S3-etch-parser-subset.md` Out-of-scope). Any identifier that
+/// Etch keywords that introduce **constructs the parser does not accept**.
+/// Any identifier that
 /// matches one of these is lexed as `error_unknown_keyword` so the parser
 /// emits `E0001 UnsupportedConstructInS3` at use site.
 ///
@@ -323,42 +323,24 @@ pub const s3_keywords = [_]KeywordEntry{
 /// — they reach the type-checker as plain identifiers or `TYPE_IDENT`s
 /// and surface as `E0102 UndefinedSymbol` (or POD-specific messages on
 /// component fields). Sub-construct keywords (`segment`, `state`, `layer`,
-/// `bind`, ...) are also omitted: they are unreachable in legal S3 input
+/// `bind`, ...) are also omitted: they are unreachable in legal input
 /// since their parent construct is already rejected, and including them
 /// would collide with legitimate identifier names like `state`, `event`,
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
-    // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
-    //    call mechanism; `struct` / `impl` / `enum` / `trait` with E2 block 3;
-    //    `event` + `tags` with E3 ECS layer; `data` with E4 Level B gameplay;
-    //    `scene` + `prefab` graduated with E7 Level C — the last two construct
-    //    keywords of the v0.6 grammar; `import` graduated with M1.0.7 cross-file
-    //    import; `const` / `private` / `test` graduated with M1.0.8 — they now
-    //    lex as `kw_const` / `kw_private` / `kw_test` via `s3_keywords`.
-    //    `override` is the last reserved member: it waits for a Tier-1
-    //    overridable module (cf. `engine-phase-1-plan.md`) ──
+    // `override` waits for a Tier-1 overridable module
+    // (cf. `engine-phase-1-plan.md`).
     "override",
 
-    // ── Async machinery: fully graduated. `async` with M0.8 E2, `await` with
-    //    M0.8 E3 sub-slice B, `spawn` with M1.0.10 (structural expr) then
-    //    M1.0.12 (async task statement — disambiguated by the next token),
-    //    `branch` with the M0.8 E4 quest slice (async statement form M1.0.12),
-    //    `race` / `sync` with M1.0.12 (concurrency algebra, §4.2) ──
-
-    // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
-    //    `after` graduated with E4 routine triggers; `every` / `after_unscaled`
-    //    graduated with M1.0.13 — the §4.3 timer statement parses and executes.
-    //    `quantize` stays reserved: its musical beat/bar clock (Sequencer /
-    //    Pulse) is absent from the Phase-1 runtime, so its realization is
-    //    assigned to a later Sequencer-adjacent milestone) ──
+    // `quantize` waits for its musical beat/bar clock (Sequencer / Pulse),
+    // which the runtime does not carry.
     "quantize",
 
-    // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
-    // they appear in legitimate identifier-shaped positions in S3 annotation
-    // args (e.g. `@pause_group(.none)`). The S3 parser accepts them as plain
-    // identifiers; their grammar-level uses (generic bound, impl self param,
-    // Optional construction) only show up in constructs rejected at the top
-    // level. `as` graduated to a real keyword with the M0.8 cast operator.
+    // `where`, `self`, `none`, `some` are intentionally NOT listed — they appear
+    // in legitimate identifier-shaped positions in annotation args (e.g.
+    // `@pause_group(.none)`). The parser accepts them as plain identifiers; their
+    // grammar-level uses (generic bound, impl self param, Optional construction)
+    // only show up in constructs rejected at the top level.
 };
 
 test "non_s3_keywords does not collide with s3_keywords" {
@@ -371,9 +353,9 @@ test "non_s3_keywords does not collide with s3_keywords" {
 }
 
 test "const/private/test graduate to s3 keywords" {
-    // M1.0.8: `const` / `private` / `test` move from the reserve list into
-    // `s3_keywords`, each mapped to its own `kw_*` kind. `override` is the last
-    // member left reserved, so it still lexes as `error_unknown_keyword`.
+    // `const` / `private` / `test` are IN `s3_keywords`, each mapped to its own
+    // `kw_*` kind. `override` is the last member left reserved, so it still
+    // lexes as `error_unknown_keyword`.
     const T = struct {
         fn s3Kind(lexeme: []const u8) ?TokenKind {
             for (s3_keywords) |kw| {
@@ -406,10 +388,10 @@ test "const/private/test graduate to s3 keywords" {
 }
 
 test "spawn graduates to s3 keyword (M1.0.10)" {
-    // M1.0.10: `spawn` moves from the reserve list into `s3_keywords`, mapped
-    // to `kw_spawn`. The structural `spawn(C{…})` expr now lexes to a real
+    // `spawn` is IN `s3_keywords`, mapped
+    // to `kw_spawn`, so the structural `spawn(C{…})` expr lexes to a real
     // keyword so the parser can dispatch it. (The async `spawn { }` task form
-    // shares the keyword since M1.0.12 — next-token disambiguation.)
+    // shares the keyword — next-token disambiguation.)
     const T = struct {
         fn s3Kind(lexeme: []const u8) ?TokenKind {
             for (s3_keywords) |kw| {
@@ -432,7 +414,7 @@ test "spawn graduates to s3 keyword (M1.0.10)" {
 }
 
 test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
-    // M1.0.12: `race` / `sync` move from the reserve list into `s3_keywords`,
+    // `race` / `sync` are IN `s3_keywords`,
     // mapped to `kw_race` / `kw_sync` — the concurrency-algebra statements
     // (§4.2) become parseable. `override` remains the last reserved top-level
     // construct keyword (waits for a Tier-1 overridable module).
@@ -463,11 +445,11 @@ test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
 }
 
 test "every/after_unscaled graduate to s3 keywords (M1.0.13 E1)" {
-    // M1.0.13: `every` / `after_unscaled` move from the reserve list into
+    // `every` / `after_unscaled` are IN
     // `s3_keywords`, mapped to `kw_every` / `kw_after_unscaled` — the §4.3
     // timer statements become parseable (`after` has been a real keyword
-    // since M0.8 E4 routine triggers). `quantize` stays reserved: its
-    // musical clock is absent from the Phase-1 runtime.
+    // for longer). `quantize` stays reserved: its
+    // musical clock is absent from the runtime.
     const T = struct {
         fn s3Kind(lexeme: []const u8) ?TokenKind {
             for (s3_keywords) |kw| {
