@@ -175,8 +175,8 @@ pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) 
 
 /// Cook a `.scene.etch` source, resolving each `instance of "P"` by flattening
 /// `P.prefab.bin` (located through `base_resolver`) into the instance's entity:
-/// the prefab's components are inherited and the instance's overrides applied
-///. `base_resolver` may be null for a scene with no instances; an
+/// the prefab's components are inherited and the instance's overrides applied.
+/// `base_resolver` may be null for a scene with no instances; an
 /// instance with a null/unknowing resolver errors `BasePrefabMissing`.
 pub fn cookScene(
     gpa: std.mem.Allocator,

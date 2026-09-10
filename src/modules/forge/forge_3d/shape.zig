@@ -267,8 +267,8 @@ pub const ShapeStore = struct {
 /// core + radius, box → box(`half_extents`) core + radius 0 (a box has no convex
 /// radius).
 ///
-/// **This is the CONVEX ARM, and its precondition is asserted**,
-/// `engine-physics-forge.md` §1.11.15). It stopped being a total function of the
+/// **This is the CONVEX ARM, and its precondition is asserted**
+/// (`engine-physics-forge.md` §1.11.15). It stopped being a total function of the
 /// store the moment the store gained a half-space: the category is chosen upstream
 /// by `Shape.class()`, and calling this with a `.half_space` — or
 /// with a `.triangle_soup`, whose triangles enter the narrowphase ONE AT A TIME and
