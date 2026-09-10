@@ -42,7 +42,6 @@ pub const Writer = struct {
     /// (ASCII, no leading digit) — escaping is needed only for that collision,
     /// which can arise for lowercase value-idents (field, binding, param
     /// names); Etch type/component names are capitalized and never collide.
-    /// Cf. M0.5 item 8.
     pub fn ident(self: *Writer, name: []const u8) !void {
         if (std.zig.Token.keywords.has(name) or std.zig.primitives.isPrimitive(name)) {
             try self.write("@\"");

@@ -1,5 +1,5 @@
-//! Tier 1 service registry and the tree-walker invocation path (`etch-abi-
-//! zig.md` §8 and §8.7).
+//! Tier 1 service registry and the tree-walker invocation path (`etch-abi-zig.md` §8
+//! and §8.7).
 //!
 //! §8.7 records that the rest of §4, §6 and §8 describes invocation THROUGH THE
 //! VM — `CALL_SERVICE`, `VMContext`, `callconv(.c)` trampolines, `service_ref_pool`

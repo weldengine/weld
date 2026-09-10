@@ -321,7 +321,8 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
             .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
             // a top-level `const` is exportable (always public — a
             // const cannot carry a `private` prefix). `test` blocks are NOT
-            // listed: they live in a dedicated test-name namespace and are
+            // listed: they live in a dedicated test-name namespace
+            // (`TypeChecker.test_symbols`) and are
             // never exported.
             .const_decl => .{ .name = a.const_decls.items[datas[i]].name, .kind = .const_ },
             else => null,

@@ -1,9 +1,8 @@
-//! AST → Zig source lowering for the S5 Etch codegen.
+//! AST → Zig source lowering for the Etch codegen.
 //!
-//! The lowering pass consumes an `AstArena` that has already passed the S3
+//! The lowering pass consumes an `AstArena` that has already passed the
 //! two-pass type-checker and emits a single human-readable Zig source file
-//! per Etch program. Output layout (per `briefs/S5-etch-codegen-zig.md`
-//! Scope — "Generated file layout — readable, not minified"):
+//! per Etch program. The generated file is readable, not minified:
 //!
 //!     // Auto-generated from <source>.etch — DO NOT EDIT
 //!     const std = @import("std");
@@ -20,7 +19,7 @@
 //!                                                  // source order, flushes
 //!                                                  // tag mutations
 //!
-//! Implementation choices (cf. brief Notes):
+//! Implementation choices:
 //! - `extern struct` types match Etch component names verbatim (no prefix).
 //! - `int` → `i64`, `float` → `f64`, `bool` → `bool`; user types map to the
 //!   matching generated struct.
@@ -29,7 +28,7 @@
 //!   runtime registry matches the Zig `extern struct` layout exactly
 //!   (same `@offsetOf` semantics on both sides) so the cast is well-formed.
 //! - Rules are emitted in source declaration order; `tick(world, gpa)` invokes
-//!   them sequentially, matching the S4 interpreter's scheduler so
+//!   them sequentially, matching the interpreter's scheduler so
 //!   differential corpus parity holds.
 
 const std = @import("std");
@@ -80,11 +79,11 @@ pub fn generateFile(
 
     var stats: GenerateStats = .{};
 
-    // Build the global tag table (the shared `tags.zig` algorithm, same as
-    // the resolver and the interpreter) so tag filters resolve to leaf bits
-    // and `TagSet` is emitted + registered when the program declares any tag
-    //. The program is already type-checked, so `build` reports no
-    // new diagnostics here; the throwaway list is freed immediately.
+    // Build the global tag table (the shared `tags.zig` algorithm, same as the resolver
+    // and the interpreter) so tag filters resolve to leaf bits and `TagSet` is emitted
+    // + registered when the program declares any tag. The program is already
+    // type-checked, so `build` reports no new diagnostics here; the throwaway list is
+    // freed immediately.
     var tag_diags: std.ArrayListUnmanaged(diag_mod.Diagnostic) = .empty;
     defer {
         for (tag_diags.items) |*d| d.deinit(gpa);
@@ -105,7 +104,7 @@ pub fn generateFile(
         const data = ast.items.items(.data)[i];
         switch (kind) {
             .component_decl => {
-                // M1.B/G1 — refuse a sparse component EXPLICITLY, before any
+                // Refuse a sparse component EXPLICITLY, before any
                 // byte of it is emitted. The refusal is at the DECLARATION and
                 // not at a use site, and that is the stronger of the two
                 // readings for a measured reason: the emitted `register()`
@@ -142,7 +141,7 @@ pub fn generateFile(
         }
     }
 
-    // Builtin `Error` / `ErrorCode` prelude (tranche 2, part1 §10.2) —
+    // Builtin `Error` / `ErrorCode` prelude (part1 §10.2) —
     // the codegen image of the synthetic declarations skipped in
     // pass A. Emitted only when the program touches error handling, so an
     // error-free program keeps byte-identical output. `Error` is a plain
@@ -155,7 +154,7 @@ pub fn generateFile(
     }
 
     // Map-insert + map-get helpers — emitted iff the
-    // program has a map literal (the only source of a map value in the M0.8
+    // program has a map literal (the only source of a map value in the
     // subset). An unused private fn is legal Zig, so over-emitting on a
     // program that only inserts (or only reads) is harmless; map-free
     // programs stay byte-identical.
@@ -186,7 +185,7 @@ pub fn generateFile(
     // order matching source order.
     try emitRegister(&w, ast, &tag_table);
 
-    // Pass C — emit one Zig function per top-level Etch `fn` (M0.8 E2 call
+    // Pass C — emit one Zig function per top-level Etch `fn` (the call
     // mechanism). Emitted before the rules so the file reads top-down; Zig
     // resolves container-level references regardless of declaration order.
     i = 0;
@@ -351,7 +350,7 @@ fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: De
             try w.ident(fname);
             try w.print(": {s} = {s},\n", .{ zig_type, zeroDefault(zig_type) });
         } else {
-            // Emit the default expression. The S3 type-checker has already
+            // Emit the default expression. The type-checker has already
             // verified it is const-evaluable on the field type.
             try w.writeIndent();
             try w.ident(fname);
@@ -378,7 +377,7 @@ fn zeroDefault(zig_type: []const u8) []const u8 {
 /// not extern-compatible); `source` is `?*const Error` — a struct cannot
 /// contain itself by value. Field defaults satisfy Zig literal completeness:
 /// the resolver requires `message` + `code` on every `Error` literal, so only
-/// `source = null` (the omittable chaining field, tranche 4) is observable.
+/// `source = null` (the omittable chaining field) is observable.
 fn emitErrorPrelude(w: *Writer) CodegenError!void {
     try w.line("pub const ErrorCode = enum(i32) {");
     w.indentBy(1);
@@ -400,14 +399,14 @@ fn emitErrorPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
-/// Emit the map-insert helper (tranche 3, stdlib §14.2): one
+/// Emit the map-insert helper (stdlib §14.2): one
 /// duck-typed fn shared by `m.insert(k, v)`, the map-literal seeding, and
 /// nothing else. Last-write-wins through the same scan-replace-or-append as
 /// the interpreter's map store — byte-exact iteration order by construction.
 /// `m` is a `*std.ArrayListUnmanaged(struct { key: K, value: V })`; `==` on
 /// the key bounds K to the scalar key types the emitter's type table allows.
 /// Gated on the program containing a map literal (the only way a map value
-/// exists in the M0.8 subset), so map-free programs stay byte-identical.
+/// exists in the subset), so map-free programs stay byte-identical.
 fn emitMapInsertPrelude(w: *Writer) CodegenError!void {
     try w.line("fn __etchMapInsert(m: anytype, fa: std.mem.Allocator, k: anytype, v: anytype) void {");
     w.indentBy(1);
@@ -427,7 +426,7 @@ fn emitMapInsertPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
-/// Emit the map-get helper (tranche 4, stdlib §14.2 `m[k] -> V?`):
+/// Emit the map-get helper (stdlib §14.2 `m[k] -> V?`):
 /// the same insertion-ordered scan as `__etchMapInsert` (and the
 /// interpreter's map store) returning the value or `null`. Same gate as the
 /// insert helper (a map literal in the program).
@@ -445,14 +444,14 @@ fn emitMapGetPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
-/// Emit the set-insert helper (tranche 3bis, stdlib §15.2): one
+/// Emit the set-insert helper (stdlib §15.2): one
 /// duck-typed fn shared by `s.insert(item)` and the `Set.from` seeding —
 /// scan-skip-or-append, the exact mechanics of the interpreter's set store,
 /// so element order is byte-exact by construction. `s` is a
 /// `*std.ArrayListUnmanaged(struct { item: T })`; `==` on the element bounds
 /// T to the scalar types the emitter's set table allows. Gated on the
 /// program containing a `Set.*` associated call (the only source of a set
-/// value in the M0.8 subset — sets have no literal).
+/// value in the subset — sets have no literal).
 fn emitSetInsertPrelude(w: *Writer) CodegenError!void {
     try w.line("fn __etchSetInsert(s: anytype, fa: std.mem.Allocator, item: anytype) void {");
     w.indentBy(1);
@@ -467,7 +466,7 @@ fn emitSetInsertPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
-/// Emit the set-contains helper (tranche 3bis, stdlib §15.2): the
+/// Emit the set-contains helper (stdlib §15.2): the
 /// same insertion-ordered scan as `__etchSetInsert` (and the interpreter's
 /// set store) returning whether the element is present. Same gate as the
 /// insert helper.
@@ -782,12 +781,11 @@ fn exprCanThrow(ast: *const AstArena, expr: NodeId) bool {
     }
 }
 
-/// Whether a statement run references identifier `name` — drives the `_ =
-/// <name>;` discard for an unused catch binding (Zig
-/// rejects unused captures). An inner rebinding of the same name counts as
-/// a use (over-approximation): the discard is then skipped and Zig fails
-/// loud on the unused outer capture — an exotic shadowing shape, never a
-/// silent divergence.
+/// Whether a statement run references identifier `name` — drives the `_ = <name>;`
+/// discard for an unused catch binding (Zig rejects unused captures). An inner
+/// rebinding of the same name counts as a use (over-approximation): the discard is then
+/// skipped and Zig fails loud on the unused outer capture — an exotic shadowing shape,
+/// never a silent divergence.
 fn stmtRunUsesIdent(ast: *const AstArena, name: StringId, start: u32, len: u32) bool {
     var s: u32 = 0;
     while (s < len) : (s += 1) {
@@ -934,23 +932,16 @@ fn exprUsesIdent(ast: *const AstArena, name: StringId, expr: NodeId) bool {
     }
 }
 
-// ─── struct (by-value type) ──────────────────────────────────────────────
+// ─── by-value types: enum and struct ─────────────────────────────────────
 
-/// Emit a `struct` declaration as a Zig `extern struct` with its fields plus
-/// its inherent `impl` methods as `pub fn` members. Unlike a
-/// component / resource, a struct is not RTTI-registered (it is a by-value
-/// type, not an ECS type). Field layout mirrors `emitComponentLikeStruct` so
-/// the runtime registry's `@offsetOf` semantics match if the struct is later
-/// nested in a component (out of block-3 scope, but layout-compatible).
-/// Emit a C-like `enum` as a Zig `enum(i32)` (block 3 tranche B, `etch-abi-
-/// zig.md` §3.1 — `enum E { A, B }` → `enum(i32) { a, b }`). Variant
-/// names are preserved verbatim (Etch variants are snake_case by convention).
-/// A data-carrying variant (struct-like / tuple-like) is deferred: its
-/// construction + destructuring are post-Phase-1, so the whole enum fails loud
-/// (`UnsupportedConstruct`) and the interpreter is its reference.
+/// Emit a C-like `enum` as a Zig `enum(i32)` (`etch-abi-zig.md` §3.1 —
+/// `enum E { A, B }` → `enum(i32) { a, b }`). Variant names are preserved verbatim
+/// (Etch variants are snake_case by convention). A data-carrying variant (struct-like /
+/// tuple-like) is deferred: its construction + destructuring are unimplemented, so the
+/// whole enum fails loud (`UnsupportedConstruct`) and the interpreter is its reference.
 fn emitEnumDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     const decl = ast.enum_decls.items[data];
-    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
     var v_i: u32 = 0;
     while (v_i < decl.variants_len) : (v_i += 1) {
         if (ast.enum_variants.items[decl.variants_start + v_i].shape != .c_like) {
@@ -971,11 +962,17 @@ fn emitEnumDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     try w.blankLine();
 }
 
+/// Emit a `struct` declaration as a Zig `extern struct` with its fields plus its
+/// inherent `impl` methods as `pub fn` members. Unlike a component or resource, a
+/// struct is not RTTI-registered — it is a by-value type, not an ECS type. Field
+/// layout mirrors `emitComponentLikeStruct` so the runtime registry's `@offsetOf`
+/// semantics match if the struct is later nested in a component: nesting is out of
+/// scope, and the layout is compatible.
 fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     const decl = ast.struct_decls.items[data];
-    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
     const name = ast.strings.slice(decl.name);
-    // A `string` field (unlocked with the Error layer, M0.8 E3-C tranche 2)
+    // A `string` field (unlocked with the Error layer)
     // lowers to `[]const u8` — not extern-compatible, so such a struct is a
     // plain Zig struct. String-free structs keep the extern layout.
     var has_string = false;
@@ -1020,7 +1017,7 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
             try w.print(": {s} = @enumFromInt(0),\n", .{etch_type});
             continue;
         }
-        // Struct-typed field (tranche 8, unlocked by the anonymous `.{ … }`
+        // Struct-typed field (unlocked by the anonymous `.{ … }`
         // field-value context — part1 §5.5 nested POD structs).
         // `.{}` is a valid Zig default (every emitted struct field carries
         // one) but is never observed: the resolver requires literal provision
@@ -1105,12 +1102,12 @@ fn implHasMethod(ast: *const AstArena, impl: ast_mod.ImplDecl, name: StringId) b
 /// `throws` methods stay deferred. The body is a value-block
 /// (trailing expression → implicit `return`), shared with `emitFnDecl`'s
 /// shape. Bare `self` in value position (returned / passed on) would be a
-/// `*T` where the by-value shape has `T` — no M0.8 differential uses it;
+/// `*T` where the by-value shape has `T` — no differential uses it;
 /// such a program fails loud at `zig build` of the cooked file.
 fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method: ast_mod.FnDecl) CodegenError!void {
-    if (method.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
-    if (method.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
-    if (method.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
+    if (method.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
+    if (method.is_async) return CodegenError.UnsupportedConstruct; // async is not emitted
+    if (method.throws) return CodegenError.UnsupportedConstruct; // a throwing method is not emitted here
 
     var ctx: LocalCtx = .{};
     defer ctx.deinit(w.gpa);
@@ -1175,7 +1172,7 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
     try w.line("pub fn register(world: *World, gpa: std.mem.Allocator) !void {");
     w.indentBy(1);
 
-    // A program with nothing to register (possible since M0.8 E4 — a pure
+    // A program with nothing to register (a pure
     // Level-B program has no component/resource/event/tag) must still
     // compile: discard the params instead of leaving them unused.
     if (ast.component_decls.items.len == 0 and ast.resource_decls.items.len == 0 and
@@ -1302,7 +1299,7 @@ fn fieldKindLiteral(zig_type: []const u8) []const u8 {
     if (std.mem.eql(u8, zig_type, "u32")) return "FieldKind.u32_";
     if (std.mem.eql(u8, zig_type, "f32")) return "FieldKind.f32_";
     if (std.mem.eql(u8, zig_type, "f64")) return "FieldKind.f64_";
-    // Unreachable per the S3 type-checker — kept defensive.
+    // Unreachable per the type-checker — kept defensive.
     return "FieldKind.int_";
 }
 
@@ -1318,8 +1315,8 @@ const WhenInfo = struct {
     components: [][]const u8,
     /// Resource dependencies — name + must-be-changed flag.
     resource_deps: []ResourceDep,
-    /// Per-entity field filters, one per `has T { field == value }` clause
-    /// . Flat-AND model, mirroring the interpreter's `field_filters`.
+    /// Per-entity field filters, one per `has T { field == value }` clause. Flat-AND
+    /// model, mirroring the interpreter's `field_filters`.
     field_filters: []FieldFilter,
     /// True iff the when clause contains at least one component-side
     /// predicate (i.e. the rule iterates entities).
@@ -1411,15 +1408,15 @@ const FieldFilter = struct {
 /// Emit one Zig `fn` for a top-level Etch `fn`. The
 /// body is a value-block: the statement run is emitted, then the trailing
 /// expression as `return <value>;` (the implicit return). Params + return type
-/// map through `type_map`. `async` codegen is Phase 2 and fails loud
+/// map through `type_map`. `async` is not emitted and fails loud
 /// (`UnsupportedConstruct`); the interpreter is its reference. A `throws` fn
 /// gains a hidden trailing `__err: *?Error` out-param —
 /// the codegen image of the interpreter's `thrown` signal crossing the
 /// `callFn` boundary; an in-body throw stores through it and returns the
 /// never-read zero default of the return type.
 fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenError!void {
-    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
-    if (decl.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
+    if (decl.is_async) return CodegenError.UnsupportedConstruct; // async is not emitted
 
     const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else fnTypeZig(ast, decl.return_type);
     if (decl.throws and !decl.return_type.isNone()) {
@@ -1541,13 +1538,10 @@ fn fnBodyCanThrow(ast: *const AstArena, decl: ast_mod.FnDecl) bool {
 fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
     const tnode = ast.named_types.items[ast.typeNodeData(type_node)];
     const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-    // `string` params/returns lower to `[]const u8` — the same mapping the
-    // struct-field emitter delivers (M0.8 E3-C tranche 2). Before E4 this
-    // fell through to the raw-name fallback and emitted invalid Zig
-    // (`name: string`), violating the no-silently-wrong-output doctrine;
-    // first exercised by Level-B stub fns (flagged in the E4 journal). The
-    // ratified fn-body string-concat bound (no fn arena) is untouched —
-    // this maps the TYPE only.
+    // `string` params/returns lower to `[]const u8` — the same mapping the struct-field
+    // emitter delivers. A raw-name fallback here would emit invalid Zig
+    // (`name: string`), which is the no-silently-wrong-output doctrine breached. The
+    // fn-body string-concat bound (no fn arena) is untouched — this maps the TYPE only.
     if (std.mem.eql(u8, tname, "string")) return "[]const u8";
     // Non-builtin names pass through verbatim: declared struct/enum types
     // are emitted under their own names in the same generated file.
@@ -1589,15 +1583,13 @@ fn programUsesChanged(ast: *const AstArena) bool {
 /// the same tick. This matches the interpreter's per-tick `EventStore` (cleared
 /// at `stepOnce` start, drained in emit order), so the two backends agree.
 ///
-/// Scope: the observer is pure event-based. A combined event+entity form (a
-/// component `when` or tag filter on the observer) is deferred and fails loud
-/// here; the interpreter is its reference. The body's receiver-less resource
-/// write is codegen-sound since M0.8 E3-C tranche 7 (D-S3-resource-receiver
-/// closed) — the byte-exact emit → observer → resource-write differential is
-/// `60_event_observer_resource`.
-/// Observer variant of the `emitRule` two-pass frame-arena classification
-/// — returns whether the fn takes the conditional
-/// `fa` param. See `emitRule` for why the classification must be exact.
+/// Scope: the observer is pure event-based. A combined event+entity form (a component
+/// `when` or tag filter on the observer) is deferred and fails loud here; the
+/// interpreter is its reference. The body's receiver-less resource write is
+/// codegen-sound — the byte-exact emit → observer → resource-write differential is
+/// `60_event_observer_resource`. `60_event_observer_resource`. Observer variant of the
+/// `emitRule` two-pass frame-arena classification — returns whether the fn takes the
+/// conditional `fa` param. See `emitRule` for why the classification must be exact.
 fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!bool {
     var scratch_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer scratch_buf.deinit(w.gpa);
@@ -1620,7 +1612,7 @@ fn emitObserverRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDec
     var info = try collectWhenInfo(w.gpa, ast, rule, tag_table);
     defer freeWhenInfo(w.gpa, &info);
     // Combined event+entity (an observer that also iterates entities via a
-    // component `when`, or a per-entity tag filter) is out of M0.8 scope.
+    // component `when`, or a per-entity tag filter) is out of scope.
     if (info.has_component_ref or info.tag_filters.len > 0) return CodegenError.UnsupportedConstruct;
 
     // The conditional frame-arena param, appended last.
@@ -1694,7 +1686,7 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
 
 fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool, needs_arena: bool) CodegenError!void {
     // `async rule` lowers to a suspend/resume state
-    // machine — HIR-dependent, Phase 2. The interpreter is the reference; the
+    // machine — HIR-dependent and unimplemented. The interpreter is the reference; the
     // codegen rejects it loudly (consistent with `async fn` at l.689).
     if (rule.is_async) return CodegenError.UnsupportedConstruct;
 
@@ -1781,14 +1773,14 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
     }
 
     if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating or program_has_changed) {
-        // Path 2 — manual archetype walk. Reserved for the S4 inherited
-        // debt cases (`not has X`, `entity has A or entity has B`), the M0.8 E3
-        // tag cases (a positive tag filter / a tag mutation needs the entity id,
-        // which the comptime-query `Row` does not expose), and — when the
-        // program uses `changed` filters — EVERY component rule, so a writer's
-        // `markChanged` and a `changed` filter's per-slot `changedTick` can
-        // address `arch`/`chunk`/`slot`. The synth bench corpus never hits this
-        // branch (gate 4's monomorphisation count reflects only the AND path).
+        // Path 2 — manual archetype walk. Reserved for the inherited debt cases
+        // (`not has X`, `entity has A or entity has B`), the tag cases (a positive tag
+        // filter / a tag mutation needs the entity id, which the comptime-query `Row`
+        // does not expose), and — when the program uses `changed` filters — EVERY
+        // component rule, so a writer's `markChanged` and a `changed` filter's per-slot
+        // `changedTick` can address `arch`/`chunk`/`slot`. The synth bench corpus never
+        // hits this branch (gate 4's monomorphisation count reflects only the AND
+        // path).
         try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table, program_has_changed, arena);
     } else {
         // Path 1 — comptime query. The cooked code emits one
@@ -1861,8 +1853,8 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
 
 /// Emit the body of a rule using the manual archetype-walk fallback for
 /// when clauses containing `or` / `not`. Same shape as the pre-rewrite
-/// codegen — kept until the inherited S4 debts (`not` / `or` predicates)
-/// are addressed in Phase 0.2.
+/// codegen — kept until the inherited debts (`not` / `or` predicates)
+/// are addressed.
 fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable, program_has_changed: bool, arena: ?[]const u8) CodegenError!void {
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
@@ -2055,7 +2047,7 @@ fn walkExprForComponents(
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
             // Receiver-less `get(R)` accesses a resource, not a component —
-            // it must not enter the query tuple (D-S3-resource-receiver).
+            // it must not enter the query tuple.
             if (mg.receiver.isNone()) return;
             const cname = ast.strings.slice(mg.type_name);
             _ = try out.getOrPut(gpa, cname);
@@ -2186,7 +2178,7 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
             try w.print("arch.hasComponent({s}_id)", .{cname});
         },
         .resource, .resource_changed, .resource_filter => {
-            // Resource gates (incl. the §6 expression filter, M0.8 E4) are
+            // Resource gates (incl. the §6 expression filter) are
             // tested ahead of the archetype loop (in `emitRule`); inside the
             // archetype predicate they evaluate to a constant `true`.
             try w.write("true");
@@ -2272,7 +2264,7 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
     }
     try ctx.recordParams(w.gpa, ast, rule);
 
-    // §6 expression guards (M0.8 E4) — after the field-filter guards the
+    // §6 expression guards — after the field-filter guards the
     // comptime-query path emitted, mirroring the interpreter.
     try emitWhenExprGuards(w, ast, &ctx, info, "continue");
 
@@ -2412,13 +2404,11 @@ fn collectExprIdentsBounded(gpa: std.mem.Allocator, ast: *const AstArena, expr: 
 const LocalKind = enum {
     value,
     component_alias,
-    /// A receiver-less `let s = get(R)` / `get_mut(R)` resource binding
-    ///. Uses lower per access,
-    /// mirroring the interpreter's `Value.resource_ref`: a read forms a
-    /// `*const R` through `getResource` (no dirty — a read through a mutable
-    /// ref does not dirty), the write target forms a `*R` through
-    /// `getMutResource` (dirty set co-located with the write, the
-    /// interpreter's `writeResourceField` point).
+    /// A receiver-less `let s = get(R)` / `get_mut(R)` resource binding. Uses lower per
+    /// access, mirroring the interpreter's `Value.resource_ref`: a read forms a
+    /// `*const R` through `getResource` (no dirty — a read through a mutable ref does
+    /// not dirty), the write target forms a `*R` through `getMutResource` (dirty set
+    /// co-located with the write, the interpreter's `writeResourceField` point).
     resource_alias,
     /// A closure capture: an outer binding snapshotted
     /// into a field of the generated closure struct. Inside the closure's
@@ -2455,7 +2445,7 @@ const LocalRecord = struct {
 
 const LocalCtx = struct {
     /// Stack of records; lookups walk from the top so the most recent
-    /// declaration wins. S3 forbids shadowing within a single scope so the
+    /// declaration wins. Etch forbids shadowing within a single scope so the
     /// stack stays flat for compliant programs.
     records: std.ArrayListUnmanaged(LocalRecord) = .empty,
     /// When non-null, the body is emitted inside a `comptime_query.query`
@@ -2480,7 +2470,7 @@ const LocalCtx = struct {
     mark_changed: bool = false,
     /// The in-scope frame-arena allocator parameter name (`"fa"`), or null
     /// when the emission context has no arena — top-level fns / methods,
-    /// where a string concat fails loud (tranche 1b; fn-body
+    /// where a string concat fails loud (fn-body
     /// allocation = the §6.3 outparam-arena model, deferred). Set on
     /// rule-body contexts by the rule emitters.
     arena_param: ?[]const u8 = null,
@@ -2536,7 +2526,7 @@ const LocalCtx = struct {
             const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
             if (std.mem.eql(u8, tname, "Entity")) {
                 // Entity params are handled by the iteration machinery; the
-                // ident never reaches `emitExpr` in compliant S3 programs.
+                // ident never reaches `emitExpr` in a compliant program.
                 continue;
             }
             const zig_t = type_map.mapBuiltin(tname) orelse tname;
@@ -2667,14 +2657,13 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.writeIndent();
                 try w.write("} }\n");
             } else if (f.index_name != 0) {
-                // `for k, v in m` — a two-binding for-in is a map iteration
-                //. The map local is an insertion-ordered
-                // pair list (the interpreter's exact iteration order), so the
-                // loop walks the items slice and binds key then value as
-                // consts. An unused binding gets a `_ =` discard (the same
-                // static-scan discipline as the tranche-2 catch binding). Any
-                // non-map two-binding iterable already failed at the resolver;
-                // fail loud here as the belt.
+                // `for k, v in m` — a two-binding for-in is a map iteration. The map
+                // local is an insertion-ordered pair list (the interpreter's exact
+                // iteration order), so the loop walks the items slice and binds key
+                // then value as consts. An unused binding gets a `_ =` discard (the
+                // same static-scan discipline as the catch binding). Any
+                // non-map two-binding iterable already failed at the resolver; fail
+                // loud here as the belt.
                 const kv = mapKVZig(inferExprZigType(ast, ctx, f.iterable)) orelse return CodegenError.UnsupportedConstruct;
                 try w.writeIndent();
                 try w.write("for ((");
@@ -2713,12 +2702,11 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.writeIndent();
                 try w.write("}\n");
             } else {
-                // `for v in <array> { body }` → Zig `for (<array>) |v| { ... }`
-                //. Fixed arrays iterate directly; a dynamic
-                // array iterates its backing items
-                // slice, with the loop variable typed at the element type. Zig
-                // infers the element type for fixed iterables, so that local
-                // is recorded with no zig_type.
+                // `for v in <array> { body }` → Zig `for (<array>) |v| {... }`. Fixed
+                // arrays iterate directly; a dynamic array iterates its backing items
+                // slice, with the loop variable typed at the element type. Zig infers
+                // the element type for fixed iterables, so that local is recorded with
+                // no zig_type.
                 const dyn_elem = dynArrayElemZig(inferExprZigType(ast, ctx, f.iterable));
                 try w.writeIndent();
                 try w.write("for (");
@@ -2742,10 +2730,10 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             }
         },
         .while_stmt => {
-            // `while cond { body }` → Zig `while (<cond>) { <body> }`. `while
-            // let x = opt { body }` → `while (opt) |x| {
-            // body }`. The body is a statement run; `break` /
-            // `continue` inside lower through their own statement cases.
+            // `while cond { body }` → Zig `while (<cond>) { <body> }`.
+            // `while let x = opt { body }` → `while (opt) |x| { body }`. The body is a
+            // statement run; `break` / `continue` inside lower through their own
+            // statement cases.
             const wh = ast.while_stmts.items[data];
             try w.writeIndent();
             try w.write("while (");
@@ -2800,11 +2788,11 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             // the field initializers become a typed struct literal. Omitted
             // fields take the `extern struct`'s declared defaults. `emit` is
             // `comptime T` over the event type. (The `@on_event` observer that
-            // polls the bus is the E3 observer tranche, resolver-types §12.)
+            // polls the bus is the observer path, resolver-types §12.)
             const em = ast.emit_stmts.items[data];
             const ename = ast.strings.slice(em.event_type);
             // `catch unreachable`, not `try`: a generated rule fn returns `void`
-            // (rule error-propagation is the sub-slice-C error-handling codegen,
+            // (rule error-propagation is the error-handling codegen,
             // ABI §11). `emit` only errors on an unregistered event type, which
             // cannot happen — every declared event is registered at init
             // (`register`), and queue saturation drops internally (no error).
@@ -2823,12 +2811,12 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             w.indentBy(-1);
             try w.line("}) catch unreachable;");
         },
-        // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (`etch-
-        // grammar.md` §4.4) → a deferred `set_tag`/`clear_tag` command,
-        // applied at the tick boundary by `cmd.flush()`. `__entity` is the
-        // arch-walk slot's entity id; the `TagSet` id is looked up by name.
-        // The append only fails on OOM, which a `void` rule swallows
-        // (best-effort, matching the codegen's void-rule error stance).
+        // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (`etch-grammar.md`
+        // §4.4) → a deferred `set_tag`/`clear_tag` command, applied at the tick
+        // boundary by `cmd.flush()`. `__entity` is the arch-walk slot's entity id; the
+        // `TagSet` id is looked up by name. The append only fails on OOM, which a
+        // `void` rule swallows (best-effort, matching the codegen's void-rule error
+        // stance).
         .tag_mutation_stmt => {
             const tm = ast.tag_mutation_stmts.items[data];
             const table = ctx.tag_table orelse return CodegenError.UnsupportedConstruct;
@@ -2922,11 +2910,10 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
     }
 }
 
-/// `return <zero default>;` for the enclosing `throws` fn — the value a
-/// throwing path returns after storing through `__err` (M0.8 E3-C tranche
-/// 2). Never read: every sanctioned call site checks its `__terr_*` local
-/// before using the result, mirroring the interpreter's `callFn` returning
-/// unit with the signal set.
+/// `return <zero default>;` for the enclosing `throws` fn — the value a throwing path
+/// returns after storing through `__err`. Never read: every sanctioned call site checks
+/// its `__terr_*` local before using the result, mirroring the interpreter's `callFn`
+/// returning unit with the signal set.
 fn emitThrowsFnAbort(w: *Writer, ctx: *const LocalCtx) CodegenError!void {
     try w.writeIndent();
     if (ctx.fn_ret_zig.len == 0) {
@@ -3302,7 +3289,7 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.
     try w.write(" ");
     try emitExpr(w, ast, ctx, assign.value);
     try w.write(";\n");
-    // Change detection (M0.8 E3): right after a component-field write, stamp
+    // Change detection: right after a component-field write, stamp
     // the slot's `changed_tick` so an `entity has T changed` rule sees it. The
     // marking is co-located with the assignment (so it executes exactly when
     // the write does, even under a conditional) and at the same logical point
@@ -3384,7 +3371,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         .bool_lit => try w.write(ast.strings.slice(data)),
         .string_lit => {
             // String literal → a Zig `[]const u8`
-            // slice so `.len` and (tranche 1b) concat compose uniformly. The
+            // slice so `.len` and concat compose uniformly. The
             // Etch literal's bytes are re-emitted as an escaped Zig string
             // literal.
             try w.write("@as([]const u8, ");
@@ -3392,7 +3379,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(")");
         },
         .string_interp => {
-            // Interpolated string (tranche 1c, stdlib §12.5) →
+            // Interpolated string (stdlib §12.5) →
             // ONE `std.fmt.allocPrint(fa, "<segments+specs>", .{args})` in
             // the tick's frame arena. Per-arg specs mirror the interpreter's
             // piece formatting exactly: `{d}` for ints and floats (f64 args
@@ -3487,16 +3474,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
-            // Receiver-less `get(R)` / `get_mut(R)` in value (read) position
-            //: a typed
-            // const pointer over the resource-store buffer via `getResource`
-            // — no dirty, exactly the interpreter's `readResourceField`
-            // route (a read through a mutable ref does not dirty; the write
-            // target is handled in `emitAssign`). The store buffer is
-            // chunk-aligned (Option A, `resources.zig`) so the `@alignCast`
-            // is sound in ReleaseSafe — ABI pointer identity, `etch-abi-zig.md`
-            // §3.1. `<R>_id` is in scope from the rule's resource gate (the
-            // resolver requires `resource R` in the when clause, E1213).
+            // Receiver-less `get(R)` / `get_mut(R)` in value (read) position: a typed
+            // const pointer over the resource-store buffer via `getResource` — no
+            // dirty, exactly the interpreter's `readResourceField` route (a read
+            // through a mutable ref does not dirty; the write target is handled in
+            // `emitAssign`). The store buffer is chunk-aligned (Option A,
+            // `resources.zig`) so the `@alignCast` is sound in ReleaseSafe — ABI
+            // pointer identity, `etch-abi-zig.md` §3.1. `<R>_id` is in scope from the
+            // rule's resource gate (the resolver requires `resource R` in the when
+            // clause, E1213).
             if (mg.receiver.isNone()) {
                 try emitResourceConstPtr(w, ast.strings.slice(mg.type_name));
                 return;
@@ -3505,13 +3491,12 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .match_expr => try emitMatch(w, ast, ctx, data),
         .array_lit => {
-            // `[a, b, c]` → `[_]ELEM{ ... }`, `[v; n]` → `[_]ELEM{v} ** n`
-            //: the fixed (stack) array form — the element
-            // type is inferred from the first element. Dynamic `T[]` literals
-            // never reach this arm: they are routed at the `let` (the only
-            // place a slice annotation types them, M0.8 E3-C tranche 3). An
-            // empty literal outside that route has no type — fail loud. Set
-            // codegen is deferred with its interp runtime (no Set store yet).
+            // `[a, b, c]` → `[_]ELEM{... }`, `[v; n]` → `[_]ELEM{v} ** n`: the fixed
+            // (stack) array form — the element type is inferred from the first element.
+            // Dynamic `T[]` literals never reach this arm: they are routed at the `let`
+            // (the only place a slice annotation types them). An
+            // empty literal outside that route has no type — fail loud. Set codegen is
+            // deferred with its interp runtime (no Set store yet).
             const al = ast.array_lits.items[data];
             if (al.elements_len == 0) return CodegenError.UnsupportedConstruct;
             const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
@@ -3537,7 +3522,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // (`recv[lo..hi]`). A range index lowers to a
             // Zig slice; an inclusive range adds 1 to the exclusive Zig bound.
             const ix = ast.index_exprs.items[data];
-            // `m[k] -> V?` (stdlib §14.2, M0.8 E3-C tranche 4): a map
+            // `m[k] -> V?` (stdlib §14.2): a map
             // receiver routes through the __etchMapGet prelude helper — the
             // same insertion-ordered scan as the interpreter's map store,
             // byte-exact by construction.
@@ -3582,7 +3567,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // emits its statements straight into the `call` fn — a `return`
             // inside is the fn's own natural Zig boundary, the exact image of
             // the interpreter's boundary-consume (a return exits the closure,
-            // never the enclosing fn — the ratified E2 forward note); the
+            // never the enclosing fn); the
             // trailing value becomes the final `return`.
             const ce = ast.closure_exprs.items[data];
             var captures: std.ArrayListUnmanaged(Capture) = .empty;
@@ -3607,12 +3592,11 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // A body whose Zig type is not inferable would emit a void fn
             // returning a value — fail loud instead (interpreter reference).
             if (ret_zig.len == 0) return CodegenError.UnsupportedConstruct;
-            // The closure's `call` fn is a NEW fn boundary: the enclosing
-            // try label / frame arena / `throws` out-param are not in scope
-            // inside it. A THROWING body rides the closure's OWN hidden
-            // `__err` out-param — the tranche-2 throws-fn machinery verbatim
-            // (the sanctioned call site re-raises; thrown PROPAGATES through
-            // the closure boundary where returning is consumed inside).
+            // The closure's `call` fn is a NEW fn boundary: the enclosing try label /
+            // frame arena / `throws` out-param are not in scope inside it. A THROWING
+            // body rides the closure's OWN hidden `__err` out-param — the throws-fn
+            // machinery verbatim (the sanctioned call site re-raises; thrown PROPAGATES
+            // through the closure boundary where returning is consumed inside).
             const body_throws = exprCanThrow(ast, ce.body);
             const saved_try = ctx.try_label;
             const saved_arena = ctx.arena_param;
@@ -3730,7 +3714,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .struct_lit => {
             // `T { f: v, … }` → Zig `T{ .f = v, … }`. The
-            // anonymous `.{ … }` form (`type_name == 0`, M0.8 E3-C tranche 8)
+            // anonymous `.{ … }` form (`type_name == 0`)
             // is emitted by its typed context (let annotation / typed field
             // value) through `emitStructLitAs` — the resolver rejects any
             // other position (E0210); belt here.
@@ -3740,13 +3724,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .method_call => {
             // `recv.method(args)` / `Type.assoc(args)` → Zig method / associated
-            // call (block 3, §5.1). Inherent methods are emitted inside
+            // call (§5.1). Inherent methods are emitted inside
             // the struct, so Zig's `value.method(args)` / `Type.assoc(args)`
             // syntax resolves them directly.
             const mc = ast.method_calls.items[data];
             // `recv?.method()` — optional chain: a Zig
             // if-capture that short-circuits to `null`. The resolver bounds
-            // the op to builtin-payload methods; the only one in the M0.8
+            // the op to builtin-payload methods; the only one in the
             // subset is string `len`, so the emission is closed over it —
             // anything else fails loud (interpreter reference).
             if (mc.opt_chain) {
@@ -3768,7 +3752,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // position (the resolver bounds them there); a value-position use
             // fails loud downstream (`void` binding). `len` is the count as
             // Etch `int`; `pop` maps to the list's own `?T`-returning pop
-            // (tranche 4). Anything else is stdlib Phase 1+ → fail loud.
+            // Anything else is unimplemented stdlib → fail loud.
             if (ast.exprKind(mc.receiver) != .path) {
                 const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
                 if (dynArrayElemZig(recv_zig) != null) {
@@ -3819,13 +3803,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     return CodegenError.UnsupportedConstruct;
                 }
-                // Builtin set methods (tranche 3bis — minimal faithful subset,
+                // Builtin set methods (a minimal faithful subset,
                 // stdlib §15.2), routed on the emitted
                 // declaration type like arrays / maps. `insert` goes through
                 // the scan-skip-or-append prelude helper (statement position,
                 // Zig `void`); `contains` through the matching scan helper
                 // (→ bool); `len` is the element count as Etch `int`.
-                // Anything else is stdlib Phase 1+ → fail loud.
+                // Anything else is unimplemented stdlib → fail loud.
                 if (setElemZig(recv_zig) != null) {
                     const mname = ast.strings.slice(mc.method_name);
                     if (std.mem.eql(u8, mname, "insert") and mc.args_len == 1) {
@@ -3857,7 +3841,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             }
             // Builtin string method. `s.len()` →
             // Zig `(s).len` cast to `i64` (Etch `int`). Other string methods are
-            // stdlib Phase 1+ → fail loud (the resolver already rejects them, so
+            // unimplemented stdlib → fail loud (the resolver already rejects them, so
             // this is a defensive belt).
             if (ast.exprKind(mc.receiver) != .path and
                 std.mem.eql(u8, inferExprZigType(ast, ctx, mc.receiver), "[]const u8"))
@@ -3895,7 +3879,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (ast.exprKind(mc.receiver) == .path) {
                 // Associated fn: the receiver is a bare type name. A `Set.*`
                 // builtin call outside the `emitLet` set route (the only
-                // supported position, M0.8 E3-C tranche 3bis) fails loud
+                // supported position) fails loud
                 // here rather than emitting an undeclared `Set`.
                 const tname = ast.strings.slice(ast.exprData(mc.receiver));
                 if (std.mem.eql(u8, tname, "Set")) return CodegenError.UnsupportedConstruct;
@@ -3914,9 +3898,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(")");
         },
         .loop_expr => {
-            // `[label:] loop { body }` → Zig `[label:] while (true) { ... }`
-            //. As an expression its value is the operand of
-            // the `break` that exits it (Zig `while (true)` is value-carrying).
+            // `[label:] loop { body }` → Zig `[label:] while (true) {... }`. As an
+            // expression its value is the operand of the `break` that exits it (Zig
+            // `while (true)` is value-carrying).
             const lp = ast.loop_exprs.items[data];
             if (lp.label != 0) {
                 try w.ident(ast.strings.slice(lp.label));
@@ -3961,7 +3945,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try emitExpr(w, ast, ctx, ife.else_branch);
             }
         },
-        .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
+        .range => return CodegenError.UnsupportedConstruct, // a range appears only as a for-in iterable (lowered by emitStmt .for_stmt)
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
             // in `@as(T, …)`. The conversion builtin
@@ -3987,7 +3971,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         .binary => {
             const b = ast.binary_exprs.items[data];
             // `string + string` → concat allocated in the tick's frame arena
-            // via the rule's threaded `fa` (tranche 1b; stdlib §12.4, arena
+            // via the rule's threaded `fa` (stdlib §12.4, arena
             // model `etch-memory-model.md` §3 / abi-zig §5.6).
             // Same logical point as the interpreter's `.add` intercept in
             // `evalExpr` — byte-exact by construction. The resolver only
@@ -4025,7 +4009,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     try emitExpr(w, ast, ctx, u.operand);
                     try w.write(")");
                 },
-                // `expr!` → Zig `.?` (tranche 4, stdlib §16.2):
+                // `expr!` → Zig `.?` (stdlib §16.2):
                 // the null-unwrap panic is the same observable as the
                 // interpreter's RuntimeFailure on a `none`.
                 .force_unwrap => {
@@ -4066,15 +4050,14 @@ fn emitFieldAccessExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, fa: ast
     try w.ident(ast.strings.slice(fa.field_name));
 }
 
-/// Lower a `match` expression to a labeled Zig block that binds the
-/// scrutinee once and yields the first matching arm's value (M0.8 v0.6
-/// foundations). Literal arms compare with `==`; wildcard / binding arms are
-/// unconditional. A binding arm declares `const <name> = __m<n>` in an inner
-/// block statement so the arm body resolves the name. When no catch-all arm
-/// exists (a bool match covering true+false), a trailing `unreachable`
-/// satisfies Zig that the block always yields — exhaustiveness is already
-/// proven by the type-checker. `data` (the match-expr slab index) is unique
-/// per match in the file, so nested matches get distinct labels.
+/// Lower a `match` expression to a labeled Zig block that binds the scrutinee once and
+/// yields the first matching arm's value. Literal arms compare with `==`; wildcard /
+/// binding arms are unconditional. A binding arm declares `const <name> = __m<n>` in an
+/// inner block statement so the arm body resolves the name. When no catch-all arm
+/// exists (a bool match covering true+false), a trailing `unreachable` satisfies Zig
+/// that the block always yields — exhaustiveness is already proven by the type-checker.
+/// `data` (the match-expr slab index) is unique per match in the file, so nested
+/// matches get distinct labels.
 fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
     const m = ast.match_exprs.items[data];
     const lbl = data;
@@ -4125,7 +4108,7 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
                 ctx.records.items.len = saved_len;
                 try w.write("; }");
             },
-            // `some(v)` / `none` optional patterns (tranche 4, part1 §7.6)
+            // `some(v)` / `none` optional patterns (part1 §7.6)
             // → Zig optional capture / null comparison on the
             // scrutinee snapshot.
             .optional_some => {
@@ -4197,8 +4180,8 @@ fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) 
             },
             .wildcard => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null),
             .binding => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, arm.pattern_payload),
-            // `some(v)` / `none` optional patterns in statement position
-            //: Zig optional capture / null comparison.
+            // `some(v)` / `none` optional patterns in statement position: Zig optional
+            // capture / null comparison.
             .optional_some => {
                 try w.print("if (__ms{d}) |", .{lbl});
                 try w.ident(ast.strings.slice(arm.pattern_payload));
@@ -4368,7 +4351,7 @@ fn emitIfChain(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Code
     }
 }
 
-/// The Zig type emitted for a closure parameter. E1 codegen
+/// The Zig type emitted for a closure parameter. The codegen
 /// expects annotated scalar params; a missing / non-scalar annotation falls
 /// back to `i64` (the interpreter is the reference for richer closures).
 fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8 {
@@ -4382,10 +4365,10 @@ fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8
 /// the binding's recorded scalar Zig type.
 const Capture = struct { name: StringId, zig_type: []const u8 };
 
-/// True for the POD scalar Zig types a closure may capture — the `etch-
-/// resolver-types.md` §8.2 value-by-copy rows the
-/// M0.8 codegen subset records concretely. Strings / collections are
-/// ref-captures per §8.2 and stay deferred (interpreter reference).
+/// True for the POD scalar Zig types a closure may capture — the
+/// `etch-resolver-types.md` §8.2 value-by-copy rows the codegen subset records
+/// concretely. Strings / collections are ref-captures per §8.2 and stay deferred
+/// (interpreter reference).
 fn isCapturableZigType(t: []const u8) bool {
     return std.mem.eql(u8, t, "i64") or std.mem.eql(u8, t, "f64") or std.mem.eql(u8, t, "bool");
 }
@@ -4638,7 +4621,7 @@ fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
 }
 
 /// The Zig declaration type of an Etch dynamic-array local `E[]` — a frame-
-/// arena-backed list. The table is closed over the E1
+/// arena-backed list. The table is closed over the emitted
 /// builtin element scalars (+ string); any other element type is deferred
 /// (fail loud). Static strings keep the emitter allocation-free and make the
 /// reverse lookup (`dynArrayElemZig`) exact.
@@ -4672,7 +4655,7 @@ const dyn_array_types = .{
 /// map store so iteration order (and therefore every differential) is
 /// byte-exact by construction. Keys are bounded to `int`/`bool`: string keys
 /// need content equality (Eq on strings is deferred with the same policy as
-/// tranche 1) and float keys are not hashable per stdlib §4.3 — both fail
+/// the same policy) and float keys are not hashable per stdlib §4.3 — both fail
 /// loud here, the interpreter staying the reference.
 fn mapZigType(key_zig: []const u8, value_zig: []const u8) ?[]const u8 {
     inline for (map_types_table) |p| {
@@ -4731,7 +4714,7 @@ fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
 /// wrapper keeps the type distinct from the dyn-array list types — the
 /// method / index / for-in routing is keyed on the emitted declaration type.
 /// Elements are bounded to `int`/`bool`: string elements need content
-/// equality (deferred — the ratified tranche-3 map-key policy, interp
+/// equality (deferred — the map-key policy, interp
 /// reference) and float elements are resolver-rejected (E0601).
 fn setZigType(elem_zig: []const u8) ?[]const u8 {
     inline for (set_types_table) |p| {
@@ -4809,12 +4792,11 @@ fn isStructName(ast: *const AstArena, name: StringId) bool {
     return false;
 }
 
-/// Emit a struct literal as the qualified Zig `TypeName{ .f = v, … }` (M0.8
-/// E2 block 3; split out in E3-C tranche 8 so the anonymous `.{ … }` form
-/// emits through the same point with the name supplied by its context — the
-/// same logical point as the resolver's check mode and the interp's
-/// `evalStructLitAs`). Omitted fields fall back to the `extern struct`
-/// declared defaults.
+/// Emit a struct literal as the qualified Zig `TypeName{ .f = v, … }`. Both this and
+/// the anonymous `.{ … }` form emit through the same point with the name supplied by
+/// its context — the same logical point as the resolver's check mode and the interp's
+/// `evalStructLitAs`. Omitted fields fall back to the `extern struct` declared
+/// defaults.
 fn emitStructLitAs(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, sl: ast_mod.StructLitExpr, type_name: StringId) CodegenError!void {
     try w.print("{s}{{", .{ast.strings.slice(type_name)});
     var i: u32 = 0;
@@ -4904,10 +4886,9 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
     return null;
 }
 
-/// Re-emit an Etch string literal's raw bytes as a valid Zig string literal
-///. Escapes the quote / backslash / common
-/// control bytes; any other non-printable byte becomes `\xHH`.
-/// `true` when the program declares at least one Level-B construct with a
+/// Re-emit an Etch string literal's raw bytes as a valid Zig string literal. Escapes
+/// the quote / backslash / common control bytes; any other non-printable byte becomes
+/// `\xHH`. `true` when the program declares at least one Level-B construct with a
 /// descriptor.
 fn programHasLevelBDecls(ast: *const AstArena) bool {
     return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0 or ast.shader_decls.items.len > 0 or ast.scene_decls.items.len > 0 or ast.prefab_decls.items.len > 0;
@@ -5290,7 +5271,7 @@ fn emitSequenceDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAre
     try w.line("    } } },");
 }
 
-// ── M0.8 E7 Level C — scene / prefab emit-structure (byte-identical with the
+// ── Scene / prefab emit-structure (byte-identical with the
 //    interp `descriptor.zig buildScene`/`buildPrefab` — same shared renderers) ──
 
 /// Emit a `struct_lit_fields` run as `ComponentFieldDesc` literals (metadata or a
@@ -5852,8 +5833,7 @@ fn emitBehaviorDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAre
     try w.line(" } },");
 }
 
-/// Emit one behavior-tree node as a `etch_descriptor.BehaviorNode` literal
-/// .
+/// Emit one behavior-tree node as a `etch_descriptor.BehaviorNode` literal.
 fn emitBTNodeLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, node_idx: u32) CodegenError!void {
     const node = ast.bt_nodes.items[node_idx];
     const kind_tag = switch (node.kind) {
@@ -6201,7 +6181,7 @@ fn emitDescriptorNamespace(w: *Writer) CodegenError!void {
 }
 
 /// Find a top-level `fn` declaration by name. Top-level fn
-/// names are unique.
+/// names are unique (E0101).
 fn findFnDeclByName(ast: *const AstArena, name: StringId) ?ast_mod.FnDecl {
     for (ast.fn_decls.items) |decl| {
         if (decl.name == name) return decl;
@@ -6343,7 +6323,7 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .bool_lit => "bool",
         // String → `[]const u8`; drives the
         // string-receiver dispatch in the `method_call` emit. Interpolation
-        // (tranche 1c) produces a string too.
+        // produces a string too.
         .string_lit, .string_interp => "[]const u8",
         // Optionals: `some(x)` self-types via `@as` in
         // `emitExpr`, so the binding needs no annotation ("" → Zig infers);
@@ -6385,8 +6365,8 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             };
         },
         .field_access => blk: {
-            // Enum value `EnumName.variant` → the enum type name, so a `let d =
-            // Difficulty.hard` binds at that type.
+            // Enum value `EnumName.variant` → the enum type name, so a
+            // `let d = Difficulty.hard` binds at that type.
             if (enumValueName(ast, expr)) |ename| break :blk ename;
             const fa = ast.field_accesses.items[data];
             // Resolve the receiver to a component name, then look up the
@@ -6396,9 +6376,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             const z = fieldZigTypeOnComponent(ast, comp_name, fname) orelse break :blk "i64";
             break :blk z;
         },
-        // Array literals and index/slice results are emitted without a `let`
-        // type annotation — Zig infers the array / element / slice type
-        //. Returning "" makes `emitLet` drop the `: T`.
+        // Array literals and index/slice results are emitted without a `let` type
+        // annotation — Zig infers the array / element / slice type. Returning "" makes
+        // `emitLet` drop the `: T`.
         .array_lit => "",
         .index => "",
         // Closures (anonymous struct type) and call results are left to Zig
@@ -6408,8 +6388,8 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // Struct literals (struct type) and method-call results (the method's
         // return type) are left to Zig inference.
         .struct_lit => blk: {
-            // An explicit `T { … }` literal types as `T`; the anonymous `.{
-            // … }` form keeps "" (context-typed).
+            // An explicit `T { … }` literal types as `T`; the anonymous `.{ … }` form
+            // keeps "" (context-typed).
             const sl = ast.struct_lits.items[data];
             break :blk if (sl.type_name == 0) "" else ast.strings.slice(sl.type_name);
         },
@@ -6508,10 +6488,9 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
                 const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
                 const resolved = ast.resolveTypeAliasName(tnode.name);
                 const etch_t = ast.strings.slice(resolved);
-                // `string` fields (`Error.message`) → the codegen string
-                // type, driving `.len()` dispatch; enum-typed fields
-                // (`Error.code`) map 1:1, driving the match shorthand
-                //.
+                // `string` fields (`Error.message`) → the codegen string type, driving
+                // `.len()` dispatch; enum-typed fields (`Error.code`) map 1:1, driving
+                // the match shorthand.
                 if (std.mem.eql(u8, etch_t, "string")) return "[]const u8";
                 if (isEnumName(ast, resolved)) return etch_t;
                 return type_map.mapBuiltin(etch_t);
@@ -6598,7 +6577,7 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
     w.indentBy(1);
 
     if (program_has_changed) {
-        // Open the tick before its rules run (change detection, M0.8 E3):
+        // Open the tick before its rules run (change detection):
         // advance `current_tick` + clear the dirty bitsets, so a write this tick
         // stamps `changedTick = current_tick > __last_run` and a `changed` rule
         // fires for it — byte-exact with the interpreter's `runFor` `beginFrame`.
@@ -6614,7 +6593,7 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
         try w.line("defer cmd.deinit();");
     }
     if (any_arena) {
-        // Frame arena (tranche 1b, `etch-memory-model.md` §3 / abi-zig
+        // Frame arena (`etch-memory-model.md` §3 / abi-zig
         // §5.6): transient non-POD allocations (string concat) live
         // here, threaded into arena-needing rule fns as `fa`. Arena-per-tick
         // mounted on the threaded gpa = reset-at-tick-boundary by

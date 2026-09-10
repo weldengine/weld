@@ -1,13 +1,10 @@
-//! S3 Etch type-checker — two passes over an `AstArena` produced by the
+//! Etch type-checker — two passes over an `AstArena` produced by the
 //! parser. Pass 1 collects top-level symbols (component / resource / rule)
-//! and validates field declarations against the S3 builtin type set.
+//! and validates field declarations against the builtin type set.
 //! Pass 2 resolves the `when` clauses and rule bodies — checking ECS
 //! access rules, expression types, and const-evaluable defaults.
 //!
-//! Behaviour mirrors `briefs/S3-etch-parser-subset.md` Scope /
-//! "Type-checker — pass 1 (collect)" and "pass 2 (resolve / check)".
-//! Diagnostics use the codes listed in `briefs/S3-etch-parser-subset.md`
-//! Scope / Diagnostics typed API.
+//! Diagnostics carry the codes of `etch-diagnostics.md`.
 
 const std = @import("std");
 const ast_mod = @import("ast.zig");
@@ -50,7 +47,7 @@ const storage_domain_dotted = blk: {
 ///
 /// Shared by the interpreter and the scene cook, exactly as `storageModeOf` is,
 /// so the two registries cannot disagree about what a declaration requires —
-/// the G1 arbitration applied to the second annotation this milestone consumes.
+/// which is what a shared resolver buys.
 ///
 /// `out` is the caller's buffer and the result borrows it: the names are slices
 /// into the AST's string pool, which outlives the registration, so nothing is
@@ -124,7 +121,7 @@ const DiagnosticCode = diag_mod.DiagnosticCode;
 const SourceSpan = token_mod.SourceSpan;
 const StringId = ast_mod.StringId;
 
-/// Closed enum of Etch primitive types known to the S3 type-checker.
+/// Closed enum of Etch primitive types known to the type-checker.
 pub const BuiltinType = enum {
     int_,
     float_,
@@ -137,26 +134,26 @@ pub const BuiltinType = enum {
     vec3,
     color,
     duration,
-    /// `Time` (§2.2 builtin, M0.8 E7). The expression type of a `TIME_LITERAL`
+    /// `Time` (§2.2 builtin). The expression type of a `TIME_LITERAL`
     /// (`HH:MM`, §1.4 / §3.2 literal) — the DURATION/COLOR-precedent lift.
     /// EVALUATION is fail-loud in both backends (time runtime semantics are
-    /// Tier-1/E5+); like `duration`/`string_` it is NOT in `fromName`, so it
+    /// Tier 1); like `duration`/`string_` it is NOT in `fromName`, so it
     /// stays a literal-expression type, not a component/resource field type.
     time,
     /// `string`. A first-class expression type so
     /// `"lit"` / concat / `.len()` resolve, but deliberately NOT in `fromName`
     /// — `string` stays rejected as a component/resource field type (POD /
-    /// "not in the builtin set", `validateFieldsInDecl`). Since tranche 2
+    /// "not in the builtin set", `validateFieldsInDecl`). Since the Error layer
     /// (the Error layer) `string` is accepted on `struct` fields and resolves
     /// as a declared type through `namedTypeToResolved`'s special case.
     string_,
-    /// `TaskHandle` (§2.2 builtin, M1.0.12 E3) — the value of a bound spawn
+    /// `TaskHandle` (§2.2 builtin) — the value of a bound spawn
     /// task statement (`let h = spawn { }`). Non-POD (`etch-grammar.md` §2.2):
     /// like `string_`/`time` it is deliberately NOT in `fromName`, so it stays
     /// rejected as a component/resource field type. `h.cancel()` and `await h`
     /// are its only operations (§9.8).
     task_handle,
-    /// `TimerHandle` (§2.2 builtin, M1.0.13 E4) — the value of a bound timer
+    /// `TimerHandle` (§2.2 builtin) — the value of a bound timer
     /// statement (`let t = after(d) { }`). Non-POD (`etch-grammar.md` §2.2):
     /// like `task_handle` it is deliberately NOT in `fromName`, so it stays
     /// rejected as a component/resource field type. `t.cancel()` is its ONLY
@@ -229,7 +226,7 @@ pub const BuiltinResource = struct {
 /// `get_mut(GameTime).time_scale` against it, and `interp.zig` Pass A
 /// auto-registers the resources from it at the builtin `TagSet` injection
 /// point. No `.etch` prelude, no separate module. `GameTime.fixed_dt`'s
-/// default IS the interpreter's fixed timestep (`1.0 / 60.0`, the M1.0.11
+/// default IS the interpreter's fixed timestep (`1.0 / 60.0`, the
 /// async 60 Hz convention). `UnscaledTime` and `RealTime` are affected by
 /// neither `time_scale` nor `paused`.
 pub const builtin_resources = [_]BuiltinResource{
@@ -264,8 +261,8 @@ pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
 }
 
 /// Fixed-array carrier for `ResolvedType.array_fixed`: builtin element type +
-/// compile-time length. E1 collections hold **builtin primitive** elements
-/// only (collections of components / structs are E2); a non-builtin element
+/// compile-time length. Collections hold **builtin primitive** elements
+/// only (collections of components / structs are unsupported); a non-builtin element
 /// resolves the whole collection type to `unknown`.
 pub const ArrayFixedInfo = struct { elem: BuiltinType, len: u64 };
 /// Map carrier for `ResolvedType.map_t`: builtin key + value types.
@@ -277,7 +274,7 @@ pub const ResolvedType = union(enum) {
     component: StringId, // user-declared component type name
     resource: StringId, // user-declared resource type name
     /// `start..end` range; payload is the (integer) element type. Only
-    /// consumed by `for-in` in E1.
+    /// consumed by `for-in`.
     range: BuiltinType,
     /// `T[N]` fixed-size array. Element + compile-time len.
     array_fixed: ArrayFixedInfo,
@@ -372,13 +369,13 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
-/// Resolve a foreign-arena component field's declared type to a `BuiltinType`,
-/// or `null` for a non-builtin (named / array / complex) type — M1.0.7 E6 (D-E).
-/// Mirrors the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's
-/// strings + alias chain; it consults no symbol table. `null` is unreachable for a
-/// valid component (component fields are builtin-POD only, `validateFieldsInDecl
-/// .component_like`) — so the cross-arena field-TYPE check is complete for every
-/// valid imported component.
+/// Resolve a foreign-arena component field's declared type to a `BuiltinType`, or
+/// `null` for a non-builtin (named / array / complex) type. Mirrors
+/// the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's strings +
+/// alias chain; it consults no symbol table. `null` is unreachable for a valid
+/// component (component fields are builtin-POD only,
+/// `validateFieldsInDecl.component_like`) — so the cross-arena field-TYPE check is
+/// complete for every valid imported component.
 fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
     if (decl_arena.typeNodeKind(type_node) != .named) return null;
     const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
@@ -390,7 +387,7 @@ fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?Buil
 
 /// `true` if `s` contains an ASCII uppercase letter — an `E1768
 /// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
-/// `etch-validation-ecs.md` §22.2; M0.8 E4).
+/// `etch-validation-ecs.md` §22.2).
 fn containsUppercase(s: []const u8) bool {
     for (s) |c| {
         if (c >= 'A' and c <= 'Z') return true;
@@ -427,21 +424,20 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
     return std.fmt.parseFloat(f64, arena.strings.slice(arena.exprData(expr_id))) catch null;
 }
 
-/// Target categories the annotation-applicability check distinguishes
-///. E1 had `component` / `resource` / `rule`
-/// items and their `field`s; `function` joins with top-level `fn`. No
-/// builtin annotation in the current catalogue applies to a `function` (the
-/// fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
-/// `@custom` is accepted there; `event` joins with the `event` construct
-///; other construct targets arrive with their constructs.
-/// `data` / `routine` join with the E4 Level-B constructs (no builtin
-/// annotation targets them — only `.custom` is accepted, like `function`).
+/// Target categories the annotation-applicability check distinguishes. The first set held
+/// `component` / `resource` / `rule` items and their `field`s; `function` joins with
+/// top-level `fn`. No builtin annotation in the current catalogue applies to a
+/// `function` (the fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
+/// `@custom` is accepted there; `event` joins with the `event` construct; other
+/// construct targets arrive with their constructs. `data` / `routine` join with the
+/// Level-B constructs (no builtin annotation targets them — only `.custom` is accepted,
+/// like `function`).
 const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_ };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
 /// `.custom` is accepted everywhere (plugin-registered, schema validated
-/// Phase 3). `@networked` targets `event` (`etch-grammar.md` §18.2).
+/// unimplemented). `@networked` targets `event` (`etch-grammar.md` §18.2).
 /// `@loc` → expression returns `false` on every current target.
 fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
     return switch (kind) {
@@ -469,7 +465,7 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
     };
 }
 
-/// S3 type-checker — runs pass 1 (symbol collection) then pass 2
+/// The type-checker — runs pass 1 (symbol collection) then pass 2
 /// (type resolution + body validation) against an `AstArena`,
 /// accumulating diagnostics in a caller-owned list.
 pub const TypeChecker = struct {
@@ -479,7 +475,7 @@ pub const TypeChecker = struct {
     /// Symbol table keyed by interned name `StringId`.
     symbols: std.AutoHashMapUnmanaged(StringId, Symbol) = .empty,
     /// Test-name namespace, SEPARATE from `symbols`: a `test "Foo"`
-    /// no longer collides with a `component Foo` (the M1.0.8 collision this
+    /// no longer collides with a `component Foo` (the collision this
     /// milestone resolves). Keyed by the interned test-name string; membership
     /// enforces intra-namespace uniqueness (two `test "X"` → E0101, contextual
     /// message). Test names are never referenced by code and never exported.
@@ -489,7 +485,7 @@ pub const TypeChecker = struct {
     /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
     /// the associated-fn dispatch of `Type.assoc()`.
     methods: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    /// Trait impls (`impl Trait for Type [when …]`, M0.8 E2 block 3 tranche C),
+    /// Trait impls (`impl Trait for Type [when …]`),
     /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
     /// §5.2`) scans this for the receiver type, AFTER inherent (§5.5 order).
     trait_impls: std.ArrayListUnmanaged(TraitImplEntry) = .empty,
@@ -507,7 +503,7 @@ pub const TypeChecker = struct {
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
     /// assignment RHS / `return` operand); `synthExprE` flags any OTHER
     /// `await_expr` it visits as E0904 `AwaitNotStatementHead` (a sub-expression
-    /// `await` — a Phase-1 tree-walker restriction; §9.12).
+    /// `await` — a tree-walker restriction; §9.12).
     stmt_head_await: NodeId = NodeId.none,
     /// Whether the statements currently being checked sit on the async driver's
     /// frame-driven spine: a rule / `fn` / method body, or the body
@@ -528,11 +524,11 @@ pub const TypeChecker = struct {
     /// which can never be `throws` (E0903), and false in a plain fn. Saved and
     /// restored at every body boundary, exactly like `current_is_async`.
     current_can_throw: bool = false,
-    /// Whether the statements currently being checked are a `test` block body
-    ///. Test-scoped builtins (`test_world`, `tick_until`) and the
-    /// `measure { }` expression resolve only when this is `true`; outside a test
-    /// body they fall through to E0102 (`test_world`/`tick_until`) or E0910
-    /// (`measure`). Set/restored around the body in `checkTest`.
+    /// Whether the statements currently being checked are a `test` block body.
+    /// Test-scoped builtins (`test_world`, `tick_until`) and the `measure { }`
+    /// expression resolve only when this is `true`; outside a test body they fall
+    /// through to E0102 (`test_world`/`tick_until`) or E0910 (`measure`). Set/restored
+    /// around the body in `checkTest`.
     in_test_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked, `null` outside any.
@@ -541,11 +537,10 @@ pub const TypeChecker = struct {
     /// E0907 (a `break`/`continue` must not cross the task boundary §9.2).
     /// Saved/restored at each branch entry (innermost wins).
     conc_branch: ?ConcBranchKind = null,
-    /// Loop-nesting depth accumulated INSIDE the innermost concurrency branch
-    ///: >0 means an unlabeled `break`/`continue` targets an
-    /// in-branch loop (legal); 0 means it would escape the task → E0907.
-    /// Reset to 0 at branch entry (saved/restored); incremented by the
-    /// `for`/`while` statement arms and `synthLoop`.
+    /// Loop-nesting depth accumulated INSIDE the innermost concurrency branch: >0 means
+    /// an unlabeled `break`/`continue` targets an in-branch loop (legal); 0 means it
+    /// would escape the task → E0907. Reset to 0 at branch entry (saved/restored);
+    /// incremented by the `for`/`while` statement arms and `synthLoop`.
     conc_loop_depth: u32 = 0,
     /// Stack of the labels of every labeled loop currently open,
     /// pushed/popped by `synthLoop`. Only the window past `conc_labels_base`
@@ -553,15 +548,14 @@ pub const TypeChecker = struct {
     /// `break`/`continue` whose label is outside that window targets a loop
     /// beyond the task boundary → E0907.
     conc_labels: std.ArrayListUnmanaged(StringId) = .empty,
-    /// Start of the innermost branch's label window in `conc_labels`
-    ///. Saved/restored at branch entry.
+    /// Start of the innermost branch's label window in `conc_labels`. Saved/restored at
+    /// branch entry.
     conc_labels_base: usize = 0,
-    /// The direct-call node consumed by the `await` currently being typed
-    ///: the free-fn/method call sites skip E0905 for it. Set
-    /// around the future-form arg synthesis; `NodeId.none` otherwise. The
-    /// `await` is the SOLE call-grain consumer of the `{async}` effect
-    /// (`etch-resolver-types.md` §9.2, revision 2): the four concurrency
-    /// constructs relocate the suspension into a child task — their bodies
+    /// The direct-call node consumed by the `await` currently being typed: the
+    /// free-fn/method call sites skip E0905 for it. Set around the future-form arg
+    /// synthesis; `NodeId.none` otherwise. The `await` is the SOLE call-grain consumer
+    /// of the `{async}` effect (`etch-resolver-types.md` §9.2, revision 2): the four
+    /// concurrency constructs relocate the suspension into a child task — their bodies
     /// are ordinary async contexts where E0905 applies recursively.
     awaited_call: NodeId = NodeId.none,
     /// Merged global tag table (`etch-validation-ecs.md` §5.2), built
@@ -569,7 +563,7 @@ pub const TypeChecker = struct {
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
     /// landed in the query-operator commit) resolves paths against it.
     tag_table: ?tags_mod.TagTable = null,
-    /// Names captured by the closure body currently being typed (tranche 6,
+    /// Names captured by the closure body currently being typed (
     /// `etch-resolver-types.md` §8.2): the caller-scope bindings
     /// snapshotted at `synthCall` minus the closure params. An assignment
     /// targeting one of them is E0221 ClosureCannotMutateCapture; a body-local
@@ -577,42 +571,40 @@ pub const TypeChecker = struct {
     /// `null` outside a closure body. Saved/restored around nested typing.
     closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
     /// Cross-file project context. `null` in single-file mode (the
-    /// M0.8 behaviour: E1782/E1786/E1791 resolve against per-file sets). When
+    /// Single-file behaviour: E1782/E1786/E1791 resolve against per-file sets). When
     /// set (via `checkProject`), those three scene/prefab reference + UUID
     /// checks resolve against the byte-keyed PROJECT indexes instead, so a
     /// prefab or UUID defined in another project file is in scope.
     project: ?*const ProjectContext = null,
-    /// Symbols brought into this file's scope by a selective `import a.b { X }`
-    ///, byte-keyed under their LOCAL name's `StringId` in THIS arena
-    /// (the `as Y` alias if present, else the imported name). Built by
-    /// `bindImports` after pass 1; consulted by E6's `TYPE_IDENT` resolution.
-    /// Empty in single-file mode.
+    /// Symbols brought into this file's scope by a selective `import a.b { X }`,
+    /// byte-keyed under their LOCAL name's `StringId` in THIS arena (the `as Y` alias
+    /// if present, else the imported name). Built by `bindImports` after pass 1;
+    /// consulted by `TYPE_IDENT` resolution. Empty in single-file mode.
     imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
     /// Module aliases from `import a.b as m` / bare `import a.b`:
     /// local alias `StringId` → target file index. Qualified `m.Type` resolution
     /// is deferred; the binding is recorded so the later walk is purely additive.
     imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
-    /// Every `service` reachable from this check, keyed by NAME BYTES
-    ///. Byte-keyed and not `StringId`-keyed for the reason
-    /// M1.0.7 established for the exports index: a `StringId` is per-arena, and
-    /// a service is declared in one arena and called from another.
+    /// Every `service` reachable from this check, keyed by NAME BYTES. Byte-keyed and
+    /// not `StringId`-keyed for the reason the exports index does: a
+    /// `StringId` is per-arena, and a service is declared in one arena and called from
+    /// another.
     services: std.StringHashMapUnmanaged(ServiceEntry) = .empty,
     /// Every `event` a `.d.etch` in this project declares, keyed by NAME BYTES
     /// for the reason `services` is.
     foreign_events: std.StringHashMapUnmanaged(ForeignEvent) = .empty,
 
-    /// Byte-keyed cross-file indexes for project-level scene/prefab validation
-    ///. StringIds are per-arena, so cross-file resolution keys on
-    /// the interned string BYTES. `prefabs` holds every prefab name declared
-    /// anywhere in the project (read-only during checks); `uuids` is the shared
-    /// cross-scene UUID tracker, mutated as each file's scenes are visited — a
-    /// second occurrence of a UUID is E1782. Both sets' keys reference the
-    /// arenas' string pools, which `root.validateProject` keeps alive for the
-    /// duration of the checks.
-    /// The four concurrency-branch contexts — see `conc_branch`.
+    /// Byte-keyed cross-file indexes for project-level scene/prefab validation.
+    /// StringIds are per-arena, so cross-file resolution keys on the interned string
+    /// BYTES. `prefabs` holds every prefab name declared anywhere in the project
+    /// (read-only during checks); `uuids` is the shared cross-scene UUID tracker,
+    /// mutated as each file's scenes are visited — a second occurrence of a UUID is
+    /// E1782. Both sets' keys reference the arenas' string pools, which
+    /// `root.validateProject` keeps alive for the duration of the checks. The four
+    /// concurrency-branch contexts — see `conc_branch`.
     pub const ConcBranchKind = enum { race, sync, branch, spawn };
 
-    /// Visibility of an exported symbol (M1.0.7 E5, D-G). Since `private`
+    /// Visibility of an exported symbol. Since `private`
     /// graduated the exports builder sets `.private` from the decl's
     /// `Item.visibility`, making the binding path's `E0107` check reachable.
     pub const Visibility = enum { public, private };
@@ -629,20 +621,20 @@ pub const TypeChecker = struct {
     };
 
     /// Per-module exports table, byte-keyed on the interned export name (StringIds
-    /// are per-arena → cross-file keys on bytes, the M0.9 pattern). One table per
+    /// are per-arena → cross-file keys on bytes). One table per
     /// project file, indexed by file index in `ProjectContext.exports`.
     pub const ExportTable = std.StringHashMapUnmanaged(ExportEntry);
 
     pub const ProjectContext = struct {
         prefabs: *const std.StringHashMapUnmanaged(void),
         uuids: *std.StringHashMapUnmanaged(void),
-        // ── M1.0.7 E5 — cross-file import resolution ──
+        // ── Cross-file import resolution ──
         /// Module-path bytes → file index (built by `root.validateProject`).
         module_index: *const std.StringHashMapUnmanaged(usize),
         /// Per-file exports tables, indexed by file index.
         exports: []const ExportTable,
         /// Per-file arenas, indexed by file index (= the project's parsed ASTs).
-        /// The defining arena for E6's cross-arena component-decl fetch.
+        /// The defining arena for the cross-arena component-decl fetch.
         arenas: []AstArena,
     };
 
@@ -659,10 +651,10 @@ pub const TypeChecker = struct {
         span: SourceSpan,
     };
 
-    /// One `event` declared in a `.d.etch` reachable from this check
-    ///. Same shape and same reason as `ServiceEntry`: the
-    /// declaration lives in a different arena than the rule observing it, so the
-    /// arena pointer is what makes the field run reachable.
+    /// One `event` declared in a `.d.etch` reachable from this check. Same shape and
+    /// same reason as `ServiceEntry`: the declaration lives in a different arena than
+    /// the rule observing it, so the arena pointer is what makes the field run
+    /// reachable.
     ///
     /// Declaration files ONLY. An `event` in an ordinary `.etch` keeps the
     /// existing single-arena path through `symbols`, and nothing about it moves.
@@ -720,7 +712,7 @@ pub const TypeChecker = struct {
     }
 
     fn runCheck(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic), project: ?*const ProjectContext) !void {
-        // Builtin `Error` / `ErrorCode` declarations (M0.8 E3-C tranche 2,
+        // Builtin `Error` / `ErrorCode` declarations (
         // part1 §10.2) join the arena before pass 1 so they register like
         // ordinary declarations. Every interp / codegen driver runs through
         // `check`, so the injection point is unique.
@@ -783,17 +775,14 @@ pub const TypeChecker = struct {
     /// this code.**
     ///
     /// **`event_decl` is IN the allow-list, and it is the one place where the
-    /// reversible-direction argument was actually exercised** (M1.1.15.2, G1
-    /// amendment after a Claude.ai round-trip; `etch-grammar.md` §20.1 patched
-    /// to match). The gate's own finding contained the reason without naming it:
-    /// G4 has to make a Zig-emitted event observable from a rule, and a rule can
-    /// only observe an event whose type Etch knows. `TriggerEnter` appears zero
-    /// times in the `etch-*` corpus and in `engine-ecs-internals.md`, so the
-    /// corpus states nowhere how a Zig event type becomes visible to Etch —
-    /// and the only other candidate, a hand-written duplicate in a user `.etch`,
-    /// is a surface derived from a Zig shape with no drift guard, which is
-    /// exactly the class `bindgen-check` exists to close. The emitted `.d.etch`
-    /// is one artefact under one guard.
+    /// reversible-direction argument is actually exercised** (`etch-grammar.md` §20.1).
+    /// The reason: a Zig-emitted event must be observable from a rule, and a rule can
+    /// only observe an event whose type Etch knows. `TriggerEnter` appears zero times
+    /// in the `etch-*` corpus and in `engine-ecs-internals.md`, so the corpus states
+    /// nowhere how a Zig event type becomes visible to Etch — and the only other
+    /// candidate, a hand-written duplicate in a user `.etch`, is a surface derived from
+    /// a Zig shape with no drift guard, which is exactly the class `bindgen-check`
+    /// exists to close. The emitted `.d.etch` is one artefact under one guard.
     ///
     /// An event needs no body rule of its own: `ast.EventDecl` is a name plus a
     /// field run and has no statement run at all, so the "declaration files
@@ -827,7 +816,7 @@ pub const TypeChecker = struct {
                 .type_alias,
                 .const_decl,
                 .service_decl,
-                // Admitted by the G1 amendment, see the note above.
+                // Admitted, see the note above.
                 .event_decl,
                 => true,
                 // §20.2's twenty-one behavioural constructs.
@@ -943,7 +932,7 @@ pub const TypeChecker = struct {
 
     /// Resolve `svc.method(args)` against a declared `service`.
     /// Names and arity only — this gate owns the RESOLUTION; the runtime
-    /// dispatch is G2's and the argument-type confrontation needs the foreign
+    /// dispatch lives in the interpreter, and the argument-type confrontation needs the foreign
     /// arena's type nodes, bounded below.
     fn checkServiceCall(
         self: *TypeChecker,
@@ -1022,7 +1011,7 @@ pub const TypeChecker = struct {
     /// The return type of a foreign-arena signature, resolved BY BYTES.
     ///
     /// Bounded to builtins on purpose, and the bound is inherited rather than
-    /// invented: M1.0.7 settled the same question for cross-arena field types
+    /// invented: the same question is settled for cross-arena field types
     /// and recorded "builtin-typed-only; named foreign field types are a
     /// documented residual". Resolving a named foreign type here would mean
     /// re-keying `symbols` and `generic_scope`, which are `StringId` maps over
@@ -1055,10 +1044,9 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// Validate every `type Name = Type` alias once all symbols are known
-    ///: the alias must ultimately resolve to a
-    /// builtin primitive or a declared component/resource. A cyclic or
-    /// dangling alias surfaces as E0102 on the alias's target.
+    /// Validate every `type Name = Type` alias once all symbols are known: the alias
+    /// must ultimately resolve to a builtin primitive or a declared component/resource.
+    /// A cyclic or dangling alias surfaces as E0102 on the alias's target.
     fn validateTypeAliases(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -1106,7 +1094,7 @@ pub const TypeChecker = struct {
     /// Identity of one `(table, entry)` pair for the spread graph.
     const DataEntryRef = struct { table: u32, entry: u32 };
 
-    /// Validate every `data` table once all symbols are known (M0.8 E4):
+    /// Validate every `data` table once all symbols are known:
     /// E1760 empty table, E1761 duplicate entry ids, E1762 entry-type /
     /// spread-type mismatch, E1763 unknown entry field, E1764 field value
     /// type, E1765 required field missing (spread-less entries only — a
@@ -1272,7 +1260,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    // ─── Input mapping (Level B STRICT, `etch-grammar.md` §16) ────
+    // ─── Input mapping (STRICT, `etch-grammar.md` §16) ────
 
     /// Modifier catalogue (`etch-grammar.md` §16 l.1752) — E1804 ModifierTypeUnknown.
     const input_modifiers = [_][]const u8{
@@ -1457,7 +1445,7 @@ pub const TypeChecker = struct {
     fn validateLocale(self: *TypeChecker, decl: ast_mod.LocaleDecl) !void {
         const code = self.arena.strings.slice(decl.name);
         // E1821 — the name must be a well-formed ISO-639 code (FORM check, not
-        // an embedded code table — E5 ruling 4).
+        // an embedded code table).
         if (!isValidLocaleCode(code)) {
             try self.emit(.locale_code_invalid, .error_, decl.name_span, "locale code '{s}' is not a well-formed ISO-639 code (2-3 lowercase letters, optional regional variant)", .{code});
         }
@@ -1636,7 +1624,7 @@ pub const TypeChecker = struct {
     /// FPSInvalid, E1750 DurationInvalid, W1740 EmptyTrack. RESERVED-with-variant:
     /// E1748 SubSequenceRefInvalid (the grammar §13 has no sub-sequence-ref
     /// production — grammar-wins, so it can never fire). DEFERRED-no-variant:
-    /// E1743 TrackTargetNotFound (scene/binding resolution is E7), E1747
+    /// E1743 TrackTargetNotFound (scene/binding resolution is elsewhere), E1747
     /// AnimationTrackClipInvalid (asset), W1741 OverlappingTracks (heuristic).
     fn validateSequence(self: *TypeChecker, decl: ast_mod.SequenceDecl) !void {
         // E1749 fps + E1750 duration positivity; capture duration (seconds) for E1744.
@@ -1707,8 +1695,8 @@ pub const TypeChecker = struct {
     }
 
     /// The `anim_graph` param type catalogue (`etch-validation-ecs.md` §18.2 E1695,
-    /// the common set inlined — the open `…` is treated as this fixed list for
-    /// M0.8). All resolve to a `.named` type node.
+    /// the common set inlined, the open `…` treated as this fixed list). All
+    /// resolve to a `.named` type node.
     fn isKnownAnimParamType(self: *TypeChecker, type_node: NodeId) bool {
         if (self.arena.typeNodeKind(type_node) != .named) return false;
         const name = self.arena.strings.slice(self.arena.named_types.items[self.arena.typeNodeData(type_node)].name);
@@ -1833,7 +1821,7 @@ pub const TypeChecker = struct {
     /// stage is parser-mandatory and `vertex` optional, so E1610 ShaderStageMissing
     /// + E1611 ShaderFragmentRequiresVertex are RESERVED (never fire); E1612-E1616
     /// + W1610 are DEFERRED (the GPU param/input-type catalogues are not attached,
-    /// Phase 2+). The stage bodies are walked in SHADER MODE: a STRUCTURAL pass
+    /// unimplemented). The stage bodies are walked in SHADER MODE: a STRUCTURAL pass
     /// (§15.3) that flags the §15.2 GPU-incompatible CONSTRUCTS with the single
     /// representative E0400 ShaderModeViolation — it does NOT resolve symbols
     /// (shader bodies reference undeclared GPU builtins; a synthExpr-based check
@@ -1877,7 +1865,7 @@ pub const TypeChecker = struct {
     }
 
     /// Flag a bound value's top-level GPU-incompatible expression kind (the
-    /// representative E0400 walk is shallow for M0.8 — deep expression recursion,
+    /// representative E0400 walk is shallow — deep expression recursion,
     /// like the recursion-DFS E0420 and the GPU-builtin-table E0421, is deferred).
     fn checkShaderBoundExpr(self: *TypeChecker, expr: NodeId) !void {
         switch (self.arena.exprKind(expr)) {
@@ -1890,12 +1878,12 @@ pub const TypeChecker = struct {
         }
     }
 
-    // ── M0.8 E7 Level C — scene (§23) + prefab (§24) validations ──────────
+    // ── Scene (§23) + prefab (§24) validations ──────────
     // Serialization-only (parse + validation + descriptor); runtime
-    // instantiation is M0.9. DELIVER the structural / reference / field-name +
+    // instantiation is elsewhere. Delivered here: the structural / reference / field-name +
     // field-type checks over the single-file compilation unit. RESERVED-with-
     // variant: E1796 PrefabComponentRedefined (variant/base component-shape
-    // MERGE is M0.9 runtime — the variant's components are already validated
+    // MERGE is a runtime concern — the variant's components are already validated
     // against the component RTTI here) + W1790 PrefabRemoveBaseComponent (no
     // `remove` syntax in the §24.1 grammar — grammar-wins, inexpressible).
     // DEFERRED: cross-FILE project-graph refs (E1782/E1786/E1791 only resolve
@@ -1971,7 +1959,7 @@ pub const TypeChecker = struct {
     /// Resolve a `component_instance` against the component RTTI: `code_type`
     /// if the type is not a declared component, then per-field checks.
     ///
-    /// M1.0.7 E6 (D-E): the component type may be a SELECTIVELY-IMPORTED symbol
+    /// The component type may be a SELECTIVELY-IMPORTED symbol
     /// whose declaration lives in another file's arena. When it is, the decl is
     /// fetched from `project.arenas[entry.arena_index]` and the fields are checked
     /// CROSS-ARENA (field names compared by bytes — StringIds are per-arena). This
@@ -1979,7 +1967,7 @@ pub const TypeChecker = struct {
     /// clean instead of tripping `PrefabComponentTypeUnknown`.
     fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
         const owner = self.arena.strings.slice(ci.type_name);
-        // 1. Local component (the M0.8 path).
+        // 1. Local component (the single-file path).
         if (self.symbols.get(ci.type_name)) |sym| {
             if (sym.kind == .component) {
                 const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
@@ -1991,7 +1979,7 @@ pub const TypeChecker = struct {
             }
             // A local symbol that is NOT a component → fall through to code_type.
         } else if (self.imported_symbols.get(ci.type_name)) |entry| {
-            // 2. Imported component (cross-arena, E6 / D-E).
+            // 2. Imported component (cross-arena).
             if (entry.kind == .component) {
                 const decl_arena = &self.project.?.arenas[entry.arena_index];
                 const decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)];
@@ -2076,7 +2064,7 @@ pub const TypeChecker = struct {
     /// already present. In project mode the shared byte-keyed
     /// cross-scene tracker is consulted (a UUID reused across scenes or files
     /// is a duplicate); in single-file mode the per-scene `local` set keeps the
-    /// M0.8 intra-scene semantics.
+    /// intra-scene semantics.
     fn uuidSeen(self: *TypeChecker, local: *std.AutoHashMapUnmanaged(StringId, void), uuid_id: StringId) !bool {
         if (self.project) |proj| {
             return (try proj.uuids.getOrPut(self.gpa, self.arena.strings.slice(uuid_id))).found_existing;
@@ -2087,7 +2075,7 @@ pub const TypeChecker = struct {
     /// E1786 / E1791 helper — is `name_id` a known prefab? In project mode the
     /// byte-keyed PROJECT prefab index is consulted (a prefab declared in any
     /// project file is in scope); in single-file mode the per-file `local` set
-    /// keeps the M0.8 compilation-unit semantics. `local` is `anytype` because
+    /// keeps the single-unit semantics. `local` is `anytype` because
     /// the scene caller passes a `…(StringId, void)` set and the prefab caller
     /// a `…(StringId, usize)` name→index map — both answer `.contains`.
     fn prefabKnown(self: *TypeChecker, local: anytype, name_id: StringId) bool {
@@ -2518,7 +2506,7 @@ pub const TypeChecker = struct {
 
     // ─── Routines (`etch-validation-ecs.md` §9) ─────────────────
 
-    /// Validate every `routine` once all symbols are known (M0.8 E4):
+    /// Validate every `routine` once all symbols are known:
     /// E1520 empty routine, E1521 duplicate segment names, E1522/E1523
     /// malformed trigger/until times (HH < 24, MM < 60 — the only semantic
     /// content left after the parse-enforced §8.2 forms), E1524 `after`
@@ -2526,7 +2514,7 @@ pub const TypeChecker = struct {
     /// targets (a declared behavior or `pause_segment`), E1527 action
     /// return types (a routine action calls a void fn). The temporal-logic
     /// heuristics (W1520/W1521) are deferred per validation-ecs §9.3
-    /// (Phase 2+).
+    /// (unimplemented).
     fn validateRoutineDecls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -2824,8 +2812,8 @@ pub const TypeChecker = struct {
     /// or `end`), E1565/E1566 line / choice conditions (full §6 when
     /// machinery, bare arm on the construct codes), E1567 emit event
     /// references (the item-11 trailing condition validates through the
-    /// same when machinery). E1563 (SpeakerNotFound) is VACUOUS in E4
-    /// (scene/prefab context is E7; any string is referencable — recorded);
+    /// same when machinery). E1563 (SpeakerNotFound) is VACUOUS here
+    /// (a scene/prefab context is validated elsewhere; any string is referencable);
     /// W1560/W1561 are deferred heuristics (recorded at the STOP). The
     /// ambient scope injects `player: Entity` (item-5 ruling).
     fn validateDialogueDecls(self: *TypeChecker) !void {
@@ -3223,11 +3211,11 @@ pub const TypeChecker = struct {
     }
 
     /// Recognize and validate a Cortex intrinsic action (`run_behavior` /
-    /// `run_routine`, M0.8 E4): the single argument must name a declared
+    /// `run_routine`): the single argument must name a declared
     /// behavior / routine (E1502 BehaviorInvalidLeaf otherwise — the
     /// "unknown identifier referenced by a leaf"). Returns true when the
     /// payload was an intrinsic (normal synth skipped — Cortex owns the
-    /// runtime signature, Phase 1+).
+    /// runtime signature, unimplemented).
     fn btIntrinsicAction(self: *TypeChecker, node: ast_mod.BTNode, behavior_idx: u32, index_of: *const std.AutoHashMapUnmanaged(StringId, u32), edges: *std.AutoHashMapUnmanaged(u64, void)) !bool {
         if (self.arena.exprKind(node.payload) != .fn_call) return false;
         const call = self.arena.call_exprs.items[self.arena.exprData(node.payload)];
@@ -3321,15 +3309,14 @@ pub const TypeChecker = struct {
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
-                    // An `event` is a frame-arena struct-message, not a POD
-                    // component: the `EMIT_EVENT` opcode promotes non-POD fields
-                    // rule-arena → frame-arena (`etch-memory-model.md` §6.7 / §2.5;
+                    // An `event` is a frame-arena struct-message, not a POD component:
+                    // the `EMIT_EVENT` opcode promotes non-POD fields rule-arena →
+                    // frame-arena (`etch-memory-model.md` §6.7 / §2.5;
                     // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
-                    // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict
-                    // is component-only (part1 §5.5, SoA storage). Event fields
-                    // therefore follow the `struct` field surface (`string`/enum
-                    // accepted, nested-struct deferred) via the `.event_` origin
-                    //.
+                    // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict is
+                    // component-only (part1 §5.5, SoA storage). Event fields therefore
+                    // follow the `struct` field surface (`string`/enum accepted,
+                    // nested-struct deferred) via the `.event_` origin.
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
@@ -3348,7 +3335,7 @@ pub const TypeChecker = struct {
                 .struct_decl => {
                     // A `struct` is a by-value type. Register
                     // the name and validate fields. Struct fields are builtin
-                    // scalars plus, since tranche 2 (the Error layer), `string`
+                    // scalars plus, since the Error layer, `string`
                     // and enum-typed fields; nested-struct fields stay deferred.
                     const decl = self.arena.struct_decls.items[data];
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
@@ -3411,7 +3398,7 @@ pub const TypeChecker = struct {
                 .test_decl => {
                     // Top-level `test` block. The test name lives in a
                     // DEDICATED namespace (`test_symbols`), so `test "Foo"` does
-                    // not collide with `component Foo` (the M1.0.8 collision this
+                    // not collide with `component Foo` (the collision this
                     // milestone resolves). Intra-namespace uniqueness only: two
                     // `test "X"` → E0101 with a contextual message (the code is
                     // reused per `etch-diagnostics.md` §24.1, the
@@ -3550,19 +3537,17 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Bind this file's `import` directives against the project exports index
-    ///. For each `ImportDecl`:
-    ///   - resolve the module path against `project.module_index`; a path that
-    ///     names no project file is `E0103 NotAModule`.
-    ///   - selective `{ X }`: look X up in the target module's exports — absent →
-    ///     `E0104 UnknownExport`; private → `E0107` (activated M1.0.8); else
-    ///     register it in `imported_symbols` under its local name (alias if present).
-    ///   - module alias `as m` / bare `import a.b`: record the alias → target
-    ///     binding in `imported_aliases` (D-F; qualified `m.Type` resolution is
-    ///     E6+ additive, not done here).
-    /// No-op in single-file mode (`project == null`). This pass only records the
-    /// bindings + emits the import diagnostics; APPLYING the imports to
-    /// `TYPE_IDENT` resolution + the cross-arena component check is E6.
+    /// Bind this file's `import` directives against the project exports index. For each
+    /// `ImportDecl`: - resolve the module path against `project.module_index`; a path
+    /// that names no project file is `E0103 NotAModule`. - selective `{ X }`: look X up
+    /// in the target module's exports — absent → `E0104 UnknownExport`; private →
+    /// `E0107`; else register it in `imported_symbols` under its
+    /// local name (alias if present). - module alias `as m` / bare `import a.b`: record
+    /// the alias → target binding in `imported_aliases` (D-F; qualified `m.Type`
+    /// resolution is additive, not done here). No-op in single-file mode
+    /// (`project == null`). This pass only records the bindings + emits the import
+    /// diagnostics; APPLYING the imports to `TYPE_IDENT` resolution + the cross-arena
+    /// component check runs in pass 2.
     fn bindImports(self: *TypeChecker) !void {
         const project = self.project orelse return;
         const kinds = self.arena.items.items(.kind);
@@ -3609,7 +3594,7 @@ pub const TypeChecker = struct {
                     continue;
                 };
                 if (entry.visibility == .private) {
-                    // Dormant until `private` graduates (M1.0.8, D-G).
+                    // Dormant until `private` graduates.
                     try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path_buf.items });
                     continue;
                 }
@@ -3629,7 +3614,7 @@ pub const TypeChecker = struct {
         gop.value_ptr.* = .{ .kind = kind, .name = name, .item_id = item_id };
     }
 
-    /// Index an inherent `impl`'s methods into the `methods` map (M0.8 E2 block
+    /// Index an inherent `impl`'s methods into the `methods` map (block
     /// 3, §5.1). Order-independent — the target type need not be declared yet
     /// (top-level decls come in any order); the target is validated separately
     /// in `validateImpls` once all symbols are known. A method name colliding
@@ -3649,10 +3634,9 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Validate every `impl`'s target type once all symbols are known (M0.8 E2
-    /// block 3) — the target must be a declared `struct` / `component` /
-    /// `resource`. Coherence / orphan rules (§7.4) and trait impls arrive in
-    /// tranche C.
+    /// Validate every `impl`'s target type once all symbols are known: the target
+    /// must be a declared `struct` / `component` / `resource`. Coherence and orphan
+    /// rules (§7.4) apply to a trait impl, conditional impls included.
     fn validateImpls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3678,11 +3662,11 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Validate one `impl Trait for Type [when …]` (block 3 tranche C, `etch-
-    /// resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the
-    /// orphan rule (§7.4 — trait OR type local to this module); every abstract
-    /// trait method is provided (E0214, else the trait must supply a default);
-    /// the target type is a struct / component / resource / `Entity`.
+    /// Validate one `impl Trait for Type [when …]` (
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the orphan
+    /// rule (§7.4 — trait OR type local to this module); every abstract trait method is
+    /// provided (E0214, else the trait must supply a default); the target type is a
+    /// struct / component / resource / `Entity`.
     fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         const trait_slice = self.arena.strings.slice(impl.trait_name);
         const type_slice = self.arena.strings.slice(impl.type_name);
@@ -3704,7 +3688,7 @@ pub const TypeChecker = struct {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
         }
 
-        // Orphan rule (§7.4): trait OR type local to the impl's module. In M0.8
+        // Orphan rule (§7.4): trait OR type local to the impl's module. In single-file mode
         // (single module) the trait is always local, so this holds — the check
         // is structural for the cross-module future.
         if (!trait_local and !type_local) {
@@ -3787,7 +3771,7 @@ pub const TypeChecker = struct {
     }
 
     /// Resolve an inherent method `(type_name, method_name)` to its `FnDecl`
-    /// (block 3, §5.1), or `null` if no such method exists.
+    /// (§5.1), or `null` if no such method exists.
     fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
         const idx = self.methods.get(methodKey(type_name, method_name)) orelse return null;
         return self.arena.impl_methods.items[idx];
@@ -3796,9 +3780,9 @@ pub const TypeChecker = struct {
     /// Which declaration kind a validated field range belongs to. `component_like`
     /// (components) keeps the POD-strict surface (`string`/enum/nested-struct
     /// rejected — part1 §5.5, SoA archetype storage). `resource` shares the wider
-    /// non-POD surface with `struct_` / `event_` for `string` (M1.0.3 E2 — the
-    /// Option A alignment, formerly deferred "tranche 7"; part1 §5.5 "no POD
-    /// constraint for resources"); enum-typed resource fields land in M1.0.3 E3,
+    /// non-POD surface with `struct_` / `event_` for `string` (the
+    /// alignment; part1 §5.5 "no POD
+    /// constraint for resources"); enum-typed resource fields are accepted too,
     /// nested-struct fields stay deferred. `struct_` and `event_` accept `string`
     /// + enum-typed fields (the builtin `Error` forces them on structs; events
     /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5).
@@ -3846,15 +3830,15 @@ pub const TypeChecker = struct {
             }
 
             // Collection / composite field types (`T[]`, `[K: V]`, `Set<T>`,
-            // and fixed `T[N]`) are not part of the E1 component/resource
+            // and fixed `T[N]`) are not part of the component/resource
             // surface — fields stay scalar POD. Reject anything non-named here
-            // rather than mis-indexing the `named_types` slab (M0.8 collections
+            // rather than mis-indexing the `named_types` slab (collections
             // land as locals, not fields).
             const tspan = self.arena.typeNodeSpan(field.type_node);
             if (self.arena.typeNodeKind(field.type_node) != .named) {
                 // One bounded exception: a `struct` field
                 // may be `Error?` — the builtin Error's `source` chaining field
-                // (part1 §10.2). General optional fields are tranche 4.
+                // (part1 §10.2). General optional fields are unsupported.
                 if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
                     const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
                     if (self.arena.typeNodeKind(payload) == .named) {
@@ -3869,7 +3853,7 @@ pub const TypeChecker = struct {
                 // `CollectionSlot`. Fixed `T[N]` (`.array`) stays out of scope
                 // (falls through to rejection). Element ∈ {POD scalar, string,
                 // enum}; nested collection / unsupported element → E0222. The
-                // collection default (`= []`) is wired in E2+, so the accepted
+                // collection default (`= []`) is unwired, so the accepted
                 // field skips the scalar-default check below.
                 if (origin == .resource) {
                     switch (self.arena.typeNodeKind(field.type_node)) {
@@ -3897,8 +3881,8 @@ pub const TypeChecker = struct {
             }
             const named_idx = self.arena.typeNodeData(field.type_node);
             const named = self.arena.named_types.items[named_idx];
-            // A field typed by an in-scope generic param (`min: T`, M0.8 E2
-            // block 4) is a generic field — accepted (type-erased). Only structs
+            // A field typed by an in-scope generic param (`min: T`) is a
+            // generic field — accepted (type-erased). Only structs
             // are generic; component / resource fields never reach this branch.
             if (self.generic_scope.contains(named.name)) continue;
             const resolved_name = self.arena.resolveTypeAliasName(named.name);
@@ -3907,17 +3891,18 @@ pub const TypeChecker = struct {
             if (BuiltinType.fromName(tname) == null) {
                 if ((origin == .struct_ or origin == .event_ or origin == .resource) and std.mem.eql(u8, tname, "string")) {
                     // `string` fields unlock for structs (the Error layer,
-                    // M0.8 E3-C tranche 2 — `Error.message` forces them), events
+                    // `Error.message` forces them), events
                     // (frame-arena non-POD payload, `etch-memory-model.md` §6.7 /
-                    // §2.5 — M1.0.2 ruling), and now resources (M1.0.3 E2 — the
+                    // §2.5), and now resources (the
                     // Option A alignment; part1 §5.5 "no POD constraint for
                     // resources"; the persistent-heap slot is `{ptr,len}`). part1
                     // §5.5 constrains components only — component string fields
                     // stay rejected below.
                 } else if ((origin == .struct_ or origin == .event_ or origin == .resource) and self.declaredEnumName(resolved_name)) {
                     // Enum-typed fields unlock for structs (`Error.code:
-                    // ErrorCode`, same tranche), events (M1.0.2), and now resources
-                    // . Checked
+                    // ErrorCode`), events, and now resources
+                    // — it mirrors the `string` unlock, and the slot stores the
+                    // variant's declaration-order discriminant, POD. Checked
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
                     // incrementally. Components stay enum-rejected (POD-strict).
@@ -3934,8 +3919,8 @@ pub const TypeChecker = struct {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
                     }
                     // A field of component-typed or resource-typed value is
-                    // still not in the S3 POD builtin set — reject as
-                    // unsupported. The brief enforces builtin POD only.
+                    // still not in the POD builtin set — reject as
+                    // unsupported: builtin POD only.
                     try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not in the S3 POD builtin set", .{tname});
                 } else if (std.mem.eql(u8, tname, "string")) {
                     // Reached only by `component_like` now: struct / event /
@@ -3971,12 +3956,12 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// M1.0.17: validate a resource collection field's element type is in
+    /// Validate a resource collection field's element type is in
     /// the supported set {POD scalar builtin, `string`, enum} — the exact
     /// resource scalar-field surface. A nested collection, or any other
     /// element (component/resource/struct/unknown/optional/function/…), emits
     /// `E0222 CollectionFieldElementInvalid`. This is the type-check gate only;
-    /// element STORAGE / promotion wiring is E2+ (`string[]`) / E3 / E4.
+    /// element STORAGE and promotion wiring live in the interpreter.
     fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
         const espan = self.arena.typeNodeSpan(elem);
         switch (self.arena.typeNodeKind(elem)) {
@@ -3997,9 +3982,10 @@ pub const TypeChecker = struct {
         // element set: they are stored inline (POD) or promoted into an owned
         // persistent string, with no per-element load-time fixup. `Entity` is a
         // builtin scalar field type, but it carries cross-reference-table remap
-        // semantics at scene load — the collection
+        // semantics at scene load: a cooked `.entity_` slot is written `dead` and
+        // resolved via the Cross-references Table — the collection
         // container wires no per-element remap, so an entity reference as a
-        // collection element is out of Phase-1 scope (rejected here rather than
+        // collection element is out of scope (rejected here rather than
         // becoming a silent load-time gap).
         if (BuiltinType.fromName(tname)) |bt| {
             if (bt == .entity) {
@@ -4036,7 +4022,7 @@ pub const TypeChecker = struct {
 
     /// Validate annotation applicability for a `(start, len)` range in
     /// `annot_pool` against the target the annotations decorate
-    /// (D-S3-annot-applicability, cf. `etch-resolver-types.md` §13).
+    /// (cf. `etch-resolver-types.md` §13).
     /// Emits
     /// `E0502 AnnotationMisapplied` per offending builtin annotation;
     /// `.custom` (plugin) annotations are accepted on any target.
@@ -4114,7 +4100,7 @@ pub const TypeChecker = struct {
     /// Resolve a type node to a `ResolvedType`. Despite the historical name it
     /// dispatches on the node kind: `.named` resolves through the alias chain
     /// to a builtin / component / resource; the collection kinds (`.array` /
-    /// `.slice` / `.map_type` / `.set_type`, M0.8) resolve their element /
+    /// `.slice` / `.map_type` / `.set_type`) resolve their element /
     /// key / value to a builtin.
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         switch (self.arena.typeNodeKind(type_node)) {
@@ -4122,7 +4108,7 @@ pub const TypeChecker = struct {
                 const named_idx = self.arena.typeNodeData(type_node);
                 const named = self.arena.named_types.items[named_idx];
                 // A type-parameter name in scope resolves to a generic variable
-                // (M0.8 E2 block 4), checked before alias / builtin / symbol.
+                // checked before alias / builtin / symbol.
                 if (self.generic_scope.contains(named.name)) return .{ .generic = named.name };
                 // Resolve through any top-level `type` alias chain first.
                 const resolved_name = self.arena.resolveTypeAliasName(named.name);
@@ -4173,7 +4159,7 @@ pub const TypeChecker = struct {
             },
             .generic => {
                 // `Foo<T, …>` generic type application. The
-                // type arguments are erased (no monomorphisation in M0.8); the
+                // type arguments are erased (no monomorphisation); the
                 // result is the base type. A generic param name as the base
                 // (e.g. `T<…>`, unusual) resolves to the variable.
                 const gt = self.arena.generic_type_nodes.items[self.arena.typeNodeData(type_node)];
@@ -4227,7 +4213,7 @@ pub const TypeChecker = struct {
     }
 
     /// Outcome of resolving a `.path` qualified type node (`alias.Member`,
-    /// M1.0.16). Split so the silent central resolver (`namedTypeToResolved`)
+    /// resolution). Split so the silent central resolver (`namedTypeToResolved`)
     /// and the emitting use site (`validateTypeAliases`) share one lookup, each
     /// deciding whether/how to diagnose.
     const PathResolution = union(enum) {
@@ -4243,7 +4229,7 @@ pub const TypeChecker = struct {
         member_private,
     };
 
-    /// Resolve a `.path` type node (`alias.Member`, M1.0.16) against the
+    /// Resolve a `.path` type node (`alias.Member`) against the
     /// whole-module import aliases (`imported_aliases` → target file index) and
     /// the project exports index — the qualified twin of the `imported_symbols`
     /// branch in `namedTypeToResolved`. Pure lookup, no diagnostics. Identity of
@@ -4266,7 +4252,7 @@ pub const TypeChecker = struct {
         } };
     }
 
-    /// Const-fold a fixed-array size node to its `u64` length. E1 accepts a
+    /// Const-fold a fixed-array size node to its `u64` length. It accepts a
     /// bare integer literal (`int[8]`); a more general const expression is a
     /// later refinement, so anything else returns `null` (→ `unknown` type).
     fn constArrayLen(self: *TypeChecker, size_node: NodeId) ?u64 {
@@ -4321,7 +4307,7 @@ pub const TypeChecker = struct {
         else
             ResolvedType.unknown;
 
-        // Impl-level generics (`impl<T> …`, M0.8 E2 block 4) are in scope for
+        // Impl-level generics (`impl<T> …`) are in scope for
         // every method body.
         try self.addGenerics(impl.generics_start, impl.generics_len);
         defer self.removeGenerics(impl.generics_start, impl.generics_len);
@@ -4336,7 +4322,7 @@ pub const TypeChecker = struct {
     /// but, when the method takes a `self` receiver, binds `self` to the impl's
     /// target type first so the body's `self.field` / `self.method()` resolve.
     /// A conditional trait impl's `when` (`impl Trait for Entity when self has
-    /// H`, tranche C) is folded into the method's accessible-component set so
+    /// H`) is folded into the method's accessible-component set so
     /// `self.get(H)` / `self.get_mut(H)` are allowed in the body (§7.3).
     fn checkImplMethod(self: *TypeChecker, decl: ast_mod.FnDecl, self_type: ResolvedType, when_root: u32) !void {
         var ctx: RuleCtx = .{};
@@ -4370,8 +4356,8 @@ pub const TypeChecker = struct {
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
-        // The body statements sit on the async driver's frame-driven spine
-        //: a statement-head `await` here is executable.
+        // The body statements sit on the async driver's frame-driven spine: a
+        // statement-head `await` here is executable.
         const saved_susp = self.await_suspendable;
         self.await_suspendable = true;
         defer self.await_suspendable = saved_susp;
@@ -4441,7 +4427,7 @@ pub const TypeChecker = struct {
     }
 
     /// True iff rule param `idx` is named `name` and typed by the component
-    /// `comp` (the lifecycle annotation's T) — M1.0.2 E2.
+    /// `comp` (the lifecycle annotation's T).
     fn observerParamIsComponent(self: *TypeChecker, rule: ast_mod.RuleDecl, idx: u32, name: []const u8, comp: StringId) bool {
         const p = self.arena.rule_params.items[rule.params_start + idx];
         if (!std.mem.eql(u8, self.arena.strings.slice(p.name), name)) return false;
@@ -4546,7 +4532,7 @@ pub const TypeChecker = struct {
                 const local_event = sym != null and sym.?.kind == .event_;
                 // A `.d.etch`-declared event resolves here too —
                 // which is the whole point of admitting `event_decl` into §20.1
-                // at G1: a rule can only observe an event whose type Etch knows.
+                // a rule can only observe an event whose type Etch knows.
                 if (local_event or self.declaredEvent(event_type) != null) {
                     const event_id = try self.arena.strings.intern(self.gpa, "event");
                     try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
@@ -4561,7 +4547,7 @@ pub const TypeChecker = struct {
         // Observer lifecycle annotations: `@on_added/removed/replaced/
         // spawned/despawned` route a structural observer onto a rule, mirroring
         // `@on_event`. Surface validations only (the Tier-0 ObserverRegistry
-        // bridge is E3). The component-typed params (`component`/`old`/`new`: T)
+        // bridge lives elsewhere). The component-typed params (`component`/`old`/`new`: T)
         // are bound self-style by the param loop above. An observer rule carries
         // exactly one lifecycle annotation and no `when` / `@on_event` (the
         // lifecycle component type is the sole trigger; observers do not iterate).
@@ -4703,10 +4689,9 @@ pub const TypeChecker = struct {
         var i: u32 = 0;
         while (i < annot.args_len) : (i += 1) {
             const name_id = self.arena.requiresTypeNameAt(annot, i) orelse {
-                // A tag path, a literal or a named argument. The message names
-                // the shape expected rather than only refusing, because an
-                // author corrects what is named — the G1/§13.3 lesson recorded
-                // as corpus anomaly 92.
+                // A tag path, a literal or a named argument. The message names the
+                // shape expected rather than only refusing, because an author corrects
+                // what is named (§13.3).
                 try self.emit(
                     .annotation_arg_mismatch,
                     .error_,
@@ -4820,24 +4805,14 @@ pub const TypeChecker = struct {
         return self.requisiteClosureReaches(decl, decl.name);
     }
 
-    /// `E1216 RequisiteRemovalRefused` IS RETIRED, and the number stays
-    /// reserved (`diagnostics.zig`) so no later milestone re-uses it for another
-    /// subject. Three helpers died with it here — the guarantee walk, the
-    /// receiver-identity proof, and the refusal itself.
-    ///
-    /// It was the STATIC half of the `@requires` removal refusal, and it refused
-    /// correct code FIVE times in three review rounds: a foreign receiver, a
-    /// guarantee read as permanent, a shadowed parameter name, an aliased
-    /// removal, and finally a removal performed by a CALL. The first four are
-    /// binding forms and were closed one at a time; the fifth is a CONTROL form,
-    /// and closing it conservatively reads "no statement before the removal",
-    /// which fires on a one-line body and is not a check.
-    ///
-    /// Its own stop rule decided this: five false refusals against zero
-    /// documented captures of a real defect. The guarantee lives entirely on the
-    /// runtime channel — a counted skip inside `World.requiresRefusesRemoval`
-    /// plus one warning per tick — which covers every path, the call included,
-    /// and can never refuse a just program.
+    /// Validate a `@storage` annotation's single argument against the storage-mode
+    /// domain. Four refusals, each with its own message because each names a
+    /// DIFFERENT fault: a wrong arity, a named argument where the schema declares a
+    /// positional one, a tag path outside the domain, and a bare enumeration value
+    /// written without its sigil. Anything else is a non-constant argument. The
+    /// bare-name and named-argument branches exist so the answer is not the
+    /// fall-through `E0504 must be a constant`, which is false about the value and
+    /// silent about the real fault.
     fn checkStorageAnnotation(self: *TypeChecker, decl: ast_mod.ComponentDecl) !void {
         const annot = self.arena.storageAnnotation(decl) orelse return;
 
@@ -4897,7 +4872,7 @@ pub const TypeChecker = struct {
     /// return type for `return` / trailing-value checks, walks the body run,
     /// then checks the trailing block value (the implicit return) against the
     /// declared return type. `async` bodies are checked the same way (their
-    /// interpretation is E3); the `throws` marker does not change body checking.
+    /// interpretation is the interpreter's); the `throws` marker does not change body checking.
     /// Bring a construct's generic type parameters into scope
     /// so their names resolve to `.generic` inside the body. Balanced by
     /// `removeGenerics`.
@@ -4935,7 +4910,7 @@ pub const TypeChecker = struct {
 
         // Declared return type drives `return` / trailing-value checks. A void
         // fn (no `-> type`) records `.unknown` — return values aren't strictly
-        // checked against void in block 2.
+        // checked against void.
         const ret_t: ResolvedType = if (decl.return_type.isNone())
             ResolvedType.unknown
         else
@@ -4943,8 +4918,8 @@ pub const TypeChecker = struct {
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
-        // The body statements sit on the async driver's frame-driven spine
-        //: a statement-head `await` here is executable.
+        // The body statements sit on the async driver's frame-driven spine: a
+        // statement-head `await` here is executable.
         const saved_susp = self.await_suspendable;
         self.await_suspendable = true;
         defer self.await_suspendable = saved_susp;
@@ -5081,7 +5056,7 @@ pub const TypeChecker = struct {
     }
 
     /// Type a §6 general filter expression (`{ expression }` on `has T` /
-    /// `resource T`, M0.8 E4) in a FIELDS-ONLY scope: each field of the
+    /// `resource T`) in a FIELDS-ONLY scope: each field of the
     /// filtered component/resource is bound by name to its declared type.
     /// Non-bool filters are E1211 (the field-filter code family).
     fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, fields_start: u32, fields_len: u32) !void {
@@ -5098,11 +5073,11 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Validate one tag operand path against the global tag table (`etch-
-    /// validation-ecs.md` §5.4-5.5 / §7.2). An unknown path is `E1212
-    /// UnknownTag`; `has_tag` / `has_no_tag` additionally require a leaf (a
-    /// namespace operand is only meaningful for the multi operators, where it
-    /// expands to a category mask).
+    /// Validate one tag operand path against the global tag table
+    /// (`etch-validation-ecs.md` §5.4-5.5 / §7.2). An unknown path is
+    /// `E1212 UnknownTag`; `has_tag` / `has_no_tag` additionally require a leaf (a
+    /// namespace operand is only meaningful for the multi operators, where it expands
+    /// to a category mask).
     fn validateTagPath(self: *TypeChecker, path_node: NodeId, op: ast_mod.TagOp) !void {
         const tp = self.arena.tag_paths.items[self.arena.exprData(path_node)];
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -5182,12 +5157,12 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Type-check an `await entity_event` / `await global_event` target
-    ///. `T` must be a declared `event` (`E0102` — fix-as-you-go:
-    /// `global_event` previously accepted an undeclared `T` silently). For an
-    /// entity-scoped target the designated field must resolve (`E0908`/`E0909`
-    /// at the await site, via the shared `arena.resolveEventEntityTarget`). The
-    /// optional payload filter is validated for both targets.
+    /// Type-check an `await entity_event` / `await global_event` target. `T` must be a
+    /// declared `event` (`E0102` — fix-as-you-go: `global_event` previously accepted an
+    /// undeclared `T` silently). For an entity-scoped target the designated field must
+    /// resolve (`E0908`/`E0909` at the await site, via the shared
+    /// `arena.resolveEventEntityTarget`). The optional payload filter is validated for
+    /// both targets.
     fn checkEventTarget(self: *TypeChecker, await_id: NodeId, aw: ast_mod.AwaitExpr, entity_scoped: bool, ctx_opt: ?*RuleCtx) !void {
         const sym = self.symbols.get(aw.event_type);
         if (sym == null or sym.?.kind != .event_) {
@@ -5249,10 +5224,9 @@ pub const TypeChecker = struct {
                     if (declared.? == .map_t) try self.checkHashBound(declared.?.map_t.key, "map key type", "K: Hash", self.arena.typeNodeSpan(let.type_annotation));
                     if (declared.? == .set_t) try self.checkHashBound(declared.?.set_t, "set element type", "T: Hash", self.arena.typeNodeSpan(let.type_annotation));
                 }
-                // Anonymous `.{ … }` initializer against a struct annotation
-                //: check mode — the annotation is the
-                // expected type (resolver-types §4), the same propagation as
-                // the tranche-4 field-value position.
+                // Anonymous `.{ … }` initializer against a struct annotation: check
+                // mode — the annotation is the expected type (resolver-types §4), the
+                // same propagation as the field-value position.
                 const inferred = blk: {
                     if (declared != null and declared.? == .struct_t and self.arena.exprKind(let.value) == .struct_lit) {
                         const sl_data = self.arena.exprData(let.value);
@@ -5285,7 +5259,7 @@ pub const TypeChecker = struct {
                 if (target_kind == .ident) {
                     const name_id = self.arena.exprData(assign.target);
                     if (ctx.locals.get(name_id)) |local| {
-                        // E0221 (tranche 6, resolver-types §8.2):
+                        // E0221 (resolver-types §8.2):
                         // a closure body cannot mutate a captured binding —
                         // captures are value snapshots in both backends. The
                         // capture check precedes the mutability check (a
@@ -5303,7 +5277,7 @@ pub const TypeChecker = struct {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                         // Compound assignment on strings (`s += t`) is not in
-                        // the M0.8 minimal subset (only `+` concatenation is —
+                        // the minimal subset (only `+` concatenation is —
                         // stdlib §12.4): reject here so neither backend sees
                         // one (interp would fail at runtime, codegen would
                         // emit invalid Zig — fail loud, not divergently).
@@ -5355,7 +5329,7 @@ pub const TypeChecker = struct {
                 }
             },
             .for_stmt => {
-                // `for v in iterable { body }` — E1 iterates ranges; the loop
+                // `for v in iterable { body }` — ranges are iterated; the loop
                 // variable binds to the range's integer element type, then the
                 // body is checked with it in scope.
                 const f = self.arena.for_stmts.items[data];
@@ -5375,7 +5349,7 @@ pub const TypeChecker = struct {
                     if (iter_t == .range) {
                         elem_t = .{ .builtin = iter_t.range };
                     } else if (iter_t == .set_t) {
-                        // Set for-in is not delivered with the tranche-3bis
+                        // Set for-in is not delivered with the
                         // subset (no differential requires it) — rejected
                         // here so NEITHER backend sees one, the established
                         // out-of-subset policy. Must precede `elementType`,
@@ -5426,7 +5400,7 @@ pub const TypeChecker = struct {
             },
             .break_stmt => {
                 // `break [label] [value]`. Type the value if
-                // present; loop-membership / label validity is permissive in E1.
+                // present; loop-membership / label validity is permissive.
                 const b = self.arena.break_stmts.items[data];
                 if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
                 // E0907: the break must not cross the enclosing
@@ -5489,7 +5463,7 @@ pub const TypeChecker = struct {
                 // contradicts the join-all, and in a `branch`/`spawn` body the
                 // parent has potentially already advanced — no propagation
                 // site (`etch-resolver-types.md` §9.2). Asymmetric by design
-                // (brief Notes) — do NOT generalize.
+                // — do NOT generalize.
                 if (self.conc_branch) |ck| {
                     if (ck != .race) {
                         try self.emit(.illegal_return_in_concurrency_branch, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in a '{s}' {s} (only a 'race' branch may return — the winner's return propagates at the race site)", .{ @tagName(ck), if (ck == .sync) "branch" else "body" });
@@ -5523,11 +5497,11 @@ pub const TypeChecker = struct {
                 }
             },
             .tag_mutation_stmt => {
-                // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (`etch-
-                // grammar.md` §4.4). The receiver must be an `Entity`
-                // (E0833); the operand must be a declared leaf tag (E0830) —
-                // a mutation sets or clears a single bit. Resolves only; the
-                // deferred structural mutation runs in the interpreter / codegen.
+                // `entity.add_tag(.path)` / `entity.remove_tag(.path)`
+                // (`etch-grammar.md` §4.4). The receiver must be an `Entity` (E0833);
+                // the operand must be a declared leaf tag (E0830) — a mutation sets or
+                // clears a single bit. Resolves only; the deferred structural mutation
+                // runs in the interpreter / codegen.
                 const tm = self.arena.tag_mutation_stmts.items[data];
                 const recv_t = self.synthExpr(tm.receiver, ctx);
                 if (recv_t != .builtin or recv_t.builtin != .entity) {
@@ -5541,7 +5515,7 @@ pub const TypeChecker = struct {
             },
             .race_stmt, .sync_stmt => {
                 // `race { race_branch* }` / `sync { sync_branch* }` (§4.2).
-                // Async-context requirement first (901 — §4.2: the
+                // Async-context requirement first (E0901 — §4.2: the
                 // async constructs are only available in an async context).
                 // Each conditional guard (`if cond =>`) types as bool
                 // in the PARENT scope (it is evaluated there, synchronously,
@@ -5599,14 +5573,14 @@ pub const TypeChecker = struct {
                 }
             },
             .timer_stmt => {
-                // `[let t =] after/every/after_unscaled(d) { }` (M1.0.13 E4,
+                // `[let t =] after/every/after_unscaled(d) { }` (
                 // §9.10). A timer is usable in ANY body, async or not — it
                 // carries no `{async}` effect (absent from the §9.4
                 // builtin-effect table), so there is no E0901 gate on the
                 // statement itself.
                 const ts = self.arena.timer_stmts.items[data];
                 // The duration argument is a full expression typed `Duration`
-                // (§9.10), evaluated once at scheduling time (E6).
+                // (§9.10), evaluated once at scheduling time.
                 const arg_t = self.synthExpr(ts.arg, ctx);
                 if (arg_t != .unknown and !(arg_t == .builtin and arg_t.builtin == .duration)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ts.arg), "timer argument must be a Duration expression", .{});
@@ -5773,13 +5747,13 @@ pub const TypeChecker = struct {
             .color_lit => return .{ .builtin = .color },
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType{ .builtin = .string_ },
-            // Interpolated string `"a {x} b"` (tranche 1c, stdlib §12.5):
+            // Interpolated string `"a {x} b"` (stdlib §12.5):
             // each embedded expression must be Display-able within
             // the minimal subset — int / i32 / u32 / float / f64 / bool /
             // string. `f32` is rejected: the interpreter widens it to f64
             // before formatting, so its text could diverge from the
             // codegen's native-f32 formatting (byte-exact guard). The rest
-            // of the §4.2 Display catalogue is stdlib Phase 1+ → fail loud.
+            // of the §4.2 Display catalogue is unimplemented stdlib → fail loud.
             .string_interp => {
                 const si = self.arena.string_interps.items[data];
                 var k: u32 = 0;
@@ -5796,7 +5770,7 @@ pub const TypeChecker = struct {
                 }
                 return ResolvedType{ .builtin = .string_ };
             },
-            .tag_path => return ResolvedType.unknown, // enum-variant shorthand; type unknown in S3
+            .tag_path => return ResolvedType.unknown, // enum-variant shorthand; the type is unknown here
             // `none`: an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).
             .none_lit => return ResolvedType.unknown,
@@ -5817,8 +5791,8 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
             .loc_expr => {
-                // `@loc…` (§3.2, M0.8 E4 — item 10): structurally a string.
-                // Key/fingerprint resolution is E5 with `locale`;
+                // `@loc…` (§3.2, item 10): structurally a string. Key and
+                // fingerprint resolution (E1627) belongs with `locale`;
                 // interpolation args type freely here.
                 const le = self.arena.loc_exprs.items[data];
                 var a: u32 = 0;
@@ -5828,7 +5802,7 @@ pub const TypeChecker = struct {
                 return .{ .builtin = .string_ };
             },
             .tag_query => {
-                // Postfix tag query (§3.2 `tag_expr`, M0.8 E4): the receiver
+                // Postfix tag query (§3.2 `tag_expr`): the receiver
                 // must be an Entity (E0833 TagInvalidOperation), the operand
                 // paths must resolve in the global tag table (E1212-family
                 // via `validateTagPath`); the query is a bool. Evaluation is
@@ -5848,7 +5822,7 @@ pub const TypeChecker = struct {
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
                 // `recv?.field`: optional payloads are
-                // builtin scalars in M0.8 — they have no fields, so the
+                // builtin scalars — they have no fields, so the
                 // chained field form has nothing to resolve against. The
                 // interpreter stays the reference for the op set delivered
                 // (`?.method`, `??`, `!`, patterns).
@@ -5877,7 +5851,7 @@ pub const TypeChecker = struct {
                 const tname = self.arena.strings.slice(mg.type_name);
 
                 // Receiver-less `get(T)` / `get_mut(T)` — resource access
-                // (D-S3-resource-receiver). `T` must name a resource; a
+                // `T` must name a resource; a
                 // component here is the symmetric E0301 error.
                 if (mg.receiver.isNone()) {
                     // Builtin engine resource: resolved against
@@ -5953,7 +5927,7 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
             .cast => {
-                // `operand as Type`. The S3 subset
+                // `operand as Type`. The subset
                 // permits numeric-scalar → numeric-scalar conversions only;
                 // the result type is the (numeric) target. Casts to or from a
                 // non-numeric type are rejected (E0200).
@@ -5991,10 +5965,10 @@ pub const TypeChecker = struct {
             // carries the awaited call's declared return type, so `let x = await f()`
             // binds the right type (and the inner call is type-checked here — arg
             // count, etc.). The wake-condition forms (`wait` / `wait_unscaled` /
-            // `entity_event` / `global_event`) produce no value. E3 placement
+            // `entity_event` / `global_event`) produce no value. Placement
             // (E0904): an `await` that is not this statement's head await is a
             // sub-expression (`some(await f())`, `a + await b`) — rejected; hoist
-            // it into a `let`. Function coloring is added in E4.
+            // it into a `let`. Function coloring is checked too.
             .await_expr => {
                 // E0904 fires unless this `await` is BOTH the statement head AND
                 // on the frame-driven spine — a statement-head `await` inside a
@@ -6012,12 +5986,12 @@ pub const TypeChecker = struct {
                 const aw = self.arena.awaitExpr(id);
                 switch (aw.target_kind) {
                     // `wait` / `wait_unscaled` take a Duration LITERAL, validated
-                    // at the interpreter (literal-only, M1.0.11/13) — nothing to
+                    // at the interpreter (literal-only) — nothing to
                     // synthesize here.
                     .wait, .wait_unscaled => {},
                     .entity_event => {
                         // The entity operand (evaluated once at suspension in the
-                        // interpreter) must type `Entity` — reuse E0200 (M1.0.14 E2;
+                        // interpreter) must type `Entity` — reuse E0200 (
                         // this operand was never synthesized before).
                         const et = self.synthExpr(aw.entity_expr, ctx_opt);
                         if (!(et == .builtin and et.builtin == .entity)) {
@@ -6039,8 +6013,8 @@ pub const TypeChecker = struct {
                         if (ak == .fn_call or ak == .method_call) return t;
                         // Non-call target: the handle-await form (§9.8) — the target
                         // must be a TaskHandle. The result is
-                        // unit in Phase 1 (spawn bodies have no value channel —
-                        // brief Notes); `unknown` ≈ unit, the house convention.
+                        // unit (spawn bodies have no value channel —
+                        // `unknown` ≈ unit, the house convention.
                         if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
                         // A `TimerHandle` is NOT awaitable (§9.10):
                         // a timer is not a task — no join semantics. Precise
@@ -6065,7 +6039,7 @@ pub const TypeChecker = struct {
     /// Type an array literal. `[a, b, c]` (and `[v; n]`)
     /// without an annotation infers a **fixed** array of the unified builtin
     /// element type; an empty `[]` stays `unknown` so the `let`'s annotation
-    /// supplies the type. E1 arrays carry builtin primitive elements only.
+    /// supplies the type. Arrays carry builtin primitive elements only.
     fn synthArrayLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const al = self.arena.array_lits.items[data];
         if (al.is_fill) {
@@ -6101,19 +6075,18 @@ pub const TypeChecker = struct {
         return .{ .array_fixed = .{ .elem = elem_bt.?, .len = al.elements_len } };
     }
 
-    /// Type a map literal. `[k: v, ...]` infers a map whose
-    /// key / value are the unified builtin types of the entries. E1 maps carry
-    /// builtin key / value types — a non-builtin (e.g. a `string` key, which is
-    /// not a builtin in E1) leaves the literal `unknown` (the interpreter still
-    /// builds it from the runtime values; precise string-keyed map typing is a
-    /// later refinement). Empty `[:]` stays `unknown` so the annotation types it.
-    /// stdlib §14 / §15 pin `K: Hash + Eq` on map keys and `T: Hash + Eq` on
-    /// set elements, and the builtin Hash set excludes float/f32/f64 (NaN !=
-    /// NaN, hash undefined — stdlib §4.3): a float map key or set element is
-    /// an invalid program, rejected at the resolver so NEITHER backend ever
-    /// sees one (E0601 BoundNotSatisfied). Generalized from the tranche-4
-    /// `checkMapKeyHashable` for the tranche-3bis Set vertical — same code,
-    /// same wording family, `what`/`bound` carry the per-collection nouns.
+    /// Type a map literal. `[k: v, ...]` infers a map whose key / value are the unified
+    /// builtin types of the entries. Maps carry builtin key / value types — a
+    /// non-builtin (e.g. a `string` key, which is not a builtin) leaves the literal
+    /// `unknown` (the interpreter still builds it from the runtime values; precise
+    /// string-keyed map typing is a later refinement). Empty `[:]` stays `unknown` so
+    /// the annotation types it. stdlib §14 / §15 pin `K: Hash + Eq` on map keys and
+    /// `T: Hash + Eq` on set elements, and the builtin Hash set excludes float/f32/f64
+    /// (NaN != NaN, hash undefined — stdlib §4.3): a float map key or set element is an
+    /// invalid program, rejected at the resolver so NEITHER backend ever sees one
+    /// (E0601 BoundNotSatisfied). Generalized from the optional-op
+    /// `checkMapKeyHashable` for the Set vertical — same code, same
+    /// wording family, `what`/`bound` carry the per-collection nouns.
     fn checkHashBound(self: *TypeChecker, t: BuiltinType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
         if (t.isFloat()) {
             try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
@@ -6189,7 +6162,7 @@ pub const TypeChecker = struct {
     /// statements are checked in order, then the block's type is the trailing
     /// value's type (or `unknown` ≈ unit when value-less). Locals declared in
     /// the block use the flat per-rule locals map — lexical scoping is a later
-    /// refinement (consistent with E1; the interpreter is the reference).
+    /// refinement (the interpreter is the reference).
     fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const blk = self.arena.block_exprs.items[data];
         if (ctx_opt) |ctx| {
@@ -6279,9 +6252,9 @@ pub const TypeChecker = struct {
         return try self.synthExprE(arg, ctx_opt);
     }
 
-    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`
-    ///: scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums,
-    /// or `unknown` (already-diagnosed). Aggregates lack a structural `Value.eql`.
+    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`:
+    /// scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums, or `unknown`
+    /// (already-diagnosed). Aggregates lack a structural `Value.eql`.
     fn assertComparable(t: ResolvedType) bool {
         return switch (t) {
             .builtin, .enum_t, .unknown => true,
@@ -6400,11 +6373,11 @@ pub const TypeChecker = struct {
         return null;
     }
 
-    /// Type a call expression. E1 only resolves calls whose
+    /// Type a call expression. Only calls are resolved whose
     /// callee is a closure: arity is checked, then the body is typed for the
     /// return with the parameters bound (to their annotation, else the argument
     /// type) in the caller's scope. Calls on non-closures are an error
-    /// (function / method calls arrive with fn / impl in E2).
+    /// (a function or method call resolves through `fn` / `impl`).
     fn synthCall(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const call = self.arena.call_exprs.items[data];
 
@@ -6412,8 +6385,8 @@ pub const TypeChecker = struct {
         // naming a top-level `fn` (and not shadowed by a local binding) is the
         // §4.2 rule — synth the signature, check arity + arg types, result is
         // the declared return type. The other three dispatch kinds need `impl`
-        // (block 3) or the service registry (Level B), so block 2 ships free
-        // calls; method-call dispatch follows in block 3.
+        // or the service registry, so a bare call resolves free
+        // of them; method-call dispatch is separate.
         if (self.arena.exprKind(call.callee) == .ident) {
             const callee_name = self.arena.exprData(call.callee);
             const shadowed = if (ctx_opt) |ctx| ctx.locals.contains(callee_name) else false;
@@ -6439,7 +6412,7 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure)];
-        // Named arguments on a closure call are an M0.8 bound (item-16
+        // Named arguments on a closure call are a bound (item-16
         // scope: declared fns + methods; flagged for the gate) — the
         // binding machinery targets declared signatures.
         if (call.names_start != ast_mod.no_arg_names) {
@@ -6479,7 +6452,7 @@ pub const TypeChecker = struct {
         self.closure_captures = &captures;
         defer self.closure_captures = saved_captures;
         const ret = try self.synthExprE(ce.body, ctx_opt);
-        // Remove the parameter bindings (E1 closures don't collide their params
+        // Remove the parameter bindings (a closure's params do not collide
         // with outer locals in practice; a save/restore is a later refinement).
         i = 0;
         while (i < ce.params_len) : (i += 1) {
@@ -6549,7 +6522,7 @@ pub const TypeChecker = struct {
     }
 
     /// Type a free-function call `f(args)` to a top-level `fn`. Checks
-    /// the argument binding (named arguments per §3.3, M0.8 E4 — E0203) then
+    /// the argument binding (named arguments per §3.3 — E0203) then
     /// each bound argument against its declared parameter type; the result
     /// is the declared return type (`unknown` for a void fn).
     fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -6592,13 +6565,13 @@ pub const TypeChecker = struct {
         return ret;
     }
 
-    /// Type a call to a generic `fn` (block 4, `etch-resolver-types.md`
+    /// Type a call to a generic `fn` (`etch-resolver-types.md`
     /// §6.3/§6.4). Type arguments are inferred structurally from the value
     /// arguments (E0603 if a parameter can't be inferred, E0604 on inconsistent
     /// inference); each inferred type is bound-checked (E0601); the return type
     /// is the declared return with the inferred substitution applied. The
-    /// monomorphisation instance table (§6.2) drives the Phase-2 codegen
-    /// lowering — there is no consumer in the M0.8 direct AST→Zig path, so the
+    /// monomorphisation instance table (§6.2) drives a bytecode codegen
+    /// lowering — there is no consumer in the direct AST→Zig path, so the
     /// resolver computes the substitution per call without persisting it.
     fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, decl: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         var subst: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
@@ -6640,9 +6613,9 @@ pub const TypeChecker = struct {
     }
 
     /// Structurally match a formal parameter type-node against an actual argument
-    /// type, binding generic variables into `subst` (block 4, §6.4).
+    /// type, binding generic variables into `subst` (§6.4).
     /// Handles a bare param `T` and an element-of `T[]` / `T[N]`; deeper nesting
-    /// is not inferred in M0.8 (leaves the param unbound → E0603 if unresolved).
+    /// is not inferred (leaves the param unbound → E0603 if unresolved).
     fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
         switch (self.arena.typeNodeKind(formal)) {
             .named => {
@@ -6666,7 +6639,7 @@ pub const TypeChecker = struct {
                 };
                 if (elem) |ea| try self.unifyGeneric(decl, at.elem, ea, subst, span);
             },
-            else => {}, // generic_type / map / set — not inferred in M0.8
+            else => {}, // generic_type / map / set — not inferred
         }
     }
 
@@ -6696,7 +6669,7 @@ pub const TypeChecker = struct {
     /// Check an inferred type argument against a parameter's bounds (block
     /// 4, §6.5). `component` / `resource` require the RTTI category;
     /// `trait` requires an `impl Trait for <actual>` in the compilation set;
-    /// `event` is unsatisfiable until events land (E3). E0601 otherwise.
+    /// E0601 otherwise.
     fn checkGenericBounds(self: *TypeChecker, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
         var bi: u32 = 0;
         while (bi < gp.bounds_len) : (bi += 1) {
@@ -6757,7 +6730,7 @@ pub const TypeChecker = struct {
     }
 
     /// Check a struct literal's fields against the declared struct
-    /// `struct_name` (block 3; split out in E3-C tranche 8 so the
+    /// `struct_name` (split out so the
     /// anonymous `.{ … }` form checks through the same point with the name
     /// supplied by its context — check mode, resolver-types §4).
     fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_name: StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -6781,12 +6754,12 @@ pub const TypeChecker = struct {
                     break;
                 }
             }
-            // Check mode (resolver-types §4 + §3.5, M0.8 E3-C tranche 4):
+            // Check mode (resolver-types §4 + §3.5):
             // the declared field type is the expected type, so a bare
             // `.variant` shorthand in field-value position resolves against
             // a declared enum field — the part1 §10.2 canonical form
             // `Error { code: .io_fail }` — and an anonymous `.{ … }` value
-            // resolves against a declared struct field (tranche 8, the same
+            // resolves against a declared struct field (the same
             // propagation extended from the bare variant to the whole
             // literal).
             const actual = blk: {
@@ -6858,7 +6831,7 @@ pub const TypeChecker = struct {
     }
 
     /// The user type name carried by a struct / component / resource type, or
-    /// `null` for builtins / collections (no user methods in M0.8 E2 block 3 —
+    /// `null` for builtins / collections (no user methods on them —
     /// builtin/stdlib methods like `Vec3.length` are §5.3, out of scope).
     fn typeNameOfResolved(rt: ResolvedType) ?StringId {
         return switch (rt) {
@@ -6874,7 +6847,7 @@ pub const TypeChecker = struct {
     /// Associated-fn dispatch when the receiver is a bare type path
     /// (`Type.assoc()`, `self_kind == .none`). Instance dispatch follows the
     /// strict order of `etch-resolver-types.md §5.5`: inherent (§5.1) → trait
-    /// (§5.2) → builtin/service (§5.3-5.4, out of M0.8 block-3 core). A trait
+    /// (§5.2) → builtin/service (§5.3-5.4, out of the core). A trait
     /// receiver may be a struct / component / resource or `Entity`; a `mut self`
     /// call on an immutable receiver is E0220 (§7.6); a conditional trait impl's
     /// `when` must be provable from the calling rule's `when` (E0215, §7.3).
@@ -6949,7 +6922,7 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // `recv?.method(args)` — optional chain (tranche 4, part1 §6.6):
+        // `recv?.method(args)` — optional chain (part1 §6.6):
         // the method dispatches against the payload type and the
         // result re-wraps in an optional (`none` short-circuits at runtime).
         if (mc.opt_chain) {
@@ -6965,16 +6938,16 @@ pub const TypeChecker = struct {
         return try self.dispatchMethodOnType(id, mc, raw_t, ctx_opt);
     }
 
-    /// Type a `Set.assoc(...)` builtin associated call (tranche 3bis,
+    /// Type a `Set.assoc(...)` builtin associated call (
     /// stdlib §15.1 — minimal faithful subset). `Set.new()` is
     /// element-less: it synthesizes `unknown` and the let annotation types
     /// the binding (the same policy as the empty map literal `[:]`).
     /// `Set.from(arr)` takes its element type from the array argument;
     /// stdlib §15 pins `T: Hash + Eq` and §4.3 excludes float/f32/f64 from
     /// the builtin Hash set, so a float element is an invalid program for
-    /// BOTH backends (E0601 — the same redressement as map keys).
+    /// BOTH backends (E0601 — the same bound as map keys).
     /// `with_capacity` (a generic call form) and anything else §15.1 is a
-    /// stdlib activation (Phase 1+).
+    /// stdlib activation, unimplemented.
     fn synthSetAssociated(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const method_slice = self.arena.strings.slice(mc.method_name);
         if (std.mem.eql(u8, method_slice, "new")) {
@@ -7006,7 +6979,7 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
-    /// M1.0.9 B2 — validate the single string argument of an `Entity` extension
+    /// Validate the single string argument of an `Entity` extension
     /// method (`activate_extension` / `deactivate_extension` / `has_extension`).
     /// A non-builtin / `unknown` arg type is left alone (no cascading error), the
     /// same shape as the collection-method arg checks above.
@@ -7156,10 +7129,9 @@ pub const TypeChecker = struct {
     fn dispatchMethodOnType(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, recv_t: ResolvedType, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const method_slice = self.arena.strings.slice(mc.method_name);
 
-        // Builtin string methods. `len` → int (byte length). Any other §12
-        // String method is a
-        // stdlib activation (Phase 1+), not Level-A language → diagnostic here +
-        // fail-loud codegen.
+        // Builtin string methods. `len` → int (byte length). Any other §12 String
+        // method is an unimplemented stdlib activation, not core language → diagnostic
+        // here + fail-loud codegen.
         if (recv_t == .builtin and recv_t.builtin == .string_) {
             if (std.mem.eql(u8, method_slice, "len")) {
                 if (mc.args_len != 0) {
@@ -7171,10 +7143,10 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // Builtin dynamic-array methods (tranche 3 — minimal faithful
+        // Builtin dynamic-array methods (a minimal faithful
         // subset of stdlib §13.2). `push(item)` (mut receiver,
         // element-typed arg, void return) and `len()` (→ int). Any other §13
-        // method is a stdlib activation (Phase 1+) → diagnostic here +
+        // method is an unimplemented stdlib activation → diagnostic here +
         // fail-loud codegen.
         if (recv_t == .array_dyn) {
             if (std.mem.eql(u8, method_slice, "push")) {
@@ -7196,9 +7168,9 @@ pub const TypeChecker = struct {
                 }
                 return ResolvedType{ .builtin = .int_ };
             }
-            // `pop() -> T?` (stdlib §13.2, M0.8 E3-C tranche 4): the
+            // `pop() -> T?` (stdlib §13.2): the
             // optional-returning accessor unlocked by the Optional ops —
-            // lifts the tranche-3 rejection. `mut self` like `push`.
+            // lifts the earlier rejection. `mut self` like `push`.
             if (std.mem.eql(u8, method_slice, "pop")) {
                 if (mc.args_len != 0) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'pop' takes no arguments", .{});
@@ -7210,10 +7182,10 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // Builtin map methods (tranche 3 — minimal faithful subset of stdlib
-        // §14.2). `insert(k, v)` (mut receiver, key/value-typed
-        // args; its `V?` return is out of the subset — statement use only)
-        // and `len()` (→ int). Any other §14 method is stdlib Phase 1+.
+        // Builtin map methods (a minimal faithful subset of stdlib §14.2).
+        // `insert(k, v)` (mut receiver, key/value-typed args; its `V?` return is out of
+        // the subset — statement use only) and `len()` (→ int). Any other §14 method is
+        // unimplemented stdlib.
         if (recv_t == .map_t) {
             if (std.mem.eql(u8, method_slice, "insert")) {
                 if (mc.args_len != 2) {
@@ -7243,12 +7215,12 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // Builtin set methods (tranche 3bis — minimal faithful subset of
+        // Builtin set methods (a minimal faithful subset of
         // stdlib §15.2). `insert(item)` (mut receiver, element-typed
         // arg; its `bool` return is out of the subset — statement use only),
         // `contains(item)` (→ bool) and `len()` (→ int). The §15.2 remainder
         // (remove, clear, the set-algebra ops, iter) is a stdlib activation
-        // (Phase 1+).
+        // (unimplemented).
         if (recv_t == .set_t) {
             if (std.mem.eql(u8, method_slice, "insert")) {
                 if (mc.args_len != 1) {
@@ -7286,7 +7258,7 @@ pub const TypeChecker = struct {
         }
 
         // builtin TaskHandle method (§9.8): `cancel()` — no args,
-        // statement-effect (`unknown` ≈ unit; idempotent at runtime, E5). The
+        // statement-effect (`unknown` ≈ unit; idempotent at runtime). The
         // handle's only other operation is `await h` (handled in the await
         // arm); anything else is an error with a pointer to both.
         if (recv_t == .builtin and recv_t.builtin == .task_handle) {
@@ -7300,10 +7272,9 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // builtin TimerHandle method (§9.10): `cancel()` — no
-        // args, statement-effect (`unknown` ≈ unit), idempotent at runtime
-        //. Its ONLY operation: a timer is not a task — no `await t`,
-        // no join, nothing else.
+        // builtin TimerHandle method (§9.10): `cancel()` — no args, statement-effect
+        // (`unknown` ≈ unit), idempotent at runtime. Its ONLY operation: a timer is not
+        // a task — no `await t`, no join, nothing else.
         if (recv_t == .builtin and recv_t.builtin == .timer_handle) {
             if (std.mem.eql(u8, method_slice, "cancel")) {
                 if (mc.args_len != 0) {
@@ -7346,7 +7317,7 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
-        // M1.0.9 B2 — builtin extension methods on an `Entity` receiver, checked
+        // Builtin extension methods on an `Entity` receiver, checked
         // BEFORE the trait-method resolution below (these are interpreter builtins,
         // not user traits; any other method on an Entity falls through to the
         // trait lookup). `activate_extension`/`deactivate_extension` are
@@ -7439,7 +7410,7 @@ pub const TypeChecker = struct {
             return try self.checkMethodArgs(id, mc, disp.method, ctx_opt);
         }
 
-        // Steps 3-4 (builtin / service) are §5.3-5.4 — out of M0.8 block-3 core.
+        // Steps 3-4 (builtin / service) are §5.3-5.4 — out of the core.
         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
         return ResolvedType.unknown;
     }
@@ -7453,7 +7424,7 @@ pub const TypeChecker = struct {
     /// §5.2`). Scans `trait_impls` for the type; a candidate is an impl-provided
     /// method or, failing that, the trait's default-bodied method. >1 distinct
     /// candidate ⇒ E0211 AmbiguousTraitMethod (the first is returned to avoid a
-    /// cascade). M0.8 simplification: multiple conditional impls of the same
+    /// cascade). Simplification: multiple conditional impls of the same
     /// trait also surface as E0211 (the §7.3 most-specific-wins / E0216 tie-break
     /// is a refinement — flagged for review).
     fn findTraitMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
@@ -7498,7 +7469,7 @@ pub const TypeChecker = struct {
     /// Prove a conditional trait impl's `when` (§7.3). Unconditional ⇒ always
     /// proven; otherwise every `has C` the impl requires must be in the calling
     /// rule's guaranteed component set (`ctx.components_in_when`). Outside a rule
-    /// context, or for an `or`/`not`/resource condition (not provable in M0.8),
+    /// context, or for an `or`/`not`/resource condition (not provable),
     /// the proof fails (conservative).
     fn traitImplConditionsProven(self: *TypeChecker, when_root: u32, ctx_opt: ?*RuleCtx) bool {
         if (when_root == ast_mod.RuleDecl.none_when) return true;
@@ -7511,14 +7482,14 @@ pub const TypeChecker = struct {
         return switch (node.kind) {
             .has, .has_with_filter => ctx.components_in_when.contains(node.type_name),
             .logical_and => self.requiredComponentsProven(node.lhs, ctx) and self.requiredComponentsProven(node.rhs, ctx),
-            else => false, // or / not / resource conditions are not provable in M0.8
+            else => false, // or / not / resource conditions are not provable
         };
     }
 
-    /// E0220-shaped check for the builtin mutating collection methods
-    ///: `push` / `insert` are `mut self` per stdlib
-    /// §13.2/§14.2, so the receiver must be a mutable binding. Same
-    /// reachability rule as `checkMutSelfReceiver`, without a user `FnDecl`.
+    /// E0220-shaped check for the builtin mutating collection methods: `push` /
+    /// `insert` are `mut self` per stdlib §13.2/§14.2, so the receiver must be a
+    /// mutable binding. Same reachability rule as `checkMutSelfReceiver`, without a
+    /// user `FnDecl`.
     fn checkMutCollectionReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
         const ctx = ctx_opt orelse return;
         if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
@@ -7595,9 +7566,9 @@ pub const TypeChecker = struct {
                 return .{ .builtin = elem };
             },
             .map_t => |mi| {
-                // `m[k] -> V?` (stdlib §14.2/§14.3, M0.8 E3-C tranche 4):
+                // `m[k] -> V?` (stdlib §14.2/§14.3):
                 // the optional-returning accessor unlocked by the Optional
-                // ops — lifts the tranche-3 rejection. The key must fit the
+                // ops — lifts the earlier rejection. The key must fit the
                 // map's key type.
                 if (idx_t == .builtin and !self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
@@ -7682,10 +7653,10 @@ pub const TypeChecker = struct {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern used on a non-enum scrutinee", .{});
                     }
                 },
-                // `some(v)` / `none` optional patterns (tranche 4, part1
+                // `some(v)` / `none` optional patterns (part1
                 // §7.6): the scrutinee must be an optional; `some(v)`
                 // binds the payload for its arm body (flat per-rule locals,
-                // the E1 scoping policy).
+                // the scoping policy).
                 .optional_some => {
                     if (scrut_t == .optional) {
                         saw_some = true;
@@ -7742,7 +7713,7 @@ pub const TypeChecker = struct {
             .add, .sub, .mul, .div, .rem => {
                 if (lhs_t == .builtin and rhs_t == .builtin) {
                     // `string + string → string` — concatenation, the only
-                    // string arithmetic in the M0.8 minimal subset (stdlib
+                    // string arithmetic in the minimal subset (stdlib
                     // §12.4 / `etch-resolver-types.md` §16 builtin `Add`).
                     // `-`/`*`/`/`/`%` on strings stay errors via the numeric
                     // checks below.
@@ -7764,7 +7735,7 @@ pub const TypeChecker = struct {
             },
             .eq, .neq, .lt, .gt, .le, .ge => {
                 // String `Eq`/`Ord` (content equality, lexicographic order —
-                // stdlib §12.4) are NOT in the M0.8 minimal subset: reject at
+                // stdlib §12.4) are NOT in the minimal subset: reject at
                 // type-check so neither backend sees one (fail loud here, not
                 // divergently at runtime / in generated Zig).
                 if ((lhs_t == .builtin and lhs_t.builtin == .string_) or (rhs_t == .builtin and rhs_t.builtin == .string_)) {
@@ -7788,7 +7759,7 @@ pub const TypeChecker = struct {
             },
             .coalesce => {
                 // `expr ?? default` ≡ `expr.unwrap_or(default)` (stdlib
-                // §16.2, M0.8 E3-C tranche 4): the lhs must be an optional;
+                // §16.2): the lhs must be an optional;
                 // the default must fit the payload type; the result is the
                 // unwrapped payload.
                 if (lhs_t == .optional) {
@@ -7824,8 +7795,7 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
             .force_unwrap => {
-                // `expr!` ≡ `expr.unwrap()` — panic if none (stdlib §16.2,
-                // M0.8 E3-C tranche 4).
+                // `expr!` ≡ `expr.unwrap()` — panic if none (stdlib §16.2).
                 if (operand_t == .optional) return .{ .builtin = operand_t.optional };
                 if (operand_t == .unknown) return ResolvedType.unknown;
                 try self.emit(.type_mismatch, .error_, span, "'!' force unwrap requires an optional operand", .{});
@@ -7895,7 +7865,7 @@ pub const TypeChecker = struct {
                     }
                 } else if (self.declaredEvent(name_id)) |fe| {
                     // Cross-arena field lookup, BY BYTES on both the field name
-                    // and the type — the discipline M1.0.7 settled for
+                    // and the type — the discipline that holds for
                     // `checkComponentInstance`, and bounded the same way:
                     // builtins resolve, a named foreign type yields `unknown`.
                     const want = self.arena.strings.slice(field_name);
@@ -7931,7 +7901,7 @@ pub const TypeChecker = struct {
 /// Return `true` if the expression at `id` can be folded to a value
 /// at type-check time (literals + arithmetic/comparison/logic on
 /// const-evaluable operands). Drives the `component` default-value
-/// admissibility check in the S3 type-checker.
+/// admissibility check in the type-checker.
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {
@@ -7939,9 +7909,9 @@ pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
         .binary => blk: {
             const bin = arena.binary_exprs.items[arena.exprData(id)];
             // Arithmetic / comparison / logic on const-evaluable args is OK.
-            // The S3 brief restricts defaults to "literals + arithmetic on
+            // A default is restricted to literals + arithmetic on
             // literals + parenthesized" — we allow comparison/logic too as
-            // long as both sides are const-evaluable; the brief's intent is
+            // long as both sides are const-evaluable; the intent is
             // to keep defaults compile-time, and these operations are.
             break :blk isConstEvaluable(arena, bin.lhs) and isConstEvaluable(arena, bin.rhs);
         },
@@ -8021,7 +7991,7 @@ test "type-checker emits E0101 on duplicate component declaration" {
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
 }
 
-// ── M1.B / G1 — `@storage` argument schema ────────────────
+// ── `@storage` argument schema ────────────────────────────
 //
 // The two codes exist so the two failures are TOLD APART, so each test below
 // asserts the presence of its own code AND the absence of the other. Asserting
@@ -8132,7 +8102,7 @@ test "the guard's bound, tested in BOTH directions" {
     }
 }
 
-// ── M0.8 E7 Level C — scene / prefab validation tests ─────────────────────
+// ── Scene / prefab validation tests ──────────────────────────────────────
 
 test "scene + prefab: a well-formed scene and prefab type-check clean (M0.8 E7)" {
     const gpa = std.testing.allocator;
@@ -8285,7 +8255,7 @@ test "type-checker emits E0102 on field referencing unknown type" {
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
 }
 
-// ── M1.0.17 E1 — resource collection field type-check ─────────────────────
+// ── Resource collection field type-check ─────────────────────────────────
 
 test "resource string[] field type-checks" {
     const gpa = std.testing.allocator;
@@ -8311,7 +8281,7 @@ test "resource collection field with unsupported element yields E0222" {
 
 test "resource nested collection field string[][] yields E0222" {
     const gpa = std.testing.allocator;
-    // Nesting is out of Phase 1 (the recursive-drop dimension is out of scope).
+    // Nesting is out of scope (the recursive-drop dimension is).
     var result = try parseAndCheck(gpa,
         \\resource Grid { rows: string[][] }
     );
@@ -8335,7 +8305,7 @@ test "resource Entity[] collection element yields E0222 (entity-reference messag
     const gpa = std.testing.allocator;
     // `Entity` is a valid resource scalar field type, but as a collection element
     // it carries cross-reference-table remap semantics a persistent collection
-    // does not wire → rejected with a
+    // does not wire (`.entity_` is resolved at load time) → rejected with a
     // message distinct from the generic unsupported-element one.
     var result = try parseAndCheck(gpa,
         \\resource Party { members: Entity[] }
@@ -8425,7 +8395,7 @@ test "duplicate test names collide within the test namespace (E0101, M1.0.15)" {
 
 test "test name does not collide with a component of the same name (M1.0.15)" {
     const gpa = std.testing.allocator;
-    // The M1.0.8 collision this milestone resolves: a `test "Foo"` lives in a
+    // A `test "Foo"` lives in a
     // dedicated namespace, so it no longer clashes with `component Foo`.
     var result = try parseAndCheck(gpa,
         \\component Foo { x: int = 0 }
@@ -9297,7 +9267,7 @@ test "type-checker accepts string .len() as int, rejects other string methods (M
         defer result.deinit(gpa);
         try expectNoCode(result.diagnostics.items, .type_mismatch);
     }
-    // Any other §12 String method is stdlib Phase 1+ → rejected.
+    // Any other §12 String method is unimplemented stdlib → rejected.
     {
         var result = try parseAndCheck(gpa,
             \\component Acc { out: int = 0 }
@@ -9435,7 +9405,7 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 
-    // Wrong arity → E0203 (unfolded from E0200, M0.8 E4 item 16).
+    // Wrong arity → E0203 (unfolded from E0200, item 16).
     var arity = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -9503,7 +9473,7 @@ test "closure body cannot mutate a capture, E0221 (M0.8 E3-C tranche 6)" {
     defer local_mut.deinit(gpa);
     try expectNoCode(local_mut.diagnostics.items, .closure_cannot_mutate_capture);
 
-    // READING a capture stays clean (the E1 capture path, unchanged).
+    // READING a capture stays clean.
     var read_ok = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -9536,7 +9506,7 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 
-    // Wrong arity → E0203 (unfolded from E0200, M0.8 E4 item 16).
+    // Wrong arity → E0203 (unfolded from E0200, item 16).
     var arity = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\fn double(x: int) -> int { x * 2 }
@@ -9563,7 +9533,7 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     try expectAnyCode(argty.diagnostics.items, .type_mismatch);
 
     // Body value type does not match the declared return type → E0204
-    // (unfolded from E0200, M0.8 E4 item 16).
+    // (unfolded from E0200, item 16).
     var retty = try parseAndCheck(gpa,
         \\fn bad(x: int) -> bool { x * 2 }
     );
@@ -9644,7 +9614,7 @@ test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E
     try expectAnyCode(no_target.diagnostics.items, .undefined_symbol);
 
     // Argument-count mismatch on an associated fn → E0203 (unfolded from
-    // E0200, M0.8 E4 item 16).
+    // E0200, item 16).
     var arity = try parseAndCheck(gpa,
         \\struct V2 { x: int = 0 }
         \\impl V2 { fn make(a: int) -> V2 { V2 { x: a } } }
@@ -9703,7 +9673,7 @@ test "type-checker validates entity_event / global_event await targets (M1.0.14 
     const gpa = std.testing.allocator;
 
     // Non-Entity first operand of `entity_event` → E0200 (the operand was
-    // never synthesized before M1.0.14). `Ev` has an Entity field so E0908 does
+    // synthesized for this form). `Ev` has an Entity field so E0908 does
     // not also fire.
     var bad_operand = try parseAndCheck(gpa,
         \\component C { }
@@ -10125,7 +10095,7 @@ test "type-checker validates tag mutations (M0.8 E3)" {
 test "type-checker accepts string + enum fields on struct + resource, keeps component rejection (M1.0.3)" {
     const gpa = std.testing.allocator;
 
-    // `string` + enum-typed struct fields are the tranche-2 unlock (the
+    // `string` + enum-typed struct fields are the Error-layer unlock (the
     // builtin Error forces both; part1 §5.5 constrains components only).
     var ok = try parseAndCheck(gpa,
         \\enum Severity { low, high }
@@ -10152,17 +10122,15 @@ test "type-checker accepts string + enum fields on struct + resource, keeps comp
     defer comp_enum.deinit(gpa);
     try expectAnyCode(comp_enum.diagnostics.items, .undefined_symbol);
 
-    // Resources accept `string` since M1.0.3 E2 (the Option A alignment,
-    // formerly the deferred "tranche 7"; part1 §5.5 "no POD constraint for
-    // resources"). FLIPPED from rejected → accepted — the intended resolution,
-    // not a regression.
+    // Resources accept `string` (part1 §5.5 "no POD constraint for resources") —
+    // accepted and not rejected, which is the intended resolution and not a regression.
     var res = try parseAndCheck(gpa,
         \\resource Settings { player_name: string }
     );
     defer res.deinit(gpa);
     try expectNoCode(res.diagnostics.items, .undefined_symbol);
 
-    // Resources accept enum fields since M1.0.3 E3 (mirrors the `string` unlock).
+    // Resources accept enum fields too (mirrors the `string` unlock).
     var res_enum = try parseAndCheck(gpa,
         \\enum Difficulty { easy, normal, hard }
         \\resource GameMode { diff: Difficulty = .normal }
@@ -10296,7 +10264,7 @@ test "type-checker accepts the minimal collection method subset (M0.8 E3-C tranc
 
 test "type-checker rejects out-of-subset collection methods and immutable receivers (M0.8 E3-C tranches 3-4)" {
     const gpa = std.testing.allocator;
-    // `remove` is §13.2 but outside the minimal subset (stdlib Phase 1+).
+    // `remove` is §13.2 but outside the minimal subset (unimplemented stdlib).
     var rem = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
         \\  let mut xs: int[] = [1, 2]
@@ -10316,7 +10284,7 @@ test "type-checker rejects out-of-subset collection methods and immutable receiv
     defer immut.deinit(gpa);
     try expectAnyCode(immut.diagnostics.items, .immutable_receiver_for_mut_self);
 
-    // `pop` is `mut self` too (lifted into the subset in tranche 4): an
+    // `pop` is `mut self` too (and in the subset): an
     // immutable receiver stays rejected.
     var pop_immut = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
@@ -10353,11 +10321,10 @@ test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)
 
 test "type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
     const gpa = std.testing.allocator;
-    // The full tranche-4 op surface (part1 §6.6, stdlib §16.2/§16.3):
-    // `??` unwraps to the payload, `!` force-unwraps, `?.len()` re-wraps the
-    // string-method result, `some(v)`/`none` patterns are exhaustive on an
-    // optional scrutinee, and the tranche-3 lift points type `pop() -> T?`
-    // and `m[k] -> V?`.
+    // The full optional op surface (part1 §6.6, stdlib §16.2/§16.3): `??` unwraps to
+    // the payload, `!` force-unwraps, `?.len()` re-wraps the string-method result,
+    // `some(v)`/`none` patterns are exhaustive on an optional scrutinee, and the lift
+    // points type `pop() -> T?` and `m[k] -> V?`.
     var ok = try parseAndCheck(gpa,
         \\component Probe { n: int = 0 }
         \\rule r(entity: Entity)
@@ -10434,7 +10401,7 @@ test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranch
     const gpa = std.testing.allocator;
     // stdlib §14 pins `K: Hash + Eq` and §4.3 excludes float/f32/f64 from
     // the builtin Hash set — a float map key is an INVALID program for both
-    // backends, not a codegen-only bound (2026-06-10 tranche-3 redressement).
+    // backends, not a codegen-only bound.
     var lit = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
         \\  let m = [1.5: 10]
@@ -10452,7 +10419,7 @@ test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranch
     try expectAnyCode(ann.diagnostics.items, .bound_not_satisfied);
 
     // Hashable keys stay accepted (int here; string keys keep the ratified
-    // tranche-3 bound: interp reference, codegen fail-loud).
+    // bound: interp reference, codegen fail-loud).
     var ok = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
         \\  let mut m = [1: 10]
@@ -10501,7 +10468,7 @@ test "type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tr
     const gpa = std.testing.allocator;
     // stdlib §15 pins `T: Hash + Eq` on set elements and §4.3 excludes
     // float/f32/f64 from the builtin Hash set — a float set element is an
-    // INVALID program for both backends (the tranche-4 map-key redressement,
+    // INVALID program for both backends (the map-key bound,
     // generalized through `checkHashBound`).
     var from = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
@@ -10564,7 +10531,7 @@ test "anonymous struct literal resolves in check mode, rejected without an expec
     const gpa = std.testing.allocator;
 
     // The two wired contexts — let annotation and typed field value (the
-    // tranche-4 propagation extended to the whole literal) — plus the enum
+    // propagation extended to the whole literal) — plus the enum
     // shorthand composing INSIDE an anonymous literal, and a struct-typed
     // struct field (part1 §5.5 nested POD structs) carrying a nested anon.
     var ok = try parseAndCheck(gpa,
@@ -12332,7 +12299,7 @@ test "conditional branch guards type-check as bool in the parent scope (M1.0.12 
     try expectAnyCode(bad.diagnostics.items, .type_mismatch);
 }
 
-// ─── M1.1.15.2 G1 — declaration files, services, E1901 ──────────────────────
+// ─── Declaration files, services, E1901 ────────────────────────────────────
 
 /// `parseAndCheck` for a declaration file. The mode is a property of the
 /// arena, so the only difference from `parseAndCheck` is which parser entry
@@ -12444,10 +12411,9 @@ test "E1901 on disallowed top-level construct in .d.etch" {
 
     // The constructs §20.1 refuses and §20.2 does not name are refused on the
     // ALLOW-LIST. Asserted per construct: a count would pass if one of them were
-    // admitted and another double-reported. `event` was in this list until the
-    // G1 amendment moved it to the admitted side; `component` and `resource`
-    // stay, and the twin test below is what proves the amendment widened the
-    // list by exactly one and not by a family.
+    // admitted and another double-reported. `event` was in this list until it moved to
+    // the admitted side; `component` and `resource` stay, and the twin test below is
+    // what proves the admission widened the list by exactly one and not by a family.
     for ([_][]const u8{
         "component Health { current: int = 100 }",
         "resource Score { n: int = 0 }",
@@ -12568,8 +12534,8 @@ test "unknown service method resolves to a diagnostic" {
 test "an event declared in a .d.etch parses and registers, a component still does not" {
     const gpa = std.testing.allocator;
 
-    // G1 amendment (Claude.ai round-trip): `event_decl` joins §20.1's
-    // `decl_file_item`. G4 has to make a Zig-emitted event observable from a
+    // `event_decl` joins §20.1's
+    // `decl_file_item`: a Zig-emitted event must be observable from a
     // rule, and a rule can only observe an event whose type Etch knows.
     //
     // PARSES: no parse diagnostic, and no E1901.
@@ -12581,7 +12547,7 @@ test "an event declared in a .d.etch parses and registers, a component still doe
 
     // The declaration reached the AST with its payload intact — a construct
     // admitted by the allow-list and then dropped would pass the assertions
-    // above and be useless to G4.
+    // above and carry nothing.
     try std.testing.expectEqual(@as(usize, 1), ok.ast.event_decls.items.len);
     try std.testing.expectEqualStrings("Hit", ok.ast.strings.slice(ok.ast.event_decls.items[0].name));
     try std.testing.expectEqual(@as(u32, 2), ok.ast.event_decls.items[0].fields_len);
@@ -12627,6 +12593,6 @@ test "an event declared in a .d.etch parses and registers, a component still doe
     // no longer BLOCKS the event, not that a `.d.etch`-declared event is visible
     // to a user `.etch`. Cross-file visibility runs through the export index and
     // `imported_symbols`, which a `.d.etch` does not participate in (it is loaded
-    // at compiler build, §20.5, never imported). Wiring that is G4's, and G4 is
-    // where it gets a test.
+    // at compiler build, §20.5, never imported). That wiring is the service
+    // registry's, and it is tested there.
 }

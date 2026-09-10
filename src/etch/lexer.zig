@@ -356,7 +356,7 @@ pub const Lexer = struct {
             // surfaces as an error token via lexUtf8 from the outer loop.
             // All non-newline bytes are accepted verbatim inside the
             // string literal — explicit UTF-8 validation is only enforced
-            // outside string literals (per brief).
+            // outside string literals.
             self.pos += 1;
         }
         // Unterminated string: surface as error_byte at the opening quote.

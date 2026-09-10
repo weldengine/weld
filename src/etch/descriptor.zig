@@ -979,7 +979,10 @@ pub fn renderFieldTypeAlloc(gpa: std.mem.Allocator, arena: *const AstArena, type
     // function, …) has no descriptor-construct surface: fail loud. Collections in
     // particular type-check ONLY on `resource` (cooked via `interp.compileTypeDecl`,
     // not this path), so a collection type node is unreachable here for a valid
-    // program — the rejection is the cook's defensive fail-loud contract.
+    // program — the rejection is the cook's defensive fail-loud contract. A
+    // collection-specific error was weighed and refused: it would ripple through
+    // ~15 codegen `BuildError` switches for zero behavioural gain, both mapping
+    // to `UnsupportedConstruct`.
     if (arena.typeNodeKind(type_node) != .named) return error.UnsupportedDescriptorExpr;
     return try gpa.dupe(u8, arena.strings.slice(arena.named_types.items[arena.typeNodeData(type_node)].name));
 }

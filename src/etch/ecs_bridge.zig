@@ -1,4 +1,4 @@
-//! S4 Etch ↔ ECS adapter — translates the interpreter's name-based view of
+//! Etch ↔ ECS adapter — translates the interpreter's name-based view of
 //! the world (`entity.get(Health).current`, `when resource Score changed`)
 //! onto the Tier 0 byte-oriented surface (`Registry`, `DynamicArchetype`,
 //! `ResourceStore`).
@@ -129,7 +129,7 @@ pub const Bridge = struct {
         const loc = world.dynamicLocation(core_id) orelse return BridgeError.UnknownEntity;
         // The MODE decides the arm, and the presence question is the routed one:
         // asking `arch.componentIndex` for a sparse id answers null, which is
-        // what made a sparse component look ABSENT before G5 — the same error a
+        // indistinguishable from the entity not carrying it — the same error a
         // caller gets for a component the entity really does not carry.
         if (!world.hasComponentDyn(core_id, component_id)) return BridgeError.UnknownComponent;
         if (world.storageOf(component_id) == .sparse) {
@@ -167,7 +167,7 @@ pub const Bridge = struct {
             },
             .sparse => |wire| {
                 const core_id: CoreEntityId = @bitCast(wire);
-                // Through the World-level entry, which G3 made bimodal and which
+                // Through the World-level entry, which is bimodal and which
                 // deliberately does NOT stamp a change — the table arm does not
                 // either, and `markComponentChanged` owns the stamp.
                 return world.componentBytes(core_id, ref.component_id) orelse
@@ -205,7 +205,7 @@ pub const Bridge = struct {
     }
 
     /// Stamp `ref`'s slot as modified at `tick` — writes the `changed_tick`
-    /// sidecar + sets the dirty bit (M0.8 E3 change detection,
+    /// sidecar + sets the dirty bit (change detection,
     /// `engine-ecs-internals.md` §5). Called by the interpreter right after a
     /// `writeComponentField` when the program uses `changed` filters. This is
     /// the SAME logical point (post component write) at which the codegen emits
@@ -272,7 +272,7 @@ pub const Bridge = struct {
     /// persistent promotion). The interpreter resolves the incoming string's
     /// bytes (literal / rule-arena) and hands them here with the allocator.
     ///
-    /// Order is load-bearing (M1.0.3 E2 review guard, anti use-after-free): read
+    /// Order is load-bearing, against a use-after-free: read
     /// the old slot → alloc + copy the new value → write the new slot → only then
     /// `decref` the *previous* slot value (never after overwriting it). The
     /// previous value's `decref` is a no-op when it was the immortal default. An
@@ -305,8 +305,9 @@ pub const Bridge = struct {
     }
 
     /// Swap a resource collection field's slot to a freshly-built persistent
-    /// container block.xs =
-    /// [...]`). The interpreter builds `new_block` (a `type_array` block whose
+    /// container block, for a whole-field reassignment
+    /// `get_mut(R).xs = [...]`. The interpreter builds `new_block` (a `type_array`
+    /// block whose
     /// elements are deep-copied, strings promoted — it owns the collections store
     /// + string helpers this needs); the bridge does only the slot mechanics, in
     /// the load-bearing order: read the old slot → write the new slot → decref the
@@ -427,9 +428,8 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
 /// field. `bytes` must already be sized to the field's column stride.
 ///
 /// Returns `error.TypeMismatch` when `v`'s tag is incompatible with the
-/// field's `kind` (M0.5 item 10 — resolves the S4 closing-debt
-/// `D-S4-ecs-bridge-panic`: a type incoherence is now a recoverable typed
-/// error propagated to the caller instead of a runtime `@panic`).
+/// field's `kind`: a type incoherence is a recoverable typed error propagated
+/// to the caller, never a runtime `@panic`.
 pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!void {
     switch (kind) {
         .int_ => {
@@ -537,7 +537,7 @@ test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
 }
 
 test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
-    // Dedicated D-S4-ecs-bridge-panic proof (closed by M0.5 item 10): a type
+    // A type
     // incoherence at the bridge is a recoverable typed error on EVERY kind
     // branch — never a runtime `@panic`.
     var buf: [8]u8 = undefined;
@@ -548,21 +548,21 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     // Float kinds (.float_/.f64_/.f32_) intentionally accept an int Value via
     // `@floatFromInt` (see `writeValueAsBytes` above), so an int is NOT an
     // incompatible tag for `.f64_` — probe it with a genuinely incompatible tag
-    // (`.bool_`).
+    // (`.bool_`). `.int_ = 7` does not discriminate: the int→float coercion
+    // accepts it, so the assertion would pass whatever the impl does.
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }
 
-// ─── M1.B / G5 — the handle is bimodal ──────────────────────────────────────
+// ─── The handle is bimodal ─────────────────────────────────────────────────
 //
 // `ComponentRef` was chunk-anchored, and a sparse component has no chunk. These
 // tests live here rather than in `tests/etch/` because the bridge is not
 // exported from the Etch root, and exporting it to reach a test would widen the
-// public surface for the test's convenience. They also cannot be written end to
-// end yet: a rule does not SELECT an entity by a sparse component until G7's
-// planner lands, so the body that would use this handle never runs — pinned in
-// `tests/etch/storage_mode_test.zig` as the boundary of the day.
+// public surface for the test's convenience. The end-to-end counterpart — a
+// rule selecting an entity by a sparse component and writing its row — is
+// pinned in `tests/etch/storage_mode_test.zig`.
 
 fn g5TestWorld(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
     const zero = [_]u8{0} ** 8;
@@ -584,10 +584,10 @@ test "G5: componentRefOf resolves a SPARSE component, and the field round-trips"
     const cid = try g5TestWorld(gpa, &world, .sparse);
     const eid = try world.spawnDynamic(gpa, &.{cid});
 
-    // Before G5 this returned `BridgeError.UnknownComponent`: the resolution
-    // asked `arch.componentIndex(cid)`, which answers null for a sparse id, so
-    // `entity.get(T)` on a sparse component was indistinguishable from asking
-    // for a component the entity does not carry.
+    // A naive resolution returns `BridgeError.UnknownComponent` here: it
+    // asks `arch.componentIndex(cid)`, which answers null for a sparse id, so
+    // `entity.get(T)` on a sparse component would be indistinguishable from
+    // asking for a component the entity does not carry.
     const ref = try Bridge.componentRefOf(&world, @bitCast(eid), cid, true);
 
     try Bridge.writeComponentField(&world.registry, ref, &world, "v", .{ .float_ = 7.5 });

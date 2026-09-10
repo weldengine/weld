@@ -269,9 +269,8 @@ pub const ExprKind = enum {
     closure,
     await_expr,
     throw_expr,
-    /// Interpolated string literal `"a {expr} b"` (`etch-
-    /// grammar.md` §1.4 `interpolation = "{" , expression , "}"`).
-    /// Data indexes `string_interps`.
+    /// Interpolated string literal `"a {expr} b"` (`etch-grammar.md` §1.4
+    /// `interpolation = "{" , expression , "}"`). Data indexes `string_interps`.
     string_interp,
     /// Localized text `@loc…` (§3.2 `loc_expr` — item-10 ruling:
     /// STRUCTURAL parse only; the fingerprint/extraction model comes with
@@ -448,15 +447,14 @@ pub const EntityTargetResolution = union(enum) {
     ambiguous,
 };
 
-/// Side-slab entry for a `tags { ... }` hierarchical declaration (`etch-
-/// grammar.md` §5.11 `tags_decl`). The hierarchy is stored flat and
-/// parent-linked across `arena.tag_namespaces` + `arena.tag_leaves`, appended
-/// in **pre-order** (the parser descends top-down). Pre-order append order is
-/// exactly the depth-first + declaration order `etch-validation-ecs.md` §5.2
-/// mandates for `bit_index` assignment, so a leaf's position in
-/// `arena.tag_leaves` is its canonical bit_index ordering before the
-/// cross-block merge performed by the global tag-table pass (`tags.zig`). A
-/// `tags_decl` item records the `(start, len)` runs this block contributed.
+/// Side-slab entry for a `tags { ... }` hierarchical declaration (`etch-grammar.md`
+/// §5.11 `tags_decl`). The hierarchy is stored flat and parent-linked across
+/// `arena.tag_namespaces` + `arena.tag_leaves`, appended in **pre-order** (the parser
+/// descends top-down). Pre-order append order is exactly the depth-first + declaration
+/// order `etch-validation-ecs.md` §5.2 mandates for `bit_index` assignment, so a leaf's
+/// position in `arena.tag_leaves` is its canonical bit_index ordering before the
+/// cross-block merge performed by the global tag-table pass (`tags.zig`). A `tags_decl`
+/// item records the `(start, len)` runs this block contributed.
 pub const TagsDecl = struct {
     ns_start: u32, // into `arena.tag_namespaces`
     ns_len: u32,
@@ -489,10 +487,10 @@ pub const TagLeaf = struct {
     span: SourceSpan,
 };
 
-/// The five tag query operators (`etch-grammar.md` §3.2 `tag_op`, `etch-
-/// validation-ecs.md` §5.4). `has_tag`/`has_no_tag` take a single tag;
-/// `has_any_tag`/`has_all_tags`/`has_no_tags` take a list (or a category
-/// namespace expanding to a mask).
+/// The five tag query operators (`etch-grammar.md` §3.2 `tag_op`,
+/// `etch-validation-ecs.md` §5.4). `has_tag`/`has_no_tag` take a single tag;
+/// `has_any_tag`/`has_all_tags`/`has_no_tags` take a list (or a category namespace
+/// expanding to a mask).
 pub const TagOp = enum { has_tag, has_no_tag, has_any_tag, has_all_tags, has_no_tags };
 
 /// Side-slab entry for a `tag_path` expression (`TAG_PATH = "." IDENT {"."
@@ -680,12 +678,11 @@ pub const TypeAliasDecl = struct {
     target: NodeId,
 };
 
-/// Side-slab entry for a top-level `const` declaration (`etch-grammar.md`
-/// §4.1: `const_stmt = "const" ( IDENT | TYPE_IDENT) ":"
-/// type "=" const_expression`). `name` is the interned binding name (a
-/// `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT`; both cases accepted).
-/// `type_node` is the declared `: type` annotation (mandatory — no inference
-/// on a const, part1 §3.5); `value` is the const expression, validated for
+/// Side-slab entry for a top-level `const` declaration (`etch-grammar.md` §4.1:
+/// `const_stmt = "const" ( IDENT | TYPE_IDENT) ":" type "=" const_expression`). `name`
+/// is the interned binding name (a `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT`;
+/// both cases accepted). `type_node` is the declared `: type` annotation (mandatory —
+/// no inference on a const, part1 §3.5); `value` is the const expression, validated for
 /// const-evaluability + type at resolve (E1101 / E0200). Top-level only.
 pub const ConstDecl = struct {
     name: StringId,
@@ -881,10 +878,9 @@ pub const MatchArm = struct {
     body: NodeId,
 };
 
-/// Payload of an `.enum_variant` match pattern (`etch-
-/// grammar.md` §3.2 l.510-511). The shorthand `.easy` stores
-/// `type_name = 0` (resolved type-driven from the scrutinee enum); the
-/// qualified `Difficulty.easy` stores the explicit enum type name. `variant`
+/// Payload of an `.enum_variant` match pattern (`etch-grammar.md` §3.2 l.510-511). The
+/// shorthand `.easy` stores `type_name = 0` (resolved type-driven from the scrutinee
+/// enum); the qualified `Difficulty.easy` stores the explicit enum type name. `variant`
 /// is the variant identifier.
 pub const EnumPatternPayload = struct {
     type_name: StringId, // 0 = shorthand `.variant`
@@ -918,8 +914,8 @@ pub const MapEntry = struct {
     value: NodeId,
 };
 
-/// `[k: v, ...]` (entries) or `[:]` (empty) map literal (collections, `etch-
-/// grammar.md` §496-498). Entries live in a flat `(start, len)` range of
+/// `[k: v, ...]` (entries) or `[:]` (empty) map literal (collections,
+/// `etch-grammar.md` §496-498). Entries live in a flat `(start, len)` range of
 /// `arena.map_entries`.
 pub const MapLitExpr = struct {
     entries_start: u32,
@@ -957,12 +953,12 @@ pub const StringInterp = struct {
     n_exprs: u32,
 };
 
-/// `{ statement* [expression] }` block expression (control flow, `etch-
-/// grammar.md` §3.2 l.520 / §4.1 l.645). `body_start`/`body_len` index a
-/// statement run in `arena.extra`; `value` is the trailing expression that is
-/// the block's value (`NodeId.none` when value-less — Etch has no `;`, so the
-/// last bare expression before `}` is the value). Used directly
-/// (`let x = { ...; v }`), as `if`/`match` arm bodies, and as closure bodies.
+/// `{ statement* [expression] }` block expression (control flow, `etch-grammar.md`
+/// §3.2 l.520 / §4.1 l.645). `body_start`/`body_len` index a statement run in
+/// `arena.extra`; `value` is the trailing expression that is the block's value
+/// (`NodeId.none` when value-less — Etch has no `;`, so the last bare expression before
+/// `}` is the value). Used directly (`let x = { ...; v }`), as `if`/`match` arm bodies,
+/// and as closure bodies.
 pub const BlockExpr = struct {
     body_start: u32,
     body_len: u32,
@@ -1006,10 +1002,9 @@ pub const ThrowStmt = struct {
     value: NodeId,
 };
 
-/// `try { ... } catch IDENT { ... }` statement (error handling, `etch-
-/// grammar.md` §640). Both bodies are statement runs in `arena.extra`
-/// (they are statement blocks, not block expressions). `catch_name` is the
-/// caught-value binding.
+/// `try { ... } catch IDENT { ... }` statement (error handling, `etch-grammar.md`
+/// §640). Both bodies are statement runs in `arena.extra` (they are statement blocks,
+/// not block expressions). `catch_name` is the caught-value binding.
 pub const TryCatchStmt = struct {
     try_start: u32,
     try_len: u32,
@@ -1041,17 +1036,15 @@ pub const AwaitTargetKind = enum {
     future, // await <expression> (Future) — T2, interp fail-loud in a later slice
 };
 
-/// `await <target>` expression (`etch-grammar.md` §3.2
-/// `await_expr` / §4.2 `await_stmt`). One node covers both the statement form
-/// (`await target`, wrapped in an expr-stmt) and the value form. `arg_expr` is
-/// the duration/tick expr (`wait`/`wait_unscaled`) or the awaited future
-/// (`future`), else `NodeId.none`; `entity_expr` is the `entity_event` entity,
-/// else `NodeId.none`; `event_type` is the event type name for the two event
-/// forms, else `0`. `filter_start` / `filter_len` index a run of
-/// `arena.struct_lit_fields` — the optional payload filter of the two event
-/// forms (`entity_event` / `global_event`), each `IDENT : expression` an
-/// equality predicate; `(0, 0)` when no filter body is present (`etch-
-/// grammar.md` §4.2).
+/// `await <target>` expression (`etch-grammar.md` §3.2 `await_expr` / §4.2
+/// `await_stmt`). One node covers both the statement form (`await target`, wrapped in
+/// an expr-stmt) and the value form. `arg_expr` is the duration/tick expr
+/// (`wait`/`wait_unscaled`) or the awaited future (`future`), else `NodeId.none`;
+/// `entity_expr` is the `entity_event` entity, else `NodeId.none`; `event_type` is the
+/// event type name for the two event forms, else `0`. `filter_start` / `filter_len`
+/// index a run of `arena.struct_lit_fields` — the optional payload filter of the two
+/// event forms (`entity_event` / `global_event`), each `IDENT : expression` an equality
+/// predicate; `(0, 0)` when no filter body is present (`etch-grammar.md` §4.2).
 pub const AwaitExpr = struct {
     target_kind: AwaitTargetKind,
     arg_expr: NodeId,
@@ -1181,11 +1174,11 @@ pub const CallExpr = struct {
 /// Sentinel for a call without named arguments.
 pub const no_arg_names: u32 = std.math.maxInt(u32);
 
-/// `receiver.method(args)` call expression (call mechanism, `etch-
-/// grammar.md` postfix_op §421). Args are a run of expr `NodeId` raw
-/// values in `arena.extra`. Block 2 produces the node (parser-testable); the
-/// 4-kind method dispatch (`etch-resolver-types.md §5`) is exercised in a later slice
-/// once `impl` provides methods.
+/// `receiver.method(args)` call expression (call mechanism, `etch-grammar.md`
+/// postfix_op §421). Args are a run of expr `NodeId` raw values in `arena.extra`. Block
+/// 2 produces the node (parser-testable); the 4-kind method dispatch
+/// (`etch-resolver-types.md §5`) is exercised in a later slice once `impl` provides
+/// methods.
 pub const MethodCall = struct {
     /// Named-argument labels (§3.3) — same encoding as `CallExpr`.
     names_start: u32 = no_arg_names,
@@ -1246,13 +1239,12 @@ pub const GenericTypeNode = struct {
     args_len: u32,
 };
 
-/// Side-slab entry for a top-level `fn` declaration (call mechanism, `etch-
-/// grammar.md` §5.3). The body is a block: `body_start`/`body_len` index
-/// a statement run in `arena.extra`, `value` is the trailing expression (the
-/// implicit return value; `NodeId.none` when value-less). `return_type` is
-/// `NodeId.none` for a void fn. `is_async` / `throws` carry the parsed effect
-/// markers — `async` is interpreted and its codegen rejects it; a `throws`
-/// fn's codegen folds into error-handling codegen.
+/// Side-slab entry for a top-level `fn` declaration (call mechanism, `etch-grammar.md`
+/// §5.3). The body is a block: `body_start`/`body_len` index a statement run in
+/// `arena.extra`, `value` is the trailing expression (the implicit return value;
+/// `NodeId.none` when value-less). `return_type` is `NodeId.none` for a void fn.
+/// `is_async` / `throws` carry the parsed effect markers — `async` is interpreted and
+/// its codegen rejects it; a `throws` fn's codegen folds into error-handling codegen.
 pub const FnDecl = struct {
     name: StringId,
     params_start: u32, // index into `arena.fn_params`
@@ -1330,10 +1322,9 @@ pub const EnumVariant = struct {
     data_len: u32,
 };
 
-/// Side-slab entry for an `enum` declaration (`etch-
-/// grammar.md` §5.8). Variants live in a `(start, len)` run of
-/// `arena.enum_variants`. Generics (`<...>`) are a later slice (a `<` after the name
-/// is rejected at parse time, like `struct`).
+/// Side-slab entry for an `enum` declaration (`etch-grammar.md` §5.8). Variants live
+/// in a `(start, len)` run of `arena.enum_variants`. Generics (`<...>`) are a later
+/// slice (a `<` after the name is rejected at parse time, like `struct`).
 pub const EnumDecl = struct {
     name: StringId,
     variants_start: u32, // index into `arena.enum_variants`
@@ -1345,11 +1336,11 @@ pub const EnumDecl = struct {
     generics_len: u32 = 0,
 };
 
-/// Side-slab entry for a `trait` declaration (`etch-
-/// grammar.md` §5.9). `trait_member = function_signature | function_decl`
-/// — members live in a `(start, len)` run of `arena.impl_methods` (each an
-/// `FnDecl`; an abstract member carries `has_body = false`, a default-bodied
-/// one `has_body = true`). Generics (`<...>`) are a later slice (rejected at parse).
+/// Side-slab entry for a `trait` declaration (`etch-grammar.md` §5.9).
+/// `trait_member = function_signature | function_decl` — members live in a
+/// `(start, len)` run of `arena.impl_methods` (each an `FnDecl`; an abstract member
+/// carries `has_body = false`, a default-bodied one `has_body = true`). Generics
+/// (`<...>`) are a later slice (rejected at parse).
 pub const TraitDecl = struct {
     name: StringId,
     methods_start: u32, // index into `arena.impl_methods`
@@ -1361,9 +1352,8 @@ pub const TraitDecl = struct {
     generics_len: u32 = 0,
 };
 
-/// Side-slab entry for a `service` declaration (`etch-
-/// grammar.md` §20.4: `service_decl = "service" IDENT "{" {
-/// function_decl_no_body } "}"`).
+/// Side-slab entry for a `service` declaration (`etch-grammar.md` §20.4:
+/// `service_decl = "service" IDENT "{" { function_decl_no_body } "}"`).
 ///
 /// **Structurally a `TraitDecl` minus generics**, and that is deliberate rather
 /// than convenient: a service body is a run of bodyless `fn` signatures, which
@@ -1395,11 +1385,10 @@ pub const StructLitField = struct {
     value: NodeId, // expr
 };
 
-/// `TYPE_IDENT "{" [field_init …] "}"` struct literal (`etch-
-/// grammar.md` §3.2 l.486). `type_name` is the explicit struct type; the
-/// anonymous `.{ … }` form carries `type_name == 0` and
-/// resolves against the expected type from its context (check mode,
-/// `etch-resolver-types.md` §4). Fields live in a `(start, len)` run of
+/// `TYPE_IDENT "{" [field_init …] "}"` struct literal (`etch-grammar.md` §3.2 l.486).
+/// `type_name` is the explicit struct type; the anonymous `.{ … }` form carries
+/// `type_name == 0` and resolves against the expected type from its context (check
+/// mode, `etch-resolver-types.md` §4). Fields live in a `(start, len)` run of
 /// `arena.struct_lit_fields`.
 pub const StructLitExpr = struct {
     type_name: StringId,
@@ -1426,12 +1415,12 @@ pub const SpawnStructExpr = struct {
     args_len: u32 = 0,
 };
 
-/// One entry of a `data` table (`etch-grammar.md` §14: `data_entry = IDENT
-/// ":" struct_literal_body [","]`). The entry body is a
-/// `(start, len)` run of `arena.struct_lit_fields` (spread fields carry
-/// `name == 0`). `id_pascal` records that the id token was TYPE_IDENT-shaped
-/// so validation can emit `E1768 IdInvalidFormat` (ids are snake_case IDENTs)
-/// without re-lexing. `span` covers `id ... }` for entry-precise diagnostics.
+/// One entry of a `data` table (`etch-grammar.md` §14:
+/// `data_entry = IDENT ":" struct_literal_body [","]`). The entry body is a
+/// `(start, len)` run of `arena.struct_lit_fields` (spread fields carry `name == 0`).
+/// `id_pascal` records that the id token was TYPE_IDENT-shaped so validation can emit
+/// `E1768 IdInvalidFormat` (ids are snake_case IDENTs) without re-lexing. `span` covers
+/// `id ... }` for entry-precise diagnostics.
 pub const DataEntry = struct {
     id: StringId,
     id_pascal: bool,
@@ -1440,10 +1429,10 @@ pub const DataEntry = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for a `data` table declaration ( `etch-
-/// grammar.md` §14: `data_decl = "data" TYPE_IDENT ":" TYPE_IDENT "{"
-/// {data_entry} "}"`). `entry_type` is the shared entry type (a declared
-/// `struct`); entries live in a `(start, len)` run of `arena.data_entries`.
+/// Side-slab entry for a `data` table declaration (`etch-grammar.md` §14:
+/// `data_decl = "data" TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"`). `entry_type`
+/// is the shared entry type (a declared `struct`); entries live in a `(start, len)` run
+/// of `arena.data_entries`.
 pub const DataDecl = struct {
     name: StringId,
     entry_type: StringId,
@@ -1596,13 +1585,12 @@ pub const PrefabDecl = struct {
     annotations_len: u32,
 };
 
-/// Side-slab entry for a `theme` declaration (presentation, `etch-
-/// grammar.md` §10.2: `theme_decl = "theme" STRING_LITERAL "{"
-/// {theme_entry} "}"`, `theme_entry = IDENT ":" expression`). The grammar
-/// shape WINS over the validation-ecs §16.1 typed-token shape:
-/// entries are `key: expression` pairs (a widget-kind → style mapping or a
-/// global variable), the name is a string literal. Entries live in a
-/// `(start, len)` run of `arena.theme_entries`.
+/// Side-slab entry for a `theme` declaration (presentation, `etch-grammar.md` §10.2:
+/// `theme_decl = "theme" STRING_LITERAL "{" {theme_entry} "}"`,
+/// `theme_entry = IDENT ":" expression`). The grammar shape WINS over the
+/// validation-ecs §16.1 typed-token shape: entries are `key: expression` pairs (a
+/// widget-kind → style mapping or a global variable), the name is a string literal.
+/// Entries live in a `(start, len)` run of `arena.theme_entries`.
 pub const ThemeDecl = struct {
     name: StringId, // decoded STRING_LITERAL content
     name_span: SourceSpan, // for the E1640 ThemeEmpty diagnostic
@@ -1623,16 +1611,14 @@ pub const ThemeEntry = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for a `motion` declaration (presentation, `etch-
-/// grammar.md` §10.3: `motion_decl = "motion" TYPE_IDENT "{" [motion_states]
-/// motion_transitions "}"`). The grammar shape WINS: the
-/// `states { … }` block is OPTIONAL (E1660 RESERVED — the
-/// grammar makes it optional, so the relaxed ≥1 check would reject a
-/// grammar-valid stateless motion), there is NO `initial` clause (E1667/E1668
-/// RESERVED), and transitions are `source -> target : animator`. States and
-/// transitions live in `(start, len)` runs of `arena.motion_states` /
-/// `arena.motion_transitions` (fed only from motion context — motions do not
-/// nest — so the runs stay contiguous).
+/// Side-slab entry for a `motion` declaration (presentation, `etch-grammar.md` §10.3:
+/// `motion_decl = "motion" TYPE_IDENT "{" [motion_states] motion_transitions "}"`). The
+/// grammar shape WINS: the `states { … }` block is OPTIONAL (E1660 RESERVED — the
+/// grammar makes it optional, so the relaxed ≥1 check would reject a grammar-valid
+/// stateless motion), there is NO `initial` clause (E1667/E1668 RESERVED), and
+/// transitions are `source -> target : animator`. States and transitions live in
+/// `(start, len)` runs of `arena.motion_states` / `arena.motion_transitions` (fed only
+/// from motion context — motions do not nest — so the runs stay contiguous).
 pub const MotionDecl = struct {
     name: StringId, // TYPE_IDENT
     name_span: SourceSpan, // for the diagnostics
@@ -1702,13 +1688,13 @@ pub const MotionKeyframe = struct {
     fields_len: u32,
 };
 
-/// Side-slab entry for an `input_mapping` declaration (STRICT — NO
-/// input execution, `etch-grammar.md` §16: `input_mapping STRING_LITERAL "{"
-/// {property} {action} {combo} "}"`). The grammar shape WINS:
-/// `context` is a PROPERTY (not a named block — E1802/W1801 RESERVED), priority
-/// / consume_input are properties. STRING-named → no symbol (the theme
-/// precedent). Properties are stored as 0/1 expression NodeIds; actions / combos
-/// in `(start, len)` runs of their slabs.
+/// Side-slab entry for an `input_mapping` declaration (STRICT — NO input execution,
+/// `etch-grammar.md` §16:
+/// `input_mapping STRING_LITERAL "{" {property} {action} {combo} "}"`). The grammar
+/// shape WINS: `context` is a PROPERTY (not a named block — E1802/W1801 RESERVED),
+/// priority / consume_input are properties. STRING-named → no symbol (the theme
+/// precedent). Properties are stored as 0/1 expression NodeIds; actions / combos in
+/// `(start, len)` runs of their slabs.
 pub const InputMappingDecl = struct {
     name: StringId, // decoded STRING_LITERAL content
     name_span: SourceSpan,
@@ -1752,7 +1738,7 @@ pub const InputBind = struct {
 
 /// One `input_combo` (`"combo" IDENT ":" type "{" "sequence" ":" array_literal
 /// "window" ":" expression "}"`, §16). The `sequence` elements are STRUCTURAL
-/// input tokens — NOT action references (807 RESERVED, ruling: the §16
+/// input tokens — NOT action references (E1807 RESERVED, ruling: the §16
 /// shape has no action-ref form; the token catalogue is the Input module's).
 pub const InputCombo = struct {
     name: StringId,
@@ -1762,16 +1748,14 @@ pub const InputCombo = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for a `widget` declaration (presentation, `etch-
-/// grammar.md` §10.1: `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")"
-/// [when_clause] "{" ui_tree "}"`). TYPE_IDENT-named → it registers a
-/// symbol (the motion precedent). The recursive `ui_tree` lives in a
-/// `(start, len)` run of `arena.ui_elems`. `@screen` / `@worldspace` arrive as
-/// `.custom` annotations (NOT in `AnnotationKind`) distinguished by name —
-/// their mutual exclusivity is E1621; the placement annotation is OPTIONAL.
-/// `bind Component.field` has NO EBNF production;
-/// `@loc` key resolution = extractor
-/// tooling.
+/// Side-slab entry for a `widget` declaration (presentation, `etch-grammar.md` §10.1:
+/// `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")" [when_clause] "{" ui_tree "}"`).
+/// TYPE_IDENT-named → it registers a symbol (the motion precedent). The recursive
+/// `ui_tree` lives in a `(start, len)` run of `arena.ui_elems`. `@screen` /
+/// `@worldspace` arrive as `.custom` annotations (NOT in `AnnotationKind`)
+/// distinguished by name — their mutual exclusivity is E1621; the placement annotation
+/// is OPTIONAL (E1622 RESERVED). `bind Component.field` has NO EBNF production
+/// (E1623-E1628 DEFERRED); `@loc` key resolution = extractor tooling.
 pub const WidgetDecl = struct {
     name: StringId, // TYPE_IDENT
     name_span: SourceSpan, // for the diagnostics
@@ -1847,14 +1831,13 @@ pub const UiFor = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for a `locale` declaration (presentation, `etch-
-/// grammar.md` §10.4: `locale_decl = "locale" IDENT "{" {locale_entry} "}"`,
-/// `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named → it
-/// registers a symbol. The `name` is the locale code (E1821 validates its
-/// ISO-639 FORM, not an embedded table — ruling 4). Fingerprint generation
-/// is the `weld-extract-locale` tool's job; ICU plurals
-/// / interpolation are not implemented. Entries
-/// live in a `(start, len)` run of `arena.locale_entries`.
+/// Side-slab entry for a `locale` declaration (presentation, `etch-grammar.md` §10.4:
+/// `locale_decl = "locale" IDENT "{" {locale_entry} "}"`,
+/// `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named → it registers a
+/// symbol. The `name` is the locale code (E1821 validates its ISO-639 FORM, not an
+/// embedded table — ruling 4). Fingerprint generation is the `weld-extract-locale`
+/// tool's job; ICU plurals / interpolation are not implemented. Entries live in a
+/// `(start, len)` run of `arena.locale_entries`.
 pub const LocaleDecl = struct {
     name: StringId, // IDENT (the locale code)
     name_span: SourceSpan, // for the E1820/E1821 diagnostics
@@ -1920,13 +1903,12 @@ pub const EffectEventHandler = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for an `audio_graph` declaration (audio, `etch-
-/// grammar.md` §12.2: `audio_graph_decl = "audio_graph" TYPE_IDENT "{"
-/// [params_block] {statement} audio_output "}"`; `audio_output = "output" "("
-/// expression ")"`). The optional params block is a `(start, len)` run of the
-/// shared `arena.fields`; the DSP node-building statements are a run of
-/// `arena.extra` (rendered to canonical text, never executed); `output` is the
-/// mandatory sink expression (its absence is a parse error — E1700/E1701 stay
+/// Side-slab entry for an `audio_graph` declaration (audio, `etch-grammar.md` §12.2:
+/// `audio_graph_decl = "audio_graph" TYPE_IDENT "{" [params_block] {statement} audio_output "}"`;
+/// `audio_output = "output" "(" expression ")"`). The optional params block is a
+/// `(start, len)` run of the shared `arena.fields`; the DSP node-building statements
+/// are a run of `arena.extra` (rendered to canonical text, never executed); `output` is
+/// the mandatory sink expression (its absence is a parse error — E1700/E1701 stay
 /// RESERVED-with-variant, the structure makes "no output" / "multiple outputs"
 /// impossible).
 pub const AudioGraphDecl = struct {
@@ -1941,13 +1923,12 @@ pub const AudioGraphDecl = struct {
     annotations_len: u32,
 };
 
-/// Side-slab entry for an `audio_score` declaration (audio, `etch-
-/// grammar.md` §12.1: `audio_score_decl = "audio_score" STRING_LITERAL "{"
-/// {audio_score_element} "}"`). STRING-named (the `theme`/`input_mapping`
-/// precedent — referenced by string, NOT a symbol). `score_property`s
-/// (`tempo`/`IDENT ":" expression`, STRICT no annotation — the ability
-/// ruling-15 precedent) are a `(start, len)` run of `arena.struct_lit_fields`;
-/// sections and stems live in their own runs.
+/// Side-slab entry for an `audio_score` declaration (audio, `etch-grammar.md` §12.1:
+/// `audio_score_decl = "audio_score" STRING_LITERAL "{" {audio_score_element} "}"`).
+/// STRING-named (the `theme`/`input_mapping` precedent — referenced by string, NOT a
+/// symbol). `score_property`s (`tempo`/`IDENT ":" expression`, STRICT no annotation —
+/// the ability ruling-15 precedent) are a `(start, len)` run of
+/// `arena.struct_lit_fields`; sections and stems live in their own runs.
 pub const AudioScoreDecl = struct {
     name: StringId, // STRING_LITERAL content
     name_span: SourceSpan,
@@ -1992,13 +1973,12 @@ pub const AudioScoreStem = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for a `sequence` declaration (cinematic, `etch-
-/// grammar.md` §13: `sequence_decl = "sequence" TYPE_IDENT "{"
-/// {sequence_property} {sequence_track} "}"`). TYPE_IDENT-named (grammar wins —
-/// both refs said STRING_LITERAL). `sequence_property`s (`IDENT ":" expression`,
-/// e.g. `duration: 15.0` / `fps: 30.0`) are a BUFFERED `struct_lit_fields` run
-/// (tracks also write that slab); `on_start` / `on_finish` are emit statements
-/// (the §13 patched form, COMPLETE — both emit-only).
+/// Side-slab entry for a `sequence` declaration (cinematic, `etch-grammar.md` §13:
+/// `sequence_decl = "sequence" TYPE_IDENT "{" {sequence_property} {sequence_track} "}"`).
+/// TYPE_IDENT-named (grammar wins — both refs said STRING_LITERAL).
+/// `sequence_property`s (`IDENT ":" expression`, e.g. `duration: 15.0` / `fps: 30.0`)
+/// are a BUFFERED `struct_lit_fields` run (tracks also write that slab); `on_start` /
+/// `on_finish` are emit statements (the §13 patched form, COMPLETE — both emit-only).
 pub const SequenceDecl = struct {
     name: StringId, // TYPE_IDENT
     name_span: SourceSpan,
@@ -2043,12 +2023,11 @@ pub const SequenceKeyframe = struct {
     span: SourceSpan,
 };
 
-/// Side-slab entry for an `anim_graph` declaration (animation, `etch-
-/// grammar.md` §11: `anim_graph_decl = "anim_graph" TYPE_IDENT "{"
-/// [params_block] {anim_state} {anim_layer} "}"`). The grammar shape WINS (the
-/// ratified 2-against-1 calls): transitions are STATE-NESTED (no `from`/
-/// `duration`/`*` — `from` = the enclosing state, `initial` = first declared
-/// state), layers carry only an `additive` flag (no `mask`/blend enum).
+/// Side-slab entry for an `anim_graph` declaration (animation, `etch-grammar.md` §11:
+/// `anim_graph_decl = "anim_graph" TYPE_IDENT "{" [params_block] {anim_state} {anim_layer} "}"`).
+/// The grammar shape WINS (the ratified 2-against-1 calls): transitions are
+/// STATE-NESTED (no `from`/ `duration`/`*` — `from` = the enclosing state, `initial` =
+/// first declared state), layers carry only an `additive` flag (no `mask`/blend enum).
 pub const AnimGraphDecl = struct {
     name: StringId, // TYPE_IDENT
     name_span: SourceSpan,
@@ -2141,11 +2120,11 @@ pub const ShaderStage = struct {
     body_len: u32,
 };
 
-/// Side-slab entry for a `shader` declaration (render, `etch-grammar.md`
-/// §9.1: `shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn]
-/// fragment_fn "}"`). The ruling: NO compute stage (dropped); the
-/// `fragment` stage is parser-mandatory, `vertex` optional. `params { … }`
-/// (uniforms) live in `arena.fields` and are NOT shader-mode.
+/// Side-slab entry for a `shader` declaration (render, `etch-grammar.md` §9.1:
+/// `shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn] fragment_fn "}"`).
+/// The ruling: NO compute stage (dropped); the `fragment` stage is parser-mandatory,
+/// `vertex` optional. `params { … }` (uniforms) live in `arena.fields` and are NOT
+/// shader-mode.
 pub const ShaderDecl = struct {
     name: StringId, // TYPE_IDENT
     name_span: SourceSpan,
@@ -2393,7 +2372,7 @@ pub const AnnotationArg = struct {
 /// is routed by one of the `@on_added` / `@on_removed` / `@on_replaced` /
 /// `@on_spawned` / `@on_despawned` annotations — NOT a keyword (the stale
 /// `observer` keyword of `engine-ecs-internals.md` §8 is not implemented; the
-/// brief routes via annotations, reusing the `@on_event` path). `on_added` /
+/// routing is by annotation, reusing the `@on_event` path). `on_added` /
 /// `on_removed` / `on_replaced` carry a target component type; the spawn /
 /// despawn hooks carry none.
 pub const ObserverKind = enum { on_added, on_removed, on_replaced, on_spawned, on_despawned };
@@ -3294,16 +3273,14 @@ pub const AstArena = struct {
         return try self.addTypeNode(gpa, .set_type, idx, span);
     }
 
-    /// `T?` optional type (`etch-grammar.md` §267 `optional_type =
-    /// type "?"`). The payload type-node is stored directly as
-    /// the type-node `data` (no side slab).
+    /// `T?` optional type (`etch-grammar.md` §267 `optional_type = type "?"`). The
+    /// payload type-node is stored directly as the type-node `data` (no side slab).
     pub fn addOptionalType(self: *AstArena, gpa: std.mem.Allocator, payload: NodeId, span: SourceSpan) !NodeId {
         return try self.addTypeNode(gpa, .optional, payload.raw(), span);
     }
 
-    /// `Foo<T, U>` generic type in type position (`etch-
-    /// grammar.md` §270). `args` is a slice of type-`NodeId`s, bulk-
-    /// appended to `arena.extra` as a contiguous run.
+    /// `Foo<T, U>` generic type in type position (`etch-grammar.md` §270). `args` is a
+    /// slice of type-`NodeId`s, bulk-appended to `arena.extra` as a contiguous run.
     pub fn addGenericType(self: *AstArena, gpa: std.mem.Allocator, name: StringId, args: []const NodeId, span: SourceSpan) !NodeId {
         const start: u32 = @intCast(self.extra.items.len);
         for (args) |a| try self.extra.append(gpa, a.raw());
@@ -3443,7 +3420,7 @@ pub const AstArena = struct {
         return try self.addItem(gpa, .data_decl, idx, span);
     }
 
-    /// `theme "name" { entries }` ( `etch-grammar.md` §10.2).
+    /// `theme "name" { entries }` (`etch-grammar.md` §10.2).
     /// The caller appends entries to `arena.theme_entries` beforehand,
     /// passing the range in `decl`.
     pub fn addThemeDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ThemeDecl, span: SourceSpan) !NodeId {
@@ -3452,10 +3429,9 @@ pub const AstArena = struct {
         return try self.addItem(gpa, .theme_decl, idx, span);
     }
 
-    /// `motion Name { [states { … }] transitions { … } }` ( `etch-
-    /// grammar.md` §10.3). The caller appends the states / transitions /
-    /// animators / keyframes to their slabs beforehand, passing the ranges in
-    /// `decl`.
+    /// `motion Name { [states { … }] transitions { … } }` (`etch-grammar.md` §10.3).
+    /// The caller appends the states / transitions / animators / keyframes to their
+    /// slabs beforehand, passing the ranges in `decl`.
     pub fn addMotionDecl(self: *AstArena, gpa: std.mem.Allocator, decl: MotionDecl, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.motion_decls.items.len);
         try self.motion_decls.append(gpa, decl);
@@ -3471,7 +3447,7 @@ pub const AstArena = struct {
         return try self.addItem(gpa, .input_mapping_decl, idx, span);
     }
 
-    /// `widget Name(params) [when …] { ui_tree }` ( `etch-grammar.md`
+    /// `widget Name(params) [when …] { ui_tree }` (`etch-grammar.md`
     /// §10.1). The caller appends the params and the recursive
     /// `ui_tree` (ui_elems / ui_widget_calls / ui_ifs / ui_fors) to their slabs
     /// beforehand, passing the ranges in `decl`.
@@ -3481,7 +3457,7 @@ pub const AstArena = struct {
         return try self.addItem(gpa, .widget_decl, idx, span);
     }
 
-    /// `locale code { "key" = "value" }` ( `etch-grammar.md` §10.4).
+    /// `locale code { "key" = "value" }` (`etch-grammar.md` §10.4).
     /// The caller appends the entries to `arena.locale_entries`
     /// beforehand, passing the range in `decl`.
     pub fn addLocaleDecl(self: *AstArena, gpa: std.mem.Allocator, decl: LocaleDecl, span: SourceSpan) !NodeId {
@@ -3499,9 +3475,9 @@ pub const AstArena = struct {
         return try self.addItem(gpa, .effect_decl, idx, span);
     }
 
-    /// `audio_graph Name { [params] {statement} output(expr) }` (`etch-
-    /// grammar.md` §12.2). The caller appends the params fields and body
-    /// statements to their slabs beforehand, passing the ranges + sink in `decl`.
+    /// `audio_graph Name { [params] {statement} output(expr) }` (`etch-grammar.md`
+    /// §12.2). The caller appends the params fields and body statements to their slabs
+    /// beforehand, passing the ranges + sink in `decl`.
     pub fn addAudioGraphDecl(self: *AstArena, gpa: std.mem.Allocator, decl: AudioGraphDecl, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.audio_graph_decls.items.len);
         try self.audio_graph_decls.append(gpa, decl);
@@ -3733,7 +3709,8 @@ pub const AstArena = struct {
     }
 
     /// `branches` is the statement's complete branch list, bulk-appended to
-    /// `arena.concurrency_branches` as a contiguous run.
+    /// `arena.concurrency_branches` as a contiguous run — the `addMatch` arms
+    /// pattern, safe under nesting.
     pub fn addRaceStmt(self: *AstArena, gpa: std.mem.Allocator, branches: []const ConcurrencyBranch, span: SourceSpan) !NodeId {
         const start: u32 = @intCast(self.concurrency_branches.items.len);
         try self.concurrency_branches.appendSlice(gpa, branches);

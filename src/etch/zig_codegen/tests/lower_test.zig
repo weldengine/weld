@@ -1,6 +1,4 @@
-//! Unit tests for the S5 AST → Zig source lowering. The test names mirror
-//! the list under `briefs/S5-etch-codegen-zig.md` Acceptance criteria /
-//! Tests so the brief and the suite are in lock-step.
+//! Unit tests for the AST → Zig source lowering.
 
 const std = @import("std");
 const parser = @import("../../parser.zig");
@@ -62,7 +60,7 @@ test "lowers rule with single component when clause" {
         \\  entity.get_mut(Counter).value = 5
         \\}
     , &out);
-    // Comptime query path — the brief's "world.query(.{T1, T2, ...})" shape
+    // Comptime query path — the `world.query(.{T1, T2, ...})` shape
     // (gate 4 reports one monomorphisation per distinct tuple).
     try std.testing.expect(std.mem.indexOf(u8, out.items, "pub fn rule_update(world: *World) void {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query(world, .{Counter})") != null);
@@ -129,7 +127,7 @@ test "fallback to manual archetype walk when when clause contains 'not'" {
         \\  entity.get_mut(A).v += 1
         \\}
     , &out);
-    // `not` triggers the S4-debt manual walk path.
+    // `not` forces the manual archetype walk instead of the comptime query.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "for (world.archetypes.items) |arch|") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query") == null);
 }
@@ -176,7 +174,7 @@ test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zi
     // A global producer emits A; the `@on_event(A)` observer (relay) drains A
     // and re-emits B carrying the payload field. This test validates the
     // engraved drain contract cooks to valid Zig; the byte-exact world-state
-    // event differential (observer resource write, M0.8 E3-C tranche 7) is
+    // event differential (observer resource write) is
     // `60_event_observer_resource`.
     _ = try parseTypeCheckGen(gpa,
         \\event A { x: i32 = 0 }
@@ -686,8 +684,7 @@ test "lowers capturing closures to struct-with-fields, snapshot at creation (M0.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { factor: i64, fn call(__self: @This(), x: i64) i64 { return ") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "__self.factor") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "}{ .factor = factor };") != null);
-    // The capture-free closure keeps the bare TYPE shape (namespace call) —
-    // byte-identical to the E1 emission.
+    // The capture-free closure keeps the bare TYPE shape (namespace call).
     try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { fn call(x: i64) i64 { return ") != null);
 
     // The generated Zig is syntactically valid (Zig's own parser).
@@ -701,7 +698,7 @@ test "lowers capturing closures to struct-with-fields, snapshot at creation (M0.
 
 test "closure captures are bounded to POD scalars: string capture fails loud (M0.8 E3-C tranche 6)" {
     const gpa = std.testing.allocator;
-    // A string-typed capture is a §8.2 ref-capture — outside the M0.8
+    // A string-typed capture is a §8.2 ref-capture — outside the
     // codegen subset (interpreter reference, fail loud).
     var pr = try parser.parse(gpa,
         \\component Acc { n: int = 0 }
@@ -751,9 +748,9 @@ test "lowers block-body closures: statements in the call fn, return is the fn bo
         \\}
     , &out);
     // The block's statements emit straight into the `call` fn: the internal
-    // `return` is the anonymous fn's own natural Zig boundary (the ratified
-    // E2 forward note — a return exits the closure, never the enclosing fn;
-    // nothing simulates a leak), the trailing value is the final return.
+    // `return` is the anonymous fn's own natural Zig boundary: a return exits the
+    // closure, never the enclosing fn, and nothing simulates a leak. The trailing
+    // value is the final return.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { fn call(x: i64) i64 {") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "return 40;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "return x;") != null);
@@ -792,7 +789,7 @@ test "lowers throwing closures with their own __err out-param, let call site re-
         \\  }
         \\}
     , &out);
-    // The closure's call fn carries its own hidden out-param (the tranche-2
+    // The closure's call fn carries its own hidden out-param (the
     // throws-fn machinery verbatim); the throw stores and aborts with the
     // zero default.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "fn call(x: i64, __err: *?Error) i64 {") != null);

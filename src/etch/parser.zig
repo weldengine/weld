@@ -1066,10 +1066,10 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (`etch-
-    /// grammar.md` §5.10). Same shape as `parseComponentDecl` /
-    /// `parseResourceDecl` — an event is a POD struct of fields. `kw_event`
-    /// is mirrored in `parseTopLevel` AND `recoverToTopLevel`'s stop-set.
+    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (`etch-grammar.md` §5.10).
+    /// Same shape as `parseComponentDecl` / `parseResourceDecl` — an event is a POD
+    /// struct of fields. `kw_event` is mirrored in `parseTopLevel` AND
+    /// `recoverToTopLevel`'s stop-set.
     fn parseEventDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'event'
@@ -1270,8 +1270,7 @@ pub const Parser = struct {
                     const name = self.sliceOf(tok.span);
                     if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
                     if (std.mem.eql(u8, name, "Map")) return try self.parseMapGeneric(tok.span);
-                    // General `Name<T, …>` generic type (`etch-
-                    // grammar.md` §270).
+                    // General `Name<T, …>` generic type (`etch-grammar.md` §270).
                     return try self.parseGenericTypeApp(try self.internSlice(tok.span), tok.span);
                 }
                 const name_id = try self.internSlice(tok.span);
@@ -1615,9 +1614,8 @@ pub const Parser = struct {
         }
         const generics = try self.commitGenerics(&temp_generics);
 
-        // An abstract trait member (`function_signature`
-        // tranche C) ends without a body. Outside a trait, a missing body is the
-        // existing "expected '{'" error.
+        // An abstract trait member: a `function_signature` that ends without a body.
+        // Outside a trait, a missing body is the existing "expected '{'" error.
         //
         // in a `.d.etch` EVERY `fn` is signature-only, whatever
         // the caller's own rule (`etch-grammar.md` §20.1: `function_decl_no_body`
@@ -1715,10 +1713,9 @@ pub const Parser = struct {
         return .none;
     }
 
-    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (`etch-
-    /// grammar.md` §5.7). Same field machinery as a component / resource;
-    /// a struct is a by-value type (not registered with the world). Generics
-    /// (`<...>`) are rejected here.
+    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (`etch-grammar.md` §5.7).
+    /// Same field machinery as a component / resource; a struct is a by-value type (not
+    /// registered with the world). Generics (`<...>`) are rejected here.
     fn parseStructDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'struct'
@@ -1885,12 +1882,12 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` ( `etch-
-    /// grammar.md` §10.2). The name is a string literal (the grammar
-    /// shape — ruling 1, NOT the validation-ecs §16.1 TYPE_IDENT); entries
-    /// are `IDENT ":" expression` pairs. `no_struct_lit` is cleared for the
-    /// body so an inline `.{ … }` style value parses. Theme slabs are fed
-    /// only from theme context (themes do not nest) → contiguous appends.
+    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (`etch-grammar.md` §10.2).
+    /// The name is a string literal (the grammar shape — ruling 1, NOT the
+    /// validation-ecs §16.1 TYPE_IDENT); entries are `IDENT ":" expression` pairs.
+    /// `no_struct_lit` is cleared for the body so an inline `.{ … }` style value
+    /// parses. Theme slabs are fed only from theme context (themes do not nest) →
+    /// contiguous appends.
     fn parseThemeDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'theme'
@@ -1926,7 +1923,7 @@ pub const Parser = struct {
     }
 
     /// Parse `motion TYPE_IDENT "{" [motion_states] motion_transitions "}"`
-    /// ( `etch-grammar.md` §10.3). `states` / `transitions`
+    /// (`etch-grammar.md` §10.3). `states` / `transitions`
     /// are contextual sub-keywords (the sub-construct doctrine — never
     /// reserved): the `states { … }` block is OPTIONAL, `transitions { … }`
     /// is mandatory. State bodies reuse `parseDataEntryBody`
@@ -1939,7 +1936,8 @@ pub const Parser = struct {
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.lbrace, "expected '{' to start the motion body");
 
-        // Optional `states { motion_state }` block.
+        // Optional `states { motion_state }` block: states are optional
+        // (E1660 RESERVED).
         const states_start: u32 = @intCast(self.arena.motion_states.items.len);
         if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "states")) {
             _ = try self.advance(); // 'states'
@@ -2333,14 +2331,13 @@ pub const Parser = struct {
     }
 
     /// Parse a `widget` declaration (presentation, `etch-grammar.md` §10.1:
-    /// `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")" [when_clause] "{"
-    /// ui_tree "}"`). TYPE_IDENT-named (the motion
-    /// precedent). The optional `[when_clause]` mirrors `impl`'s optional when
-    /// (default `when_brace_is_filter` — the body `{` is NOT a filter, resolved
-    /// by `braceOpensWhenFilter`'s matching-brace scan). The recursive `ui_tree`
-    /// is parsed by `parseUiTree`. `@screen`/`@worldspace` arrive as `.custom`
-    /// annotations validated in `validateWidget` (E1621). The `kw_widget` starter
-    /// is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
+    /// `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")" [when_clause] "{" ui_tree "}"`).
+    /// TYPE_IDENT-named (the motion precedent). The optional `[when_clause]` mirrors
+    /// `impl`'s optional when (default `when_brace_is_filter` — the body `{` is NOT a
+    /// filter, resolved by `braceOpensWhenFilter`'s matching-brace scan). The recursive
+    /// `ui_tree` is parsed by `parseUiTree`. `@screen`/`@worldspace` arrive as
+    /// `.custom` annotations validated in `validateWidget` (E1621). The `kw_widget`
+    /// starter is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
     fn parseWidgetDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'widget'
@@ -3904,16 +3901,15 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` ( `etch-
-    /// grammar.md` §8.2). Elements are segments (`segment Name { … }`)
-    /// and interrupts (`on_xxx -> target`), dispatched on the head
-    /// identifier: `segment` is a contextual keyword (the sub-construct
-    /// doctrine); an interrupt head is lexically one IDENT starting `on_`
-    /// (the EBNF's `"on_" , IDENT` split is not lexable).
+    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (`etch-grammar.md` §8.2).
+    /// Elements are segments (`segment Name { … }`) and interrupts
+    /// (`on_xxx -> target`), dispatched on the head identifier: `segment` is a
+    /// contextual keyword (the sub-construct doctrine); an interrupt head is lexically
+    /// one IDENT starting `on_` (the EBNF's `"on_" , IDENT` split is not lexable).
     /// Interrupt targets accept `ident | type_ident` (behavior names are
-    /// TYPE_IDENT-shaped); `pause_segment` is matched by
-    /// lexeme. Direct slab appends stay contiguous: routine slabs are only
-    /// fed from routine context and routines do not nest.
+    /// TYPE_IDENT-shaped); `pause_segment` is matched by lexeme. Direct slab appends
+    /// stay contiguous: routine slabs are only fed from routine context and routines do
+    /// not nest.
     fn parseRoutineDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'routine'
@@ -4269,7 +4265,7 @@ pub const Parser = struct {
     }
 
     /// Parse `ability TYPE_IDENT "{" {ability_property} [rule_decl] "}"`
-    ///  ( `etch-grammar.md` §8.5 — items 12-15 ruling: the
+    ///  (`etch-grammar.md` §8.5 — items 12-15 ruling: the
     /// grammar shape WINS over the validation-ecs §12 handler shape; no
     /// handlers, no property annotations). `cost` takes a
     /// `struct_literal_body`, `tags_required` / `tags_blocked` take an
@@ -4368,7 +4364,7 @@ pub const Parser = struct {
     }
 
     /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
-    /// ( `etch-grammar.md` §8.3 PATCHED — items 7/8).
+    /// (`etch-grammar.md` §8.3 PATCHED — items 7/8).
     /// Properties come first (`IDENT ":" expression`, incl. `requires`);
     /// stages follow (`[async] stage IDENT { elements }`). `stage` /
     /// `objective` / the handler heads are contextual identifiers (the
@@ -4606,14 +4602,12 @@ pub const Parser = struct {
         return idx;
     }
 
-    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` ( `etch-
-    /// grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
-    /// bt_condition | bt_action`, item-1 ruling) — `E1500` enforces the
-    /// composite root at validation. `selector` / `condition` / `action`
-    /// are contextual identifiers (the sub-construct doctrine);
-    /// `sequence` is the graduated `kw_sequence` (it doubles as the
-    /// top-level construct keyword, which stays out of scope via the
-    /// default top-level error).
+    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (`etch-grammar.md` §8.1 PATCHED).
+    /// The root accepts a leaf (`bt_leaf = bt_condition | bt_action`, item-1 ruling) —
+    /// `E1500` enforces the composite root at validation. `selector` / `condition` /
+    /// `action` are contextual identifiers (the sub-construct doctrine); `sequence` is
+    /// the graduated `kw_sequence` (it doubles as the top-level construct keyword,
+    /// which stays out of scope via the default top-level error).
     fn parseBehaviorDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'behavior'
@@ -4871,11 +4865,10 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (`etch-
-    /// grammar.md` §20.4). A service declares the calling surface of a
-    /// Tier 1 module to Etch; its `.d.etch` is generated from the module's Zig
-    /// `bindgen.ServiceSpec` and is never hand-written (`engine-c-bindings.md`
-    /// §8.4).
+    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (`etch-grammar.md`
+    /// §20.4). A service declares the calling surface of a Tier 1 module to Etch; its
+    /// `.d.etch` is generated from the module's Zig `bindgen.ServiceSpec` and is never
+    /// hand-written (`engine-c-bindings.md` §8.4).
     ///
     /// **Valid in a `.d.etch` and nowhere else** (§20.4, §20.5). In a standard
     /// `.etch` the construct is refused with a plain parse error naming the
@@ -4930,7 +4923,7 @@ pub const Parser = struct {
 
     /// Parse `impl TYPE_IDENT [when_clause] "{" {fn_method} "}"` — an inherent
     /// impl (`etch-grammar.md` §5.9). The trait form
-    /// `impl Trait for Type` lands in tranche C; a `for` after the first type
+    /// `impl Trait for Type` is a conditional impl; a `for` after the first type
     /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
     /// `allow_self = true` and are stored in `arena.impl_methods`.
     fn parseImplDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -5532,9 +5525,8 @@ pub const Parser = struct {
     /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
     fn parseIf(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'if'
-        // `if let <name> = <optional> { … } [else { … }]` (`etch-
-        // grammar.md` §501) — unwraps an optional, binding `<name>` to its
-        // payload in the then-block.
+        // `if let <name> = <optional> { … } [else { … }]` (`etch-grammar.md` §501) —
+        // unwraps an optional, binding `<name>` to its payload in the then-block.
         var let_binding: StringId = 0;
         if (self.peek() == .kw_let) {
             _ = try self.advance(); // 'let'
@@ -5708,7 +5700,7 @@ pub const Parser = struct {
     /// l.630). Etch has no statement separator, so a `return` immediately
     /// before `}` (or EOF) is a bare/void return; otherwise the following
     /// expression is the return value. Dead-code `return` mid-block (followed by
-    /// more statements) is not in the block-2 surface.
+    /// more statements) is not in the surface.
     fn parseReturnStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'return'
         if (self.peek() == .rbrace or self.peek() == .eof) {
@@ -6066,10 +6058,9 @@ pub const Parser = struct {
         }, span);
     }
 
-    /// Parse `assert ( cond [, "message"] )` (v0.6 foundations, `etch-
-    /// reference-part1.md` §10.3). The optional message is a string
-    /// literal dev diagnostic; the condition is checked to be `bool` by the
-    /// type-checker.
+    /// Parse `assert ( cond [, "message"] )` (v0.6 foundations,
+    /// `etch-reference-part1.md` §10.3). The optional message is a string literal dev
+    /// diagnostic; the condition is checked to be `bool` by the type-checker.
     fn parseAssertStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'assert'
         _ = try self.expect(.lparen, "expected '(' after 'assert'");
@@ -6284,10 +6275,10 @@ pub const Parser = struct {
                         else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
                     }
                 },
-                // Index / slice access `receiver[index]` (collections, `etch-
-                // grammar.md` postfix_op §425). A range index expression
-                // (`arr[0..3]`) lowers to a slice; any other index to a single
-                // element — disambiguated downstream from the index expr kind.
+                // Index / slice access `receiver[index]` (collections,
+                // `etch-grammar.md` postfix_op §425). A range index expression
+                // (`arr[0..3]`) lowers to a slice; any other index to a single element
+                // — disambiguated downstream from the index expr kind.
                 .lbracket => {
                     _ = try self.advance(); // '['
                     // A bracketed index re-enables struct literals even inside an
@@ -6544,7 +6535,7 @@ pub const Parser = struct {
             },
             .type_ident => {
                 // Qualified enum-variant pattern `Difficulty.easy` (a later slice
-                // tranche B, `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
+                // `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
                 // struct-destructure pattern (l.512) and a bare `TYPE_IDENT` are
                 // the advanced pattern set — rejected with a pointer.
                 const type_tok = try self.advance();
@@ -6957,11 +6948,11 @@ pub const Parser = struct {
                 return try self.parseMultilineStringLiteralExpr(tok);
             },
             .ident => {
-                // `none` / `some(x)` optional literals (`etch-
-                // grammar.md` §480-481). `none` / `some` are not keywords
-                // (they appear in identifier positions in annotations) — detected
-                // by lexeme. `some(` opens a some-literal; a bare `some` / `none`
-                // identifier elsewhere stays a plain ident (`none` → `none_lit`).
+                // `none` / `some(x)` optional literals (`etch-grammar.md` §480-481).
+                // `none` / `some` are not keywords (they appear in identifier positions
+                // in annotations) — detected by lexeme. `some(` opens a some-literal; a
+                // bare `some` / `none` identifier elsewhere stays a plain ident (`none`
+                // → `none_lit`).
                 const lexeme = self.sliceOf(self.current.span);
                 if (std.mem.eql(u8, lexeme, "none")) {
                     const tok = try self.advance();
@@ -7020,11 +7011,10 @@ pub const Parser = struct {
                 // the surrounding context. Tag path literals with
                 // multiple segments (`.foo.bar`) remain out-of-scope.
                 const dot_span = (try self.advance()).span;
-                // Anonymous struct literal `.{ f: v, … }` (`etch-
-                // grammar.md` §3.2): `type_name == 0` is the anon
-                // sentinel — the resolver supplies the type from the expected
-                // context (check mode, resolver-types §4). The dot prefix
-                // makes the form unambiguous in `if`/`while`/`for`/`match`
+                // Anonymous struct literal `.{ f: v, … }` (`etch-grammar.md` §3.2):
+                // `type_name == 0` is the anon sentinel — the resolver supplies the
+                // type from the expected context (check mode, resolver-types §4). The
+                // dot prefix makes the form unambiguous in `if`/`while`/`for`/`match`
                 // heads, so `no_struct_lit` does not apply.
                 if (self.peek() == .lbrace) {
                     return try self.parseStructLiteral(0, dot_span);
@@ -7367,7 +7357,7 @@ test "parser captures annotation kind and args" {
     );
     defer result.deinit(gpa);
     // We don't currently parse `.foo` patterns; we accept named or
-    // bare expressions as annotation args. The brief notes annotation
+    // bare expressions as annotation args. Annotation
     // applicability is deferred — only "kind + args reachable" is required.
     try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
@@ -8199,7 +8189,7 @@ test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 blo
 
 test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0.8 E2)" {
     const gpa = std.testing.allocator;
-    // `impl Trait for T` parses in tranche C — the first name is the trait, the
+    // `impl Trait for T` — the first name is the trait, the
     // post-`for` name the target type (trait existence is a resolver concern).
     {
         var result = try parse(gpa,
@@ -10162,7 +10152,7 @@ test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
     // Exactly the shape `descriptor.renderStmtRunAlloc` emits for an extension
     // hook body: statements joined by "; ", no enclosing braces. The emit body
     // uses `field: expr` form — Etch struct-literal fields have no bare-name
-    // shorthand (`etch-grammar.md` §4.3 `field_init`), so the brief's spec-style
+    // shorthand (`etch-grammar.md` §4.3 `field_init`), so the spec-style
     // `{ entity }` is written `{ source: entity }` here (same 2-statement shape).
     var result = try parseStmtBlock(gpa, "entity.get_mut(Health).max += 50; emit ExtensionAttached { source: entity }");
     defer result.deinit(gpa);

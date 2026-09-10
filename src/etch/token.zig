@@ -1,10 +1,8 @@
-//! Token types for the Etch lexer. Keywords / operators / punctuation
-//! mirror the brief's "Keywords recognized" and "Operators / punctuation
-//! recognized" surface the lexer implements. Any other
-//! keyword from EBNF v0.6 is lexed as an `error_unknown_keyword` token so
-//! the parser can emit `E0001 ParseError` with a precise span at the use
-//! site (Scope: "Any other Etch keyword listed in `etch-grammar.md` §1.3
-//! is lexed as an unknown keyword token").
+//! Token types for the Etch lexer. Keywords / operators / punctuation are the
+//! recognised surface the lexer implements. Any other keyword from EBNF v0.6 is lexed
+//! as an `error_unknown_keyword` token so the parser can emit `E0001 ParseError` with a
+//! precise span at the use site — every keyword `etch-grammar.md` §1.3 lists and this
+//! lexer does not recognise reaches the parser as an unknown-keyword token.
 
 const std = @import("std");
 

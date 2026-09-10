@@ -1,14 +1,13 @@
-//! Consolidated cook — the library home of the `etch_cook` pipeline
-//!. Renders N named Etch sources into ONE
-//! consolidated `.zig` buffer: a shared import header, one
-//! `pub const <name> = struct { ... };` namespace per input, and a `programs`
-//! table mapping names to `(register, tick)` function pointers.
+//! Consolidated cook — the library home of the `etch_cook` pipeline. Renders N named
+//! Etch sources into ONE consolidated `.zig` buffer: a shared import header, one
+//! `pub const <name> = struct {... };` namespace per input, and a `programs` table
+//! mapping names to `(register, tick)` function pointers.
 //!
 //! Consumers:
 //! - `tools/etch_cook/main.zig` — the thin CLI shim (arg parsing + file I/O)
 //!   kept for the build-graph `b.addRunArtifact` cooks.
 //! - `bench/etch_compile.zig` — consumes the cook IN-PROCESS (no child
-//!   process on the timed path), closing the S5 subprocess-boundary debt.
+//!   process on the timed path).
 //!
 //! Inputs are in-memory `(name, source)` pairs — the library does no file
 //! I/O, so it is host/target agnostic and trivially unit-testable.

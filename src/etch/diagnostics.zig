@@ -108,7 +108,7 @@ pub const DiagnosticCode = enum {
     observer_rule_conflict, // E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
     // E1216 RequisiteRemovalRefused is RETIRED, and the number stays
     // reserved rather than freed: a later E1216 on another subject would be a
-    // collision of meaning for anyone re-reading this milestone, its brief or
+    // collision of meaning for anyone re-reading this code or
     // its corpus. The static check refused correct code five times in three
     // review rounds and was removed by its own stop rule; the `@requires`
     // removal guarantee lives on the runtime channel alone
@@ -279,7 +279,7 @@ pub const DiagnosticCode = enum {
     duplicate_emitter_name, // E1601 DuplicateEmitterName
     emitter_ref_not_found, // E1604 EmitterRefNotFound (on X.event where X is not an emitter of this effect)
 
-    // ── audio_graph (700/E1701, etch-grammar.md §12.2, Level-B
+    // ── audio_graph (E1700/E1701, etch-grammar.md §12.2, Level-B
     // audio. Both RESERVED-with-variant: the grammar's single mandatory
     // `output(...)` sink makes "no output" a parse error and "multiple
     //    outputs" impossible, so neither check ever fires. The DSP-semantic
@@ -348,7 +348,7 @@ pub const DiagnosticCode = enum {
     anim_deadend_state, // W1681 DeadendState
     anim_redundant_wildcard_transition, // W1682 RedundantWildcardTransition (RESERVED: no `*` in §11)
 
-    // ── shader (400 + E0420/E0421 + E1610/E1611, etch-grammar.md
+    // ── shader (E0400 + E0420/E0421 + E1610/E1611, etch-grammar.md
     // §9.1 + resolver §15, Level-B render. E0400 ShaderModeViolation is the
     // single representative for the whole §15.2 GPU-incompatible family
     // (DELIVER). E0420 ShaderRecursion (call-graph DFS) + E0421
@@ -395,27 +395,22 @@ pub const DiagnosticCode = enum {
     ambiguous_event_entity_target, // E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
     measure_outside_test, // E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
 
-    // ── Declaration files `.d.etch` (900-E1919, `etch-
-    // validation-ecs.md` §28, `etch-grammar.md` §20). The E19xx block
-    //    was empty before this milestone. The two codes split by WHERE they are
-    //    decided, and the split is the settled arbitration of `etch-grammar.md`
-    //    §20.3 (whose wording said only "a parser mode"):
-    //      - E1900 bears on the FORM of a `fn`. The parser knows at the `{` that
-    //        a body follows, so it refuses there and constructs NO body node —
-    //        letting it build one to reject it afterwards manufactures an AST no
-    //        downstream stage may see.
-    //      - E1901 bears on the IDENTITY of an already-parsed top-level
-    //        construct, which is enumerable from the AST. Giving it a parser
-    //        path would duplicate a twenty-construct list; `scene_cook.zig` sets
-    //        the precedent of deciding this after the parse.
-    //    E1902 confronts a declared signature with its Zig implementation, so
-    //    it was allocated once both existed. What
-    //    reports it is `zig build bindgen-check`, not the type-checker: a
-    //    `.d.etch` is a derived artifact (`engine-c-bindings.md` §8.4.1) and
-    //    the only confrontation available is between the committed file
-    //    and what the emitter produces on the current Zig `ServiceSpec`. The
-    //    load-time signature check `etch-grammar.md` §20.3 describes keys on a
-    //    `.etchc`, which does not exist. ──
+    // ── Declaration files `.d.etch` (900-E1919, `etch-validation-ecs.md` §28,
+    // `etch-grammar.md` §20). The E19xx block was empty before this milestone. The two
+    // codes split by WHERE they are decided, and the split is the settled arbitration
+    // of `etch-grammar.md` §20.3 (whose wording said only "a parser mode"): - E1900
+    // bears on the FORM of a `fn`. The parser knows at the `{` that a body follows, so
+    // it refuses there and constructs NO body node — letting it build one to reject it
+    // afterwards manufactures an AST no downstream stage may see. - E1901 bears on the
+    // IDENTITY of an already-parsed top-level construct, which is enumerable from the
+    // AST. Giving it a parser path would duplicate a twenty-construct list;
+    // `scene_cook.zig` sets the precedent of deciding this after the parse. E1902
+    // confronts a declared signature with its Zig implementation, so it was allocated
+    // once both existed. What reports it is `zig build bindgen-check`, not the
+    // type-checker: a `.d.etch` is a derived artifact (`engine-c-bindings.md` §8.4.1)
+    // and the only confrontation available is between the committed file and what the
+    // emitter produces on the current Zig `ServiceSpec`. The load-time signature check
+    // `etch-grammar.md` §20.3 describes keys on a `.etchc`, which does not exist. ──
     declaration_file_body_not_allowed, // E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
     declaration_file_implementation_mismatch, // E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
