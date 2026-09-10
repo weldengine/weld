@@ -456,11 +456,10 @@ const PhaseState = struct {
 /// the same phase) plus the usual `OutOfMemory`. Promoted to a
 /// public alias so callers do not have to spell the error set out.
 pub const RegistrationError = error{
-    /// Two systems declare `Writes(T)` on the same component (or
-    /// resource) in the same phase, with no explicit ordering to
-    /// break the tie. It is rejected at registration —
-    /// Bevy's silent serialization is explicitly not the model
-    /// (cf. brief Notes).
+    /// Two systems declare `Writes(T)` on the same component (or resource) in the same
+    /// phase, with no explicit ordering to break the tie. It is rejected at
+    /// registration — Bevy's silent serialization is explicitly not the model used
+    /// here.
     WriteWriteConflict,
     OutOfMemory,
 };

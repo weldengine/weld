@@ -15,7 +15,7 @@
 //! immediate `ProtocolHelloAck { accepted: false, reason: ... }` rejection.
 //!
 //! Endianness invariant: `engine-ipc.md` §3.2 mandates little-endian for
-//! every primitive on the wire, and the brief's § Scope locks Weld to
+//! every primitive on the wire, and Weld is locked to
 //! little-endian targets for Phase −1 / 0 / 1 / 2. We assert this at
 //! compile time so a hypothetical big-endian build fails loudly instead
 //! of silently corrupting frames.

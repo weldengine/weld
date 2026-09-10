@@ -113,13 +113,12 @@ comptime {
     std.debug.assert(@alignOf(CollectionSlot) == 8);
 }
 
-/// Signature of a per-`TypeId` drop callback (`etch-memory-model.md` §4.3).
-/// Given a block's exposed payload pointer and its recorded payload size, it
-/// releases the type's owned sub-resources (element / key / value handles) and
-/// deinits the owned container BEFORE the block is freed. Registered by the
-/// Etch runtime at init; Tier 0 stays Etch-agnostic — it never interprets the
-/// payload, it only stores and dispatches the callback (decision a, brief Notes:
-/// `runDrop` must not reinterpret a payload as an Etch container).
+/// Signature of a per-`TypeId` drop callback (`etch-memory-model.md` §4.3). Given a
+/// block's exposed payload pointer and its recorded payload size, it releases the
+/// type's owned sub-resources (element / key / value handles) and deinits the owned
+/// container BEFORE the block is freed. Registered by the Etch runtime at init; Tier 0
+/// stays Etch-agnostic — it never interprets the payload, it only stores and dispatches
+/// the callback — `runDrop` must not reinterpret a payload as an Etch container.
 pub const DropFn = *const fn (gpa: std.mem.Allocator, p: [*]u8, size: usize) void;
 
 /// Upper bound of the drop registry — a small fixed table indexed by `TypeId`.

@@ -1195,7 +1195,7 @@ test "a failed load leaves the world unchanged (M1.1.1-HF1 D2)" {
     // A scene that spawns an entity + overrides Settings = "new", then trips the
     // collection-resource rejection — a failure AFTER the spawn and the resource
     // write. (Injection chosen for buildability with the Tier-0 test scaffolding;
-    // the brief's example injections are equivalent post-first-spawn failures.)
+    // the sampled injections are equivalent post-first-spawn failures.)
     const bytes = try buildSpawnThenFailScene(gpa, &world.registry, pos, settings, bag);
     defer gpa.free(bytes);
 

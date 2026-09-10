@@ -163,7 +163,7 @@ pub const Scheduler = struct {
     /// Sleeping workers wake, observe the new generation, push their
     /// share, and resume work. The dispatcher does **not** use a
     /// matching `work_completed` condvar — it spins on
-    /// `pending_count` instead (the brief's sleep/wake requirement
+    /// `pending_count` instead (the sleep/wake requirement
     /// applies to the workers' idle path; making the dispatcher
     /// also block on a condvar added measurable wake-up latency
     /// without the CPU savings, see journal entry "bench S5a
@@ -555,7 +555,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // over-decrement site (located by static
             // analysis). Captures full scheduler state at the panic
             // for diagnosis (discriminate R1/R2/R3 from
-            // brief § Notes). Active in Debug + ReleaseSafe via
+            // Active in Debug + ReleaseSafe via
             // `std.debug.runtime_safety`, stripped in ReleaseFast.
             const prev = sched.pending_count.fetchSub(1, .acq_rel);
             if (std.debug.runtime_safety and prev == 0) {

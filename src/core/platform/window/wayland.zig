@@ -1,14 +1,13 @@
 //! Native Wayland `Window` backend. Tier 0.
 //!
-//! Implements the canonical xdg-shell boot sequence (cf. brief § Notes):
+//! Implements the canonical xdg-shell boot sequence:
 //!     create surface → get xdg_surface → get xdg_toplevel → commit
 //!         → roundtrip → ack first xdg_surface.configure → ready
 //!
-//! All event callbacks are pure Zig functions with `callconv(.c)`. This
-//! is the design hypothesis the brief asks us to validate; if the
-//! compositor delivers a corrupt event queue, returns wrong values, or
-//! triggers ABI errors, the documented fallback is to introduce a single
-//! `wayland_callbacks.c` trampoline. So far the hypothesis holds.
+//! All event callbacks are pure Zig functions with `callconv(.c)`. This is a design
+//! hypothesis under validation; if the compositor delivers a corrupt event queue,
+//! returns wrong values, or triggers ABI errors, the documented fallback is to
+//! introduce a single `wayland_callbacks.c` trampoline. So far the hypothesis holds.
 
 const std = @import("std");
 const builtin = @import("builtin");

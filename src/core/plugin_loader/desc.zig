@@ -10,7 +10,7 @@
 //! unimplemented).
 //!
 //! All declarations are **frozen final signatures** in the sense
-//! of the C0.5 partial freeze (cf. brief § Scope). No runtime
+//! of the C0.5 partial freeze. No runtime
 //! wiring — `Loader` only loads the `.so` / `.dll`, reads the
 //! descriptor, and logs the declared capabilities. Runtime
 //! enforcement of capabilities (filesystem, network, threading)

@@ -328,11 +328,10 @@ pub const ObserverRegistry = struct {
 /// THIS flush stay deferred — they apply at the NEXT call to
 /// `flushWithObservers` on a subsequent phase, NOT now).
 ///
-/// In other words: each call to `flushWithObservers` drains the
-/// **previous** flush's deferred cmds + the system's own cmds, then
-/// stashes new observer-issued cmds into `registry.deferred` for the
-/// next call. This is the "1 flush-point latency" semantic from the
-/// brief.
+/// In other words: each call to `flushWithObservers` drains the **previous** flush's
+/// deferred cmds + the system's own cmds, then stashes new observer-issued cmds into
+/// `registry.deferred` for the next call. This is the "1 flush-point latency" semantic.
+///
 pub fn flushWithObservers(
     cmd: *CommandBuffer,
     registry: ?*ObserverRegistry,

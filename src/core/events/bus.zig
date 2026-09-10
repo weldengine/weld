@@ -8,8 +8,8 @@
 //! resolve the queue pointer at the call site, then cast back to
 //! `*EventQueue(T)` with a comptime-safe `@ptrCast(@alignCast)`.
 //!
-//! The bus is registered once per event type via `register`. The
-//! brief makes `register` mandatory before `emit` — emitting an
+//! The bus is registered once per event type via `register`, and that
+//! call is MANDATORY before `emit` — emitting an
 //! unknown type returns `error.EventTypeNotRegistered`.
 //!
 //! Lifetime drains use `drainAtBoundary(lt)`: every queue whose
@@ -110,12 +110,11 @@ const QueueEntry = struct {
     vtable: *const QueueVTable,
 };
 
-/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
-/// Drain-warning threshold — `drains_since_last_drain` above this
-/// value at drain time emits a `log.warn`. Set per the brief
-/// (`drops/sec > 10`); the threshold is evaluated per drain rather
-/// than per second, but on a typical 60 Hz tick this is a strict
-/// upper bound on the per-second rate.
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5. Drain-warning threshold —
+/// `drains_since_last_drain` above this value at drain time emits a `log.warn`. The
+/// bound is `drops/sec > 10`; the threshold is evaluated per drain rather than per
+/// second, but on a typical 60 Hz tick this is a strict upper bound on the per-second
+/// rate.
 pub const DROPS_WARN_THRESHOLD: u64 = 10;
 
 /// FROZEN — see `engine-phase-0-criteria.md` C0.5.

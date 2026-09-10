@@ -135,7 +135,7 @@ test "time.sleepPrecise: 1 ms accuracy" {
     try sleepPrecise(io, 1_000_000); // 1 ms
     const elapsed_ns = nowNanos() - start;
     // Tolerance: 50 ms ceiling for slow CI. The dedicated bench test in
-    // tests/platform/time_test.zig enforces the tighter brief gate
+    // tests/platform/time_test.zig enforces the tighter bound
     // (< 2 ms Win32 / < 1 ms Linux).
     try std.testing.expect(elapsed_ns >= 1_000_000);
     try std.testing.expect(elapsed_ns < 50_000_000);

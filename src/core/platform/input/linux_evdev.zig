@@ -54,7 +54,7 @@ extern "c" fn read(fd: c_int, buf: [*]u8, nbytes: usize) isize;
 
 /// Scan `/dev/input/` for new gamepad-like devices and open the ones
 /// that aren't already tracked. Caller invokes this periodically (the
-/// brief recommends every ~1 second). Returns the number of newly
+/// roughly every second is enough). Returns the number of newly
 /// opened devices (0 in steady state).
 pub fn scanDevices(gpa: std.mem.Allocator) usize {
     if (comptime builtin.os.tag != .linux) return 0;

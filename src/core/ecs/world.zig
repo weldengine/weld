@@ -1274,7 +1274,7 @@ pub const World = struct {
     // ─── Frame tick + typed component access ──────────────────────────
 
     /// Open a new frame. Bumps `current_tick` (wrapping arithmetic — a
-    /// follow-up milestone handles the u32 wraparound per the brief)
+    /// follow-up milestone handles the u32 wraparound)
     /// and clears every chunk's dirty bitset so `Changed<T>` queries
     /// only see this frame's modifications.
     pub fn beginFrame(self: *World) void {
@@ -1660,12 +1660,11 @@ pub const World = struct {
         try self.identity.validate(entity);
         const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
 
-        // A removal refused by `@requires` is SKIPPED, not an error:
-        // the invariant "if A is present, its closure is present" holds, the
-        // deviation is counted on `World` and logged once per tick, and the
-        // tick survives. An error here would be the channel
-        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
-        // a deferred command turned into an unobservable tick failure.
+        // A removal refused by `@requires` is SKIPPED, not an error: the invariant "if
+        // A is present, its closure is present" holds, the deviation is counted on
+        // `World` and logged once per tick, and the tick survives. An error here would
+        // be the channel `engine-ecs-internals.md` §3 refuses: a deferred command
+        // turned into an unobservable tick failure.
         if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
 
         if (self.storageOf(cid_drop) == .sparse) {
@@ -1980,16 +1979,15 @@ pub const World = struct {
         // teardown would be refused forever, which is the guard's other way of
         // being wrong.
         //
-        // **This path ERRORS where the single paths SKIP, and the asymmetry is
-        // the channel each path can afford — measured, not chosen.** All three
-        // flush paths (`CommandBuffer.applyOne`, `applyWithObservers`,
-        // `applyRawCommand`) call the SINGLE `removeComponentDynamic`, so an
-        // error there would abort the tick — the channel §3 and the brief both
-        // refuse. This grouped entry has exactly ONE caller in the repository,
-        // `loader.deactivateExtension`, a scene-load path that already returns
-        // typed errors and no tick depends on. And a grouped remove is ONE
-        // migration: dropping the subset the guard admits would be a silent
-        // partial answer, so the whole command is refused rather than trimmed.
+        // **This path ERRORS where the single paths SKIP, and the asymmetry is the
+        // channel each path can afford — measured, not chosen.** All three flush paths
+        // (`CommandBuffer.applyOne`, `applyWithObservers`, `applyRawCommand`) call the
+        // SINGLE `removeComponentDynamic`, so an error there would abort the tick,
+        // which `engine-ecs-internals.md` §3 refuses. This grouped entry has exactly
+        // ONE caller in the repository, `loader.deactivateExtension`, a scene-load path
+        // that already returns typed errors and no tick depends on. And a grouped
+        // remove is ONE migration: dropping the subset the guard admits would be a
+        // silent partial answer, so the whole command is refused rather than trimmed.
         for (cids) |c| {
             if (self.requiresRefusesRemoval(entity, c, cids)) return error.RequiredComponent;
         }
@@ -2188,7 +2186,7 @@ pub const World = struct {
         // the invariant "if A is present, its closure is present" holds, the
         // deviation is counted on `World` and logged once per tick, and the
         // tick survives. An error here would be the channel
-        // `engine-ecs-internals.md` §3 and this milestone's brief both refuse —
+        // `engine-ecs-internals.md` §3 refuses:
         // a deferred command turned into an unobservable tick failure.
         if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
 

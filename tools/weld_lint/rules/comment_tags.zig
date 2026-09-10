@@ -68,6 +68,10 @@ pub fn check(
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
     if (!comment_scan.isCovered(file)) return;
+    // A generated file's comments belong to its emitter — see
+    // `comment_scan.isGenerated`. Both bounds this rule carries, the tag form
+    // and the phase mention, are the emitter's to write.
+    if (comment_scan.isGenerated(source)) return;
 
     var spans: std.ArrayList(comment_scan.Span) = .empty;
     defer spans.deinit(arena);

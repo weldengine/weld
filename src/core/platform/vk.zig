@@ -5,11 +5,11 @@
 //! Whitelist: Vulkan 1.3 core + VK_KHR_surface + VK_KHR_swapchain
 //! + VK_KHR_wayland_surface + VK_KHR_win32_surface + VK_EXT_debug_utils.
 //!
-//! Throwaway in the strict sense — replaced by the unified
+//! Throwaway in the strict sense — refactored in S3 by the unified
 //! bindgen system (cf. `engine-c-bindings.md` §10.1). The public
 //! Zig surface (handle types, struct layouts, method names) is a
 //! conformance target of `engine-c-bindings.md` §4.2 idioms so the
-//! regeneration produces zero diff at call sites.
+//! S3 regeneration produces zero diff at call sites.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -5288,8 +5288,8 @@ pub const SubmitFlags = packed struct(u32) {
 };
 
 // ---- Function pointer typedefs (callbacks) ----
-// Emitted as opaque pointers; the C decl is preserved as a comment
-// for hand-casting at call sites. Typed signatures replace them.
+// Emitted as opaque pointers in S2; the C decl is preserved as a comment
+// for hand-casting at call sites. Replaced by typed signatures in S3.
 
 // void PFN_vkInternalAllocationNotification
 // void*                       pUserData
@@ -8732,11 +8732,11 @@ pub var device_dispatch: DeviceDispatch = .{};
 
 // ---- Loader ----
 //
-// Stage 1: dlopen libvulkan, resolve `vkGetInstanceProcAddr`,
+// Phase 1: dlopen libvulkan, resolve `vkGetInstanceProcAddr`,
 //          fill the `BaseDispatch` table with loader-level entries.
-// Stage 2: once `vkCreateInstance` returns, call `loadInstance(handle)`
+// Phase 2: once `vkCreateInstance` returns, call `loadInstance(handle)`
 //          to fill the `InstanceDispatch` table via vkGetInstanceProcAddr.
-// Stage 3: once `vkCreateDevice` returns, call `loadDevice(handle)` to
+// Phase 3: once `vkCreateDevice` returns, call `loadDevice(handle)` to
 //          fill the `DeviceDispatch` table via vkGetDeviceProcAddr.
 
 var lib_handle: ?*anyopaque = null;

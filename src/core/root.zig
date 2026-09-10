@@ -251,7 +251,7 @@ comptime {
 
 test "runtime-query abstraction stays dropped (D-S4-runtime-query)" {
     // The `RuntimeQuery` / `World.query_dynamic` surface was
-    // dropped — zero consumers materialised (the brief-sanctioned exit), the
+    // dropped — zero consumers materialised, the
     // interpreter hot path iterates archetypes through its own predicate
     // pool, and the abstraction could not express the filtered query surface
     // (`or`/`not` trees, tag predicates, `changed` tick baselines). Guard

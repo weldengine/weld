@@ -3,7 +3,7 @@
 //! Minimal process control surface used by the editor stub to
 //! spawn / monitor / kill the runtime stub. Tier 0 — `engine-
 //! platform.md` §4 (Process section) defines a wider API; this fills
-//! only the four entry points the brief calls out:
+//! only four entry points:
 //!
 //!   - `spawnProcess(path, argv) !Process`
 //!   - `waitNonblock(proc) !?i32`

@@ -15,12 +15,11 @@
 //! auto-marks `changed_tick = current_tick` on the resource's
 //! slot. `resourceChanged(T, since)` reads back that tick.
 //!
-//! API signature note (vs brief): the brief lists `setResource(world,
-//! value)` and `removeResource(world, T)` without an allocator. The
-//! underlying ECS write paths (`ensureComponentRegistered`,
-//! `spawnDynamicWithValues`, `despawn`) require a `gpa`. The
-//! signatures below thread `gpa` through the write surface — read
-//! paths stay allocator-free.
+//! API signature note: a shape without an allocator — `setResource(world, value)` and
+//! `removeResource(world, T)` — is unreachable. The underlying ECS write paths
+//! (`ensureComponentRegistered`, `spawnDynamicWithValues`, `despawn`) require a `gpa`.
+//! The signatures below thread `gpa` through the write surface — read paths stay
+//! allocator-free.
 
 const std = @import("std");
 const rtti = @import("../rtti/root.zig");

@@ -29,15 +29,13 @@
 //!
 //! ## Bitset layout
 //!
-//! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total
-//! (256+256+256 = 768 bytes for the keyboard alone), the memory cost
-//! is irrelevant compared to the readability win of a direct
-//! `state.keyboard.pressed[scancode]` index over a packed-bitset
-//! shift-and-mask. The brief gates "pressed bitset (256 scancodes)" —
-//! `[256]bool` keyed by **raw scancode** is the literal interpretation.
-//! Logical-key access is `window.Event.code` (the frozen
-//! `KeyCode` contract); a KeyCode-keyed steady-state view is the
-//! Input Tier-1 mapping layer (`engine-input-system.md`).
+//! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total (256+256+256 = 768
+//! bytes for the keyboard alone), the memory cost is irrelevant compared to the
+//! readability win of a direct `state.keyboard.pressed[scancode]` index over a
+//! packed-bitset shift-and-mask. The contract is a pressed bitset over 256 scancodes —
+//! `[256]bool` keyed by **raw scancode** is the literal interpretation. Logical-key
+//! access is `window.Event.code` (the frozen `KeyCode` contract); a KeyCode-keyed
+//! steady-state view is the Input Tier-1 mapping layer (`engine-input-system.md`).
 
 const std = @import("std");
 const window = @import("../window.zig");
@@ -146,7 +144,7 @@ pub fn applyEvent(self: *InputRawState, event: window.Event) void {
     switch (event) {
         .key_down => |ev| {
             const idx = @as(usize, ev.scancode) & 0xFF;
-            // Auto-repeat events don't fire pressed_this_frame (the brief
+            // Auto-repeat events don't fire pressed_this_frame (the
             // gate is rising-edge only).
             if (!self.keyboard.pressed[idx] and !ev.repeat) {
                 self.keyboard.pressed_this_frame[idx] = true;
@@ -299,7 +297,7 @@ test "InputRawState: gamepad snapshot computes button transitions" {
     });
     try std.testing.expect((s.gamepads[0].buttons & 0b0001) != 0);
     try std.testing.expect((s.gamepads[0].buttons_this_frame & 0b0001) != 0);
-    // Sticks pass raw — no deadzone applied at Tier 0 (per brief).
+    // Sticks pass raw — no deadzone is applied at Tier 0.
     try std.testing.expectApproxEqAbs(@as(f32, 0.05), s.gamepads[0].sticks[0][0], 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), s.gamepads[0].triggers[0], 0.001);
 

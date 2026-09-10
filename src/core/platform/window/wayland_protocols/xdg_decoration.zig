@@ -1,7 +1,7 @@
 //! AUTO-GENERATED — do not edit. Regenerate via `zig build bindgen-wayland`.
 //!
 //! Wayland protocol `xdg_decoration_unstable_v1` bindings emitted from upstream XML.
-//! Throwaway: the unified generator replaces it.
+//! Throwaway: S3 unifier replaces this generator.
 
 const std = @import("std");
 const core = @import("core.zig");

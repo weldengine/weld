@@ -7,7 +7,7 @@
 //! exposes the `WeldAPI` table. All 7 sub-APIs are present with
 //! final signatures but every callback returns
 //! `WELD_ERR_NOT_IMPLEMENTED` — the runtime wiring is
-//! (cf. brief § Out-of-scope).
+//! unimplemented.
 //!
 //! Module convention follows `src/core/ecs/root.zig`,
 //! `src/core/rtti/root.zig`, `src/core/resources/root.zig`,

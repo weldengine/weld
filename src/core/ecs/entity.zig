@@ -92,7 +92,7 @@ pub const EntityIdentityStore = struct {
     /// growing `slots`. On the fresh path `free_indices.items.len == 0`, so
     /// `ensureTotalCapacity(slots.len + 1)` makes `capacity >= slots.len + 1`
     /// (`ensureUnusedCapacity(1)` would only guarantee `capacity >= 1` and
-    /// freeze there — see brief B1).
+    /// freeze there).
     ///
     /// Reserve-then-mutate: an `OutOfMemory` from the free-list reservation
     /// leaves `slots` untouched and returns no handle; an `OutOfMemory` from
@@ -285,7 +285,7 @@ test "100k allocate then release back to zero live count" {
 
 test "allocate reserves release capacity; release is allocation-free" {
     // C1 acceptance test. N is deliberately large (1000) so the buggy
-    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation (brief B1) would
+    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation would
     // freeze `free_indices.capacity` far below `slots.len` and overflow the
     // infallible `appendAssumeCapacity` in `release` (repro: overflow at
     // release #33). The corrected `ensureTotalCapacity(gpa, slots.len + 1)`

@@ -190,6 +190,41 @@ pub fn isCovered(file: []const u8) bool {
     return inPerimeter(file) and !isPending(file);
 }
 
+/// Whether `file`'s FIRST line marks it as emitter-owned.
+///
+/// A generated file's comments are written by its generator, so a finding here
+/// names a defect nobody may fix IN PLACE: the edit is reverted by the next
+/// regeneration, and `bindgen-verify` — which regenerates then asserts
+/// `git diff --quiet` — turns it into a blocked push. That is not a prediction:
+/// hand-edits to `platform/vk.zig` and the three `wayland_protocols/*.zig` did
+/// exactly that, and the guard was right to refuse them.
+///
+/// The identifiers such a file carries are real, and they are fixed in the
+/// EMITTER under `tools/bindgen/`, which is a separate subtree with its own
+/// entry in the ledger above.
+///
+/// `doc_comments` and `c_module_isolation` each carry their own copy of this
+/// predicate. This one is the comment family's single copy rather than a third
+/// and a fourth: two rules consult it, and a shape decided in two places is how
+/// the two come to disagree.
+pub fn isGenerated(source: []const u8) bool {
+    if (source.len == 0) return false;
+    const eol = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
+    const first = source[0..eol];
+    if (!std.mem.startsWith(u8, first, "//")) return false;
+    return std.mem.indexOf(u8, first, "AUTO-GENERATED") != null;
+}
+
+test "isGenerated fires on the marker and only on the first line" {
+    try std.testing.expect(isGenerated("//! AUTO-GENERATED — do not edit.\npub const x = 1;\n"));
+    try std.testing.expect(isGenerated("// AUTO-GENERATED — DO NOT EDIT\npub const x = 1;\n"));
+    // NOT the first line: a file that merely mentions the word is reported on.
+    try std.testing.expect(!isGenerated("//! Hand-written.\n//! AUTO-GENERATED files are exempt.\n"));
+    // Not a comment at all on line one.
+    try std.testing.expect(!isGenerated("pub const x = 1; // AUTO-GENERATED\n"));
+    try std.testing.expect(!isGenerated(""));
+}
+
 /// Whether `file` is under `prefix`. Exposed so the caller can confront each
 /// declared entry with the files it actually walked.
 pub fn matchesPending(file: []const u8, prefix: []const u8) bool {

@@ -110,6 +110,12 @@ pub fn check(
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
     if (!comment_scan.isCovered(file)) return;
+    // A generated file's comments belong to its emitter — see
+    // `comment_scan.isGenerated`. The sibling rules `doc_comments` and
+    // `c_module_isolation` suppress on the same marker; this rule did not, and
+    // the omission invited a hand-edit that the bindgen round-trip guard
+    // correctly refused.
+    if (comment_scan.isGenerated(source)) return;
 
     var spans: std.ArrayList(comment_scan.Span) = .empty;
     defer spans.deinit(arena);
