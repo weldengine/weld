@@ -84,7 +84,7 @@ pub const EntityIdentityStore = struct {
     /// one is available (returning the bumped generation captured by the
     /// previous `release`), otherwise appends a new slot with generation 0.
     ///
-    /// Establishes the C1 invariant *`free_indices.capacity >= slots.len` at
+    /// Establishes the invariant *`free_indices.capacity >= slots.len` at
     /// all times*, which is what lets `release` be an infallible
     /// `appendAssumeCapacity`: the recycled path frees a free-list slot the
     /// re-push reuses (`pop` drops `len` under an unchanged capacity), and the
@@ -138,7 +138,7 @@ pub const EntityIdentityStore = struct {
     /// prior; this still asserts liveness in debug.
     ///
     /// Infallible and allocation-free by construction: `allocate` already
-    /// reserved the free-list slot this push reuses (C1 invariant
+    /// reserved the free-list slot this push reuses (invariant
     /// `free_indices.capacity >= slots.len`), so this is a bare
     /// `appendAssumeCapacity` — no allocator parameter, no error. See
     /// `allocate` for the reservation that backs it.
@@ -284,7 +284,7 @@ test "100k allocate then release back to zero live count" {
 }
 
 test "allocate reserves release capacity; release is allocation-free" {
-    // C1 acceptance test. N is deliberately large (1000) so the buggy
+    // N is deliberately large (1000) so the buggy
     // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation would
     // freeze `free_indices.capacity` far below `slots.len` and overflow the
     // infallible `appendAssumeCapacity` in `release` (repro: overflow at

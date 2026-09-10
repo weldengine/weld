@@ -573,8 +573,8 @@ pub const World = struct {
     /// compiles to nothing. That distinction is not stylistic here: a sparse id
     /// reaching a signature would not crash, it would silently give the
     /// component a table column the sparse store also owns, after which the
-    /// answer depends on which of the two a given caller consulted. A wrong
-    /// answer with no diagnostic is the H1 class, and a guard
+    /// answer depends on which of the two a given caller consulted. That is a
+    /// wrong answer with no diagnostic, and a guard
     /// live only in the two matrix cells where a breach costs nothing is not a
     /// guard on the path a game ships.
     ///
@@ -1440,7 +1440,7 @@ pub const World = struct {
             // append a SECOND dense row for the same entity, after which
             // `positionOf` answers the first and `remove` swaps one of the two
             // away, leaving the other permanently unreachable. A wrong answer
-            // with no diagnostic (the H1 class). `DuplicateComponent`
+            // with no diagnostic. `DuplicateComponent`
             // is the error `addComponentsDynamic` already returns for exactly
             // this condition, so nothing new is invented.
             //
@@ -1740,28 +1740,23 @@ pub const World = struct {
         });
     }
 
-    /// Add SEVERAL components to `entity` in a SINGLE archetype
-    /// migration. Either the whole set lands (the entity moves once to the target
-    /// archetype with every new column written) or nothing changes: the only
-    /// fallible steps — target-archetype creation, `entity_locations` reservation,
-    /// and the destination slot allocation — all run BEFORE the first observable
-    /// mutation (the source `removeSwap` + location update), and the value writes
-    /// are infallible `memcpy`. This replaces N sequential `addComponentDynamic`
-    /// calls, whose mid-loop failure left the entity partially extended — the
-    /// extension-activation atomicity defect.
+    /// Add SEVERAL components to `entity` in a SINGLE archetype migration,
+    /// expanding every `@requires` closure first. Either the whole set lands (the
+    /// entity moves once to the target archetype with every new column written) or
+    /// nothing changes: the only fallible steps — target-archetype creation,
+    /// `entity_locations` reservation, and the destination slot allocation — all
+    /// run BEFORE the first observable mutation (the source `removeSwap` +
+    /// location update), and the value writes are infallible `memcpy`. This
+    /// replaces N sequential `addComponentDynamic` calls, whose mid-loop failure
+    /// left the entity partially extended — the extension-activation atomicity
+    /// defect.
     ///
     /// `cids[i]` pairs with `values[i]` (`values[i].len == componentSize(cids[i])`,
-    /// a programmer contract — asserted). `cids` length 0 is a no-op. R11(c)
+    /// a programmer contract — asserted). `cids` length 0 is a no-op.
     /// Precondition: every `cids[i]` must be ABSENT from `entity`'s current
     /// archetype AND DISTINCT within `cids` — a real check (`error.DuplicateComponent`),
     /// not an assert; a duplicate would put the id twice in the target archetype
     /// (corruption) and mis-map values.
-    /// Add a set of components, expanding every `@requires` closure first.
-    ///
-    /// The expansion happens ONCE, here, and `addComponentsExact` below is the
-    /// terminal that assumes an already-closed set — which is what keeps the
-    /// recursion finite and gives the rule a single semantics for all six add
-    /// and spawn paths.
     pub fn addComponentsDynamic(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1798,7 +1793,7 @@ pub const World = struct {
         const ids_all = if (needs) ex_ids.items else cids;
         const vals_all = if (needs) ex_vals.items else values;
         {
-            // R11(c): real duplicate/present checks BEFORE any allocation.
+            // Real duplicate/present checks BEFORE any allocation.
             //
             // Routed through `hasComponentDyn` and NOT `src_arch.hasComponent`:
             // the archetype answers `false` for a sparse component the entity
@@ -1944,10 +1939,10 @@ pub const World = struct {
         }
     };
 
-    /// R12(a) — the fallible half of a grouped remove: validate, resolve the
+    /// The fallible half of a grouped remove: validate, resolve the
     /// target archetype, reserve `entity_locations` capacity, and allocate the
     /// destination slot. No observable mutation yet (the entity stays in its
-    /// source archetype). R11(c): every `cids[i]` must be PRESENT and DISTINCT —
+    /// source archetype). Every `cids[i]` must be PRESENT and DISTINCT —
     /// real checks (`error.UnknownComponent` / `error.DuplicateComponent`) BEFORE
     /// any allocation, so exactly `cids.len` components drop and no out-of-bounds
     /// write is possible. `cids` length 0 → `error.UnknownComponent` is not
@@ -1963,7 +1958,7 @@ pub const World = struct {
         const src_arch0 = self.archetypes.items[src_loc.archetype_idx];
         const src_len = src_arch0.component_ids.len;
 
-        // R11(c): present + distinct, checked before any allocation. Routed
+        // Present + distinct, checked before any allocation. Routed
         // through `hasComponentDyn` for the same reason as the batched add: the
         // archetype answers `false` for a sparse component the entity carries,
         // so `src_arch0.hasComponent` would reject a legitimate sparse drop
@@ -2045,7 +2040,7 @@ pub const World = struct {
         };
     }
 
-    /// R12(a) — the infallible half: copy the surviving columns into the reserved
+    /// The infallible half: copy the surviving columns into the reserved
     /// dst slot, swap-pop the source, and update `entity_locations` (capacity was
     /// reserved in `prepare`). After this the remove is observable.
     pub fn commitRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
@@ -2088,7 +2083,7 @@ pub const World = struct {
         });
     }
 
-    /// R12(a) — roll back a `PreparedRemove` without committing: pop the reserved
+    /// Roll back a `PreparedRemove` without committing: pop the reserved
     /// dst slot. INVARIANT: the reserved slot is the LAST of its chunk
     /// (`allocateSlot` appended it) and nothing allocates into `dst_arch` between
     /// prepare and abort — hook structural changes are deferred and the
@@ -2353,7 +2348,7 @@ pub const World = struct {
     /// (no Zig type to hand to the comptime `queryFiltered`), so it needs an
     /// id-keyed entry point. Matches a single conjunctive term: archetypes
     /// containing every id in `with_ids` and none in `without_ids`, reusing
-    /// `archetypeMatches` + the shared option-β lazy re-scan
+    /// `archetypeMatches` + the shared lazy re-scan
     /// (`query.rescanNewArchetypes`) — the same matcher and rescan body as the
     /// comptime `Query`. The query owns copies of the id sets; callers
     /// `defer q.deinit(gpa)`.
@@ -2605,7 +2600,7 @@ test "despawn is allocation-free after spawn (M1.1.1-HF2 C1)" {
     const live_before = world.identity.liveCount();
 
     // Despawn allocates nothing: `identity.release` is a bare
-    // `appendAssumeCapacity` (C1), `entity_locations.remove` frees a hash slot,
+    // `appendAssumeCapacity`, `entity_locations.remove` frees a hash slot,
     // and this entity carries no extension entry to purge. Prove it by failing
     // every allocation for the whole despawn — it must still succeed and
     // reclaim the slot.

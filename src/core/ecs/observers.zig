@@ -439,16 +439,12 @@ pub fn applyWithObservers(
                 // EVERY COMPONENT THE TRANSACTION ADDS IS NOTIFIED, and that set
                 // is not the command's id: `addComponentDynamic` expands the
                 // `@requires` closure, so firing for `a.component_id` alone left
-                // a requisite added here with no `on_add` at all. R11 had its six
-                // command kinds derived; this is its complement, and the spawn
-                // direction already carried it (`spawnWithObservers`) — the
-                // constraint was applied where it was shown and not where the
-                // rule reaches.
+                // a requisite added here with no `on_add` at all.
                 //
                 // The ABSENT set is snapshotted BEFORE the add, so a requisite
                 // the entity already carried is not re-notified: an `on_add` for
                 // a component that was already there is the same lie about the
-                // world R11 forbids in the other direction.
+                // world, in the other direction.
                 const closure = world.registry.requiresClosure(a.component_id);
 
                 // THE ORDINARY ADD NOTIFIES NOTHING, and it was paying a list to
@@ -478,8 +474,7 @@ pub fn applyWithObservers(
                     if (cid == a.component_id) continue;
                     if (!world.hasComponentDyn(a.entity, cid)) pending.appendAssumeCapacity(cid);
                 }
-                // ASCENDING id, the order R5 fixed for the union walk and for the
-                // same reason: the closure's own order is a registry internal, so
+                // ASCENDING id: the closure's own order is a registry internal, so
                 // an observer order resting on it would depend on registration.
                 std.mem.sort(ComponentId, pending.items, {}, std.sort.asc(ComponentId));
 

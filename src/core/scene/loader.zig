@@ -133,7 +133,7 @@ pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Access
         }
         remap[i] = id;
     }
-    // R11(b): two schema entries resolving to the same runtime `ComponentId` means
+    // Two schema entries resolving to the same runtime `ComponentId` means
     // duplicate schema names on disk — malformed (the cook emits exactly one entry
     // per distinct id). The strictly-increasing file-local index check (validate
     // block (e)) cannot see this, since it compares indices, not resolved ids.
@@ -172,7 +172,7 @@ pub const LoadResult = struct {
     /// Free the loader-owned allocations and close the backing mmap (if any).
     /// Does **not** despawn the loaded entities — they belong to the `World` —
     /// and does **not** free the loaded resource `string` blocks: those are
-    /// refcounted, owned by the resources' `StringSlot`s (D1), and reclaimed by
+    /// refcounted, owned by the resources' `StringSlot`s, and reclaimed by
     /// the resource owner's teardown exactly like interp-written resource
     /// strings (`interp.zig` deinit). Teardown parity — no new mechanism.
     pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
@@ -270,7 +270,7 @@ fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJo
         if (edit.snapshot) |snap| {
             if (world.resources.getMutResource(edit.cid)) |live| @memcpy(live, snap);
             gpa.free(snap);
-            // C6: the `getMutResource` calls above (decref pass + restore) forced
+            // The `getMutResource` calls above (decref pass + restore) forced
             // `dirty = true`; restore the pre-load state so the rejected load
             // leaves no spurious `when resource T changed`.
             world.resources.setDirty(edit.cid, edit.dirty_before);
@@ -306,13 +306,13 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     errdefer uuid_to_entity.deinit(gpa);
     var journal: ResourceJournal = .empty;
 
-    // D2 — the load is loader-transactional. On any error after the first spawn,
+    // The load is loader-transactional. On any error after the first spawn,
     // roll back the loader's OWN mutations: decref the string blocks it installed
     // and restore/remove the resources it touched, then despawn every spawned
-    // entity in reverse order (which, post-D7, also purges each entity's extension
+    // entity in reverse order (which also purges each entity's extension
     // entry). The contract covers the loader's mutations only — side effects of
     // user `on_attach` / `on_spawned` hooks that ran before the failure are
-    // outside it. Best-effort under OOM (despawn on the D3-atomic release path).
+    // outside it. Best-effort under OOM (despawn on the atomic release path).
     var committed = false;
     errdefer if (!committed) {
         rollbackResources(world, gpa, &journal);
@@ -548,10 +548,10 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 /// Activate one extension on one entity — the shared bytes-taking path
 /// reused by load
 /// (`applyExtensions`), the runtime `activate_extension` entry, and the
-/// interpreter's deferred B1 flush. Structured reserve-then-mutate so it is
+/// interpreter's deferred flush. Structured reserve-then-mutate so it is
 /// all-or-nothing under OOM:
 ///   0. Reject re-activation of an already-active extension
-///      (`error.ExtensionAlreadyActive`, R12(d) — closes the hook-only
+///      (`error.ExtensionAlreadyActive` — closes the hook-only
 ///      re-activation gap); resolve the strict mono-entity archetype
 ///      (`extEntityArchetype`: `total == 0`/`> 1` rejected).
 ///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; size-check;
@@ -573,7 +573,7 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 /// authority; the static cook counterpart is the fatal `E1797
 /// ExtensionAdditiveConflict`, and together they guarantee `cooked ⇒ loadable`.
 pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
-    // Step 0 — refuse re-activation (R12(d)); works for hook-only (0-component)
+    // Step 0 — refuse re-activation; works for hook-only (0-component)
     // extensions too, where the component-conflict check below cannot fire.
     if (world.hasEntityExtension(entity, name)) return error.ExtensionAlreadyActive;
     const ext = try openVerified(ext_bytes);
@@ -627,9 +627,9 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 
 /// Deactivate one extension on one entity given its cooked bytes —
 /// the shared bytes-taking core reused by the
-/// runtime deactivate entry and the interpreter's deferred B1 flush.
+/// runtime deactivate entry and the interpreter's deferred flush.
 ///
-/// R12(b) prepare/commit order — the hook-ordering guarantee is now REAL:
+/// Prepare/commit order — the hook-ordering guarantee is REAL:
 ///   1. Prevalidate with ZERO mutation: extension active (`ExtensionNotActive`),
 ///      bytes valid, strict mono-entity archetype, declared components resolvable;
 ///      collect the ones currently present.
@@ -692,7 +692,7 @@ pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: Entity
 
 /// Runtime deactivation entry (direct-programmatic path): resolve the
 /// extension by name, then `deactivateExtension`. The Etch method goes through
-/// the interpreter's deferred queue instead (B1); this stays for direct callers.
+/// the interpreter's deferred queue instead; this stays for direct callers.
 pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
     const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
     try deactivateExtension(world, gpa, entity, name, bytes);
@@ -707,7 +707,7 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
 /// are owned by the slot, reclaimed by the resource owner's teardown (parity with
 /// interp-written strings); the old blocks the snapshot captured are decreffed at
 /// commit. Each touched resource is recorded in `journal` so the load is
-/// transactional (D2). An empty string keeps the zeroed slot (`ptr == 0`).
+/// transactional. An empty string keeps the zeroed slot (`ptr == 0`).
 ///
 /// Scene resources are *injected into the resource map at load*
 /// (`engine-scene-serialization.md` § "Resources de scène — install-or-overwrite"):
@@ -771,7 +771,7 @@ fn loadResources(
         // rolls the whole resource back (decref partial new blocks + restore).
         journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot, .dirty_before = dirty_before });
 
-        // Per string field: alloc a REFCOUNTED block owned by the slot (D1), copy
+        // Per string field: alloc a REFCOUNTED block owned by the slot, copy
         // the cooked value, write the new `StringSlot`.
         for (world.registry.componentFields(cid)) |fd| {
             if (fd.kind != .string_) continue;
@@ -914,7 +914,7 @@ fn buildStringResourceScene(gpa: std.mem.Allocator, reg: *const Registry, res_ci
 /// Test helper: cook a scene that spawns one `ecid` entity, overrides string
 /// resource `settings_cid` with `"new"`, then carries a collection resource
 /// `bag_cid` (LAST) — so the loader's collection rejection fires AFTER the spawn
-/// and the Settings write, exercising the full transactional rollback (D2).
+/// and the Settings write, exercising the full transactional rollback.
 fn buildSpawnThenFailScene(
     gpa: std.mem.Allocator,
     reg: *const Registry,
@@ -1294,10 +1294,10 @@ test "instantiate under post-spawn OOM leaves no orphan (M1.1.1-HF2 C2)" {
 
     // Exhaustively fail each allocation of the load in turn. Whatever fails, the
     // load must either fully succeed (both entities present) or leave the world
-    // at its pre-load state — never a live entity stranded outside `spawned`
-    // (the C2 orphan). Under the pre-fix code, an OOM on the post-spawn
+    // at its pre-load state — never a live entity stranded outside `spawned`.
+    // Under the pre-fix code, an OOM on the post-spawn
     // `uuid_to_entity.put` / `spawned.append` left exactly that orphan; the
-    // rollback (allocation-free after C1) never reclaimed it. `entityCount == 0`
+    // rollback (allocation-free since the fix) never reclaimed it. `entityCount == 0`
     // AND `liveCount == 0` on every failure prove the fix.
     var saw_success = false;
     var fail_index: usize = 0;
@@ -1348,7 +1348,7 @@ test "rejected load restores the resource dirty bit (M1.1.1-HF2 C6)" {
     defer gpa.free(bytes);
     try testing.expectError(error.CollectionResourceFieldUnsupported, loadFromBytes(&world, gpa, bytes, null));
 
-    // C6: dirty is restored to its pre-load value (false), not left spuriously
+    // Dirty is restored to its pre-load value (false), not left spuriously
     // true by the rollback's own `getMutResource` calls. And no entity survived.
     try testing.expect(!world.resources.isDirty(settings));
     try testing.expectEqual(@as(usize, 0), world.entityCount());
@@ -1608,7 +1608,7 @@ test "activateExtension rejects re-activation, including a hook-only extension (
     try testing.expectError(error.ExtensionAlreadyActive, activateExtension(&world, backing, e, "TestExt", ext_bytes));
 
     // Hook-only extension (one entity, zero components): the component-conflict
-    // guard cannot fire, so R12(d)'s `hasEntityExtension` check is what rejects
+    // guard cannot fire, so the `hasEntityExtension` check is what rejects
     // re-activation.
     var arena = std.heap.ArenaAllocator.init(backing);
     const a = arena.allocator();

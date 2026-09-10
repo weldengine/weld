@@ -10,7 +10,7 @@
 //! `query(world, .{...})` invocation, and Zig's comptime monomorphises
 //! one iterator type per distinct tuple of component types. The total
 //! number of distinct instantiations is the figure reported by
-//! `bench-etch-compile` for Gate 4.
+//! `bench-etch-compile`.
 //!
 //! Coexists with the single-archetype `world.query()` (which still
 //! covers the comptime `(Transform, Velocity)` path). They do not share

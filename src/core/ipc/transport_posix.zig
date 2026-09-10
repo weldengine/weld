@@ -278,7 +278,7 @@ pub const Backend = struct {
 
         if (sys.connect(fd, &addr, addr_len) != 0) return error.ConnectionRefused;
 
-        // C5: suppress SIGPIPE on the connected data socket (no-op on Linux,
+        // Suppress SIGPIPE on the connected data socket (no-op on Linux,
         // where `send(MSG_NOSIGNAL)` covers it; `SO_NOSIGPIPE` on macOS).
         setNoSigPipe(fd);
         return Backend{ .fd = fd };
@@ -295,7 +295,7 @@ pub const Backend = struct {
             _ = sys.close(client_fd);
             return error.PeerCredentialMismatch;
         }
-        // C5: suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
+        // Suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
         setNoSigPipe(client_fd);
         return Backend{ .fd = client_fd };
     }
@@ -398,7 +398,7 @@ pub const Backend = struct {
             // The fds rode out with this first segment. On a short write —
             // a signal after a partial transfer left 0 < sent < bytes.len —
             // flush the remaining payload through the shared plain-write loop;
-            // the remainder carries no ancillary data (D5).
+            // the remainder carries no ancillary data.
             const sent: usize = @intCast(n);
             if (sent < bytes.len) try self.writeAll(bytes[sent..]);
             break;
@@ -475,7 +475,7 @@ pub const Backend = struct {
 
 // Most runtime tests live in `tests/ipc/transport.zig` — one exe each
 // to keep an eventual deadlock in one case from stalling the rest of
-// `zig build test`. The R2 permission test below is bind-only (no
+// `zig build test`. The permission test below is bind-only (no
 // accept/recv, so no deadlock risk) and is kept inline with the code it guards.
 
 /// Test helper: the raw `st_mode` of a path, read WITHOUT opening it (so it works

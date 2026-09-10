@@ -553,7 +553,7 @@ pub fn rescanNewArchetypes(
 /// the comptime `Query`. `DynamicQuery` matches a single conjunctive term —
 /// a `with` id set (archetype must contain every id) and a `without` id set
 /// (archetype must contain none) — reusing `archetypeMatches` and the same
-/// option-β lazy re-scan (`rescanNewArchetypes`) as the comptime path.
+/// lazy re-scan (`rescanNewArchetypes`) as the comptime path.
 ///
 /// Composition is the caller's job: a rule's `when` clause lowers to a DNF
 /// of conjunctive terms, one `DynamicQuery` per term, and the rule's matched
@@ -568,7 +568,7 @@ pub const DynamicQuery = struct {
     with_ids: []ComponentId,
     /// Owned copy of the "must not contain" component ids.
     without_ids: []ComponentId,
-    /// Matched archetypes, ascending by `archetype_id`. The option-β cache.
+    /// Matched archetypes, ascending by `archetype_id`.
     matching: std.ArrayListUnmanaged(*Archetype) = .empty,
     /// Lazy-rescan view onto the world's archetype slice. Null only for a
     /// default-constructed query that was never wired by `World.queryDynamic`.
@@ -587,7 +587,7 @@ pub const DynamicQuery = struct {
         self.* = undefined;
     }
 
-    /// Lazy tail rescan (option β), shared with the comptime `Query` via
+    /// Lazy tail rescan, shared with the comptime `Query` via
     /// `rescanNewArchetypes`. Returns the number of archetypes scanned this
     /// call (0 in the steady state) so the interpreter can surface the
     /// per-rule rescan-evaluation observable. The required-id set is empty:

@@ -549,7 +549,7 @@ pub const QueryPlan = struct {
     /// **So the predicate is a function of storage modes ALONE and does not
     /// enter the election**: making it answer from the elected form would send a
     /// term with sparse members but a table election back through the archetype
-    /// merge, which is the P1-2 defect exactly.
+    /// merge.
     ///
     /// The merge runs `iterateArchetype` once per archetype under a SINGLE
     /// owner, so every other term's `admits` is skipped, and the entity a
