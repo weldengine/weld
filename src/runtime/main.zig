@@ -1,5 +1,5 @@
 //! Weld runtime stub — the spawned-by-editor process side of the
-//! S6 editor↔runtime IPC.
+//! editor↔runtime IPC.
 //!
 //! Argv contract (set by `src/editor/main.zig`):
 //!   argv[0] = binary path
@@ -9,11 +9,11 @@
 //!   argv[4] = (optional) `--frames=<N>` to bound the lifetime
 //!             (default: run until editor closes the socket).
 //!
-//! S6 behaviour:
+//! Behaviour:
 //!   - Parses argv, connects to the editor's listening socket,
 //!     attaches the viewport shm.
-//!   - Sends `ProtocolHello { protocol_version, "0.0.7-S6",
-//!     "deadbee", capabilities: 0 }` and awaits `ProtocolHelloAck`.
+//!   - Sends `ProtocolHello` — the version string and build hash are at
+//!     the `sendHello` call below — and awaits `ProtocolHelloAck`.
 //!     Logs and exits non-zero on rejection.
 //!   - Drives a 60 Hz mire (CPU-side color gradient with frame-
 //!     counter modulation) into the shm viewport's double-buffer.
@@ -26,8 +26,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const weld_core = @import("weld_core");
-// M1.1.14 — the engine float environment (`ARCH-031` rule 5): the main thread
-// is not born of a spawn, so it is installed here rather than by the job system.
+// The engine float environment (`ARCH-031` rule 5): the main thread is not
+// born of a spawn, so it is installed here rather than by the job system.
 const foundation = @import("foundation");
 const ipc = weld_core.ipc;
 const framing = ipc.framing;
@@ -104,7 +104,7 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    // M1.1.14 — the main thread is not born of a spawn, so it does not pass
+    // The main thread is not born of a spawn, so it does not pass
     // through the job system's worker entry and receives the engine float
     // environment here instead (`ARCH-031` rule 5, `engine-platform.md` §4).
     // First statement, before anything can compute.
@@ -117,8 +117,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = try parseArgs(gpa, init);
 
     // Default I/O for the snapshot file ops. The runtime stays
-    // `Init.Minimal` per convention (it will bind a custom Io on the job
-    // system in Phase 1); a local `Threaded` covers M0.7. `page_allocator`
+    // `Init.Minimal` per convention (binding a custom Io on the job system
+    // comes later); a local `Threaded` covers it here. `page_allocator`
     // is threadsafe, satisfying Threaded's async-allocator contract, and
     // the `io` is safe to share with the reader thread.
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
@@ -196,7 +196,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         vp.commit(slot);
         // Play/Pause/Stop gate the animation: advance the mire only while
         // playing; paused/stopped re-commit the held frame so the viewport
-        // stays live (G6 visual) without animating.
+        // stays live without animating.
         if (reader_state.play_state.load(.acquire) == play_playing) frame += 1;
         sleepMs(16); // ~60 Hz
         iter += 1;
@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 /// Play-state driven by the `Play` / `Pause` / `Stop` commands
-/// (`engine-ipc.md` §3.3). Default `playing` so the S6 mire renders
+/// (`engine-ipc.md` §3.3). Default `playing` so the mire renders
 /// immediately when no control command is sent (e.g. the crash-recovery
 /// tests). The reader thread sets it; the render loop reads it to gate
 /// the mire's frame advance.
@@ -312,7 +312,7 @@ fn readerLoop(state: *ReaderState) void {
             .hot_reload_script => {
                 // Stub: decode to validate the frame. The real reload + the
                 // ScriptHotReloadComplete event land with the script pipeline
-                // (out of M0.7 scope).
+                // (not in this stub's scope).
                 _ = framing.decode(messages.HotReloadScript, fr.header, fr.payload_bytes) catch return;
             },
             .save_project => {
@@ -336,7 +336,7 @@ fn readerLoop(state: *ReaderState) void {
                 state.client.connection().sendMessage(messages.ProjectSaved, fr.header.seq_id, &ps) catch return;
             },
             // `save_scene` (scene granularity) is declared with no wired
-            // handler in M0.7 — it falls through to `else` and is ignored.
+            // handler — it falls through to `else` and is ignored.
             else => {
                 // Unilateral / unsupported types — ignore at the stub level.
             },

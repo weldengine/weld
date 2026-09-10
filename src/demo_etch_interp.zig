@@ -1,10 +1,7 @@
-//! S4 demo binary — loads the fixed 5-rule program from
+//! Demo binary — loads the fixed 5-rule program from
 //! `bench/fixtures/demo_5_rules.etch`, spawns 1 000 entities with every
-//! component the fixture declares, runs 60 ticks, prints the summary line
-//! mandated by `briefs/S4-etch-tree-walking-interpreter.md`
-//! Observable behaviour:
-//!
-//!     Demo S4 OK | mode=ReleaseSafe | entities=1000 | rules=5 | ticks=60 | rules_matched=N | errors=0 | total=Tms
+//! component the fixture declares, runs 60 ticks, and prints one summary
+//! line whose exact format is the `print` call below.
 
 const std = @import("std");
 const foundation = @import("foundation");

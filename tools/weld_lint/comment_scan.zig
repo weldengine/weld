@@ -146,10 +146,6 @@ pub const Pending = struct {
 /// is covered, so a subtree nobody thought of goes red rather than silent. That
 /// is how the file below this list was found.
 pub const pending = [_]Pending{
-    .{ .prefix = "src/editor" },
-    .{ .prefix = "src/runtime" },
-    .{ .prefix = "src/demo_etch_codegen.zig" },
-    .{ .prefix = "src/demo_etch_interp.zig" },
     .{ .prefix = "src/modules/forge/module.zig" },
     .{ .prefix = "src/modules/forge/sensor_events.zig" },
     .{ .prefix = "src/modules/forge/services" },
