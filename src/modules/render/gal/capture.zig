@@ -1,9 +1,9 @@
 //! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! GAL frame-capture helper — Phase 0 / M0.5 (item 2).
+//! GAL frame-capture helper.
 //!
 //! Reads back an already-rendered color texture into host memory and writes
-//! it as a binary PPM (P6) file. Extracted from the M0.4 triangle example so
+//! it as a binary PPM (P6) file. Extracted from the triangle example so
 //! the staging-buffer readback + PPM-encoding boilerplate lives once on the
 //! public GAL surface instead of being hand-rolled by every consumer
 //! (cf. `engine-zig-conventions.md` §13 surface coverage — the triangle

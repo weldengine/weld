@@ -1,15 +1,14 @@
-//! RenderPass Vulkan — Phase 0 / M0.4.
+//! RenderPass Vulkan.
 //!
-//! Phase 0: the Vulkan RenderPasses are created **on demand** during
+//! The Vulkan RenderPasses are created **on demand** during
 //! `CommandEncoder.beginRenderPass` from a GAL `RenderPassDescriptor`.
 //! This is inefficient compared to a by-signature cache
 //! (color_targets + depth_format + load/store ops), but sufficient for
-//! the Phase 0 triangle. Phase 1+: hashed `(formats + ops)` cache →
-//! reuse.
+//! the triangle; a hashed `(formats + ops)` cache would give reuse.
 //!
 //! The corresponding framebuffers are created transient for the duration
-//! of the pass (unless the caller goes directly through VK_KHR_dynamic_rendering
-//! — Phase 1+).
+//! of the pass, unless the caller goes directly through
+//! VK_KHR_dynamic_rendering.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -90,7 +89,7 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     if (descriptor.depth_stencil_attachment) |d| {
         if (n_attach >= max_attachments) return error.Unsupported;
         const view = texture_mod.lookupView(device, d.view) orelse return error.InvalidArgument;
-        // Phase 0: expected depth format D32_SFLOAT (cf. brief §Notes decision 5).
+        // Expected depth format: D32_SFLOAT.
         const format = vk.Format.d32_sfloat;
         attachments[n_attach] = .{
             .flags = .empty,
@@ -137,7 +136,7 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     // synchronization-validation reports a WRITE_AFTER_READ hazard at submit.
     // The raw editor blit carried this dependency; the GAL render pass must
     // too, for every swapchain consumer (and it is harmless for offscreen
-    // targets). Frozen by E7 (C0.5).
+    // targets). Frozen (C0.5).
     const external_dep: vk.SubpassDependency = .{
         .src_subpass = vk.SUBPASS_EXTERNAL,
         .dst_subpass = 0,
@@ -161,7 +160,7 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     errdefer device.vk_device.destroyRenderPass(rp, null);
 
     // Extent — we take the dimension of the first color attachment texture
-    // (all attachments must match in Phase 0).
+    // (all attachments must match).
     if (descriptor.color_attachments.len > 0) {
         const first_view = descriptor.color_attachments[0].view;
         if (lookupViewExtent(device, first_view)) |e| extent = e;

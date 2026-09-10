@@ -1,4 +1,4 @@
-//! No-op stubs shared by the Null GAL backend — Phase 0 / M0.4.
+//! No-op stubs shared by the Null GAL backend.
 //!
 //! The Null backend serves two purposes:
 //!
@@ -20,7 +20,7 @@ const types = @import("../types.zig");
 const escape = @import("../escape_hatches.zig");
 
 /// Monotonic handle counter. Shared by all resource types (a single
-/// numeric space suffices in Phase 0; each type has its own tag via the
+/// numeric space suffices; each type has its own tag via the
 /// `extern struct` wrapping).
 pub const HandleCounter = struct {
     next: u64 = 1,

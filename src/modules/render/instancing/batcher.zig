@@ -1,9 +1,9 @@
-//! CPU-side ECS instancing batcher — Phase 0 / M0.4.
+//! CPU-side ECS instancing batcher.
 //!
 //! Without batching, 100 k entities at 60 FPS is ruled out — the CPU/driver
-//! overhead per drawcall caps at ~5-15 k drawcalls/frame (brief §Notes decision 9).
+//! overhead per drawcall caps at ~5-15 k drawcalls/frame.
 //!
-//! Phase 0 algorithm:
+//! The algorithm:
 //! 1. For each entity (Mesh, MaterialInstance, Transform), group by
 //!    the key `(mesh_id, material_id)` via `std.HashMap`.
 //! 2. For each bucket, collect the `Transform`s into a contiguous
@@ -13,15 +13,15 @@
 //! 4. Emit a single instanced drawcall per bucket (`drawIndexed` with
 //!    `instance_count = bucket.transforms.len`).
 //!
-//! Perf target (brief §Acceptance criteria > Tests):
+//! Perf target:
 //! - 100 000 entities over 100 distinct (mesh, material) → ≤ 100 drawcalls
 //!
-//! Phase 1+: GPU-driven culling + indirect draw (cf. brief §Out-of-scope).
+//! GPU-driven culling with indirect draw is what replaces this CPU path.
 
 const std = @import("std");
 
 /// Mesh identifier (32 bits — enough for 4 billion unique meshes
-/// per project). Phase 0: fed by the asset pipeline, alias `u32`.
+/// per project). Fed by the asset pipeline; an alias of `u32`.
 pub const MeshId = u32;
 
 /// Material instance identifier (32 bits).
@@ -35,13 +35,13 @@ pub const Transform = extern struct {
     _padding0: f32 = 0,
     /// Quaternion (x, y, z, w).
     rotation: [4]f32 = .{ 0, 0, 0, 1 },
-    /// Uniform scale — Phase 0 simplification. Phase 1+: Vec3.
+    /// Uniform scale — a simplification; a Vec3 would be the general form.
     scale: f32 = 1,
     _padding1: [3]f32 = .{ 0, 0, 0 },
 };
 
 /// Entity as seen by the batcher (extracted by the pre-render ECS
-/// system — Phase 0 the caller builds this array manually).
+/// system — the caller builds this array manually).
 pub const Entity = struct {
     mesh: MeshId,
     material: MaterialId,
@@ -91,8 +91,8 @@ pub const Batcher = struct {
     /// Buckets by BucketKey.inner. Incremental allocation.
     buckets: std.AutoHashMapUnmanaged(u64, Bucket) = .empty,
     /// Bucket emission order after front-to-back sorting.
-    /// Indices into `buckets.values()` — Phase 0 uses a
-    /// simpler approach: we extract the buckets into `sorted_keys`.
+    /// Indices into `buckets.values()` — the simpler approach taken here
+    /// extracts the buckets into `sorted_keys`.
     sorted_keys: std.ArrayListUnmanaged(u64) = .empty,
     stats: Stats = .{},
 
@@ -122,9 +122,9 @@ pub const Batcher = struct {
         self.stats = .{};
     }
 
-    /// Adds an entity to the batch. Phase 0: the caller calls this
-    /// method for each post-culling visible entity. Phase 1+: GPU
-    /// culling eliminates this CPU-side step.
+    /// Adds an entity to the batch. The caller calls this method for each
+    /// post-culling visible entity; GPU culling would eliminate this
+    /// CPU-side step.
     pub fn submit(self: *Batcher, entity: Entity) std.mem.Allocator.Error!void {
         const key = BucketKey.pack(entity.mesh, entity.material);
         const packed_key: u64 = @bitCast(key);

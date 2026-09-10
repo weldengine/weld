@@ -1,12 +1,12 @@
-//! Depth Prepass — Phase 0 / M0.4.
+//! Depth Prepass.
 //!
-//! First pass of the Phase 0 render graph (cf. brief §Scope).
+//! First pass of the render graph.
 //! Writes only the D32_SFLOAT depth buffer (no stencil). The
 //! forward opaque that follows reads this depth buffer via depth test on +
 //! depth write off (early-Z).
 //!
-//! Phase 1+: replaced by the V-Buffer pass (cf. `engine-render.md` §4).
-//! The slot remains for tests / legacy scenes compatibility.
+//! The V-Buffer pass (cf. `engine-render.md` §4) is what replaces it; the
+//! slot remains for tests and legacy-scene compatibility.
 
 const std = @import("std");
 const gal = @import("../../gal/root.zig");
@@ -14,18 +14,15 @@ const pass_mod = @import("../pass.zig");
 
 /// Configuration of the depth prepass.
 pub const Config = struct {
-    /// Depth buffer texture (D32_SFLOAT format expected, cf. brief).
+    /// Depth buffer texture (D32_SFLOAT format expected).
     depth_target: gal.types.TextureHandle,
-    /// Depth clear value (1.0 by default — reverse-Z = 0.0 Phase 1+).
+    /// Depth clear value (1.0 by default; reverse-Z would be 0.0).
     depth_clear: f32 = 1.0,
     /// Storage the returned `Pass.reads`/`Pass.writes` point at.
     ///
-    /// M1.1.14 — before this field, `buildPass` returned slices of an ANONYMOUS
-    /// LITERAL built in its own stack frame, so the `Pass` carried a dangling
-    /// pointer the moment it returned. Measured: `writes.ptr` was a stack address,
-    /// the access mask read `false` immediately after the call, and a fresh call at
-    /// the SAME address read `true`. Live since M0.4 and invisible because nothing
-    /// compiled this file's tests until the M1.1.14 dead-test sweep.
+    /// Without this field, `buildPass` would return slices of an ANONYMOUS
+    /// LITERAL built in its own stack frame, so the `Pass` would carry a
+    /// dangling pointer the moment it returned.
     ///
     /// The config owns it and introduces NO new lifetime constraint: the config is
     /// already the pass's `ctx`, so it had to outlive the pass by construction.
@@ -50,15 +47,14 @@ pub fn buildPass(config: *Config) pass_mod.Pass {
     };
 }
 
-/// Pass body — Phase 0: no-op (the brief states that the actual
-/// rendering of objects happens Phase 1+ via the V-Buffer). The pass exists
-/// to wire the depth buffer into the graph and exercise barrier insertion.
+/// Pass body — a no-op: the actual rendering of objects belongs to the
+/// V-Buffer pass. This one exists to wire the depth buffer into the graph
+/// and exercise barrier insertion.
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0: no drawcalls — the depth buffer is just cleared by
-    // the render pass load op. The Phase 0 instancing bench uses
-    // the forward directly (without prepass) — this pass is exercised by
-    // the barrier insertion tests.
+    // No drawcalls — the depth buffer is just cleared by the render pass
+    // load op. The instancing bench uses the forward directly (without
+    // prepass), so this pass is exercised by the barrier-insertion tests.
 }
 
 test "depth_prepass: buildPass populates writes" {

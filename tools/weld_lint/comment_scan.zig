@@ -148,7 +148,6 @@ pub const Pending = struct {
 pub const pending = [_]Pending{
     .{ .prefix = "src/modules/asset_pipeline" },
     .{ .prefix = "src/modules/audio" },
-    .{ .prefix = "src/modules/render" },
     .{ .prefix = "src/editor" },
     .{ .prefix = "src/runtime" },
     .{ .prefix = "src/demo_etch_codegen.zig" },

@@ -1,6 +1,6 @@
-//! Null GAL backend — Phase 0 / M0.4.
+//! Null GAL backend.
 //!
-//! No-op implementation of the Phase 0 GAL concepts — used for headless
+//! No-op implementation of the GAL concepts — used for headless
 //! tests in CI and to validate that the interface contract is satisfied
 //! at comptime (cf. `interface.checkBackend`).
 //!
@@ -43,9 +43,9 @@ pub const Device = struct {
 
     pub fn supports(self: *Device, feature: escape.Feature) bool {
         _ = self;
-        // No optional feature declared by the Null backend in Phase 0.
-        // Phase 1+ we could simulate `timeline_semaphore = true` to validate
-        // the escape-hatch tests without Vulkan.
+        // The Null backend declares no optional feature. Simulating
+        // `timeline_semaphore = true` here would let the escape-hatch tests
+        // run without Vulkan.
         return switch (feature) {
             else => false,
         };
@@ -74,8 +74,7 @@ pub const Device = struct {
     }
 
     pub fn createTexture(self: *Device, descriptor: types.TextureDescriptor) types.Error!types.TextureHandle {
-        // Phase 0: sample_count > 1 unsupported (consistent with brief
-        // §Out-of-scope MSAA).
+        // sample_count > 1 is unsupported: no MSAA.
         if (descriptor.sample_count > 1) return error.Unsupported;
         return .{ .inner = self.handles.next_id() };
     }
@@ -208,8 +207,8 @@ pub const Device = struct {
     }
 
     /// Null stub mirror of `Device.getSwapchainImageCount` (cross-backend
-    /// parity, E7/M0.9). The Null backend tracks no per-swapchain state,
-    /// so it reports the Phase-0 default double-buffer count
+    /// parity). The Null backend tracks no per-swapchain state,
+    /// so it reports the default double-buffer count
     /// (`SwapchainDescriptor.min_image_count`'s default of 2) — enough for
     /// the comptime interface check and headless smoke tests; the Null
     /// backend never performs a real present.
@@ -262,15 +261,15 @@ pub const Device = struct {
     }
 
     /// Frees a CommandEncoder allocated by `createCommandEncoder`. A
-    /// required GAL interface method (`interface.required_methods`, E7/M0.9),
+    /// required GAL interface method (`interface.required_methods`),
     /// paired with `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *stubs.CommandEncoder) void {
         self.allocator.destroy(encoder);
     }
 
     /// Read back a rendered color texture and write it as a binary PPM
-    /// file. Thin delegation to the backend-agnostic `gal.capture` helper
-    /// (M0.5 item 2). The Null backend has no real buffer storage, so the
+    /// file. Thin delegation to the backend-agnostic `gal.capture` helper.
+    /// The Null backend has no real buffer storage, so the
     /// readback surfaces `error.Unsupported` at `mapBuffer` — portable
     /// callers can skip capture on the Null backend.
     pub fn captureFrameToPPM(

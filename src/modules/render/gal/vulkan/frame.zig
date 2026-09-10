@@ -1,7 +1,7 @@
-//! Vulkan frame cycle — Phase 0 / M0.4.
+//! Vulkan frame cycle.
 //!
 //! Absorbs the role of the `vk_frame.zig` spike (removed, brief §Removals).
-//! Phase 0 exposes a submission helper (`submit`) that takes a finished
+//! What is exposed is a submission helper (`submit`) that takes a finished
 //! CommandEncoder and a sync pair (wait/signal semaphore + fence) and
 //! submits to the graphics queue.
 //!
@@ -12,7 +12,7 @@
 //! 4. `present(swapchain, image_index, &.{ render_done })`
 //! 5. `waitFence(inflight)` (on the next frame, for a 2-deep pipeline)
 //!
-//! Phase 1+: high-level `drawFrame(graph: *RenderGraph)` helper that orchestrates
+//! A high-level `drawFrame(graph: *RenderGraph)` helper orchestrating
 //! the whole thing from the render graph.
 
 const std = @import("std");
@@ -76,7 +76,7 @@ pub fn submit(
 }
 
 /// One-shot helper: allocates a command buffer, the body is called to
-/// record into it, submits and waits for completion. Phase 0 useful for
+/// record into it, submits and waits for completion. Useful for
 /// staging transfers (e.g. vertex buffer upload).
 pub fn oneShot(
     device: *Device,

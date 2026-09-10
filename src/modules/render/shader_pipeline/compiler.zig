@@ -1,4 +1,4 @@
-//! Shader compiler — Phase 0 / M0.4.
+//! Shader compiler.
 //!
 //! Compiles GLSL shaders into SPIR-V by spawning the `glslc` CLI (consistent
 //! with brief §Notes decision 7: no shaderc/glslang binding, the keeper count
@@ -17,7 +17,7 @@ const std = @import("std");
 /// Global counter to generate unique temp file names.
 var unique_id: std.atomic.Value(u64) = .init(0);
 
-/// Shader stage supported in Phase 0. Phase 1+ extends it (geometry, tessellation,
+/// The supported shader stages. Geometry, tessellation
 /// raygen/closesthit/miss for RT).
 pub const Stage = enum {
     vertex,
@@ -67,7 +67,7 @@ pub const Result = struct {
 /// Returns `error.GlslcNotFound` if glslc is not findable in
 /// PATH — usable as a heuristic to disable hot-reload.
 ///
-/// Phase 0: uses `std.process.run` (Zig 0.16 API). The caller provides
+/// Uses `std.process.run` (Zig 0.16 API). The caller provides
 /// the required `io: std.Io` instance.
 pub fn compile(
     allocator: std.mem.Allocator,
