@@ -1,11 +1,11 @@
 //! Local cooking cache — a directory of `<key>.bin` cooked artifacts.
 //!
 //! Key = BLAKE3-128 hex of `source_hash ++ settings ++ platform`
-//! (brief §E4): the cache invalidates on `source_hash`, the settings, or the
+//! The cache invalidates on `source_hash`, the settings, or the
 //! target platform. A cache hit avoids re-running the (expensive) decode +
 //! cook; the differential is measured in `tests/assets/cache_diff.zig`.
 //!
-//! Only the local tier exists in M0.6 (network/cloud tiers are Phase 2+).
+//! Only the local tier exists; there is no network or cloud tier.
 
 const std = @import("std");
 

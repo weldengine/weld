@@ -1,6 +1,6 @@
 //! PNG decode codec namespace (`codecs/png/`).
 //!
-//! Native in-tree PNG → RGBA8 decoder. Decode-only in M0.6 (no encoder).
+//! Native in-tree PNG → RGBA8 decoder. Decode-only: there is no encoder.
 
 const decode_mod = @import("decode.zig");
 

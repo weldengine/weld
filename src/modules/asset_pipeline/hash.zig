@@ -2,7 +2,7 @@
 //!
 //! `source_hash`, `extracted.blob`, and the cooking-cache key are all
 //! BLAKE3 truncated to 128 bits, rendered as 32 lowercase hex chars
-//! (`engine-asset-pipeline.md §3`, brief §E4). The runtime `.bin` header
+//! (`engine-asset-pipeline.md §3`). The runtime `.bin` header
 //! `hash` field is a u64 — the first 8 bytes of the same digest, read LE.
 
 const std = @import("std");

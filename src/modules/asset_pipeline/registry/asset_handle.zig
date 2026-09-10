@@ -2,7 +2,7 @@
 //!
 //! `AssetHandle` — the 64-bit typed, generation-checked asset reference.
 //!
-//! Layout frozen day 1 (M0.6, brief §Scope). `packed struct(u64)` fixes the
+//! Layout frozen day 1. `packed struct(u64)` fixes the
 //! field order low-to-high: `index` (u32) addresses the registry slot table,
 //! `generation` (u16) detects use-after-unload of a stale handle, `type_tag`
 //! (u16) carries the `AssetType` so a handle can be type-checked without a

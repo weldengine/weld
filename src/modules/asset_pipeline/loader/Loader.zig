@@ -1,24 +1,24 @@
 //! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Async runtime asset loader + lifecycle (M0.6 / E5).
+//! Async runtime asset loader + lifecycle.
 //!
 //! Loads a cooked `.<type>.bin` off the main thread and tracks its lifetime
-//! through the E1 `Registry`. `beginLoad` spawns the file read on a worker
+//! through the `Registry`. `beginLoad` spawns the file read on a worker
 //! via `io.concurrent` (the §8 "worker thread + async I/O" path); the caller
 //! polls `Pending.ready()` and ticks its own loop meanwhile — the load never
 //! blocks the main thread. `finish` registers the result (main thread, the
 //! registry is single-threaded). `load` is the blocking convenience.
 //!
-//! Lifecycle (brief §E5): `load → alloc` (uuid 0 at runtime — the `.bin`
-//! carries no uuid in M0.6); `retain`/`release` for refcount (release at 0
+//! Lifecycle: `load → alloc` (uuid 0 at runtime — the `.bin` carries no
+//! uuid); `retain`/`release` for refcount (release at 0
 //! unloads + frees the payload); `unload` is the forced path reserved for
 //! hot-reload / eviction; `reload` re-reads and swaps the payload in place.
 //!
 //! Byte order: the header is parsed with the portable `RuntimeHeader.read`
-//! (explicit little-endian). M0.6 does NOT take the zero-copy `@ptrCast` /
-//! mmap path, so `RuntimeHeader.read` remains the single byte-order site (the
-//! E1 note holds). A future zero-copy mmap path would add a SECOND
-//! byte-order-dependent path — correct on the LE Phase 0 targets, but it
+//! (explicit little-endian). The zero-copy `@ptrCast` / mmap path is NOT
+//! taken, so `RuntimeHeader.read` remains the single byte-order site. A
+//! future zero-copy mmap path would add a SECOND byte-order-dependent
+//! path — correct on the little-endian targets, but it
 //! means `read` is not the universal single byte-swap point once that path
 //! exists. The two would coexist; neither is claimed as the sole authority.
 //!
@@ -60,7 +60,7 @@ pub const LoadError = error{
     BadMagic,
     /// The header failed structural validation (unsupported version, a
     /// section out of bounds / overflowing) or the data-section hash did not
-    /// match the header hash (M1.1.1-HF1 / D6).
+    /// match the header hash.
     MalformedAsset,
     /// Allocation failed.
     OutOfMemory,
@@ -142,7 +142,7 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
         gpa.free(raw.bin);
         return error.UnknownAssetType;
     };
-    // C3 (M1.1.1-HF2): reserve the payload-map slot BEFORE allocating the
+    // Reserve the payload-map slot BEFORE allocating the
     // registry handle, so the post-alloc insert is infallible. Reserve-then-
     // mutate — on the reservation's OOM, free the buffer and return with NO
     // handle allocated, so there is no undischargeable slot. The old order
@@ -175,7 +175,7 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
 /// `ShortBuffer` / `BadMagic` / `OutOfMemory`) and `FinishError`
 /// (`UnknownAssetType` / `OutOfMemory`). **Pinned**, not inferred, so the
 /// frozen contract cannot silently widen when a callee's set changes; a
-/// Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump
+/// change to it is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump
 /// (cf. C0.5).
 pub fn load(self: *Loader, gpa: std.mem.Allocator, io: std.Io, path: []const u8) (std.Io.ConcurrentError || LoadError || FinishError)!AssetHandle {
     var pending = try self.beginLoad(gpa, io, path);
@@ -224,9 +224,9 @@ pub fn unload(self: *Loader, gpa: std.mem.Allocator, handle: AssetHandle) Regist
 /// `LoadError` from the re-read (`readBin`) plus `OutOfMemory` from the
 /// payload-map insert. **Pinned** named set
 /// `LoadError || error{StaleHandle, AssetTypeMismatch}` (see `load`): a
-/// Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump (cf. C0.5).
+/// change to it is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump (cf. C0.5).
 ///
-/// R7 (M1.1.1-HF3): the re-read `.bin`'s `asset_type` is validated against the
+/// The re-read `.bin`'s `asset_type` is validated against the
 /// slot's `AssetHandle.type_tag` BEFORE any payload mutation — reloading from a
 /// `.bin` of a different category is rejected (its bytes freed) instead of
 /// serving a mismatched payload under the old handle.
@@ -287,7 +287,7 @@ fn readBin(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8
     return .{ .header = header, .bin = bin };
 }
 
-// ─── tests (M1.1.1-HF1 / D6) ────────────────────────────────────────────
+// ─── tests ────────────────────────────────────────────
 
 test "a malformed .bin loads as error.MalformedAsset" {
     const gpa = std.testing.allocator;

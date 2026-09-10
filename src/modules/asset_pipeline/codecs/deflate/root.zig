@@ -1,7 +1,7 @@
 //! DEFLATE / zlib codec namespace (`codecs/deflate/`).
 //!
 //! Native in-tree RFC 1951 inflate + RFC 1950 zlib wrapper. Decode-only in
-//! M0.6; consumed by the PNG codec (E3) and, later, EXR.
+//! Consumed by the PNG codec, and later by EXR.
 
 const inflate_mod = @import("inflate.zig");
 

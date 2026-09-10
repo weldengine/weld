@@ -1,13 +1,13 @@
 //! WAV (RIFF PCM) decode.
 //!
 //! Lives in `importers/` rather than a `codecs/wav/` of its own — RIFF PCM
-//! is trivial (brief §Notes — WAV location). M0.6 ships the decoder here;
-//! the import → intermediate orchestration is added in E4.
+//! is trivial The decoder lives here;
+//! the import → intermediate orchestration sits above it.
 //!
 //! Supports linear PCM (`audio_format == 1`); compressed WAV is out of scope.
 //!
-//! E4 adds `import` (source → intermediate `AudioClip` doc + PCM blob) atop
-//! the E3 `decode`.
+//! `import` (source → intermediate `AudioClip` doc + PCM blob) sits atop
+//! `decode`.
 
 const std = @import("std");
 const format = @import("../format/root.zig");
@@ -38,7 +38,7 @@ pub const Audio = struct {
     sample_rate: u32,
     /// Channel count (interleaved in `data`).
     channels: u16,
-    /// Bits per sample (8 or 16 in M0.6).
+    /// Bits per sample (8 or 16).
     bits_per_sample: u16,
     /// Raw interleaved PCM bytes.
     data: []u8,

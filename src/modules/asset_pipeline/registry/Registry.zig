@@ -3,12 +3,12 @@
 //! Asset registry — owns the slot table that `AssetHandle`s index into,
 //! plus per-slot refcount and generation.
 //!
-//! M0.6 scope (brief §Scope): handle allocation, refcount, and a generation
+//! Handle allocation, refcount, and a generation
 //! bump on unload so a stale handle is detectable. Mirrors the ECS
 //! `EntityIdentityStore` (slot table + free-index stack + generation),
 //! adding the refcount and the `type_tag` carried by `AssetHandle`. Payload
 //! binding (the loaded bytes) is deliberately out of scope here — it lands
-//! with the async loader (E5).
+//! with the async loader.
 //!
 //! Unmanaged: the registry stores no allocator (Asset Pipeline is not on the
 //! `engine-zig-conventions.md` §3 allocator-storing whitelist); the
@@ -36,9 +36,9 @@ const Slot = struct {
     refcount: u32,
     /// `true` while the slot points at a live asset.
     alive: bool,
-    /// Stable asset identity (UUIDv7 as u128). Stored only in M0.6 —
-    /// references resolve by path; uuid-based resolution is Phase 1+. 0 when
-    /// unknown (the runtime `.bin` carries no uuid in M0.6).
+    /// Stable asset identity (UUIDv7 as u128). Stored only —
+    /// references resolve by path; there is no uuid-based resolution. 0 when
+    /// unknown (the runtime `.bin` carries no uuid).
     uuid: u128,
 };
 
@@ -49,7 +49,7 @@ pub const Error = error{
     StaleHandle,
     /// The slot table or free list could not grow.
     OutOfMemory,
-    /// R9 (M1.1.1-HF3): `retain` would overflow the `u32` refcount (it is already
+    /// `retain` would overflow the `u32` refcount (it is already
     /// at `maxInt(u32)`). Widens the pinned `Registry.Error` — a change tracked by
     /// `WELD_ASSET_PIPELINE_PROTOCOL_VERSION`.
     ReferenceCountOverflow,
@@ -89,7 +89,7 @@ pub fn alloc(self: *Registry, gpa: std.mem.Allocator, asset_type: AssetType) Err
 }
 
 /// Like `alloc`, but records the asset's stable `uuid` in the slot. The uuid
-/// is stored only (M0.6 resolves by path); use `alloc` when no uuid is known.
+/// is stored only (resolution is by path); use `alloc` when no uuid is known.
 pub fn allocWithUuid(self: *Registry, gpa: std.mem.Allocator, asset_type: AssetType, uuid: u128) Error!AssetHandle {
     const tag = asset_type.toU16();
     if (self.free_indices.pop()) |idx| {
@@ -188,7 +188,7 @@ fn liveIndex(self: *const Registry, handle: AssetHandle) ?u32 {
 
 /// Mark a slot dead, bump its generation, and push it onto the free list.
 ///
-/// R9 (M1.1.1-HF3): a slot whose generation would WRAP is PERMANENTLY retired —
+/// A slot whose generation would WRAP is PERMANENTLY retired —
 /// marked dead but never returned to the free list. Recycling it would reset the
 /// generation to 0 and let a stale handle (generation 0) resolve against a fresh
 /// asset (the ABA hazard). This is a deliberate, bounded, documented leak: one

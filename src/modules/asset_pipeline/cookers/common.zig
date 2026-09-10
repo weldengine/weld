@@ -1,7 +1,7 @@
 //! Shared cook assembly: lay out a runtime `.<type>.bin` as
 //! `[40-byte header][metadata][data]`.
 //!
-//! The header is the E1-frozen `RuntimeHeader`, written via its explicit
+//! The header is the frozen `RuntimeHeader`, written via its explicit
 //! little-endian `writeTo`/`toBytes` (no `@ptrCast` on write — the on-disk
 //! bytes are produced field-by-field so the format is endianness-defined).
 

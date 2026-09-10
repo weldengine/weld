@@ -1,11 +1,11 @@
 //! UUIDv7 — the stable per-asset identity (RFC 9562). Pure Zig, no C binding.
 //!
-//! Used as the `uuid` field of `<type>.asset.etch` (brief §E4 complement):
+//! Used as the `uuid` field of `<type>.asset.etch` —
 //! generated once at first import and preserved across re-imports
 //! (rename/move-safe). Distinct from `source_hash`, which *changes* when the
-//! source changes; the uuid is stable for life. In M0.6 the uuid is stored
+//! source changes; the uuid is stable for life. The uuid is stored
 //! only — cross-asset references still resolve by path (uuid-based
-//! resolution / rename-propagation is Phase 1+).
+//! there is no resolution or rename-propagation).
 //!
 //! Layout (128 bits, big-endian on the wire): 48-bit unix-ms timestamp,
 //! 4-bit version (0x7), 12-bit rand_a, 2-bit variant (0b10), 62-bit rand_b.

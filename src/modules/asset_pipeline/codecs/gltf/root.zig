@@ -1,7 +1,7 @@
 //! glTF static-mesh decode codec namespace (`codecs/gltf/`).
 //!
 //! Native in-tree glTF 2.0 static decode (JSON via `std.json`). Static
-//! geometry only in M0.6 — no skinning/animation/morph (brief §Out-of-scope).
+//! Geometry only — no skinning, animation or morph.
 
 const decode_mod = @import("decode.zig");
 

@@ -19,7 +19,7 @@ pub const Error = inflate_mod.Error || error{
 
 /// Decompress a zlib stream into a freshly allocated, caller-owned slice.
 /// Validates the header and the ADLER32 trailer. `max_out` bounds the inflated
-/// size (R3, M1.1.1-HF3): production beyond it is `error.OutputLimitExceeded`
+/// size: production beyond it is `error.OutputLimitExceeded`
 /// and the buffer never exceeds it — the decompression-bomb guard. The caller
 /// supplies the exact expected size (the PNG codec derives it from IHDR).
 pub fn decompress(gpa: std.mem.Allocator, src: []const u8, max_out: usize) Error![]u8 {
@@ -29,7 +29,7 @@ pub fn decompress(gpa: std.mem.Allocator, src: []const u8, max_out: usize) Error
     if ((cmf & 0x0f) != 8) return error.BadZlibHeader; // CM must be 8 (deflate)
     if ((cmf >> 4) > 7) return error.BadZlibHeader; // CINFO: window ≤ 32 KiB
     if (((@as(u16, cmf) << 8) | flg) % 31 != 0) return error.BadZlibHeader; // FCHECK
-    if ((flg & 0x20) != 0) return error.BadZlibHeader; // FDICT unsupported in M0.6
+    if ((flg & 0x20) != 0) return error.BadZlibHeader; // FDICT unsupported
 
     const body = src[2 .. src.len - 4];
     const out = try inflate_mod.inflate(gpa, body, max_out);
