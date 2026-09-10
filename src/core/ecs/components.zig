@@ -1,6 +1,6 @@
-//! S1 component definitions — `Transform` and `Velocity` POD `extern struct`.
+//! Canonical component definitions — `Transform` and `Velocity` POD `extern struct`.
 //!
-//! Layout follows the suggested baseline of `briefs/S1-mini-ecs.md` (Notes):
+//! Layout:
 //! pos/rot/scale (resp. linear/angular) each on their own 16-byte lane via
 //! field-level `align(16)`. Total sizes are 48 (Transform) and 32 (Velocity)
 //! bytes, both 16-byte aligned — friendly to `@Vector(4, f32)` SIMD and to
@@ -13,9 +13,9 @@ const entity_mod = @import("entity.zig");
 
 /// Canonical generational entity identifier (`packed struct(u64)`,
 /// `(index, generation)` low-to-high). The 8-byte size assertion below
-/// pins the wire layout S1 committed to; the generational halves are an
-/// M0.1 / E1 addition (cf. `briefs/M0.1-ecs-full.md` E1 — Identity
-/// foundations) that closes the S1 debts D-S1-1 (slot reuse) and D-S1-2
+/// pins the committed wire layout; the generational halves are an
+/// generational addition that closes slot reuse and
+/// stale-handle detection
 /// (generational indices). See `entity.zig` for the type definition and
 /// the matching `EntityIdentityStore`.
 pub const EntityId = entity_mod.EntityId;
@@ -30,7 +30,7 @@ pub const Transform = extern struct {
 };
 
 /// Linear and angular velocity of an entity (units per second / radians per
-/// second). The S1 bench body integrates `linear` against `Transform.pos`.
+/// second). The ECS bench body integrates `linear` against `Transform.pos`.
 pub const Velocity = extern struct {
     linear: [3]f32 align(16) = .{ 0, 0, 0 },
     _pad0: f32 = 0,

@@ -1,8 +1,8 @@
 //! `.scene.bin` runtime loader — Tier 0 (`engine-scene-serialization.md` §4,
-//! "Chargement (loader runtime — M1.0.5)").
+//! § "Chargement (loader runtime)").
 //!
 //! Reads a cooked `.scene.bin` back into a live ECS `World`. It **reuses
-//! `accessor.zig` verbatim** (the zero-copy read half of the M1.0.4 codec) and
+//! `accessor.zig` verbatim** (the zero-copy read half of the codec) and
 //! layers the runtime-only steps on top: on-disk-identity → runtime remap,
 //! per-entity instantiation, the UUID→handle map, and the `on_spawned`
 //! lifecycle. No new ECS storage primitive — the loader assembles existing
@@ -10,20 +10,17 @@
 //! `world.addResource`).
 //!
 //! Tier discipline: imports `weld_core` internals only — never `weld_etch`
-//! (`ARCH-013` / the M1.0.4 brief Notes). The cook driver's Etch coupling
+//! (`ARCH-013`). The cook driver's Etch coupling
 //! lives in `src/etch/scene_cook.zig`; the loader consumes only the neutral
 //! byte image.
 //!
-//! ## Stages (gate-split, see `briefs/M1.0.5-scene-load.md`)
-//! * **E1 (here)** — open + integrity check + schema-identity remap. The two
-//!   units below (`openVerified`, `buildSchemaRemap`) are the front of the load
-//!   pipeline; both operate on a borrowed byte image so they are unit-testable
-//!   without touching the filesystem. They form the clean internal boundary the
-//!   E2 instantiation step builds on (and a future bulk path would swap behind).
-//! * **E2** — `loadScene(world, gpa, path)`: the `fs.mmapFile` wrapper, the
-//!   per-entity instantiation loop, the UUID map, two-phase `on_spawned`, and
-//!   the `LoadResult` that owns the mmap.
-//! * **E3** — resource loading (POD bytes + interned `string` fields).
+//! The load is three stages, and the first two are separable on purpose:
+//! `openVerified` and `buildSchemaRemap` operate on a BORROWED byte image, so
+//! they are unit-testable without touching the filesystem and a future bulk path
+//! can swap in behind them. `loadScene` then wraps `fs.mmapFile`, runs the
+//! per-entity instantiation loop, builds the UUID map, fires `on_spawned` in two
+//! phases, and returns the `LoadResult` that owns the mmap. Resource loading —
+//! POD bytes plus interned `string` fields — closes it.
 
 const std = @import("std");
 
@@ -51,7 +48,7 @@ pub const OpenError = format.ReadError || error{CorruptScene} || StructureError;
 
 /// Errors from mapping on-disk schema identity to the runtime registry.
 /// `UnknownComponent`: a scene type the running program never registered
-/// (Phase 1 has no auto-registration from the on-disk `SchemaEntry` —
+/// (there is no auto-registration from the on-disk `SchemaEntry` —
 /// `engine-scene-serialization.md` §4). `SchemaMismatch`: the type is
 /// registered but its size/alignment diverge from the cooked layout, so
 /// byte-copying its columns into storage would corrupt it.
@@ -61,11 +58,11 @@ pub const RemapError = error{ UnknownComponent, SchemaMismatch } || std.mem.Allo
 /// e.g. an entity whose parent ordinal points past the UUID table. **Distinct
 /// from `error.CorruptScene`** (a content-hash mismatch): the bytes are intact
 /// (the cook's `XxHash64` matches), the scene structure is not. A well-formed
-/// M1.0.4 cook never produces this — it is a defensive guard on external input.
+/// The cook never produces this — it is a defensive guard on external input.
 pub const StructureError = error{MalformedScene};
 
 /// Resolves an extension prefab name (from the scene's Prefab ID Table) to its
-/// cooked `.prefab.bin` bytes at load (M1.0.6 E6) — the runtime twin of the
+/// cooked `.prefab.bin` bytes at load — the runtime twin of the
 /// cook's `BaseResolver`. The bytes must outlive the load. Null = unknown name
 /// (the loader errors `UnknownExtension`). Wired to a project/asset registry at
 /// runtime; tests wire it to an in-process buffer.
@@ -104,7 +101,7 @@ pub fn openVerified(bytes: []const u8) OpenError!Accessor {
 }
 
 /// Build the schema-remap table: on-disk Schema-Registry index → runtime
-/// `ComponentId`. Phase-1 schema identity is the component **name**
+/// `ComponentId`. Schema identity is the component **name**
 /// (`engine-ecs-internals.md` §10): each on-disk schema's name is resolved
 /// through the world's registry (`Registry.idOf`), and its cooked
 /// `size`/`alignment` are validated against the runtime layout so a scene
@@ -118,7 +115,7 @@ pub fn openVerified(bytes: []const u8) OpenError!Accessor {
 ///   - `error.UnknownComponent` — a schema name the world never registered
 ///   - `error.SchemaMismatch` — registered, but size/alignment diverge
 ///   - `error.MalformedScene` — two schema entries resolve to the same
-///     runtime `ComponentId` (duplicate schema names on disk; R11(b), M1.1.1-HF3)
+///     runtime `ComponentId` (duplicate schema names on disk)
 ///   - `error.OutOfMemory`
 pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Accessor) (RemapError || StructureError)![]ComponentId {
     const count = acc.schemaCount();
@@ -148,7 +145,7 @@ pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Access
     return remap;
 }
 
-// ─── E2 — instantiation + UUID map + two-phase on_spawned ────────────────────
+// ─── Instantiation + UUID map + two-phase on_spawned ───────────────────────
 
 /// 16-byte UUID → runtime `EntityId`, built as the scene loads. Keyed on the
 /// raw UUID bytes (`Archetype.entityUuid`) so the accessor stays untouched; a
@@ -165,7 +162,7 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
 /// the map, and closes `mmap` if present). Loaded resource `string` blocks are
-/// refcounted and owned by their `StringSlot`s (M1.1.1-HF1 / D1), not by the
+/// refcounted and owned by their `StringSlot`s, not by the
 /// `LoadResult` — the resource owner reclaims them at teardown.
 pub const LoadResult = struct {
     spawned: []EntityId,
@@ -199,22 +196,22 @@ fn uuidCount(acc: Accessor) u32 {
     return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
 }
 
-// ─── D2 — resource-write transaction (snapshot / commit / rollback) ──────────
+// ─── Resource-write transaction (snapshot / commit / rollback) ─────────────
 
-/// One resource the loader wrote, recorded for commit or rollback (M1.1.1-HF1 /
-/// D2). `snapshot` is the resource's full byte image captured immediately BEFORE
-/// the loader overwrote its string fields — its slots point at the *old* blocks.
-/// A `null` snapshot marks a resource the loader ADDED fresh (rollback removes it
-/// rather than restoring). The load is transactional: on success `commitResources`
-/// decrefs the replaced old blocks; on any post-first-spawn error `rollbackResources`
-/// decrefs the new blocks and restores/removes each touched resource.
+/// One resource the loader wrote, recorded for commit or rollback. `snapshot` is the
+/// resource's full byte image captured immediately BEFORE the loader overwrote its
+/// string fields — its slots point at the *old* blocks. A `null` snapshot marks a
+/// resource the loader ADDED fresh (rollback removes it rather than restoring). The
+/// load is transactional: on success `commitResources` decrefs the replaced old blocks;
+/// on any post-first-spawn error `rollbackResources` decrefs the new blocks and
+/// restores/removes each touched resource.
 const ResourceEdit = struct {
     cid: ComponentId,
     snapshot: ?[]u8,
     /// The resource's dirty bit BEFORE the loader touched it, captured at
     /// snapshot time (before the first `getMutResource`, which sets it true).
     /// Restored on rollback so a rejected load leaves no spurious
-    /// `when resource T changed` (M1.1.1-HF2 C6). Moot on commit (a committed
+    /// `when resource T changed`. Moot on commit (a committed
     /// write is genuinely dirty) and for a freshly-added resource (rollback
     /// removes it).
     dirty_before: bool,
@@ -235,7 +232,7 @@ fn decrefResourceStrings(world: *const World, gpa: std.mem.Allocator, cid: Compo
     }
 }
 
-/// Commit the loader's resource writes (M1.1.1-HF1 / D2). For each resource that
+/// Commit the loader's resource writes. For each resource that
 /// REPLACED a prior value, decref the old string blocks the snapshot captured —
 /// they are no longer referenced (the live slot holds the new block). The new
 /// blocks stay live, owned by the resource slots (freed by the resource owner's
@@ -251,7 +248,7 @@ fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *Resour
     journal.deinit(gpa);
 }
 
-/// Roll back the loader's resource writes (M1.1.1-HF1 / D2), best-effort under
+/// Roll back the loader's resource writes, best-effort under
 /// OOM. For each touched resource, decref the NEW string blocks it installed (read
 /// from the live buffer), then restore the snapshot (a replaced resource) or remove
 /// it (a freshly-added one). Every touched resource is left holding its prior bytes
@@ -285,7 +282,7 @@ fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJo
 }
 
 /// Load a cooked `.scene.bin` byte image into `world`. The byte-level core
-/// (no filesystem): validate + remap (E1), instantiate every entity, then fire
+/// (no filesystem): validate + remap, instantiate every entity, then fire
 /// the `on_spawned` lifecycle in a second pass. The returned `LoadResult` has a
 /// null `mmap` — the caller owns `bytes`.
 ///
@@ -293,7 +290,7 @@ fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJo
 /// before any `on_spawned` fires** (phase 1 spawns via `spawnDynamicWithValues`,
 /// which dispatches no observers; phase 2 fires `on_spawned` per entity).
 ///
-/// Errors: the E1 set (`OpenError`/`RemapError`), `error.MalformedScene`
+/// Errors: `OpenError` / `RemapError`, `error.MalformedScene`
 /// (`StructureError`) for a structurally-invalid scene (e.g. an out-of-range
 /// parent ordinal), allocation failure, plus anything an `on_spawned` observer
 /// propagates (hence the open error set).
@@ -333,10 +330,10 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     try resolveCrossRefs(world, acc, remap, uuid_to_entity);
     // Resources before extensions/on_spawned so a hook/rule can read them.
     try loadResources(world, gpa, acc, remap, &journal);
-    // Extension activation (M1.0.6 E6): add each active extension's components +
+    // Extension activation: add each active extension's components +
     // fire the `on_attach` seam. After resources, before `on_spawned`.
     try applyExtensions(world, gpa, acc, uuid_to_entity, ext_resolver);
-    // M1.0.9 — drain the structural commands the `on_attach` hooks queued, AFTER
+    // Drain the structural commands the `on_attach` hooks queued, AFTER
     // the whole activation pass and BEFORE `on_spawned`, so a spawn observer sees
     // a fully-materialised entity. `dispatchSpawnLifecycle` also opens with a
     // drain; this explicit one keeps the ordering contract local to the load
@@ -376,16 +373,14 @@ pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8, ext_re
     return result;
 }
 
-/// Phase 1 — instantiate every entity of every archetype block. Maps each
-/// block's on-disk schema-index columns to runtime `ComponentId`s (the E1
-/// remap), gathers each slot's raw component bytes (borrowed, on-disk column
-/// order — `spawnDynamicWithValues` reorders by id AND PARTITIONS BY STORAGE
-/// MODE, so an id named by the block may never reach an archetype at all),
-/// spawns the entity, records
-/// `uuid → eid`, and appends to `spawned`. Validates each parent ordinal is
-/// `no_parent` or in `[0, uuidCount)` (else `error.MalformedScene`) but
-/// **applies no parent link** (no runtime hierarchy component exists yet —
-/// owned by the hierarchy milestone).
+/// Instantiate every entity of every archetype block. Maps each block's on-disk
+/// schema-index columns to runtime `ComponentId`s (the schema remap), gathers each
+/// slot's raw component bytes (borrowed, on-disk column order —
+/// `spawnDynamicWithValues` reorders by id AND PARTITIONS BY STORAGE MODE, so an id
+/// named by the block may never reach an archetype at all), spawns the entity, records
+/// `uuid → eid`, and appends to `spawned`. Validates each parent ordinal is `no_parent`
+/// or in `[0, uuidCount)` (else `error.MalformedScene`) but **applies no parent link**
+/// (no runtime hierarchy component exists yet — owned by the hierarchy milestone).
 fn instantiate(
     world: *World,
     gpa: std.mem.Allocator,
@@ -397,7 +392,7 @@ fn instantiate(
     const ucount = uuidCount(acc);
     const arch_count = acc.archetypeCount();
 
-    // C2 (M1.1.1-HF2): pre-reserve both maps to the load's totals up front so
+    // Pre-reserve both maps to the load's totals up front so
     // every per-entity insert below is assume-capacity (infallible). A
     // post-spawn OOM must never strand a just-spawned entity outside `spawned`
     // (the slice the `loadFromBytes` rollback errdefer despawns) — such an
@@ -441,7 +436,7 @@ fn instantiate(
 
         var slot: usize = 0;
         while (slot < block.entity_count) : (slot += 1) {
-            // C2b (M1.1.1-HF2): validate the entity's own UUID ordinal BEFORE the
+            // Validate the entity's own UUID ordinal BEFORE the
             // spawn — mirroring the parent-ordinal / cross-ref / extension checks.
             // A malformed (hash-valid) scene could otherwise dereference out of
             // the UUID table via `uuidAt`, and inserting > `uuidCount` distinct
@@ -472,7 +467,7 @@ fn instantiate(
     }
 }
 
-/// Resolve the Cross-references Table (M1.0.6 E4): patch each cooked `Entity`
+/// Resolve the Cross-references Table: patch each cooked `Entity`
 /// field slot (written `EntityId.dead` at cook) to the referenced entity's
 /// runtime handle. Per entry: map source/target UUID ordinals → handles via
 /// `uuid_to_entity`, map the file-local schema index → runtime `ComponentId` via
@@ -501,12 +496,12 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
     }
 }
 
-/// Extension activation (M1.0.6 E6) — for each entity in the Entity Extensions
+/// Extension activation — for each entity in the Entity Extensions
 /// Table, in table order, activate each of its extensions: resolve the extension
 /// `.prefab.bin` by name (Prefab ID Table → `ExtensionResolver`), add its
 /// components, and fire the `on_attach` Tier-0 seam. **No-op when the scene has no
 /// active extensions** (so an extension-free scene needs no resolver). The
-/// `on_attach` hook EXECUTION (M1.0.9) runs inside the registered seam's callback
+/// `on_attach` hook EXECUTION runs inside the registered seam's callback
 /// (the Etch bridge); here `dispatchOnAttach` fires it with the cooked hook text.
 fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
     const count = acc.extensionsCount();
@@ -531,11 +526,11 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
     }
 }
 
-/// The single archetype block of a mono-entity extension prefab (R12(c),
-/// M1.1.1-HF3): STRICT cardinality — `total == 0` → `error.EmptyExtension`,
-/// `total > 1` → `error.MultiEntityExtensionUnsupported`, else the one archetype
-/// whose `entity_count == 1`. The single source of the mono-entity contract,
-/// shared by `activateExtension` and `deactivateExtension`.
+/// The single archetype block of a mono-entity extension prefab. STRICT cardinality —
+/// `total == 0` → `error.EmptyExtension`, `total > 1` →
+/// `error.MultiEntityExtensionUnsupported`, else the one archetype whose
+/// `entity_count == 1`. The single source of the mono-entity contract, shared by
+/// `activateExtension` and `deactivateExtension`.
 fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
     var found: ?Accessor.Archetype = null;
     var total: u64 = 0; // u64 so the sum cannot wrap (entity_counts are u32)
@@ -550,8 +545,8 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
     return found.?; // total == 1 ⇒ exactly one archetype has entity_count == 1
 }
 
-/// Activate one extension on one entity (M1.0.6 E6; **R6 atomicity rewrite,
-/// M1.1.1-HF3**) — the shared bytes-taking path reused by load
+/// Activate one extension on one entity — the shared bytes-taking path
+/// reused by load
 /// (`applyExtensions`), the runtime `activate_extension` entry, and the
 /// interpreter's deferred B1 flush. Structured reserve-then-mutate so it is
 /// all-or-nothing under OOM:
@@ -568,7 +563,7 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 /// On any failure through step 3 the entity is left untouched (no partial
 /// extension — the defect this rewrite closes). The activation is committed
 /// BEFORE the hook; a hook error propagates but does not unwind it (same contract
-/// as load-time hooks, M1.1.1-HF1 / D2).
+/// as load-time hooks).
 ///
 /// Conflict policy: a component the entity already carries is rejected with
 /// `error.ExtensionComponentConflict` — the normative runtime policy for additive
@@ -611,14 +606,14 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
 
     // Step 4 — record the extension (infallible; takes ownership of `owned`),
     // then fire `on_attach`. The record is BEFORE the hook so a hook querying
-    // `has_extension` / `active_extensions` sees it (M1.0.9).
+    // `has_extension` / `active_extensions` sees it.
     world.commitEntityExtension(gpa, entity, owned);
     committed = true;
     const on_attach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_attach else null;
     try world.dispatchOnAttach(entity, name, on_attach_text);
 }
 
-/// M1.0.9 — runtime extension activation entry, reached from Etch
+/// Runtime extension activation entry, reached from Etch
 /// `entity.activate_extension("X")` (the interpreter resolves the name through
 /// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
 /// path (atomic prevalidate → reserve → grouped add → record → `on_attach`).
@@ -630,8 +625,8 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
     try activateExtension(world, gpa, entity, name, bytes);
 }
 
-/// Deactivate one extension on one entity given its cooked bytes (M1.0.9; **R6
-/// atomicity rewrite, M1.1.1-HF3**) — the shared bytes-taking core reused by the
+/// Deactivate one extension on one entity given its cooked bytes —
+/// the shared bytes-taking core reused by the
 /// runtime deactivate entry and the interpreter's deferred B1 flush.
 ///
 /// R12(b) prepare/commit order — the hook-ordering guarantee is now REAL:
@@ -695,7 +690,7 @@ pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: Entity
     world.removeEntityExtension(gpa, entity, name);
 }
 
-/// M1.0.9 — runtime deactivation entry (direct-programmatic path): resolve the
+/// Runtime deactivation entry (direct-programmatic path): resolve the
 /// extension by name, then `deactivateExtension`. The Etch method goes through
 /// the interpreter's deferred queue instead (B1); this stays for direct callers.
 pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
@@ -703,8 +698,8 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
     try deactivateExtension(world, gpa, entity, name, bytes);
 }
 
-/// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD
-/// resource path, following the `ecs_bridge` write discipline (M1.1.1-HF1 / D1):
+/// Load the resources block — the load-side mirror of the non-POD
+/// resource path, following the `ecs_bridge` write discipline:
 /// for each resource, snapshot its current bytes, install the POD `data`
 /// (string-field slots are zeroed on disk), then for each `string` field intern
 /// the cooked value into the **Tier-0 persistent heap** as a **refcounted** block
@@ -732,13 +727,13 @@ fn loadResources(
         const r = acc.resource(i);
         const cid = remap[r.schema_index];
 
-        // M1.0.17 — the loader reconstructs POD + interned `string` resource fields
+        // The loader reconstructs POD + interned `string` resource fields
         // only. A collection field (`.array_`/`.map_`/`.set_`) on disk is a zeroed
         // `CollectionSlot` (ptr == 0); installing it would crash the interpreter on
         // first access AND overwrite (without decref) any container the running
         // program already built — a leak. Reject cleanly BEFORE touching the
         // resource; full persistent-block reconstruction at scene-load is a Tier-0
-        // scene-serialization milestone (M1.6), not this one.
+        // scene-serialization owner, not here.
         for (world.registry.componentFields(cid)) |fd| switch (fd.kind) {
             .array_, .map_, .set_ => return error.CollectionResourceFieldUnsupported,
             else => {},
@@ -755,7 +750,7 @@ fn loadResources(
         // pre-write snapshot. For an existing resource the snapshot holds the old
         // string slots (decreffed at commit / restored at rollback); for a fresh
         // one the snapshot is null (rollback removes it).
-        // C6 (M1.1.1-HF2): capture the pre-write dirty bit BEFORE `getMutResource`
+        // Capture the pre-write dirty bit BEFORE `getMutResource`
         // (which unconditionally sets it true), so a rollback can restore it — a
         // rejected load must not leave a spurious `when resource T changed`.
         // Absent resource → false (added fresh below; rollback removes it, moot).
@@ -790,7 +785,7 @@ fn loadResources(
     }
 }
 
-/// Phase 2 — fire the `on_spawned` lifecycle for every loaded entity, in load
+/// Fire the `on_spawned` lifecycle for every loaded entity, in load
 /// order, reusing the existing flush path (`observers.flushWithObservers` /
 /// `applyRawCommand`). A pre-existing deferred queue is drained first; an
 /// `on_spawned` rule may queue structural commands, drained after the pass.
@@ -1434,7 +1429,7 @@ test "instantiate rejects a duplicate entity uuid ordinal (M1.1.1-HF2 C2b)" {
 }
 
 /// Build a mono-entity extension `.prefab.bin`: one entity carrying [ExtX, ExtY]
-/// (both size 4, align 4). Reused by the E3 activate-atomicity test.
+/// (both size 4, align 4). Reused by the activate-atomicity test.
 fn buildExtPrefab(gpa: std.mem.Allocator) ![]u8 {
     var reg = Registry.init();
     defer reg.deinit(gpa);

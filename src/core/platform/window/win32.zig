@@ -1,6 +1,5 @@
-//! Native Win32 `Window` backend for the S2 spike. Throwaway? No — the
-//! brief makes this Tier 0 from S2 onward. Phase 0.3 extends with input
-//! handling under the same public surface.
+//! Native Win32 `Window` backend. Tier 0, and it carries input and multi-monitor beside
+//! windowing.
 //!
 //! Hand-written `extern fn` declarations against `user32.dll` /
 //! `gdi32.dll` / `kernel32.dll`. Static linkage via Zig import libs;
@@ -170,7 +169,7 @@ extern "user32" fn GetWindowLongPtrW(hwnd: HWND, n_index: INT) callconv(.c) ULON
 extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.c) UINT;
 extern "user32" fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) callconv(.c) BOOL;
 
-// M0.3 multi-monitor surface.
+// Multi-monitor surface.
 extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: DWORD) callconv(.c) ?*anyopaque;
 extern "user32" fn GetMonitorInfoW(hMonitor: *anyopaque, lpmi: *MONITORINFOEXW) callconv(.c) BOOL;
 extern "shcore" fn GetDpiForMonitor(hMonitor: *anyopaque, dpiType: UINT, dpiX: *UINT, dpiY: *UINT) callconv(.c) i32;
@@ -191,11 +190,11 @@ const MONITORINFOEXW = extern struct {
 
 // =============================================================== Backend =
 
-// M0.3 — Win32 thread safety patch (dette D-S2-win32-globals).
+// Win32 thread safety.
 //
-// Phase 0 Win32 backend used three plain `var` globals (class_atom,
+// The backend used three plain `var` globals (class_atom,
 // class_open_count, dpi_awareness_set) that were race-condition prone
-// under concurrent createWindow/destroyWindow. M0.3 migrates them to:
+// under concurrent createWindow/destroyWindow. They are now:
 //
 //   - `class_once` (Once)      — registers the window class exactly once
 //                                 per process lifetime. Class atom value
@@ -297,11 +296,11 @@ const State = struct {
     title_w: [:0]u16,
     /// Last delivered DPI scale, so `WM_DPICHANGED` skips no-op ticks.
     last_dpi: u32 = 96,
-    // M0.3 — mouse state tracking for delta computation.
+    // Mouse state tracking for delta computation.
     last_mouse_x: i32 = 0,
     last_mouse_y: i32 = 0,
     mouse_in_window: bool = false,
-    // M0.3 — multi-monitor: last known HMONITOR for change detection.
+    // Multi-monitor: last known HMONITOR for change detection.
     last_monitor: ?*anyopaque = null,
 };
 
@@ -468,7 +467,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
             return 0;
         },
 
-        // ============================== M0.3 — Keyboard events
+        // ================================== Keyboard events
         WM_KEYDOWN, WM_SYSKEYDOWN => {
             // LParam bits 16-23: scan code. Bit 24: extended key flag.
             // Bit 30: previous key state (1 = was down → repeat).
@@ -491,7 +490,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
             return 0;
         },
 
-        // ============================== M0.3 — Mouse events
+        // ================================== Mouse events
         WM_MOUSEMOVE => {
             const lp: u32 = @bitCast(@as(i32, @truncate(lparam)));
             const x: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(lp)))));
@@ -551,7 +550,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
             return 0;
         },
 
-        // ============================== M0.3 — Focus events
+        // ================================== Focus events
         WM_SETFOCUS => {
             state.events.append(state.gpa, .focus_gained) catch {};
             return 0;

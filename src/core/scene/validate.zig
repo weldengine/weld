@@ -1,4 +1,4 @@
-//! `.scene.bin` structural validator — Tier 0 (M1.1.1-HF3 / R1).
+//! `.scene.bin` structural validator — Tier 0.
 //!
 //! A standalone structural pre-flight that walks the raw `.scene.bin` bytes
 //! **directly** and **never calls an `accessor.zig` getter**. It is the front

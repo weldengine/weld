@@ -1,11 +1,11 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Public surface of the M0.2 RTTI subsystem.
+//! Public surface of the RTTI subsystem.
 //!
 //! The Tier 0 reflection runtime — comptime builder, type metadata,
-//! deterministic hashes, and runtime registry. E1 ships the
-//! standalone surface without any metier consumer wired yet (the S6
-//! IPC swap is E2, resources are E3, events are E4).
+//! deterministic hashes, and runtime registry. It ships as a
+//! standalone surface; the IPC schema-hash swap, the resource
+//! store and the event bus all consume it.
 //!
 //! Re-exports follow the Tier 0 convention of `engine-zig-conventions.md`
 //! § "Fichier racine : `root.zig` (module) vs `main.zig` (exécutable)":
@@ -31,7 +31,7 @@ pub const comptime_builder = builder_mod;
 /// Runtime registry that indexes `TypeInfo` by `TypeId` / `type_name`.
 pub const registry = registry_mod;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen RTTI Tier-0 public surface (TypeId/SchemaHash,
 /// FieldDesc/TypeInfo, the builder + hash fns, the Registry API). Bumped
 /// on any breaking change — a tracked migration, not a freeze failure (the
@@ -87,7 +87,7 @@ pub const isPOD = builder_mod.isPOD;
 /// Reads the resource lifecycle from a struct's `pub const lifecycle`
 /// declaration. Returns `null` for non-resource categories;
 /// `.transient` is the default for resources without an explicit
-/// declaration (M0.2 / E3).
+/// declaration.
 pub const inferLifecycle = builder_mod.inferLifecycle;
 
 /// Comptime-deterministic 32-bit identity for `T`.

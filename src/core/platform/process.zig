@@ -1,8 +1,8 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Minimal process control surface used by the S6 editor stub to
+//! Minimal process control surface used by the editor stub to
 //! spawn / monitor / kill the runtime stub. Tier 0 — `engine-
-//! platform.md` §4 (Process section) defines a wider API; S6 fills
+//! platform.md` §4 (Process section) defines a wider API; this fills
 //! only the four entry points the brief calls out:
 //!
 //!   - `spawnProcess(path, argv) !Process`
@@ -11,8 +11,8 @@
 //!   - `isAlive(pid) bool`
 //!
 //! The rest of the surface (stdout/stderr piping, env passing,
-//! redirection, working directory) lands in Phase 0.3 alongside
-//! the X11 backend + input handling — out of scope for S6.
+//! redirection, working directory) is unimplemented, and lands with
+//! the wider surface.
 //!
 //! POSIX: `posix_spawnp` + `waitpid(WNOHANG)` + `kill(SIGKILL)` +
 //! `kill(0)` for the liveness probe.
@@ -96,7 +96,7 @@ const win = struct {
 
 /// `STARTUPINFOW` — `cb` must be `@sizeOf(STARTUPINFOW)`; the rest is
 /// zeroed for a plain console-less spawn (we inherit nothing and pipe
-/// nothing — stdio piping is Phase 0.3 per the file header).
+/// nothing — stdio piping is unimplemented, per the file header).
 const STARTUPINFOW = extern struct {
     cb: u32,
     lpReserved: ?[*:0]u16,
@@ -247,7 +247,7 @@ pub fn spawnProcess(
             // Build a UTF-8 command line (each arg quoted), convert to
             // UTF-16, and spawn via CreateProcessW. `lpApplicationName`
             // pins the binary; argv[0] stays in the command line by
-            // convention. M0.7 / E3 — wires the Windows editor path.
+            // convention. This wires the Windows editor path.
             var cmd: std.ArrayList(u8) = .empty;
             defer cmd.deinit(gpa);
             for (argv, 0..) |a, i| {

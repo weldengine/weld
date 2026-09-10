@@ -1,4 +1,4 @@
-//! M0.1 / E6 — structural mutation observers.
+//! Structural mutation observers.
 //!
 //! Hooks that fire during the per-system command-buffer flush, in
 //! lock-step with the four deferrable mutations:
@@ -8,7 +8,7 @@
 //! - `on_add[ComponentId]` (per-component, hash-keyed)
 //! - `on_remove[ComponentId]` (per-component, hash-keyed)
 //!
-//! Dispatch timing relative to each command (per brief E6):
+//! Dispatch timing relative to each command:
 //!
 //! | Command            | Pre-apply observers              | Post-apply observers       |
 //! |--------------------|----------------------------------|----------------------------|
@@ -23,7 +23,7 @@
 //! position for spawn / add lets `on_add` see the newly-attached
 //! component values.
 //!
-//! Re-entrancy contract (brief E6): observers MAY record structural
+//! Re-entrancy contract: observers MAY record structural
 //! mutations through the shared deferred command buffer
 //! (`ObserverRegistry.deferred`), but those mutations are NOT
 //! applied re-entrantly during the current flush. They run at the
@@ -43,8 +43,8 @@ const CommandBuffer = command_buffer_mod.CommandBuffer;
 const Command = command_buffer_mod.Command;
 
 /// Callback fired when a structural mutation triggers an observer.
-/// Arguments (M1.0.2 E3 — uniform signature carrying a context pointer
-/// and old/new value pointers):
+/// Arguments — a uniform signature carrying a context pointer and old/new
+/// value pointers:
 /// - `ctx` — opaque per-listener context (e.g. the Etch interpreter's
 ///    `{ interp, rule_desc_idx }`), threaded back to the callback. `null`
 ///    for context-free (native) observers.
@@ -76,7 +76,7 @@ pub const ObserverFn = *const fn (
     deferred: *CommandBuffer,
 ) anyerror!void;
 
-/// One registered observer: a callback plus its opaque context (M1.0.2 E3).
+/// One registered observer: a callback plus its opaque context.
 pub const Listener = struct {
     ctx: ?*anyopaque,
     callback: ObserverFn,
@@ -142,7 +142,7 @@ pub const ObserverRegistry = struct {
     on_add: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
     on_remove: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
     /// `on_replaced[cid]` — fired when `add_component(entity, cid)` lands on an
-    /// entity that already has `cid` (M1.0.2 E3). Carries old + new values.
+    /// entity that already has `cid`. Carries old + new values.
     on_replaced: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
 
     /// Shared deferred buffer for observer-issued cmds. Created
@@ -180,7 +180,7 @@ pub const ObserverRegistry = struct {
         if (self.deferred == null) self.deferred = CommandBuffer.init(gpa, world);
     }
 
-    /// Register an `on_spawned` observer (M1.0.2 E3: `ctx` threaded back).
+    /// Register an `on_spawned` observer (`ctx` threaded back).
     pub fn registerOnSpawned(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
@@ -228,7 +228,7 @@ pub const ObserverRegistry = struct {
         try self.registerInMap(gpa, world, &self.on_remove, cid, ctx, callback);
     }
 
-    /// Register an `on_replaced` observer for `cid` (M1.0.2 E3).
+    /// Register an `on_replaced` observer for `cid`.
     pub fn registerOnReplaced(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
@@ -255,7 +255,7 @@ pub const ObserverRegistry = struct {
         try entry.value_ptr.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
-    /// Fire `on_spawned` for one already-instantiated entity (M1.0.5 E2). The
+    /// Fire `on_spawned` for one already-instantiated entity. The
     /// scene loader drives the spawn lifecycle in a dedicated second pass —
     /// after every loaded entity exists — rather than through the
     /// command-buffer flush, so the ordering guarantee "all entities present
@@ -277,7 +277,7 @@ pub const ObserverRegistry = struct {
     /// observers a deferred `.spawn` flush fires — `on_spawned`, then
     /// `on_add[cid]` per component — returning the new handle. Factored out of
     /// `applyWithObservers`'s `.spawn` arm so an IMMEDIATE spawn that must return
-    /// a handle (the Etch `world.spawn_with` test-runner surface, M1.0.15) shares
+    /// a handle (the Etch `world.spawn_with` test-runner surface) shares
     /// the one observer-firing spawn path instead of duplicating it. The handle
     /// is valid on return (same tick). Observer-issued structural changes queue
     /// into the shared `deferred` buffer (drained at the next flush / tick).
@@ -373,7 +373,7 @@ pub fn applyWithObservers(
     switch (c) {
         .spawn => |s| {
             // Shares the returning-eid primitive with the immediate
-            // `world.spawn_with` surface (M1.0.15) — one observer-firing spawn
+            // `world.spawn_with` surface — one observer-firing spawn
             // path (on_spawned + on_add per component).
             _ = try reg.spawnWithObservers(gpa, world, s.component_ids, s.payloads);
         },
@@ -414,7 +414,7 @@ pub fn applyWithObservers(
             try world.despawn(gpa, d.entity);
         },
         .add_component => |a| {
-            // Replace = add-on-present (M1.0.2 E3): if the entity already has
+            // Replace = add-on-present: if the entity already has
             // the component, this is an in-place overwrite, not a migration —
             // `addComponentDynamic` would panic on the already-present assert.
             // Capture the old bytes before the overwrite (storage is clobbered),
@@ -453,7 +453,7 @@ pub fn applyWithObservers(
                 const closure = world.registry.requiresClosure(a.component_id);
 
                 // THE ORDINARY ADD NOTIFIES NOTHING, and it was paying a list to
-                // discover that (M1.B review P4). With an empty closure the
+                // discover that. With an empty closure the
                 // notified set is a subset of `{a.component_id}`, so with no
                 // `on_add` registered for that id the loop below fires nothing
                 // whatever the presence tests answer — the two paths are
@@ -517,7 +517,7 @@ pub fn applyWithObservers(
             }
             try world.removeComponentDynamic(gpa, r.entity, r.component_id);
         },
-        // Tag bit set/clear (M0.8 E3) — a deferred structural change with no
+        // Tag bit set/clear — a deferred structural change with no
         // observer hook (tags are not add/remove-component events).
         .set_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, true),
         .clear_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, false),
@@ -552,10 +552,10 @@ test "ObserverRegistry init/deinit round-trip is leak-free" {
     try testing.expectEqual(@as(usize, 0), reg.on_spawned.items.len);
 }
 
-// ─── M1.0.2 E3 — replace detection + old-value capture ─────────────────────
+// ─── Replace detection + old-value capture ────────────────────────────────
 
 /// Test-only capture of the old/new component bytes (single `i32`) seen by an
-/// observer fire (M1.0.2 E3).
+/// observer fire.
 const E3Capture = struct {
     var fired: u32 = 0;
     var old: i32 = 0;
@@ -653,7 +653,7 @@ test "on_removed receives the pre-removal value (M1.0.2 E3)" {
     try testing.expect(world.componentBytes(e, drop) == null); // component gone
 }
 
-// ─── M1.0.5 E2 — two-phase on_spawned dispatch entry ───────────────────────
+// ─── Two-phase on_spawned dispatch entry ──────────────────────────────────
 
 const SpawnCounter = struct {
     var count: u32 = 0;

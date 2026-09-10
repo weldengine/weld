@@ -1,12 +1,12 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Public surface of the M0.2 / E6 plugin loader skeleton.
+//! Public surface of the plugin loader skeleton.
 //!
 //! Tier 0 component that loads Tier 3 plugin shared libraries
 //! (.so / .dll / .dylib), reads their `WeldPluginDesc`, and
 //! exposes the `WeldAPI` table. All 7 sub-APIs are present with
 //! final signatures but every callback returns
-//! `WELD_ERR_NOT_IMPLEMENTED` — the runtime wiring is Phase 3
+//! `WELD_ERR_NOT_IMPLEMENTED` — the runtime wiring is
 //! (cf. brief § Out-of-scope).
 //!
 //! Module convention follows `src/core/ecs/root.zig`,
@@ -49,7 +49,7 @@ pub const WELD_API_VERSION_MAJOR = desc_mod.WELD_API_VERSION_MAJOR;
 /// `WELD_API_VERSION_MINOR` constant.
 pub const WELD_API_VERSION_MINOR = desc_mod.WELD_API_VERSION_MINOR;
 /// Stub API singleton — what the loader passes to every plugin
-/// in M0.2. The 7 sub-APIs all return `WELD_ERR_NOT_IMPLEMENTED`.
+/// today. The 7 sub-APIs all return `WELD_ERR_NOT_IMPLEMENTED`.
 pub const stub_api = api_mod.stub_api;
 
 comptime {

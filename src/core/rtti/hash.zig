@@ -15,8 +15,7 @@
 //! two structs with the same layout but different names
 //! produce distinct `schema_hash` values. The hash_test.zig
 //! "schema_hash is sensitive to the type name" test documents the decision.
-//! The algorithm follows `briefs/M0.2-rtti-resources-events-bindgen.md`
-//! E1 §Deliverable.
+//! The algorithm is deliberate and stable:
 
 const std = @import("std");
 const type_info = @import("type_info.zig");
@@ -27,14 +26,14 @@ const FieldDesc = type_info.FieldDesc;
 const FieldKind = type_info.FieldKind;
 const builder = @import("comptime_builder.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Comptime-deterministic 32-bit identity for `T`. Wraps
 /// `computeTypeIdFromName(@typeName(T))`.
 pub fn computeTypeId(comptime T: type) TypeId {
     return computeTypeIdFromName(@typeName(T));
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Comptime-deterministic 32-bit identity for an arbitrary name.
 /// Exposed for tests and for use cases (cross-language tools, IPC
 /// debugging) that need to compute a `TypeId` without holding the Zig
@@ -43,7 +42,7 @@ pub fn computeTypeIdFromName(name: []const u8) TypeId {
     return std.hash.XxHash32.hash(0, name);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Comptime-deterministic 64-bit schema digest for `T`. The fields are
 /// derived from `builder.buildFields(T)`; the hash mixes the type
 /// name with the `(name, kind, count, offset)` tuple of each field in
@@ -54,9 +53,9 @@ pub fn computeSchemaHash(comptime T: type) SchemaHash {
     return computeSchemaHashFromParts(@typeName(T), fields);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Direct hash entry point used by `computeSchemaHash` and the
-/// E1 registry tests. Hashes the tuple `(type_name,
+/// the registry tests. Hashes the tuple `(type_name,
 /// [(field.name, kind, count, offset) for each field])` with
 /// `XxHash64(seed=0)`. Exposed so callers can verify field-order
 /// sensitivity without going through the comptime builder.

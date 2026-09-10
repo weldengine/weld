@@ -6,13 +6,13 @@
 //! and yields a comptime-typed tuple of pointers `(*T1, *T2, ...)` per
 //! matching slot.
 //!
-//! This is the path the S5 codegen consumes — each rule emits one
+//! This is the path the codegen consumes — each rule emits one
 //! `query(world, .{...})` invocation, and Zig's comptime monomorphises
 //! one iterator type per distinct tuple of component types. The total
 //! number of distinct instantiations is the figure reported by
 //! `bench-etch-compile` for Gate 4.
 //!
-//! Coexists with the S1 single-archetype `world.query()` (which still
+//! Coexists with the single-archetype `world.query()` (which still
 //! covers the comptime `(Transform, Velocity)` path). They do not share
 //! storage — `query` here only sees archetypes spawned via
 //! `world.spawnDynamic`, the path the codegen and the differential
@@ -102,7 +102,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                 // component.
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
-                    // M0.2 / E3 — singleton resources are invisible to
+                    // Singleton resources are invisible to
                     // user queries (cf. `ARCH-006`).
                     if (arch.is_singleton) continue;
                     var all_present = true;

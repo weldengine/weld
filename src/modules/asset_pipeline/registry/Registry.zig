@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Asset registry — owns the slot table that `AssetHandle`s index into,
 //! plus per-slot refcount and generation.

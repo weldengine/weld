@@ -1,8 +1,8 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Normalized keyboard scancode enum — common to Win32 and Wayland backends.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in the M0.3 brief and
+//! Documented in
 //! `engine-input-system.md` §1 (Hardware Layer Tier 0).
 //!
 //! ## Model
@@ -14,12 +14,11 @@
 //!
 //! Text input (the layout-aware "what character did the user type?")
 //! requires XKB on Linux and `ToUnicodeEx` on Win32, both of which are
-//! out-of-scope for Phase 0 — see `engine-phase-0-criteria.md` §C0.7 and
-//! the M0.3 brief § Out-of-scope.
+//! out of scope — see `engine-phase-0-criteria.md` §C0.7.
 //!
 //! ## Encoding
 //!
-//! Encoded as `u8` (256 values max) — the M0.3 `InputRawState.keyboard`
+//! Encoded as `u8` (256 values max) — the `InputRawState.keyboard`
 //! resource uses `[256]bool` bitsets indexed directly by the `@intFromEnum`
 //! representation. Unknown / unhandled keys map to `.unknown` (0).
 //!

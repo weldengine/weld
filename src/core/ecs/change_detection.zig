@@ -1,4 +1,4 @@
-//! Change-detection primitives — M0.1 / E4.
+//! Change-detection primitives.
 //!
 //! Two cooperating layers feed the `Changed<T>` query filter:
 //!

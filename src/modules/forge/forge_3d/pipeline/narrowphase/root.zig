@@ -105,14 +105,10 @@ pub const FastResult = fast_paths.FastResult;
 /// Analytic per-pair narrowphase dispatcher (`.not_handled` until a kernel lands).
 pub const fastSeed = fast_paths.fastSeed;
 
-// --- Ray kernels (analytic ray↔core, raycast.zig) ---
-
-/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
-/// Precondition: `raySupportsShape` (no error channel).
-/// The shallow/separated contact margin at a coordinate scale, and the symmetric coordinate
-/// scale of a pair — the two quantities a CANDIDATE FILTER upstream of GJK must reuse rather than
-/// re-derive, so the filter and the classification cannot disagree about where the band ends
-/// margin.
+/// The shallow/separated contact margin at a coordinate scale, and the symmetric
+/// coordinate scale of a pair — the two quantities a CANDIDATE FILTER upstream of GJK
+/// must reuse rather than re-derive, so the filter and the classification cannot
+/// disagree about where the band ends.
 pub const contactMargin = gjk_mod.contactMargin;
 /// The symmetric coordinate scale of a pair — `|Δpos| + coreExtent(a) + coreExtent(b)`.
 pub const coordScale = gjk_mod.coordScale;
@@ -120,6 +116,8 @@ pub const coordScale = gjk_mod.coordScale;
 pub const coreExtent = gjk_mod.coreExtent;
 /// ULP multiplier of the contact margin — the accumulated-rounding bound, not a tolerance.
 pub const contact_margin_conv_k = gjk_mod.contact_margin_conv_k;
+
+// --- Ray kernels (analytic ray↔core, raycast.zig) ---
 
 /// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
 /// Precondition: `raySupportsShape` (no error channel).

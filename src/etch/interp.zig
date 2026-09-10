@@ -2541,10 +2541,8 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Walk one archetype's chunks/slots for an entity-bound rule — the per-archetype
-    /// body of the cached-matching-set selection. When `collect` is non-null, matched
-    /// entities are gathered instead of run. The per-entity guard chain and body,
-    /// shared by BOTH walks.
+    /// The per-entity guard chain and body, shared by BOTH walks. When `collect`
+    /// is non-null, a matched entity is gathered instead of run.
     ///
     /// Extracted because the sparse arm needs the same chain and a
     /// second copy is how the two would come to disagree — the milestone's
@@ -4317,9 +4315,6 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Raise a typed runtime failure: record
-    /// the `(kind, span)` payload on the sideband and return the unwinding
-    /// error. Usage: `return self.fail(.DivisionByZero, self.ast.exprSpan(id))`.
     /// Install the Tier 1 service registry (`etch-abi-zig.md` §8.4). Borrowed:
     /// the registry must outlive this interpreter.
     pub fn setServiceRegistry(self: *Interpreter, reg: *const services_mod.Registry) void {

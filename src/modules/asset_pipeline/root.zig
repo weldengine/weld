@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Asset Pipeline module (Tier 1) — public entry point.
 //!
@@ -17,7 +17,7 @@
 //! E2, `foundation` (the SIMD kernels). No `weld_etch` dependency
 //! (brief §Out-of-scope).
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen AssetPipeline (Tier-1, exercised) public surface —
 /// AssetHandle/Registry, AssetType, RuntimeHeader, the intermediate doc
 /// model, importers/cookers/cache, and the `Loader` verbs + pinned error

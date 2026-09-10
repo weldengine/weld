@@ -114,7 +114,7 @@ pub const Backend = struct {
     /// Windows CPU shm attach stays by name (`open`) — the named
     /// mapping has no BSD shm quirk, so the `SCM_RIGHTS`/`fromFd` pivot
     /// (`engine-ipc.md` §4.8) is POSIX-only. Handle passing on Windows
-    /// (`DuplicateHandle`) is reserved for the Phase 3 GPU shared
+    /// (`DuplicateHandle`) is reserved for the GPU shared
     /// framebuffer (§4.7). Returns `error.Unimplemented` so a caller
     /// that mistakenly routes the Windows attach through `fromFd`
     /// fails loudly instead of silently.
@@ -123,7 +123,7 @@ pub const Backend = struct {
         return error.Unimplemented;
     }
 
-    /// The mapping kernel-object handle. Unused by the M0.7 Windows
+    /// The mapping kernel-object handle. Unused by the Windows
     /// attach path (which is by name); present for API symmetry with
     /// the POSIX backend.
     pub fn handle(self: *const Backend) Handle {

@@ -369,8 +369,6 @@ const Builder = struct {
         return self.arena.allocator();
     }
 
-    /// Pass A: register every `component`/`resource` declaration into the
-    /// registry via the shared `interp.compileTypeDecl` path.
     /// After every declaration is registered, resolve the `@requires` closures
     /// ONCE. Called at the END of the pass and not per declaration, because a
     /// declaration may name a component registered later — Etch admits forward

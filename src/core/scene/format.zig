@@ -1,21 +1,21 @@
 //! `.scene.bin` format — Tier 0, single source of truth shared verbatim with
-//! the M1.0.5 runtime loader (`engine-scene-serialization.md` §4).
+//! the runtime loader (`engine-scene-serialization.md` §4).
 //!
 //! This file owns two things:
 //!   1. The **on-disk format contract** — magic / version constants and the SoA
-//!      column-layout rules (the M1.0.5 loader SLICES each column at an entity's
+//!      column-layout rules (the loader SLICES each column at an entity's
 //!      rank and hands the slices to the World's spawn surface, so the cook and
 //!      the loader must agree on column order, stride and alignment — the
 //!      agreement is what makes the slice land on the right bytes, and it is
-//!      required whether or not the destination is an archetype chunk). The `SceneHeader` extern struct + the byte-level
-//!      writer/accessor land in E2.
+//!      required whether or not the destination is an archetype chunk). The `SceneHeader` extern struct and the byte-level
+//!      writer and accessor live beside it.
 //!   2. The **neutral cook model** (`CookModel`) — the in-memory representation
-//!      the M1.0.4 Etch cook driver (`src/etch/scene_cook.zig`) produces and the
-//!      E2 writer serializes. It is raw bytes + index tables + Tier-0 `FieldKind`
+//!      the Etch cook driver (`src/etch/scene_cook.zig`) produces and the
+//!      writer serializes. It is raw bytes + index tables + Tier-0 `FieldKind`
 //!      only — **no `weld_etch` types** (tier discipline: `src/core/scene/` never
 //!      imports `weld_etch`).
 //!
-//! SoA layout contract (correctness contract with the M1.0.5 loader):
+//! SoA layout contract (a correctness contract with the loader):
 //!   * Component columns are flat N-element SoA arrays (chunk-agnostic); the
 //!     loader slices them across 16 KB chunks.
 //!   * Column order = ascending component order (`archetype.sortComponentIds`).
@@ -29,12 +29,12 @@
 //! the `.scene.bin` carries a **Schema Registry** section; an archetype's
 //! component mask and a resource's schema reference are encoded as **file-local
 //! indices** into that table — never as runtime `ComponentId`s (which are not
-//! stable across runs/processes). Phase-1 schema identity is the component
+//! stable across runs/processes). Schema identity is the component
 //! **name** (the runtime registry for Etch-declared components exposes only
 //! `componentName`/`idOf` — there is no comptime `schema_hash` for them); the
-//! M1.0.5 loader maps each schema name back to a runtime id via `idOf(name)`.
+//! loader maps each schema name back to a runtime id via `idOf(name)`.
 //! The in-memory `CookModel` below keeps its `ComponentId`s — the in-process
-//! round-trip resolves them through the cook's own registry; only the E2
+//! round-trip resolves them through the cook's own registry; only the
 //! on-disk encoding is schema-indexed.
 
 const std = @import("std");
@@ -59,12 +59,12 @@ pub const magic = [4]u8{ 'W', 'S', 'C', 'N' };
 /// breaking layout change). Distinct from `content_version` (the authored
 /// scene's `version:` field, opaque to the codec).
 ///
-/// **2** (M1.0.6): the reserved sections became real — the cross-references table
+/// **2**: the reserved sections became real — the cross-references table
 /// and the `extensions_offset` region (Entity Extensions Table + Prefab ID Table
 /// + hooks) went from bare count-placeholders (`[0]`) to full structures. A break
-/// vs v1 (M1.0.4/M1.0.5): a v1 file fails `BadVersion` and must be re-cooked
+/// vs v1: a v1 file fails `BadVersion` and must be re-cooked
 /// (`.scene.bin`/`.prefab.bin` are deterministic build artifacts, no prod files
-/// in Phase 1).
+/// anywhere).
 pub const format_version: u16 = 2;
 
 /// `SceneHeader` size — the fixed 64-byte (cache-line) prefix every file opens
@@ -91,7 +91,7 @@ pub const ReadError = error{
 /// recompute `std.hash.XxHash64.hash(0, bytes[header_size..])` and compare.
 /// Section offsets are file-relative. `schema_table_offset` / `schema_count`
 /// locate the Schema Registry (`engine-ecs-internals.md` §10); `extensions` and
-/// `crossrefs` are reserved (written empty in M1.0.4, populated by M1.0.6).
+/// `crossrefs` were reserved and are now populated.
 pub const SceneHeader = extern struct {
     magic: [4]u8 = magic, // @0
     version: u16 = format_version, // @4
@@ -106,8 +106,8 @@ pub const SceneHeader = extern struct {
     schema_table_offset: u32 = 0, // @32
     resources_offset: u32 = 0, // @36
     archetypes_offset: u32 = 0, // @40
-    extensions_offset: u32 = 0, // @44 — reserved (empty in M1.0.4)
-    crossrefs_offset: u32 = 0, // @48 — reserved (empty in M1.0.4)
+    extensions_offset: u32 = 0, // @44
+    crossrefs_offset: u32 = 0, // @48
     _reserved: u32 = 0, // @52 — pads `hash` to the 8-aligned @56
     hash: u64 = 0, // @56
 
@@ -167,10 +167,10 @@ pub const SceneHeader = extern struct {
 };
 
 /// On-disk Schema Registry entry (`engine-ecs-internals.md` §10). One per
-/// distinct component/resource type referenced by the scene. Phase-1 identity is
+/// distinct component/resource type referenced by the scene. Identity is
 /// the component **name** (`name_ref` into the string table); `size`/`alignment`
 /// (from `Registry.componentSize`/`componentAlignment`) make archetype columns
-/// self-describing so the accessor slices them without a registry. The M1.0.5
+/// self-describing so the accessor slices them without a registry. The
 /// loader maps `name` → its runtime `ComponentId` via `idOf`. Field-level schema
 /// (`engine-ecs-internals.md` §10 "champs", for migration) is deferred — Etch
 /// components have no comptime schema hash; the name is the identity.
@@ -183,7 +183,7 @@ pub const SchemaEntry = extern struct {
     alignment: u16,
 };
 
-/// On-disk Cross-references Table entry (M1.0.6 D-B) — one per entity→entity
+/// On-disk Cross-references Table entry — one per entity→entity
 /// `Entity` component field that references another entity of the same scene.
 /// 16 bytes, 4-aligned. All four fields are file-local ordinals/indices (never
 /// runtime ids): the loader resolves them against the UUID table + the schema
@@ -242,9 +242,9 @@ pub fn columnsRegionEnd(region_start: usize, sizes: []const u16, aligns: []const
     return off;
 }
 
-// ── Neutral cook model (E1 output → E2 writer input) ─────────────────────────
+// ── Neutral cook model (the cook produces it, the writer consumes it) ──────
 //
-// All references below are indices into the `CookModel`'s own tables; the E2
+// All references below are indices into the `CookModel`'s own tables; the
 // writer resolves them to on-disk offsets. No `weld_etch` types appear here.
 
 /// `parent_uuid` sentinel: the entity has no parent (root entity).
@@ -263,7 +263,7 @@ pub const StringFieldRef = struct {
 
 /// One serialized resource (the scene's `resources { … }` block, one per
 /// resource instance). `schema_id` is the cook's in-memory registry
-/// `ComponentId` of the resource type (the E2 writer re-encodes it as a
+/// `ComponentId` of the resource type (the writer re-encodes it as a
 /// file-local Schema Registry index on disk — see the file header). `data` is
 /// `Registry.componentSize(schema_id)` bytes: POD scalar/enum fields are encoded
 /// in place; each `string_` field's slot is zeroed and listed in `string_fields`.
@@ -289,7 +289,7 @@ pub const EntityEntry = struct {
 pub const ArchetypeBlock = struct {
     /// Sorted-ascending component ids (`archetype.sortComponentIds`) — the
     /// in-memory archetype identity. These are the cook's runtime `ComponentId`s;
-    /// the E2 writer re-encodes them as file-local Schema Registry indices on
+    /// the writer re-encodes them as file-local Schema Registry indices on
     /// disk (the on-disk component mask is never raw `ComponentId`s — see the
     /// component-identity note in the file header).
     component_ids: []ComponentId,
@@ -302,7 +302,7 @@ pub const ArchetypeBlock = struct {
     entities: []EntityEntry,
 };
 
-/// One entity→entity cross-reference in the neutral cook model (M1.0.6 E4). The
+/// One entity→entity cross-reference in the neutral cook model. The
 /// model carries it in terms of the cook's in-memory `component_id`; the **writer**
 /// converts `component_id` → file-local Schema Registry index when emitting the
 /// on-disk `CrossRefEntry` (the model never knows file-local schema indices).
@@ -317,7 +317,7 @@ pub const CrossRef = struct {
     target_uuid: u32,
 };
 
-/// One entity's active extensions (M1.0.6 E5) in the neutral model — the
+/// One entity's active extensions in the neutral model — the
 /// `extensions:` clause of a scene entity/instance. `uuid` is a `CookModel.uuids`
 /// ordinal (the bearing entity); `prefab_ids` are indices into
 /// `CookModel.prefab_id_table` (the dedup'd extension-name table). On-disk these
@@ -327,19 +327,19 @@ pub const ExtModelEntry = struct {
     prefab_ids: []const u32,
 };
 
-/// An `extends` prefab's hooks (M1.0.6 E5) in the neutral model — `on_attach` /
+/// An `extends` prefab's hooks in the neutral model — `on_attach` /
 /// `on_detach` rendered as canonical Etch **text** (`CookModel.strings` indices,
 /// `null` = the hook is absent). On-disk these become the hooks sub-section's
 /// `{on_attach_ref, on_detach_ref}` (string-table offsets; `0` = absent). Only an
-/// `extends` `.prefab.bin` carries one (`hook_count ∈ {0,1}` in M1.0.6).
+/// `extends` `.prefab.bin` carries one (`hook_count ∈ {0,1}`).
 pub const HookSet = struct {
     on_attach: ?u32,
     on_detach: ?u32,
 };
 
 /// The neutral, World-free model the cook produces. Owns every slice via an
-/// internal arena; `deinit` frees the lot. The E2 writer reads it to emit
-/// `.scene.bin`; the E1 cook test inspects it directly (no serialization).
+/// internal arena; `deinit` frees the lot. The writer reads it to emit
+/// `.scene.bin`; the cook test inspects it directly (no serialization).
 pub const CookModel = struct {
     /// Deduplicated UTF-8 strings: entity names + resource `string_` values.
     strings: [][]const u8,
@@ -347,19 +347,19 @@ pub const CookModel = struct {
     uuids: [][16]u8,
     resources: []ResourceEntry,
     archetypes: []ArchetypeBlock,
-    /// Entity→entity cross-references (M1.0.6 E4); empty for a scene with no
+    /// Entity→entity cross-references; empty for a scene with no
     /// `Entity` field references and for every prefab. Serialized to the
     /// Cross-references Table @ `crossrefs_offset`.
     cross_refs: []const CrossRef = &.{},
-    /// Active-extension entries (M1.0.6 E5) — one per scene entity/instance with a
+    /// Active-extension entries — one per scene entity/instance with a
     /// non-empty `extensions:` clause. Empty for a prefab and for an extension-free
     /// scene. Serialized to the Entity Extensions Table @ `extensions_offset`.
     ext_entries: []const ExtModelEntry = &.{},
-    /// Deduplicated extension-prefab names (M1.0.6 E5), as `CookModel.strings`
+    /// Deduplicated extension-prefab names, as `CookModel.strings`
     /// indices; `ExtModelEntry.prefab_ids` index this table. Serialized to the
     /// Prefab ID Table (string-table offsets).
     prefab_id_table: []const u32 = &.{},
-    /// `extends` prefab hooks (M1.0.6 E5) — `hook_count ∈ {0,1}`. Empty for a
+    /// `extends` prefab hooks — `hook_count ∈ {0,1}`. Empty for a
     /// scene and for `of`/standalone prefabs. Serialized to the hooks sub-section.
     hooks: []const HookSet = &.{},
     /// The authored scene's `version:` field (0 if absent). Propagated to

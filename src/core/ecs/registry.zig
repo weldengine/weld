@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Tier 0 runtime component registry — assigns a stable `ComponentId` to
 //! every component (or resource) type known to the engine, plus enough
@@ -14,7 +14,7 @@
 //!   component names, field names, default bytes come from the source
 //!   file).
 //!
-//! Coexists with the S1 comptime `(Transform, Velocity)` archetype defined
+//! Coexists with the comptime `(Transform, Velocity)` archetype defined
 //! in `world.zig` — additive, never replaces it. The struct stores no
 //! allocator; per `engine-zig-conventions.md` §3, the gpa is passed at
 //! every mutating op.
@@ -22,19 +22,19 @@
 const std = @import("std");
 
 /// `EntityId` (`packed struct(u64)`) — the storage type of a `.entity_` field
-/// (M1.0.6 E4). Imported only for `FieldKind.fromZigType`; `entity.zig` imports
+/// Imported only for `FieldKind.fromZigType`; `entity.zig` imports
 /// nothing of `registry.zig`, so this is acyclic.
 const EntityId = @import("entity.zig").EntityId;
 
 /// Stable identifier assigned at registration. The first registered
 /// component gets `ComponentId(0)`; subsequent registrations get the next
 /// integer. Stability across runs is *not* guaranteed (it would require an
-/// out-of-band scheme like StableId — Phase 2).
+/// out-of-band scheme like StableId).
 pub const ComponentId = u32;
 
 /// Storage backend of a component — the closed two-variant domain owned by
 /// `engine-ecs-internals.md` §2 (*Table vs SparseSet*). `table` is the default
-/// and, before M1.B.0, the only backend implemented; `sparse` is the explicit
+/// and was for a time the only backend implemented; `sparse` is the explicit
 /// opt-in a declaration carries through `@storage(.sparse)`.
 ///
 /// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
@@ -58,7 +58,7 @@ pub const StorageKind = enum {
 };
 
 /// Coarse-grained tag for primitive fields. The interpreter uses this to
-/// decide how to read or write raw bytes. The S3 subset only exercises
+/// decide how to read or write raw bytes. The Etch subset only exercises
 /// `int_`, `float_`, `bool_`; the integer-family variants are reserved
 /// for future extension.
 pub const FieldKind = enum {
@@ -71,7 +71,7 @@ pub const FieldKind = enum {
     f64_,
     /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
     /// pointing into the Tier-0 persistent heap (`src/core/memory/persistent.zig`,
-    /// `StringSlot`). **Resource-only by construction** (M1.0.3): the Etch
+    /// `StringSlot`). **Resource-only by construction**: the Etch
     /// validator rejects `string` on `component` and `fieldKindFromTypeName`
     /// only emits this kind for the `.resource` origin, so no component can ever
     /// carry it — the component SoA/POD invariant (`ARCH-004`) is
@@ -88,13 +88,13 @@ pub const FieldKind = enum {
     /// An `Entity` field slot: an `EntityId` (`packed struct(u64)`, 8 bytes,
     /// 8-aligned). POD — no heap, no teardown — so the component SoA/POD invariant
     /// (`ARCH-004`) is untouched. **Component-only by construction**
-    /// (M1.0.6 D-A): the exact mirror of `.string_`/`.enum_` (resource-only) —
+    /// The exact mirror of `.string_`/`.enum_` (resource-only) —
     /// `fieldKindFromTypeName` emits `.entity_` only for the `.component` origin.
     /// An unassigned / dangling slot holds `EntityId.dead` (all-ones); at scene
     /// cook the slot is written `dead` and an entity→entity reference is carried by
     /// the Cross-references Table, resolved to the target's handle at load.
     entity_,
-    /// A dynamic-array field slot (`T[]`, M1.0.17): a `CollectionSlot`
+    /// A dynamic-array field slot (`T[]`): a `CollectionSlot`
     /// (`{ ptr: u64 }`, 8 bytes, 8-aligned, `src/core/memory/persistent.zig`)
     /// holding the persistent-heap pointer of the owned container block. Like
     /// `.string_`, **resource-only by construction** — the Etch validator gates
@@ -102,10 +102,10 @@ pub const FieldKind = enum {
     /// (the POD invariant, `ARCH-004`, is untouched). Tier 0 stores/
     /// copies the 8 raw slot bytes; the Etch runtime owns the container's lifetime.
     array_,
-    /// A map field slot (`[K: V]`, M1.0.17). Same 8-byte `CollectionSlot`
+    /// A map field slot (`[K: V]`). Same 8-byte `CollectionSlot`
     /// discipline and resource-only gating as `.array_`.
     map_,
-    /// A set field slot (`Set<T>`, M1.0.17). Same 8-byte `CollectionSlot`
+    /// A set field slot (`Set<T>`). Same 8-byte `CollectionSlot`
     /// discipline and resource-only gating as `.array_`.
     set_,
 
@@ -165,7 +165,7 @@ pub const FieldDesc = struct {
     name: []const u8,
     offset: u16,
     kind: FieldKind,
-    /// For a `.enum_` field (resource-only, M1.0.3 E3): the Etch-interned id of
+    /// For a `.enum_` field (resource-only): the Etch-interned id of
     /// the declared enum type name (an AST `StringId`, kept opaque by Tier-0 —
     /// a plain `u32`, never dereferenced here). Lets the Etch bridge rebuild a
     /// typed `enum_value{ type_name, variant }` on read with no string pool.
@@ -218,7 +218,7 @@ const Entry = struct {
     /// once by `finalizeRequires`. Beside the descriptor and not inside it
     /// because the descriptor is what a CALLER supplies and this is what the
     /// registry DERIVES — one authority per question, the rule this milestone
-    /// settled at G3. Empty until finalisation, and empty forever for a
+    /// settled at registration. Empty until finalisation, and empty forever for a
     /// component with no requisites.
     closure: []const ComponentId = &.{},
 };
@@ -235,7 +235,7 @@ pub const Registry = struct {
     by_name: std.StringHashMapUnmanaged(ComponentId) = .empty,
     /// Extra name slices that map to existing component ids. Lets a single
     /// component be reached by both its Etch name (via `idOf("Counter")`)
-    /// and its Zig type's `@typeName(T)` (so the S5 codegen's comptime
+    /// and its Zig type's `@typeName(T)` (so the codegen's comptime
     /// `world.query(.{T})` can resolve to the same `ComponentId` as
     /// `world.spawnDynamic(gpa, &.{idOf("Counter").?})`). Stored separately
     /// from the primary names so `deinit` can free them without
@@ -465,7 +465,7 @@ pub const Registry = struct {
     /// Storage backend recorded for `id` at registration. `table` for every
     /// component declared without `@storage`, and for every component
     /// registered from Zig — `registerComponent(T)` reaches no annotation, so
-    /// the Etch annotation is the mode's only producer (M1.B/G0 §2.1).
+    /// the Etch annotation is the mode's only producer.
     pub fn componentStorage(self: *const Registry, id: ComponentId) StorageKind {
         return self.entries.items[id].desc.storage;
     }
@@ -488,7 +488,7 @@ pub const Registry = struct {
     }
 
     /// Add an additional name → id mapping for an already-registered
-    /// component. Used by the S5 codegen's `register()` function so the
+    /// component. Used by the codegen's `register()` function so the
     /// component is reachable by both its Etch name (e.g. `"Counter"`)
     /// and its Zig `@typeName(T)` (e.g. `"corpus_codegen.p01_…Counter"`).
     /// The two names share one entry — no duplication of the underlying

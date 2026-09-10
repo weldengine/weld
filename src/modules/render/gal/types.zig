@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! GAL public types — Phase 0 / M0.4.
 //!

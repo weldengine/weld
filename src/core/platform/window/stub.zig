@@ -1,14 +1,12 @@
-//! Stub `Window` backend for platforms outside the Phase 0 scope.
+//! Stub `Window` backend for platforms outside the supported set.
 //!
-//! Phase 0.3 / M0.3 acts the abandoned X11 backend definitively — Weld
-//! Linux = Wayland natif uniquement Phase 0+ (cf. `engine-phase-0-plan.md`
-//! M0.3, debt D-S2-x11 closed as abandoned; `engine-phase-0-criteria.md`
-//! §C0.7 patched). Fedora 44 + Ubuntu 26.04 ship Wayland-only sessions
-//! by default; XWayland covers legacy X11 clients but Weld has a native
-//! Wayland backend since S2. No X11 backend will be implemented unless
-//! Phase 2/3 surfaces a concrete external requirement.
+//! The X11 backend is abandoned: on Linux, Weld is Wayland-native only. Fedora 44
+//! and Ubuntu 26.04 ship Wayland-only sessions by default, XWayland covers legacy
+//! X11 clients, and Weld has a native Wayland backend. No X11 backend will be
+//! implemented unless a concrete external requirement appears
+//! (`engine-phase-0-criteria.md` §C0.7).
 //!
-//! Darwin / macOS lands in Phase 2 via Cocoa + Metal. Until then, this
+//! Darwin / macOS would land via Cocoa + Metal. Until then, this
 //! stub returns `error.UnsupportedPlatform` on macOS so the rest of the
 //! engine remains buildable for tools/headless CI passes.
 

@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Render module — Phase 0 / M0.4.
 //!
@@ -11,7 +11,7 @@
 //! surface stays stable — it is the contract frozen on day 1 (brief
 //! §Notes decision 1).
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen RenderModule (Tier-1, exercised) public surface
 /// — the `gal` + `render_graph` + `shader_pipeline` + `instancing`
 /// namespaces. The GAL cross-backend contract has its own finer-grained

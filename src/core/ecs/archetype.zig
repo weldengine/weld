@@ -1,7 +1,7 @@
 //! Generalised byte-level archetype storage.
 //!
-//! M0.1 / E2 collapses the S1 comptime-typed `Archetype(Components)` and
-//! the S4 `DynamicArchetype` into a single byte-level `Archetype` that
+//! A comptime-typed `Archetype(Components)` and
+//! a `DynamicArchetype` are collapsed into a single byte-level `Archetype` that
 //! both spawn paths can share. The chunk layout is computed from the
 //! component sizes + alignments registered with the world (cf.
 //! `registry.zig`). Comptime-typed access is layered on top via the
@@ -38,7 +38,7 @@ const Registry = registry_mod.Registry;
 const EntityId = entity_mod.EntityId;
 const Tick = tick_mod.Tick;
 
-/// Re-export of `chunk.ChunkSize` — 16 KiB locked per S1.
+/// Re-export of `chunk.ChunkSize` — 16 KiB, locked.
 pub const ChunkSize = chunk_mod.ChunkSize;
 /// Re-export of `chunk.ChunkAlignment` — 16 bytes for SIMD.
 pub const ChunkAlignment = chunk_mod.ChunkAlignment;
@@ -59,11 +59,11 @@ pub const ArchetypeId = u32;
 
 /// Position of an entity in the world: which archetype, which chunk
 /// inside that archetype, which slot inside that chunk. Replaces the
-/// per-path locations (S1 + S4) the world used to maintain separately
+/// per-path locations the world used to maintain separately
 /// — there is now exactly one location type, populated by the unified
 /// `entity_locations` map.
 ///
-/// `archetype_idx` is named to match the pre-E2 `DynamicLocation` field
+/// `archetype_idx` is named to match the older `DynamicLocation` field
 /// the Etch interpreter + bridge already consume, even though under the
 /// hood it is the same value as the archetype's stable `archetype_id`
 /// (an index into `World.archetypes`).
@@ -145,7 +145,7 @@ pub const Archetype = struct {
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
     transitions: TransitionCache = .{},
-    /// M0.2 / E3 — `true` iff this archetype hosts a singleton-entity
+    /// `true` iff this archetype hosts a singleton-entity
     /// resource. Set by `resources.setResource` after spawning the
     /// resource's entity. `Query.maybeRescan` skips singleton
     /// archetypes so user queries never see resource entities.
@@ -154,14 +154,14 @@ pub const Archetype = struct {
     /// Initialise the archetype with the given sorted component list.
     /// Asserts the list is non-empty (an empty archetype is the
     /// no-component archetype, reachable via `World.spawnEmpty` once
-    /// E3+ exposes it; M0.1 / E2 does not).
+    /// once something exposes it).
     pub fn init(
         gpa: std.mem.Allocator,
         registry: *const Registry,
         archetype_id: ArchetypeId,
         component_ids: []const ComponentId,
     ) ArchetypeError!Archetype {
-        // An EMPTY component list is legal since M1.B/G2: an entity whose whole
+        // An EMPTY component list is legal: an entity whose whole
         // set is sparse still has an archetype, because an entity ALWAYS has
         // one. Making it optional would create a second entity lifecycle that
         // despawn, the observers, the three spawn paths and `dynamicLocation`
@@ -279,8 +279,8 @@ pub const Archetype = struct {
     /// Append a fresh entity initialised from the registry's default
     /// bytes for every component. The `tick` parameter stamps both
     /// `added_tick` and `changed_tick` sidecars and is propagated by
-    /// callers from `World.current_tick`. Mirrors the pre-E4
-    /// `spawnDefault` shape with one extra `Tick` argument — the S4
+    /// callers from `World.current_tick`. Mirrors the older
+    /// `spawnDefault` shape with one extra `Tick` argument — the
     /// Etch path and the runtime-query tests pass through via the
     /// `archetype_dynamic.zig` re-export.
     pub fn spawnDefault(
@@ -409,7 +409,7 @@ pub const Archetype = struct {
         return @ptrCast(@alignCast(&chunk.bytes[self.layout.entity_ids_offset]));
     }
 
-    // ─── M0.1 / E4 change-detection helpers ─────────────────────────────
+    // ─── Change-detection helpers ───────────────────────────────────────
 
     /// Mark `(comp_idx, slot)` as modified at `tick`. Writes the
     /// `changed_tick` sidecar and sets the slot's dirty bit so chunk-
@@ -459,9 +459,9 @@ test "Archetype init pins sorted component_ids and registry-driven sizes/aligns"
     defer reg.deinit(gpa);
 
     const Health = extern struct { current: f32 = 0, max: f32 = 100 };
-    // M0.1 / E5b note: Tag uses `u32` rather than `u8` because the
-    // E4 `FieldKind` registry whitelist does not include `u8`
-    // (RTTI cleanup is M0.2). The test only cares that two
+    // Tag uses `u32` rather than `u8` because the
+    // `FieldKind` registry whitelist does not include `u8`
+    // yet. The test only cares that two
     // components with distinct sizes/aligns sort correctly.
     const Tag = extern struct { v: u32 = 0 };
 

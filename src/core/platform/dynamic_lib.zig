@@ -1,15 +1,15 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Dynamic library loader — `DynamicLib { open, lookup, close }`.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (Dynamic loader section) and the M0.3 brief.
+//! Documented in `engine-platform.md` §4
+//! (Dynamic loader section).
 //!
 //! Consistent with `engine-c-bindings.md` §4.6 (dlopen-by-strategy pattern)
 //! and `engine-c-bindings.md` §4.6.5 (per-module load lifecycle).
 //! The bindgen generator will produce the Symbols structs on top of this
 //! low-level layer — `DynamicLib` is the portable API used by the
-//! generated bindings Phase 1+.
+//! generated bindings.
 //!
 //! Backends:
 //!   - Win32  : `LoadLibraryW` + `GetProcAddress` + `FreeLibrary`

@@ -161,7 +161,6 @@ pub const pending = [_]Pending{
     .{ .prefix = "src/etch/services.zig" },
     .{ .prefix = "src/etch/tags.zig" },
     .{ .prefix = "src/etch/test_runner.zig" },
-    .{ .prefix = "src/core" },
     .{ .prefix = "src/foundation" },
     .{ .prefix = "src/interfaces" },
     .{ .prefix = "src/editor" },

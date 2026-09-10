@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! GAL escape hatches pre-wired day 1 (brief §Scope + §Notes decision 1).
 //!

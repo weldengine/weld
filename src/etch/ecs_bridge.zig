@@ -148,8 +148,6 @@ pub const Bridge = struct {
         };
     }
 
-    /// Read a field from a component slot as a `Value` (auto-tagged from
-    /// the field's `FieldKind`).
     /// The component's bytes for this handle, whichever backend holds them.
     ///
     /// ONE place, not four: the three accessors below each re-derived the

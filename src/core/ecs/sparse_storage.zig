@@ -7,7 +7,7 @@
 //! parallel to dense. Add and remove are O(1) by swap-remove, and neither
 //! migrates an archetype — which is the whole reason the mode exists.
 //!
-//! Wired to the `World` since M1.B/G3: it owns a `SparseStores` field, every
+//! Wired to the `World`: it owns a `SparseStores` field, every
 //! resolution entry and structural mutator routes through it, and
 //! `World.storageOf` is the mode authority.
 //!
@@ -31,7 +31,7 @@
 //! 6. **`EntityId` GENERATION** — `sparse` is addressed by the entity INDEX and
 //!    never by the full handle; an entry whose generation no longer matches is
 //!    absence, so two entities of one index never share an entry.
-//! 7. **OOM rollback** — `add` is reserve-then-mutate (M1.1.1-HF1 D3/D4).
+//! 7. **OOM rollback** — `add` is reserve-then-mutate.
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");
@@ -266,7 +266,7 @@ pub const SparseSetStorage = struct {
     /// the first observable mutation, so a failure leaves the storage exactly
     /// as it was — no half-written entry, and no `sparse[index]` designating an
     /// uninitialised dense row. This is the repository's named invariant from
-    /// M1.1.1-HF1 (D3/D4), applied rather than re-derived.
+    /// applied rather than re-derived.
     ///
     /// Adding an entity that is already present is a programmer error and
     /// asserts: add-on-present is a REPLACEMENT and the decision belongs to the
@@ -368,7 +368,7 @@ pub const SparseSetStorage = struct {
 
 /// The set of sparse storages a world owns, keyed by `ComponentId`.
 ///
-/// **Why the set is part of G2 and not of the routing gate.** Two of the seven
+/// **Why the set lands with the backend and not with the routing.** Two of the seven
 /// invariants are not expressible against a single storage: invariant 3 is a
 /// sweep over EVERY storage for one entity, and invariant 4 is an ORDER across
 /// storages. The smallest object that can carry either is a collection, so it
@@ -521,7 +521,7 @@ fn e(index: u32, generation: u32) EntityId {
 /// index on failure, so from `fail_index` onward EVERY allocation fails, and a
 /// test that asserts recovery after the induced failure would be proving the
 /// property OR exhaustion without distinguishing them
-/// (`engine-development-workflow.md` §5.5, measured at M1.1.15.1). One shot is
+/// (`engine-development-workflow.md` §5.5). One shot is
 /// what makes the assertion after the failure mean something.
 const OneShotFail = struct {
     backing: std.mem.Allocator,

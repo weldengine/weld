@@ -1,12 +1,11 @@
 //! Byte-level chunk — the storage unit shared by every archetype.
 //!
-//! M0.1 / E2 generalises the S1 comptime-typed `Chunk(Components)` into a
-//! single byte-level `Chunk` (16 KiB buffer + minimal header). The runtime
-//! `ChunkLayout` descriptor pinned per archetype tells consumers where each
-//! component column lives inside the buffer; typed access flows through a
-//! comptime view defined in `query.zig`.
+//! A comptime-typed `Chunk(Components)` is generalised into a single byte-level `Chunk`
+//! (16 KiB buffer + minimal header). The runtime `ChunkLayout` descriptor pinned per
+//! archetype tells consumers where each component column lives inside the buffer; typed
+//! access flows through a comptime view defined in `query.zig`.
 //!
-//! M0.1 / E4 extends the layout with three change-detection sidecars
+//! The layout carries three change-detection sidecars
 //! that live inside the same 16 KiB buffer:
 //!
 //! - `added_tick[N][capacity]u32` — per-component, per-slot tick of
@@ -17,12 +16,10 @@
 //!   reset by `World.beginFrame`; lets queries skip whole chunks
 //!   without per-slot inspection.
 //!
-//! The sidecars reduce the effective per-slot budget, so the
-//! capacity drops slightly versus the pre-E4 layout (~16 % for the
-//! (Transform, Velocity) S1 archetype) — the trade-off is documented
-//! in `briefs/M0.1-ecs-full.md` E4 scope.
+//! The sidecars reduce the effective per-slot budget, so the capacity drops slightly
+//! against a sidecar-free layout (~16 % for the (Transform, Velocity) archetype).
 //!
-//! Layout matches the S4 `archetype_dynamic.Chunk` byte-for-byte for
+//! Layout matches `archetype_dynamic.Chunk` byte-for-byte for
 //! the component columns + entity_ids; the new sidecars trail at the
 //! end of the chunk. The Etch interpreter / bridge keep working
 //! through the `archetype_dynamic.zig` re-export because they only
@@ -58,7 +55,7 @@ const Tick = tick_mod.Tick;
 pub const ChunkSize: usize = 16 * 1024;
 
 /// Required alignment of the chunk and of every SoA column within it.
-/// 16 bytes matches `@Vector(4, f32)`, the worst case for the S1 components.
+/// 16 bytes matches `@Vector(4, f32)`, the worst case for the canonical components.
 pub const ChunkAlignment: usize = 16;
 
 /// Minimal header overlaid on the first 16 bytes of every chunk. Fits one
@@ -84,15 +81,15 @@ pub const ChunkLayout = struct {
     /// Byte offset of the `entity_ids[]` array. 8-byte aligned.
     entity_ids_offset: u16,
     /// Byte offset of each per-component `added_tick[capacity]u32`
-    /// column. Same length and ordering as `component_offsets`. M0.1
-    /// / E4 sidecar.
+    /// column. Same length and ordering as `component_offsets`. A
+    /// change-detection sidecar.
     added_tick_offsets: []u16,
     /// Byte offset of each per-component `changed_tick[capacity]u32`
-    /// column. Same length and ordering as `component_offsets`. M0.1
-    /// / E4 sidecar.
+    /// column. Same length and ordering as `component_offsets`. A
+    /// change-detection sidecar.
     changed_tick_offsets: []u16,
     /// Byte offset of the per-chunk `dirty_bitset[ceil(capacity/64)]u64`.
-    /// 8-byte aligned. M0.1 / E4 sidecar.
+    /// 8-byte aligned change-detection sidecar.
     dirty_bitset_offset: u16,
     /// Number of `u64` words in the dirty bitset = `ceil(capacity / 64)`.
     dirty_bitset_word_count: u16,
@@ -105,7 +102,7 @@ pub const ChunkLayout = struct {
 pub const ArchetypeError = error{
     LayoutTooLarge,
     OutOfMemory,
-    // `EmptyComponentList` was removed at M1.B/G2, when the EMPTY archetype
+    // `EmptyComponentList` was removed when the EMPTY archetype
     // became legal. An entity always has an archetype — making it optional
     // would create a second entity lifecycle that despawn, the observers, the
     // three spawn paths and `dynamicLocation` would each have to distinguish —
@@ -161,7 +158,7 @@ pub const Chunk = struct {
         };
     }
 
-    // ─── M0.1 / E4 sidecar accessors ────────────────────────────────────
+    // ─── Change-detection sidecar accessors ─────────────────────────────
 
     /// Pointer to the `added_tick[capacity]u32` column for component
     /// index `comp_idx`. Length is the chunk's `capacity` (every slot
@@ -213,7 +210,7 @@ pub const Chunk = struct {
 ///
 /// An EMPTY column list is legal and yields a positive capacity: the per-slot
 /// cost is then the entity id plus the dirty bitset alone, which is what the
-/// archetype of an entity carrying only sparse components needs (M1.B/G2).
+/// archetype of an entity carrying only sparse components needs.
 ///
 /// Errors: `LayoutTooLarge` if no capacity fits, `OutOfMemory` from the slice
 /// allocations.
@@ -326,7 +323,7 @@ test "chunk alignment is at least 16 bytes" {
 
 test "computeLayout ACCEPTS an empty component list (M1.B/G2)" {
     // The reversal made observable. This test asserted the refusal until
-    // M1.B/G2; it is the same call with the opposite verdict, so a
+    // It is the same call with the opposite verdict, so a
     // re-introduced guard fails here rather than surfacing three layers up as
     // a spawn that cannot happen.
     const gpa = std.testing.allocator;
@@ -344,8 +341,8 @@ test "computeLayout ACCEPTS an empty component list (M1.B/G2)" {
 }
 
 test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars" {
-    // Post-E4 the layout reserves added_tick + changed_tick columns
-    // + a dirty bitset, so the capacity drops below the S1 reference
+    // The layout reserves added_tick + changed_tick columns
+    // + a dirty bitset, so the capacity drops below the sidecar-free reference
     // (185) but stays comfortably above 140. The capacity check is a
     // sanity bound, not a precise lock — the precise value is
     // observable via the bench harness.

@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! GPU Abstraction Layer (GAL) — public entry point of the Render module, Phase 0 / M0.4.
 //!
@@ -42,7 +42,7 @@ pub const vulkan_backend = @import("vulkan/device.zig");
 /// method (cf. `gal/capture.zig`).
 pub const capture = @import("capture.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen GAL cross-backend contract — the comptime
 /// `interface.required_methods` + `checkBackend`, the opaque handle +
 /// descriptor + `Error` types, and the colorspace/copy/subpass touch-points.

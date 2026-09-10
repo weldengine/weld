@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Intermediate `<type>.asset.etch` document model + a minimal Etch-syntax
 //! reader/writer.

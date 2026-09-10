@@ -1,13 +1,13 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! M0.1 / E5a work-stealing scheduler.
+//! Work-stealing scheduler.
 //!
 //! Dynamic worker pool — `worker_count = std.Thread.getCpuCount() catch 4`
 //! at `Scheduler.init` — and dynamic chunk-pointer buffer sized
 //! `worker_count * Deque.capacity` so the dispatch never overflows a
-//! single worker's local deque. Replaces the S1 fixed `[4]Worker` +
-//! `[1024]chunks` layout and absorbs debts D-S1-3 (sleep/wake) and
-//! D-S1-4 (`MaxChunksPerDispatch` dynamic).
+//! single worker's local deque. Replaces the fixed `[4]Worker` +
+//! `[1024]chunks` layout, and it owns both sleep/wake and a dynamic
+//! `MaxChunksPerDispatch`.
 //!
 //! Wake-up. Workers used to busy-yield on `pending_count`; now they
 //! park on a `std.Io.Condition` ("work_available") when they cannot
@@ -16,29 +16,29 @@
 //! dispatch and waits on a second condition ("work_completed") until
 //! every chunk has been processed.
 //!
-//! Ownership invariant from S1 preserved. Chase-Lev assumes a single
+//! Ownership invariant preserved. Chase-Lev assumes a single
 //! owner per deque; the dispatch still has each worker push its own
 //! strided share `worker_idx, worker_idx + N, …` into its own deque.
 //! The lock-free hot path inside the worker loop is untouched — only
 //! the idle path enters the mutex.
 //!
-//! Trampoline. `dispatch` keeps the S1 shape (the comptime body
+//! Trampoline. `dispatch` keeps its original shape (the comptime body
 //! type-checks against `query.chunkAt(0)`'s return type) but the
 //! `ctx_storage` lifetime extends until the dispatch returns. The
 //! tuple of args can hold pointers, slices, or other non-trivially-
 //! copyable references — the workers consume them via the trampoline's
-//! `ctx.*` deref while the dispatcher's stack frame is alive (D-S1-5).
+//! `ctx.*` deref while the dispatcher's stack frame is alive.
 //!
 //! Zero-allocation steady state. After `init` allocates the workers
 //! slice, the chunks slice, and the workers' stack-resident deques,
 //! every subsequent `dispatch` runs without touching the allocator.
 //! The dedicated test `tests/ecs/no_alloc_scheduler_dispatch.zig`
-//! validates this for one full dispatch cycle (D-S1-6).
+//! validates this for one full dispatch cycle.
 
 const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
-// M1.1.14 — the engine float environment, installed at the head of every worker
+// The engine float environment, installed at the head of every worker
 // thread (`ARCH-031` rule 5). Imported from its single definition rather than
 // through a Tier 0 facade; the tier rule lives at that definition.
 const float_env = @import("foundation").math.float_env;
@@ -49,7 +49,7 @@ const TrampolineFn = worker_mod.TrampolineFn;
 const Worker = worker_mod.Worker;
 const WorkerStats = worker_mod.WorkerStats;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen Job-system Tier-0 public surface (Scheduler
 /// methods, SchedulerError, Job/TrampolineFn/Deque shapes). Bumped on
 /// any breaking change — a tracked migration, not a freeze failure (the
@@ -57,12 +57,12 @@ const WorkerStats = worker_mod.WorkerStats;
 pub const WELD_JOBS_PROTOCOL_VERSION: u32 = 1;
 
 /// Fallback worker count used when `std.Thread.getCpuCount` returns
-/// an error (no /proc/cpuinfo, Wasm sandbox, etc.). Matches the S1
+/// an error (no /proc/cpuinfo, Wasm sandbox, etc.). Matches the
 /// hardcoded count so existing benches behave consistently in
 /// degraded environments.
 pub const default_worker_count: usize = 4;
 
-/// Per-worker deque capacity inherited from S1. Drives the dynamic
+/// Per-worker deque capacity. Drives the dynamic
 /// upper bound on `MaxChunksPerDispatch` — each worker can carry at
 /// most this many chunks in its local deque before the dispatch
 /// fails with `error.TooManyChunks`.
@@ -82,11 +82,11 @@ pub const SchedulerError = error{
     Unexpected,
 };
 
-/// M0.2.1 / E5 — packed snapshot of (generation, chunk_count) loaded
+/// Packed snapshot of (generation, chunk_count) loaded
 /// atomically by workers. Two helpers and a wrapper struct guarantee
 /// that a worker observing a given generation sees the matching
 /// chunk_count by construction (single 64-bit atomic load) — fixes
-/// the wave-lifecycle race confirmed by E2ter dumps (R1 in § Notes).
+/// the wave-lifecycle race the state dumps confirmed.
 pub const GenAndN = struct { gen: u32, n: u32 };
 
 inline fn pack(gen: u32, n: u32) u64 {
@@ -100,7 +100,7 @@ inline fn unpack(packed_value: u64) GenAndN {
     };
 }
 
-/// M0.2.1 / E5 — cache line size assumed on the targets we run
+/// Cache line size assumed on the targets we run
 /// (Apple Silicon ARM64, x86_64). Used for the comptime layout
 /// assertions on `Scheduler` below.
 const cache_line: usize = 64;
@@ -118,21 +118,20 @@ pub const Scheduler = struct {
     workers: []Worker,
     /// Heap-allocated job buffer for the in-flight dispatch. Sized
     /// `workers.len * per_worker_capacity` so the per-worker stride
-    /// never overflows the local deque. M0.1 / E5b each job carries
+    /// never overflows the local deque. Each job carries
     /// its own `(trampoline, ctx_ptr)` inline so a single dispatch
     /// can run heterogeneous bodies (multi-job concurrent intra-
     /// phase via `dispatchBatch`).
     jobs: []Job,
 
-    /// M0.2.1 / E5 — single atomic snapshot of `(generation: u32,
-    /// chunk_count: u32)`. Replaces the pre-M0.2.1 split `chunk_count:
+    /// Single atomic snapshot of `(generation: u32,
+    /// chunk_count: u32)`. Replaces an earlier split `chunk_count:
     /// u32` + `generation: std.atomic.Value(u64)`. The split version
     /// allowed a wave-lifecycle race where a worker observing the
     /// older generation could read the newer chunk_count after a
     /// preemption between the two field accesses, causing a double
-    /// `pushShare` and an over-decrement on `pending_count` (R1
-    /// confirmed by E2ter dumps — cf. brief § Notes "E3 residual
-    /// hypotheses"). Packed atomic guarantees `(gen, n)` is
+    /// `pushShare` and an over-decrement on `pending_count`, which the state
+    /// dumps confirmed. Packed atomic guarantees `(gen, n)` is
     /// observed as a single snapshot by construction. `gen` is u32
     /// (wraps at 2^32 dispatches ≈ 33 years at 3600 dispatches/s,
     /// outside any product lifecycle). Workers compare `gen` against
@@ -155,7 +154,7 @@ pub const Scheduler = struct {
     /// is a data race (UB) the ReleaseFast/ReleaseSafe optimizer may hoist
     /// out of the spin loop, so a worker could spin forever on a cached
     /// `false` and never observe shutdown. `.release` store pairs with the
-    /// `.acquire` loads on the read sites (M1.0.1 — surfaced while
+    /// `.acquire` loads on the read sites (surfaced while
     /// diagnosing the windows-2025/ReleaseSafe scheduler hang).
     shutdown: std.atomic.Value(bool) = .init(false),
 
@@ -220,7 +219,7 @@ pub const Scheduler = struct {
         self.* = undefined;
     }
 
-    /// Total worker count actually in flight. Replaces the pre-E5a
+    /// Total worker count actually in flight. Replaces an earlier
     /// `pub const worker_count` constant for callers.
     pub fn workerCount(self: *const Scheduler) usize {
         return self.workers.len;
@@ -235,9 +234,9 @@ pub const Scheduler = struct {
     /// Returns `error.TooManyChunks` when
     /// `query.chunkCount() > workers.len * per_worker_capacity` — the
     /// caller is expected to size queries against the scheduler's max
-    /// throughput. E7 (M0.9) replaced the prior `std.debug.assert`
-    /// (compiled out in ReleaseFast → out-of-bounds write on overflow)
-    /// with this explicit, build-mode-independent error return.
+    /// throughput. This error return replaces a `std.debug.assert`
+    /// (compiled out in ReleaseFast → out-of-bounds write on overflow):
+    /// it is explicit and build-mode-independent.
     pub fn dispatch(self: *Scheduler, query: anytype, comptime Body: anytype, args: anytype) SchedulerError!void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
@@ -261,7 +260,6 @@ pub const Scheduler = struct {
         // means non-trivially-copyable tuples (slices, function
         // pointers, deeply nested pointers) round-trip through the
         // trampoline's `ctx.*` deref without losing information
-        // (D-S1-5).
         var ctx_storage = args;
 
         const n = query.chunkCount();
@@ -282,7 +280,7 @@ pub const Scheduler = struct {
     /// Dispatch a caller-provided slice of pre-built jobs and wait
     /// for completion. Each job carries its own
     /// `(trampoline, ctx_ptr)` so a single dispatch can run
-    /// heterogeneous bodies — the M0.1 / E5b multi-job concurrent
+    /// heterogeneous bodies — the multi-job concurrent
     /// intra-phase scheduler interleaves chunks from multiple
     /// systems on the same workers via this entry point.
     ///
@@ -313,12 +311,12 @@ pub const Scheduler = struct {
         // that may be entering / leaving the parked path.
         self.mu.lockUncancelable(self.io);
         self.pending_count.store(n, .release);
-        // M0.2.1 / E5 — atomic publish of `(gen, n)` as a single
+        // Atomic publish of `(gen, n)` as a single
         // 64-bit store. Replaces the pre-fix split
         // `chunk_count = n` + `generation.fetchAdd(1)` which left a
         // window where workers could see the new generation with
         // stale chunk_count (or vice versa) — the R1 race confirmed
-        // by E2ter dumps. Read-modify-write of `gen_and_n` is safe
+        // by the state dumps. Read-modify-write of `gen_and_n` is safe
         // here because the dispatcher holds `mu` (sole writer in this
         // critical section).
         const prev = unpack(self.gen_and_n.load(.acquire));
@@ -328,18 +326,18 @@ pub const Scheduler = struct {
 
         // Busy-yield on completion. The dispatcher is the only main
         // thread, so spinning here keeps the dispatch's per-frame
-        // overhead near the S1 baseline — the brief's E5a sleep/wake
+        // overhead near the baseline — the sleep/wake
         // requirement applies to the **workers**' idle path (they
         // do park on `work_available` after the spin window).
         //
         // Two comptime-selected variants. ReleaseFast (C0.1 bench + shipped
         // runtime) gets the bare loop — zero added work. Debug + ReleaseSafe
-        // (tests, pre-push, AND the S1 bench) get two runtime-safety
+        // (tests, pre-push, AND the bench) get two runtime-safety
         // invariants:
-        //   1. M0.2.1 / E5 belt-and-suspenders: `pending_count <= n` across
+        //   1. Belt-and-suspenders: `pending_count <= n` across
         //      the wave — an over-decrement (R1 `u64::MAX`) signature,
         //      complementing the seat assertion at the worker `fetchSub`.
-        //   2. M1.0.1 livelock watchdog: if the wave fails to drain within
+        //   2. Livelock watchdog: if the wave fails to drain within
         //      `livelock_budget_ns` the scheduler is livelocked (a worker that
         //      missed its wake never ran its `pushShare`, so `pending_count`
         //      is stuck POSITIVE — distinct from the impossible `u64::MAX`
@@ -347,7 +345,7 @@ pub const Scheduler = struct {
         //      until the CI build-runner kills the process at ~60 s.
         //
         // The wall-clock is sampled only every `livelock_check_stride` spins,
-        // NOT per iteration: S1 runs in ReleaseSafe, so a per-spin `Clock.now`
+        // NOT per iteration: the bench runs in ReleaseSafe, so a per-spin `Clock.now`
         // would tax the measured dispatch path. A draining wave exits in far
         // fewer spins than the stride; only a genuinely stuck wave reads the
         // clock. The counter increment + mask test is ~1 ns, lost in `yield`.
@@ -373,7 +371,7 @@ pub const Scheduler = struct {
         }
     }
 
-    // M0.2.1 / E5 — comptime layout guard against false sharing
+    // Comptime layout guard against false sharing
     // between `gen_and_n` (dispatcher-written each wave) and
     // `pending_count` (worker-written each chunk). Both fields carry
     // `align(64)`, so each lands on its own cache line; this guard
@@ -398,7 +396,7 @@ pub const Scheduler = struct {
         for (self.workers) |*w| w.stats.reset();
     }
 
-    /// M0.2.1 / E2ter — diagnostic dump of the scheduler state.
+    /// Diagnostic dump of the scheduler state.
     /// Read-only (`.acquire` loads + per-worker `WorkerStats.snapshot`),
     /// safe to call from any thread including a worker about to panic.
     /// Used by:
@@ -406,7 +404,7 @@ pub const Scheduler = struct {
     ///   - the over-decrement assertion in `workerMain` (cf.
     ///     `overDecrementPanic` below).
     pub fn dumpStateTo(self: *const Scheduler, writer: *std.Io.Writer) !void {
-        // M0.2.1 / E5 — single atomic load + unpack so the dump reads
+        // Single atomic load + unpack so the dump reads
         // a consistent (gen, n) snapshot rather than torn fields.
         const snapshot = unpack(self.gen_and_n.load(.acquire));
         try writer.print("=== Job scheduler ===\n", .{});
@@ -472,13 +470,13 @@ pub const Scheduler = struct {
 /// 60 Hz.
 const idle_spin_rounds: u32 = 1024;
 
-/// M1.0.1 — dispatcher-side livelock watchdog budget. If a wave fails to
+/// Dispatcher-side livelock watchdog budget. If a wave fails to
 /// drain within this wall-clock window, `publishWaveAndWait` is spinning
 /// forever on a stuck-positive `pending_count` (a worker missed its wake and
 /// never ran its `pushShare`). runtime-safety-gated (Debug + ReleaseSafe) →
-/// stripped from the ReleaseFast C0.1 bench + shipped runtime. The **S1 bench
+/// stripped from the ReleaseFast C0.1 bench + shipped runtime. The **ECS bench
 /// runs in ReleaseSafe**, so the watchdog IS live there — its clock read is
-/// amortized over `livelock_check_stride` spins (below) to keep S1's measured
+/// amortized over `livelock_check_stride` spins (below) to keep its measured
 /// dispatch path off the per-iteration clock. 30 s is ≫ any legitimate wave
 /// yet below the CI build-runner's ~60 s no-response kill, so a fired watchdog
 /// is always a real livelock, never a merely slow drain.
@@ -486,13 +484,13 @@ const livelock_budget_ns: i96 = 30 * std.time.ns_per_s;
 
 /// Power-of-two spin stride between wall-clock samples in the dispatcher's
 /// livelock watchdog. Sampling `Clock.now` once per this many spins (vs every
-/// iteration) keeps the S1 ReleaseSafe dispatch path free of per-spin clock
+/// iteration) keeps the ReleaseSafe dispatch path free of per-spin clock
 /// syscalls — 65536 ≫ any draining wave, so the clock is read only on a wave
 /// that is genuinely stuck.
 const livelock_check_stride: u64 = 1 << 16;
 
 fn workerMain(sched: *Scheduler, worker_idx: u32) void {
-    // M1.1.14 — FIRST statement of every engine worker thread. The float
+    // FIRST statement of every engine worker thread. The float
     // environment is per-thread and its default is not portable (it depends on
     // the OS, the linked C runtime, and on what a graphics driver may have left
     // behind), so it is installed rather than assumed (`ARCH-031` rule 5).
@@ -505,7 +503,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     float_env.install();
 
     const self = &sched.workers[worker_idx];
-    // M0.2.1 / E5 — last_generation now u32 to match packed gen_and_n's
+    // `last_generation` is u32 to match packed `gen_and_n`'s
     // generation half. Initial 0 matches `gen_and_n: .init(0)` which
     // unpacks to gen=0, n=0; first dispatch publishes gen=1 → workers
     // observe `snapshot.gen != last_generation` and push share.
@@ -535,7 +533,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         };
 
         if (maybe_job) |job| {
-            // Found work — execute (still lock-free). M0.1 / E5b
+            // Found work — execute (still lock-free).
             // each job carries its own trampoline + ctx, so workers
             // can interleave chunks from heterogeneous bodies
             // (multi-job concurrent intra-phase dispatch).
@@ -553,8 +551,8 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // condvar signal is needed when the wave drains — the
             // dispatcher observes the zero on its next yield round.
             //
-            // M0.2.1 / E2ter — debug assertion at the unique
-            // over-decrement site (located by E3 static
+            // Debug assertion at the unique
+            // over-decrement site (located by static
             // analysis). Captures full scheduler state at the panic
             // for diagnosis (discriminate R1/R2/R3 from
             // brief § Notes). Active in Debug + ReleaseSafe via
@@ -574,7 +572,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         // catches it without paying the futex wake cost.
         if (idle_spin_count < idle_spin_rounds) {
             idle_spin_count += 1;
-            // M0.2.1 / E5 — single atomic load + unpack. Replaces
+            // Single atomic load + unpack. Replaces
             // the split `generation.load` + later `chunk_count` read
             // in pushShare which left a race window (R1).
             const snapshot = unpack(sched.gen_and_n.load(.acquire));
@@ -607,7 +605,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             continue;
         }
         // Truly idle — park on the wake-up condvar.
-        // E9 STATS-ONLY: count the park entry under `sched.mu`, immediately
+        // STATS-ONLY: count the park entry under `sched.mu`, immediately
         // before the wait — the mirror of `parks_completed` after the wake. The
         // park/wake logic itself is unchanged.
         _ = self.stats.parks_entered.fetchAdd(1, .acq_rel);
@@ -625,7 +623,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     }
 }
 
-/// M0.2.1 / E2ter — assertion debug panic path for the over-decrement
+/// Assertion debug panic path for the over-decrement
 /// at `workerMain`'s fetchSub site. Dumps the full scheduler state via
 /// `Scheduler.dumpStateTo` then `std.debug.panic`s with a stable
 /// parseable message (grep-able if multiple panics happen across
@@ -655,7 +653,7 @@ fn overDecrementPanic(sched: *Scheduler, worker_idx: u32) noreturn {
     );
 }
 
-/// M1.0.1 — livelock watchdog panic path for `publishWaveAndWait`'s
+/// Livelock watchdog panic path for `publishWaveAndWait`'s
 /// dispatcher spin. Mirrors `overDecrementPanic`: dump the full
 /// scheduler state then `std.debug.panic` with a stable parseable
 /// message. The classifier is `pending_count`: stuck POSITIVE is the
@@ -689,7 +687,7 @@ fn livelockPanic(sched: *Scheduler, n: u32) noreturn {
 /// `Job` carries its own `(trampoline, ctx_ptr)` so the worker can
 /// run it without pulling any scheduler-global state.
 ///
-/// M0.2.1 / E5 — `n` is now passed as an explicit parameter (was a
+/// `n` is passed as an explicit parameter (was a
 /// non-atomic read of `sched.chunk_count` pre-fix). The caller is
 /// responsible for ensuring `n` matches the generation that triggered
 /// this push, by reading both halves of `gen_and_n` in a single
