@@ -1,4 +1,4 @@
-//! M1.1.11.1 acceptance suite for the static triangle mesh.
+//! Acceptance suite for the static triangle mesh.
 //!
 //! A mesh is a SURFACE, not a solid, and that is CATEGORICAL rather than a setting
 //! (`engine-physics-forge.md` §1.11.17). It is also the first shape the store OWNS
@@ -386,7 +386,7 @@ test "a mesh forces a static body" {
 
     const mesh = try store.createShape(gpa, oneTriangle());
 
-    // The refusal is the invariant's error, reused from M1.1.11 rather than a second one
+    // The refusal is the invariant's error, reused rather than a second one
     // minted for the mesh — the reason it was named for the invariant back then.
     inline for (.{ api.BodyType.dynamic, api.BodyType.kinematic }) |bt| {
         try testing.expectError(error.ShapeMustBeStatic, bm.addBody(gpa, &store, .{
@@ -1359,7 +1359,7 @@ test "a caller-supplied threshold changes the classification in both directions"
     // The same two folds as the threshold test above, driven by the DESCRIPTOR's field
     // rather than by the default. This is what makes the parameter configurable at all:
     // `createShape` is the only path to the flags, so without the field there would be no
-    // way to reach them, and after the M1.1.15 freeze there could be none.
+    // way to reach them, and after the freeze there could be none.
     //
     // `A(0,0,0)`, `B(1,0,0)`, `C(0,1,0)`, `D(0, −cos α, −sin α)`; the shared edge `(0,1)`
     // is edge 0 of both triangles, so the verdict lands in bit 0 and the four boundary
@@ -1858,8 +1858,8 @@ test "the ray family agrees exactly with brute force over the mesh" {
 }
 
 test "the frozen query surface carries the back-face mode and a filled subshape id" {
-    // Field NAMES, TYPES and defaults are the contract, and this pin EXTENDS the M1.1.9 /
-    // M1.1.10 one field by field rather than replacing any part of it.
+    // Field NAMES, TYPES and defaults are the contract, and this pin EXTENDS the
+    // query-family one field by field rather than replacing any part of it.
     const ray = api.RaycastQuery{ .origin = ApiVec3.zero, .direction = ApiVec3.unit_x, .max_distance = 10 };
     try testing.expectEqual(api.BackFaceMode.ignore, ray.back_face_mode);
     try testing.expectEqual(api.BackFaceMode, @TypeOf(ray.back_face_mode));
@@ -2016,7 +2016,7 @@ test "shapeCast against a mesh gives the closed-form time of impact" {
     //   centre `y = 1.45` → lowest point `0.95 < 1` → HIT
     // The two are 0.1 apart, five orders past any float noise at this scale, so neither
     // verdict is a coin toss. The exact tangency at `1.5` is a measure-zero configuration the
-    // M1.1.2 classification notes already document and is deliberately not asserted.
+    // GJK classification notes already document and is deliberately not asserted.
     const grazer = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
     try testing.expect((try query.shapeCast(&world.bp, &world.bm, &world.store, .{
         .shape = grazer,
@@ -2128,7 +2128,7 @@ test "an overlap probe entirely behind is discarded, straddling is not" {
     try testing.expect(narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -2), 1));
 
     // STRADDLING: centre EXACTLY on the plane, `r = 1` → reach `+1`. NOT behind, and this is
-    // the assertion that decides the SIGN of the radius term. §1.11.17 and the brief write the
+    // the assertion that decides the SIGN of the radius term. §1.11.17 writes the
     // predicate as `n · support_core − r < n · v₀`; with that form a point core on the plane
     // gives `n·v₀ − 1 < n·v₀`, TRUE, so this probe would be classified BEHIND — which the same
     // paragraph forbids one line later ("a probe straddling the plane touches from the front
@@ -2149,7 +2149,7 @@ test "an overlap probe entirely behind is discarded, straddling is not" {
 
     // WITHOUT the radius term the point-core cases collapse: a sphere would be judged by its
     // CENTRE, so a probe straddling by up to its radius would read as behind. Restated here as
-    // the counter-factual the brief's Notes name — right for a box, wrong for a sphere and a
+    // the named counter-factual — right for a box, wrong for a sphere and a
     // capsule by exactly the radius.
     try testing.expect(narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -0.5), 0));
     try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -0.5), 1));
@@ -2664,7 +2664,7 @@ test "the shared query invariants hold with a mesh in the scene" {
 }
 
 test "the frozen surface carries the back-face mode on the two probe entries" {
-    // EXTENDED field by field on top of the gate C pin, which stays as it is.
+    // EXTENDED field by field on top of the earlier pin, which stays as it is.
     const cast = api.ShapeCastQuery{ .shape = 0, .origin = ApiVec3.zero, .direction = ApiVec3.unit_x, .max_distance = 1 };
     try testing.expectEqual(api.BackFaceMode.ignore, cast.back_face_mode);
     try testing.expectEqual(api.BackFaceMode, @TypeOf(cast.back_face_mode));
@@ -3029,7 +3029,7 @@ test "mesh versus mesh and mesh versus half-space are unreachable" {
     // came from `computePairs` under a correct layer assignment, and a static↔static pair is a
     // programming error at its call site. It is NOT that `BodyType` determines the broad layer —
     // no such wiring exists, the layer being an insertion argument, and it arrives with
-    // `PhysicsWorld` at M1.1.15.
+    // `PhysicsWorld`.
     const gpa = testing.allocator;
     var store = ShapeStore{};
     defer store.deinit(gpa);
@@ -3209,7 +3209,7 @@ test "the contact answer is invariant under creation-order permutation" {
     // an ULP apart decorrelate, and a bound on continuous deviation after hundreds of frames is
     // ill-posed.
     //
-    // RE-MEASURED at M1.1.13.1 under the substepped solver, and the two directions
+    // RE-MEASURED under the substepped solver, and the two directions
     // separated because they no longer behave alike. Along the CONTACT NORMAL the two
     // orders now agree to `2e-8` m — four orders tighter than the `1.34e-4` the big-step
     // solver left, so that bound is TIGHTENED rather than carried over. LATERALLY they
@@ -3374,7 +3374,7 @@ test "a slider does not catch on a flat seam, and catches when that seam is acti
     // m/s, i.e. the loss is below a millionth of the speed, which on a frictionless flat plane is
     // the physically correct answer.
     const corrected = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
-    // A PHYSICAL bound, not an ULP one — the same class as RD-5's: 1% of the launch speed, forty
+    // A PHYSICAL bound, not an ULP one: 1% of the launch speed, forty
     // thousand times the measured loss.
     try testing.expect(corrected >= 4.95);
 
@@ -3382,7 +3382,7 @@ test "a slider does not catch on a flat seam, and catches when that seam is acti
     // experiment.** The SAME geometry, vertex for vertex, with each triangle carrying its own
     // copies so no edge pairs: every seam is then a BOUNDARY edge of an open mesh and therefore
     // ACTIVE, the correction never fires, and the tilted normals decelerate the slider.
-    // RE-MEASURED at M1.1.13.1 under the substepped solver: 4.850727 m/s, a 3% loss, where the
+    // RE-MEASURED under the substepped solver: 4.850727 m/s, a 3% loss, where the
     // big-step solver left 4.647478 m/s and 7%. It still FAILS the bound above, which is what
     // makes the first assertion a test of the MECHANISM and not of the geometry. The catch
     // costs less now because a softer, sub-sampled contact takes a smaller bite out of the
@@ -3681,7 +3681,7 @@ test "F1 the mesh candidate filter is conservative with respect to the GJK margi
         // position is `f32` by design (§1.11.8), and at `f64` this gap is `3.5e-15` — six orders
         // below `f32`'s resolution at 0.2 — so it would narrow away to zero and the probe would
         // land exactly touching, making the out-of-band branch report a contact. Measured; the
-        // same class as the eighth-turn rotation at gate A and the `f32(0.3)` extent at gate D.
+        // same class as the eighth-turn rotation and the `f32(0.3)` extent.
         const dynamic_probe = try world.addBody(gpa, .{
             .shape = probe_shape,
             .body_type = .dynamic,
@@ -4273,7 +4273,7 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
     //   (iii) A tight unit normal on every triangle either form calls non-degenerate.
     //
     // What is NOT asserted, because it is FALSE for any implementation working in `Real`: exact
-    // agreement on family A. The residual is reported in the milestone brief with its measured
+    // agreement on family A. The residual is reported with its measured
     // rate; the reason is that the intermediate needs an exponent range wider than the format
     // holds, and no arrangement of power-of-two factors supplies one.
     const units = [_][3]Real{
@@ -4473,7 +4473,7 @@ test "F3 gjkPair states its convex precondition at its own site" {
     // The assert cannot be caught in a Zig test, so what is checked is the PREDICATE it rests on —
     // that the two refused categories really are what the assert names — together with the
     // admitted pair still answering. The hole was real and pre-dated this milestone: a half-space
-    // reached `supportShape` through this entry from M1.1.11 onward, panicking in a safe build and
+    // reached `supportShape` through this entry, panicking in a safe build and
     // undefined in ReleaseFast.
     const sphere = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
     const plane = try store.createShape(gpa, .{ .plane = .{} });
@@ -4582,10 +4582,10 @@ test "F4 the constraint order is a total key, not the sort's tie-handling" {
 }
 
 test "the frictionless-slider residual is rounding, not energy injection" {
-    // M1.1.14 — the qualification the brief owes on the M1.1.13.1 residual, and it
+    // The qualification owed on the slider residual, and it
     // is the FIRST branch of the alternative it imposed: the residual PERSISTS.
-    // Pinning the float environment did not move it — `5.000002` at f32, the same
-    // figure M1.1.13.1 recorded — so its cause was NOT the unpinned environment,
+    // Pinning the float environment did not move it — `5.000002` at f32, the
+    // figure recorded before it — so its cause was NOT the unpinned environment,
     // which was this milestone's own subject.
     //
     // Measured after the libm removal, the explicit folds, the installed FPU and
@@ -4617,9 +4617,9 @@ test "the frictionless-slider residual is rounding, not energy injection" {
     // same shape as collected-versus-source, local-versus-cell, and
     // `live_tests`-versus-collected-total earlier in this milestone.
     //
-    // THE f64 RESIDUAL'S CAUSE IS NOT ATTRIBUTED, and deliberately so. M1.1.12
+    // THE f64 RESIDUAL'S CAUSE IS NOT ATTRIBUTED, and deliberately so. An earlier
     // measured exactly 5.0 there; three ULP appear today. Two changes sit between
-    // those measurements — the TGS Soft port at M1.1.13.1, and this milestone's
+    // those measurements — the TGS Soft port, and the float-environment
     // explicit left folds, which alter the summation order of `dot` and `lengthSq`
     // and are of exactly this magnitude. Neither has been measured against this
     // scene, so neither is named as the cause. The conclusion does not depend on

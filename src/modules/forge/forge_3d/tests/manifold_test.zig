@@ -1,4 +1,4 @@
-//! M1.1.3/E3 acceptance suite for the forge_3d contact-manifold generator
+//! Acceptance suite for the `forge_3d` contact-manifold generator
 //! (`collide`: GJK → supporting-face clipping, both regimes). Keyed to
 //! `config.Real` so `-Dphysics_f64=true` sweeps the whole suite at f64 (local).
 
@@ -119,7 +119,7 @@ fn pointsDistinct(m: ContactManifold) bool {
 }
 
 test "box-box rotated face reduces to four distinct points" {
-    // Adversarial-review regime (finding F): a yawed box makes the incident face
+    // A yawed box makes the incident face
     // clip to an OCTAGON (8 coplanar points), which the reduction must collapse to
     // four DISTINCT spread points — not a degenerate set with a duplicated corner.
     // Unit box A at origin; unit box B 1.9 above, yawed 45° about Y ⇒ overlap 0.1.
@@ -136,7 +136,7 @@ test "box-box rotated face reduces to four distinct points" {
 }
 
 test "staggered capsule segment clips without a duplicate point" {
-    // Adversarial-review regime (finding E): two parallel Y-capsules staggered
+    // Two parallel Y-capsules staggered
     // along their axis so B's segment straddles A's endpoint plane. The segment
     // clip must yield two DISTINCT points, not a doubled crossing point.
     const cap = capsuleShape(1, 0.5);
@@ -148,7 +148,7 @@ test "staggered capsule segment clips without a duplicate point" {
 }
 
 test "crossed capsules yield a single witness contact" {
-    // M1.1.4/E1 (RED on the pre-fix generator): a segment × segment contact whose
+    // RED on the pre-fix generator: a segment × segment contact whose
     // axes are NOT parallel is an edge-edge crossing → ONE witness contact along
     // the contact axis, not a 2-point segment clip. Pre-fix the segment reference
     // forces `rn = n_a`, so FIX-1's |rn·n_a| test never trips and `clipSegment`
@@ -168,7 +168,7 @@ test "crossed capsules yield a single witness contact" {
 }
 
 test "nearly-parallel capsules transition deterministically" {
-    // M1.1.4/E1 (P2-4): sample the ACTUAL scalar-specific parallel threshold —
+    // Sample the ACTUAL scalar-specific parallel threshold —
     // `sin²θ ≤ parallel_rel` (`1e-6` f32 / `1e-12` f64) ⇒ θ_thr ≈ `1e-3` f32 /
     // `1e-6` f64 — just below / at / clearly above, in BOTH fixed A/B orders.
     // Below ⇒ parallel 2-point; above ⇒ crossed single witness; every case is
@@ -212,7 +212,7 @@ test "nearly-parallel capsules transition deterministically" {
 }
 
 test "degenerate capsule (half_height == 0) behaves as a sphere" {
-    // M1.1.4/E1: a `half_height == 0` capsule has a zero-length segment core —
+    // A `half_height == 0` capsule has a zero-length segment core —
     // geometrically a sphere. Its supporting feature is a count-2 segment with
     // both verts coincident, which `segmentsParallel` treats as degenerate (a
     // point), so the pair takes the single-witness path just like a sphere.
@@ -236,7 +236,7 @@ test "degenerate capsule (half_height == 0) behaves as a sphere" {
 }
 
 test "intersection feature ids are unique among simultaneous contacts" {
-    // Codex P1a repro: two unit boxes, B offset into a corner with a small yaw so
+    // Corner repro: two unit boxes, B offset into a corner with a small yaw so
     // the manifold points are edge×plane intersections. The old `@min(edge)` key
     // aliased distinct box edges (a vertex is on 3 edges) → two contacts shared
     // 0x800e8002; the sorted-pair key makes every simultaneous contact distinct.
@@ -296,7 +296,7 @@ fn validClassPairs(m: ContactManifold) bool {
 }
 
 test "capsule endpoint feature ids distinguish the two ends and the segment" {
-    // Codex FIX-12: an end-on capsule endpoint must encode WHICH endpoint (its
+    // An end-on capsule endpoint must encode WHICH endpoint (its
     // vert id), not just the constant face_id 6 — else +Y and −Y ends share an
     // id, and an endpoint (point-core) is indistinguishable from a side segment.
     const cap = capsuleShape(1, 0.3);
@@ -318,7 +318,7 @@ test "capsule endpoint feature ids distinguish the two ends and the segment" {
 }
 
 test "pose sweep: capsule pairs have distinct well-classed feature ids" {
-    // Extend the feature-id coverage to the capsule pairs (Codex FIX-12): every
+    // Extend the feature-id coverage to the capsule pairs: every
     // config's manifold has pairwise-distinct ids, each carrying a valid class
     // pair, and no multi-point manifold carries the single-contact (a,c) pair.
     const cap = capsuleShape(1, 0.3);
@@ -353,7 +353,7 @@ test "pose sweep: capsule pairs have distinct well-classed feature ids" {
 }
 
 test "single-contact fallback id never aliases a clip id" {
-    // Codex FIX-11 threshold repro (the two Codex angles straddle `face_face_min`
+    // Threshold repro (the two angles straddle `face_face_min`
     // at f32; the threshold is precision-dependent — 0.999 f32 / 0.9999 f64 — so
     // scan a small tilt range around them to find, at THIS build's precision, both
     // a clipped (multi-point) and a fallback (single-contact) box/box at the same
@@ -384,7 +384,7 @@ test "single-contact fallback id never aliases a clip id" {
 }
 
 test "reference corner feature id encodes the incident face" {
-    // Codex FIX-10: a reference corner's incident half must carry which incident
+    // A reference corner's incident half must carry which incident
     // face it lies on, not a constant — else two corners at the SAME reference
     // vertex on DIFFERENT incident faces (a supporting-face flip inter-frame)
     // share a feature_id and warm-starting mis-matches them.
@@ -573,7 +573,7 @@ test "shallow and deep manifolds are continuous" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.5), m.points[i].penetration, tol); // r_sum(2) − dist(1.5)
 }
 
-// --- E4: broadphase → collidePair integration ---
+// --- Broadphase → collidePair integration ---
 
 /// Add a `.dynamic` box body at (x,y,z). Descriptor positions are the f32 api Vec3.
 fn addBoxBodyAt(gpa: std.mem.Allocator, bm: *BodyManager, store: *const ShapeStore, shape: api.ShapeId, entity_index: u32, x: f32, y: f32, z: f32) !BodyId {
@@ -604,7 +604,7 @@ fn addBoxBodyAtRot(gpa: std.mem.Allocator, bm: *BodyManager, store: *const Shape
 }
 
 test "collidePair feature ids are stable across a pose-order boundary" {
-    // Codex P1b: `collide` re-canonicalizes by pose, so the feature_id
+    // `collide` re-canonicalizes by pose, so the feature_id
     // reference/incident ownership flips when a coordinate crosses the
     // lexicographic order boundary (x = 0 here). `collidePair` drives a FIXED
     // body-id order, so a tiny shift crossing that boundary leaves the feature_ids
@@ -636,7 +636,7 @@ test "collidePair feature ids are stable across a pose-order boundary" {
 }
 
 test "collidePair deep generic manifold is stable across a pose-order boundary" {
-    // M1.1.3-HF E4(d): the same pose-order-boundary guard on the GENERIC deep path
+    // The same pose-order-boundary guard on the GENERIC deep path
     // (a capsule/box pair — no box/box fast path — so it runs GJK/EPA). A capsule
     // at the origin, two boxes straddling the poseAfter x = 0 lexicographic boundary
     // by ±1e-4, deep-overlapping. `collidePair` drives a FIXED body-id order, so
@@ -734,9 +734,9 @@ test "broadphase pairs to manifolds via collidePair" {
 }
 
 test "pose sweep: feature ids are distinct and frame-stable" {
-    // The verification a single-point test cannot give (Codex FIX-9): a grid of
+    // The verification a single-point test cannot give: a grid of
     // deep box/box contacts — yaw × a light second-axis tilt × lateral offsets ×
-    // two Y overlaps, plus the two Codex repros — each checked for (a) pairwise-
+    // two Y overlaps, plus the two corner repros — each checked for (a) pairwise-
     // distinct feature_ids and (b) frame-stability of the feature_id SET under a
     // ±1e-4 offset via `collidePair`'s body-id order.
     const gpa = testing.allocator;
@@ -800,7 +800,7 @@ test "pose sweep: feature ids are distinct and frame-stable" {
         }
     }
 
-    // Explicit Codex repros (yaw about Y), asserted distinct.
+    // The two corner repros again, yawed about Y: their feature ids must be DISTINCT.
     inline for (.{ .{ -1.0, 1.9, -1.9, 0.125 }, .{ -0.9, 1.9, -0.9, 0.05 } }) |c| {
         const rot = math.Quatf.fromAxisAngle(math.Vec3.unit_y, c[3]);
         const id_r = try addBoxBodyAtRot(gpa, &bm, &store, box, idx, c[0], c[1], c[2], rot);

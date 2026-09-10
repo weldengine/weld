@@ -1,8 +1,8 @@
-//! M1.1.11 acceptance suite for the infinite plane (half-space).
+//! Acceptance suite for the infinite plane (half-space).
 //!
 //! The half-space is the first shape whose geometry the existing narrowphase
 //! cannot express: `{x : n·x <= d}` has an UNBOUNDED support map, diverging in
-//! every direction but `−n`, so GJK, EPA and the M1.1.10 cast kernel — all built
+//! every direction but `−n`, so GJK, EPA and the cast kernel — all built
 //! on the support map — do not apply to it (`engine-physics-forge.md` §1.11.15).
 //! The answer is a taxonomy ABOVE the support map: the category is chosen before a
 //! shape is converted into a `SupportShape`, which is why that conversion stops
@@ -43,7 +43,7 @@ fn vr(x: Real, y: Real, z: Real) Vec3r {
 }
 
 // ---------------------------------------------------------------------------
-// E1 — the taxonomy, the stored half-space, and the unit-normal invariant
+// The taxonomy, the stored half-space, and the unit-normal invariant
 // ---------------------------------------------------------------------------
 
 test "the plane descriptor payload defaults to the +Y half-space through the origin" {
@@ -77,7 +77,7 @@ test "a plane carries the half_space class and sphere, box and capsule carry con
         try testing.expectEqual(ShapeClass.convex, store.get(id).?.class());
     }
 
-    // THREE variants exactly, since M1.1.11.1 brought the third category of §1.11.15.
+    // THREE variants exactly, the mesh having brought the third category of §1.11.15.
     // The count is pinned so a fourth arrival is a deliberate act rather than a silent
     // widening; it fired on this line when the mesh landed, which is the whole reason
     // it is written this way. The pin is EXTENDED and not relaxed: the count moved 2 → 3
@@ -196,7 +196,7 @@ test "a plane shape occupies a store slot like any other and reuses it LIFO" {
 
     // A half-space owns no memory — it is POD — so it takes the ordinary
     // generational slot path and `destroyShape` frees nothing. Pinned because the
-    // mesh (M1.1.11.1) is the shape that changes this, and the change must be
+    // mesh is the shape that changes this, and the change must be
     // visible against a baseline.
     const a = try store.createShape(gpa, .{ .plane = .{} });
     const b = try store.createShape(gpa, .{ .plane = .{ .normal = av3(1, 0, 0), .distance = -2 } });
@@ -212,7 +212,7 @@ test "a plane shape occupies a store slot like any other and reuses it LIFO" {
 }
 
 // ---------------------------------------------------------------------------
-// E2 — the two poisoned fields, observable
+// The two poisoned fields, observable
 // ---------------------------------------------------------------------------
 
 test "a plane's local aabb and unit inertia are NaN on every component" {
@@ -228,7 +228,7 @@ test "a plane's local aabb and unit inertia are NaN on every component" {
     // safe build, the NaN is the one that outlives it and propagates loudly through any
     // arithmetic that reaches it.
     //
-    // The alternative was measured on the E1 commit, where the fields were `undefined`:
+    // The alternative was measured with the fields `undefined`:
     // a plane's sleep radius came out 5.2510e-13 at f32 and 6.4444e-104 at f64, and the
     // Debug 0xAA fill reads as −3.0316e-13 — all three finite, small and entirely
     // plausible, which is precisely why nobody would ever notice one.
@@ -256,7 +256,7 @@ test "a plane's local aabb and unit inertia are NaN on every component" {
 }
 
 // ---------------------------------------------------------------------------
-// E4 — the analytic kernels of §1.11.15's table
+// The analytic kernels of §1.11.15's table
 // ---------------------------------------------------------------------------
 
 /// The half-space `{ x : normal·x <= distance }` at solver precision.
@@ -584,15 +584,15 @@ test "an oblique far-field configuration keeps a unit normal" {
 }
 
 // ---------------------------------------------------------------------------
-// E4 — the five `BodyManager` adapters, at the BODY grain
+// The five `BodyManager` adapters, at the BODY grain
 // ---------------------------------------------------------------------------
 //
 // Driven through `bm.addBody` and the adapters DIRECTLY, with no test harness. That
 // is not a shortcut: `harness.World.addBody` calls `bm.bodyAabb(...).?` to insert a
 // broadphase proxy, and a half-space has no world AABB — the class assert fires. The
-// harness learns the half-space at E5, together with the unbounded lists it belongs
-// in; until then the body-grain adapters are what can be exercised, and they are what
-// E4 owns.
+// harness learns the half-space further down, with the unbounded lists it belongs
+// in; before that the body-grain adapters are what can be exercised, and they are
+// this section's subject.
 //
 // **The world-frame oracle is derived once, here, and hard-coded below.** A plane body
 // at `(10, 20, 30)` rotated +90° about +Z, carrying the LOCAL half-space `{ y <= 0 }`:
@@ -806,10 +806,10 @@ test "overlapShapeBody answers by the sign of the separation" {
 }
 
 // ---------------------------------------------------------------------------
-// E5 — the eight query entries, at ENTRY grain, with a plane in the scene
+// The eight query entries, at ENTRY grain, with a plane in the scene
 // ---------------------------------------------------------------------------
 //
-// Unblocked by the harness learning the half-space: until E5 a plane body could not be
+// Unblocked by the harness learning the half-space: before that a plane body could not be
 // added to a `harness.World` at all, `addBody` calling `bodyAabb` to build a broadphase
 // proxy. Now it goes into the layer's unbounded list instead, and the entries can be
 // exercised where a caller actually meets them.
@@ -916,7 +916,7 @@ test "all eight query entries answer a half-space body" {
         .position = vr(20, 1.5, 0),
     }, &bodies));
 
-    // (6) overlapAabb — THE OBLIGATION DEFERRED FROM E2. Its collector used to call
+    // (6) overlapAabb — THE OBLIGATION THE POISONED FIELDS DEFERRED. Its collector used to call
     // `bodyAabb` on every candidate, which asserts on a half-space; it goes through
     // `aabbOverlapsBody` now, whose half-space arm is the corner predicate. A box
     // straddling y = 0 meets the solid; one entirely above does not.
@@ -1068,7 +1068,7 @@ test "the answer is invariant under creation-order permutation, and two runs are
 }
 
 // ---------------------------------------------------------------------------
-// E6 — the contact path
+// The contact path
 // ---------------------------------------------------------------------------
 
 /// A static plane body carrying the LOCAL half-space `(normal, distance)` at the
@@ -1310,7 +1310,7 @@ test "a full tick cycle runs with a plane body, and a falling box comes to rest 
     var world = harness.World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
 
-    // THE RESIDUAL E5 NAMED, CLOSED. Until this gate `world.step()` panicked in
+    // THE RESIDUAL THE QUERY SECTION NAMED, CLOSED. `world.step()` once panicked in
     // `collidePair` the moment the broadphase emitted a pair containing a plane body:
     // the plane reached `supportShape`, whose precondition is the convex class. A FULL
     // cycle now, all eleven steps, not a kernel call.
@@ -1331,7 +1331,7 @@ test "a full tick cycle runs with a plane body, and a falling box comes to rest 
     //   f64   0.495074006        0.004925994    6.9388939e-18
     //
     // and the settled manifold carries FOUR contacts, one constraint. Worth recording:
-    // it settles just BELOW the slop, where M1.1.7's RD-1 measured a box on a BOX
+    // it settles just BELOW the slop, where a recorded deviation measured a box on a BOX
     // settling just above it (0.00500059 at f32). The difference is not a discrepancy —
     // the correction factor is 0.2, so the last step lands within one step of the fixed
     // point on either side — but the plane's `sep` is a dot product against a stored unit
@@ -1348,13 +1348,13 @@ test "a full tick cycle runs with a plane body, and a falling box comes to rest 
     try testing.expectApproxEqAbs(@as(Real, 0), velocity_y, 1e-6);
     // The settled contact is the FOUR-point face manifold, not a degenerate single point.
     try testing.expectEqual(@as(u8, 4), world.bm.collidePair(&world.store, plane_body, box).?.count);
-    // Nothing became NaN on the way — the poison of E2 never entered an arithmetic path.
+    // Nothing became NaN on the way — the poison never entered an arithmetic path.
     for (world.bm.position(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
     for (world.bm.linearVelocity(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
 }
 
 // ---------------------------------------------------------------------------
-// E7 / I1 — the bit-agreement between the overlap predicate and the generator
+// The bit-agreement between the overlap predicate and the generator
 // ---------------------------------------------------------------------------
 
 test "overlapShapeBody and collidePlane agree to the bit on whether a pair touches" {
@@ -1363,7 +1363,7 @@ test "overlapShapeBody and collidePlane agree to the bit on whether a pair touch
     defer world.deinit(gpa);
     const ground = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
 
-    // E6 CLAIMED this agreement as a consequence of NOT copying the generic generator's
+    // The contact section CLAIMED this agreement as a consequence of NOT copying the generic
     // `keep_eps`: the query predicate is `separation(...) <= 0` and the generator's
     // per-vertex criterion is `sep <= 0`, both exact, so they cannot disagree. A claim
     // of agreement that is never exercised is a plea, so here it is exercised — on
@@ -1437,7 +1437,7 @@ test "overlapShapeBody and collidePlane agree to the bit on whether a pair touch
 }
 
 // ---------------------------------------------------------------------------
-// E7 / J1 — `normal · direction <= 0` on EVERY hit, the four kernels agreeing
+// `normal · direction <= 0` on EVERY hit, the four kernels agreeing
 // ---------------------------------------------------------------------------
 
 test "an outward cast from inside a half-space reports minus-direction, not the plane normal" {
@@ -1543,7 +1543,7 @@ test "castShapeBody transports the normal without disturbing the invariant" {
 }
 
 // ---------------------------------------------------------------------------
-// E7 / J2 — the `distance` domain
+// The `distance` domain
 // ---------------------------------------------------------------------------
 
 test "a non-finite plane distance is refused at creation, in both senses" {

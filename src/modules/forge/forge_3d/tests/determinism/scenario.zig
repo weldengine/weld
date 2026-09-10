@@ -1,6 +1,6 @@
-//! The CANONICAL determinism scenario of M1.1.14 — frozen by the brief.
+//! The CANONICAL determinism scenario — frozen.
 //!
-//! Fixed step 60 Hz, `substep_count` at its M1.1.13.1 default, ONE worker, and
+//! Fixed step 60 Hz, `substep_count` at its default, ONE worker, and
 //! **no RNG anywhere**: every initial value below is a literal. What the scenario
 //! is for is not to be a plausible game scene — it is to make every mechanism
 //! whose determinism the milestone claims actually RUN, so that a witness taken
@@ -13,15 +13,15 @@
 //! and every committed witness becomes wrong. The order is numbered in the code.
 //!
 //! NINE elements, each present for a named reason and none decorative — and a
-//! REASON FOR PRESENCE IS NOT AN ORACLE, which is the correction of M1.1.14's own
-//! closing review: three of these nine were listed with their reason while their
+//! REASON FOR PRESENCE IS NOT AN ORACLE, which is the correction of this file's own
+//! a closing review: three of these nine were listed with their reason while their
 //! effect fell outside the compared window, outside every artifact, or both. Each
 //! entry below now states WHERE its effect is observed.
 //!
 //! 1. **A static half-space ground.** The surface everything rests on, and the
 //!    one shape with no AABB at all — it exercises the unbounded proxy list
 //!    (`engine-physics-shapes.md` §1.11.15) rather than the BVH.
-//! 2. **The five-box stack of M1.1.13.1.** Manifold cardinality 4, sleep
+//! 2. **The five-box stack.** Manifold cardinality 4, sleep
 //!    transitions, and the deepest chain of contacts in the scene.
 //! 3. **Two groups starting apart and colliding partway through.** The island
 //!    partition changes in BOTH DIRECTIONS ON THESE TWO GROUPS — separate, then one
@@ -34,11 +34,11 @@
 //!    60-frame window, measured. A dedicated test requires SEPARATE → TOGETHER →
 //!    SEPARATE on the island MEMBERSHIP of these two groups; it requires nothing of
 //!    the global island count, which is the separate and coarser probe above.
-//! 4. **The frictionless slider of M1.1.13.1.** Carries that milestone's named
-//!    ULP residual into the instrument, which is what Gate E re-measures.
+//! 4. **The frictionless slider.** Carries the named
+//!    ULP residual into the instrument, which the closing measurement re-checks.
 //! 5. **A sphere crossing the internal edge of a static `MeshShape`.** Several
 //!    constraints per body pair, hence the THIRD term of the ordering key
-//!    (`subshape_id`, M1.1.11.1) — without a mesh the key's totality is never
+//!    (`subshape_id`) — without a mesh the key's totality is never
 //!    exercised and a two-term key would pass every trace.
 //! 6. **One sensor and one body entering then leaving it.** Sensor state and both
 //!    deltas (`engine-physics-solver.md` §1.13.11) — SERIALISED INTO THE CHAIN since
@@ -58,7 +58,7 @@
 //!    where a wrong `max_slope` conversion surfaces first, which is the whole
 //!    reason the deterministic cosine exists.
 //!
-//! **Elements 3, 6, 8 and 9 were each defective until M1.1.14's review, and they are
+//! **Elements 3, 6, 8 and 9 were each defective until a review, and they are
 //! four instances of ONE class: a reason for presence read as an oracle.** This header claimed "a step and a slope" while the
 //! scene held neither — nothing stood near the character but the flat half-space,
 //! so `max_slope` was never approached; and the character entered NO artifact,
@@ -109,7 +109,7 @@ pub const Scenario = struct {
     /// The two groups that start apart and collide.
     group_a: [2]BodyId = undefined,
     group_b: [2]BodyId = undefined,
-    /// The frictionless slider of M1.1.13.1.
+    /// The frictionless slider.
     slider: BodyId = undefined,
     /// The sphere that crosses the mesh's internal edge.
     mesh_sphere: BodyId = undefined,
@@ -125,7 +125,7 @@ pub const Scenario = struct {
     /// The ramps exist to make `cos_max_slope` LOAD-BEARING, which is the whole
     /// reason the deterministic cosine was written: their surface cosines are
     /// `0.894` and `0.6247`, bracketing `cos(0.785) = 0.70738` by `0.187` and
-    /// `0.083`. Before M1.1.14's review this scenario had no relief at all — its
+    /// `0.083`. Before that review this scenario had no relief at all — its
     /// header claimed "a step and a slope" while nothing stood near the character
     /// but the flat half-space, so `max_slope` was never approached and the cosine
     /// the milestone added was exercised by no witness.
@@ -146,7 +146,7 @@ pub const Scenario = struct {
     /// scope test used to infer "the character reached the riser" from a box drawn
     /// around the tread; `ground_body` is the controller's own answer to the same
     /// question, so the assertion stops depending on a rectangle staying correct.
-    /// The result was DISCARDED here until M1.1.14's review — `_ = moveCharacter(...)`
+    /// The result was DISCARDED here until that review — `_ = moveCharacter(...)`
     /// — which is why no test could name what the character was standing on.
     last_move: character_mod.MoveResult = .{
         .position = Vec3r.zero,
@@ -273,7 +273,7 @@ pub const Scenario = struct {
         slider.friction = 0;
         slider.restitution = 0;
         // Damping OFF, both channels. At the default 0.05 a 5 m/s slider loses
-        // 4.756 m/s over sixty ticks — measured at M1.1.11.1 — which would swamp
+        // 4.756 m/s over sixty ticks — measured — which would swamp
         // the ULP-scale residual this element exists to carry.
         slider.linear_damping = 0;
         slider.angular_damping = 0;
@@ -333,7 +333,7 @@ pub const Scenario = struct {
         // face touches the half-space boundary exactly, so the trigger detects the
         // GROUND as well — a second, permanent pair, and the scope test below
         // reported two `entered` instead of one. Lifting it clear leaves the
-        // element as the brief describes it: one sensor, one body crossing.
+        // element in its specified form: one sensor, one body crossing.
         trig.position = av3(80, 3, 0);
         trig.is_trigger = true;
         // The visitor is on the default object layer, so the trigger's mask must
@@ -362,7 +362,7 @@ pub const Scenario = struct {
         try self.mobile.append(gpa, self.trigger_visitor);
         w.bm.setLinearVelocity(self.trigger_visitor, vr(12, 0, 0));
         // Nothing switches the sensor pass on: step 10 bis is UNCONDITIONAL from
-        // M1.1.15 (`../../world.zig`). The scenario only has to CONTAIN a trigger,
+        // `PhysicsWorld` (`../../world.zig`). The scenario only has to CONTAIN a trigger,
         // which is what the composition test below asserts.
 
         // --- (7) a lone box that settles at once, x = 15 -----------------------
@@ -435,7 +435,7 @@ pub const Scenario = struct {
         // lifts by `step_height` and then advances by the motion REMAINING in that
         // tick, so whether a riser is climbed depends on the caller's per-tick step
         // and not on the riser height alone. Swept here: at 0.03 m/tick — the walk
-        // this scenario used before M1.1.14's review — NO riser is ever climbed,
+        // this scenario used before that review — NO riser is ever climbed,
         // 0.15 m and 0.25 m alike; 0.15 m needs 0.06 m/tick and 0.25 m needs 0.10.
         // So the scenario walked below the threshold of its own step arm, and the
         // walk is now 0.06 with a 0.15 m riser: the cheapest pair that exercises
@@ -451,7 +451,7 @@ pub const Scenario = struct {
         // Top face at y = 0.15, the body sunk well below the half-space rather than
         // resting flush on it: static × static is `false` in the layer matrix so
         // there is no pair either way, but a face exactly coplanar with the
-        // boundary is the configuration M1.1.13 measured a spurious second contact
+        // boundary is the configuration measured to give a spurious second contact
         // from, and it costs nothing to not reproduce it.
         riser.position = av3(-65.5, -0.85, 0);
         riser.friction = 0.5;
@@ -506,7 +506,7 @@ pub const Scenario = struct {
         // leg that ends 2.2 m short of its commanded 9 m is followed by a `−x` leg
         // that spends all 9, and the character drifts 2.2 m per cycle for ever. Over
         // 1000 frames that is cosmetic — it still meets the ramps every cycle — but
-        // this scenario is an INSTRUMENT that M1.1.21.1 and M1.A replay, possibly at
+        // this scenario is an INSTRUMENT that gets replayed, possibly at
         // other frame counts, and at ten times the length the character is 55 m away
         // and the terrain is never touched again. An unbounded drift in a replayed
         // instrument is a latent vacuity, so the excursion is closed by geometry
@@ -596,7 +596,7 @@ pub const Scenario = struct {
     ///
     /// The walk is 0.06 and not 0.03 because `tryStepUp` is a per-tick sweep: at
     /// 0.03 m/frame NO riser is ever climbed, at any height — swept and measured at
-    /// M1.1.14's review, where the scenario was found walking below the threshold of
+    /// a review, where the scenario was found walking below the threshold of
     /// its own step arm.
     ///
     /// The gravity term runs throughout so the character is always resolving a
@@ -613,8 +613,6 @@ pub const Scenario = struct {
         };
     }
 };
-
-// --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
 const trace_mod = @import("trace.zig");
@@ -635,7 +633,7 @@ test "scenario: builds, and every element is present" {
     // out so a reader
     // can check it against the constructor rather than trust the total.
     //
-    // **THIS ASSERTION DID NOT DO WHAT ITS COMMENT CLAIMED, and M1.1.14's review
+    // **THIS ASSERTION DID NOT DO WHAT ITS COMMENT CLAIMED, and a review
     // proved it by finding the case it was written for.** It used to say it "fails
     // when an element is added without being appended to `mobile`, which would
     // silently shrink the continuous metric's coverage". The character was added
@@ -654,7 +652,7 @@ test "scenario: builds, and every element is present" {
     try testing.expectEqual(@as(u32, 21), s.world.bm.count());
     try testing.expectEqual(@as(u32, 1), s.chars.count());
     // THE TRIGGER IS PRESENT, asserted on the body's ROLE rather than on a world
-    // flag. Until M1.1.15 this line read `expect(s.world.sensors_on)`, a claim about
+    // flag. This line once read `expect(s.world.sensors_on)`, a claim about
     // a switch the harness carried and production would not: step 10 bis is now
     // unconditional, so that switch is gone and the claim it made — "this scenario
     // exercises the sensor pass" — splits in two. The half that belongs here is
@@ -677,7 +675,7 @@ test "scenario: steps without error, and the character resolves its ground" {
     // fall of 2 cm per tick over 120 ticks would put an unresolved character
     // 2.4 m under the plane, and the terrain's lowest surface is the plane itself.
     //
-    // The BAND is what changed at M1.1.14's review, and the reason is the whole
+    // The BAND is what that review changed, and the reason is the whole
     // point of the fix: this used to assert `|y| < 0.05`, which is only true of a
     // character on FLAT GROUND. It passed for a thousand frames because the scene
     // had no relief at all — the assertion was a witness to the defect rather than
@@ -775,7 +773,7 @@ test "scenario: every one of the nine elements actually fires" {
         // THIRD INSTANCE of one class on this single test, and the previous repair
         // MOVED it rather than closing it: `slept_last_tick > 0` is generic, so it
         // was satisfied at frame 29 by element 7's body while the line claimed the
-        // stack's transition at 100. Codex measured the consequence — forbidding all
+        // stack's transition at 100. The consequence was measured — forbidding all
         // five stack bodies to sleep left the whole suite green.
         if (first_stack_sleep == null) {
             for (s.stack) |b| {
@@ -787,10 +785,10 @@ test "scenario: every one of the nine elements actually fires" {
         }
 
         // (7) THE LONE SLEEPER, BY IDENTITY AND BY INSTANT. Element 7 had NO
-        // observation of its own until Codex measured its absence: the sleep line
+        // observation of its own until that absence was measured: the sleep line
         // above is satisfied by ANY body, so forbidding `lone_sleeper` to sleep left
         // this test green. The first repair gave it an identity and left it
-        // accumulating over 750 frames, and Codex measured THAT too — awake for the
+        // accumulating over 750 frames, and THAT was measured too — awake for the
         // compared window and asleep afterwards was green again. A test that promises
         // nine proofs and delivers seven is worse than one that promises seven.
         if ((s.world.bm.isSleeping(s.lone_sleeper) orelse false) and first_lone_sleep == null) first_lone_sleep = f;
@@ -873,7 +871,7 @@ test "scenario: every one of the nine elements actually fires" {
     //     on at frame 422, measured.
     //
     // So the five discrete-carried observations below assert a FRAME, not a boolean.
-    // The correction came from Codex on element 7: its former boolean accumulated
+    // The correction on element 7: its former boolean accumulated
     // over 750 frames while the element exists to make the sleep-state trace
     // non-constant inside 60, so keeping that body awake for the compared window and
     // letting it sleep later left the test green. Identity had been fixed one round
@@ -1015,7 +1013,7 @@ test "scenario: the slope test DECIDES the character's trajectory, both ways" {
 
     // And the DEFAULT run stays inside the bowl the terrain forms — the property
     // that keeps the instrument from drifting off its own scene when replayed at a
-    // longer frame count (M1.1.21.1, M1.A).
+    // longer frame count.
     try testing.expect(actual.min_x > -68.5);
     try testing.expect(actual.max_x < -60.0);
 }
@@ -1024,7 +1022,7 @@ test "scenario: the retained pair set really SHRINKS — the fourth trace is an 
     // P1-5, THE NON-VACUITY OF THE FOURTH DISCRETE TRACE. The retained pair set is
     // one of the four invariants every CI cell compares, and `trace.zig` states the
     // hazard on itself: over a set that can only GROW, a trace agrees with itself by
-    // accumulation and proves nothing. The harness was pruned at M1.1.14 precisely
+    // accumulation and proves nothing. The harness was pruned precisely
     // so that stops being true — but the pruning being IMPLEMENTED and the canonical
     // scenario EXERCISING it are two different claims, and `solver_test.zig`'s
     // generic departure test establishes only the first. This establishes the second.
@@ -1191,7 +1189,7 @@ test "the two groups are separate, then one island, then separate again" {
         }
     }
 
-    // THE FULL SEQUENCE ON THESE TWO GROUPS. Phase 2 alone would be a merge-only
+    // THE FULL SEQUENCE ON THESE TWO GROUPS. Alone, phase 2 would be a merge-only
     // scene; phase 3 is what proves the partition splits as well as joins, and both
     // are read off the membership of these bodies rather than off a global count that
     // the sleeper also moves.

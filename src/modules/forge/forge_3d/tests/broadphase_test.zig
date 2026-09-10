@@ -1,6 +1,6 @@
 //! Acceptance suite for `forge_3d/pipeline/broadphase.zig`.
 //!
-//! Grows gate by gate with M1.1.1: E1 covers `Bvh(T)` insert/remove invariants
+//! It covers `Bvh(T)` insert/remove invariants
 //! and deterministic LIFO free-list reuse. Later gates add update hysteresis,
 //! `queryAabb`, determinism, the layer-pair matrix, `computePairs`, and the
 //! `BodyManager`→`Broadphase` integration.
@@ -209,7 +209,7 @@ test "update hysteresis" {
     var tree = BvhF.init(.{ .margin = 0.1 });
     defer tree.deinit(gpa);
 
-    // A few anchors plus the proxy we move. Anchors keep the tree non-trivial
+    // A few anchors plus the proxy under test. Anchors keep the tree non-trivial
     // so `update` actually exercises removeLeaf + insertLeaf (not just re-root).
     _ = try tree.insert(gpa, boxCe(.{ 20, 0, 0 }, 0.5), 1);
     _ = try tree.insert(gpa, boxCe(.{ -20, 0, 0 }, 0.5), 2);
@@ -249,7 +249,7 @@ test "update hysteresis" {
 test "queryAabb matches brute force" {
     const gpa = std.testing.allocator;
     // margin 0 → stored box == tight box, so the brute-force reference is a
-    // plain `overlaps` scan (the face-inclusive convention, brief trap note).
+    // plain `overlaps` scan, on the face-inclusive convention.
     var tree = BvhF.init(.{ .margin = 0 });
     defer tree.deinit(gpa);
 
@@ -439,14 +439,14 @@ test "layer-pair matrix filters pairs" {
     try std.testing.expect(hasPair(pairs.items, 10, 30)); // static × debris
     try std.testing.expect(hasPair(pairs.items, 20, 30)); // dynamic × debris
 
-    // Forbidden combinations absent — the WHOLE `trigger` row and column, M1.1.13.
+    // Forbidden combinations absent — the WHOLE `trigger` row and column.
     try std.testing.expect(!hasPair(pairs.items, 10, 11)); // static × static
     try std.testing.expect(!hasPair(pairs.items, 30, 31)); // debris × debris
     try std.testing.expect(!hasPair(pairs.items, 40, 41)); // trigger × trigger
     try std.testing.expect(!hasPair(pairs.items, 10, 40)); // static × trigger
     try std.testing.expect(!hasPair(pairs.items, 30, 40)); // debris × trigger
-    // `dynamic × trigger` — this cell was `true` at M1.1.1 and a positive assertion on
-    // exactly this pair stood here until M1.1.13. It is REVERSED, not relaxed, and the
+    // `dynamic × trigger` — this cell was once `true` and a positive assertion on
+    // exactly this pair stood here. It is REVERSED, not relaxed, and the
     // old assertion is DELETED rather than commented out: a trigger detects without
     // responding, so it must never reach constraint construction, and killing the pair at
     // the source is a stronger guarantee than filtering it downstream every tick
@@ -459,7 +459,7 @@ test "forEachLeaf skips a retired slot and follows it through recycling" {
     var tree = BvhF.init(.{ .margin = 0 });
     defer tree.deinit(gpa);
 
-    // **THE ENTRY POINT OF THE WHOLE SENSOR PASS** (M1.1.13): `forEachInLayer` enumerates the
+    // **THE ENTRY POINT OF THE WHOLE SENSOR PASS**: `forEachInLayer` enumerates the
     // TRIGGERS THEMSELVES through this walk, so a missed leaf is a trigger that detects
     // nothing, silently, and everything the pass reports rests on it.
     //
@@ -467,7 +467,7 @@ test "forEachLeaf skips a retired slot and follows it through recycling" {
     // predicate of its own: it delegates to `isLiveLeaf`, which pre-dates it and which
     // production already consumes (`computePairs` skips a stale proxy id with it). The
     // existing suites hole the node pool through `remove` in several places, but none of them
-    // walks it, and until M1.1.13 nothing did.
+    // walks it, and before the sensor pass nothing did.
     const a = try tree.insert(gpa, boxAt(0), 10);
     const b = try tree.insert(gpa, boxAt(4), 20);
     const c = try tree.insert(gpa, boxAt(8), 30);
@@ -820,7 +820,7 @@ test "insert is atomic under allocation failure (no orphan leaf)" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.1 / gate B — the moved-log uniqueness invariant.
+// The moved-log uniqueness invariant.
 //
 // REPLACES `test "update is atomic under allocation failure (no hysteresis poisoning)"`,
 // whose object no longer exists: `Broadphase.update` has no allocation and therefore no
@@ -997,12 +997,12 @@ test "update is infallible once capacity is reserved at insert" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.9 / E2 — ray traversal (`queryRay`)
+// Ray traversal (`queryRay`)
 // ---------------------------------------------------------------------------
 
 /// Ray sink over a scene whose `user_data` IS its index into `boxes`, so the
 /// collector can resolve a candidate's box and turn it into a distance — the
-/// stand-in, at broadphase level, for the exact kernel E4 will call.
+/// stand-in, at broadphase level, for `BodyManager.raycastBody`, the exact kernel
 ///
 /// `tighten` selects the two selection modes this gate can express: a `closest`
 /// collector that lowers its bound on every accepted candidate, and an `all`
@@ -1303,7 +1303,7 @@ test "queryRay node count grows logarithmically" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E2 — swept-volume traversal (`queryCast`)
+// Swept-volume traversal (`queryCast`)
 // ---------------------------------------------------------------------------
 //
 // `queryCast` is `queryRay` with one difference: each node's stored box is inflated
@@ -1313,11 +1313,11 @@ test "queryRay node count grows logarithmically" {
 // refactor's proof and asserts counts MEASURED BEFORE it.
 
 /// Cast sink: the swept counterpart of `RayCollector`, which is left untouched so
-/// the bit-identity test exercises the M1.1.9 collector as delivered.
+/// the bit-identity test exercises the ray collector as delivered.
 ///
 /// Its exact test is the same slab predicate on the INFLATED box — the brute-force
 /// reference every test here compares against, and the stand-in for the exact kernel
-/// E3 will write.
+/// `BodyManager.castShapeBody`, which `query/cast.zig` calls.
 const CastCollector = struct {
     gpa: std.mem.Allocator,
     boxes: []const Aabbf,
@@ -1364,7 +1364,7 @@ const CastCollector = struct {
 /// reproduced construction for construction — same seed, same order, same zero
 /// margin. The reproduction is not taken on trust: the visited counts baked into the
 /// bit-identity test were measured through this exact sequence, so a divergence from
-/// the M1.1.9 scene would show up there.
+/// the ray scene would show up there.
 fn buildCloud(gpa: std.mem.Allocator, tree: *BvhF, boxes: *std.ArrayListUnmanaged(Aabbf)) !void {
     var prng = std.Random.DefaultPrng.init(0x2A11_D0C5);
     const rng = prng.random();
@@ -1415,7 +1415,7 @@ test "queryRay at zero extent is bit-identical to M1.1.9" {
     //
     // The counts below were MEASURED on the pre-refactor traversal, through the
     // scene builders above, before `queryCast` existed. Two of them are independently
-    // corroborated: the 399 / 17 of the line are the figures the M1.1.9 pruning test
+    // corroborated: the 399 / 17 of the line are the figures the ray pruning test
     // already records in its own comment, and they were re-read off the running code
     // rather than copied from it.
     //
@@ -1501,7 +1501,7 @@ test "queryRay at zero extent is bit-identical to M1.1.9" {
     // A COUNT AND A SET ARE NOT ENOUGH, and this was measured rather than reasoned:
     // delegating at an extent of 0.001 instead of zero left every count and every set
     // above unchanged — the cloud's boxes are far apart and the line's are spaced 4 —
-    // so the two scenes are blind to a small non-zero extent. The M1.1.9 suite caught
+    // so the two scenes are blind to a small non-zero extent. The ray suite caught
     // it, on the one assertion in it that is sensitive at the ulp: a bound placed
     // exactly at a box's entry parameter.
     //
@@ -1761,7 +1761,7 @@ test "queryCast is empty on an empty tree" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.11 / E5 — unbounded shapes live OUTSIDE the trees
+// Unbounded shapes live OUTSIDE the trees
 // ---------------------------------------------------------------------------
 //
 // An unbounded AABB does not degrade the BVH, it destroys it
@@ -2030,7 +2030,7 @@ test "the unbounded list stops growing with the total ever created; its bound is
     defer bp.deinit(gpa);
     const list = &bp.unbounded[@intFromEnum(Layer.static)];
 
-    // MEASURED BOTH WAYS rather than asserted once (M1.1.11/E7-J3). Before the free-list,
+    // MEASURED BOTH WAYS rather than asserted once. Before the free-list,
     // `remove` only cleared the `live` flag, so 64 create/destroy cycles left 64 slots in
     // the list and `visitUnbounded` walked all of them for every query — a monotonic cost
     // in the number of planes ever created. With the LIFO free-list the same sequence
@@ -2181,7 +2181,7 @@ test "iteration follows the slot index, and an identical op sequence gives an id
     //
     // It suffices because no observable result depends on this order: the query entries
     // sort by the §1.11.14 key and `computePairs` sorts by the canonical pair key and
-    // adjacent-dedupes. What M1.1.14 requires is that the order be a DETERMINISTIC FUNCTION
+    // adjacent-dedupes. What determinism requires is that the order be a DETERMINISTIC FUNCTION
     // OF THE OPERATION SEQUENCE, which the second half of this test is.
     const Order = struct {
         fn of(bp: *const BphF, out: *[8]u32) usize {
@@ -2212,7 +2212,7 @@ test "iteration follows the slot index, and an identical op sequence gives an id
     try std.testing.expectEqual(@as(usize, 3), Order.of(&bp, &seen));
     try std.testing.expectEqualSlices(u32, &.{ 'D', 'B', 'C' }, seen[0..3]);
 
-    // THE ACTUAL REQUIREMENT (M1.1.14): the same operation sequence yields the same order.
+    // THE ACTUAL REQUIREMENT: the same operation sequence yields the same order.
     // A second broadphase, driven identically, must iterate identically — including through
     // the free-list, whose head is itself a function of that sequence.
     var bp2 = BphF.init(.{});

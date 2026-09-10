@@ -1,4 +1,4 @@
-//! M1.1.4 acceptance suite for the forge_3d narrowphase fast paths. Keyed to
+//! Acceptance suite for the `forge_3d` narrowphase fast paths. Keyed to
 //! `config.Real` so `-Dphysics_f64=true` sweeps the whole suite at f64 (local).
 //!
 //! **Method.** A fast pair's `collideOrdered` (which dispatches the analytic
@@ -10,11 +10,11 @@
 //! the id is inherited). Where the generic oracle is documented invalid (P1d
 //! extreme-aspect box), a CLOSED-FORM oracle replaces it.
 //!
-//! **Coverage.** sphere/sphere + sphere/box (E2), box/box (E3), capsule/capsule
-//! (E4) differentials + closed-forms + separated short-circuits; the deep+rotated
+//! **Coverage.** sphere/sphere + sphere/box, box/box, capsule/capsule
+//! differentials + closed-forms + separated short-circuits; the deep+rotated
 //! box/box oracle-free suite (order-independence, inline-SAT MTV, frame-invariance,
 //! surface-witness positions); and the consolidated `feature_id` producer × pair
-//! × A/B-order matrix (E5). Pairs that stay on the generic path (capsule/box,
+//! × A/B-order matrix. Pairs that stay on the generic path (capsule/box,
 //! sphere/capsule, rounded box) are asserted bit-identical to the oracle.
 
 const std = @import("std");
@@ -68,13 +68,13 @@ fn maxPen(m: ContactManifold) Real {
 
 /// Tie-band scale for SAT minimal-axis classification. Two axes whose TRUE
 /// overlaps are equal (an MTV tie) must count together, while a real geometric
-/// gap (e.g. the S1 pins' 1.9 vs 1.957 next axis) stays a unique minimum. The
+/// gap (e.g. the corruption pins' 1.9 vs 1.957 next axis) stays a unique minimum. The
 /// band `sat_tie_k · floatEps(T) · coordScale` bounds the accumulated
 /// projection/normalization rounding of the per-axis overlaps; `coordScale` is
 /// symmetric (`|Δpos| + |he_a| + |he_b|`), mirroring the gjk.zig contact-margin
 /// scale. 128 sits ~8× above the observed f32 projection noise (~7e-6 at unit
-/// scale) and ~950× below the S1 geometric gap (~0.057). Shared by the
-/// epa_robustness_test.zig cross-order tie classification (M1.1.3-HF E4).
+/// scale) and ~950× below that geometric gap (~0.057). Shared by the
+/// `epa_robustness_test.zig` cross-order tie classification.
 pub const sat_tie_k: Real = 128;
 
 /// Colinearity threshold for deduplicating minimal-band axes into DISTINCT
@@ -106,7 +106,7 @@ pub const BoxSatResult = struct {
 /// oracle. Both boxes are radius 0 and assumed overlapping. `depth` is
 /// byte-identical to the former inline `satMinOverlap` (same axis order, same
 /// `@min` selection, same `ov_raw / √l2` normalization); `axis` and `tie_count`
-/// are added so the M1.1.3-HF suite can SAT-classify cross-order divergences.
+/// are added so the robustness suite can SAT-classify cross-order divergences.
 pub fn satBoxBox(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v: Vec3r) BoxSatResult {
     const axa = [3]Vec3r{ ra.rotateVec3(Vec3r.unit_x), ra.rotateVec3(Vec3r.unit_y), ra.rotateVec3(Vec3r.unit_z) };
     const axb = [3]Vec3r{ rb.rotateVec3(Vec3r.unit_x), rb.rotateVec3(Vec3r.unit_y), rb.rotateVec3(Vec3r.unit_z) };
@@ -169,7 +169,7 @@ pub fn satBoxBox(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v
     // direction whose center-separation projection is within the band
     // (`|dc·axis| <= band`) is BILATERAL — both signs are equally-minimal MTV
     // directions, and the generic normal can pick the same absolute axis (NOT
-    // negated) in the two orders — so it counts as TWO tie directions (Codex (a)).
+    // negated) in the two orders — so it counts as TWO tie directions.
     var seen: [15]Vec3r = undefined;
     var seen_count: usize = 0;
     var tie_count: u32 = 0;
@@ -405,13 +405,13 @@ test "sphere/box P1d deep extreme aspect (closed-form)" {
 }
 
 /// Whether the generic oracle is SELF-CONSISTENT on this pair — same null-ness,
-/// same `count`, and negated normal across the two A/B orders. The M1.1.3 generic
-/// EPA deep-rotated frame-dependence is FIXED in M1.1.3-HF (`epa.zig` expansion
+/// same `count`, and negated normal across the two A/B orders. The generic
+/// EPA deep-rotated frame-dependence is FIXED (`epa.zig` expansion
 /// robustness + the `gjk.zig` deep band), so the generic oracle is now order-
 /// consistent except at exact MTV ties — where the two orders may pick the same
 /// absolute axis (a bilateral minimum) or different equally-minimal axes, giving
 /// a non-negated or count-differing normal. The caller SAT-classifies any
-/// inconsistency: an exact tie is skipped, anything else fails (E4(b)).
+/// inconsistency: an exact tie is skipped, anything else fails.
 fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) bool {
     const ab = generic(sa, pa, ra, sb, pb, rb);
     const ba = generic(sb, pb, rb, sa, pa, ra);
@@ -425,9 +425,9 @@ test "box/box SAT differential vs generic (<=30:1)" {
     // Cube A at the origin vs cube B rotated/offset — a broad sweep hitting the
     // face-face, face-vertex and edge-edge regimes. Per config, `collideOrdered`
     // is compared to the generic oracle in BOTH A/B orders where that oracle is
-    // self-consistent; a residual inconsistency (post-M1.1.3-HF, only at an exact
+    // self-consistent; a residual inconsistency (post-fix, only at an exact
     // MTV tie) is SAT-confirmed as a tie before it is skipped — an unclassified
-    // one fails (E4(b)). Geometry-only (fid tie bands excluded); fid-exact is
+    // one fails. Geometry-only (fid tie bands excluded); fid-exact is
     // asserted on the clean explicit configs.
     const box = boxShape(1, 1, 1);
     const rots = [_]Quatr{
@@ -451,22 +451,22 @@ test "box/box SAT differential vs generic (<=30:1)" {
                 const rb = g.mul(r);
                 const m = ordered(box, pa, ra, box, pb, rb) orelse continue;
                 // Compare fast vs generic in both orders where the oracle is
-                // self-consistent. Post-fix (M1.1.3-HF), a residual cross-order
+                // self-consistent. Post-fix, a residual cross-order
                 // inconsistency is permitted ONLY as an exact MTV tie, SAT-confirmed
                 // (>= 2 minimal directions / a bilateral axis); anything else is a
-                // defect (E4(b)) — never a silent skip.
+                // defect — never a silent skip.
                 if (genericConsistent(box, pa, ra, box, pb, rb)) {
                     try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
                     compared += 1;
                 } else {
                     // A residual inconsistency is classified, never silently skipped
-                    // (E4(b)). UNCONDITIONAL: null-ness AND depth must always agree —
+                    // UNCONDITIONAL: null-ness AND depth must always agree —
                     // a null-ness or depth divergence is the frame-dependence class
                     // and fails, tie or not. The residual (normal not negated, or a
                     // differing count) is then legitimate iff an exact MTV tie (SAT,
-                    // >= 2 minimal directions) OR the documented M1.1.4 `collideOrdered`
+                    // >= 2 minimal directions) OR the documented `collideOrdered`
                     // COUNT-order-dependence (the normal still negates; depth already
-                    // asserted equal) — RD-5.
+                    // asserted equal).
                     const ab = generic(box, pa, ra, box, pb, rb);
                     const ba = generic(box, pb, rb, box, pa, ra);
                     try testing.expect(ab != null and ba != null);
@@ -535,7 +535,7 @@ test "box/box SAT extreme aspect (closed-form)" {
 /// depth + a negated normal both orders, by construction).
 ///
 /// The multi-point POSITIONS are deliberately NOT asserted equal for `count > 1`:
-/// `generateManifold` (FROZEN, M1.1.3) selects the reference face by A/B order
+/// `generateManifold` (FROZEN) selects the reference face by A/B order
 /// (its `feature_id` ownership contract), so a fixed-order clip of a deep
 /// face-face contact keeps a different — equally valid, coplanar, same-depth —
 /// subset of the overlap polygon in each order. That is a clip artifact of the
@@ -631,7 +631,7 @@ test "capsule/capsule differential vs generic (three regimes)" {
     // Capsule/capsule is always shallow (segment cores are 1-D), so the generic
     // GJK oracle is robust (no deep-EPA frame-dependence like box/box) — compared
     // directly, both orders, fid-exact. The three regimes are produced by
-    // `generateManifold` from the segment features (E1-corrected generator).
+    // `generateManifold` from the segment features (the corrected generator).
     const cap = capsuleShape(1, 0.3);
     const cap2 = capsuleShape(0.6, 0.4);
     const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
@@ -639,7 +639,7 @@ test "capsule/capsule differential vs generic (three regimes)" {
     const Case = struct { a: SupportShape, pb: Vec3r, b: SupportShape, rb: Quatr, count: u8 };
     const cases = [_]Case{
         .{ .a = cap, .pb = vr(0, 2.2, 0), .b = cap, .rb = Quatr.identity, .count = 1 }, // end-on (collinear, stacked)
-        .{ .a = cap, .pb = vr(0, 0, 0.5), .b = cap, .rb = zrot, .count = 1 }, // crossed (E1 fix)
+        .{ .a = cap, .pb = vr(0, 0, 0.5), .b = cap, .rb = zrot, .count = 1 }, // crossed
         .{ .a = cap, .pb = vr(0, 0.3, 0.4), .b = cap2, .rb = zrot, .count = 1 }, // crossed, different sizes
         .{ .a = cap, .pb = vr(0.5, 0, 0), .b = cap, .rb = Quatr.identity, .count = 2 }, // parallel side-by-side
         .{ .a = cap, .pb = vr(0.5, 0.4, 0), .b = cap, .rb = Quatr.identity, .count = 2 }, // parallel, staggered along Y
@@ -656,7 +656,7 @@ test "capsule/capsule differential vs generic (three regimes)" {
     }
     // Separated → null (both).
     try testing.expect(ordered(cap, vr(0, 0, 0), Quatr.identity, cap, vr(3, 0, 0), Quatr.identity) == null);
-    // Closed-form crossed (the E1 oracle geometry, now via the fast path): count
+    // Closed-form crossed (the oracle geometry, now via the fast path): count
     // 1, normal +Z, pen 0.1, contact at (0,0,0.25).
     const mc = ordered(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), zrot).?;
     try testing.expectEqual(@as(u8, 1), mc.count);
@@ -665,7 +665,7 @@ test "capsule/capsule differential vs generic (three regimes)" {
     try testing.expect(mc.points[0].position.approxEql(vr(0, 0, 0.25), diff_tol));
 }
 
-// --- E6: Codex review P1 regression repros (RED-first) ---
+// --- Review regression repros (written RED-first) ---
 
 test "degenerate-segment capsule pair is symmetric (P1-1)" {
     // P1-1: `closestSegSeg` must handle a point (`h == 0`) segment in BOTH orders
@@ -686,7 +686,7 @@ test "degenerate-segment capsule pair is symmetric (P1-1)" {
 test "SAT tests every edge axis for separation (P1-2)" {
     // P1-2: a near-parallel edge×edge axis can be THE separating axis. Pre-fix the
     // `par_eps = 1e-6` skip dropped it ⇒ a false contact (visible at f32). This
-    // Codex config separates on A.x×B.x with overlap ≈ −0.003 ⇒ must be `null`
+    // This config separates on A.x×B.x with overlap ≈ −0.003 ⇒ must be `null`
     // (separated) in both orders.
     const a = boxShape(100, 0.5, 1);
     const b = boxShape(80, 0.4, 0.8);
@@ -709,10 +709,10 @@ test "collinear capsules use a radial normal (P1-3)" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.6), m.points[i].penetration, diff_tol);
 }
 
-// --- E7: scale-invariance / small-geometry class (RED-first) ---
+// --- Scale-invariance / small-geometry class (written RED-first) ---
 
 test "capsule endpoint segment resolves at tiny scale (P1)" {
-    // P1 (E7): `closestSegSeg`'s degeneracy test must be EXACT zero, not an
+    // `closestSegSeg`'s degeneracy test must be EXACT zero, not an
     // absolute `1e-10`. A capsule with `a = (2·4e-6)² = 6.4e-11 > 0` is a
     // resolvable segment, but the old `seg_eps = 1e-10` collapsed it to a point.
     // A (h=4e-6, r=1e-6) segment vs B (h=0, r=1e-6) point at y=5.5e-6 ⇒ closest
@@ -726,7 +726,7 @@ test "capsule endpoint segment resolves at tiny scale (P1)" {
 }
 
 test "tiny spheres keep the center-to-center normal (P1)" {
-    // P1 (E7): the coincidence test on `dist_sq` must scale with the ABSOLUTE
+    // The coincidence test on `dist_sq` must scale with the ABSOLUTE
     // coordinate magnitude, not an absolute `1e-12`. Two r=3e-7 spheres 5e-7 apart
     // in Y overlap (r_sum 6e-7 > 5e-7); the normal must be ±Y, not the +X
     // coincidence fallback (`dist_sq = 2.5e-13` tripped the old absolute floor).
@@ -801,7 +801,7 @@ test "fast paths are scale and translation invariant" {
         .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot, .mf = 0.3, .ext = 1.8 }, // capsule crossed
         .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity, .mf = 0.3, .ext = 1.5 }, // capsule parallel
         .{ .a = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity, .mf = 1, .ext = 2.5 }, // box/box face
-        // Off-centre small feature on a large body (Codex round-5 P2): the dedup
+        // Off-centre small feature on a large body: the dedup
         // extent (0.1), not the absolute position (55000), must set the eps.
         .{ .a = boxShape(100000, 1, 100000), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(0.05, 1, 0.05), .pb = vr(55000, 1.5, 0), .rb = Quatr.identity, .mf = 0.05, .ext = 100000 },
     };
@@ -832,10 +832,10 @@ test "fast paths are scale and translation invariant" {
 }
 
 test "unit spheres far from the origin keep the center normal (P1 class A)" {
-    // Codex round-4 probe: `normalize(d)` is scale-EQUIVARIANT, so its 0/0 guard
+    // Probe: `normalize(d)` is scale-EQUIVARIANT, so its 0/0 guard
     // must fire only at TRUE zero, never a coord_scale floor. Two UNIT spheres at
     // (1e6,1e6,1e6), 1.2 apart in Y: `d = cb − ca` is clean (≠ 0), so the normal
-    // must be ±Y. The E7 coord_scale threshold classed them coincident at this
+    // must be ±Y. An earlier coord_scale threshold classed them coincident at this
     // magnitude and returned +X (RED at f32).
     const s = sphereShape(1);
     const base = vr(1e6, 1e6, 1e6);
@@ -853,7 +853,7 @@ test "unit spheres far from the origin keep the center normal (P1 class A)" {
 }
 
 test "anisotropic box face-face keeps four points (P2 class B)" {
-    // Codex round-4 probe: the dedup tolerance must be PER-AXIS, not an isotropic
+    // Probe: the dedup tolerance must be PER-AXIS, not an isotropic
     // scalar. Two he=(1.1e6,1,1) boxes stacked 0.5 in Y: the 4 contact corners
     // differ by 2.2e6 in X and only 2 in Z. An isotropic eps (driven by X → ~2.1)
     // merged the Z-separated pair → count 2 (RED); per-axis keeps all 4.
@@ -865,10 +865,10 @@ test "anisotropic box face-face keeps four points (P2 class B)" {
 }
 
 test "off-center small feature on a large body keeps four points (P2 class B, E9)" {
-    // Codex round-5 probe: the dedup eps must be relative to the candidates' local
+    // Probe: the dedup eps must be relative to the candidates' local
     // EXTENT, never `max|pos|`. A small box (he = 0.05×1×0.05) resting on a large
     // ground face (he = 100000×1×100000) at x = 55000: its 4 bottom corners span
-    // only 0.1 in X and Z. The E8 `max|pos| ≈ 55000` inflated eps_x to ~0.1 and
+    // only 0.1 in X and Z. A `max|pos| ≈ 55000` inflated eps_x to ~0.1 and
     // merged them in the ground→box order (count 2, order-dependent); the extent
     // (0.1) keeps eps ~ 1.9e-7, so all 4 survive in BOTH orders.
     const ground = boxShape(100000, 1, 100000);
@@ -879,7 +879,7 @@ test "off-center small feature on a large body keeps four points (P2 class B, E9
     try testing.expectEqual(@as(u8, 4), bg.count);
 }
 
-// --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
+// --- Consolidated feature_id producer × pair × A/B-order matrix ---
 
 const fid_class_mask: u32 = 0xc000;
 const fid_id_mask: u32 = 0x3fff;

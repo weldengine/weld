@@ -1664,7 +1664,7 @@ pub const BodyManager = struct {
     /// handles/shapes then runs the manifold pipeline in THIS order. Calls `collideOrdered`
     /// (not `collide`): `collide` would re-canonicalize by pose, so the `feature_id`
     /// reference/incident ownership would follow the pose and flip across a lexicographic pose
-    /// boundary (Codex P1b). Driving by the fixed body-id order instead keeps the feature_id
+    /// boundary. Driving by the fixed body-id order instead keeps the feature_id
     /// frame-stable; `collidePairEach`'s normal negation still gives order-independence.
     fn collidePairEachOrdered(
         self: *const BodyManager,

@@ -1,8 +1,8 @@
-//! M1.1.13.1 acceptance suite for the SUBSTEPPED rigid contact solver (TGS Soft),
-//! replacing the M1.1.6 Sequential Impulses suite and absorbing the M1.1.7 NGS
+//! Acceptance suite for the SUBSTEPPED rigid contact solver (TGS Soft),
+//! replacing the Sequential Impulses suite and absorbing the NGS
 //! suite, whose model no longer exists.
 //!
-//! **The cycle this suite drives left this file at M1.1.15.** `World` below is an
+//! **The cycle this suite drives lives in production now.** `World` below is an
 //! alias for `forge_3d.PhysicsWorld` (`../world.zig`), which is now the sole owner
 //! of the eleven steps of `engine-physics-solver.md` §1.7 — their order, the
 //! candidate-pair retention rule, the substep cadence and the per-tick scratches.
@@ -28,9 +28,9 @@ const integration = @import("../pipeline/integration.zig");
 const sleep = @import("../pipeline/sleep.zig");
 const sensor = @import("../pipeline/sensor.zig");
 const rigid = @import("../rigid/root.zig");
-// M1.1.15 — the per-tick cycle, now production. `World` below is this type.
+// The per-tick cycle, in production. `World` below is this type.
 const world_mod = @import("../world.zig");
-// M1.1.14 — the module's float-environment check, asserted where a world opens.
+// The module's float-environment check, asserted where a world opens.
 const determinism = @import("../determinism.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -61,7 +61,7 @@ pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
 
 // --- the cycle under test -----------------------------------------------------
 
-/// The per-tick cycle, MOVED to production at M1.1.15. Every suite that drives a
+/// The per-tick cycle, MOVED to production. Every suite that drives a
 /// world drives THIS type, so there is exactly one composition of the eleven steps
 /// in the module — see `../world.zig` for the order and the retention rule.
 ///
@@ -75,7 +75,7 @@ pub const World = world_mod.PhysicsWorld;
 // Every margin below is a measured value with headroom, never a tuning knob.
 
 /// Per-contact spring sag at rest, ON TOP of the slop dead zone — the quantity that
-/// replaces the M1.1.7 NGS fixed point.
+/// replaces the NGS fixed point.
 ///
 /// Inside the dead zone the bias term is exactly zero, so the contact is held by
 /// impulse alone and settles a little deeper than the slop; how much deeper is set by
@@ -125,7 +125,7 @@ const lateral_bound: Real = 4e-2;
 const lateral_creep_bound: Real = 1e-3;
 
 /// Float noise of a separation reconstructed from two world coordinates, in the
-/// M1.1.4 `k·floatEps·coordScale` form.
+/// `k·floatEps·coordScale` form.
 fn noiseMargin(coord_scale: Real) Real {
     return 16 * std.math.floatEps(Real) * coord_scale;
 }
@@ -236,7 +236,7 @@ test "rest overlap at equilibrium is measured and bounded" {
     while (t < 600) : (t += 1) try world.step(gpa);
 
     // The equilibrium overlap under soft constraints is NOT the NGS fixed point the
-    // M1.1.7 model converged to (`slop` exactly, approached from below, measured
+    // NGS model converged to (`slop` exactly, approached from below, measured
     // `5.9e-7` above it at f32 — SUPERSEDED). It is the slop dead zone plus the sag
     // the spring leaves under the load: inside the dead zone the bias term is zero,
     // so the contact holds by impulse alone and sits slightly deeper.
@@ -268,7 +268,7 @@ test "five-box stack comes to rest at substep_count=4" {
     try addStack(gpa, &world, &boxes, 0, 1);
 
     // THE DISCRIMINATING ORACLE of the port. This is the scene that measured the
-    // 16-iteration floor at M1.1.7 — a five-deep chain of four-point face manifolds,
+    // 16-iteration floor — a five-deep chain of four-point face manifolds,
     // forty contact points — and it must now come to rest on the substep budget
     // alone, with no iteration count anywhere in the config.
     try testing.expectEqual(@as(u32, 4), world.cfg.substep_count);
@@ -401,7 +401,7 @@ test "separation beyond the fat margin prunes the retained pair" {
     // prune — and only the two together pin §1.7 step 2, "removal on fat-AABB
     // separation only".
     //
-    // It is also the NON-VACUITY probe M1.1.14 owes its fourth discrete trace. A
+    // It is also the NON-VACUITY probe the fourth discrete trace owes itself. A
     // retained set that can only grow is a monotone sequence, and a trace over a
     // monotone sequence agrees with itself by accumulation whatever the engine did.
     // Until this milestone the harness never pruned, so that trace was about to be

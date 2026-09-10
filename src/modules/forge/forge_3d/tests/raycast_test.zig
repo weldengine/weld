@@ -1,8 +1,8 @@
-//! Acceptance suite for the raycast query (M1.1.9).
+//! Acceptance suite for the raycast query.
 //!
-//! Grows gate by gate: E3 covers the analytic ray↔core kernels of
+//! It covers the analytic ray↔core kernels of
 //! `pipeline/narrowphase/raycast.zig` against closed-form oracles, in the shape's
-//! local frame. E6 adds the query-level suite — selection modes, filtering,
+//! local frame, then the query-level suite — selection modes, filtering,
 //! tie-break, sleeping bodies, determinism — on top of `forge_3d/query.zig`.
 //!
 //! Every expectation here is a CLOSED FORM computed by hand in the comment above
@@ -16,7 +16,7 @@ const config = @import("../config.zig");
 const testing = std.testing;
 
 /// The kernels are exercised at the solver's own scalar so `-Dphysics_f64`
-/// covers them, matching the M1.1.1 precedent for the `BodyManager` gate.
+/// covers them, matching the precedent set for the `BodyManager` suite.
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 const SupportShapeR = narrowphase.SupportShape(Real);
@@ -435,7 +435,7 @@ test "a rounded box is refused by the ray kernel's precondition, whatever the or
     // set: no arm measures its inflated surface, so the box arm would under-report it
     // by the radius.
     //
-    // RE-EXPRESSED at M1.1.11/E3, and the claim is unchanged. It was three
+    // RE-EXPRESSED, and the claim is unchanged. It was three
     // `expectError(error.UnsupportedShape, rayShape(...))` calls at three origins; the
     // kernel no longer carries an error, because through `supportShape` — which gives
     // every stored box `radius = 0` — that error was reachable by no path at all, and
@@ -471,8 +471,8 @@ test "a rounded box is refused by the ray kernel's precondition, whatever the or
 }
 
 test "a degenerate zero radius never divides by zero" {
-    // Nothing validates a zero radius at shape creation yet (descriptor
-    // validation is a later milestone), so the kernels must stay defined on it.
+    // Nothing validates a zero radius at shape creation, so the kernels must stay
+    // defined on it.
     // A zero-radius sphere is a point and a zero-radius capsule a bare segment:
     // the hit is measure-zero, but when it happens the normal must still satisfy
     // the invariants rather than come out NaN.
@@ -506,7 +506,7 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.9 / E4 — the `Real`-bound query entries over a real broadphase
+// The `Real`-bound query entries over a real broadphase
 // ---------------------------------------------------------------------------
 //
 // The harness is NOT duplicated: `World` comes from `tests/solver_test.zig`, the
@@ -520,7 +520,7 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
 // with their call sites, never that the bodies are right. The full acceptance
 // matrix — selection modes over a scene sweep, filtering cases, the ordering-key
 // tie-break with its bit-identical precondition, sleeping bodies, the closed
-// `max_distance`, creation-order invariance — is E6's.
+// `max_distance`, creation-order invariance — belongs to the query-level suite.
 
 const harness = @import("solver_test.zig");
 const query = @import("../query/root.zig");
@@ -688,12 +688,12 @@ test "every shape the store can build answers a ray query, and the ray path is t
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
 
-    // RE-EXPRESSED at M1.1.11/E3, and this is the test whose PREMISE the milestone
+    // RE-EXPRESSED, and this is the test whose PREMISE the half-space
     // closed. It recorded a dated unreachability: through `BodyManager.raycastBody`,
     // `error.UnsupportedShape` could not be produced by any shape the store held,
     // because `shape.supportShape` gives every box `radius = 0` — so the ray path
     // carried an error channel no input could reach, and the record said the date was
-    // M1.1.11. It is: the channel is GONE from the ray path (the kernel's refusal is an
+    // changed. It is: the channel is GONE from the ray path (the kernel's refusal is an
     // asserted precondition) and the typed refusal now lives at the two query entries
     // taking a caller-supplied shape handle, where a caller can provoke it and where
     // `shapecast_test.zig` / `overlap_test.zig` exercise both of its members.
@@ -722,7 +722,7 @@ test "every shape the store can build answers a ray query, and the ray path is t
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.9 / E5 — the frozen family and the collision-layer domain
+// The frozen family and the collision-layer domain
 // ---------------------------------------------------------------------------
 
 test "a body on layer 32 or above is refused at creation" {
@@ -769,7 +769,7 @@ fn errorSetOf(comptime F: type) type {
 test "the family carries its Real signatures, and the public types stay frozen" {
     // TWO pins, and they are deliberately not the same claim.
     //
-    // (1) THE EIGHT SOLVER-SIDE ENTRIES, AT `Real`. Until M1.1.10/E5 five of them
+    // (1) THE EIGHT SOLVER-SIDE ENTRIES, AT `Real`. Five of them once
     //     carried the f32 PUBLIC aggregates while the raycast trio took `Real`, so
     //     the family straddled the precision boundary and this pin recorded that one
     //     half would have to move. It moved: `engine-physics-forge.md` §1.11.8's
@@ -777,7 +777,7 @@ test "the family carries its Real signatures, and the public types stay frozen" 
     //     conversion into the solver — under `-Dphysics_f64`, a time of impact
     //     narrowed to f32 before leaving the kernel and widened again at the
     //     interface tier, two conversions of which one is invisible. The family is
-    //     uniform now and the single f32 wrapper lands at M1.1.15.
+    //     uniform, and the single f32 wrapper lives in the module adapter.
     //
     // (2) THE PUBLIC TYPES OF `api/types.zig`, PINNED FIELD BY FIELD. They used to be
     //     pinned INCIDENTALLY, by appearing in the stubs' signatures. Now that no
@@ -789,7 +789,7 @@ test "the family carries its Real signatures, and the public types stay frozen" 
     const SS = body_manager_mod.ShapeStore;
     const BP = broadphase_mod.Broadphase(Real);
 
-    // (1) The three ray entries. TOTAL since M1.1.11/E3 — they carried
+    // (1) The three ray entries. TOTAL — they carried
     //     `query.Error!` while the kernel's rounded-box latch existed, and that error
     //     was reachable through no body at all (`supportShape` gives every stored box
     //     `radius = 0`), so it became an asserted precondition and the latch went with
@@ -907,7 +907,7 @@ test "the family carries its Real signatures, and the public types stay frozen" 
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.9 / E6 — the query-level acceptance suite
+// The query-level acceptance suite
 // ---------------------------------------------------------------------------
 
 /// A unit sphere body at `centre` on layer `layer`, `entity_index` distinct so a
@@ -954,7 +954,7 @@ test "closest hit wins over several candidates" {
 
 test "equal distance is broken by the owning entity" {
     const gpa = std.testing.allocator;
-    // A SECOND tie geometry, independent of the one in the E1 section below: two
+    // A SECOND tie geometry, independent of the one in the ordering-key section below: two
     // spheres of radius 1.5 centred at (10, ±1, 0). Their local ray origins are
     // (−10, ∓1, 0), whose squared lengths and dot products with +X are identical
     // term for term, so the two entry distances are BIT-identical — which this test
@@ -964,8 +964,8 @@ test "equal distance is broken by the owning entity" {
     // The entity indices are attached to the POSITIONS and not to the creation order:
     // the sphere at −1 always carries entity 4 and the one at +1 always entity 9,
     // while the loop builds them in both orders. So the winner is decided by the
-    // entity in both legs, and a `BodyId`-only tie-break — the M1.1.9 rule this test
-    // asserted before M1.1.10 — would answer the two legs differently (§1.11.14).
+    // entity in both legs, and a `BodyId`-only tie-break — the superseded rule this test
+    // once asserted — would answer the two legs differently (§1.11.14).
     const low_y_entity: u32 = 4;
     const high_y_entity: u32 = 9;
     inline for (.{ true, false }) |high_first| {
@@ -1341,7 +1341,7 @@ test "the result is invariant under creation-order permutation" {
     // depends on the tree shape, hence on creation order (§1.11.6). Only the RESULT
     // is invariant.
     //
-    // M1.1.10 / E6 strengthens this: the M1.1.9 form asserted the GEOMETRY —
+    // This is STRENGTHENED from a form that asserted the GEOMETRY —
     // distance, position, normal — and not the IDENTITY of the body returned. On a
     // scene where two bodies sit at different distances the geometry pins the
     // identity implicitly, so the gap was latent rather than active; but "invariant"
@@ -1409,7 +1409,7 @@ test "two identical runs are bit-identical" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.9 / F1 — far-field conditioning of the quadratic kernels
+// Far-field conditioning of the quadratic kernels
 // ---------------------------------------------------------------------------
 
 /// Absolute tolerance for a distance measured at ~5 000 m: the f32 spacing there
@@ -1682,7 +1682,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E1 — the ordering key `(distance, entity, BodyId)`
+// The ordering key `(distance, entity, BodyId)`
 // ---------------------------------------------------------------------------
 //
 // `BodyId` cannot order a query result. It is a slot index, so it ENCODES creation
@@ -1693,7 +1693,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
 // tie-break (`engine-physics-forge.md` §1.11.14, which is normative on this and says
 // in as many words that without it §1.11.6 is false on an exact distance tie).
 //
-// The first of the two tests below was written and RUN against the M1.1.9 code
+// The first of the two tests below was written and RUN against the superseded code
 // before the fix, and was RED there. That is what makes it a test of the RULE rather
 // than a transcription of the implementation.
 
@@ -1810,7 +1810,7 @@ test "two bodies on the same entity fall back on BodyId" {
     // test asserts that non-invariance instead of hiding it, so the residual is a
     // recorded property and not a surprise.
     //
-    // It was GREEN against the M1.1.9 code too, and that is correct rather than a
+    // It was GREEN against that code too, and that is correct rather than a
     // weakness: where the entities are equal, the entity key and the `BodyId`-only
     // key coincide, so only the sibling test above can tell the two rules apart.
     const shared: u32 = 11;
@@ -1853,7 +1853,7 @@ test "two bodies on the same entity fall back on BodyId" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 — the public queries KEEP SEEING triggers, and the asymmetry with the
+// The public queries KEEP SEEING triggers, and the asymmetry with the
 // character controller is deliberate (`engine-physics-solver.md` §1.13.7).
 // ---------------------------------------------------------------------------
 

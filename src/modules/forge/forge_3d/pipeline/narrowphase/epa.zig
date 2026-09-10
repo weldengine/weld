@@ -282,7 +282,7 @@ pub fn epa(
         // compaction (kept faces keep their flag, new fan faces start fresh), so a
         // face that failed duplicate-progress STAYS skipped rather than being
         // resurrected to re-fail identically — its support/dist are unchanged since
-        // vertices are only ever appended (Codex P2).
+        // vertices are only ever appended.
         if (!expandPolytope(T, &verts, &vcount, &faces, &fcount, skipped[0..], w, sel, vis_eps)) {
             skipped[sel] = true;
             faces_skipped += 1;
@@ -489,7 +489,7 @@ fn duplicate(comptime T: type, verts: []const support.Vertex(T), w: math.Vec(3, 
 /// silhouette is empty, a fan face is a sliver, or the buffers cannot hold it.
 /// On commit, `skipped` is remapped in lockstep with the face compaction — a kept
 /// face carries its flag to its new index, a new fan face starts unskipped — so a
-/// face known to fail is not resurrected (Codex P2).
+/// face known to fail is not resurrected.
 fn expandPolytope(
     comptime T: type,
     verts: *[max_verts]support.Vertex(T),
@@ -884,7 +884,7 @@ test "epa terminalFace rejects a different-normal face in the distance band" {
     // sel (face 0): plane x = 1, closest-to-origin 1.0. Face 1: plane y = 0.7
     // (a DIFFERENT normal) within the distance band, whose closest 0.7 is smaller
     // — a plane-agnostic scan would adopt it, but its normal was never proven
-    // converged, so terminalFace must reject it and keep sel's plane (Codex P3).
+    // converged, so terminalFace must reject it and keep sel's plane .
     const verts = [_]Vx{
         .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ 1, 1, -1 }), .support_a = z, .support_b = z },
@@ -906,7 +906,7 @@ test "epa expandPolytope keeps a kept face's skip flag through a successful expa
     const z = V.zero;
     // A regular tetra around the origin; expand beyond face 0 only (faces 1-3 kept).
     // Mark kept face 1 skipped BEFORE the expansion — the lockstep remap must carry
-    // the flag to its new compacted index (Codex P2: no resurrection).
+    // the flag to its new compacted index (no resurrection).
     var verts: [max_verts]Vx = undefined;
     verts[0] = .{ .w = V.fromArray(.{ 1, 1, 1 }), .support_a = z, .support_b = z };
     verts[1] = .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z };

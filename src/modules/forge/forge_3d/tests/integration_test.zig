@@ -1,14 +1,14 @@
-//! M1.1.5 acceptance suite for semi-implicit Euler integration. E2 covers the
+//! Acceptance suite for semi-implicit Euler integration. It covers the
 //! linear half (gravity as acceleration, clamped-linear damping, position from
 //! the new velocity) plus the discrete free-fall oracle, force consumption,
 //! impulse, static/kinematic invariance, freed-slot skipping, and determinism.
-//! E3 adds the angular tests to this same file.
+//! The angular tests live in this same file.
 //!
-//! M1.1.6 adds the velocity/position split: `integrate` is now the composition
+//! The velocity/position split: `integrate` is the composition
 //! of `integrateVelocities` + `integratePositions`, and the composition is pinned
 //! bit-for-bit here so the contact solve can sit between the two.
 //!
-//! M1.1.13.1 adds the substep decomposition: `integrateVelocities` is itself the
+//! The substep decomposition: `integrateVelocities` is itself the
 //! composition of `integrateVelocitiesNoReset` and `resetForceAccumulators`, because
 //! a solver that calls the velocity half once per substep must not have the force
 //! accumulators consumed on the first one.
@@ -31,8 +31,6 @@ const Vec3 = math.Vec3; // f32 descriptor vector
 const Quatf = math.Quatf; // f32 descriptor quaternion
 const testing = std.testing;
 
-// --- helpers -----------------------------------------------------------------
-
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
 }
@@ -54,7 +52,7 @@ fn dynDesc(entity_index: u32, shape: api.ShapeId) api.BodyDescriptor {
     };
 }
 
-// --- E2 tests ----------------------------------------------------------------
+// --- Linear tests ----------------------------------------------------------------
 
 test "free fall matches the discrete semi-implicit oracle" {
     // Semi-implicit Euler integrates v then x from the *new* v, so after N steps
@@ -209,7 +207,7 @@ test "forces are consumed once per tick" {
     try testing.expectEqual(v_after_1, v_after_2);
 }
 
-// --- M1.1.13.1: the substep decomposition of the velocity half ----------------
+// --- The substep decomposition of the velocity half ----------------
 
 test "integrateVelocitiesNoReset leaves the accumulators standing" {
     const gpa = testing.allocator;
@@ -269,7 +267,7 @@ test "resetForceAccumulators clears every live slot and no dead one" {
     }
     // The dead slot keeps its stale accumulator: the store does not compact, and a
     // freed slot's columns are nobody's business until it is reused. Same statement
-    // the M1.1.5 freed-slot test makes about `integrate`, now about the clear alone.
+    // the freed-slot test makes about `integrate`, now about the clear alone.
     try testing.expectEqual(force_dead, bm.bodies.items(.force)[i_dead].toArray());
 }
 
@@ -363,7 +361,7 @@ test "static and kinematic bodies are not integrated" {
     bm.addForce(id_stat, vr(50, 50, 50));
     bm.addTorque(id_stat, vr(9, 9, 9));
 
-    // Kinematic with a velocity set (no position-from-velocity in M1.1.5),
+    // Kinematic with a velocity set (no position-from-velocity),
     // an orientation, and a force + torque.
     var kin = api.BodyDescriptor{
         .entity = .{ .index = 1, .generation = 0 },
@@ -382,9 +380,9 @@ test "static and kinematic bodies are not integrated" {
     // `integrate` alone. Comparing the stored rotation against a locally
     // re-widened `rot_r` instead mixed this test's claim with a claim about what
     // `addBody` stores — and `addBody` now normalises the widened descriptor
-    // rotation (`Body.rotation`'s invariant, M1.1.9), so that comparison was
+    // rotation (`Body.rotation`'s invariant), so that comparison was
     // asserting creation semantics under the name of integration semantics. Form
-    // taken from the M1.1.7 NGS suite (since deleted), which already captured the pose
+    // taken from the NGS suite (since deleted), which already captured the pose
     // before its pass and asserts it bit-unchanged after.
     const before_rot_stat = bm.rotation(id_stat).?;
     const before_rot_kin = bm.rotation(id_kin).?;
@@ -400,7 +398,7 @@ test "static and kinematic bodies are not integrated" {
     // the creation-side claim, kept but stated separately and at the right
     // tolerance instead of bit-exactly.
     try testing.expect(bm.rotation(id_stat).?.approxEql(rot_r, 16 * std.math.floatEps(f32)));
-    // Kinematic velocities are untouched (not consumed in M1.1.5).
+    // Kinematic velocities are untouched (never consumed).
     try testing.expect(bm.linearVelocity(id_kin).?.approxEql(vr(1, 0, 0), 0));
     try testing.expect(bm.angularVelocity(id_kin).?.approxEql(vr(0, 2, 0), 0));
     // But their accumulators ARE cleared (§2 uniform reset).
@@ -516,7 +514,7 @@ test "integration is deterministic" {
     }
 }
 
-// --- E3 angular tests --------------------------------------------------------
+// --- Angular tests --------------------------------------------------------
 
 test "torque on a rotated anisotropic box" {
     // With angular_damping = 0 and ω₀ = 0, one step gives
@@ -670,7 +668,7 @@ test "orientation update uses the left (world-space) quaternion product" {
     try testing.expect(!bm.rotation(id).?.approxEql(right, discrimination_tol));
 }
 
-// --- M1.1.6 integration split ------------------------------------------------
+// --- The integration split ------------------------------------------------
 
 test "split integration composes to the monolithic pass" {
     // The contact solve sits BETWEEN the velocity and

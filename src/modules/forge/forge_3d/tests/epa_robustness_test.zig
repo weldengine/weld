@@ -1,13 +1,13 @@
-//! M1.1.3-HF — generic EPA deep-path order-dependence: reproduction suite.
+//! Generic EPA deep-path order-dependence: reproduction suite.
 //!
 //! This file pins the `collideOrderedGeneric` (GJK → EPA → generateManifold)
 //! order-independence contract for deep, rotated convex pairs against
 //! INDEPENDENT separating-axis oracles (no GJK/EPA in the oracle path). At the
-//! E1 gate it is RED-first: the S1 (polytope corruption → wrong depth) and S3
-//! (1-D Minkowski degenerate normal frame-dependence) pins fail, and the
-//! order-equivalence sweep exposes the frame-dependence, BEFORE any epa.zig fix
-//! lands (E2/E3). The assertions target the ORACLE, never a recon transcript
-//! (engine-physics-forge.md §3 Order-independence; brief E1).
+//! It was written RED-FIRST: the polytope-corruption pin (wrong depth) and the
+//! 1-D Minkowski degenerate-normal pin both failed, and the
+//! order-equivalence sweep exposed the frame-dependence, BEFORE any `epa.zig` fix
+//! landed. The assertions target the ORACLE, never a recon transcript
+//! (`engine-physics-forge.md` §3 Order-independence).
 //!
 //! Oracles:
 //!  - box/box: the shared 15-axis SAT `fast_paths_test.satBoxBox` (depth + axis
@@ -40,18 +40,17 @@ const sat_dir_colinear = fast_paths_test.sat_dir_colinear;
 // scales it by the config scale (depths scale, so does the f32 residual).
 const depth_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-7;
 // Normal tolerance — component-wise; a unit normal is scale-independent, so this
-// is NOT scaled. ~0.3° in f32; the exact-negation S3 claim uses `.eql`, not this.
+// is NOT scaled. ~0.3° in f32; the exact-negation claim uses `.eql`, not this.
 const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 
-// RED-first gates (M1.1.3-HF). Each defect pin below is RED until its fix lands;
-// it skips (`error.SkipZigTest`) so the pre-push `zig build test` stays green
-// while the branch carries the reproduction suite for gate-by-gate review — no
-// hook bypass. The observed RED values are journaled in the brief (E1). Flip to
-// false per gate as the fix turns each green: s1 → E2 (epa.zig Fix A), s3 → E3
-// (intrinsic degenerate normal), sweep → E4 (full order-equivalence).
-const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
-const red_gate_s3 = false; // un-gated at E3: intrinsic point⊖segment normal (bit-negated)
-const red_gate_rd4 = false; // un-gated at E4: RD-4 gjk.zig deep-band fix (C′) lands
+// RED-first skip switches, ALL OPEN. Each defect pin below ran RED until its fix
+// landed, skipping (`error.SkipZigTest`) rather than failing so `zig build test`
+// stayed green while the branch carried the reproduction suite for review — no
+// hook bypass. Kept as the MECHANISM and not as live gating: at `false` nothing
+// skips, and every pin below runs.
+const red_gate_s1 = false; // open: the `epa.zig` expansion fix landed, green in both orders
+const red_gate_s3 = false; // open: the intrinsic point⊖segment normal is bit-negated
+const red_gate_rd4 = false; // open: the `gjk.zig` deep-band fix landed
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
@@ -78,7 +77,7 @@ fn maxPen(m: ContactManifold) Real {
 }
 
 // ---------------------------------------------------------------------------
-// segment⊖box zonotope SAT oracle (E1(a))
+// segment⊖box zonotope SAT oracle
 // ---------------------------------------------------------------------------
 
 const SegBoxSatResult = struct {
@@ -143,7 +142,7 @@ fn satSegBox(seg_center: Vec3r, seg_rot: Quatr, half_height: Real, box_center: V
     // Count DISTINCT minimal-band directions (colinear slots merged, v/−v same); a
     // BILATERAL minimal direction (`|dc·axis| <= band`) counts twice — both signs
     // are equally-minimal MTV, so the generic normal may pick the same absolute
-    // axis (not negated) across orders (Codex (a)).
+    // axis (not negated) across orders.
     var seen: [6]Vec3r = undefined;
     var seen_count: usize = 0;
     var tie_count: u32 = 0;
@@ -191,7 +190,7 @@ test "segment-box zonotope sat oracle self-checks" {
 }
 
 // ---------------------------------------------------------------------------
-// S1 — polytope corruption → wrong depth (RED at E1, GREEN at E2)
+// Polytope corruption → wrong depth
 // ---------------------------------------------------------------------------
 
 /// Drive one deep box/box pin in one A/B order: assert the SAT oracle sees a
@@ -219,7 +218,7 @@ fn checkDeepBoxPin(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb:
 /// Run the deep box pin ONLY where this build classifies the pair `.deep`. Used
 /// for the frozen (0.1,0.1,0.1) pitch-X config (iii), which GJK classifies
 /// `.deep` on x86-64/Linux but `.shallow` on this arm64/macOS build — a
-/// cross-platform float divergence on the deep/shallow boundary (RD-3; GJK is out
+/// cross-platform float divergence on the deep/shallow boundary (GJK is out
 /// of scope). Skipping the assertion when `.shallow` (rather than failing) keeps
 /// coverage on platforms that reach EPA, without falsely asserting deep here.
 fn checkDeepBoxPinIfDeep(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) !void {
@@ -229,7 +228,7 @@ fn checkDeepBoxPinIfDeep(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShap
 }
 
 test "deep rotated box pair matches sat in both orders" {
-    if (red_gate_s1) return error.SkipZigTest; // RED at E1 (EPA depth 0.0 vs oracle 1.9); un-gate at E2
+    if (red_gate_s1) return error.SkipZigTest; // ran RED at EPA depth 0.0 against an oracle of 1.9
     const box = boxShape(1, 1, 1);
     const z = Vec3r.unit_z;
     const x = Vec3r.unit_x;
@@ -247,7 +246,7 @@ test "deep rotated box pair matches sat in both orders" {
         try checkDeepBoxPin(box, vr(0.1, 0.1, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
     }
     // (iii) pitch 0.4 about X. The FROZEN offset (0.1,0.1,0.1) is `.deep` on
-    // x86-64/Linux but `.shallow` on this arm64/macOS build (RD-3) — run
+    // x86-64/Linux but `.shallow` on this arm64/macOS build — run
     // conditionally on status so it covers platforms that reach EPA without
     // falsely asserting deep here. The retargeted (0.2,0.4,0.1) is `.deep` on both
     // and is the unconditional third pin. checkDeepBoxPin asserts against the SAT
@@ -262,11 +261,11 @@ test "deep rotated box pair matches sat in both orders" {
 }
 
 // ---------------------------------------------------------------------------
-// S3 — 1-D Minkowski degenerate normal frame-dependence (RED at E1, GREEN at E3)
+// 1-D Minkowski degenerate normal: frame-dependence
 // ---------------------------------------------------------------------------
 
 test "on-axis sphere-capsule normal is exactly negated across orders" {
-    if (red_gate_s3) return error.SkipZigTest; // RED at E1 (normal not bit-negated across orders); un-gate at E3
+    if (red_gate_s3) return error.SkipZigTest; // ran RED: the normal was not bit-negated across orders
     const sphere = sphereShape(0.7);
     const cap = capsuleShape(1.0, 0.5);
     const r_sum: Real = 1.2;
@@ -289,17 +288,17 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
         try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
         try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
 
-        // Manifold-level EXACT bit negation — the CONSUMER guarantee (M1.1.6
+        // Manifold-level EXACT bit negation — the CONSUMER guarantee (
         // warm-start consumes manifolds, not EpaResults). On the count-1 point-core
         // path, generateManifold's A-frame rotation is used ONLY for supporting-face
         // selection; pointCoreContact returns `.normal = n_world` VERBATIM, so the
-        // E3 EPA bit-negation propagates to the manifold unchanged (a pure copy,
+        // The EPA bit-negation propagates to the manifold unchanged (a pure copy,
         // platform-independent — no arithmetic on the normal between e.normal and
         // the manifold).
         try testing.expect(ab.?.normal.eql(ba.?.normal.neg()));
 
         // Complement — the same bit negation at its SOURCE, the raw epa() normal
-        // (the E3 intrinsic point⊖segment derivation), documenting where it arises.
+        // (the intrinsic point⊖segment derivation), documenting where it arises.
         const g_ab = narrowphase.gjk(Real, sphere, center, Quatr.identity, cap, center, rc);
         const g_ba = narrowphase.gjk(Real, cap, center, rc, sphere, center, Quatr.identity);
         try testing.expectEqual(GjkResult.Status.deep, g_ab.status);
@@ -311,7 +310,7 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
 }
 
 // ---------------------------------------------------------------------------
-// Order-equivalence sweep with SAT classification (E1(e); GREEN at E4)
+// Order-equivalence sweep with SAT classification
 // ---------------------------------------------------------------------------
 
 test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
@@ -319,8 +318,8 @@ test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
     // The frozen pitch-X offset is a GJK deep/shallow-boundary stall: GJK converges
     // to a non-enclosing terminal ~2.66·floatEps·scale from the origin on a
     // genuinely-deep overlap, and (the noise floor being tighter) mis-reports
-    // `.shallow` with dist≈0 — a pen-0-vs-MTV error of the S1 class, produced by the
-    // GJK stage instead of EPA. It flips with scalar/scale/order (RD-4). The generic
+    // `.shallow` with dist≈0 — a pen-0-vs-MTV error of the corruption class, produced by
+    // the GJK stage instead of EPA. It flips with scalar/scale/order. The generic
     // manifold's max penetration must match the SAT oracle at every scale, both
     // orders — never the ~0 of the mis-classified shallow.
     const rb = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
@@ -342,7 +341,7 @@ test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
 }
 
 test "collide is invariant under the quaternion double cover" {
-    // `-q` is the double-cover partner (RD-6: the E4(c) design presumed poseAfter's
+    // `-q` is the double-cover partner (the design presumed poseAfter's
     // quaternion compare is reached — false for any distinct-position pair, since
     // poseAfter compares positions FIRST). Two legs:
     const box = boxShape(1, 1, 1);
@@ -388,7 +387,7 @@ test "collide is invariant under the quaternion double cover" {
 
 test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
     // Two unit boxes with a small but REAL core gap (~145·contact_margin at unit
-    // scale) must classify separated — the RD-4 deep band (`dist <= m`) must not
+    // scale) must classify separated — the deep band (`dist <= m`) must not
     // swallow a genuine separation just above it. collideOrderedGeneric → null.
     const box = boxShape(1, 1, 1);
     const gap: Real = 1.0e-3;
@@ -397,7 +396,7 @@ test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
 
 test "rd-4 in-band false-deep is benign" {
     // Complement of the "stay separated" boundary pin above: a core gap INSIDE the
-    // RD-4 band (`dist <= contact_margin`) must classify `.deep` (a non-enclosing
+    // The band (`dist <= contact_margin`) must classify `.deep` (a non-enclosing
     // terminal at noise distance from the origin) yet stay BENIGN downstream —
     // near-zero penetration for hard cores, and the correct inflated depth for
     // inflated boxes — in BOTH A/B orders.
@@ -406,7 +405,7 @@ test "rd-4 in-band false-deep is benign" {
     // `m = conv_k · floatEps(Real) · coord_scale`, `coord_scale = |Δpos| +
     // coreExtent(a) + coreExtent(b)` (gjk.zig classifier). For two unit boxes
     // (`coreExtent(box) = |(1,1,1)| = √3`) at centres 0 / (2+gap): `coord_scale =
-    // (2+gap) + 2·√3`. We size `m0` at gap≈0 (Δpos = 2); `contact_margin` is
+    // (2+gap) + 2·√3`. `m0` is sized at gap≈0 (Δpos = 2); `contact_margin` is
     // monotone INCREASING in gap, so `m0 ≤ contact_margin(gap)` for every gap ≥ 0,
     // hence `gap = m0/2 < m0 ≤ contact_margin(gap)` is PROVABLY in-band at any
     // `Real` — no fixed-point iteration needed. (An absolute gap like 3e-6 would be
@@ -419,11 +418,11 @@ test "rd-4 in-band false-deep is benign" {
     const gap: Real = m0 / 2; // provably ≤ contact_margin(gap) ⇒ in-band
 
     // Leg 1 — radius-0 boxes: the band fires on a HARD-core near-touch (cores
-    // disjoint by `dist ≈ gap`, no enclosure). Both orders: `.deep` (the RD-4
+    // disjoint by `dist ≈ gap`, no enclosure). Both orders: `.deep` (the
     // band, a non-enclosing terminal, `dist ≈ gap ≈ 4× the in-loop noise floor,
     // 0.5× the contact margin`); generic non-null; count ≥ 1; penetration BENIGN
     // (the non-enclosing seed clamps EPA depth to ≈ 0 — the false-deep must NOT
-    // fabricate a spurious depth, the S1 defect class). The normal DIRECTION is
+    // fabricate a spurious depth, the corruption class). The normal DIRECTION is
     // left unasserted: at pen ≈ 0 it is noise-dominated.
     {
         const box = boxShape(1, 1, 1);
@@ -508,7 +507,7 @@ fn satTieCount(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec
 /// and agree on count + negated normal EXCEPT inside a SAT-confirmed MTV tie
 /// (≥ 2 minimal axes). Any divergence not classified as a tie fails.
 /// Drive `epa()` with diagnostics on a deep config and assert the corrupt paths
-/// never fire post-fix (E4(a)): no exhaustion fallback, and the exit is only
+/// never fire post-fix: no exhaustion fallback, and the exit is only
 /// `converged` (the expanding path) or `degenerate_low_dim` (a genuine < 3-D
 /// Minkowski, e.g. an on-axis point⊖segment). `iteration_cap` /
 /// `fallback_exhausted` / `defensive_non_deep_seed` would signal a residual
@@ -570,7 +569,7 @@ test "generic deep path is order-equivalent over the sweep" {
                     for (offsets) |off| {
                         const pb = off.scale(k);
                         try assertOrderEquivalent(s[0], vr(0, 0, 0), ra, s[1], pb, rb, dtol);
-                        // E4(a): the corrupt EPA paths (fallback / iteration-cap /
+                        // The corrupt EPA paths (fallback / iteration-cap /
                         // defensive) must never fire post-fix, either order.
                         try assertEpaDiagClean(s[0], vr(0, 0, 0), ra, s[1], pb, rb);
                         try assertEpaDiagClean(s[1], pb, rb, s[0], vr(0, 0, 0), ra);

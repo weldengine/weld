@@ -1,7 +1,7 @@
-//! M1.1.2 acceptance suite for the forge_3d narrowphase (distance-based GJK).
-//! Grows gate by gate: **E1** covers the support functions + the relative-pose
-//! transform; E2 the Voronoi-region simplex solver; E3 the GJK descent loop and
-//! `GjkResult`; E4 the broadphase→narrowphase integration. Keyed to
+//! Acceptance suite for the `forge_3d` narrowphase (distance-based GJK).
+//! It covers the support functions and the relative-pose
+//! transform, the Voronoi-region simplex solver, the GJK descent loop and
+//! `GjkResult`, and the broadphase→narrowphase integration. Keyed to
 //! `config.Real` so `-Dphysics_f64=true` sweeps the whole suite at f64 (local).
 
 const std = @import("std");
@@ -120,7 +120,7 @@ test "support tie-breaks are fixed" {
     try testing.expect(seg.support(vr(1, 0, 0)).eql(seg.support(vr(1, 0, 0))));
 }
 
-// --- E2: Voronoi-region simplex solver ---------------------------------------
+// --- The Voronoi-region simplex solver ---------------------------------------
 
 /// Every component of `v` is finite (no NaN, no inf) — the degenerate-input bar.
 fn finite3(v: Vec3r) bool {
@@ -263,7 +263,7 @@ test "simplex solver handles degenerate inputs" {
 test "simplex feature reconstructs closest from barycentrics" {
     // The triplet contract: Σ bary·w over the surviving vertices equals the
     // returned closest — the property the GJK loop relies on to rebuild the
-    // closest points on A and B from the same weights (E3).
+    // closest points on A and B from the same weights.
     const v0 = Simplex.Vertex{ .w = vr(-1, 1, 0), .support_a = vr(-1, 1, 0), .support_b = Vec3r.zero };
     const v1 = Simplex.Vertex{ .w = vr(1, 1, 0), .support_a = vr(1, 1, 0), .support_b = Vec3r.zero };
     const v2 = Simplex.Vertex{ .w = vr(0, 2, 0), .support_a = vr(0, 2, 0), .support_b = Vec3r.zero };
@@ -279,7 +279,7 @@ test "simplex feature reconstructs closest from barycentrics" {
     try testing.expect(hasFeature(r, &.{ 0, 1 }));
 }
 
-// --- E3: GJK loop + result ---------------------------------------------------
+// --- The GJK loop and its result ---------------------------------------------------
 
 /// Distance tolerance for GJK results (looser than `tol`: convergence + f32 +
 /// an oblique global rotation accumulate error; f64 passes far tighter).
@@ -411,7 +411,7 @@ test "gjk shallow pairs are detected" {
     // inflated shapes overlapping), canonical and under an oblique global rigid
     // transform (non-trivial rotation) — the Scope's "6 combinations in all 3
     // regimes". Line 70's ss+sb-only phrasing was aligned on the Scope (line 25)
-    // via a Claude.ai round-trip (see the brief's Recorded deviations).
+    // as a recorded deviation.
     const g_rot = Quatr.fromAxisAngle(vr(3, -1, 2).normalize(), 0.9);
     const g_trans = vr(6, -3, 5);
 
@@ -541,7 +541,7 @@ test "gjk near-contact pairs are not deep" {
 }
 
 test "gjk contact margin is absolute not radius-proportional" {
-    // P1 (Codex review): the shallow/separated boundary must absorb only GJK's
+    // The shallow/separated boundary must absorb only GJK's
     // convergence noise on `dist` (∝ the cores' coordinate scale), never a
     // fraction of r_sum. Two point cores r=500 (r_sum=1000): a genuine 5 cm gap
     // (centers 1000.05) is unambiguously `.separated`. Under the former
@@ -562,7 +562,7 @@ test "gjk contact margin is absolute not radius-proportional" {
 }
 
 test "gjk oriented tangency stays shallow" {
-    // P1b (Codex review): the exact tangency the `conv_k = 2` margin mis-classified
+    // The exact tangency the `conv_k = 2` margin mis-classified
     // as `.separated`. GJK over-estimates `dist` by the ACCUMULATED rounding of its
     // pipeline (7.15e-7 here, ≈ 2 ULP × coordScale, zero convergence residue) — the
     // contact margin at `conv_k = 16` absorbs it; the pair is `.shallow` (touch).
@@ -635,7 +635,7 @@ test "gjk classification is order-independent" {
         try expectSame(boxShape(hx, 70, 40), vr(0, 0, 0), q, sphereShape(gap), q.rotateVec3(vr(hx + gap, 0, 0)), Quatr.identity);
     }
 
-    // The Codex P1c repro: a large oriented box tangent to a point core. Under the
+    // A large oriented box tangent to a point core. Under the
     // former A-frame `coord_scale` this read `.separated` one order and `.shallow`
     // the other; the symmetric scale makes both `.shallow`. The radius (= analytic
     // core distance) is recomputed at `Real` so the tangency is exact at f32+f64.
@@ -693,14 +693,14 @@ test "gjk deep pairs enclose the origin" {
     // stay `.deep` at scale (the closest point lands at the origin up to rounding).
     try checkDeep(capsuleShape(50, 0.3), vr(0, 0, 0), Quatr.identity, capsuleShape(50, 0.3), vr(0, 0, 0), rot_z90);
 
-    // ANISOTROPIC box interior (Codex P1d): a point core well inside a sharp,
+    // ANISOTROPIC box interior: a point core well inside a sharp,
     // very flat box (half-extents 50.14 × 0.236 × 0.984, ~212:1) ⇒ `.deep`. The
     // former `maxEdgeSq³` degeneracy normalization rejected the valid but
     // elongated enclosing tetrahedron (its long edge dominated the cube), reading
     // this interior point `.separated`; the dimensionless product-of-edges
     // criterion classifies it correctly. (Aspect ratios beyond a moderate bound
     // are NOT guaranteed — a GJK f32 limitation on sharp cores, deferred to the
-    // M1.1.4 analytic box fast paths / M1.1.3 EPA; see `gjk.zig`.)
+    // the analytic box fast paths and EPA; see `gjk.zig`.)
     try checkDeep(boxShape(50.13848, 0.23608336, 0.98368657), vr(0, 0, 0), Quatr.identity, sphereShape(0.5), vr(14.877217, 0.01973883, 0.07743414), Quatr.identity);
 }
 
@@ -708,8 +708,8 @@ test "gjk deep is reliable to moderate box aspect ratio" {
     // Boundary guarantee (P1d): a point core inside a box is reliably `.deep`
     // up to a MODERATE aspect ratio (~30:1). Beyond that (sharp radius-0 boxes)
     // GJK f32 can miss the enclosure (degeneracy + premature anti-cycling
-    // termination) — a documented limitation deferred to M1.1.4 (analytic box
-    // fast paths) / M1.1.3 (EPA). This test deliberately stops at the guaranteed
+    // termination) — a documented limitation the analytic box
+    // fast paths and EPA answer. This test deliberately stops at the guaranteed
     // regime; it does NOT assert `.deep` at extreme aspect ratios (that would
     // paper over the residual).
     const aspects = [_]Real{ 1, 5, 15, 30 };
@@ -753,7 +753,7 @@ test "gjk is deterministic and iteration-bounded" {
     try testing.expect(near.distance > 0.5 and near.distance < 1.2);
 }
 
-// --- E4: broadphase → narrowphase integration --------------------------------
+// --- Broadphase → narrowphase integration --------------------------------
 
 /// Add a `.dynamic` box body at (x,y,z) — descriptor positions are the f32 api
 /// `Vec3`, so the coordinates are f32.
@@ -793,7 +793,7 @@ test "broadphase pairs filtered by gjkPair" {
     const id_c = try addBoxBodyAt(gpa, &bm, &store, box, 2, 10, 0, 0);
     const id_d = try addBoxBodyAt(gpa, &bm, &store, box, 3, 10.3, 0, 0);
 
-    // Proxies via the broadphase, `user_data` = the packed `BodyId` (M1.1.1).
+    // Proxies via the broadphase, `user_data` = the packed `BodyId`.
     const ids = [_]BodyId{ id_a, id_b, id_c, id_d };
     for (ids) |id| {
         _ = try bp.insert(gpa, .dynamic, bm.bodyAabb(&store, id).?, id);

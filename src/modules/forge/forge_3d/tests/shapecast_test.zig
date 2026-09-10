@@ -1,5 +1,5 @@
 //! `forge_3d/tests/shapecast_test.zig` — the shape-cast kernel and its closed-form
-//! oracles (M1.1.10 / E3).
+//! oracles.
 //!
 //! Every expectation here is a closed form DERIVED in the comment above it, never a
 //! value read back from the implementation. The cast is a raycast against the
@@ -9,7 +9,7 @@
 //! kernel is asked to agree.
 //!
 //! The full acceptance suites of the five query entries, and the initial-contact
-//! witness, are E6's. This file is the kernel and its oracles.
+//! witness, belong to the entry-level suite. This file is the kernel and its oracles.
 
 const std = @import("std");
 const math = @import("foundation").math;
@@ -408,7 +408,7 @@ test "sphere cast against a box answers where the ray kernel's precondition refu
     // cover. Both facts are asserted here, in the same test, so the claim that the cast
     // covers what the ray kernel refuses is proven rather than stated.
     //
-    // RE-EXPRESSED at M1.1.11/E3: clause (1) was
+    // RE-EXPRESSED: clause (1) was
     // `expectError(error.UnsupportedShape, rayShape(...))` and is now the same
     // refusal read off the kernel's asserted precondition, the error having left the
     // ray path (see `raycast_test.zig`'s rounded-box test for why). The claim — the ray
@@ -518,7 +518,7 @@ test "an oblique cast in the far field keeps a unit normal" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E4 — the `BodyManager` adapters
+// The `BodyManager` adapters
 // ---------------------------------------------------------------------------
 //
 // Four adapters resolve a BODY's pose and support shape through `store` and call the
@@ -528,7 +528,7 @@ test "an oblique cast in the far field keeps a unit normal" {
 // convention — and answer null on a stale HANDLE and on a stale SHAPE, which are two
 // distinct ways to be gone.
 //
-// The query-level suites of the five entries are E6's; this section is the wiring.
+// The query-level suites of the five entries come later; this section is the wiring.
 
 const harness = @import("solver_test.zig");
 const body_manager_mod = @import("../body_manager.zig");
@@ -539,7 +539,7 @@ const query_mod = @import("../query/root.zig");
 /// A body carrying a sphere at `centre`, static, so a scene can be built without the
 /// solver moving anything. Both handles come back: the tests need the SHAPE id to
 /// destroy it independently of the body, and `BodyManager` deliberately grows no
-/// getter for it here — E4's scope is the four adapters.
+/// getter for it here — this section's scope is the four adapters.
 const SphereBody = struct { id: api.BodyId, shape: api.ShapeId };
 
 fn addSphereBody(gpa: std.mem.Allocator, world: *harness.World, centre: [3]f32, radius: f32) !SphereBody {
@@ -805,12 +805,12 @@ test "a sleeping body answers every adapter and stays asleep" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E5 — the `shapeCast` entry
+// The `shapeCast` entry
 // ---------------------------------------------------------------------------
 
 test "shapeCast returns the nearest body along the sweep" {
     // The strict minimum so the body does not ship bare; the full acceptance matrix
-    // is E6's. Three unit spheres on +X at 10, 20 and 30, inserted NEAREST-LAST so
+    // comes later. Three unit spheres on +X at 10, 20 and 30, inserted NEAREST-LAST so
     // the answer cannot come from insertion order. A unit sphere swept from the
     // origin along +X first touches the one at 10 when its centre reaches
     // 10 − (1 + 1) = 8.
@@ -854,10 +854,10 @@ test "shapeCast returns the nearest body along the sweep" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E6 — the `shapeCast` acceptance suite
+// The `shapeCast` acceptance suite
 // ---------------------------------------------------------------------------
 //
-// The iteration ceiling is NOT re-tested here: it is pinned in the E3 section above
+// The iteration ceiling is NOT re-tested here: it is pinned in the kernel section above
 // (`the iteration ceiling returns a hit at the current parameter`), with the
 // discrimination guard proving the cap actually bound. Doubling it would add a
 // second control over one behaviour and dilute which one is load-bearing.
@@ -1111,7 +1111,7 @@ pub fn sleepingBox(gpa: std.mem.Allocator, world: *harness.World) !api.BodyId {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.11 / E3 — the three-way outcome of the two entries taking a shape handle
+// The three-way outcome of the two entries taking a shape handle
 // ---------------------------------------------------------------------------
 
 test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
@@ -1120,7 +1120,7 @@ test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
     defer world.deinit(gpa);
 
     // THREE outcomes a single `null` used to conflate (`engine-physics-forge.md`
-    // §1.11.7). MEASURED on the pre-E3 tree, which is `main` for this entry: a stale
+    // §1.11.7). MEASURED on the tree before the split: a stale
     // probe handle returned `null` and a live probe aimed at empty space returned
     // `null` — byte-identical, so no caller could tell a malformed query from a
     // negative answer. That is the silent-false-negative class §1.11.3 forbids by

@@ -121,7 +121,7 @@ pub fn collide(
 /// normal is A→B and its `feature_id` reference/incident ownership follows the
 /// given `(a, b)` order. Callers that own a stable external key (e.g. body ids)
 /// use this directly so the feature_id stays frame-stable across a pose change
-/// that would flip `collide`'s pose-based order (Codex P1b); `BodyManager`'s
+/// that would flip `collide`'s pose-based order; `BodyManager`'s
 /// `collidePair` drives it in a canonical body-id order.
 ///
 /// An analytic fast path is dispatched first (`fast_paths.fastSeed`).
@@ -442,7 +442,7 @@ fn oneContact(comptime T: type, normal: math.Vec(3, T), position: math.Vec(3, T)
 /// feature (a sphere point, or an end-on capsule endpoint) is a VERTEX (its
 /// `vert_id`), otherwise a FACE (its `face_id`) — so a capsule's `+Y` (vert 0)
 /// and `−Y` (vert 1) endpoints, and an end-on endpoint (here) vs a side segment
-/// (`clipSegment`), get distinct ids (Codex FIX-12). The `(class_a, class_c)`
+/// (`clipSegment`), get distinct ids. The `(class_a, class_c)`
 /// class pair is used by NO clip producer (kept vertex `(class_a, class_a)`, edge
 /// crossing `(class_edge, class_edge)`, reference corner `(class_c, class_c)`,
 /// `clipSegment` endpoints `(class_a, class_a)`), so a single-contact id can never
@@ -490,7 +490,7 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
 
 // Feature-id classes, per 16-bit half (top two bits). A contact's `feature_id`
 // is `(reference_feature << 16) | incident_feature`; the class bits keep the
-// three contact kinds in DISTINCT id ranges so they never alias (Codex FIX-9):
+// three contact kinds in DISTINCT id ranges so they never alias:
 //   reference half: face (`class_a`), side plane / edge (`class_edge`), vertex /
 //     corner (`class_c`);  incident half: vertex (`class_a`), edge (`class_edge`),
 //     face (`class_c`).
@@ -544,8 +544,8 @@ fn featureId(ref16: u16, inc16: u16) u32 {
 /// `p` AND `qid` — a REFERENCE CORNER (a ref vertex), whose incident feature is
 /// the incident FACE (`class_c | inc_face_id` — carrying which incident face, so
 /// a supporting-face flip inter-frame changes the id and warm-starting cannot
-/// mis-match two corners at the same ref vertex on different faces; Codex FIX-10).
-/// It must NOT inherit a neighbour's incident edge (Codex FIX-9: that aliased
+/// mis-match two corners at the same ref vertex on different faces).
+/// It must NOT inherit a neighbour's incident edge (FIX-9: that aliased
 /// distinct contacts). Otherwise the point is an incident-edge × ref-edge crossing.
 fn intersectionFid(qid: u16, cur_fid: u32, nxt_fid: u32, inc_face_id: u16) u32 {
     const cur_ref: u16 = @intCast(cur_fid >> 16);

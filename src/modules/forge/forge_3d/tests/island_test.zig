@@ -1,4 +1,4 @@
-//! M1.1.8 acceptance suite for island partitioning.
+//! Acceptance suite for island partitioning.
 //!
 //! Two layers, matching the two layers of the design
 //! (`engine-physics-forge.md` §1.8.1): the branch-neutral union-find core of
@@ -580,7 +580,7 @@ test "per-island solve equals global solve bit-exactly on disjoint islands" {
     rigid.relaxRange(&global.bm, global.constraints.items, 0, global.constraints.items.len, cfg, h);
 
     // THE PRECONDITION, asserted rather than assumed — and it is what carries the
-    // equivalence now that there is no early-out to discriminate on. The M1.1.7 guard
+    // equivalence now that there is no early-out to discriminate on. The NGS guard
     // compared iteration counts between the two strategies; a fixed per-substep cost
     // leaves no count to differ, so what has to be pinned instead is the property that
     // makes the two orders identical in the first place: the island ranges are
