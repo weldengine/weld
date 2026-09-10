@@ -1,16 +1,15 @@
-//! Swapchain Vulkan — Phase 0 / M0.4.
+//! Swapchain Vulkan.
 //!
-//! Absorbs the role of `src/spike/vk_frame.zig` (removed, brief §Removals).
 //! Creates the VkSwapchainKHR + the associated image views, exposes
 //! `acquireNextImage` and `present` on the GAL side.
 //!
-//! Phase 0: 2 images (double buffer FIFO), BGRA8_UNORM format, FIFO present
-//! mode. Recreation on `OUT_OF_DATE_KHR` is not automatic (the caller must
-//! detect `error.SwapchainOutOfDate` and recreate manually). Phase 1+:
-//! transparent recreate on the GAL side.
+//! 2 images (double buffer FIFO), BGRA8_UNORM format, FIFO present mode.
+//! Recreation on `OUT_OF_DATE_KHR` is not automatic: the caller must detect
+//! `error.SwapchainOutOfDate` and recreate manually, the GAL side doing no
+//! transparent recreate.
 //!
-//! Surface selection is done via the `surface` of the DeviceDescriptor —
-//! Phase 0 expects the caller (e.g., `examples/triangle/`) to have created the
+//! Surface selection is done via the `surface` of the DeviceDescriptor — the
+//! caller (e.g. `examples/triangle/`) must have created the
 //! VK_KHR_xxx_surface upstream and passed it to the Device.
 
 const std = @import("std");
@@ -150,7 +149,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
     const view_handles = try device.allocator.alloc(types.TextureViewHandle, images.len);
     errdefer device.allocator.free(view_handles);
 
-    // R5d (M1.1.1-HF3): ONE native-cleanup path covering the whole function.
+    // ONE native-cleanup path covering the whole function.
     // `views_created` counts the native image views actually created; `registered`
     // counts the GAL handles adopted for them. On any failure from here through
     // `swapchains.put`, destroy every created native view and drop every
