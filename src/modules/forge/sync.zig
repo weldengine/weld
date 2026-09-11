@@ -5,8 +5,8 @@
 //! resolved and never an intermediate one.
 //!
 //! **THE INWARD DIRECTION IS NOT HERE, and its absence is a decision.** ECS → solver — the
-//! `Transform` and `Velocity` a rule writes reaching the solver — belongs to **M1.1.15.2**, with
-//! the Tier 1 Etch service. The reason is a property of the ECS: the tick says WHEN a write
+//! `Transform` and `Velocity` a rule writes reaching the solver — belongs with the Tier 1
+//! Etch service. The reason is a property of the ECS: the tick says WHEN a write
 //! happened and never WHO produced it, and no comparison of change stamps can manufacture
 //! that. A solver-side provenance does not close it either, since `moveKinematic` moves a
 //! kinematic body whose pose this file deliberately does not publish — gameplay being its
@@ -64,8 +64,8 @@
 //! documented one.
 //!
 //! `electPublishers` answers it with one criterion at two levels, and everything else in this
-//! file's outward direction defers to it. An earlier version excluded triggers outright and
-//! was WRONG TWICE OVER.
+//! file's outward direction defers to it. Excluding triggers outright would be WRONG
+//! TWICE OVER.
 //!
 //! First, on the corpus. §1.13.7 denies a trigger a manifold, a constraint and an impulse, and
 //! the amended text distinguishes TWO kinds of island entry: a CONSTRAINT island, which a
@@ -73,8 +73,7 @@
 //! SINGLETON, which it enters explicitly — the singleton comes from the enumeration of
 //! dynamic bodies and not from any pair, and without one a dynamic trigger could never sleep
 //! and would be integrated forever. So a `.dynamic` trigger falls under gravity and its pose
-//! IS a fact the solver resolved. An earlier version of this comment read the exclusion as
-//! total and was corrected with the corpus.
+//! IS a fact the solver resolved, and the exclusion is NOT total.
 //!
 //! Second, on the arbitration itself: excluding triggers arbitrates only
 //! solid-against-trigger, leaving two triggers or two solids in silent last-write-wins.
@@ -106,7 +105,7 @@ const Vec3r = forge_3d.Vec3r;
 /// THE precision crossing — see `forge/api/precision.zig`. This file narrows solver values to
 /// the world scalar on every tick, so it is the seam most able to grow a second conversion; it
 /// spells none of its own, and `no_precision_crossing` is what enforces that.
-/// The INWARD half of this seam (M1.1.15.2 G5b). Re-exported here so `forge_sync`
+/// The INWARD half of this seam. Re-exported here so `forge_sync`
 /// carries both directions through one module root — they share the election, and a
 /// caller reaching one must be able to reach the other.
 pub const in = @import("sync_in.zig");
@@ -142,9 +141,9 @@ pub fn solverVelocity(pw: *const PhysicsWorld, body: api.BodyId) struct { linear
 
 /// Which registrations publish, decided ONCE per tick.
 ///
-/// **A PRE-PASS, because the per-body form was quadratic.** The first version asked
-/// "who is my entity's publisher?" from inside each of the three publication passes, and each
-/// answer swept the whole registration list: 3·N² comparisons, 363 million of them at C1.1's
+/// **A PRE-PASS, because the per-body form is quadratic.** Asking "who is my entity's
+/// publisher?" from inside each of the three publication passes sweeps the whole
+/// registration list per answer: 3·N² comparisons, 363 million of them at C1.1's
 /// 11 000 bodies, paid in full by a scene with no trigger and no multi-body entity at all.
 /// The question is per ENTITY and its answer does not change during a tick, so it is answered
 /// once.
@@ -232,7 +231,7 @@ pub fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !Publish
 /// `changed_tick` UNCONDITIONALLY and `Changed<T>` is built on that mark, so
 /// writing a bit-identical value reports a change that did not happen — and
 /// `Velocity` is `@replicated(strategy: .rollback)`, so that false delta leaves on
-/// the wire. Measured at M1.1.15 (finding F-D1): an immobile kinematic platform
+/// the wire. Measured: an immobile kinematic platform
 /// held awake republished a constant zero forever.
 ///
 /// `with_velocity` is false for a STATIC body, which has no velocity columns a
@@ -272,8 +271,7 @@ pub fn mirrorSolverState(
     return wrote;
 }
 
-/// The body an ENTITY is driven through, or null when it owns none
-/// (M1.1.15.2 G11).
+/// The body an ENTITY is driven through, or null when it owns none.
 ///
 /// **THE SAME CRITERION AS `electPublishers`, and it is shared rather than
 /// restated.** The mutation wrappers write through the body `syncOut` publishes
@@ -310,7 +308,7 @@ pub fn electedBodyOf(pw: *const PhysicsWorld, entity: EntityId) ?api.BodyId {
     return if (best) |b| b.body else null;
 }
 
-/// The character an ENTITY owns, or null when it owns none (M1.1.15.2 G11).
+/// The character an ENTITY owns, or null when it owns none.
 ///
 /// No election to share: a character has no publisher role and `syncOut` never
 /// reads one. What it does share is the DISCIPLINE — the smallest handle among
@@ -329,7 +327,7 @@ pub fn characterOf(pw: *const PhysicsWorld, entity: EntityId) ?api.CharacterId {
     return best;
 }
 
-/// Who owns a body's pose and velocity, read from the ECS (M1.1.15.2 G5b).
+/// Who owns a body's pose and velocity, read from the ECS.
 ///
 /// An entity without a `RigidBody` is `.solver`, which is the declared default and
 /// not a fallback invented here: the model's whole point is that `.gameplay` is
@@ -377,7 +375,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         const entity = pw.bm.entity(body) orelse continue;
         const body_type = pw.bm.bodyType(body).?;
         if (body_type == .static) continue;
-        // AMENDED AT M1.1.15.2 G5b: the condition is `body_type × authority`, not
+        // The condition is `body_type × authority`, not
         // `body_type` alone. A `.gameplay` body publishes NOTHING — neither pose nor
         // velocity — because gameplay owns both and publishing either would be this
         // seam overwriting the authority `syncIn` just read from the ECS. It is the
@@ -482,10 +480,6 @@ const WritesResource = core.ecs.WritesResource;
 /// and the sensor state. Handing a frame allocator to those would free them out from under
 /// the solver at the end of the frame.
 ///
-/// The site this paragraph used to name — `refreshProxy` reaching `Broadphase.update`,
-/// which reserved a moved-log slot — is no longer one of them: that entry became
-/// allocation-free at M1.1.15.1. The REASON is unchanged and the list above is what carries
-/// it now; only the example moved.
 /// Stored as three raw words rather than as typed fields, because the ECS registry builds a
 /// resource's default bytes from a default-constructed value and a pointer has no meaningful
 /// default. Zero means "nothing published", which `resolve` reports as absence.
@@ -494,7 +488,7 @@ pub const PhysicsWorldRef = extern struct {
     /// The two halves of a `std.mem.Allocator`, which is `{ ptr, vtable }`.
     alloc_ptr: usize = 0,
     alloc_vtable: usize = 0,
-    /// The inward pass's journal (M1.1.15.2 G5b), or `0` when no caller attached
+    /// The inward pass's journal, or `0` when no caller attached
     /// one. A RAW POINTER for the same reason the two above are: this resource is
     /// an `extern struct` of POD and cannot own anything, so the journal's
     /// lifetime is the caller's.
@@ -578,7 +572,7 @@ pub fn publishPhysicsWorld(gpa: std.mem.Allocator, ecs: *World, pw: *PhysicsWorl
 /// repository produces. It does NOT separate two GENERATIONS occupying the same storage: a
 /// world destroyed, a second one allocated at the same address, and a late withdrawal aimed at
 /// the first would clear the second. Closing that needs an opaque publication token rather
-/// than a pointer comparison, which is recorded with its owner in the brief's Closing notes.
+/// than a pointer comparison, which is recorded with its owner.
 /// The limit is written here rather than widened.
 ///
 /// The handle is ZEROED rather than the resource removed: the accessor already reads zero as
@@ -598,9 +592,9 @@ pub fn unpublishPhysicsWorld(ecs: *World, expected: *PhysicsWorld) void {
 
 /// Read the published handle back, or null if nothing was published.
 ///
-/// **A PURE LOOKUP, and that is the point.** The first version obtained the id by REGISTERING
-/// the type here, on `ctx.gpa` — the FRAME allocator — and a registration keeps the type's
-/// name for the world's whole life. A frame allocator handing out memory the registry retains
+/// **A PURE LOOKUP, and that is the point.** Obtaining the id by REGISTERING the type
+/// here, on `ctx.gpa` — the FRAME allocator — would keep the type's name for the world's
+/// whole life. A frame allocator handing out memory the registry retains
 /// is the same defect this file avoids one level up, arriving through the lookup instead of
 /// through the physics. `componentId` resolves an already-registered name and allocates
 /// nothing; a world where nothing was published has no such name, which is absence and not
@@ -618,11 +612,11 @@ fn resolve(ecs: *World) ?PhysicsWorldRef {
     return ref;
 }
 
-/// Attach the inward pass's journal to the published world (M1.1.15.2 G5b), so
+/// Attach the inward pass's journal to the published world, so
 /// the registered system runs `syncIn` before `step`.
 ///
 /// Separate from `publishPhysicsWorld` rather than a parameter on it: that entry's
-/// signature is the M1.1.15 publication contract, and the inward pass is opt-in
+/// signature is the publication contract, and the inward pass is opt-in
 /// (see the field). BORROWED — the journal must outlive the publication.
 pub fn attachSyncInJournal(ecs: *World, journal: *in.Journal) !void {
     const rid = ecs.registry.idOf(@typeName(PhysicsWorldRef)) orelse return error.PhysicsWorldNotPublished;
@@ -650,8 +644,8 @@ fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     // discipline: gameplay rules and systems have already run in this phase's
     // predecessors, `syncIn` consumes what they wrote, `step` simulates, `syncOut`
     // publishes. A caller-side `syncIn` would put the order back into a discipline
-    // someone has to remember — the defect M1.1.15's closing pass fixed by
-    // registering the outward half at all.
+    // someone has to remember — the defect that registering the outward half at
+    // all avoids.
     if (ref.journalPtr()) |j| {
         _ = try in.syncIn(ref.allocator(), ref.worldPtr().?, ctx.world, j);
     }
@@ -722,7 +716,7 @@ fn wouldConflict(
 /// `ARCH-031` names as inside the float discipline's perimeter, and where a fixed-timestep
 /// tick belongs. The publication rides the tick rather than sitting in a later phase, so
 /// `update` observes the poses of the tick that just ran instead of the previous one. The
-/// ECS → solver direction is M1.1.15.2's and registers nothing here.
+/// ECS → solver direction belongs to the service and registers nothing here.
 ///
 /// The declared accesses are exactly what the system does, which is what a future `ARCH-030`
 /// enforcement will check — `Transform`, `Velocity` and the `Sleeping` marker it migrates,

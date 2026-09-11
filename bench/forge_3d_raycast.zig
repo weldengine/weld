@@ -1,4 +1,4 @@
-//! forge_3d raycast throughput bench (M1.1.9).
+//! forge_3d raycast throughput bench.
 //!
 //! Closest-hit raycast over a STATIC scene of 10 000 bodies (spheres, boxes and
 //! capsules on a grid), plus the `any` and `all` selection modes over the same
@@ -12,9 +12,9 @@
 //! dead-code elimination.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered: the baseline
-//! has never been measured, and inventing a bound before measuring it is the
-//! failure mode recorded at M1.1.8. The structural guarantee this milestone owes
-//! is carried by the logarithmic node-count test in the acceptance suite, not by a
+//! has never been measured, and a bound registered before its baseline is invented
+//! rather than measured. The structural guarantee is carried by the logarithmic
+//! node-count test in the acceptance suite, not by a
 //! figure here. The C1.1 target — 10 000 rays per frame at 60 Hz — is verified at
 //! its own declared point, `bench/physics_forge_3d_integration.zig` on the demo
 //! scene, which does not exist yet; the derived "rays per 16.67 ms frame" column
@@ -94,7 +94,7 @@ const Scene = struct {
 /// spheres / boxes / capsules, spaced 3 m apart — all STATIC, which is the scene a
 /// query cares about: the broadphase tree is built once and never moved.
 /// Build the bench scene. With `with_plane`, one static half-space `{ y <= 0 }` joins the
-/// SAME scene — the M1.1.11 delta measurement. The grid starts at y = 0, so the plane is
+/// SAME scene, which is the delta measurement. The grid starts at y = 0, so the plane is
 /// genuinely in contact with its lowest layer; and an unbounded list has no box to prune
 /// on, which is precisely why it is not in a tree, so EVERY ray is offered to it and the
 /// exact kernel runs on every one. That is the worst case, and the honest one to report.
@@ -150,7 +150,7 @@ fn buildScene(gpa: std.mem.Allocator, with_plane: bool) !Scene {
     return scene;
 }
 
-/// One ray SELECTION MODE, timed on one scene — the M1.1.11 delta harness.
+/// One ray SELECTION MODE, timed on one scene — the delta harness.
 ///
 /// One function rather than three copied loops, and both scenes measured through it in the
 /// same process, back to back: a delta between two separate runs would carry the machine's
@@ -429,7 +429,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // --- M1.1.11: the cost of one half-space in the scene, REPORTED, never gated ---
+    // --- the cost of one half-space in the scene, REPORTED, never gated ---
     //
     // The same 10 000 rays, the same code, the same process — once against the grid alone
     // and once against the grid plus one static half-space in the layer's unbounded list.

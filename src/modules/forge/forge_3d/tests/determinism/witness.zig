@@ -18,7 +18,7 @@
 //!     strongest signal available, and measured at the close the eight witnesses are
 //!     BIT-IDENTICAL between `ubuntu-24.04` and aarch64-macOS, the chains included —
 //!     a MEASURED property of a pinned arithmetic, dated, and NOT a promotion of
-//!     level 3, which C1.1 still places out of Phase 1.
+//!     level 3, which C1.1 still places out of scope.
 //!   - the FOUR DISCRETE TRACES are level 2 point 1, compared by EVERY cell, ISA
 //!     included. They are derived from integers — handles, counts, keys — so they
 //!     are ISA-independent by construction, and that is precisely why a mismatch
@@ -37,7 +37,7 @@
 //! and on a witness produced eight months earlier by another machine.
 //!
 //! A MISMATCH NAMES A FRAME AND A TRACE. "The outputs differ" is not a diagnosis:
-//! the brief requires the failure to name the first differing frame index, and for
+//! the failure must name the first differing frame index, and
 //! the discrete side there are four independent claims per frame, so collapsing
 //! them would throw away the half of the answer that says WHICH invariant moved.
 

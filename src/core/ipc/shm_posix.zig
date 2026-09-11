@@ -18,14 +18,13 @@
 //! to ONE successful `shm_open(O_CREAT) → shm_open(O_RDWR)`
 //! sequence per process lifetime (independent of `shm_unlink`
 //! status or names). Subsequent attempts return `EACCES`. The
-//! real S6 demo is unaffected because the editor (creator) and
+//! real demo is unaffected because the editor (creator) and
 //! the runtime (opener) live in different processes; the bug
 //! only surfaces in single-process tests, which gate themselves
 //! on `builtin.os.tag != .macos` in `tests/ipc/shm.zig` and
-//! `tests/ipc/shm_viewport.zig`. Linux is unaffected. The Phase 0.6
-//! macOS hardware validation milestone revisits this when the
-//! editor lifecycle integration test lands (cf. `briefs/S6-…` §
-//! "Inherited debts" — promoted from inherited to active).
+//! `tests/ipc/shm_viewport.zig`. Linux is unaffected. A macOS
+//! hardware validation revisits this when the editor lifecycle
+//! integration test lands.
 //!
 //! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o600)` →
 //!                   `ftruncate(fd, size)` → `mmap`. Keep fd.

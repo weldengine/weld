@@ -1,5 +1,5 @@
 //! `forge_3d/query/cast.zig` — the shape-cast collector and its per-candidate
-//! evaluation (M1.1.10 / E5).
+//! evaluation.
 //!
 //! The cast's selection is the ray's `closest` and nothing else: one hit, the
 //! nearest, with the bound tightened TO each accepted time of impact so the rest of

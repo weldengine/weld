@@ -1,4 +1,4 @@
-//! S3 Etch parser benchmark.
+//! Etch parser benchmark.
 //!
 //! Iterates the valid corpus from `tests/etch/corpus/valid/` and measures
 //! lexer-only, parser-only, type-checker-only, and total time per file at
@@ -11,8 +11,8 @@
 //!
 //! Pass `--smoke` for a CI sanity short-circuit (single iteration, no
 //! report). The full bench is not run in CI — the verdict is captured on
-//! the physical reference machine (cf. S2 convention,
-//! `engine-development-workflow.md` §17 CI obligations).
+//! the physical reference machine (`engine-development-workflow.md` §17 CI
+//! obligations).
 
 const std = @import("std");
 const builtin = @import("builtin");

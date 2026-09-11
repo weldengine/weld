@@ -1,11 +1,11 @@
-//! Disk shader cache — Phase 0 / M0.4.
+//! Disk shader cache.
 //!
-//! Hash over `(source + defines + glslc_version)` (brief §Scope). Phase 0:
-//! cache stored under `.weld-cache/shaders/<hash>.spv`. Lookup → `LoadResult.hit`
+//! Hash over `(source + defines + glslc_version)`. The cache is stored
+//! under `.weld-cache/shaders/<hash>.spv`. Lookup → `LoadResult.hit`
 //! with the SPIR-V bytes; miss → caller compiles + inserts.
 //!
-//! Hash format: SHA-1 hex (160 bits → 40 char). Phase 1+: switch to
-//! blake3 if profiling justifies it (the hash is not perf-critical — a few
+//! Hash format: SHA-1 hex (160 bits → 40 char). Switching to blake3 would
+//! need profiling to justify it (the hash is not perf-critical — a few
 //! ms per shader).
 
 const std = @import("std");
@@ -138,7 +138,7 @@ pub fn insert(allocator: std.mem.Allocator, io: std.Io, key: LookupKey, spv: []c
     file.writeStreamingAll(io, spv) catch return error.InputOutput;
 }
 
-/// Removes the entire cache (debug / clean build). Not exposed in CLI Phase 0.
+/// Removes the entire cache (debug / clean build). Not exposed in the CLI.
 pub fn clear(allocator: std.mem.Allocator, io: std.Io) Error!void {
     _ = allocator;
     std.Io.Dir.cwd().deleteTree(io, CACHE_ROOT) catch |e| switch (e) {

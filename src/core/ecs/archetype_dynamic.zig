@@ -1,8 +1,8 @@
-//! Compatibility shim for the M0.1 / E2 archetype consolidation.
+//! Compatibility shim for the archetype consolidation.
 //!
-//! Before M0.1, the S1 comptime-typed `Archetype(Components)` lived in
+//! A comptime-typed `Archetype(Components)` lived in
 //! `archetype.zig` and the byte-level `DynamicArchetype` (Etch / runtime-
-//! query side) lived here. M0.1 / E2 fuses them into a single byte-level
+//! query side) lived here. They are fused into a single byte-level
 //! `Archetype` in `archetype.zig`. This file is now a thin re-export so
 //! the Etch interpreter, the runtime query, and any other consumer that
 //! still imports `archetype_dynamic.DynamicArchetype` keep working without

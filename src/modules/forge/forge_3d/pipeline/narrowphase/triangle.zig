@@ -1,9 +1,9 @@
 //! `forge_3d/pipeline/narrowphase/triangle.zig` — the analytic ray↔triangle kernel and
-//! the back-face predicate (M1.1.11.1, `engine-physics-forge.md` §1.11.17).
+//! the back-face predicate (`engine-physics-forge.md` §1.11.17).
 //!
 //! **Why one kernel and not four families.** A triangle is a BOUNDED convex whose support
 //! map is the max of three dot products, and that is the only property GJK, EPA, the
-//! manifold generator and the M1.1.10 cast kernel require — so those four serve a mesh
+//! manifold generator and the cast kernel require — so those four serve a mesh
 //! through `SupportShape.Core.triangle` unchanged. Only the RAY gains an arm, for the
 //! reason §1.11.3 gives ray kernels their existence: a configuration-space march against
 //! a FLAT core is ill-conditioned where ray↔triangle has a closed form.
@@ -88,7 +88,7 @@ pub fn isBackFace(comptime T: type, normal: math.Vec(3, T), direction: math.Vec(
 /// predicate is right for a box and wrong for a sphere and a capsule by exactly the
 /// radius — which is the failure the term exists to prevent.
 ///
-/// **RECORDED DEVIATION on the sign.** §1.11.17 and the milestone brief both write this as
+/// **RECORDED DEVIATION on the sign.** §1.11.17 writes this as
 /// `n · support_probe(n) − r_probe < n · v₀`, with the radius SUBTRACTED. That contradicts
 /// their own normative sentence one line later — "a probe straddling the plane touches from
 /// the front and counts in both modes" — and the contradiction is decidable on the case

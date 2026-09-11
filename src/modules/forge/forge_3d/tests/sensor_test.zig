@@ -1,4 +1,4 @@
-//! Acceptance suite for the sensor traversal (M1.1.13).
+//! Acceptance suite for the sensor traversal.
 //!
 //! Trigger-proxy enumeration, the unilateral mask, the exact narrowphase confirmation, the
 //! probe rule and the creation-time refusal of the role on a mesh; then the observable state
@@ -219,7 +219,7 @@ test "a trigger detects across every broad class" {
     var out: std.ArrayListUnmanaged(sensor.BodyOverlap) = .empty;
     defer out.deinit(gpa);
 
-    // The pass consults NO pair matrix — after gate B the whole `trigger` row and column
+    // The pass consults NO pair matrix — the whole `trigger` row and column
     // read `false`, so a pass that consulted it would return nothing at all. A trigger
     // detects a static body, a moving one and another trigger alike (§1.13.2).
     const st = try addBox(gpa, &world, av(1, 1, 1), av(0, 0, 0), 1, false, 0);
@@ -312,7 +312,7 @@ test "the probe rule serves both configurations in which it decides the answer" 
     // it is deliberately not asserted here: the overlap boolean is symmetric in exact
     // arithmetic, so no observable of this pass distinguishes the two orders. What the rule
     // buys there is that the order is STATED rather than left to whichever side happened to
-    // be usable, so M1.1.14 can verify it instead of establishing it.
+    // be usable, so the determinism instrument verifies it instead of establishing it.
 }
 
 test "the sensor role is refused on a mesh, by typed error, and kept on a half-space" {
@@ -427,7 +427,7 @@ test "two half-spaces meet unless their normals are opposite and their boundarie
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 / gate E — the observable state and its two deltas
+// The observable state and its two deltas
 // ---------------------------------------------------------------------------
 
 fn hasPair(items: []const sensor.EntityPair, trigger: u32, other: u32) bool {
@@ -591,7 +591,7 @@ fn clearTriggerRole(gpa: std.mem.Allocator, world: *harness.World, id: api.BodyI
         if (b.id != id) continue;
         world.bp.remove(b.proxy);
         // THROUGH `rebindProxy`, never by writing the record: the proxy is held both here
-        // and in the dense index behind `proxyOf` (M1.1.15.1), and writing one leaves the
+        // and in the dense index behind `proxyOf`, and writing one leaves the
         // other answering with a freed node.
         const rebound = switch (record.class()) {
             .convex, .triangle_soup => try world.bp.insert(

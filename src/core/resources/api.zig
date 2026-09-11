@@ -1,4 +1,4 @@
-//! M0.2 / E3 — public API of the resource subsystem.
+//! Public API of the resource subsystem.
 //!
 //! Resources are singleton instances of POD types — exactly one
 //! value of each resource type lives in the world at any given
@@ -10,17 +10,16 @@
 //! archetype, and `Archetype.is_singleton` flips on the
 //! resource archetype so user queries never see the entity.
 //!
-//! Change detection reuses the M0.1 tick-based mechanism:
+//! Change detection reuses the tick-based mechanism:
 //! `getResourceMut` returns `world.getMut(T, entity)` which
 //! auto-marks `changed_tick = current_tick` on the resource's
 //! slot. `resourceChanged(T, since)` reads back that tick.
 //!
-//! API signature note (vs brief): the brief lists `setResource(world,
-//! value)` and `removeResource(world, T)` without an allocator. The
-//! underlying ECS write paths (`ensureComponentRegistered`,
-//! `spawnDynamicWithValues`, `despawn`) require a `gpa`. The
-//! signatures below thread `gpa` through the write surface — read
-//! paths stay allocator-free.
+//! API signature note: a shape without an allocator — `setResource(world, value)` and
+//! `removeResource(world, T)` — is unreachable. The underlying ECS write paths
+//! (`ensureComponentRegistered`, `spawnDynamicWithValues`, `despawn`) require a `gpa`.
+//! The signatures below thread `gpa` through the write surface — read paths stay
+//! allocator-free.
 
 const std = @import("std");
 const rtti = @import("../rtti/root.zig");
@@ -32,7 +31,7 @@ const EntityId = registry_mod.EntityId;
 const ResourceMarker = registry_mod.ResourceMarker;
 const World = world_mod.World;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Errors surfaced by `setResource` / `removeResource`. Read paths
 /// return `null` instead of failing through this set.
 pub const ResourceError = error{
@@ -61,7 +60,7 @@ fn mapWorldErr(e: anyerror) ResourceError {
     };
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Insert or update the singleton resource of type `T`. On the
 /// first call for `T`, spawns a dedicated entity holding
 /// `[T, ResourceMarker]` and marks its archetype singleton. On
@@ -108,7 +107,7 @@ pub fn setResource(
     world.singleton_resources.register(gpa, tid, eid) catch |e| return mapWorldErr(e);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Immutable view of resource `T`. Returns `null` if the resource
 /// has not been set or has been removed.
 pub fn getResource(world: *const World, comptime T: type) ?*const T {
@@ -117,7 +116,7 @@ pub fn getResource(world: *const World, comptime T: type) ?*const T {
     return world.get(T, eid);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Mutable view of resource `T`. Auto-marks `changed_tick` on the
 /// resource's component slot — the next call to
 /// `resourceChanged(T, since)` will see the bump. Returns `null` if
@@ -128,14 +127,14 @@ pub fn getResourceMut(world: *World, comptime T: type) ?*T {
     return world.getMut(T, eid);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Returns `true` iff a resource of type `T` is currently set.
 pub fn hasResource(world: *const World, comptime T: type) bool {
     const tid: TypeId = comptime rtti.computeTypeId(T);
     return world.singleton_resources.lookup(tid) != null;
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Drop the resource of type `T`. Despawns the singleton entity
 /// and clears the `(TypeId → EntityId)` binding. No-op when the
 /// resource has not been set.
@@ -146,7 +145,7 @@ pub fn removeResource(world: *World, gpa: std.mem.Allocator, comptime T: type) R
     world.singleton_resources.unregister(tid);
 }
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Returns `true` iff resource `T`'s `changed_tick` is strictly
 /// greater than `since_tick`. Combined with `World.current_tick`
 /// progress, lets a consumer detect mutations across frame

@@ -1,4 +1,4 @@
-//! The three artifact kinds of M1.1.14, and nothing else.
+//! The three artifact kinds of the determinism instrument, and nothing else.
 //!
 //! Everything here is a pure function of a `Scenario` at a tick. No allocation
 //! decision, no ordering and no threshold is taken from the engine's internals
@@ -69,7 +69,7 @@ fn putReal(out: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator, v: Real) !v
 
 /// Append the canonical binary state of every MOBILE body at the current tick.
 ///
-/// Mobile only, and the exclusion is the brief's: a static shape with an
+/// Mobile only, and the exclusion is specified: a static shape with an
 /// unbounded local AABB has no meaningful scale, and forcing one into a metric
 /// that weights by radius would mean inventing that radius.
 ///
@@ -237,7 +237,7 @@ pub fn dumpDiscrete(s: *const Scenario, gpa: std.mem.Allocator, out: *std.ArrayL
     }
 
     // (4) THE RETAINED PAIR SET, sorted, as the harness holds it. This is the one
-    // that needed the M1.1.14 pruning fix to be an oracle at all: over a set that
+    // that needed the pruning fix to be an oracle at all: over a set that
     // can only grow, a trace agrees with itself by accumulation.
     try putU32(out, gpa, @intCast(s.world.active.items.len));
     for (s.world.active.items) |k| try putU64(out, gpa, k);
@@ -321,7 +321,7 @@ pub fn deviationExceeded(s: *const Scenario, reference: []const u8) bool {
 /// canonical scenario — its THIRTEEN mobile bodies are all of comparable size —
 /// and would break silently the day a body of another scale entered the scene.
 /// That is the "assertion valid only through a tacit property of its fixture"
-/// class the brief names, and it becomes undetectable once a witness is
+/// class named for it, and it becomes undetectable once a witness is
 /// committed over the scene that hides it. Hence the two-scale test below, which
 /// an absolute form cannot pass.
 ///
@@ -331,8 +331,6 @@ pub fn bodyExceeds(translation: Real, rotation_chord: Real, r: Real) bool {
     const deviation = translation + 2 * r * rotation_chord;
     return @as(f64, deviation) > divergence_factor * @as(f64, r);
 }
-
-// --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -381,7 +379,7 @@ test "the rotation term is weighted by the body radius" {
 }
 
 test "the character IS in the continuous state, and the proof is a discrimination" {
-    // WHY THIS TEST EXISTS. Until M1.1.14's review the character reached NO
+    // WHY THIS TEST EXISTS. Until a review the character reached NO
     // artifact: `dumpState` walked `s.mobile`, which holds rigid bodies, and a
     // virtual character owns none — so the controller ran a thousand frames and its
     // whole output was discarded. Adding it to the dump is one line, and one line

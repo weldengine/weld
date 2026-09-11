@@ -1,13 +1,13 @@
-//! Buffer Vulkan — Phase 0 / M0.4.
+//! Buffer Vulkan.
 //!
 //! GPU Buffer = `vk.Buffer` + `vk.DeviceMemory` bound together. The GAL does
 //! not separate the two (the WebGPU-like semantics treat a Buffer as an
 //! indivisible memory + handle unit). We store both in an `Entry` indexed
 //! by a monotonic counter on the Device side.
 //!
-//! Phase 0 allocation: one allocator per buffer (direct `vkAllocateMemory` /
-//! `vkFreeMemory`). Sub-allocation + pooling = Phase 1+ (cf. brief §Notes).
-//! Inefficient for thousands of buffers, sufficient for the Phase 0
+//! Allocation: one allocator per buffer (direct `vkAllocateMemory` /
+//! `vkFreeMemory`), with no sub-allocation or pooling.
+//! Inefficient for thousands of buffers, sufficient for the
 //! triangle + the benchmark's instance buffers.
 
 const std = @import("std");
@@ -101,8 +101,8 @@ pub fn lookup(device: *Device, handle: types.BufferHandle) ?vk.Buffer {
     return if (device.buffers.get(handle.inner)) |e| e.vk_buffer else null;
 }
 
-/// Helper — map / unmap for `host_visible` buffers. Phase 0: simple
-/// passthrough. Phase 1+: integration with persistent mapping.
+/// Helper — map / unmap for `host_visible` buffers. A simple passthrough,
+/// with no persistent mapping.
 pub fn map(device: *Device, handle: types.BufferHandle) types.Error![]u8 {
     if (handle.inner == 0) return error.InvalidArgument;
     const entry_ptr = device.buffers.getPtr(handle.inner) orelse return error.InvalidArgument;

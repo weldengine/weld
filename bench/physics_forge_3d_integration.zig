@@ -1,29 +1,26 @@
-//! The C1.1 verification instrument for `forge_3d` (M1.1.15.1).
+//! The C1.1 verification instrument for `forge_3d`.
 //!
 //! `engine-phase-1-criteria.md` C1.1 names this file as the point where the frame column is
-//! measured, and until M1.1.15.1 **it did not exist**. Two files of the repository cited it
-//! in the present tense, which made it read as delivered; `bench/forge_3d_raycast.zig` and
+//! measured, and NO OTHER BENCH ANSWERS FOR IT: `bench/forge_3d_raycast.zig` and
 //! `bench/forge_3d_shapecast.zig` do reach 10 000 bodies, but they interrogate a STATIC
-//! scene — they never tick. So C1.1's two figures were neither met nor refuted: they were
-//! not measured, which is not the same thing.
+//! scene — they never tick, so neither meets nor refutes C1.1's two figures.
 //!
 //! **WHAT IS GATED, and what is only reported.**
 //!
 //!   - GATED: frame time `<= 16.6 ms` at 1 000 dynamic + 10 000 static bodies, 60 Hz, **on
-//!     the p99 and not on the median**. The brief says "frame time <= 16.6 ms" with no
-//!     statistic, and the first version of this bench settled that silently on the median —
-//!     the permissive reading. A 60 Hz frame budget is a REAL-TIME constraint: one frame in a
+//!     the p99 and not on the median**. C1.1 says "frame time <= 16.6 ms" with no statistic,
+//!     and settling that on the median is the permissive reading — do NOT take it. A 60 Hz
+//!     frame budget is a REAL-TIME constraint: one frame in a
 //!     hundred at 20 ms is a visible hitch, and a median never sees it. The median and the
 //!     max are reported beside the gated figure, so the shape of the tail stays readable
 //!     rather than being reduced to the one number the gate stands on.
 //!   - GATED: **zero allocations in steady state**, under an instrumented allocator. This
-//!     one is DUE because `step` became `anyerror!void` at M1.1.15.1 over eight measured
-//!     allocation sites: a fallible signature with no such measurement would silently
+//!     one is DUE because `step` is `anyerror!void` over eight measured allocation
+//!     sites: a fallible signature with no such measurement would silently
 //!     legitimise per-frame allocation, when the eight are amortised growths on
 //!     capacity-retaining lists. The signature says the tick MAY fail; this says that once
 //!     the scene is stable it does not allocate. Neither substitutes for the other.
-//!   - REPORTED: the step-2 retention shape, `M1.D.13`'s first oracle, with P and N measured
-//!     at two sizes.
+//!   - REPORTED: the step-2 retention shape, with P and N measured at two sizes.
 //!
 //! **"STEADY STATE" IS DEFINED BEFORE IT IS MEASURED, AND THE DEFINITION IS NOT CIRCULAR.**
 //! Defining it as "the frames after allocation stops" would make the zero-allocation result
@@ -118,9 +115,9 @@ fn nowNs() i64 {
 ///
 /// Counting `alloc`, `resize` AND `remap` matters and is not belt-and-braces: an
 /// `ArrayListUnmanaged` growth tries `remap` first and only falls back to `alloc`, so a
-/// counter watching `alloc` alone reports zero for a list that grew — the exact blind spot
-/// that made an OOM injection report "no allocations seen" at M1.1.12. A `free` is not an
-/// allocation and is not counted.
+/// counter watching `alloc` alone reports zero for a list that grew, which is how an OOM
+/// injection comes to report "no allocations seen". A `free` is not an allocation and is
+/// not counted.
 const CountingAllocator = struct {
     child: std.mem.Allocator,
     allocs: usize = 0,
@@ -174,9 +171,9 @@ const CountingAllocator = struct {
 ///
 /// **`n_far` IS THE WHOLE POINT OF THE RETENTION EXPERIMENT.** Growing the floor grows the
 /// body count N and the retained pair count P *together*, so a frame time that grows with it
-/// says nothing about which of the two drives step 2 — the first version of this bench did
-/// exactly that and its "N x3.99 -> frame x4.09" line could not discriminate Θ(P·N) from
-/// Θ(P). A far static field is what separates them: statics never pair with statics
+/// says nothing about which of the two drives step 2: a ratio like "N x3.99 -> frame x4.09"
+/// read off such a sweep cannot discriminate Θ(P·N) from Θ(P). A far static field is what
+/// separates them: statics never pair with statics
 /// (`default_layer_pairs`), so these bodies enter the broadphase and the registration list
 /// and contribute ZERO pairs. N moves, P does not.
 fn buildScene(
@@ -334,11 +331,11 @@ fn run(gpa: std.mem.Allocator, n_floor: usize, n_far: usize, allow_sleeping: boo
         try pw.step(ca);
         samples[i] = nowNs() - t0;
 
-        // AWAKE **DYNAMIC** BODIES, and the qualifier is the correction: `isSleeping` answers
-        // `false` for a static, which never carries the flag at all. The first version of this
-        // bench counted every body and reported "11000..11000 awake" for a scene whose 1 000
-        // dynamics had all fallen asleep — a denominator that could not fall below 10 000 and
-        // a guard that could therefore never fire. The type filter is what makes both real.
+        // AWAKE **DYNAMIC** BODIES, and the qualifier is load-bearing: `isSleeping` answers
+        // `false` for a static, which never carries the flag at all. Do NOT count every body:
+        // the denominator then cannot fall below the static count, so a scene whose dynamics
+        // have all fallen asleep still reports itself fully awake and the guard beneath can
+        // never fire. The type filter is what makes both real.
         var awake: usize = 0;
         for (pw.bodies.items) |entry| {
             const pos = pw.bm.position(entry.id).?.toArray();
@@ -434,8 +431,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("    a Theta(P*N) step 2 would cost {d} resolutions/frame at B against {d} at A (x{d:.2})\n", .{
         2 * ret_b.pairs * ret_b.n_bodies, 2 * ret_a.pairs * ret_a.n_bodies, rn,
     });
-    // The confounded pair, shown BECAUSE it is confounded: it is the reading the first
-    // version of this bench offered, and on its own it discriminates nothing.
+    // The confounded pair, shown BECAUSE it is confounded: growing the floor is the
+    // reading that comes first to mind, and on its own it discriminates nothing.
     std.debug.print("    (confounded, for contrast: growing the FLOOR moves N and P together —\n", .{});
     std.debug.print("     N={d} P={d} -> {d} ns  vs  N={d} P={d} -> {d} ns)\n", .{
         ret_a.n_bodies, ret_a.pairs, ret_a.median_ns, gated.n_bodies, gated.pairs, gated.median_ns,

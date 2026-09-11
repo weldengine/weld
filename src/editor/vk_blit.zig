@@ -1,15 +1,15 @@
-//! Editor viewport blit renderer — M0.9 / E6 (consolidated onto the GAL).
+//! Editor viewport blit renderer, consolidated onto the GAL.
 //!
 //! Renders the runtime-written IPC viewport (a 1280×720 RGBA8 shm framebuffer)
-//! onto the editor's swapchain via a fullscreen-triangle blit. As of E6 this
-//! drives the **public GAL** (`gal.Device`) instead of raw Vulkan: the S6
+//! onto the editor's swapchain via a fullscreen-triangle blit. It drives the
+//! **public GAL** (`gal.Device`) instead of raw Vulkan: the earlier
 //! hand-rolled instance/device/swapchain/descriptor/command plumbing
 //! (`vk.device_dispatch.*`) is gone, replaced by GAL calls. The per-frame shm
-//! upload uses `copyBufferToTexture` (the E4 primitive), whose internal
+//! upload uses `copyBufferToTexture`, whose internal
 //! `undefined→transfer_dst→shader_read` barriers subsume the layout
 //! transitions the raw path issued by hand.
 //!
-//! Two M0.5 sync bugs are resorbed by routing through the GAL:
+//! Two sync bugs are resorbed by routing through the GAL:
 //!   (a) colorspace — the GAL swapchain now selects a surface pair carrying
 //!       the core `srgb_nonlinear` colorspace (`gal swapchain.zig` +
 //!       `conv.colorSpace`), so it never emits an extended `*_EXT` colorspace
@@ -296,7 +296,7 @@ fn destroyPresentSemaphores(
 
 /// Record + submit + present one blit frame. Returns `false` (and sets
 /// `swapchain_dirty`) when the swapchain is out-of-date and the caller must
-/// recreate it. Free fn (`*Renderer` first arg) to preserve the S6 call site.
+/// recreate it. Free fn (`*Renderer` first arg) to preserve the call site.
 pub fn drawFrame(r: *Renderer) SetupError!bool {
     const dev = &r.device;
     const cur = r.current_frame;

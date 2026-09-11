@@ -1,4 +1,4 @@
-//! `etch_test` — thin CLI shim over the M1.0.15 Etch test runner
+//! `etch_test` — thin CLI shim over the Etch test runner
 //! (`weld_etch.test_runner`). The shim owns arg parsing + file I/O + report
 //! printing only; parse + type-check + run all live in the library, which
 //! `weld test` (`engine-platform.md` § "Build System — CLI `weld`") will

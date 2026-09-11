@@ -1,15 +1,14 @@
-//! ECS benchmark — Phase 0 entry point.
+//! ECS benchmark entry point.
 //!
 //! Hosts two cases, selectable via `--case=<name>`:
 //!
-//! 1. **S1 non-regression** (`--case=s1`, default): 100 000 entities ×
+//! 1. **The `--case=s1` non-regression case** (default): 100 000 entities ×
 //!    1 archetype × 1000 measured iterations after 100 warm-up
 //!    iterations through the comptime-generated
 //!    `(*Transform, *Velocity)` query and the work-stealing scheduler.
 //!    Mode requirement: ReleaseSafe (CI gate, comparable across hosts).
-//!    Gate: median ≤ 62 µs (M0.1/E7 recalibrated from the 57.2 µs
-//!    E5b gate by +5 µs to account for the dispatchFrame overhead
-//!    inherent to the generalised scheduler — see brief journal).
+//!    Gate: median ≤ 62 µs — 57.2 µs plus 5 µs for the `dispatchFrame`
+//!    overhead inherent to the generalised scheduler.
 //!
 //! 2. **C0.1 production target** (`--case=c01`): 1 000 000 entities ×
 //!    4 archetypes × 10 systems × tick loop. Mode requirement:
@@ -26,7 +25,7 @@
 //! - `--help`            — print this list and exit.
 //! - `--case=s1|c01`     — pick the case. Default: `s1`.
 //! - `--workers=N`       — force the job system's worker count instead of
-//!                         `std.Thread.getCpuCount`. The S1 baseline is
+//!                         `std.Thread.getCpuCount`. The `s1` baseline is
 //!                         calibrated at 4 workers (`--workers=4`) so the
 //!                         CI gate is comparable across host topologies.
 //!                         The C0.1 case uses the default (= one worker
@@ -42,11 +41,10 @@
 //! ## Build-mode guard
 //!
 //! `bench-ecs` REJECTS Debug builds (the inner gate would falsely
-//! report GO at Debug speeds, hiding regressions — cf. brief E1
-//! journal entry 2026-05-20 18:44). Compile with
-//! `-Doptimize=ReleaseSafe` (S1) or `-Doptimize=ReleaseFast` (C0.1).
+//! report GO at Debug speeds, hiding regressions). Compile with
+//! `-Doptimize=ReleaseSafe` (`s1`) or `-Doptimize=ReleaseFast` (C0.1).
 //!
-//! ## Locked iteration body (S1 case — re-used by every measurement
+//! ## Locked iteration body (`s1` case — re-used by every measurement
 //! ## and by the smoke paths in `src/main.zig` and
 //! ## `tests/ecs/no_alloc_in_simulation_test.zig`)
 //!
@@ -70,15 +68,15 @@ const SystemScheduler = weld_core.ecs.scheduler.SystemScheduler;
 const SystemContext = weld_core.ecs.scheduler.SystemContext;
 const Query = weld_core.ecs.world.Query;
 
-// ─── S1 constants ─────────────────────────────────────────────────────────
+// ─── `s1` constants ─────────────────────────────────────────────────────────
 
 const S1NumEntities: u32 = 100_000;
 const S1WarmupIterations: u32 = 100;
 const S1MeasuredIterations: u32 = 1000;
 const S1SmokeEntities: u32 = 1024;
 
-const S1LegacyPrimaryGateNs: u64 = 1_000_000; // 1.0 ms — historic S1 ceiling
-const S1RegressionGateNs: u64 = 62_000; // 62 µs — E7 recalibrated gate
+const S1LegacyPrimaryGateNs: u64 = 1_000_000; // 1.0 ms — the superseded ceiling
+const S1RegressionGateNs: u64 = 62_000; // 62 µs — the live gate
 const SecondaryTargetNs: u64 = 500_000; // 0.5 ms — recorded only
 const ImbalanceGate: f64 = 0.15;
 
@@ -92,14 +90,14 @@ fn parseCase(s: []const u8) ?Case {
     return null;
 }
 
-// ─── S1 — Locked iteration body + system ──────────────────────────────────
+// ─── `s1` — Locked iteration body + system ──────────────────────────────────
 
 /// Locked iteration body. Reads the byte offsets of the Transform and
 /// Velocity columns from the dispatch args (resolved once at query
 /// construction by `componentOffset` on the query view) and casts the
-/// chunk bytes to the typed SoA pointers. Mirrors the pre-E2 inner
-/// loop verbatim — only the way the typed pointers are recovered
-/// changed.
+/// chunk bytes to the typed SoA pointers. The locked body of the header,
+/// verbatim — only the way the typed pointers are recovered differs from
+/// the two smoke sites.
 fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f32) void {
     const count = chunk.entityCount();
     const transforms: [*]Transform = @ptrCast(@alignCast(&chunk.bytes[transforms_off]));
@@ -113,7 +111,7 @@ fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f
     }
 }
 
-/// Cross-frame state shared by the S1 `integrateSystem` —
+/// Cross-frame state shared by the `s1` `integrateSystem` —
 /// stashes the query (built once, reused every dispatch) and the
 /// pre-resolved Transform / Velocity column offsets. Lives on the
 /// bench main stack frame and is forwarded to each `dispatchFrame`
@@ -390,7 +388,7 @@ fn assertReleaseMode() void {
     }
 }
 
-// ─── S1 case ──────────────────────────────────────────────────────────────
+// ─── `s1` case ──────────────────────────────────────────────────────────────
 
 fn runS1(
     gpa: std.mem.Allocator,

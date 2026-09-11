@@ -1,8 +1,8 @@
 //! Viewport framebuffer shared between the runtime (writer) and the
-//! editor (reader). Double-buffered per the S6 brief — `engine-
-//! ipc.md` §4.2 specifies three slots for Phase 1-2 but S6 narrows
+//! editor (reader). Double-buffered — `engine-
+//! ipc.md` §4.2 specifies three slots but this narrows
 //! to two to keep the spike tight. The protocol of `last_complete` /
-//! `writer_slot` / `reader_slot` atomics is unchanged; Phase 0.6
+//! `writer_slot` / `reader_slot` atomics is unchanged; a later
 //! lifts the slot count to three without changing the public API.
 //!
 //! Layout (1280×720 RGBA8_UNORM, total ≈ 7 MB):
@@ -26,10 +26,10 @@
 //!   1. `slot = header.last_complete.load(.acquire)` — paired with
 //!      the writer's `.release` to make pixel writes visible.
 //!   2. Copy the pixel block (or sample it directly if backed by GPU
-//!      memory in Phase 3).
+//!      memory).
 //!   3. Optionally record `header.reader_slot` (informational —
 //!      lets the writer avoid clobbering an in-flight read on the
-//!      Phase 0.6 triple-buffer path).
+//!      triple-buffer path).
 //!
 //! The header itself sits inside the shared region; both sides access
 //! atomics through the same physical pages, no locks needed.
@@ -38,8 +38,8 @@ const std = @import("std");
 
 const shm = @import("shm.zig");
 
-/// Pixel format negotiated at handshake. S6 supports only the
-/// single value; the field exists so Phase 0.6 + Phase 3 can pick a
+/// Pixel format negotiated at handshake. Only the
+/// single value is supported; the field exists so a later revision can pick a
 /// vendor-friendlier swapchain format without breaking layout
 /// compatibility.
 pub const PixelFormat = enum(u32) {
@@ -52,12 +52,12 @@ pub const Resolution = struct {
     height: u32,
 };
 
-/// S6 viewport resolution per the brief. Locked here (single source
+/// Viewport resolution. Locked here (single source
 /// of truth) so the editor and runtime can size their staging
 /// buffers identically.
 pub const default_resolution: Resolution = .{ .width = 1280, .height = 720 };
 
-/// Number of slots in the rotating buffer. Phase 0.6 lifts to 3
+/// Number of slots in the rotating buffer. A later revision lifts it to 3
 /// (triple buffering).
 pub const slot_count: u32 = 2;
 
@@ -243,7 +243,7 @@ pub const ShmViewport = struct {
 
     /// Reader-side: optional bookkeeping — record which slot was
     /// last consumed so the writer can avoid clobbering it on the
-    /// Phase 0.6 triple-buffer path.
+    /// triple-buffer path.
     pub fn markReaderSlot(self: *const ShmViewport, slot: u32) void {
         std.debug.assert(slot < slot_count);
         @atomicStore(u32, &self.header().reader_slot, slot, .release);

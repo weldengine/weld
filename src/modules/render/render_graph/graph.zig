@@ -1,16 +1,15 @@
-//! Render Graph — Phase 0 / M0.4.
+//! Render Graph.
 //!
 //! Declarative DAG (Directed Acyclic Graph). Each pass declares its
 //! reads/writes; the graph computes the topological execution order and
 //! inserts the barriers automatically via the `BarrierTracker`.
 //!
-//! Phase 0:
+//! Shape:
 //! - 3 passes max expected (depth prepass / forward / conditional
 //!   capture), compact structure without optimization.
 //! - Topological sort in `O(V + E)` (Kahn's algorithm).
 //! - Cycle detection → `error.RenderGraphCycle`.
-//! - Pass merging and resource aliasing deferred to Phase 1+ (cf. brief
-//!   §Notes decision 2).
+//! - No pass merging and no resource aliasing.
 
 const std = @import("std");
 const gal = @import("../gal/root.zig");
@@ -167,9 +166,10 @@ pub const Graph = struct {
     /// topological order. The caller provides an optional opaque context
     /// passed to each pass.body.
     ///
-    /// Phase 0: does not yet wire the barriers between passes (left
-    /// to the Vulkan backend via the native render pass dependencies —
-    /// PR follow-up wires `trackBarriers` to the emitted barriers).
+    /// TODO(wire trackBarriers into execute): this inserts NO barrier between
+    /// passes. `trackBarriers` exists and is exercised only by this file's
+    /// tests, so correctness rests on the Vulkan backend's native render pass
+    /// dependencies instead.
     pub fn execute(self: *Graph, encoder: ?*anyopaque) Error!void {
         for (self.execution_order.items) |idx| {
             const p = &self.passes.items[idx];
@@ -188,8 +188,8 @@ pub const Graph = struct {
 /// - **WAW** (Write-After-Write) is handled in `compile`, not here: two passes
 ///   writing the same resource are serialized by insertion order (lower index
 ///   first) via `writesSameResource` + the `i < j` tiebreak. Keeping it out of
-///   this query is what makes WAW acyclic (M0.5 item 7 — the old symmetric WAW
-///   check here emitted edges both ways and a false `RenderGraphCycle`).
+///   this query is what makes WAW acyclic: a SYMMETRIC WAW check here emits
+///   edges both ways and a false `RenderGraphCycle`.
 /// - **WAR is NOT a topological dependency**: it is a pure memory hazard,
 ///   handled by the `BarrierTracker` (cf. `gal/barriers.zig`) which inserts the
 ///   barrier without imposing a topological order. Consistent with WebGPU and

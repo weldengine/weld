@@ -78,7 +78,7 @@ test "resource string fields round-trip through the persistent heap" {
     persistent.decref(gpa, @ptrFromInt(ss.ptr));
 }
 
-test "loader rejects a resource collection field (M1.0.17 E5 guard)" {
+test "loader rejects a resource collection field (guard)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

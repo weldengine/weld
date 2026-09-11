@@ -1,9 +1,9 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Intermediate `<type>.asset.etch` document model + a minimal Etch-syntax
 //! reader/writer.
 //!
-//! The on-disk text is the frozen surface (M0.6): a single top-level
+//! The on-disk text is the frozen surface: a single top-level
 //! `asset "<name>" { … }` construct holding the importer-extracted metadata
 //! and the user-editable settings. The bulk bytes live in a separate hashed
 //! blob; `extracted.blob` references it.
@@ -16,10 +16,10 @@
 //! pipeline-generated). The container (fixed fields + block list + value
 //! grammar) is frozen; block *contents* are open per asset category.
 //!
-//! This ad-hoc reader/writer avoids a `weld_etch` dependency in M0.6 (the
-//! full Etch parser is M0.8). It covers exactly the §21.4 value grammar
-//! minus `@unit(...)` annotations, which the writer does not emit in M0.6
-//! (additive Phase 1). The on-disk text is the frozen contract, not this
+//! This ad-hoc reader/writer avoids a `weld_etch` dependency (the
+//! full Etch parser lives elsewhere). It covers exactly the §21.4 value grammar
+//! minus `@unit(...)` annotations, which the writer does not emit
+//! (adding them is additive). The on-disk text is the frozen contract, not this
 //! reader implementation.
 //!
 //! Ownership: `parseEtch` allocates every string/array/object into the
@@ -116,7 +116,7 @@ pub fn fieldsEql(a: []const Field, b: []const Field) bool {
 
 /// The frozen intermediate-format schema. The three settings/extracted
 /// blocks are generic field lists so each asset category populates only
-/// what it needs (M0.6: texture / mesh / audio).
+/// what it needs (texture / mesh / audio).
 pub const AssetDoc = struct {
     /// Logical asset name (the `asset "<name>"` string).
     name: []const u8,

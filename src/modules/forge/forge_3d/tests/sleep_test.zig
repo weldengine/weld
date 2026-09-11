@@ -1,4 +1,4 @@
-//! M1.1.8 acceptance suite for sleep detection: the displacement window, the
+//! Acceptance suite for sleep detection: the displacement window, the
 //! separation of write intents (`engine-physics-forge.md` §1.8.4), and the sleep
 //! transition.
 //!
@@ -243,7 +243,7 @@ test "solver writes never rearm the sleep window" {
     const pairs = [_]u64{pairKey(ids[0], ids[1])};
 
     // The real per-tick cycle, minus only the broadphase (the pair is fed directly)
-    // and the island partition (E3). BOTH solver passes run: the velocity pass
+    // and the island partition. BOTH solver passes run: the velocity pass
     // writes this box's velocity on every single tick — gravity keeps adding
     // −9.81·dt and the normal solve keeps cancelling it — and the position pass
     // writes its pose while the impact penetration is being resorbed.
@@ -859,7 +859,7 @@ test "integratePositions leaves a sleeping body bit-frozen" {
 ///
 /// Note the one-tick offset: the transition happens at step 11 of tick N, and it is
 /// tick N+1 whose `build` skips the pairs and produces the empty array. So the sleep
-/// count has to be accumulated as we go, not read once at the end.
+/// count has to be accumulated along the way, not read once at the end.
 fn runUntilAsleep(
     gpa: std.mem.Allocator,
     world: *harness.World,
@@ -1028,11 +1028,6 @@ test "an impact wakes the whole sleeping stack in one tick with its internal con
     }
     try testing.expect(worst_transient <= 5 * world.cfg.penetration_slop);
 
-    // Clause 2 of the frozen envelope is REPLACED, not widened: see RD-1 in
-    // `briefs/M1.1.8-islands-sleep.md` (Claude.ai round-trip, 2026-07-25). The
-    // absolute form measured the position pass, not the wake — the never-slept
-    // control fails it harder.
-    //
     // (2a) DIFFERENTIAL against a control that never slept. This is the question the
     // cold start actually raises — does it cost anything? — and it can only be asked
     // against a baseline. An absolute bound here would pin the position pass's fixed

@@ -1,4 +1,4 @@
-//! Sync primitives Vulkan — Fence + Semaphore — Phase 0 / M0.4.
+//! Sync primitives Vulkan — Fence + Semaphore.
 //!
 //! Direct GAL handle ↔ Vulkan handle mapping via `@intFromEnum` /
 //! `@enumFromInt`. No internal registry needed — freeing a

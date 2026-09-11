@@ -26,7 +26,7 @@ const program_b =
     \\}
 ;
 
-test "cookConsolidated renders namespaces, one header, and the programs table (D-S5-etchcook-inproc)" {
+test "cookConsolidated renders namespaces, one header, and the programs table" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
@@ -59,7 +59,7 @@ test "cookConsolidated renders namespaces, one header, and the programs table (D
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "cookConsolidated propagates a failing input as a typed error (D-S5-etchcook-inproc)" {
+test "cookConsolidated propagates a failing input as a typed error" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);

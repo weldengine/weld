@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! M0.2 / E6 — Tier 0 plugin loader skeleton.
+//! Tier 0 plugin loader skeleton.
 //!
 //! Loads a `.so` / `.dll` / `.dylib`, resolves the
 //! `weld_plugin_entry` symbol, reads the `WeldPluginDesc` produced
@@ -9,12 +9,12 @@
 //!
 //! `std.DynLib` is `@compileError("unsupported platform")` on
 //! Windows in Zig 0.16's stdlib (cf. `lib/std/dynamic_library.zig`
-//! line 21). The E6 skeleton therefore hand-rolls a thin
+//! line 21). This skeleton therefore hand-rolls a thin
 //! `dlopen` / `LoadLibraryA` (POSIX / Windows) abstraction directly,
-//! exactly the pattern used by `src/core/platform/vk.zig`. The E6
-//! brief mentions `platform.dynamic_loader` as a hypothetical M0.3
+//! exactly the pattern used by `src/core/platform/vk.zig`. A
+//! `platform.dynamic_loader` was posited as a
 //! dependency; that file does not exist yet. When the wrapper is
-//! introduced in M0.3 (platform layer extension), it will replace
+//! introduced, it will replace
 //! this local block without changing the loader's public surface.
 //!
 //! NO real wiring of the 7 sub-APIs — the loader passes the
@@ -22,8 +22,8 @@
 //! `WELD_ERR_NOT_IMPLEMENTED` (cf. `api.zig`).
 //!
 //! Runtime capability enforcement (refusing a `component_get` if
-//! not declared in `reads_components`) is Phase 3 (brief
-//! § Out-of-scope). M0.2 READS the capabilities and logs them,
+//! not declared in `reads_components`) is unimplemented: the
+//! loader READS the capabilities and logs them,
 //! without inline checks.
 
 const std = @import("std");
@@ -40,7 +40,7 @@ const log = std.log.scoped(.plugin_loader);
 // in Zig 0.16's stdlib (cf. `lib/std/dynamic_library.zig` line 21).
 // We hand-roll a tiny dlopen/LoadLibrary abstraction here, mirroring
 // the pattern used by `src/core/platform/vk.zig`. The wrapper around
-// `platform.dynamic_loader` arrives in M0.3 — drop-in substitution
+// `platform.dynamic_loader` would be a drop-in substitution
 // without any change to the loader's public surface.
 const _dl = if (builtin.os.tag == .windows) struct {
     extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.c) ?*anyopaque;
@@ -106,7 +106,7 @@ pub const PluginState = enum {
 /// lifetime of the `Loader`.
 pub const PluginHandle = struct {
     /// Original path of the `.so` / `.dll` (useful for logs
-    /// and replay after hot-reload Phase 3+).
+    /// and replay after hot-reload).
     path: []const u8,
     /// Opaque handle returned by `dlopen` (POSIX) or
     /// `LoadLibraryA` (Windows). Freed by `unloadPlugin`.
@@ -127,7 +127,7 @@ pub const Loader = struct {
     gpa: std.mem.Allocator,
     /// Pointer-stable storage: each handle is heap-boxed so the
     /// `*PluginHandle` returned by `loadPlugin` stays valid for the
-    /// lifetime of the `Loader`. E7/M0.9 fix — the prior
+    /// lifetime of the `Loader`. An earlier
     /// `ArrayListUnmanaged(PluginHandle)` returned an interior pointer
     /// (`&items[len-1]`) that a subsequent `loadPlugin` could dangle by
     /// reallocating the backing buffer, contradicting the
@@ -158,7 +158,7 @@ pub const Loader = struct {
     /// Loads `path` as a plugin. The path must point to a
     /// dynamic binary (`.so` / `.dll` / `.dylib`) that exports
     /// `weld_plugin_entry`. The loader logs the capabilities
-    /// declared by the plugin without enforcing them (Phase 3).
+    /// declared by the plugin without enforcing them.
     pub fn loadPlugin(self: *Loader, path: []const u8) LoaderError!*PluginHandle {
         // dlopen/LoadLibraryA need a NUL-terminated path. Allocate
         // a temporary buffer with the sentinel, then release after
@@ -276,7 +276,7 @@ pub const Loader = struct {
     /// tests and diagnostic tools. The caller casts the returned
     /// `*anyopaque` to the target type (the type-safe lookup
     /// wrapper will arrive when `platform.dynamic_loader` is
-    /// extracted in M0.3).
+    /// extracted).
     pub fn lookupSymbol(handle: *PluginHandle, name: [:0]const u8) ?*anyopaque {
         if (handle.state != .loaded) return null;
         if (handle.dyn_handle) |lib| {

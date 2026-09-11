@@ -7,10 +7,8 @@
 //! matching by textual content covers both the legacy keyword case and
 //! any future re-introduction.
 //!
-//! Strategy: tokenize the source and report every token (identifier or
-//! the historical `keyword_usingnamespace` tag if still present) whose
-//! text equals `"usingnamespace"`. Tokenization avoids false positives
-//! inside comments and string literals.
+//! Detection is on TOKENS, which is what keeps a file naming the keyword in
+//! prose or in a string from being a finding.
 
 const std = @import("std");
 const diag = @import("../diagnostic.zig");

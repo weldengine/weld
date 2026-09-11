@@ -1,12 +1,12 @@
 //! `forge_3d/pipeline/narrowphase/gjk.zig` — distance-based GJK convex detection.
 //!
-//! Delivered across M1.1.2: the Voronoi-region simplex solver (`Simplex(T)`),
+//! It carries the Voronoi-region simplex solver (`Simplex(T)`),
 //! the bounded GJK descent loop (`gjk`), and its three-regime `GjkResult(T)`.
 //! The support shapes, relative pose, and `minkowskiSupport` this file consumes
 //! live in the sibling `support.zig`; EPA (`epa.zig`) seeds off the `.deep`
-//! terminal simplex `GjkResult` carries (M1.1.3).
+//! terminal simplex `GjkResult` carries.
 //!
-//! **Dependency discipline (brief Notes).** This file imports `foundation`
+//! **Dependency discipline.** This file imports `foundation`
 //! (math) and the sibling `support.zig` ONLY — never `weld_forge`, never
 //! `body*.zig`, never `config.zig`, never `broadphase.zig`. The scalar arrives
 //! as the comptime parameter `T`; `forge_3d` instantiates it at `config.Real`.
@@ -20,14 +20,14 @@
 //! (`dist(cores) <= r_a + r_b`). Fast convergence, no simplex degeneracy near
 //! contact.
 //!
-//! **Computation in the frame of A (brief Notes).** B is pre-transformed
+//! **Computation in the frame of A.** B is pre-transformed
 //! relative to A once per pair (`support.RelativePose`); A's support runs
 //! untransformed. Better precision far from the world origin (avoids
 //! large-coordinate cancellation) and half the per-iteration transforms. Frozen
-//! now: changing the computation frame after the M1.1.14 determinism freeze
+//! now: changing the computation frame after the determinism freeze
 //! would break validated bit-exactness.
 //!
-//! **Determinism by construction (anticipates M1.1.14).** No hash containers,
+//! **Determinism by construction.** No hash containers,
 //! no trigonometry (dot/cross only), fixed support tie-breaks (see
 //! `support.SupportShape.support`).
 
@@ -41,10 +41,10 @@ const support = @import("support.zig");
 /// specialized to the query point being the **origin** (GJK runs on the
 /// Minkowski difference, whose closest approach to the origin is the separation).
 /// Each returns the closest point, the surviving sub-feature, and its barycentric
-/// weights — the data the E3 GJK loop needs to shrink the simplex, reconstruct
+/// weights — the data the GJK loop needs to shrink the simplex, reconstruct
 /// closest points on A and B, and steer the next search direction.
 ///
-/// Determinism (brief Notes, anticipates M1.1.14): regions are evaluated in a
+/// Determinism: regions are evaluated in a
 /// fixed order and the first match wins; every division is guarded so degenerate
 /// inputs (duplicated vertices, collinear triangle, coplanar tetrahedron) fall
 /// back to a lower feature rather than producing a NaN.
@@ -299,8 +299,8 @@ pub fn Simplex(comptime T: type) type {
     };
 }
 
-/// Named iteration ceiling for the GJK descent (brief Notes, anticipates the
-/// M1.1.14 determinism freeze): the loop always terminates within this many
+/// Named iteration ceiling for the GJK descent (anticipates the
+/// determinism freeze): the loop always terminates within this many
 /// support queries. 32 is generous — a well-formed pair converges in a handful;
 /// the bound only backstops adversarial near-parallel configurations.
 pub const max_gjk_iterations: u32 = 32;
@@ -311,11 +311,11 @@ pub const max_gjk_iterations: u32 = 32;
 ///    `closest_b` (the closest points on each core, **world** space) are valid;
 ///    `simplex_count` is 0.
 ///  - `.deep`: `simplex[0..simplex_count]` is the terminal simplex — either an
-///    origin-ENCLOSING simplex, OR (M1.1.3-HF RD-4) a terminal within the
+///    origin-ENCLOSING simplex, OR a terminal within the
 ///    accumulated-rounding band of the origin (a Minkowski witness at noise
 ///    distance from the origin, NOT necessarily enclosing) — the EPA seed;
 ///    `distance` is 0 and the closest points are unspecified. No depth / normal is
-///    computed here (that is M1.1.3 / EPA).
+///    computed here (that is EPA's).
 pub fn GjkResult(comptime T: type) type {
     return struct {
         const Vec3T = math.Vec(3, T);
@@ -334,7 +334,7 @@ pub fn GjkResult(comptime T: type) type {
         closest_a: Vec3T,
         /// Closest point on B's core, world space (`.separated`/`.shallow`).
         closest_b: Vec3T,
-        /// Terminal `.deep` simplex — origin-enclosing OR the RD-4 rounding-band
+        /// Terminal `.deep` simplex — origin-enclosing OR the rounding-band
         /// terminal (not necessarily enclosing); entries `[0..simplex_count]`.
         simplex: [4]Vertex,
         /// Number of valid `simplex` entries (`.deep`: 1..4; otherwise 0).
@@ -345,24 +345,24 @@ pub fn GjkResult(comptime T: type) type {
 /// Distance-based GJK between the **cores** of `shape_a` and `shape_b` at their
 /// world poses. Runs in the frame of A (B pre-transformed via `RelativePose`),
 /// descending on the Minkowski difference `support_A(d) − support_B(−d)` toward
-/// the origin with the E2 Voronoi solver. The search direction is never
+/// the origin with the Voronoi solver. The search direction is never
 /// normalized — squared distances throughout, a single `sqrt` for the reported
-/// distance (brief Notes). See the file header for the cores + inflation model
+/// distance. See the file header for the cores + inflation model
 /// and the frozen frame-of-A choice.
 ///
-/// Classification (brief Notes): if the terminal simplex encloses the origin the
+/// Classification: if the terminal simplex encloses the origin the
 /// cores intersect → `.deep`; otherwise the converged core distance `dist` gives
-/// `.deep` iff `dist ≤ the contact margin` (the RD-4 witness band, m1.1.3-hf — a
+/// `.deep` iff `dist ≤ the contact margin` (the witness band — a
 /// Minkowski point at noise distance from the origin; the terminal is NOT
 /// necessarily enclosing), `.separated` iff `dist − (r_a + r_b)` exceeds it, else
 /// `.shallow`. The contact margin is an absolute float-noise bound
 /// `conv_k · floatEps(T) · coordScale` (see the tolerance block). An exact inflated
 /// touch (`dist == r_a + r_b`) stays shallow iff `r_sum > contact_margin` — the
-/// RD-4 band is evaluated FIRST, so a sub-noise inflation radius
+/// witness band is evaluated FIRST, so a sub-noise inflation radius
 /// (`0 < r_sum <= contact_margin`) classifies deep; benign either way: EPA clamps
 /// depth to ~0 and the manifold penetration is ~`r_sum` in both regimes. For hard
 /// cores (`r_sum == 0`) the shallow band is empty — an exact touch (`dist == 0`) is
-/// the RD-4 deep band.
+/// the deep band.
 pub fn gjk(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -474,7 +474,7 @@ pub fn gjk(
         // duplicate support before the enclosing tetrahedron forms (near-parallel
         // search directions repeat a corner on a flat box). Reliable to a
         // moderate aspect ratio; beyond it, exact box `.deep` is the domain of the
-        // M1.1.4 analytic box/box + point/box fast paths and M1.1.3 EPA. Deferred
+        // analytic box/box and point/box fast paths, and EPA. Deferred
         // by scope decision — not chased with generic f32 GJK here (diminishing
         // returns, overlaps EPA, still imperfect in f32).
         if (res.count == 4 or degenerateOriginReached(T, verts[0..count], closest, mach_eps)) return deepResult(T, verts, count);
@@ -504,13 +504,13 @@ pub fn gjk(
     // which after cancellation reflects only who is A and made a tangency read
     // `.separated` in one order and `.shallow` in the other (P1c). The comparison
     // is additive on the already-computed `dist`. It is reached only after the
-    // RD-4 band below (`dist <= contact_margin`) did not fire, so the frozen
+    // witness band below (`dist <= contact_margin`) did not fire, so the frozen
     // convention keeps an exact inflated touch (`dist == r_sum`) shallow exactly
     // when `r_sum > contact_margin` — a sub-noise `r_sum` is caught deep above.
     const r_sum = shape_a.radius + shape_b.radius;
     const coord_scale = pos_b.sub(pos_a).length() + coreExtent(T, shape_a) + coreExtent(T, shape_b);
     const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
-    // RD-4 — deep band (m1.1.3-hf, C′). A terminal within `contact_margin` of the
+    // Deep band. A terminal within `contact_margin` of the
     // ORIGIN is a POSITIVE witness of enclosure: a Minkowski point at noise
     // distance from the origin ⇒ the cores touch to measurement precision ⇒ the
     // deep regime by definition. This holds at EVERY loop exit — the progress-test
@@ -547,7 +547,7 @@ pub fn gjk(
 
 // --- GJK internal helpers ---
 
-/// Dispatch the E2 Voronoi solver by simplex size. GJK maintains a 1..4-vertex
+/// Dispatch the Voronoi solver by simplex size. GJK maintains a 1..4-vertex
 /// simplex by construction, so the `else` arm is exactly the tetrahedron.
 fn closestOnSimplex(comptime T: type, verts: []const Simplex(T).Vertex) Simplex(T).Result {
     const S = Simplex(T);
@@ -573,7 +573,7 @@ fn maxVertexMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
 /// ACCUMULATED rounding of the whole GJK pipeline (rotate-by-conjugate, the Voronoi tetrahedron
 /// solve, the final square root) on the reported distance, at the coordinate scale.
 ///
-/// Promoted to a file-level `pub const` at the M1.1.11.1 closure. It was a local inside `gjk`,
+/// Promoted to a file-level `pub const`. It was a local inside `gjk`,
 /// which was fine while the only consumer was the classification itself; it is not, once a
 /// CANDIDATE FILTER upstream of the kernel has to be conservative with respect to the same
 /// margin. A mesh bounds its candidate triangles by a box, and a triangle separated by less than

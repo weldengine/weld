@@ -1,12 +1,12 @@
 //! Native PNG decoder → RGBA8.
 //!
-//! Parses IHDR/PLTE/tRNS/IDAT/IEND, inflates the IDAT zlib stream (E2
+//! Parses IHDR/PLTE/tRNS/IDAT/IEND, inflates the IDAT zlib stream (the
 //! `codecs/deflate`), reverses the five line filters (Paeth via the
 //! `foundation/simd` `paeth_filter_decode` kernel), handles palette + tRNS
 //! alpha and bit depths 1/2/4/8 and Adam7 interlace, and expands every
-//! pixel to RGBA8 (the M0.6 cooked-texture payload).
+//! pixel to RGBA8 (the cooked-texture payload).
 //!
-//! Out of scope (M0.6, brief §Out-of-scope): 16-bit channels, grayscale/RGB
+//! Out of scope: 16-bit channels, grayscale/RGB
 //! colour-key tRNS, mipmaps, GPU compression. Chunk CRC32 is parsed past but
 //! not verified (the IDAT ADLER32 already guards the pixel stream); a
 //! CRC32 check is deferred.
@@ -22,9 +22,9 @@ pub const Error = error{
     /// A chunk or the pixel stream ended early.
     Truncated,
     /// Malformed IHDR or an inconsistent palette index, or an image-size
-    /// computation that overflowed `usize` (R3, M1.1.1-HF3 — checked arithmetic).
+    /// computation that overflowed `usize` (checked arithmetic).
     BadHeader,
-    /// IHDR width or height exceeds `max_dimension` (R3, M1.1.1-HF3): a hostile
+    /// IHDR width or height exceeds `max_dimension`: a hostile
     /// dimension is rejected before any allocation, so a size product can never
     /// wrap `usize` into an undersized buffer.
     DimensionsTooLarge,
@@ -60,7 +60,7 @@ pub const Image = struct {
 
 const signature = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
 
-/// Maximum accepted image dimension, per axis (R3, M1.1.1-HF3). Aligned with a
+/// Maximum accepted image dimension, per axis. Aligned with a
 /// common Vulkan `maxImageDimension2D` (16384). Capping `width`/`height` here is
 /// what makes every downstream size product (`width × height × channels`, per-
 /// scanline bytes, the inflate budget) provably non-overflowing — a

@@ -1,13 +1,13 @@
 //! Persistent heap — Tier 0 (`src/core/memory`, `etch-memory-model.md` §4 / §11).
 //! The keystone for non-POD resource fields: a refcounted, system-allocator-
-//! backed heap whose blocks outlive a rule body (or a single scene load). M1.0.3
-//! uses it for resource `string` fields; the M1.0.5 scene loader interns loaded
-//! resource strings into it; M1.0.17 reuses it for dynamic collections — the
+//! backed heap whose blocks outlive a rule body (or a single scene load). It
+//! backs resource `string` fields; the scene loader interns loaded
+//! resource strings into it; dynamic collections reuse it — the
 //! `type_id` → drop dispatch (now a `DropFn` registry the Etch runtime populates
 //! at init) and the open `TypeId` set are exactly what `string[]` / `[K: V]` /
 //! `Set<T>` register against, with no Etch coupling in this module.
 //!
-//! Moved from `src/etch/` to Tier 0 in M1.0.5 (the heap is tier-neutral —
+//! Tier 0, and the heap is tier-neutral (
 //! `runDrop` is a no-op, no Etch coupling — and resource `string` fields are a
 //! Tier-0 capability). API + on-storage layout unchanged.
 //!
@@ -48,7 +48,7 @@ const std = @import("std");
 
 /// Coarse type tag stored in each block's header, used to dispatch the
 /// drop that releases a type's owned sub-resources before the block is
-/// freed. Open set: M1.0.17 dynamic collections add their own ids.
+/// freed. Open set: dynamic collections add their own ids.
 pub const TypeId = u32;
 
 /// A block whose payload owns no sub-resources (the bytes/POD live inline
@@ -60,18 +60,18 @@ pub const type_plain: TypeId = 0;
 /// id documents intent and lets `typeId` round-trip for debug/inspection.
 pub const type_string: TypeId = 1;
 
-/// A dynamic-array container block (`T[]`, M1.0.17). Its payload is the owned
+/// A dynamic-array container block (`T[]`). Its payload is the owned
 /// container the Etch runtime writes; the registered `DropFn` releases element
 /// handles (persistent-string elements) and deinits the container before the
 /// block is freed. Resource-only (the validator gates collection fields to
 /// resources); Tier 0 never interprets the payload — see `registerDrop`.
 pub const type_array: TypeId = 2;
 
-/// A map container block (`[K: V]`, M1.0.17). Same discipline as `type_array`;
+/// A map container block (`[K: V]`). Same discipline as `type_array`;
 /// its registered drop releases string keys + values before the container.
 pub const type_map: TypeId = 3;
 
-/// A set container block (`Set<T>`, M1.0.17). Same discipline as `type_array`.
+/// A set container block (`Set<T>`). Same discipline as `type_array`.
 pub const type_set: TypeId = 4;
 
 /// Refcount value marking an immortal block. `incref` / `decref` are
@@ -96,7 +96,7 @@ comptime {
 }
 
 /// On-storage layout of a resource collection field slot (`T[]` / `[K: V]` /
-/// `Set<T>`, M1.0.17): a single `{ ptr }` (8 bytes, 8-aligned) holding the
+/// `Set<T>`): a single `{ ptr }` (8 bytes, 8-aligned) holding the
 /// persistent block pointer of the owned container (a `type_array` / `type_map`
 /// / `type_set` block). Unlike `StringSlot`, `ptr` is never `0` for a live
 /// field: an empty collection is a real (empty) container block allocated at
@@ -113,22 +113,21 @@ comptime {
     std.debug.assert(@alignOf(CollectionSlot) == 8);
 }
 
-/// Signature of a per-`TypeId` drop callback (`etch-memory-model.md` §4.3).
-/// Given a block's exposed payload pointer and its recorded payload size, it
-/// releases the type's owned sub-resources (element / key / value handles) and
-/// deinits the owned container BEFORE the block is freed. Registered by the
-/// Etch runtime at init; Tier 0 stays Etch-agnostic — it never interprets the
-/// payload, it only stores and dispatches the callback (decision a, brief Notes:
-/// `runDrop` must not reinterpret a payload as an Etch container).
+/// Signature of a per-`TypeId` drop callback (`etch-memory-model.md` §4.3). Given a
+/// block's exposed payload pointer and its recorded payload size, it releases the
+/// type's owned sub-resources (element / key / value handles) and deinits the owned
+/// container BEFORE the block is freed. Registered by the Etch runtime at init; Tier 0
+/// stays Etch-agnostic — it never interprets the payload, it only stores and dispatches
+/// the callback — `runDrop` must not reinterpret a payload as an Etch container.
 pub const DropFn = *const fn (gpa: std.mem.Allocator, p: [*]u8, size: usize) void;
 
 /// Upper bound of the drop registry — a small fixed table indexed by `TypeId`.
-/// Comfortably above the Phase-1 collection ids (`type_array`/`_map`/`_set`).
+/// Comfortably above the collection ids (`type_array`/`_map`/`_set`).
 const drop_table_len = 16;
 
 /// Per-`TypeId` drop registry (the "open `TypeId` set" the module advertises).
 /// `type_plain` / `type_string` are static no-ops handled directly in `runDrop`
-/// and never consult this table. Phase-1 discipline: populated once at
+/// and never consult this table. The discipline: populated once at
 /// interpreter init, before any collection block exists, and read at drop time
 /// — the tree-walker is single-threaded, so no lock is needed.
 var drop_table = [_]?DropFn{null} ** drop_table_len;
@@ -308,7 +307,7 @@ test "immortal-interned sentinel: incref/decref are no-ops" {
     destroy(gpa, p);
 }
 
-// ─── M1.0.17 collection drop-registry tests ─────────────────────────────────
+// ─── Collection drop-registry tests ───────────────────────────────────────
 //
 // Tier-0 purity: each test defines its OWN container type + `DropFn` (persistent
 // never imports the Etch `Value`); the module only stores and dispatches the

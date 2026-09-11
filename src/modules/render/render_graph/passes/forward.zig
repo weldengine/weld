@@ -1,11 +1,11 @@
-//! Forward Opaque Pass — Phase 0 / M0.4.
+//! Forward Opaque Pass.
 //!
-//! Second pass of the Phase 0 render graph (cf. brief §Scope). Renders
+//! Second pass of the render graph. Renders
 //! all opaque entities with depth test on + depth write on.
 //! Front-to-back sorting by `(mesh_id, material_id)` bucket — fed by
 //! the instancing batcher (cf. `src/modules/render/instancing/batcher.zig`).
 //!
-//! Phase 0: no transparent pass (brief §Out-of-scope); no
+//! No transparent pass; no
 //! MSAA; no post-process. The color output is presented directly
 //! by the swapchain (or captured by the `capture` pass in
 //! `--smoke-test` mode).
@@ -24,12 +24,9 @@ pub const Config = struct {
     clear_color: gal.types.ColorClear = .{ .r = 0.05, .g = 0.05, .b = 0.08, .a = 1.0 },
     /// Storage the returned `Pass.reads`/`Pass.writes` point at.
     ///
-    /// M1.1.14 — before this field, `buildPass` returned slices of an ANONYMOUS
-    /// LITERAL built in its own stack frame, so the `Pass` carried a dangling
-    /// pointer the moment it returned. Measured: `writes.ptr` was a stack address,
-    /// the access mask read `false` immediately after the call, and a fresh call at
-    /// the SAME address read `true`. Live since M0.4 and invisible because nothing
-    /// compiled this file's tests until the M1.1.14 dead-test sweep.
+    /// Without this field, `buildPass` would return slices of an ANONYMOUS
+    /// LITERAL built in its own stack frame, so the `Pass` would carry a
+    /// dangling pointer the moment it returned.
     ///
     /// The config owns it and introduces NO new lifetime constraint: the config is
     /// already the pass's `ctx`, so it had to outlive the pass by construction.
@@ -64,10 +61,10 @@ pub fn buildPass(config: *Config) pass_mod.Pass {
 
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0: the forward pass is exercised by `examples/triangle/` and
-    // `bench/render_instancing.zig` (immediate follow-up to the milestone). The
-    // actual body will be wired via the instancing batcher (drawIndexed
-    // batched by bucket).
+    // TODO(forward pass body): this body is a NO-OP, so the pass renders
+    // nothing and is exercised only by `examples/triangle/` and
+    // `bench/render_instancing.zig`. Wiring it means drawIndexed batched by
+    // bucket through the instancing batcher.
 }
 
 test "forward: buildPass declares depth read + color write" {

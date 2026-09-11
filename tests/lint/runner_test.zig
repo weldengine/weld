@@ -152,7 +152,14 @@ test "good fixtures pass clean" {
 
 test "production tree passes clean" {
     const ctx: Context = .{ .gpa = std.testing.allocator, .io = std.testing.io };
-    const term = try runLint(ctx.gpa, ctx.io, &.{ "lint", "src", "bench", "tests" });
+    // `tools` is in this list because the linter lives there. Without it the one
+    // directory holding the rules is the one directory no gate re-inspects, and a
+    // pass over it closes on a hand-run `zig build lint` that nothing repeats.
+    //
+    // `build.zig` is here because it is production source of this repository and it
+    // sits at the ROOT, outside every subtree above — so a rule that does not name it
+    // carries an exemption that does not say its name.
+    const term = try runLint(ctx.gpa, ctx.io, &.{ "lint", "src", "bench", "tests", "tools", "build.zig" });
     try expectZeroExit(term);
 }
 

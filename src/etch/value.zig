@@ -1,15 +1,13 @@
-//! S4 runtime `Value` representation for the Etch tree-walking interpreter.
+//! Runtime `Value` representation for the Etch tree-walking interpreter.
 //!
 //! Stack-allocated tagged union covering the POD types reachable through the
-//! S3 subset (`briefs/S4-etch-tree-walking-interpreter.md` Scope — Runtime
-//! Value representation). The interpreter operates exclusively on these
+//! language subset. The interpreter operates exclusively on these
 //! primitives plus a couple of bridge tags (`entity_id`, `component_ref`,
-//! `unit`). The S3 type-checker rejects heap-typed fields on components, so
-//! no heap promotion is required at S4.
+//! `unit`). The type-checker rejects heap-typed fields on components, so no
+//! heap promotion is required here.
 //!
-//! `RuntimeError` is its own type (cf. brief Notes — "Why `RuntimeError` is
-//! its own type and not a `Diagnostic` variant"). Compile-time diagnostics
-//! live in `etch/diagnostics.zig`.
+//! `RuntimeError` is its own type and not a `Diagnostic` variant.
+//! Compile-time diagnostics live in `etch/diagnostics.zig`.
 
 const std = @import("std");
 const token = @import("token.zig");
@@ -23,14 +21,15 @@ pub const EntityId = u64;
 /// bridge to distinguish a missing handle from any valid entity.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
-/// A handle into a component slot inside a dynamic archetype chunk. The
-/// interpreter resolves `entity.get(T)` / `entity.get_mut(T)` into one of
-/// these, which the bridge dereferences when the rule body reads or writes
-/// a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
+/// A handle onto a component's bytes for one entity. NOT chunk-anchored: the
+/// `where` field below is bimodal, and a `.sparse` component designates no chunk
+/// and no slot. The interpreter resolves `entity.get(T)` / `entity.get_mut(T)`
+/// into one of these, which the bridge dereferences when the rule body reads or
+/// writes a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
     component_id: u32,
     mutable: bool,
-    /// WHERE the bytes live — bimodal since M1.B/G5.
+    /// WHERE the bytes live, and the field is bimodal.
     ///
     /// **The two arms are asymmetric ON PURPOSE.** Sparse keeps the ENTITY and
     /// re-resolves per access, because a row POINTER would be invalidated by any
@@ -48,7 +47,7 @@ pub const ComponentRef = struct {
     /// the language forbids the shape: `let r = entity.get_mut(H)` then
     /// `entity.remove(M)` then `r.hp = 99` type-checks with zero diagnostics.
     /// The three ops that MOVE a row are DEFERRED from a rule body since
-    /// M1.0.10, so no row moves while the body runs.
+    /// a rule body, so no row moves while the body runs.
     ///
     /// **An immediate SPAWN is not a counter-example and must not be recorded as
     /// one:** `Archetype.allocateSlot` appends, and an append relocates no
@@ -73,7 +72,7 @@ pub const ComponentRef = struct {
 
 /// A handle to a resource's backing bytes in the world `ResourceStore`.
 /// The interpreter resolves receiver-less `get(T)` / `get_mut(T)` into one
-/// of these (D-S3-resource-receiver). `mutable = false` for `get(T)`, `true`
+/// of these. `mutable = false` for `get(T)`, `true`
 /// for `get_mut(T)`. Unlike `ComponentRef` there is no chunk / slot — a
 /// resource is a world singleton keyed by `resource_id`.
 pub const ResourceRef = struct {
@@ -81,7 +80,7 @@ pub const ResourceRef = struct {
     mutable: bool,
 };
 
-/// A `start..end` / `start..=end` range value (M0.8 v0.6 foundations).
+/// A `start..end` / `start..=end` range value.
 /// Integer bounds; `for-in` iterates `[start, end)` (exclusive) or
 /// `[start, end]` (inclusive).
 pub const RangeVal = struct {
@@ -90,63 +89,62 @@ pub const RangeVal = struct {
     inclusive: bool,
 };
 
-/// Runtime tag for the S3 primitive value set. Mirrors `BuiltinType` in
+/// Runtime tag for the primitive value set. Mirrors `BuiltinType` in
 /// `src/etch/types.zig` but only carries the values the interpreter touches.
 pub const Value = union(enum) {
     int_: i64,
     float_: f64,
     bool_: bool,
     string_id: u32,
-    /// Handle into the interpreter's per-rule-body runtime-string store (M0.8
-    /// sub-slice C tranche 1b). A string PRODUCED at runtime (concat — and,
-    /// 1c, interpolation) cannot be a `string_id` (the AST string table is
-    /// immutable input), so it lives as owned bytes in `Interpreter
-    /// .run_strings`, reset at the rule-body boundary (rule-arena semantics,
-    /// `etch-memory-model.md` §2). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body runtime-string store. A string
+    /// PRODUCED at runtime (concat — and, 1c, interpolation) cannot be a `string_id`
+    /// (the AST string table is immutable input), so it lives as owned bytes in
+    /// `Interpreter.run_strings`, reset at the rule-body boundary (rule-arena
+    /// semantics, `etch-memory-model.md` §2). Same lifetime rules as `array_ref`.
     string_run: u32,
     entity_id: EntityId,
     component_ref: ComponentRef,
     resource_ref: ResourceRef,
     range: RangeVal,
-    /// Handle into the interpreter's per-rule-body collection store (M0.8
-    /// collections). Arrays / maps / sets are heap-managed and cannot live
+    /// Handle into the interpreter's per-rule-body collection store.
+    /// Arrays / maps / sets are heap-managed and cannot live
     /// inline in this stack union, so a runtime collection value is a `u32`
     /// index resolved against `Interpreter.collections`. Invalidated at the
     /// rule-body boundary (rule-arena semantics).
     array_ref: u32,
-    /// Handle into the interpreter's per-rule-body map store (M0.8
-    /// collections). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body map store. Same
+    /// lifetime rules as `array_ref`.
     map_ref: u32,
-    /// Handle into the interpreter's per-rule-body set store (M0.8 E3-C
-    /// tranche 3bis). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body set store. Same
+    /// lifetime rules as `array_ref`.
     set_ref: u32,
-    /// Handle into the interpreter's per-rule-body closure store (M0.8
-    /// closures). Same lifetime rules as `array_ref`.
+    /// Handle into the interpreter's per-rule-body closure store. Same
+    /// lifetime rules as `array_ref`.
     closure: u32,
-    /// Handle into the interpreter's per-rule-body struct store (M0.8 E2 block
-    /// 3). A struct value is a by-value aggregate; the handle resolves against
+    /// Handle into the interpreter's per-rule-body struct store. A struct
+    /// value is a by-value aggregate; the handle resolves against
     /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
     /// rule-body boundary).
     struct_ref: u32,
-    /// Handle into the interpreter's per-rule-body optional store (M0.8 E2 block
-    /// 5). An `Optional<T>` value resolves against `Interpreter.optionals` to a
+    /// Handle into the interpreter's per-rule-body optional store. An
+    /// `Optional<T>` value resolves against `Interpreter.optionals` to a
     /// `?Value` (`null` = `none`, else the `some` payload). Same lifetime rules
     /// as `array_ref` (reset at the rule-body boundary).
     optional: u32,
-    /// A C-like enum value (M0.8 E2 block 3 tranche B). Carries the enum type
+    /// A C-like enum value. Carries the enum type
     /// name (interned `StringId`) and the variant's declaration-order index.
     /// Value-typed: compared by `(type_name, variant)` equality.
     enum_value: EnumValue,
-    /// A borrowed view over a resource `string` field's persistent-heap bytes
-    /// (M1.0.3 E2). The read path returns this without incref'ing the block —
-    /// safe for the rule body because the resource (hence the bytes) outlives it
-    /// (`etch-memory-model.md` §11 Phase 1; scope-bound incref is Phase 2). Self-
-    /// contained `{ptr,len}` so `readBytesAsValue` can build it with no allocator
-    /// and no interpreter store; `ptr == 0` ⇔ the empty string. Additive — does
-    /// not disturb `string_id` (AST pool) / `string_run` (rule-arena) semantics.
+    /// A borrowed view over a resource `string` field's persistent-heap bytes. The read
+    /// path returns this without incref'ing the block — safe for the rule body because
+    /// the resource (hence the bytes) outlives it (`etch-memory-model.md` §11).
+    /// Self-contained `{ptr,len}` so
+    /// `readBytesAsValue` can build it with no allocator and no interpreter store;
+    /// `ptr == 0` ⇔ the empty string. Additive — does not disturb `string_id` (AST
+    /// pool) / `string_run` (rule-arena) semantics.
     string_persistent: StrView,
     /// A borrowed view over a resource `T[]` field's persistent-heap container
-    /// block (M1.0.17 E2). The `u64` is the block's exposed payload pointer (a
+    /// block. The `u64` is the block's exposed payload pointer (a
     /// `persistent` `type_array` block whose payload is the owned
     /// `ArrayListUnmanaged(Value)`). Mirrors `.string_persistent`'s persistent-vs-
     /// rule-arena split against `.array_ref`: the zone is known at the tag, no
@@ -157,38 +155,38 @@ pub const Value = union(enum) {
     /// as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
     /// A borrowed view over a resource `[K: V]` field's persistent-heap container
-    /// block (M1.0.17 E3). The `u64` is a `persistent` `type_map` block whose
+    /// block. The `u64` is a `persistent` `type_map` block whose
     /// payload is the owned insertion-ordered pair list. Same persistent-vs-rule-
     /// arena split as `.map_ref`; the read path borrows it without incref (the
     /// resource outlives the body). String keys and values are stored as owned
     /// `.string_persistent`, POD inline. Never `0` for a live field.
     map_persistent: u64,
     /// A borrowed view over a resource `Set<T>` field's persistent-heap container
-    /// block (M1.0.17 E4). The `u64` is a `persistent` `type_set` block whose
+    /// block. The `u64` is a `persistent` `type_set` block whose
     /// payload is the owned insertion-ordered unique-element list (same
     /// `ArrayListUnmanaged(Value)` shape as `array_persistent`; the drop is
     /// shared). Same persistent-vs-rule-arena split as `.set_ref`; borrowed on
     /// read. String elements owned as `.string_persistent`, POD inline. Never `0`.
     set_persistent: u64,
-    /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
+    /// A `TaskHandle` (`etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
     /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
-    /// so no generation is needed in Phase 1. Copyable/storable as a value;
+    /// so no generation is needed. Copyable/storable as a value;
     /// its operations are `h.cancel()` (idempotent) and `await h` (§9.8).
     task_handle: u32,
-    /// A `TimerHandle` (M1.0.13 E6, `etch-grammar.md` §2.2): the registry
+    /// A `TimerHandle` (`etch-grammar.md` §2.2): the registry
     /// index of a scheduled timer in `Interpreter.timers`. Safe as a bare
     /// index — the registry is MONOTONIC (no slot reuse; a fired one-shot or
     /// a canceled timer parks as a husk). Copyable/storable as a value; its
     /// ONLY operation is `t.cancel()` (idempotent, §9.10) — a timer is not a
     /// task and is not awaitable.
     timer_handle: u32,
-    /// A `Duration` in seconds (M1.0.13 E6): the runtime shape of a
+    /// A `Duration` in seconds: the runtime shape of a
     /// `DURATION_LIT` (`1.5s`), carried so a timer argument can be a full
     /// expression (`after(d)` with `d` a Duration local). Duration
-    /// arithmetic stays out of the M1.0.13 surface.
+    /// arithmetic is not supported.
     duration: f64,
-    /// The current test's World handle (M1.0.15): returned by `test_world()`,
+    /// The current test's World handle: returned by `test_world()`,
     /// receiver of `spawn_with`/`emit`/`tick`. v0.6 is MONO-WORLD — the payload
     /// is a marker (`void`); the interpreter operates on the `world` already
     /// threaded through `execStmt`, so repeated `test_world()` calls denote the
@@ -216,7 +214,7 @@ pub const Value = union(enum) {
     /// when the active tags differ — Etch comparisons across types are
     /// rejected at type-check time, so a runtime tag mismatch indicates a
     /// bug or a value reaching the interpreter through an `unsupported`
-    /// path that S4 must reject.
+    /// path the interpreter must reject.
     pub fn eql(self: Value, other: Value) bool {
         if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
         return switch (self) {
@@ -224,7 +222,7 @@ pub const Value = union(enum) {
             .float_ => |a| a == other.float_,
             .bool_ => |a| a == other.bool_,
             .string_id => |a| a == other.string_id,
-            .string_run => false, // string equality is not in the M0.8 minimal subset (Eq/Ord deferred)
+            .string_run => false, // string equality is not in the minimal subset
             .entity_id => |a| a == other.entity_id,
             .component_ref => false,
             .resource_ref => false,
@@ -233,11 +231,11 @@ pub const Value = union(enum) {
             .array_persistent => false, // collection equality is not an Etch v0.6 op (as with array_ref)
             .map_persistent => false, // as with map_ref
             .map_ref => false,
-            .set_ref => false, // set equality is not in the M0.8 minimal subset
+            .set_ref => false, // set equality is not in the minimal subset
             .set_persistent => false, // as with set_ref
             .closure => false,
             .struct_ref => false,
-            .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)
+            .optional => false, // optional equality is unexercised (unwrap via if/while let)
             .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
             .string_persistent => |a| blk: {
                 const b = other.string_persistent;
@@ -261,13 +259,13 @@ pub const Value = union(enum) {
     }
 };
 
-/// Payload of a C-like enum `Value` (M0.8 E2 block 3 tranche B).
+/// Payload of a C-like enum `Value`.
 pub const EnumValue = struct {
     type_name: u32,
     variant: u32,
 };
 
-/// Borrowed view over persistent-heap string bytes (M1.0.3 E2). `ptr` is the
+/// Borrowed view over persistent-heap string bytes. `ptr` is the
 /// raw address of the bytes (`0` for the empty string); `len` the byte count.
 pub const StrView = struct {
     ptr: u64 = 0,
@@ -288,15 +286,14 @@ pub const RuntimeErrorKind = enum {
     DivisionByZero,
     IntegerOverflow,
     UnsupportedExpr,
-    /// Bridge-level type incoherence (M0.8 E3-D, D-S4-runtime-report —
-    /// the typed-report home of `BridgeError.TypeMismatch`, closing the
-    /// D-S4-ecs-bridge-panic letter: the bridge returns the error, the
-    /// report carries the kind).
+    /// Bridge-level type incoherence — the typed-report home of
+    /// `BridgeError.TypeMismatch`: the bridge returns the error, the report
+    /// carries the kind.
     TypeMismatch,
-    /// An Etch `throw` that reached the rule top level uncaught (M0.8
-    /// E3-D). The span covers the thrown value expression.
+    /// An Etch `throw` that reached the rule top level uncaught. The
+    /// span covers the thrown value expression.
     UncaughtThrow,
-    /// A failed `assert(...)` / assertion-family builtin (M1.0.15). The span
+    /// A failed `assert(...)` / assertion-family builtin. The span
     /// covers the failing condition; the message (compared values, custom
     /// reason) travels alongside via the interpreter's `pending_message`.
     AssertFailed,
@@ -347,8 +344,8 @@ test "Value arithmetic int + int yields int" {
 }
 
 test "Value arithmetic int + float forbidden (no implicit coercion)" {
-    // The S3 type-checker rejects this; the interpreter never sees the
-    // expression. We assert that tag mismatch fails `Value.eql` so that
+    // The type-checker rejects this; the interpreter never sees the
+    // expression. The assertion is that a tag mismatch fails `Value.eql`, so
     // the contract is explicit at runtime.
     const a = Value.fromInt(2);
     const b = Value.fromFloat(2.0);

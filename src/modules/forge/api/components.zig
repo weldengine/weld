@@ -39,7 +39,6 @@ pub const Sleeping = extern struct {};
 /// (`engine-physics-forge.md` §2). Position/rotation live on the ECS
 /// `Transform`; velocity on `Velocity`; accumulated forces on `PhysicsForces`.
 pub const RigidBody = extern struct {
-    /// Simulation class.
     body_type: BodyType = .dynamic,
     /// Mass (kg).
     mass: f32 = 1.0,
@@ -49,15 +48,13 @@ pub const RigidBody = extern struct {
     angular_damping: f32 = 0.05,
     /// Coulomb friction coefficient.
     friction: f32 = 0.5,
-    /// Restitution (bounciness).
     restitution: f32 = 0.3,
     /// Per-body gravity multiplier.
     gravity_scale: f32 = 1.0,
     /// Continuous collision detection for fast movers.
     continuous_collision: bool = false,
-    /// Whether the body may go to sleep when at rest.
     can_sleep: bool = true,
-    /// Who owns this body's pose and velocity (M1.1.15.2 G5b). `.solver` for
+    /// Who owns this body's pose and velocity. `.solver` for
     /// EVERY `body_type` — no type-dependent default, because the point of the
     /// model is that `.gameplay` is declared and visible rather than inferred.
     ///
@@ -93,7 +90,7 @@ pub const RigidBody = extern struct {
 
 /// Per-shape parameters for a `CollisionShape`, an `extern` (untagged) union
 /// overlaid by `CollisionShape.shape_type` (§2 "extern union of per-shape
-/// params"). M1.1.0 carries sphere/box/capsule; other shapes read no params.
+/// params"). Only sphere, box and capsule carry params; other shapes read none.
 pub const ShapeParams = extern union {
     /// Sphere radius (metres).
     sphere: extern struct { radius: f32 = 0.5 },
@@ -145,26 +142,23 @@ comptime {
     // POD layout pins — any future field change must revisit these.
     std.debug.assert(@sizeOf(RigidBody) == 32);
     std.debug.assert(@alignOf(RigidBody) == 4);
-    // M1.1.15.2 G5b — `authority` lands in EXISTING TRAILING PADDING and the size
+    // `authority` lands in EXISTING TRAILING PADDING and the size
     // does NOT move. MEASURED before the field was written, not computed after:
     // `can_sleep` sat at 29 with `@sizeOf` already 32, so bytes 30 and 31 were
     // padding in the old layout and byte 30 is the new field. This is the OPPOSITE
-    // of `CollisionShape` at M1.1.13, which gained four full bytes and reused
-    // nothing — and the comment there records that an earlier version of exactly
-    // this claim was false in two ways at once, which is why the three offsets are
-    // PINNED here rather than described.
+    // of `CollisionShape`, which gained four full bytes and reused nothing. The
+    // three offsets are PINNED rather than described, for the reason below.
     //
     // A size assertion alone cannot catch a different arrangement landing on the
     // same size, and here the size does not move at all, so it would catch nothing.
     std.debug.assert(@offsetOf(RigidBody, "continuous_collision") == 28);
     std.debug.assert(@offsetOf(RigidBody, "can_sleep") == 29);
     std.debug.assert(@offsetOf(RigidBody, "authority") == 30);
-    // 48 -> 52 at M1.1.13. MEASURED, not reasoned: `collision_layer` sits at 44 and
+    // 48 -> 52. MEASURED, not reasoned: `collision_layer` sits at 44 and
     // `is_trigger` at 45, so the byte after them is 46; the `u32` needs 4-alignment
     // and therefore starts at 48, leaving bytes 46 and 47 as padding in BOTH layouts.
-    // The struct gains four full bytes and REUSES NOTHING — an earlier version of this
-    // comment claimed the trailing padding was consumed, which is false in two ways at
-    // once, so the three offsets below are pinned rather than described.
+    // The struct gains four full bytes and REUSES NOTHING, so the three offsets below
+    // are pinned rather than described.
     //
     // These three are what decide the 52: a different arrangement landing on the same
     // size must fail here, and size alone would not catch it. COUNTER-FACTUAL MEASURED,
@@ -172,10 +166,9 @@ comptime {
     // layout has to be confronted with a different layout. `collision_layer` and
     // `is_trigger` were SWAPPED in the declaration: both are one byte and adjacent, so
     // the size stays 52 and the alignment 4 and only the two offsets exchange. With these
-    // three asserts removed the whole suite still passed 497/497 — so the size and align
-    // pins really do accept the permutation — and with them present the build failed
-    // here. Moving the expected value from 44 to 43 would have proven only that the line
-    // executes.
+    // three asserts removed the suite still passed — so the size and align pins really do
+    // accept the permutation — and with them present the build failed here. Moving the
+    // expected value from 44 to 43 would have proven only that the line executes.
     std.debug.assert(@offsetOf(CollisionShape, "collision_layer") == 44);
     std.debug.assert(@offsetOf(CollisionShape, "is_trigger") == 45);
     std.debug.assert(@offsetOf(CollisionShape, "trigger_layer_mask") == 48);
@@ -253,7 +246,7 @@ test "CollisionShape mirrors the two authoring fields of the body descriptor" {
 
     // The count is what makes an ADDITION visible; the by-name references above cannot.
     // A component is `extern struct` POD read across the C ABI, so a field appended here
-    // after the M1.1.15 freeze shifts every offset behind it.
+    // after the freeze shifts every offset behind it.
     //
     // COUNTER-FACTUAL MEASURED, and with a field chosen so that this line is the ONLY one
     // that moves: a `u8` inserted between `is_trigger` and `trigger_layer_mask` lands in

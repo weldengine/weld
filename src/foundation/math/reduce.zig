@@ -14,7 +14,7 @@
 //! tag on `ziglang/zig`, so the exact 0.16 wording is not citable and this is
 //! the nearest tagged text.)
 //!
-//! WHAT ONE BACKEND DOES WITH IT — measured at M1.1.14 by disassembling both at
+//! WHAT ONE BACKEND DOES WITH IT — measured by disassembling both at
 //! `-mcpu=baseline`, `x86_64-linux`, on a 3-lane f32 `@reduce(.Add, …)` whose
 //! product vector is `p`:
 //!

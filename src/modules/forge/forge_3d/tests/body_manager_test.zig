@@ -1,4 +1,4 @@
-//! M1.1.0 / E3 acceptance suite for the forge_3d foundations (C1.1 verification
+//! Acceptance suite for the `forge_3d` foundations (C1.1 verification
 //! path): id allocation, LIFO slot reuse + generation checking, determinism,
 //! exact per-primitive world AABBs, and analytic inertia.
 
@@ -18,8 +18,6 @@ const MotionProperties = body_mod.MotionProperties;
 const Vec3 = math.Vec3; // f32 descriptor vector
 const Quatf = math.Quatf;
 const testing = std.testing;
-
-// --- helpers -----------------------------------------------------------------
 
 fn descOf(entity_index: u32, body_type: api.BodyType, shape: api.ShapeId) api.BodyDescriptor {
     return .{
@@ -63,8 +61,6 @@ fn capsuleInertiaRef(r: Real, h: Real, mass: Real) [3]Real {
     const ixx = mc * (h * h / 3.0 + r * r / 4.0) + ms * (0.4 * r * r + h * h + 0.75 * h * r);
     return .{ ixx, iyy, ixx };
 }
-
-// --- tests -------------------------------------------------------------------
 
 test "create 1000 bodies yields valid unique ids" {
     const gpa = testing.allocator;
@@ -303,7 +299,7 @@ test "rotation getter round-trips and rejects stale handles" {
     try testing.expect(bm.rotation(id) == null);
 }
 
-// --- E1 velocity / force / torque / impulse mutators & getters ---------------
+// --- Velocity / force / torque / impulse mutators and getters ---------------
 
 test "linear and angular velocity set/get round-trip and reject stale handles" {
     const gpa = testing.allocator;
@@ -446,8 +442,8 @@ test "friction and restitution survive addBody" {
     defer bm.deinit(gpa);
     const s = try store.createShape(gpa, .{ .sphere = .{} });
 
-    // The descriptor material coefficients are dropped by M1.1.5's `addBody`;
-    // M1.1.6 stores them on `Body` for the Sequential Impulses solver. 0.25 and
+    // The descriptor material coefficients were once dropped by `addBody`;
+    // they are stored on `Body` for the contact solver. 0.25 and
     // 0.75 are exactly representable in f32 and f64, so the f32→Real widening
     // (and the f64 build) both read back the literal exactly.
     var desc = descOf(0, .dynamic, s);
@@ -464,7 +460,7 @@ test "friction and restitution survive addBody" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.11 / E2 — a half-space forces a static body, and the class preconditions
+// A half-space forces a static body, and the class preconditions
 // ---------------------------------------------------------------------------
 
 test "a dynamic or kinematic body carrying a half-space is rejected, before any derived computation" {
@@ -572,7 +568,7 @@ test "the class precondition of every reader discriminates both ways" {
     // NEGATIVE sense, on the data rather than through the guard: the plane's two
     // fields really are the poison the readers are guarded against, so the guards
     // protect something. NaN and not a finite placeholder — a `std.debug.assert` is
-    // compiled out of ReleaseFast, and MEASURED on the E1 commit an `undefined`
+    // compiled out of ReleaseFast, and MEASURED with an `undefined`
     // `local_aabb` gave a plane a sleep radius of 5.2510e-13 at f32: finite, small
     // and plausible enough that nobody would see it go past.
     try testing.expect(std.math.isNan(plane.local_aabb.min.toArray()[0]));
@@ -580,7 +576,7 @@ test "the class precondition of every reader discriminates both ways" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 / gate A — the sensor role reaches the store, and the mask with it
+// The sensor role reaches the store, and the mask with it
 // ---------------------------------------------------------------------------
 
 test "the sensor role and its detection mask survive addBody" {
@@ -637,7 +633,7 @@ test "the sensor role and its detection mask survive addBody" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 / gate B — broad-class assignment, `is_trigger` first then body type
+// Broad-class assignment, `is_trigger` first then body type
 // ---------------------------------------------------------------------------
 
 test "broad class is the trigger role first, then the body type" {
@@ -667,7 +663,7 @@ test "broad class is the trigger role first, then the body type" {
 
     // `debris` is produced by NO input. Not an omission: nothing consumes the class before
     // destruction, and deriving it from an object layer touches no signature, so no freeze
-    // dates it. Pinned so a later milestone adding it has to delete this line.
+    // dates it. Pinned so that adding it later forces deleting this line.
     inline for (.{ false, true }) |role| {
         inline for (.{ api.BodyType.static, .kinematic, .dynamic }) |bt| {
             try testing.expect(BodyManager.broadLayerFor(role, bt) != Layer.debris);

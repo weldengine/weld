@@ -1,20 +1,20 @@
-//! Sampler Vulkan — Phase 0 / M0.4.
+//! Sampler Vulkan.
 //!
 //! Sampler has no additional state: the native `vk.Sampler` is enough
 //! as identity. Creation/destruction is inlined in `device.zig`
 //! (`createSampler`/`destroySampler` methods) to avoid the dispatch cost
 //! of a dedicated file with 0 helpers.
 //!
-//! This file stays present to follow the brief §Files split plan
-//! and to expose a future extension point (Phase 1+: presets of common
-//! samplers — anisotropic, point, linear — accessible by name).
+//! This file stays present to follow the file split plan
+//! and to expose an extension point for presets of common
+//! samplers — anisotropic, point, linear — accessible by name.
 
 const std = @import("std");
 const types = @import("../types.zig");
 const Device = @import("device.zig").Device;
 
-/// Phase 0: delegated to `device.createSampler`. This wrapper stays reserved
-/// for the Phase 1+ presets (cf. the doc at the top of the file).
+/// Delegated to `device.createSampler`. The wrapper stays reserved for the
+/// presets named at the top of the file — do NOT inline it away.
 pub fn create(device: *Device, descriptor: types.SamplerDescriptor) types.Error!types.SamplerHandle {
     return device.createSampler(descriptor);
 }

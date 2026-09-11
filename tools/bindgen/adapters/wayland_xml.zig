@@ -1,7 +1,5 @@
-//! Wayland binding adapter for the unified bindgen pipeline (M0.2 /
-//! E5). Port 1:1 of the legacy `tools/wayland_gen/` — same parser,
-//! same emitter, same jobs list. Lives under
-//! `tools/bindgen/adapters/` per `engine-c-bindings.md` §2.1.
+//! Wayland binding adapter for the unified bindgen pipeline. Lives
+//! under `tools/bindgen/adapters/` per `engine-c-bindings.md` §2.1.
 //!
 //! Reads the three vendored protocol XMLs and emits one Zig file per
 //! protocol under `src/core/platform/window/wayland_protocols/`.

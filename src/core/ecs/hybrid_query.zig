@@ -1,4 +1,4 @@
-//! Mixed-query planner — M1.B/G7.
+//! Mixed-query planner.
 //!
 //! A query whose members span both storage backends elects **exactly one
 //! driver** — the member of smallest population, ties broken by declaration
@@ -59,7 +59,7 @@ const World = world_mod.World;
 /// the per-slot guards take instead of an `(archetype, chunk, slot)` triple.
 ///
 /// The two arms are asymmetric deliberately, exactly as `ComponentRef`'s are
-/// (M1.B/G5): the table arm keeps the direct triple so the delivered fast path
+/// the table arm keeps the direct triple so the delivered fast path
 /// pays nothing, and the sparse arm carries the ENTITY because a sparse lookup
 /// is an array index plus a generation compare, and because a row pointer would
 /// be invalidated by any swap-remove in that store.
@@ -96,7 +96,11 @@ pub const Locator = union(enum) {
 
 /// Which member drives the walk.
 pub const Driver = union(enum) {
-    /// No sparse member in the with-set: archetype iteration, unchanged.
+    /// The archetype walk. Elected when the with-set names no sparse member —
+    /// and ALSO when it does, whenever the smallest-population member is a
+    /// table one. So `.table` does not mean "no sparse member", and the walk
+    /// is not the bare archetype iteration either: the sparse half of both id
+    /// sets is then tested per entity through `admits`.
     table,
     /// A sparse member drives: walk its dense array.
     sparse: ComponentId,
@@ -227,8 +231,10 @@ pub const SparseDrivenQuery = struct {
     };
 
     /// How many dense ranges the driver's population splits into, for a target
-    /// of `target` ranges. Never zero, and never more than the population: a
-    /// range is a unit of work, and an empty one is not one.
+    /// of `target` ranges. Zero iff the driver's store is absent or empty, and
+    /// otherwise never more than the population: a range is a unit of work, and
+    /// an empty one is not one. Consumers depend on the zero — `forEachDenseRange`
+    /// dispatches nothing on it — so it is an answer and not a failure.
     pub fn rangeCount(self: *const SparseDrivenQuery, world: *World, target: usize) usize {
         const store = world.sparse_stores.getConst(self.driver) orelse return 0;
         const n = store.len();
@@ -243,7 +249,7 @@ pub const SparseDrivenQuery = struct {
     /// every range differs from every other by at most one — the property that
     /// keeps a work-stealing scheduler from starving on a tail.
     ///
-    /// *That beneficiary was NAMED here before it existed: from M1.B/G8 until
+    /// *That beneficiary was NAMED here before it existed: until
     /// `JobBuilder.addDenseRangeJobs` landed, no dense range reached a worker
     /// at all, and the sentence above justified a split by a consumer with no
     /// producer. It is true as of that entry, and the note stays because the
@@ -347,7 +353,7 @@ pub fn planSparseDriven(
 /// the locator, which the contract requires: "`not has T` on a sparse `T`
 /// ceases to be an archetype-level filter and becomes a per-entity membership
 /// test." Not an optimisation — a sparse component is in NO archetype signature
-/// since G3, so a sparse exclusion handed to `DynamicQuery` excludes nothing.
+/// so a sparse exclusion handed to `DynamicQuery` excludes nothing.
 pub const TableDrivenQuery = struct {
     /// The archetype-level query, over the table subset of both sets.
     inner: query_mod.DynamicQuery,
@@ -549,7 +555,7 @@ pub const QueryPlan = struct {
     /// **So the predicate is a function of storage modes ALONE and does not
     /// enter the election**: making it answer from the elected form would send a
     /// term with sparse members but a table election back through the archetype
-    /// merge, which is the P1-2 defect exactly.
+    /// merge.
     ///
     /// The merge runs `iterateArchetype` once per archetype under a SINGLE
     /// owner, so every other term's `admits` is skipped, and the entity a

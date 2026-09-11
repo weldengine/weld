@@ -36,9 +36,8 @@
 //! writer would put ONE register layout in two places: the drift shape this
 //! repository has already paid for once (`contactMargin`, duplicated in
 //! `fast_paths.zig` while both copies were private). One definition, however
-//! many callers — the number is not a property this file gets to fix, and the
-//! sentence that used to end «three callers» went false the moment the set grew
-//! (see `install`).
+//! many callers — the number is not a property this file gets to fix, and a
+//! sentence ending in a COUNT goes false the moment the set grows (see `install`).
 //!
 //! `ARCH-031`'s own *Sources de vérité* line splits the same way, which is the
 //! corroboration rather than the argument: `engine-coordinate-system.md` §2 —
@@ -355,16 +354,11 @@ pub fn installState(state: State) void {
 /// installs, wherever in the tree it lives. Tier, module and purpose do not
 /// enter — see below.
 ///
-/// This doc comment used to enumerate three sites and declare that «a fourth one
-/// inside a module is a defect rather than an extension». **That text was false
-/// by M1.1.14, and it is the reason the enumeration is gone rather than
-/// updated.** Two failures, not one: the set had grown past three, and the rule
-/// it stated was itself wrong — the repository now installs inside modules by
-/// design (the shader watcher's thread, the determinism entry), because a thread
-/// born inside a module is a thread all the same. A count in prose drifts exactly
-/// as the corpus's own enumeration of this rule's sites drifted, which M1.1.14
-/// measured; replacing the count with a larger count would only reset the clock
-/// on the same defect.
+/// **DO NOT REPLACE THE PREDICATE WITH A LIST.** A count in prose drifts, and a
+/// larger count only resets the clock on the same defect. The set has already
+/// grown past a stated three, and the engine installs inside modules BY DESIGN —
+/// the shader watcher's thread, the determinism entry — because a thread born
+/// inside a module is a thread all the same.
 ///
 /// **NO EXCEPTION FOR A PROGRAM THAT COMPARES NOTHING TODAY.** A bench over
 /// integer kernels installs too. The exemption is tempting and does not survive:
@@ -373,14 +367,11 @@ pub fn installState(state: State) void {
 /// environment measures a configuration that exists on no machine. The cost of
 /// installing is two instructions.
 ///
-/// The set is DERIVED and journalled rather than asserted here — `briefs/`
-/// m1.1.14 Closing notes carries it with the recipe to re-derive it from source,
-/// because a reader who can re-derive does not have to trust. The main thread
-/// needs an explicit site because it is not born of a spawn, and
-/// `core/platform/threading.zig` — FROZEN at C0.5 — propagates `std.Thread`
-/// as-is rather than wrapping it, so the engine has no single `spawn_thread` of
-/// its own to hook. When a platform-layer `init()` lands, the process-entry
-/// sites move into it and nothing else changes.
+/// The set is DERIVED rather than asserted here, because a reader who can
+/// re-derive does not have to trust. The main thread needs an explicit site
+/// because it is not born of a spawn, and `core/platform/threading.zig` —
+/// FROZEN at C0.5 — propagates `std.Thread` as-is rather than wrapping it, so
+/// the engine has no single `spawn_thread` of its own to hook.
 ///
 /// Idempotent — which is what lets a site be added without auditing whether an
 /// ancestor already installed.

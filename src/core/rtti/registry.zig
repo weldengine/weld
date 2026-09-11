@@ -12,7 +12,7 @@
 //! the frozen public contract: Zig has no field-level visibility, so
 //! they are technically reachable, but consumers must go through the
 //! `Registry` methods only (`register` / `lookup` / `lookupByName` /
-//! `count`). The internal container types may change in Phase 1+
+//! `count`). The internal container types may change
 //! without a `*_PROTOCOL_VERSION` bump.
 //!
 //! `lookup` and `lookupByName` return pointers into the `types`
@@ -27,7 +27,7 @@ const TypeId = type_info.TypeId;
 const SchemaHash = type_info.SchemaHash;
 const TypeInfo = type_info.TypeInfo;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Errors returned by `Registry.register`.
 pub const RegisterError = error{
     /// A previous registration of the same `TypeId` had a different
@@ -38,9 +38,9 @@ pub const RegisterError = error{
     OutOfMemory,
 };
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
-/// Public Tier 0 registry. Owned by `World` once Phase 0 wires it up
-/// (E3+); E1 ships the standalone type with its own tests.
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
+/// Public Tier 0 registry. Owned by `World` once something wires it up
+/// — the standalone type ships with its own tests.
 pub const Registry = struct {
     gpa: std.mem.Allocator,
     types: std.AutoHashMapUnmanaged(TypeId, TypeInfo) = .empty,

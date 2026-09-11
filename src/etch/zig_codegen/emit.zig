@@ -14,8 +14,8 @@ pub const Writer = struct {
     gpa: std.mem.Allocator,
     indent: u32 = 0,
     /// Set by `lower.zig` whenever an emitted expression allocates from the
-    /// rule's threaded frame-arena allocator (`fa`) — string concat (M0.8
-    /// E3-C tranche 1b). Consumed by the rule-classification two-pass: a
+    /// rule's threaded frame-arena allocator (`fa`) — string concat.
+    /// Consumed by the rule-classification two-pass: a
     /// rule fn takes the conditional `fa` param iff its body emission set
     /// this (Zig rejects both an unused param and a pointless discard, so
     /// the classification must be exact — hence flag-on-emission, not a
@@ -42,7 +42,6 @@ pub const Writer = struct {
     /// (ASCII, no leading digit) — escaping is needed only for that collision,
     /// which can arise for lowercase value-idents (field, binding, param
     /// names); Etch type/component names are capitalized and never collide.
-    /// Cf. M0.5 item 8.
     pub fn ident(self: *Writer, name: []const u8) !void {
         if (std.zig.Token.keywords.has(name) or std.zig.primitives.isPrimitive(name)) {
             try self.write("@\"");

@@ -3,7 +3,7 @@
 //! Written from the RFC and the structure of `puff.c` (Mark Adler) / miniz;
 //! no `std.compress.flate` code adapted. Target class is "correct +
 //! table-driven", **not** zlib-ng (no 64-bit refill, no SIMD copy fast
-//! paths). Rationale (brief §Notes): API stability across Zig `std` churn
+//! paths). Rationale: API stability across Zig `std` churn
 //! and an owned, homogeneous codec surface for PNG (and later EXR) — not
 //! performance; decode runs once at cook time.
 //!
@@ -30,8 +30,8 @@ pub const Error = error{
     /// A Huffman code length exceeded 15 bits.
     OversizedCode,
     /// The decompressed output would exceed the caller's `max_out` budget — a
-    /// decompression bomb, or a stream inconsistent with the expected size
-    /// (R3, M1.1.1-HF3). The output buffer never grows past `max_out`.
+    /// decompression bomb, or a stream inconsistent with the expected size.
+    /// The output buffer never grows past `max_out`.
     OutputLimitExceeded,
     /// Allocation failed.
     OutOfMemory,
@@ -175,7 +175,7 @@ fn bitReverse(value: u16, len: u32) u16 {
 }
 
 /// Append `byte` to `out`, enforcing the `max_out` output budget FIRST so the
-/// buffer never grows past it (R3, M1.1.1-HF3): a decompression bomb is stopped
+/// buffer never grows past it: a decompression bomb is stopped
 /// at the ceiling instead of exhausting memory. The single write choke point
 /// for every block type.
 fn appendByte(gpa: std.mem.Allocator, out: *std.ArrayList(u8), byte: u8, max_out: usize) Error!void {

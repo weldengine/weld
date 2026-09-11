@@ -1,4 +1,4 @@
-//! M1.1.3/E2 acceptance suite for the forge_3d narrowphase EPA (penetration axis
+//! Acceptance suite for the `forge_3d` narrowphase EPA (penetration axis
 //! + core depth over the GJK terminal `.deep` simplex). Keyed to `config.Real`
 //! so `-Dphysics_f64=true` sweeps the whole suite at f64 (local).
 
@@ -40,7 +40,7 @@ fn finite3(v: Vec3r) bool {
     return std.math.isFinite(a[0]) and std.math.isFinite(a[1]) and std.math.isFinite(a[2]);
 }
 
-/// Run GJK then EPA on a pair, mirroring the E4 `collide` deep path. The caller
+/// Run GJK then EPA on a pair, mirroring the `collide` deep path. The caller
 /// guarantees (or asserts) the pair is `.deep`.
 fn deepEpa(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) EpaResult {
     const relpose = RelativePose.init(pa, ra, pb, rb);
@@ -155,7 +155,7 @@ test "epa expands a low-dimensional deep seed" {
 }
 
 test "epa handles eccentric thin-box deep overlaps" {
-    // Adversarial-review regime (finding 1): an eccentric (thin) box whose deep
+    // An eccentric (thin) box whose deep
     // overlap makes the Minkowski polytope long/flat, so the loop expands over
     // several iterations and the fan-face winding (inherited from the horizon,
     // not reoriented against the near-coplanar interior) is exercised. Two thin

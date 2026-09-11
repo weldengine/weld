@@ -1,10 +1,11 @@
-//! Etch `test` runner (M1.0.15, `etch-reference-part2.md` §32 normative block).
+//! Etch `test` runner (`etch-reference-part2.md` §32 normative block).
 //!
 //! Orchestration only: iterate the `test` blocks of a type-checked AST in
 //! declaration order, run each in FULL ISOLATION (a fresh `World` + fresh
-//! `Interpreter` compiled from the shared AST — the E1 recon finding: type
-//! registration lives in `Interpreter.compile`, so a fresh compile re-registers
-//! every component / resource / event / rule), honour `@skip` / `@only`, and
+//! `Interpreter` compiled from the shared AST — isolation is possible only
+//! because type registration lives in `Interpreter.compile`, so a fresh compile
+//! re-registers every component / resource / event / rule), honour `@skip` /
+//! `@only`, and
 //! convert each body's outcome into a per-test result carrying the test name,
 //! a message, the failure source span, and the wall-clock duration.
 //!
@@ -12,14 +13,16 @@
 //! failed `assert*`, an uncaught `throw`, or any runtime failure becomes a
 //! `.fail` outcome — NOT an aggregated `runtime_errors` count, §32). The
 //! test-world surface (`test_world`/`spawn_with`/`emit`/`tick`) and the
-//! assertion family (`assert_eq`, `measure`, `tick_until`) land in M1.0.15 E3/E4;
-//! this library is stable against them (it drives `runTestBody`, which grows the
-//! builtins underneath it).
+//! assertion family (`assert_eq`, `measure`, `tick_until`) live in `interp.zig`,
+//! NOT here, and this file is stable against them by construction: it drives
+//! `runTestBody` and the builtins grow underneath it without reaching this
+//! orchestration.
 //!
 //! `RunReport` OWNS its strings (an internal arena); the caller need only keep
-//! `ast` alive for the duration of `run`. The `weld test` CLI
-//! (`engine-platform.md` § "Build System — CLI `weld`") will consume this same
-//! library — the `etch_test` shim (E5) is its Phase-1 driver.
+//! `ast` alive for the duration of `run`. The `etch_test` shim is the driver:
+//! it calls `test_runner.run` directly. A `weld test` CLI
+//! (`engine-platform.md` § "Build System — CLI `weld`") would consume this same
+//! library, and `tools/weld` does not exist.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -68,7 +71,7 @@ pub const RunReport = struct {
     }
 };
 
-/// Run every `test` block in a type-checked `ast` (M1.0.15, §32). Declaration
+/// Run every `test` block in a type-checked `ast` (§32). Declaration
 /// order; a fresh World + Interpreter per test (full isolation, mono-world);
 /// `@skip` reported skipped with its reason (body not run); `@only` focusing (if
 /// any `@only` test exists in the set, only those run, the rest reported
@@ -113,7 +116,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
         defer world.deinit(gpa);
         var interp = try Interpreter.compile(gpa, ast, &world);
         defer interp.deinit();
-        interp.io = io; // wall-clock provider for `measure { … }` (M1.0.15)
+        interp.io = io; // wall-clock provider for `measure { … }`
         try interp.bindToWorld(&world);
 
         const t0 = Io.Clock.now(.awake, io);
@@ -127,8 +130,14 @@ pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
                 report.passed += 1;
             },
             .fail => |f| {
-                // Copy the borrowed message into report memory BEFORE the next
-                // test's interpreter overwrites it (string-discipline, §32 trap).
+                // Copy the borrowed message into report memory BEFORE THIS
+                // iteration's `defer interp.deinit()`. The message has two
+                // provenances (`interp.TestBodyOutcome`) and only one of them,
+                // `test_msg_buf`, is freed there; an `assert` literal points at
+                // AST-stable bytes the caller keeps alive. Copying covers both.
+                // Not the next test's interpreter — there is none yet when this
+                // runs — so moving the `dupe` after the `deinit` would be wrong
+                // for a reason the ordering here already settles.
                 try results.append(a, .{
                     .name = name,
                     .status = .failed,
@@ -282,7 +291,7 @@ test "aggregate counts across a mixed set" {
     try std.testing.expectEqual(@as(usize, 3), report.results.len);
 }
 
-// ─── E3: test-world surface ──────────────────────────────────────────────────
+// ─── test-world surface ─────────────────────────────────────────────────────
 
 test "spawn_with returns a live handle usable with get(C) immediately" {
     const gpa = std.testing.allocator;
@@ -440,7 +449,8 @@ test "test-body collection handle survives tick (no reset-from-under)" {
 test "test-body runtime string survives tick (no use-after-free)" {
     const gpa = std.testing.allocator;
     // `greeting` is a `.string_run` (concat) held across tick(1); the driven rule
-    // body's `resetRunStrings` would free it (the M1.0.14 UAF class) without the
+    // body's `resetRunStrings` would free it — a use-after-free on a value the
+    // test's own locals still hold — without the
     // suppression fix. Under testing.allocator a freed/reused slot yields a wrong
     // length (or OOB), so `len() == 10` is a genuine regression guard.
     var report = try runSource(gpa,
@@ -465,7 +475,7 @@ test "test-body runtime string survives tick (no use-after-free)" {
     try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
 
-// ─── E4: assertion family, measure, tick_until ──────────────────────────────
+// ─── assertion family, measure, tick_until ──────────────────────────────────
 
 test "assert_eq passes; a failure carries both values" {
     const gpa = std.testing.allocator;
@@ -563,7 +573,7 @@ test "tick_until stops on the predicate and on timeout" {
     try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
 
-// ─── E4 review-fix regressions ──────────────────────────────────────────────
+// ─── regressions: stale assert message, string-aware compare, throwing pred ─
 
 test "a rule-body assert failure during tick does not leak into the test's message" {
     const gpa = std.testing.allocator;

@@ -1,21 +1,21 @@
 //! Audio Dummy backend — no-op implementation of the Tier 0 `AudioModule`
 //! interface (`engine-tier-interfaces.md` §2).
 //!
-//! Phase 0.3 / M0.3 deliverable. Consistent with `engine-audio-pulse.md`
-//! §1.1 — Dummy = backend #1 in the implementation order, ~50 lines. The
-//! real backends (WASAPI / PipeWire / PulseAudio / ALSA / CoreAudio) land
-//! in Phase 1 (cf. `engine-phase-1-criteria.md` C1.3).
+//! Consistent with `engine-audio-pulse.md` §1.1 — Dummy = backend #1 in
+//! the implementation order, ~50 lines. The real backends (WASAPI /
+//! PipeWire / PulseAudio / ALSA / CoreAudio) do not exist yet (cf.
+//! `engine-phase-1-criteria.md` C1.3).
 //!
 //! Purpose: unblock CI headless tests for modules that will consume audio
-//! in Phase 1+ (Sequencer, VFX, AI). The Dummy returns plausible neutral
+//! later (Sequencer, VFX, AI). The Dummy returns plausible neutral
 //! values from every API entry point, never touches real audio hardware,
 //! and never allocates beyond the small `Dummy` struct itself.
 //!
 //! ## Interface contract
 //!
 //! The `AudioModule(Impl)` comptime interface lives in
-//! `engine-tier-interfaces.md` §2. M0.3 ships only the Dummy implementation;
-//! the formal `AudioModule(Impl)` comptime wrapper is constructed in Phase 1
+//! `engine-tier-interfaces.md` §2. Only the Dummy implementation exists;
+//! the formal `AudioModule(Impl)` comptime wrapper gets built
 //! when the first real backend (ALSA) arrives. Until then, callers consume
 //! Dummy directly via `@import("modules/audio/dummy.zig")`.
 
@@ -54,7 +54,7 @@ pub const Vec3 = extern struct {
 
 /// EntityId placeholder — the real type lives in `core/ecs`. Kept as
 /// `u64` here to avoid a tight import dependency from the audio module
-/// back into the ECS during early Phase 0.
+/// back into the ECS.
 pub const EntityId = u64;
 
 /// The Dummy backend itself. Held by the `AudioModule` wrapper or

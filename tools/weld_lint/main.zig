@@ -3,11 +3,17 @@
 //! Two subcommands wire into `build.zig`:
 //!   - `lint [path]...`         — walk the given paths (default
 //!     `src/ bench/ tests/ tools/`, including the linter's own
-//!     sources so it stays exemplary) and apply rules 1–6. Exits
-//!     non-zero if any rule fires.
+//!     sources so it stays exemplary) and apply every rule in
+//!     `rules/`. Exits non-zero if any rule fires.
 //!   - `commit-msg <file>`      — validate the title of the commit
 //!     message at `file` against the Conventional Commits subset
 //!     enforced by Weld. Exits non-zero on the first violation.
+//!
+//! Three further subcommands REPORT rather than judge — `census`,
+//! `diff-density`, and `fingerprint` without `--check`. They are not wired
+//! into the `lint` step, so no quantity they compute can gate a merge.
+//! `fingerprint --check` is the one exception and it compares token
+//! identity, never a quantity.
 //!
 //! Diagnostics are printed in `file:line:col:rule:message` form,
 //! sorted deterministically by `(file, line, col, rule)`.
@@ -24,8 +30,19 @@ const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside
 const no_float_reduce = @import("rules/no_float_reduce.zig");
 const no_precision_crossing = @import("rules/no_precision_crossing.zig");
 const dead_tests = @import("dead_tests.zig");
+const census = @import("census.zig");
+const comment_identifiers = @import("rules/comment_identifiers.zig");
+const comment_tags = @import("rules/comment_tags.zig");
+const comment_scan = @import("comment_scan.zig");
 
-const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
+const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools", "build.zig" };
+
+/// Default subtrees for `census` and `fingerprint`.
+///
+/// Narrower than `default_lint_paths` on purpose: `tests/` carries no content
+/// pass, so reporting its density by default would publish a ratio nobody is
+/// acting on. A caller who wants it passes `tests` explicitly.
+const default_census_paths = [_][]const u8{ "src", "tools", "bench" };
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -51,6 +68,18 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (std.mem.eql(u8, sub, "dead-tests")) {
         return runDeadTests(arena, init.io, stdout, argv[2..]);
+    }
+    if (std.mem.eql(u8, sub, "coverage")) {
+        return runCoverage(arena, stdout);
+    }
+    if (std.mem.eql(u8, sub, "census")) {
+        return runCensus(arena, init.io, argv[2..], stdout);
+    }
+    if (std.mem.eql(u8, sub, "fingerprint")) {
+        return runFingerprint(arena, init.io, argv[2..], stdout);
+    }
+    if (std.mem.eql(u8, sub, "diff-density")) {
+        return runDiffDensity(arena, init.io, stdout);
     }
 
     try stdout.print("unknown subcommand: {s}\n\n", .{sub});
@@ -88,6 +117,8 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
         try no_float_reduce.check(arena, file, source, &diags);
         try no_precision_crossing.check(arena, file, source, &diags, &crossing_tally);
+        try comment_identifiers.check(arena, file, source, &diags);
+        try comment_tags.check(arena, file, source, &diags);
     }
 
     // The second half of the bilateral control. It needs no notion of a "full scan": it
@@ -97,6 +128,37 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
     for (diags.items) |d| {
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
+    }
+
+    // THE COMMENT RULES STATE THEIR OWN COVERAGE, unconditionally. A declared
+    // unread subtree is not an exemption, and a green run that did not say so
+    // would read as full coverage — which is the failure mode a silent
+    // declaration always takes. The list is empty when the pass closes.
+    if (comment_scan.pending.len != 0) {
+        try out.print(
+            "comment rules: {d} subtree(s) not read yet by the conservation pass, so a clean run above covers the rest only:\n",
+            .{comment_scan.pending.len},
+        );
+        // Do NOT claim this prints on every run: the build runner suppresses a
+        // step's captured stdout on success, so under `zig build lint` it does
+        // not. What is true: it prints when the step FAILS, when the binary is
+        // run directly, and on the `comment-coverage` step, which exists for
+        // exactly that reason.
+        // Each entry is CONFRONTED with the files this run walked. An entry that
+        // matches nothing is stale — the subtree was renamed or removed — and a
+        // stale entry silences a rule over a path nobody is watching, which is the
+        // defect a declared list exists to prevent rather than to create.
+        for (comment_scan.pending) |p| {
+            var hits: usize = 0;
+            for (files.items) |file| {
+                if (comment_scan.inPerimeter(file) and comment_scan.matchesPending(file, p.prefix)) hits += 1;
+            }
+            if (hits == 0) {
+                try out.print("  STALE: {s} matches no file this run walked\n", .{p.prefix});
+            } else {
+                try out.print("  unread: {s} ({d} file(s))\n", .{ p.prefix, hits });
+            }
+        }
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
 }
@@ -117,6 +179,184 @@ fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
     }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
+}
+
+/// `coverage` — the declared unread subtrees, on their own step.
+///
+/// The same list `lint` prints, reachable on a step of its own because the build
+/// runner drops a successful run step's stdout: a coverage statement nobody can
+/// read is the silent declaration the list exists to prevent.
+fn runCoverage(arena: std.mem.Allocator, out: *std.Io.Writer) !u8 {
+    _ = arena;
+    try out.print(
+        "comment rules: {d} subtree(s) not read yet by the conservation pass\n",
+        .{comment_scan.pending.len},
+    );
+    for (comment_scan.pending) |p| try out.print("  unread: {s}\n", .{p.prefix});
+    if (comment_scan.pending.len == 0) {
+        try out.writeAll("no subtree is declared unread — note that a leading " ++
+            "`tests` segment and an AUTO-GENERATED first line are excluded by " ++
+            "the rules themselves, not by this ledger\n");
+    }
+    return 0;
+}
+
+/// `census` — per-file comment lines, code lines, density and block count.
+///
+/// It prints and returns 0. There is no threshold, no target and no failure
+/// mode: a density is a number that gets REPORTED (`engine-zig-conventions.md`
+/// §12). The one exception is an unreadable path, which is an I/O fault rather
+/// than a verdict on the tree.
+fn runCensus(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, out: *std.Io.Writer) !u8 {
+    var files = try collectPaths(arena, io, paths, &default_census_paths);
+    defer files.deinit(arena);
+
+    var total: census.Counts = .{};
+    for (files.items) |file| {
+        const source = scan.readSourceZ(arena, io, file) catch |err| {
+            try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
+            continue;
+        };
+        const c = census.countSource(source);
+        total.add(c);
+        try out.print("{d}\t{d}\t{d}\t{d}\t{d:.2}\t{s}\n", .{
+            c.code, c.comment, c.doc, c.blocks, c.density(), file,
+        });
+    }
+    // The report states the SIZE of what it measured, beside the ratio. A ratio
+    // whose denominator is unstated is not comparable to the next run's.
+    try out.print(
+        "census: {d} file(s), code {d}, comment {d} (doc {d}), blocks {d}, density {d:.2}%\n",
+        .{ files.items.len, total.code, total.comment, total.doc, total.blocks, total.density() },
+    );
+    return 0;
+}
+
+/// `fingerprint` — the token-identity oracle of the comment pass.
+///
+/// Default mode prints `<hex>\t<path>` for each file, which is the baseline
+/// format. `--check <baseline>` compares against such a listing and exits 1 on
+/// the first divergence it can name, so a comment pass that moved a token is a
+/// red step rather than a discovery six gates later.
+///
+/// A path in the baseline that this run did not visit is reported too: a check
+/// that silently ignores a vanished file stops checking exactly when a file is
+/// deleted.
+fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8, out: *std.Io.Writer) !u8 {
+    var baseline_path: ?[]const u8 = null;
+    var paths: std.ArrayList([:0]const u8) = .empty;
+    defer paths.deinit(arena);
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "--check")) {
+            i += 1;
+            if (i >= argv.len) {
+                try out.writeAll("fingerprint: --check needs a baseline path\n");
+                return 2;
+            }
+            baseline_path = argv[i];
+            continue;
+        }
+        try paths.append(arena, argv[i]);
+    }
+
+    var files = try collectPaths(arena, io, paths.items, &default_census_paths);
+    defer files.deinit(arena);
+
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer seen.deinit(arena);
+    var rows: std.ArrayList(census.BaselineEntry) = .empty;
+    defer rows.deinit(arena);
+    for (files.items) |file| {
+        const source = scan.readSourceZ(arena, io, file) catch |err| {
+            try out.print("warn: cannot read {s}: {t}\n", .{ file, err });
+            continue;
+        };
+        const digest = census.hex(census.fingerprint(source));
+        const owned = try arena.dupe(u8, &digest);
+        const key = try census.normalizePath(arena, file);
+        try seen.put(arena, key, owned);
+        try rows.append(arena, .{ .digest = owned, .path = key });
+    }
+    if (baseline_path == null) {
+        std.mem.sort(census.BaselineEntry, rows.items, {}, census.lessByPath);
+        for (rows.items) |r| try out.print("{s}\t{s}\n", .{ r.digest, r.path });
+        return 0;
+    }
+    const bp = baseline_path.?;
+
+    const text = scan.readSourceZ(arena, io, bp) catch |err| {
+        try out.print("fingerprint: cannot read baseline {s}: {t}\n", .{ bp, err });
+        return 2;
+    };
+    var entries: std.ArrayList(census.BaselineEntry) = .empty;
+    defer entries.deinit(arena);
+    census.parseBaseline(arena, text, &entries) catch |err| {
+        try out.print("fingerprint: malformed baseline {s}: {t}\n", .{ bp, err });
+        return 2;
+    };
+
+    var moved: usize = 0;
+    for (entries.items) |e| {
+        const got = seen.get(e.path) orelse {
+            try out.print("fingerprint: MISSING {s} — in the baseline, not in this run\n", .{e.path});
+            moved += 1;
+            continue;
+        };
+        if (!std.mem.eql(u8, got, e.digest)) {
+            try out.print("fingerprint: MOVED {s}\n  baseline {s}\n  current  {s}\n", .{ e.path, e.digest, got });
+            moved += 1;
+        }
+    }
+    if (entries.items.len == 0) {
+        try out.writeAll("fingerprint: baseline is EMPTY — the check proves nothing\n");
+        return 2;
+    }
+    if (moved != 0) {
+        try out.print("fingerprint: {d} file(s) moved against the baseline.\n", .{moved});
+        try out.writeAll("A comment pass must leave the token stream bit-identical. Do NOT regenerate\n" ++
+            "the baseline to make this green: read the diff of the named file and undo the\n" ++
+            "code edit that produced it.\n");
+        return 1;
+    }
+    try out.print("fingerprint: {d} file(s) unchanged against {s}.\n", .{ entries.items.len, bp });
+    return 0;
+}
+
+/// `diff-density` — comment share of the lines a diff ADDS, read from stdin.
+///
+/// Reported per gate as a fact and never as a gate (`engine-development-workflow.md`
+/// §5.3): the number exists so a gate that came out high is visible on identifiable
+/// blocks now, instead of surfacing tens of thousands of lines later.
+fn runDiffDensity(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !u8 {
+    var read_buf: [64 * 1024]u8 = undefined;
+    var reader = std.Io.File.stdin().reader(io, &read_buf);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(arena);
+    try std.Io.Reader.appendRemainingUnlimited(&reader.interface, arena, &text);
+
+    const c = census.diffCounts(text.items);
+    try out.print(
+        "diff-density: added code {d}, added comment {d} (doc {d}) in {d} block(s), density {d:.2}%\n",
+        .{ c.code, c.comment, c.doc, c.blocks, c.density() },
+    );
+    return 0;
+}
+
+/// Collect `.zig` files from `paths`, or from `fallback` when `paths` is empty.
+fn collectPaths(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    paths: []const [:0]const u8,
+    fallback: []const []const u8,
+) !std.ArrayList([]const u8) {
+    var files: std.ArrayList([]const u8) = .empty;
+    if (paths.len == 0) {
+        for (fallback) |p| try scan.collectZigFiles(arena, io, p, &files);
+    } else {
+        for (paths) |p| try scan.collectZigFiles(arena, io, p, &files);
+    }
+    return files;
 }
 
 /// `dead-tests` — every in-tree file holding a `test` block must belong to the
@@ -178,13 +418,10 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
         if (u.only_on != null and u.only_on.? != os) continue;
         try out.print("  uncollected: {s} ({d} block(s)): {s}\n", .{ u.path, u.blocks, u.reason });
     }
-    // LAYER ONE — THE UNCONDITIONAL CONFRONTATION, and its absence was the fourth
-    // instance of "a control that exists and a path bypasses" in this milestone,
-    // after the lint step in no workflow, the witnesses with no reader, and the
-    // cache save outside its own size guard. This one was inside the tool built
-    // against that family: the loop below runs ONLY when `--expect-collected=N` is
-    // passed, and neither `build.zig` nor the CI passed it, so the tool printed its
-    // expectation and then printed `clean` having compared it to nothing.
+    // LAYER ONE — THE UNCONDITIONAL CONFRONTATION. Without it the loop below runs
+    // ONLY when `--expect-collected=N` is passed, and neither `build.zig` nor the
+    // CI passed it, so the tool printed its expectation and then printed `clean`
+    // having compared it to nothing: a control a path can bypass is not a control.
     //
     // `expected` is arithmetic on the closure and the declared gap; the number here
     // is written down by a human from the suite's own reported total. Equal, not
@@ -273,8 +510,7 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
 /// by two test targets is counted ONCE. The suite counts it once PER BINARY: two
 /// targets that both reach it compile it twice and run its tests twice. Comparing
 /// the global closure against the suite total is therefore comparing a set
-/// cardinality to a multiset cardinality — the same collected-versus-source unit
-/// error this milestone has now made three times, in its own instrument.
+/// cardinality to a multiset cardinality.
 ///
 /// The per-root sum counts with the SAME multiplicity the suite does, so the two
 /// numbers are finally the same kind of thing and their difference is a finding
@@ -346,5 +582,25 @@ const usage_text =
     \\      Validate the title of the commit message at <file> against
     \\      the Conventional Commits subset enforced by Weld. Exits 0
     \\      if valid, 1 otherwise.
+    \\
+    \\  weld_lint coverage
+    \\      Print the subtrees the comment rules do not report on yet.
+    \\      Empty means no subtree is DECLARED unread. Two exclusions
+    \\      survive an empty ledger: a leading `tests` path segment,
+    \\      and a file whose first line marks it AUTO-GENERATED.
+    \\
+    \\  weld_lint census [path]...
+    \\      Report per-file code lines, comment lines, doc lines, comment
+    \\      blocks and density (default `src tools bench`). Always exits 0:
+    \\      a density is reported, never gated.
+    \\
+    \\  weld_lint fingerprint [--check <baseline>] [path]...
+    \\      Print `<sha256>\t<path>` over each file's token stream, doc
+    \\      comments and positions excluded. `--check` compares against
+    \\      such a listing and exits 1 if any file's tokens moved.
+    \\
+    \\  weld_lint diff-density
+    \\      Read a unified diff on stdin and report the comment share of
+    \\      the lines it ADDS. Always exits 0.
     \\
 ;

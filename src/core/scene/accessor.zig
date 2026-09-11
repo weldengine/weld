@@ -1,5 +1,5 @@
 //! `.scene.bin` accessor — Tier 0, zero-copy read view over the bytes the
-//! `writer.zig` produced. **Reused verbatim by the M1.0.5 runtime loader**,
+//! `writer.zig` produced. **Reused verbatim by the runtime loader**,
 //! which layers mmap + identity remap + PER-ENTITY INSTANTIATION + UUID→handle
 //! remap + `on_spawned` on top — none of that lives here.
 //!
@@ -19,7 +19,7 @@
 //! Column placement is computed with `format.columnOffset` — the SAME routine
 //! the writer used — so reader/writer offsets agree by construction.
 //!
-//! **Trust contract (M1.1.1-HF3 / R1).** Every getter here trusts file-controlled
+//! **Trust contract.** Every getter here trusts file-controlled
 //! offsets and counts: `stringAt` does an unbounded `ref + 4 + len`, `schema`
 //! indexes without a range check, `archetypeAt` asserts `component_count <=
 //! max_components_per_archetype` (an assert stripped in ReleaseFast), and `column`
@@ -152,14 +152,14 @@ pub const Accessor = struct {
         }
     };
 
-    // ── Entity Extensions region (M1.0.6 E5, SHAPE A) ──
+    // ── Entity Extensions region (SHAPE A) ──
     //
     // `@ extensions_offset`, three self-delimiting sub-tables in order:
     //   Entity Extensions Table — `ext_count:u32` then per entity
     //     `{ uuid_ordinal:u32, extension_count:u32, extension_ids:[…]u32 }`
     //   Prefab ID Table — `prefab_id_count:u32` then `[…]u32` string-table offsets
     //   Hooks — `hook_count:u32` then `[…]{ on_attach_ref:u32, on_detach_ref:u32 }`
-    //     (string-table offsets; 0 = absent). `hook_count ∈ {0,1}` in M1.0.6.
+    //     (string-table offsets; 0 = absent). `hook_count ∈ {0,1}`.
 
     /// A view over one Entity Extensions Table entry.
     pub const ExtEntry = struct {
@@ -240,10 +240,10 @@ pub const Accessor = struct {
         };
     }
 
-    // ── Cross-references Table (M1.0.6 E4) ──
+    // ── Cross-references Table ──
 
     /// Number of entity→entity cross-reference entries (`0` for a scene with no
-    /// `Entity` field references, and for every M1.0.4/M1.0.5 file).
+    /// `Entity` field references, and for every v1 file).
     pub fn crossrefsCount(self: Accessor) u32 {
         return self.readU32(self.header.crossrefs_offset);
     }

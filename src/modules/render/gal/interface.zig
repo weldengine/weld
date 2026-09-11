@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Comptime check of the GAL contract — Phase 0 / M0.4.
+//! Comptime check of the GAL contract.
 //!
 //! Pattern inspired by Mach sysgpu (`engine-mach-reference.md` §2): no
 //! runtime vtable, the backend is resolved at compile time and the interface
@@ -8,17 +8,16 @@
 //! future `Metal`, `D3D12`, `WebGPU`) passes `checkBackend(Backend)` at
 //! `comptime` — if a method is missing, the build breaks with a clear message.
 //!
-//! Phase 0: presence check + first-parameter signature
-//! (`*Backend`). Phase 1+: extension to full signature checking
-//! (parameters + return types) on the sysgpu model (~2,700
-//! lines of assertions). Phase 0 stays pragmatic so as not to block
-//! the Vulkan backend's progress.
+//! What is checked is presence plus the first-parameter signature
+//! (`*Backend`). Full signature checking (parameters and return types) on
+//! the sysgpu model would run to some 2,700 lines of assertions; this stays
+//! pragmatic instead.
 
 const std = @import("std");
 const types = @import("types.zig");
 
 /// Required method on a backend. Presence is checked at comptime;
-/// the full signature remains to be extended Phase 1+.
+/// the full signature is not.
 const RequiredMethod = struct {
     name: []const u8,
     /// Doc message shown on error — guides the reader toward the
@@ -26,7 +25,7 @@ const RequiredMethod = struct {
     purpose: []const u8,
 };
 
-/// List of methods required for any Phase 0 GAL backend. Logical order
+/// List of methods required for any GAL backend. Logical order
 /// (device lifecycle → resources → pipeline → frame).
 pub const required_methods = [_]RequiredMethod{
     // Lifecycle
@@ -84,7 +83,7 @@ pub const required_methods = [_]RequiredMethod{
     .{ .name = "destroyCommandEncoder", .purpose = "Frees a CommandEncoder — mandatory, paired with createCommandEncoder (added E7/M0.9)" },
     .{ .name = "submit", .purpose = "Submits a finished CommandEncoder to the graphics queue (cf. SubmitDescriptor)" },
 
-    // Capture (M0.5 item 2)
+    // Capture
     .{ .name = "captureFrameToPPM", .purpose = "Reads back a rendered texture and writes it as a PPM file (cf. gal/capture.zig)" },
 };
 

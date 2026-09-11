@@ -1,11 +1,11 @@
-//! Texture + TextureView Vulkan — Phase 0 / M0.4.
+//! Texture + TextureView Vulkan.
 //!
 //! As with Buffer, we bundle Image + DeviceMemory in a `TextureEntry`.
 //! TextureViews have their own registry because we must be able to destroy
 //! them without touching the parent texture, and conversely we must handle
 //! the cascade (destroy all of a texture's views when it disappears).
 //!
-//! Phase 0 limited formats (cf. brief §Scope): R8G8B8A8_UNORM, B8G8R8A8_UNORM
+//! A limited format set: R8G8B8A8_UNORM, B8G8R8A8_UNORM
 //! (swapchain), D32_SFLOAT. `sample_count > 1` returns `Unsupported`.
 
 const std = @import("std");
@@ -50,9 +50,8 @@ pub const TextureEntry = struct {
 /// They feed `render_pass.zig:begin` which needs the framebuffer dimensions
 /// — without these fields the framebuffer is created with width=0 height=0
 /// and the render pass executes on a zero-sized surface (black frame).
-/// S2 reference: `/tmp/s2-ref/src/spike/vk_setup.zig:createFramebuffers`
-/// uses `r.swapchain_extent.{width,height}` directly; the GAL needs the
-/// per-view copy because views are independent of any single source.
+/// The per-view copy is needed because a view is independent of any single
+/// source.
 pub const ViewEntry = struct {
     vk_view: vk.ImageView,
     width: u32,
@@ -75,7 +74,7 @@ pub const ViewEntry = struct {
 };
 
 /// Allocates a device-local `vk.Image` + DeviceMemory, registers it in
-/// the registry. Phase 0: `sample_count > 1` → `error.Unsupported`.
+/// the registry. `sample_count > 1` → `error.Unsupported`.
 pub fn createTexture(device: *Device, descriptor: types.TextureDescriptor) types.Error!types.TextureHandle {
     if (descriptor.width == 0 or descriptor.height == 0) return error.InvalidArgument;
     if (descriptor.sample_count > 1) return error.Unsupported;
@@ -167,7 +166,7 @@ pub fn createView(
         },
     };
     const view = device.vk_device.createImageView(&ci, null) catch return error.BackendInternal;
-    // R5b (M1.1.1-HF3): the native view must be destroyed if the registry `put`
+    // The native view must be destroyed if the registry `put`
     // below fails (OOM) — otherwise the `VkImageView` leaks with no handle to it.
     errdefer device.vk_device.destroyImageView(view, null);
     const id = device.nextHandle();

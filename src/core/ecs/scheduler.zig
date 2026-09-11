@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! M0.1 / E5b system scheduler — phase pipeline + implicit DAG +
+//! System scheduler — phase pipeline + implicit DAG +
 //! concurrent intra-phase dispatch.
 //!
 //! Sits above `core/jobs/scheduler.zig`. Owns the registry of
@@ -34,22 +34,24 @@
 //!
 //! Two writes on the same component in the same phase are a hard
 //! registration error (`error.WriteWriteConflict`) — Bevy's silent
-//! serialization is explicitly not the model (cf. brief Notes).
-//! E5b does NOT introduce `runs_before` / `runs_after` declarative
+//! serialization is explicitly not the model.
+//! There is no `runs_before` / `runs_after` declarative
 //! ordering — every conflict is unresolvable by construction, so
 //! the registration error is the only outcome. A later milestone
 //! can add explicit ordering if a real-world case requires it.
 //!
 //! Resource placeholders. `ReadsResource(R)` / `WritesResource(R)`
 //! share the DAG construction path with components — the resource
-//! API itself (M0.2) is out of scope, but the placeholders compile
+//! API itself is out of scope, but the placeholders compile
 //! and contribute to conflict detection so the SystemDescriptor
-//! signature is stable across the M0.1 → M0.2 boundary.
+//! signature is stable when it lands.
 //!
 //! Topological levels. Computed lazily on first `dispatchFrame` via
-//! Kahn's algorithm and cached per phase. The DAG's edges are
-//! frozen after the first dispatch — re-registration between
-//! frames is a programmer error and asserts in debug.
+//! Kahn's algorithm and cached per phase. Registering a system BETWEEN frames
+//! is legal: it drops the affected phase's cached levels and the next
+//! `dispatchFrame` recomputes them. Nothing freezes the DAG and nothing
+//! asserts, so do not write a caller on the assumption that a late
+//! registration is refused — it is honoured.
 //!
 //! Concurrency. Within a level, every system stages chunks into a
 //! shared `JobBuilder`. The builder's arena owns a per-system args
@@ -57,14 +59,8 @@
 //! duration of the level's dispatch. Heterogeneous trampolines on
 //! every job let workers interleave chunks from different systems
 //! freely — this is the "multi-job concurrent intra-phase" pattern
-//! the E5b brief requires.
+//! the scheduler implements.
 //!
-//! What E5b does NOT include (per the brief Execution Steps):
-//! - No command buffers (E6).
-//! - No observers (E6).
-//! - No lazy query re-scan on archetype creation mid-frame (E6).
-//! - No actual resource storage / lookup (M0.2).
-
 const std = @import("std");
 const world_mod = @import("world.zig");
 const jobs_sched_mod = @import("../jobs/scheduler.zig");
@@ -82,17 +78,17 @@ const CommandBuffer = command_buffer_mod.CommandBuffer;
 
 // ─── Phase pipeline ────────────────────────────────────────────────────────
 
-/// Canonical Phase-0 phase pipeline. Dispatched once per
+/// Canonical phase pipeline. Dispatched once per
 /// `dispatchFrame` in declaration order:
 ///
 /// 1. `pre_update`   — start-of-frame chores (input sampling, time
 ///    advance hooks).
 /// 2. `fixed_update` — physics-rate fixed-step systems.
-/// 3. `update`       — variable-rate gameplay (the bench S1 system
+/// 3. `update`       — variable-rate gameplay (the bench system
 ///    lives here).
 /// 4. `post_update`  — variable-rate gameplay cleanup.
 /// 5. `late_update`  — late-frame chores (transform propagation
-///    when M0.5 lands).
+///    once it lands).
 /// 6. `pre_render`   — final pass before render submission
 ///    (camera matrix builds, culling preparation).
 pub const Phase = enum(u8) {
@@ -110,7 +106,7 @@ pub const Phase = enum(u8) {
 
 /// Kind tag distinguishing component reads/writes from resource
 /// reads/writes. Components and resources share the same DAG
-/// construction logic in E5b — the conflict matrix is identical,
+/// construction logic — the conflict matrix is identical,
 /// only the lookup namespace differs (and resources have no
 /// concrete API yet, so the placeholders just record the intent).
 pub const AccessKind = enum { reads, writes, reads_resource, writes_resource };
@@ -159,12 +155,12 @@ pub fn Writes(comptime T: type) AccessDescriptor {
 }
 
 /// Placeholder `ReadsResource(R)` — wired into DAG construction but
-/// the resource lookup API itself lands in M0.2.
+/// the resource lookup API itself is unimplemented.
 pub fn ReadsResource(comptime R: type) AccessDescriptor {
     const Wrapper = struct {
         fn resolve(world: *World, gpa: std.mem.Allocator) anyerror!ComponentId {
-            // M0.1 / E5b shares the component-id pool for resources
-            // so the DAG can reason about them. M0.2 introduces a
+            // The component-id pool is shared with resources
+            // so the DAG can reason about them. A
             // proper resource registry.
             return try world.ensureComponentRegistered(gpa, R);
         }
@@ -196,7 +192,7 @@ pub fn WritesResource(comptime R: type) AccessDescriptor {
 /// elapsed since the previous frame (provided by `dispatchFrame`);
 /// `user` is an opaque pointer the caller can use to share custom
 /// per-frame state (the bench stashes its cached query + offsets
-/// here). E6 will extend this with the command buffer flush
+/// here). It also carries the command buffer flush
 /// context.
 pub const FrameContext = struct {
     dt: f32,
@@ -208,7 +204,7 @@ pub const FrameContext = struct {
 /// scheduler for chunked dispatch, the `FrameContext` shared
 /// across systems, the `JobBuilder` the system stages its chunked
 /// work into, and the per-system `CommandBuffer` for deferred
-/// structural mutations (M0.1 / E6).
+/// structural mutations.
 pub const SystemContext = struct {
     world: *World,
     gpa: std.mem.Allocator,
@@ -285,11 +281,12 @@ pub const JobBuilder = struct {
     ) !void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
-        // M1.B/G8 — no job body receives a command buffer. This entry hands
-        // `args` to a body the worker pool runs, so it is one of the TWO real
-        // dispatch points; the bound lives on the TYPE
-        // (`command_buffer.refuseCommandBufferInArgs`) precisely so both reach
-        // it from their own imports rather than one of them carrying it alone.
+        // No job body receives a command buffer. This entry hands `args` to a
+        // body the worker pool runs, and it is one of FOUR such entries — the
+        // count is not a remark: a derived enumeration in the suite asserts it,
+        // so adding a fifth without its bound goes red. The bound lives on the
+        // TYPE (`command_buffer.refuseCommandBufferInArgs`) precisely so each
+        // reaches it from its own imports rather than one carrying it alone.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const Trampoline = struct {
@@ -325,7 +322,7 @@ pub const JobBuilder = struct {
     /// above, and until this existed a dense range was split, bounded and
     /// never dispatched — `forEachDenseRange` runs its bodies on the CALLING
     /// thread, exactly like `Query.forEachChunk`. The split was delivered at
-    /// M1.B/G8; the consumption is here.
+    /// The consumption is here.
     ///
     /// Parity is EXACT on the property that matters, and inexact on one point
     /// that is stated rather than implied. Exact: the same `Body` serves the
@@ -396,7 +393,7 @@ pub const JobBuilder = struct {
 const PhaseAccessTracker = struct {
     /// `ComponentId → readers (system indices in by_phase[phase])`.
     readers: std.AutoHashMapUnmanaged(ComponentId, std.ArrayListUnmanaged(u32)) = .empty,
-    /// `ComponentId → writers (system indices)`. M0.1 / E5b allows
+    /// `ComponentId → writers (system indices)`. The scheduler allows
     /// at most one writer per id per phase, so this is effectively
     /// `?u32` per id (stored as ArrayList for symmetry + future
     /// growth when explicit ordering arrives).
@@ -462,11 +459,10 @@ const PhaseState = struct {
 /// the same phase) plus the usual `OutOfMemory`. Promoted to a
 /// public alias so callers do not have to spell the error set out.
 pub const RegistrationError = error{
-    /// Two systems declare `Writes(T)` on the same component (or
-    /// resource) in the same phase, with no explicit ordering to
-    /// break the tie. M0.1 / E5b rejects this at registration —
-    /// Bevy's silent serialization is explicitly not the model
-    /// (cf. brief Notes).
+    /// Two systems declare `Writes(T)` on the same component (or resource) in the same
+    /// phase, with no explicit ordering to break the tie. It is rejected at
+    /// registration — Bevy's silent serialization is explicitly not the model used
+    /// here.
     WriteWriteConflict,
     OutOfMemory,
 };
@@ -567,7 +563,7 @@ pub const SystemScheduler = struct {
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
 
-        // E6 — allocate the per-system command buffer alongside the
+        // Allocate the per-system command buffer alongside the
         // descriptor. The cmd buffer borrows `world` for type
         // resolution and uses `gpa` as its backing allocator.
         try phase.command_buffers.append(gpa, CommandBuffer.init(gpa, world));
@@ -673,16 +669,16 @@ pub const SystemScheduler = struct {
                 }
                 try dispatchPhase(self, world, gpa, io, jobs, &frame, builder, phase_idx);
             }
-            // M0.2 / E4 — drain `.phase`-lifetime event queues at
+            // Drain `.phase`-lifetime event queues at
             // every phase transition (after every phase, including
             // empty ones, so the cadence is invariant to the
             // registered system topology).
             world.event_bus.drainAtBoundary(.phase);
         }
-        // M0.2 / E4 — end-of-frame drains. Phase 0 collapses
+        // End-of-frame drains. The two are collapsed
         // fixed-tick and render into a single dispatch, so `.tick`
         // and `.frame` fire together. Kept distinct so the call
-        // sites can diverge in Phase 0.4+.
+        // sites can diverge later.
         world.event_bus.drainAtBoundary(.tick);
         world.event_bus.drainAtBoundary(.frame);
     }
@@ -721,7 +717,7 @@ pub const SystemScheduler = struct {
             // blocks until pending_count reaches zero.
         }
 
-        // M0.1 / E6 — phase-boundary command buffer flush. Iterate
+        // Phase-boundary command buffer flush. Iterate
         // systems in **submission order** (the natural order of
         // `phase.systems`), NOT in topological-level order — the
         // contract guarantees deterministic application across

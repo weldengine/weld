@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! `IpcConnection` — symmetric wrapper around an `IpcSocket`, the
 //! 16-byte framing header (`framing.Header`), and the comptime
@@ -17,7 +17,7 @@
 //!     header + a slice into `buf`.
 //!   - `sendMessageWithHandles(T, seq_id, *const T, []OsHandle)` —
 //!     POSIX-only out-of-band variant used for the viewport fd
-//!     transfer + future Phase 3 GPU shared framebuffer handles.
+//!     transfer + eventual GPU shared framebuffer handles.
 //!
 //! The connection does not own the socket: the caller passes a
 //! `*IpcSocket` and remains responsible for closing it. This makes
@@ -97,7 +97,7 @@ pub const IpcConnection = struct {
 
     /// Same as `sendMessage` but transmits an out-of-band handle
     /// vector via `sendmsg`/`SCM_RIGHTS` (POSIX). Returns
-    /// `error.Unimplemented` on Windows in S6 per the brief.
+    /// `error.Unimplemented` on Windows.
     pub fn sendMessageWithHandles(
         self: *IpcConnection,
         comptime T: type,
@@ -153,7 +153,7 @@ pub const IpcConnection = struct {
     /// (`engine-ipc.md` §4.8). `buf` should be sized to exactly
     /// `framing.frameSizeOf(T)` so the first read cannot pull bytes of
     /// a following frame. Returns `error.Unimplemented` on Windows
-    /// (the named-pipe backend has no `recvWithHandles` in M0.7).
+    /// (the named-pipe backend has no `recvWithHandles`).
     pub fn recvFrameWithHandles(
         self: *IpcConnection,
         buf: []u8,
@@ -227,7 +227,7 @@ pub const HandoffError = error{InvalidHandoff};
 ///
 /// On a violation, **every** received fd is closed before returning so
 /// a malformed handoff cannot leak descriptors into the runtime. On
-/// success, M0.7 maps only `regions[0]` (`viewport_framebuffer`); the
+/// success, only `regions[0]` is mapped (`viewport_framebuffer`); the
 /// fds of any further declared regions are closed here, and the
 /// viewport fd (`handles[0]`, now owned by the caller) is returned.
 pub fn acceptShmHandoff(

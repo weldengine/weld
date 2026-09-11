@@ -1,14 +1,18 @@
-//! Tier 1 service registry and the tree-walker invocation path (M1.1.15.2 G2,
-//! `etch-abi-zig.md` §8 and §8.7).
+//! Tier 1 service registry and the tree-walker invocation path (`etch-abi-zig.md` §8
+//! and §8.7).
 //!
-//! §8.7 records that the rest of §4, §6 and §8 describes invocation THROUGH THE
-//! VM — `CALL_SERVICE`, `VMContext`, `callconv(.c)` trampolines, `service_ref_pool`
-//! resolution at `.etchc` load — and that §15 bounds that path to Phase 2. This
-//! file is the other path, and only its invocation step differs: the
-//! `ServiceSpec`, the emitted `.d.etch`, the registry populated at startup and
-//! the version field are the SAME objects under both. That sharing is what makes
-//! the Phase 2 replacement invisible to user `.etch` code, which is the one
-//! property §8.7 asks this design to hold.
+//! §8.7 records a SECOND invocation path, through a VM — `CALL_SERVICE`,
+//! `VMContext`, `callconv(.c)` trampolines, `service_ref_pool` resolution at
+//! `.etchc` load. **NONE OF IT EXISTS: `CALL_SERVICE`, `VMContext` and
+//! `service_ref_pool` name nothing in the tree, and no `.etchc` loader exists**,
+//! so this file is not "the other path" — it is the only one.
+//!
+//! What the design holds, and what a replacement must preserve, is that only the
+//! INVOCATION STEP would differ: the `ServiceSpec`, the emitted `.d.etch`, the
+//! registry populated at startup and the version field are shared objects, so a
+//! second path would be invisible to user `.etch` code. That is the one property
+//! §8.7 asks of this design, and it is a property of the SHARING and not of a
+//! schedule.
 //!
 //! Four consequences of having no bytecode, each visible below: the name
 //! resolves at the resolver and then by lookup at the call, arguments are
@@ -24,10 +28,11 @@
 const std = @import("std");
 
 /// An Etch type as a service signature names it (`etch-abi-zig.md` §8.1). The
-/// scalar set is what the Phase 1 tree-walker converts; `ref` names a declared
+/// scalar set is what the tree-walker converts; `ref` names a declared
 /// Etch type and is REFUSED at registration rather than at the call, so an
-/// unconvertible type can never reach a running rule. Widening it is additive
-/// and belongs to the gate that needs the type.
+/// unconvertible type can never reach a running rule. Widening the scalar set is
+/// ADDITIVE — a new arm here plus its `argToZig` case — so it costs nothing to
+/// defer and belongs with the first module that needs the type.
 pub const TypeRef = union(enum) {
     void_,
     int_,
@@ -36,8 +41,9 @@ pub const TypeRef = union(enum) {
     string_,
     entity_,
     /// A declared Etch type by name (`Vec3`, `AudioHandle`). Carried so the
-    /// `.d.etch` emitter can render it and so a spec can DECLARE one; not
-    /// convertible in Phase 1.
+    /// `.d.etch` emitter can render it and so a spec can DECLARE one. NOT
+    /// convertible, and `isConvertible` below is the whole of it: registration
+    /// refuses a spec naming one, so no running rule can meet it.
     ref: []const u8,
 
     pub fn isConvertible(self: TypeRef) bool {
@@ -60,8 +66,13 @@ pub const TypeRef = union(enum) {
 };
 
 /// One declared parameter. The NAME cannot be derived — Zig's `@typeInfo` does
-/// not carry parameter names — so it is declared and the type is checked
-/// against the implementation at comptime by `method`.
+/// not carry parameter names — so it is declared here. The TYPE is DERIVED by
+/// `method` from the implementation's own signature, so nothing confronts it
+/// with a second opinion — but it is not bookkeeping: `interp.valueToArg` reads
+/// it per argument to pick the conversion arm, and rejects the call when the
+/// value does not fit. A hand-written `MethodSpec` (this struct is public and
+/// constructible without `method`) that names the wrong type here changes what
+/// the call converts, silently and at run time.
 pub const ParamSpec = struct {
     name: []const u8,
     type: TypeRef,
@@ -98,8 +109,10 @@ pub const Ret = union(enum) {
 ///
 /// `ctx` is whatever the module handed to `register`, cast back by the adapter
 /// `method` generates. `args` is positional and its length equals the declared
-/// arity — the registry checks that before calling, so an implementation never
-/// indexes past its own parameters.
+/// arity, so an implementation never indexes past its own parameters. **THE
+/// GUARANTEE COMES FROM THE INTERPRETER'S CALL PATH, not from the check in
+/// `Registry.call`** — that entry has no production caller — so a new invocation
+/// path owes the arity check itself.
 pub const MethodFn = *const fn (ctx: ?*anyopaque, args: []const Arg) anyerror!Ret;
 
 /// One declared method. Everything but `name`, `doc` and the parameter names
@@ -111,7 +124,7 @@ pub const MethodSpec = struct {
     /// Rendered as `throws` in the `.d.etch` and read by the type-checker to
     /// decide `E0902`. DERIVED from the implementation's return type by
     /// `method`, never declared: a hand-written `throws` that disagreed with the
-    /// Zig signature is the drift class this milestone exists to close.
+    /// Zig signature is exactly the drift this derivation removes.
     throws: bool,
     /// Propagated to the `.d.etch` as a `///` doc comment (§8.2).
     doc: ?[]const u8 = null,
@@ -121,14 +134,16 @@ pub const MethodSpec = struct {
 };
 
 /// A Tier 1 service as `etch-abi-zig.md` §8.1 declares it: a name, a version
-/// and its methods. The same object serves the emitter (§8.2), the registry
-/// (§8.4) and, in Phase 2, the VM path — only the invocation step differs.
+/// and its methods. ONE object serves the emitter (§8.2) and the registry
+/// (§8.4), which is what would let a second invocation path reuse it whole.
 pub const ServiceSpec = struct {
     name: []const u8,
-    /// §8.5 semantics: minor bump = additive, major = breaking. Carried because
-    /// the emitter renders it and because both invocation paths share it. The
-    /// load-time confrontation §8.5 describes keys on a `.etchc` and has no
-    /// Phase 1 site; see the module note in `engine-phase-1-plan.md`.
+    /// §8.5 semantics: minor bump = additive, major = breaking. Two readers:
+    /// `tools/bindgen/emit_detch.zig` renders it as `@version(n)` into the
+    /// committed `.d.etch`, and the emitter's own test bumps it to prove the
+    /// rendering follows. What does NOT exist is the load-time confrontation
+    /// §8.5 describes — it keys on a `.etchc` and no `.etchc` loader exists — so
+    /// a bump that is wrong AGAINST THE SURFACE is caught by a reader alone.
     version: u32,
     methods: []const MethodSpec,
 };
@@ -151,7 +166,9 @@ pub const DefaultValue = union(enum) {
     float_: f64,
     bool_: bool,
     string_: []const u8,
-    /// The ABSENT entity, rendered `Entity.null`.
+    /// The ABSENT entity. The emitter renders NO default for a field carrying
+    /// it — `Entity.null` is the value's name here, not the text that reaches a
+    /// `.d.etch`.
     ///
     /// The only default an `Entity` field can carry, and the restriction is not a
     /// simplification: no other entity value has an Etch spelling in a
@@ -162,9 +179,9 @@ pub const DefaultValue = union(enum) {
     entity_null,
 };
 
-/// An event type a Tier 1 module publishes to Etch (M1.1.15.2 G4). Declared in
-/// a `.d.etch` — which `etch-grammar.md` §20.1 admits since this milestone's G1
-/// amendment, and for exactly this reason: a rule can only observe an event
+/// An event type a Tier 1 module publishes to Etch. Declared in
+/// a `.d.etch` — which `etch-grammar.md` §20.1 admits, and for exactly this
+/// reason: a rule can only observe an event
 /// whose type Etch knows, and a hand-written duplicate of a Zig shape is a
 /// surface with no drift guard.
 pub const EventSpec = struct {
@@ -233,7 +250,8 @@ fn zeroOf(comptime T: type) DefaultValue {
 
 /// Map a Zig type onto the `TypeRef` a signature would name for it. `void` is
 /// `.void_`; everything else that is not in the scalar set is a compile error at
-/// the `method` call site, which is where an author can still fix it.
+/// the site that asked — `method` for a parameter or a return, `event` for a
+/// field — which is where an author can still fix it.
 fn typeRefOf(comptime T: type) TypeRef {
     return switch (T) {
         void => .void_,
@@ -252,8 +270,16 @@ fn argToZig(comptime T: type, a: Arg) !T {
         i64 => if (a == .int_) a.int_ else error.ServiceArgTypeMismatch,
         f64 => switch (a) {
             .float_ => |f| f,
-            // An `int` literal reaching a `float` parameter widens, which is the
-            // rule Etch already applies at every other numeric boundary.
+            // An `int` argument reaching a `float` parameter widens here — and
+            // NOT on the path a rule takes: `interp.valueToArg` has already
+            // widened it, so from `callService` this arm never runs. It is
+            // reached only through `Registry.call`, which this file records
+            // below as having no production caller. What has no second home is
+            // the ABSENCE of a check: `checkServiceCall` synthesises each
+            // argument and DISCARDS the type (`_ = try synthExprE`), so nothing
+            // compares an argument against its declared parameter and the
+            // widening is accepted with no diagnostic. Delete this arm and the
+            // language does not change; delete `valueToArg`'s and it does.
             .int_ => |i| @floatFromInt(i),
             else => error.ServiceArgTypeMismatch,
         },
@@ -345,8 +371,12 @@ pub const Entry = struct {
     ctx: ?*anyopaque,
 };
 
-/// Refusals at registration. Both are refused BEFORE the insert, so a rejected
-/// service leaves the registry exactly as it was.
+/// Refusals at registration, and they refuse by DIFFERENT mechanisms. The
+/// signature scan runs before `getOrPut`, so an unconvertible spec never
+/// reaches the map. `DuplicateService` is decided BY `getOrPut` — the call runs
+/// first and the refusal reads its `found_existing` — which leaves the registry
+/// intact only because a key that already exists is not re-inserted. Either way
+/// a rejected service leaves it exactly as it was.
 pub const RegisterError = error{
     /// Two services registered under one name. Not last-wins: which
     /// implementation a rule reaches would then depend on module init order.
@@ -360,7 +390,10 @@ pub const RegisterError = error{
 };
 
 /// Failures of the CALL MECHANISM, as opposed to failures returned BY a
-/// service. The interpreter treats these as hard runtime failures and never as
+/// service. **The interpreter never receives one**: `Registry.call` is their
+/// sole producer and has no production caller, so this set is exercised by the
+/// suite alone and a new invocation path inherits the obligation to handle it.
+/// Read as hard runtime failures and never as
 /// catchable throws: a broken call site is a defect, not a domain error.
 pub const CallError = error{
     /// No service of that name is registered. §8.6's release-mode "skip the
@@ -594,7 +627,8 @@ test "registration refuses a duplicate name and an unconvertible signature" {
 }
 
 test "etchName renders every TypeRef the emitter can meet" {
-    // G3's emitter reads these. Asserted per variant rather than by a count, and
+    // `tools/bindgen/emit_detch.zig` reads these. Asserted per variant rather than
+    // by a count, and
     // the switch in `etchName` is exhaustive, so a new variant is a compile
     // error there before it is a wrong string here.
     try std.testing.expectEqualStrings("void", (TypeRef{ .void_ = {} }).etchName());

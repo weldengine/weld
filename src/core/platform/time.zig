@@ -1,10 +1,10 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Time primitives — `sleepPrecise(ns)` + monotonic `now()` for the Weld
 //! platform layer.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (Time section) and the M0.3 brief.
+//! Documented in `engine-platform.md` §4
+//! (Time section).
 //!
 //! Zig 0.16's `std.time.Instant` and `std.time.sleep` were removed (sleep
 //! moved to `std.Io.sleep`, monotonic timing moved to `Io.Clock`). Weld's
@@ -31,7 +31,7 @@ const once_mod = @import("once.zig");
 
 /// Win32 multimedia timer minimum period activation. Lazy — runs at most
 /// once per process. Consistent with the pattern documented in the
-/// M0.3 brief § "std.once verification for Zig 0.16".
+/// `once.zig`, which documents why `std.once` is unavailable.
 var win32_period_once: once_mod.Once = .{};
 
 const winmm = struct {
@@ -135,7 +135,7 @@ test "time.sleepPrecise: 1 ms accuracy" {
     try sleepPrecise(io, 1_000_000); // 1 ms
     const elapsed_ns = nowNanos() - start;
     // Tolerance: 50 ms ceiling for slow CI. The dedicated bench test in
-    // tests/platform/time_test.zig enforces the tighter brief gate
+    // tests/platform/time_test.zig enforces the tighter bound
     // (< 2 ms Win32 / < 1 ms Linux).
     try std.testing.expect(elapsed_ns >= 1_000_000);
     try std.testing.expect(elapsed_ns < 50_000_000);

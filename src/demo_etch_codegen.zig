@@ -1,4 +1,4 @@
-//! S5 demo binary — exercises the cooked Etch → Zig codegen output. The
+//! Demo binary — exercises the cooked Etch → Zig codegen output. The
 //! `tick` function is statically compiled into the binary; no parser or
 //! VM is loaded at runtime. Output is deterministic so the test gate can
 //! diff it against `bench/fixtures/demo_5_rules_codegen.expected.txt`.

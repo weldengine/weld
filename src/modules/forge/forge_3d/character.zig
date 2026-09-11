@@ -15,11 +15,11 @@
 //!
 //! **This milestone delivers the STORE and nothing that moves.** `moveCharacter`, the ground
 //! verdict and its five quantities, `resizeCharacter`, the push and `setCharacterPosition`
-//! belong to later gates of M1.1.12; none of their state is declared here, so that a field
+//! belong to later work; none of their state is declared here, so that a field
 //! arrives with the code that fills it.
 //!
-//! **No cache of any kind, and that is written down so the next sub-milestone does not
-//! reopen it** (§1.12.8). The M1.1.11.1 `Body.world_aabb` pattern does not transfer:
+//! **No cache of any kind, and that is written down so nobody adds one by
+//! reflex** (§1.12.8). The `Body.world_aabb` pattern does not transfer:
 //! nothing expensive is pose-invariant for a character, a capsule's support shape being two
 //! scalars.
 
@@ -105,7 +105,7 @@ pub const CharacterError = error{
 /// `baseToCentre`, and it exists in exactly that one named place.
 ///
 /// **`max_slope` is stored as its COSINE**, computed once at creation. Not a
-/// micro-optimisation: an `acos` per contact per frame is precisely what M1.1.14 would have
+/// micro-optimisation: an `acos` per contact per frame is precisely what cross-platform determinism would have
 /// to make reproducible, `engine-phase-1-plan.md` naming internal trigonometric functions
 /// among its determinism hazards, and storing the cosine moves the single trigonometric call
 /// to creation time (§1.12.5).
@@ -118,8 +118,7 @@ pub const Character = struct {
     radius: Real,
     /// Total capsule height, base to top (metres).
     height: Real,
-    /// Tallest riser the controller climbs rather than being blocked by (metres). Consumed
-    /// at gate E.
+    /// Tallest riser the controller climbs rather than being blocked by (metres).
     step_height: Real,
     /// `cos(max_slope)`. The ground test is `n · up >= cos_max_slope`, so a LARGER cosine is
     /// a STRICTER slope limit — worth knowing before comparing two of these.
@@ -129,23 +128,22 @@ pub const Character = struct {
     /// §1.11.2's `k · floatEps(T) · coordScale` discipline does NOT govern it.
     padding: Real,
     /// How far outside the shape to sweep for contacts not yet touching (metres). Same
-    /// parameter class as `padding`. Its FIRST consumer is the ground probe of gate C, which
+    /// parameter class as `padding`. Its FIRST consumer is the ground probe, which
     /// bounds its downward sweep at `padding + predictive_contact_distance`.
     predictive_contact_distance: Real,
     /// What the character IS, read by others through the mask of THEIR queries. Also the
     /// presence's layer, with no dedicated field (§1.12.2).
     collision_layer: u8,
-    /// What the character SEES, read by itself alone in its own sweeps (§1.12.4). Consumed
-    /// from gate C.
+    /// What the character SEES, read by itself alone in its own sweeps (§1.12.4).
     layer_mask: u32,
-    /// Mass serving the push impulse (kg). Consumed at gate F.
+    /// Mass serving the push impulse (kg).
     mass: Real,
-    /// Ceiling on the push force (N); zero disables pushing. Consumed at gate F.
+    /// Ceiling on the push force (N); zero disables pushing.
     max_push_force: Real,
     /// The capsule in the `ShapeStore`, owned by this character for its whole life.
     shape: ShapeId,
     /// The presence, or null when the descriptor asked for none. Its `BodyId` is STABLE and
-    /// stays so across a resize (gate F): a resize is not a re-creation, and an exclusion
+    /// stays so across a resize: a resize is not a re-creation, and an exclusion
     /// the caller memorised survives it.
     inner_body: ?BodyId,
     /// The ground verdict LAST REPORTED by a `moveCharacter` (§1.12.8).
@@ -161,8 +159,8 @@ pub const Character = struct {
     /// `setPresenceProxy`.
     ///
     /// `createCharacter` cannot insert the proxy itself: the broad layer is an INSERTION ARGUMENT
-    /// and no `BodyType → BroadphaseLayer` wiring exists — that arrives with `PhysicsWorld` at
-    /// M1.1.15. So whoever owns the broadphase inserts, then hands the handle back here, and from
+    /// this store never derives, `PhysicsWorld` owning the `BodyType → BroadphaseLayer`
+    /// derivation. So whoever owns the broadphase inserts, then hands the handle back, and from
     /// then on every pose write keeps it fresh. Null means "nobody registered one", and a pose
     /// write then updates the body and not the tree.
     presence_proxy: ?Broadphase.Proxy = null,
@@ -256,8 +254,8 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
     // Guarded even though no algorithm consumes it yet, because it is STORED at solver
     // precision: a NaN entered by the caller would live in the store, indistinguishable from
     // the DELIBERATE poison NaN this repository writes on purpose into fields that have no
-    // meaning for a shape. That ambiguity is what cost M1.1.11.1 several rounds — not the NaN
-    // itself. If gate D deletes the field, this guard leaves with it: one line.
+    // meaning for a shape. That ambiguity is what cost the mesh shape several rounds — not the NaN
+    // itself. If the field ever goes, this guard leaves with it: one line.
     if (!std.math.isFinite(desc.predictive_contact_distance) or
         desc.predictive_contact_distance < 0) return error.InvalidDimensions;
 
@@ -269,7 +267,7 @@ fn validateDescriptor(desc: CharacterDescriptor) CharacterError!void {
 
 /// The ground verdict and its four companion quantities, at SOLVER precision — the internal
 /// mirror of `CharacterMoveResult`'s five `ground_*` fields (§1.12.5). Narrowing it to the
-/// public `f32` form is the interface tier's business at M1.1.15; nothing here does it.
+/// public `f32` form is the interface tier's business; nothing here does it.
 ///
 /// **Every default is the `.in_air` answer**, so that state is the struct's zero value rather
 /// than something the code has to remember to write. `.in_air` is the safe failure direction:
@@ -386,7 +384,7 @@ const GroundCollector = struct {
             .ignore,
         ) orelse return;
 
-        // **THE TWO PATHS, and the whole reason gate B delivered two entries.**
+        // **THE TWO PATHS, and the whole reason there are two entries.**
         //
         // A sweep that TRAVELLED returns the outward normal of the surface it met
         // (§1.11.11), which is exactly what `ground_normal` means — no sign work at all.
@@ -450,7 +448,7 @@ const GroundCollector = struct {
 /// probe → body: for a character on a floor it points from the capsule DOWN toward the floor.
 /// `ground_normal` is what the caller reads to know which way is up the slope, so it points
 /// from the surface TOWARD the character. Hence one negation, in this one named place — the
-/// class of error that cost M1.1.11.1 a spec correction on its own overlap predicate.
+/// class of error that cost the mesh shape a spec correction on its own overlap predicate.
 const ManifoldSink = struct {
     ground: *GroundCollector,
     body: BodyId,
@@ -479,7 +477,7 @@ const ManifoldSink = struct {
 /// How far down the ground probe looks: `padding + predictive_contact_distance`.
 ///
 /// **This is `predictive_contact_distance`'s FIRST consumer**, which settles in advance the
-/// question the brief left to gate D. The two terms are the two reasons the ground is not at
+/// open question. The two terms are the two reasons the ground is not at
 /// distance zero when a character rests on it: `padding` is how far the capsule is held OFF
 /// surfaces, so a resting character is at least that far above its floor; and
 /// `predictive_contact_distance` is, by its own definition, how far outside the shape to look
@@ -494,9 +492,7 @@ pub fn groundSweepDistance(c: Character) Real {
     return c.padding + c.predictive_contact_distance;
 }
 
-// --- The move (M1.1.12 gate D) ---
-
-/// How many times the slide loop may sweep before giving up. NAMED and mandatory: M1.1.14 forbids
+/// How many times the slide loop may sweep before giving up. NAMED and mandatory: cross-platform determinism forbids
 /// an unbounded loop on a path that must be reproducible, and the reference's own controller
 /// carries the same kind of ceiling.
 ///
@@ -532,7 +528,7 @@ const max_touched = max_depenetration_iterations + max_slide_iterations + 3 + 1;
 /// The bodies one move touched, accumulated rather than woken on the spot.
 ///
 /// The collectors hold a `*const BodyManager` — `castShapeBody` and `collideShapeBody` both take
-/// one — so nothing inside them can wake anything. The same ordering M1.1.11.1 was forced into when
+/// one — so nothing inside them can wake anything. The same ordering the mesh shape was forced into when
 /// its wake moved after `prepare`, and for the same reason.
 const TouchedBodies = struct {
     items: [max_touched]BodyId = @splat(0),
@@ -558,7 +554,7 @@ const TouchedBodies = struct {
 /// **Applied AFTER the publication, and the ORIGINAL reason has expired.** It was transactional:
 /// `syncPresenceTo` could fail after the slide loop had run and returned with the record
 /// deliberately intact, so a push applied inside the loop survived a call that reported having done
-/// nothing and the caller's retry applied it twice. `syncPresenceTo` is infallible since M1.1.15.1,
+/// nothing and the caller's retry applied it twice. `syncPresenceTo` is infallible,
 /// so no such retry exists and the placement is no longer a correctness requirement. It is KEPT
 /// unchanged — accumulate-then-drain is what makes the coalescing below possible at all, and that
 /// reason never depended on the error channel. What is gone is only the retry argument.
@@ -586,7 +582,7 @@ const PendingPushes = struct {
     len: u32 = 0,
 
     /// Accumulate onto `body`'s entry if it already has one. The scan is linear over at most
-    /// `max_touched` entries, which is twelve — a hash container on a path M1.1.14 must make
+    /// `max_touched` entries, which is twelve — a hash container on a path determinism must make
     /// reproducible would be the wrong trade even if the set were large.
     fn add(self: *PendingPushes, body: BodyId, impulse: Vec3r) void {
         for (self.items[0..self.len]) |*e| {
@@ -628,7 +624,7 @@ const PendingPushes = struct {
 pub const MoveResult = struct {
     /// The resolved BASE position (§1.12.3) — what gameplay writes into `Transform.position`.
     position: Vec3r,
-    /// The ground verdict at that NEW pose, by the same probe gate C delivered.
+    /// The ground verdict at that NEW pose, by the same probe.
     ground: GroundInfo,
 };
 
@@ -1093,7 +1089,7 @@ fn tryStepUp(
     // So the squeeze-onto-level-ground mode is NOT guarded, and that is recorded rather than
     // papered over: telling it from a legitimate step-over needs a test that the landed pose is
     // clear of the obstacle it was blocked by, which is a different mechanism from a height
-    // comparison. Named for whoever ports the reference's stair-walking in full.
+    // comparison. That test belongs with a full port of the reference's stair-walking.
     if (drop <= 0) return null;
 
     return .{ .centre = landed, .advance = forward_advance };
@@ -1169,7 +1165,7 @@ fn plannedPush(
     if (c.max_push_force <= 0 or dt <= 0) return null;
     if (bm.bodyType(body) != .dynamic) return null;
     // **A PILOTED BODY PRESENTS AN INFINITE MASS TO EVERY IMPULSE PATH, and this is the
-    // second of them** (M1.1.15.2 G13, `engine-physics-forge.md` § *Autorité
+    // second of them** (`engine-physics-forge.md` § *Autorité
     // d'écriture* clause 2). "Every path" is normative there: a path added later that
     // does not consult this flag is a defect OF THAT PATH, not a new incompleteness of
     // the contract.
@@ -1211,7 +1207,7 @@ fn plannedPush(
 ///   good side of at the ENTRY of the call.
 ///
 /// Written that way the failure direction of an unresolvable squeeze is sayable, which is what the
-/// brief requires of a guarantee: the character keeps the pose it came in with, and a residual
+/// a guarantee requires: the character keeps the pose it came in with, and a residual
 /// overlap, and does not tunnel. Enforced by reverting to the entry pose the moment a contact is
 /// found whose plane the BASE has crossed since entry — resolving further would be tunnelling and
 /// not depenetration. The base and not the centre: it is the reference point gameplay writes
@@ -1385,9 +1381,9 @@ pub const CharacterStore = struct {
     ///
     /// The presence is a `.kinematic` body carrying the controller's OWN capsule — the very
     /// `ShapeId` this call created, never a second shape (§1.12.2). Its layer is
-    /// `collision_layer`. It is NOT inserted into the broadphase here: no
-    /// `BodyType → BroadphaseLayer` wiring exists, the layer being an insertion argument, and
-    /// that wiring arrives with `PhysicsWorld` at M1.1.15 — the same reason the query suites
+    /// `collision_layer`. It is NOT inserted into the broadphase here: the layer is an
+    /// INSERTION ARGUMENT this store never derives, `PhysicsWorld` owning the
+    /// `BodyType → BroadphaseLayer` derivation — the same reason the query suites
     /// insert their own proxies.
     pub fn createCharacter(
         self: *CharacterStore,
@@ -1437,7 +1433,7 @@ pub const CharacterStore = struct {
             // the widened angle rather than in `f32` and widened after, so its accuracy is
             // bounded only by the angle the caller authored.
             //
-            // M1.1.14 — `math.cos`, NOT `@cos`. This is not a style change: `@cos` lowers
+            // `math.cos`, NOT `@cos`. This is not a style change: `@cos` lowers
             // to an external `cosf` on Linux, Windows and AArch64 alike, two C libraries
             // disagree by an ULP, and the result here is STORED ENGINE STATE — it sits in
             // the compared bits from frame 0 and never leaves them. It is, measured at
@@ -1514,9 +1510,9 @@ pub const CharacterStore = struct {
     /// the tree fresh as well as the body. No-op on a stale handle.
     ///
     /// A seam and not a design preference: the broad LAYER is an insertion argument and the
-    /// `BodyType → BroadphaseLayer` wiring arrives with `PhysicsWorld` at M1.1.15, so the store
-    /// cannot choose where the proxy goes. Whoever does the insertion — the orchestrator later, the
-    /// test harness now — hands the handle back through here.
+    /// `BodyType → BroadphaseLayer` derivation lives in `PhysicsWorld`, so the store
+    /// cannot choose where the proxy goes. Whoever does the insertion — the orchestrator, or a
+    /// test harness — hands the handle back through here.
     pub fn setPresenceProxy(self: *CharacterStore, id: CharacterId, proxy: Broadphase.Proxy) void {
         const idx = self.alloc.validate(id) orelse return;
         self.characters.items[idx].presence_proxy = proxy;
@@ -1527,7 +1523,7 @@ pub const CharacterStore = struct {
     ///
     /// **A DISPLACEMENT, not a velocity** (§1.12.1). The kinematics belong to the caller
     /// (`engine-movement.md`) and the geometry to the engine, and `dt` serves only the DERIVED
-    /// terms — the support velocity, and the push impulse at gate F — never to integrate the
+    /// terms — the support velocity, and the push impulse — never to integrate the
     /// character. It is accepted here so the signature is the frozen one and the derived terms have
     /// their input the day they land.
     ///
@@ -1824,7 +1820,7 @@ pub const CharacterStore = struct {
             .radius = radius,
             .half_height = capsuleHalfHeight(f32, radius, height),
         } });
-        // DORMANT SINCE M1.1.15.1, AND KEPT DELIBERATELY — do not read it as dead code.
+        // DORMANT AND KEPT DELIBERATELY — do not read it as dead code.
         // `createShape` above is now the LAST fallible step of this function:
         // `syncPresenceTo` became infallible when `Broadphase.update` stopped allocating, so
         // no `try` remains below and this `errdefer` can no longer fire. It stays because the
@@ -1895,15 +1891,14 @@ pub const CharacterStore = struct {
     /// know did not happen". That argument proves too much: it holds identically for
     /// `setBodyTransform`, `setLinearVelocity` and `setAngularVelocity`, all `void` in the frozen
     /// surface, so applied to its end it makes every setter fallible — a decision about the whole
-    /// Tier 0 surface and not about one entry. Whether setters should be fallible is recorded for
-    /// M1.1.15, where the interface layer is built and the question covers all of it at once.
+    /// Tier 0 surface and not about one entry, and it is recorded as such.
     ///
     /// **`void`, matching the frozen signature — the gap this entry recorded is CLOSED.** It read
-    /// `!void` until M1.1.15.1, and the residual `!` was never a semantic refusal: keeping the proxy
+    /// `!void` once, and the residual `!` was never a semantic refusal: keeping the proxy
     /// fresh is part of this entry's contract (§1.12.2), `Broadphase.update` reserved a slot on its
     /// layer's moved log, and a `void` entry had nowhere to put that failure. The note ended by
     /// saying that making it truly `void` needed a reservation seam in the broadphase which that
-    /// milestone did not own. **M1.1.15.1 owns it and delivered it**: the moved log carries at most
+    /// entry could not own. **That seam now exists**: the moved log carries at most
     /// one entry per proxy per consumption epoch, its capacity is reserved at proxy insertion, and
     /// `Broadphase.update` is infallible. Kept as a record because the prediction is what the seam
     /// was built against, and because the entry's OTHER property — no-op on a stale handle — was
@@ -1946,7 +1941,7 @@ pub const CharacterStore = struct {
     /// the previous pose, which no test on a stationary character would find. So the three entries
     /// call this, and the freshness test is per write path rather than once on the move.
     ///
-    /// **INFALLIBLE since M1.1.15.1, and it takes the target rather than reading the record.** The
+    /// **INFALLIBLE, and it takes the target rather than reading the record.** The
     /// parameter shape was chosen when this was the one fallible step of its three callers and had
     /// to run BEFORE any mutation; `Broadphase.update` no longer allocates, so that ordering is no
     /// longer load-bearing and the callers are simply infallible on this path. The parameter shape

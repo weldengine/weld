@@ -1,4 +1,4 @@
-//! S6 RTT benchmark — measures Echo round-trip latency on a
+//! IPC RTT benchmark — measures Echo round-trip latency on a
 //! single in-process AF_UNIX connection.
 //!
 //! `zig build bench-ipc-rtt -Doptimize=ReleaseSafe` runs N=10_000
@@ -7,8 +7,8 @@
 //! variant (`run-ipc-demo`) carries the same code path but the
 //! cross-process AF_UNIX handshake is already validated by
 //! `tests/ipc/transport.zig` and `tests/ipc/handshake.zig`; an
-//! in-process RTT yields a tight lower bound for the brief's
-//! G1 < 1 ms median and G2 p99 < 5 ms gates.
+//! in-process RTT yields a tight lower bound for the < 1 ms median
+//! and p99 < 5 ms gates.
 
 const std = @import("std");
 const builtin = @import("builtin");

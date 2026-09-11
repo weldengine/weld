@@ -4,8 +4,8 @@
 //! instantiable from day one). The plain-name generics (`Vec`, `Quat`,
 //! `Mat3`, `Aabb`) are the constructors; `Vec2`/`Vec3`/`Vec4` and
 //! `Quatf`/`Mat3f`/`Aabbf` are the f32 aliases (no f64 aliases — consumers
-//! instantiate the generics). First consumer of `foundation/math/`: Forge 3D
-//! (M1.1). This submodule never imports `foundation/simd/` (sister-module
+//! instantiate the generics). First consumer of `foundation/math/`: Forge 3D.
+//! This submodule never imports `foundation/simd/` (sister-module
 //! rule, `engine-directory-structure.md` §620) — typed vectors cross to the
 //! SIMD kernels via `asFloatSlice` at the call site.
 
@@ -39,7 +39,7 @@ pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;
 /// EXACTLY zero — the exact tier `triangleIsFlat` is written on, exposed for callers that need the
 /// DIRECTION together with that exact null.
 ///
-/// Re-exported at M1.1.12 for its second consumer: the character controller's edge slide, whose
+/// Re-exported for its second consumer: the character controller's edge slide, whose
 /// direction is `n₁ × n₂` and whose `null` must mean "the two normals are exactly parallel" and
 /// nothing weaker. The tiered `triangleCross` cannot serve there — its `.direction` comes from the
 /// first float tier that forms a non-zero vector, so on exactly parallel normals it returns a
@@ -51,7 +51,7 @@ pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 
 /// Ordered lane reductions — the sanctioned form for FLOAT vectors, and the reason `@reduce` may
 /// not be used on them. `@reduce` delegates the reduction order to the backend by construction, and
-/// two Zig 0.16 backends were measured at M1.1.14 to disagree on the same `x86_64` target. See
+/// two Zig 0.16 backends disagree on the same `x86_64` target. See
 /// `reduce.zig` for the two disassemblies and `ARCH-031` rule 3 for the contract.
 pub const reduce = reduce_mod;
 
@@ -79,7 +79,7 @@ pub const Aabbf = aabb.Aabbf;
 /// C1.1 binds `forge_3d` to a whitelist of two dependencies — `foundation/math/`
 /// and `forge/api/` — and `forge_3d` is the module that has to assert. There is
 /// no facade in `core/platform/`: the tier rule is documented at the definition,
-/// not re-exported across the boundary. Added M1.1.14.
+/// not re-exported across the boundary.
 pub const float_env = @import("float_env.zig");
 
 /// DETERMINISTIC cosine — no libm call, fixed operation order (`ARCH-031`
@@ -100,9 +100,9 @@ comptime {
     _ = aabb;
     _ = trig;
     _ = float_env;
-    // M1.1.14 — `exact.zig` is reached elsewhere only through `triangleIsFlat` and
+    // `exact.zig` is reached elsewhere only through `triangleIsFlat` and
     // `triangleCrossDirection`, and referencing a DECL analyses that decl, never the
-    // file's `test` blocks. Measured: its two tests had never run — the exact integer
-    // arithmetic M1.1.11.1 spent eleven rounds establishing was unguarded.
+    // file's `test` blocks. Measured: its two tests had never run, so the exact
+    // integer arithmetic they cover was unguarded.
     _ = @import("exact.zig");
 }

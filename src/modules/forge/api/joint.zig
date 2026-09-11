@@ -1,4 +1,4 @@
-//! Joint type family of the Tier 1 physics interface (M1.1.15.2 G5a).
+//! Joint type family of the Tier 1 physics interface.
 //!
 //! **Transcribed from `engine-tier-interfaces.md` §1, field for field, name for
 //! name, default for default.** The contract was arbitrated there in full and
@@ -101,7 +101,6 @@ pub const JointLimits = union(enum) {
         swing_z_radians: f32,
         /// Minimum torsion about `axis_a`.
         twist_min_radians: f32,
-        /// Maximum torsion.
         twist_max_radians: f32,
     },
 
@@ -288,18 +287,17 @@ pub const JointDescriptor = struct {
     /// the descriptor is not the motor's only state. `null` = no motor.
     motor: ?JointMotor = null,
 
-    /// PRE-FREEZE EXTENSION (M1.1.15.2). The component has carried it all along
-    /// and the descriptor did not: two jointed bodies passed through each other
-    /// or collided depending on the solver, with no way for the author to
-    /// decide.
+    /// The component carries this and the descriptor once did not, so two jointed
+    /// bodies passed through each other or collided depending on the solver, with
+    /// no way for the author to decide.
     collide_connected: bool = false,
 
     /// Breakage: 0 = unbreakable, else the minimum force to break.
     break_force: f32 = 0,
 
-    /// PRE-FREEZE EXTENSION (M1.1.15.2). Same motive as `collide_connected`: the
-    /// component carries `break_force` AND `break_torque`, the descriptor had
-    /// only the first — so a hinge could break in traction and never in torsion,
-    /// and the authoring field was silently ignored.
+    /// Same motive as `collide_connected`: the component carries `break_force` AND
+    /// `break_torque`, the descriptor once had only the first — so a hinge could
+    /// break in traction and never in torsion, and the authoring field was
+    /// silently ignored.
     break_torque: f32 = 0,
 };

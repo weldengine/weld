@@ -1,4 +1,4 @@
-//! `CodegenError` path tests (S5).
+//! `CodegenError` path tests.
 
 const std = @import("std");
 const ast_mod = @import("../../ast.zig");
@@ -9,8 +9,8 @@ const token_mod = @import("../../token.zig");
 
 test "UnsupportedConstruct surfaced for out-of-subset input" {
     // Build an AST with a let whose value is a `path` ExprKind (out of the
-    // S3 subset accepted by the codegen) and feed it through the lowering
-    // pipeline. The S3 parser cannot produce this on real source — the
+    // subset accepted by the codegen) and feed it through the lowering
+    // pipeline. The parser cannot produce this on real source — the
     // test bypasses the parser specifically to exercise the codegen's
     // defensive error path.
     const gpa = std.testing.allocator;
@@ -49,8 +49,8 @@ test "UnsupportedConstruct surfaced for out-of-subset input" {
 }
 
 test "NonPodComponent surfaced before codegen entry" {
-    // A component whose field references a type the S5 type-map does not
-    // know would normally be rejected by the S3 type-checker. The codegen
+    // A component whose field references a type the type-map does not
+    // know would normally be rejected by the type-checker. The codegen
     // includes a defensive path so a malformed AST surfaces a typed error
     // rather than panicking.
     const gpa = std.testing.allocator;

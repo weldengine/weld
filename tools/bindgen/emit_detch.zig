@@ -1,5 +1,5 @@
-//! `bindgen.ServiceSpec` → `.d.etch` emitter (M1.1.15.2 G3,
-//! `engine-c-bindings.md` §8.4, format per `etch-abi-zig.md` §8.2).
+//! `bindgen.ServiceSpec` → `.d.etch` emitter (`engine-c-bindings.md` §8.4,
+//! format per `etch-abi-zig.md` §8.2).
 //!
 //! Emission direction Zig → Etch, the mirror of the `.api.zig` → Zig pipeline
 //! the rest of `tools/bindgen/` carries. The SOURCE OF TRUTH is the Zig
@@ -21,14 +21,13 @@ const services = @import("weld_etch").services;
 /// that placement is unrealisable: `etch-grammar.md` §20.4's `service_decl` has
 /// no production for an annotation between the braces, and the parser attaches a
 /// leading annotation run to the declaration that FOLLOWS it — so inside the
-/// braces it would bind to the first method, not to the service. Settled in
-/// prefix position at the G1 gate signal; the KB carries the correction.
-/// Measured: the prefix form parses clean and the type-checker is silent on it.
+/// braces it would bind to the first method, not to the service. The prefix form
+/// parses clean and the type-checker is silent on it; the KB carries the
+/// correction.
 ///
-/// Nothing reads it in Phase 1. The confrontation §8.5 describes happens at
-/// `.etchc` load, which does not exist before Phase 2; the annotation is written
-/// now because the artifact is committed now and a version added later would
-/// diff every file.
+/// Nothing reads it today: the confrontation §8.5 describes happens at `.etchc`
+/// load and there is no `.etchc` loader. The annotation is written anyway because
+/// the artifact is committed now and adding a version later would diff every file.
 pub const version_annotation = "@version";
 
 /// The header every generated artifact carries (§8.4.1). `bindgen-lint`'s
@@ -70,7 +69,7 @@ pub fn emit(
     try w.writeAll("}\n");
 }
 
-/// Render one event's `.d.etch` (M1.1.15.2 G4). Its own artifact rather than a
+/// Render one event's `.d.etch`. Its own artifact rather than a
 /// section of the service's, because §8.4.2 emits one file per SPEC and a module
 /// may publish events without publishing a service.
 pub fn emitEvent(

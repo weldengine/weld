@@ -2,16 +2,16 @@
 //! nowhere else in the perimeter this rule governs.
 //!
 //! `engine-physics-queries.md` §1.11.8 states that the world/solver precision boundary is
-//! unique and is crossed by ONE named conversion point, and by it alone. Before M1.1.15 the
-//! forge module carried four private helpers of identical semantics under two names —
-//! `widen`, `convVec3` twice, `convQuat` — and two of the three vector copies had already
-//! diverged: one short-circuited when the two scalars coincided and the others did not. They
-//! now all route through `forge/api/precision.zig`.
+//! unique and is crossed by ONE named conversion point, and by it alone. Every crossing in
+//! the forge routes through `forge/api/precision.zig`. Do NOT write a second private
+//! helper beside it: two copies of one conversion diverge, and the shape they diverge into
+//! is a short-circuit when the two scalars coincide — correct at the default precision and
+//! silently wrong at the other.
 //!
-//! **WHY THE RULE EXISTS AT ALL, rather than the unification alone.** The four sites were
-//! collapsed in one pass and nothing would stop the fifth. That is the same argument
-//! `no_float_reduce` makes about its thirteenth site, and it is the reason a rule written
-//! down without a check is an intention.
+//! **WHY THE RULE EXISTS AT ALL, rather than the unification alone.** A unification is a
+//! pass over the sites that exist, and nothing stops the next one. That is the same
+//! argument `no_float_reduce` makes, and it is the reason a rule written down without a
+//! check is an intention.
 //!
 //! **WHAT IS FLAGGED, and the asymmetry is the whole design.** `@floatCast` — the narrowing
 //! direction, solver → world. The widening direction has NO token to flag: `f32` coerces to
@@ -27,9 +27,9 @@
 //! **THE PERIMETER, and why it is two directories and not one.** The diagnostic this rule
 //! emits makes a statement about the ENGINE — that §1.11.8's boundary is unique — so a
 //! control that looked at one module would be claiming more than it checks. §1.11.8 places
-//! the boundary AT THE INTERFACE TIER, and `src/interfaces/` is where M1.1.15.2 writes the
-//! adapter, which is conversion code by definition. It is governed here from the day the
-//! directory exists rather than the day the freeze discovers the gap. The crossing POINT
+//! the boundary AT THE INTERFACE TIER, and `src/interfaces/` holds the adapter, which is
+//! conversion code by definition. It is governed here whether or not it currently carries
+//! a crossing, so a new one arrives under the guard. The crossing POINT
 //! lives in `forge/api/` for a dependency reason — `forge_3d` cannot import the interface
 //! tier without inverting — and that reason says nothing about where the guard must look.
 //!
@@ -42,9 +42,8 @@
 //! reduction in a bench CORRUPTS the measurement, so exempting a file there would hide a
 //! defect; a `@floatCast` in a test is the assertion's own arithmetic — a test comparing a
 //! solver value against a published `Transform` must narrow one of them to compare them at
-//! all, and it is measuring the boundary rather than breaching it. Twenty-one such sites
-//! exist across seven files. The residual: a production-grade helper written inside a test
-//! file escapes this rule.
+//! all, and it is measuring the boundary rather than breaching it. The residual: a
+//! production-grade helper written inside a test file escapes this rule.
 //!
 //! **THE ESCAPE IS DECLARED, NEVER SILENT.** `WELD_NOT_A_WORLD_CROSSING` on the site's own
 //! line exempts that site — but only if the FILE also appears in `declared_escapes` below,
@@ -55,21 +54,20 @@
 //!
 //! The control is bilateral in the same sense: an escape used without a declaration is
 //! reported at its site, and a declaration whose file was READ and carried no marker is
-//! reported as stale. The list is EMPTY today — measured, not assumed: zero `@floatCast`
-//! survives in the perimeter and the marker occurs nowhere in the tree outside this file's own
-//! test sources. Zero is the cheapest moment in the project's life to install the mechanism,
-//! and both directions are exercised by this file's tests rather than by the tree's silence.
+//! reported as stale. Installing the mechanism while the list is EMPTY is the cheapest moment
+//! in the project's life, and both directions are exercised by this file's tests rather than
+//! by the tree's silence, which could exercise neither.
 //!
 //! **THE STALE HALF FOLLOWS VISITED FILES, and that is what makes it correct under a partial
 //! scan.** `lint` also accepts an explicit path list — the `pre-commit` hook passes staged
 //! files — and a declaration whose file was not read says NOTHING: it is neither used nor
 //! stale, because nobody looked. Two earlier forms tried to establish COMPLETENESS of the scan
-//! instead, first from an empty argument list and then from a set of root names, and each
-//! traded one wrong verdict for another; the second was defended with a claim that
-//! canonicalising the paths was impossible at Zig 0.16, which was FALSE —
-//! `std.process.currentPathAlloc` and `std.Io.Dir.realPathFileAbsoluteAlloc` both exist. The
-//! question does not need asking: a per-file fact answers it with neither a false positive nor
-//! a false negative, whatever the caller's spelling.
+//! instead — neither from an empty argument list nor from a set of root names: each form
+//! trades one wrong verdict for another, and the claim that canonicalising the paths is
+//! impossible at Zig 0.16 is FALSE, `std.process.currentPathAlloc` and
+//! `std.Io.Dir.realPathFileAbsoluteAlloc` both existing. The question does not need asking:
+//! a per-file fact answers it with neither a false positive nor a false negative, whatever
+//! the caller's spelling.
 //!
 //! The one residual that reasoning leaves is a declaration whose file has been DELETED — never
 //! visited, hence never stale, hence immortal. Closed by testing that the declared path
@@ -290,21 +288,19 @@ fn governs(file: []const u8) bool {
 /// absolute and a relative spelling of the same file agree, and SEPARATOR-INSENSITIVELY so a
 /// POSIX-spelled declaration matches the `\\`-spelled path the runner passes on Windows.
 ///
-/// The first version compared with `std.mem.endsWith` against a POSIX-spelled entry, which on
-/// Windows can never match: the escape would silently stop exempting, the site would be
-/// reported as an undeclared marker, and the tree would go red on one platform only. The
-/// awareness already existed one function below — `isTest` handles `\\tests\\` beside
-/// `/tests/` — and this one had lost it.
+/// Do NOT compare with `std.mem.endsWith` against a POSIX-spelled entry: on Windows it can
+/// never match, so the escape silently stops exempting, the site is reported as an
+/// undeclared marker, and the tree goes red on one platform only. `isTest` one function
+/// below handles `\\tests\\` beside `/tests/` for the same reason.
 fn declaredIndexFor(file: []const u8) ?usize {
     return declaredIndexIn(&declared_escapes, file);
 }
 
 /// The lookup itself, over an explicit list. Split for the same reason as `reportStale`: the
 /// tree's list is EMPTY, so this function never iterates and a test driving `declaredIndexFor`
-/// could not tell a separator-aware match from a POSIX-only one. Measured — the first
-/// counter-factual written for the separator fix reverted the comparison here and failed no
-/// test at all, because the only test on it drove `endsWithPath` directly and proved the
-/// helper correct without proving the call site used it.
+/// could not tell a separator-aware match from a POSIX-only one. Do NOT cover this through
+/// `endsWithPath` alone: that proves the helper correct without proving the call site uses
+/// it, and a counter-factual reverting the comparison here then fails no test at all.
 fn declaredIndexIn(declared: []const DeclaredEscape, file: []const u8) ?usize {
     for (declared, 0..) |e, i| {
         if (endsWithPath(file, e.file)) return i;
@@ -346,8 +342,6 @@ fn hasMarkerOnItsLine(source: []const u8, offset: usize) bool {
     return std.mem.indexOf(u8, source[line_start..line_end], not_a_crossing_marker) != null;
 }
 
-// --- tests -------------------------------------------------------------------
-
 /// Runs the rule over `source` as if it were `path`, and returns how many diagnostics it
 /// produced. The path is a parameter because this rule is scoped by path, and a helper that
 /// hard-coded one would leave the scoping itself unmeasured.
@@ -375,9 +369,8 @@ test "a narrowing in a governed production file is flagged" {
 }
 
 test "the perimeter is the forge module AND the interface tier, and nothing else" {
-    // THE INTERFACE TIER, which §1.11.8 names as the boundary's home and where M1.1.15.2
-    // writes the adapter. The rule ignored it until F-F1: the directory was one milestone
-    // old and held declarations only, so the gap would have been found by the freeze.
+    // THE INTERFACE TIER, which §1.11.8 names as the boundary's home and where the adapter
+    // lives. A rule scoped to the forge module alone would claim more than it checks.
     try std.testing.expectEqual(@as(usize, 1), try countOn(interface_prod, "const x: f32 = @floatCast(y);\n"));
     try std.testing.expectEqual(@as(usize, 1), try countOn(forge_prod, "const x: f32 = @floatCast(y);\n"));
 

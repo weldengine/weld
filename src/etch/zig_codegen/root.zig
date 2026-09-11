@@ -1,7 +1,5 @@
-//! Public surface of the S5 codegen module —
-//! `briefs/S5-etch-codegen-zig.md` Scope: "Codegen surface published as
-//! `weld_etch.codegen_zig` with a stable entry point ... plus minimal error
-//! type `CodegenError`".
+//! Public surface of the Etch → Zig codegen module: a stable entry point
+//! published as `weld_etch.codegen_zig`, plus the `CodegenError` set.
 //!
 //! Entry points:
 //! - `generateToBuffer(gpa, ast, source_path, &out_buffer)` — render the
@@ -11,12 +9,12 @@
 //!   end-to-end: parse + type-check + lower + write file. Skips the write
 //!   step on cache-hit (per-file xxHash cache).
 //! - `cookTree(gpa, inputs, output_dir, cache_dir)` — drive the per-file
-//!   generation over a slice of input files. Published S5 surface with no
+//!   generation over a slice of input files. A published surface with no
 //!   current in-tree consumer — the bench harness and the build-graph
 //!   cooks consume the CONSOLIDATED pipeline below.
 //! - `consolidate.cookConsolidated(gpa, named_sources, &out)` — render N
-//!   in-memory sources into one consolidated `.zig` (M0.8 E3-D,
-//!   D-S5-etchcook-inproc). The `etch_cook` CLI is a thin shim over it;
+//!   in-memory sources into one consolidated `.zig`. The `etch_cook`
+//! CLI is a thin shim over it;
 //!   the bench harness calls it in-process.
 
 const std = @import("std");
@@ -35,12 +33,11 @@ pub const errors = @import("errors.zig");
 pub const type_map = @import("type_map.zig");
 /// Low-level Zig output writer used by `lower`.
 pub const emit = @import("emit.zig");
-/// Consolidated N-sources → one-file cook (M0.8 E3-D, D-S5-etchcook-inproc
-/// — the library home of the `etch_cook` pipeline).
+/// Consolidated N-sources → one-file cook.
 pub const consolidate = @import("consolidate.zig");
 
 // Pull the dedicated `tests/` files into the module's import graph so
-// `zig build test` picks them up. The brief locates these tests under
+// `zig build test` picks them up. These tests live under
 // `src/etch/zig_codegen/tests/` per the file layout convention; the
 // imports keep them discoverable without a separate test executable.
 comptime {

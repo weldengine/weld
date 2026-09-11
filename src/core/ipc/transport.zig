@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Transport interface for the Weld editor↔runtime IPC.
 //!
@@ -7,9 +7,9 @@
 //! Windows (`transport_windows.zig`). The public API is identical
 //! across backends — the comptime dispatch below picks the OS-specific
 //! `Backend` at compile time. Refer to `engine-ipc.md` §2 for the
-//! transport rationale and §4.7 for the Phase 3 GPU handle passing
+//! transport rationale and §4.7 for the GPU handle passing
 //! that motivates the `sendWithHandles` surface (Windows backend
-//! returns `error.Unimplemented` in S6 per the brief).
+//! returns `error.Unimplemented`).
 //!
 //! Semantics:
 //!   - `listen(path)` — editor side; binds and starts accepting.
@@ -22,7 +22,7 @@
 //!     `recvWithHandles(buffer, handles)` — out-of-band handle
 //!     transport per `engine-ipc.md` §2.3 + §4.7. POSIX uses
 //!     `SCM_RIGHTS` cmsg ancillary data; Windows returns
-//!     `error.Unimplemented` and the implementation lands in Phase 3
+//!     `error.Unimplemented` and the implementation is unwritten
 //!     when GPU shared framebuffers arrive.
 //!   - `close()` — releases the socket / pipe.
 //!
@@ -77,17 +77,17 @@ pub const Error = error{
     ListenFailed,
     NameTooLong,
     PermissionDenied,
-    /// R2 (M1.1.1-HF3): the post-`bind` `chmod(path, 0600)` failed — the socket
+    /// The post-`bind` `chmod(path, 0600)` failed — the socket
     /// could not be locked to owner-only, so `listen` refuses to start it.
     SocketPermissionFailed,
-    /// R2 (M1.1.1-HF3): an accepted peer runs as a different UID than us; the
+    /// An accepted peer runs as a different UID; the
     /// connection is closed and rejected (the authoritative local-IPC boundary,
     /// `engine-ipc.md §8.2`).
     PeerCredentialMismatch,
     SocketCreationFailed,
     SystemResources,
     /// Windows: `sendWithHandles` / `recvWithHandles` are scoped to
-    /// Phase 3 per `engine-ipc.md §4.7` + S6 brief. The named-pipe
+    /// unimplemented per `engine-ipc.md §4.7`. The named-pipe
     /// implementation lives in `transport_windows.zig` and returns
     /// this error so callers can opt-out gracefully.
     Unimplemented,
@@ -134,7 +134,7 @@ pub const IpcSocket = struct {
     /// Out-of-band handle transport. `bytes` must be non-empty
     /// (POSIX requires at least one regular byte alongside any
     /// ancillary cmsg). On Windows: returns `error.Unimplemented`
-    /// in S6 (cf. file header).
+    /// (cf. file header).
     pub fn sendWithHandles(
         self: *IpcSocket,
         bytes: []const u8,
@@ -145,7 +145,7 @@ pub const IpcSocket = struct {
 
     /// Out-of-band handle receive. `handles_out` receives up to its
     /// `len` slots; the actual count is returned in `RecvResult`.
-    /// Windows S6: `error.Unimplemented`.
+    /// On Windows: `error.Unimplemented`.
     pub fn recvWithHandles(
         self: *IpcSocket,
         buffer: []u8,

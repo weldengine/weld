@@ -1,4 +1,4 @@
-//! ECS hybrid-storage crossover bench (M1.B / G10).
+//! ECS hybrid-storage crossover bench.
 //!
 //! **What it measures.** The per-tick cost of one workload — iterate a query
 //! containing component `C`, and churn `C` by add/remove — with `C` stored as
@@ -7,9 +7,9 @@
 //!
 //! **REPORTED, NOT GATED, and the reason is not the usual one.** Five sibling
 //! benches carry a template saying no envelope is pre-registered because this
-//! is a path's first measurement and a bound before a baseline is the failure
-//! mode recorded at M1.1.8 — i.e. "a bound comes later". **That is not this
-//! bench's reason.** `engine-ecs-internals.md` §2 says a threshold *cannot be
+//! is a path's first measurement and a bound registered before its baseline is
+//! invented rather than measured — i.e. "a bound comes later". **That is not
+//! this bench's reason.** `engine-ecs-internals.md` §2 says a threshold *cannot be
 //! engraved* — *"Aucune fréquence de bascule ni aucun pourcentage de population
 //! ne peut être gravé ici comme seuil"* — and names this bench as what produces
 //! the thresholds instead. So there is no future gate here: the output IS the
@@ -89,10 +89,9 @@ const Config = struct {
     /// measured off the world and reported per cell, because the carrier /
     /// non-carrier split multiplies it and four filler types cap it.
     archetypes: u16,
-    /// Worker count — §2's "nombre de workers". Measurable at all only since
-    /// M1.B/G10's B1: before it, no dense range reached a worker, so this axis
-    /// would have varied the table arm alone and reported the sparse mode
-    /// losing for a reason that is not storage.
+    /// Worker count — §2's "nombre de workers". Meaningful only while a dense
+    /// range reaches a worker: without that, this axis varies the table arm alone
+    /// and reports the sparse mode losing for a reason that is not storage.
     workers: u8,
     label: []const u8,
 };
@@ -463,9 +462,9 @@ fn TableArm(comptime c: Config) type {
     };
 }
 
-/// Sparse arm — `SparseDrivenQuery` and the dense-range dispatch M1.B/G10 B1
-/// delivered. Without B1 this arm could not dispatch at all and the worker
-/// column would have been empty by construction.
+/// Sparse arm — `SparseDrivenQuery` and the dense-range dispatch. Without that
+/// dispatch this arm cannot dispatch at all and the worker column is empty by
+/// construction.
 fn SparseArm(comptime c: Config) type {
     return struct {
         const Self = @This();
@@ -819,8 +818,8 @@ pub fn main(init: std.process.Init) !void {
     // Without that default, this bench would emit an artifact on every CI run —
     // shared runner, no idle, not the reference machine — that LOOKS like the
     // corpus measurement, and someone would cite it. That is precisely the
-    // mechanism behind the "14.2 ms M0.1 baseline" this milestone traced to a
-    // figure no M0.1 artifact carries, and CI would industrialise it.
+    // mechanism that produces a widely cited baseline no artifact carries, and
+    // CI would industrialise it.
     var cold_isolated = false;
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "--smoke")) smoke = true;

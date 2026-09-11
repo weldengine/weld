@@ -1,7 +1,7 @@
-//! Bench: render instancing — Phase 0 / M0.4 § Scope — Post-Review addendum.
+//! Bench: render instancing.
 //!
 //! Measures the CPU-side batcher throughput on the 100k entities / 100
-//! distinct (mesh, material) target from the brief Benchmarks targets.
+//! distinct (mesh, material) target.
 //! Writes a Markdown report to `bench/out/render_instancing_<os>.md`.
 //!
 //! GPU-side metrics (FPS sustained 60s, GPU frame time p99 via Vulkan

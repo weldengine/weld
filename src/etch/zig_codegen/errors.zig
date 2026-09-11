@@ -1,9 +1,8 @@
-//! S5 codegen error set per `briefs/S5-etch-codegen-zig.md` Scope —
-//! "Codegen surface published as `weld_etch.codegen_zig` with a stable entry
-//! point ... plus minimal error type `CodegenError` covering
-//! `UnsupportedConstruct`, `NonPodComponent`, `InternalCodegenBug`".
+//! Codegen error set: the closed `CodegenError` covering
+//! `UnsupportedConstruct`, `SparseStorageUnsupported`, `NonPodComponent` and
+//! `InternalCodegenBug`.
 //!
-//! The codegen is fed an AST that has already passed the S3 two-pass type-
+//! The codegen is fed an AST that has already passed the two-pass type-
 //! checker, so structural and POD violations should never reach this layer.
 //! They are listed for completeness — the codegen surfaces them as errors
 //! rather than panicking so a malformed AST cannot crash the caller.
@@ -13,10 +12,14 @@ const std = @import("std");
 /// Closed error set surfaced by the Etch → Zig codegen. Each variant
 /// names a precise failure mode reachable from the lowering pass.
 pub const CodegenError = error{
-    /// A construct outside the S5 subset (`component`, `resource`, `rule`,
-    /// `when`, arithmetic expressions, `get`/`get_mut`/`has` accessors)
-    /// reached the lowering pass. Should be impossible after S3 type-check,
-    /// but reported here as a typed error rather than a panic.
+    /// A construct the lowering pass does not emit. The emitted subset is wider
+    /// than a top-level list suggests — `component`, `resource`, `event`,
+    /// `struct`, `enum`, top-level `fn`, `rule`/`when`, arithmetic expressions
+    /// and the `get`/`get_mut`/`has` accessors — and this error is raised from
+    /// INSIDE those emitters for the shapes they decline (a generic enum, a
+    /// data-carrying variant, an impl method), so do not read it as "the
+    /// declaration kind is unknown". Unreachable after a type-check, but
+    /// reported here as a typed error rather than a panic.
     UnsupportedConstruct,
     /// A `component` declaration carries `@storage(.sparse)`.
     ///
@@ -26,9 +29,9 @@ pub const CodegenError = error{
     /// one, and the emitted `register()` records no storage mode — a sparse
     /// declaration reaching it is registered `table`, giving a program whose
     /// ECS image contradicts its own source with nothing to say so. Parity is
-    /// Phase 2-3.
+    /// unimplemented.
     SparseStorageUnsupported,
-    /// A component declaration contains a non-POD field type. The S3
+    /// A component declaration contains a non-POD field type. The
     /// type-checker rejects these — the variant exists so a malformed AST
     /// (e.g. a future caller forgetting to type-check) surfaces a clean
     /// error instead of `@panic`.

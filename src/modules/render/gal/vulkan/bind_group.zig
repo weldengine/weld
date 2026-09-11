@@ -1,12 +1,12 @@
-//! BindGroupLayout + BindGroup Vulkan — Phase 0 / M0.4.
+//! BindGroupLayout + BindGroup Vulkan.
 //!
 //! Mapping:
 //! - `BindGroupLayoutHandle` ↔ `vk.DescriptorSetLayout` (direct mapping, no registry)
 //! - `BindGroupHandle` ↔ `vk.DescriptorSet` (internal registry to
 //!   keep the parent `vk.DescriptorPool` at destruction time)
 //!
-//! Phase 0: one descriptor pool per BindGroup (overkill but simple).
-//! Phase 1+: shared multi-frame pool + reset at the frame boundary.
+//! One descriptor pool per BindGroup — overkill but simple. A shared
+//! multi-frame pool reset at the frame boundary is the alternative.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -18,7 +18,7 @@ const buffer_mod = @import("buffer.zig");
 const texture_mod = @import("texture.zig");
 
 /// Internal slot of a BindGroup — bundles DescriptorPool + DescriptorSet.
-/// Phase 0: one pool per bind group (cf. the doc at the top of the file).
+/// One pool per bind group (cf. the doc at the top of the file).
 pub const Entry = struct {
     descriptor_pool: vk.DescriptorPool,
     descriptor_set: vk.DescriptorSet,
@@ -76,7 +76,7 @@ pub fn destroyLayout(device: *Device, handle: types.BindGroupLayoutHandle) void 
 
 /// Creates a BindGroup — allocates a dedicated DescriptorPool, allocates a
 /// DescriptorSet from the pool, writes the bindings via
-/// `vkUpdateDescriptorSets`. Phase 0: one pool per group (cf. doc).
+/// `vkUpdateDescriptorSets`. One pool per group (cf. doc).
 pub fn createGroup(
     device: *Device,
     descriptor: types.BindGroupDescriptor,
@@ -88,7 +88,7 @@ pub fn createGroup(
     defer counts.deinit();
     for (descriptor.entries) |e| {
         const t: vk.DescriptorType = switch (e.resource) {
-            .buffer => .uniform_buffer, // Phase 0: uniform by default. storage if flag, to extend Phase 1.
+            .buffer => .uniform_buffer, // Uniform by default; storage would need a flag.
             .texture_view => .sampled_image,
             .sampler => .sampler,
         };

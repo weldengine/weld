@@ -1,19 +1,21 @@
-//! M1.0.4 — Etch-side `.scene.etch` cook driver (front-end).
+//! Etch-side `.scene.etch` cook driver (front-end).
 //!
 //! Consumes a parsed Etch program containing component/resource/enum
 //! declarations plus exactly one `scene` construct, and produces the **neutral
-//! cook model** (`weld_core.scene.format.CookModel`) the E2 writer serializes to
+//! cook model** (`weld_core.scene.format.CookModel`) the writer serializes to
 //! `.scene.bin`. World-free: it registers types into a standalone `Registry`
 //! (RTTI only) and const-evaluates the scene's field values into raw component
-//! bytes — it never instantiates a `World` (that is the M1.0.5 loader's job).
+//! bytes — it never instantiates a `World` (that is `core/scene/loader.zig`'s
+//! job, and `World` appears nowhere below).
 //!
 //! Pipeline:
 //!   1. Parse the source → AST.
 //!   2. Register every `component`/`resource` declaration into a fresh
-//!      `Registry` via the shared `interp.compileTypeDecl` path (refactored to
-//!      take a `*Registry`, M1.0.4 deviation). Unsupported field types surface
+//!      `Registry` via the shared `interp.compileTypeDecl` path, which takes a
+//!      bare `*Registry` so this cook needs no `World`. Unsupported field types
+//!      surface
 //!      `error.InvalidProgram` as a clear cook diagnostic.
-//!   3. Locate the single `scene`; reject `instance of` (M1.0.6 boundary).
+//!   3. Locate the single `scene`; reject `instance of`.
 //!   4. For each entity component-instance field and each `resources` field:
 //!      resolve against `Registry.findField`, const-eval the value, encode via
 //!      `ecs_bridge.writeValueAsBytes`. Resource `string` values are interned
@@ -34,12 +36,12 @@ const interp = @import("interp.zig");
 const types_mod = @import("types.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
-// M1.0.6 E5 — `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
+// `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
 // statement-runs to canonical Etch text (stored in the .prefab.bin hooks section).
 const descriptor = @import("descriptor.zig");
 
 const weld_core = @import("weld_core");
-// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+// persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
 const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
@@ -47,7 +49,7 @@ const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const archetype = weld_core.ecs.archetype;
 const format = weld_core.scene.format;
-// M1.0.6 E2 — `of` variant resolution reads the base prefab's cooked `.prefab.bin`
+// `of` variant resolution reads the base prefab's cooked `.prefab.bin`
 // back through the same zero-copy accessor the loader uses.
 const accessor = weld_core.scene.accessor;
 const validate = weld_core.scene.validate;
@@ -92,7 +94,7 @@ pub const CookError = error{
     BadUuid,
     /// An entity `parent:` name does not match any entity in the scene.
     ParentNotFound,
-    // ── M1.0.6 E2 — prefab cook (`cookPrefab`) ──
+    // ── prefab cook (`cookPrefab`) ──
     /// No top-level `prefab` construct in a source cooked as a `.prefab.etch`.
     NoPrefabConstruct,
     /// More than one `prefab` construct (a `.prefab.etch` holds exactly one).
@@ -116,22 +118,22 @@ pub const CookError = error{
     /// A base prefab component's name is unknown to the variant's registry, or
     /// its on-disk size disagrees with the variant registry's layout.
     BaseSchemaMismatch,
-    // ── M1.0.6 E3 — `instance of` flattening at scene cook ──
-    /// `instance of "P"` where `P.prefab.bin` holds more than one entity. M1.0.6
-    /// instantiates only single-entity prefabs: the instance supplies one uuid and
+    // ── `instance of` flattening at scene cook ──
+    /// `instance of "P"` where `P.prefab.bin` holds more than one entity. The
+    /// cook instantiates only single-entity prefabs: the instance supplies one uuid and
     /// the spec defines no remapping for a multi-entity prefab's internal uuids at
     /// instantiation (`engine-scene-serialization.md` §2/§5). Multi-entity
-    /// instantiation (and its hierarchy) is a dedicated later milestone (D-D).
+    /// instantiation, and the hierarchy it would need, is not implemented
+    /// anywhere: this error is the whole of the treatment.
     MultiEntityInstanceUnsupported,
     /// A `Comp.field = value` per-field override targets a component the flattened
     /// instance does not carry (neither inherited from the prefab nor added by an
     /// earlier `Comp { … }` member of the same instance body).
     OverrideTargetMissing,
-    /// An `Entity` field references an entity name absent from the scene (M1.0.6
-    /// E4 — intra-scene only; cross-scene references are a future milestone).
+    /// An `Entity` field references an entity name absent from the scene.
     UnresolvedCrossRef,
     /// The entity's {base components} ∪ {active extensions' components} is not
-    /// conflict-free (M1.1.1-HF4 — `E1797 ExtensionAdditiveConflict`). Three
+    /// conflict-free. Three
     /// rejected forms: (a) two extensions declare the same component; (b) an
     /// extension declares a component already carried by the base (or an earlier
     /// extension); (c) the same extension is listed twice. The `extends` model is
@@ -140,7 +142,7 @@ pub const CookError = error{
     /// `error.ExtensionComponentConflict` for a/b, `error.ExtensionAlreadyActive`
     /// for c). See `engine-scene-serialization.md` (extension additive conflicts).
     ExtensionAdditiveConflict,
-    /// M1.B/G9 — a `@requires` closure that is not a DAG. NAMED rather than
+    /// A `@requires` closure that is not a DAG. NAMED rather than
     /// folded into `RequiresNotSatisfied`, which belongs to the PREFAB
     /// `requires` clause (`prefab "X" extends "Y" requires Health`) — a
     /// different construct, and conflating the two would make one diagnostic
@@ -176,8 +178,8 @@ pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) 
 
 /// Cook a `.scene.etch` source, resolving each `instance of "P"` by flattening
 /// `P.prefab.bin` (located through `base_resolver`) into the instance's entity:
-/// the prefab's components are inherited and the instance's overrides applied
-/// (M1.0.6 E3). `base_resolver` may be null for a scene with no instances; an
+/// the prefab's components are inherited and the instance's overrides applied.
+/// `base_resolver` may be null for a scene with no instances; an
 /// instance with a null/unknowing resolver errors `BasePrefabMissing`.
 pub fn cookScene(
     gpa: std.mem.Allocator,
@@ -204,9 +206,9 @@ pub fn cookScene(
     const model = try b.build(scene_decl, base_resolver, diag_out);
 
     // `model` owns the cook arena by value — a copy of `b.arena` (build: `.arena =
-    // self.arena`, scene_cook build return). A failing `toOwnedSlice` here is
-    // already covered by `errdefer b.arena.deinit()` above: same buffers, freed
-    // once. Do NOT add `errdefer model.deinit()` — it double-frees the aliased arena.
+    // self.arena`, scene_cook build return), so the two share one arena. Do NOT
+    // add `errdefer model.deinit()` — it double-frees it, `errdefer
+    // b.arena.deinit()` above already covering the failure paths.
     return .{ .model = model, .registry = registry };
 }
 
@@ -219,7 +221,8 @@ fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
 /// cooked `.prefab.bin` bytes, or null if unknown. A `.prefab.bin` is the same
 /// format as a `.scene.bin`, so a variant's base is read back through the
 /// `accessor`. This is the cook-time prefab registry / path map (distinct from
-/// Etch `import`, which is M1.0.7); the driver (`tools/scene_cook`) wires it to
+/// Etch `import`, which this resolver does not handle at all); the driver
+/// (`tools/scene_cook`) wires it to
 /// the on-disk cook output, and tests wire it to an in-process byte buffer.
 ///
 /// The resolved bytes must outlive the cook (mirror of `loader.zig`'s
@@ -244,8 +247,9 @@ pub const BaseResolver = struct {
 /// entities directly; a **variant** `prefab "Y" of "X"` resolves `X`'s cooked
 /// `.prefab.bin` via `base_resolver`, inherits all of X's flattened components,
 /// and applies Y's per-entity overrides (field-merge on shared components, add on
-/// new ones) — producing the fully flattened set. An **extension** `extends` is
-/// rejected here (`error.ExtendsUnsupported`) — its cook is M1.0.6 E5.
+/// new ones) — producing the fully flattened set. `extends` is NOT rejected
+/// here: this file cooks an `extends` prefab and carries its own errors for the
+/// clause (`RequiresNotSatisfied`, the hook-render failure below).
 ///
 /// `base_resolver` may be null for a standalone prefab; an `of` prefab requires
 /// it. On failure returns a `CookError` and sets `diag_out` (if non-null).
@@ -274,9 +278,9 @@ pub fn cookPrefab(
     const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
 
     // `model` owns the cook arena by value — a copy of `b.arena` (buildPrefab:
-    // `.arena = self.arena`). A failing `toOwnedSlice` here is already covered by
-    // `errdefer b.arena.deinit()` above: same buffers, freed once. Do NOT add
-    // `errdefer model.deinit()` — it double-frees the aliased arena.
+    // `.arena = self.arena`), so the two share one arena. Do NOT add
+    // `errdefer model.deinit()` — it double-frees it, `errdefer
+    // b.arena.deinit()` above already covering the failure paths.
     return .{ .model = model, .registry = registry };
 }
 
@@ -293,8 +297,8 @@ const EntityBuild = struct {
     comp_blobs: [][]u8,
 };
 
-/// An unresolved entity→entity reference recorded during the scene build phase
-/// (M1.0.6 E4). The target is kept as a NAME (not yet resolved): a forward
+/// An unresolved entity→entity reference recorded during the scene build phase.
+/// The target is kept as a NAME (not yet resolved): a forward
 /// reference may name an entity declared later, so `name → uuid` resolution waits
 /// until `name_to_uuid_idx` is complete (the two-phase crossref pass). The source
 /// entity's `uuid` ordinal is already known (its identity was interned before its
@@ -323,14 +327,14 @@ const Builder = struct {
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     uuids: std.ArrayListUnmanaged([16]u8) = .empty,
 
-    // Cross-references (M1.0.6 E4): collected only for a scene cook
+    // Cross-references: collected only for a scene cook
     // (`collect_crossrefs`), resolved name→uuid after all entities are built.
     // A prefab cook leaves `collect_crossrefs` false — its Entity slots stay
     // `dead` and emit no cross-ref entry.
     collect_crossrefs: bool = false,
     pendings: std.ArrayListUnmanaged(CrossRefPending) = .empty,
 
-    // Active extensions (M1.0.6 E5, scene cook): per-entity `extensions:` clauses
+    // Active extensions: per-entity `extensions:` clauses
     // → Entity Extensions Table + a deduplicated Prefab ID Table (extension names
     // as `strings` indices). `prefab_id_map` dedups a name's `strings` index → its
     // Prefab ID Table slot.
@@ -370,8 +374,6 @@ const Builder = struct {
         return self.arena.allocator();
     }
 
-    /// Pass A: register every `component`/`resource` declaration into the
-    /// registry via the shared `interp.compileTypeDecl` path.
     /// After every declaration is registered, resolve the `@requires` closures
     /// ONCE. Called at the END of the pass and not per declaration, because a
     /// declaration may name a component registered later — Etch admits forward
@@ -399,7 +401,7 @@ const Builder = struct {
                 .component_decl => {
                     const decl = self.ast.component_decls.items[datas[i]];
                     // The cook resolves the mode through the SAME resolver the
-                    // interpreter uses (`interp.storageModeOf`). Its registry is
+                    // interpreter uses (`types.storageModeOf`). Its registry is
                     // a throwaway used for layout and size, and the on-disk
                     // format carries no mode (`engine-scene-serialization.md`
                     // §4) — but two registries built from one declaration that
@@ -454,7 +456,7 @@ const Builder = struct {
 
     /// Locate the single `prefab` construct, erroring if there are zero or many,
     /// or if a `scene` construct is present (a `.prefab.etch` holds exactly one
-    /// `prefab` and no `scene`). The M1.0.6 E2 twin of `findScene`.
+    /// `prefab` and no `scene`). The twin of `findScene` above.
     fn findPrefab(self: *Builder, diag_out: ?*[]const u8) CookError!ast_mod.PrefabDecl {
         const kinds = self.ast.items.items(.kind);
         const datas = self.ast.items.items(.data);
@@ -467,7 +469,7 @@ const Builder = struct {
                     if (found != null) return fail(diag_out, error.MultiplePrefabs, "more than one prefab construct in the source");
                     found = self.ast.prefab_decls.items[datas[i]];
                 },
-                // M1.1.15.2 G1 — `service_decl` reaches this `else` and that is
+                // `service_decl` reaches this `else` and that is
                 // the decision, not an oversight: a `service` exists only in a
                 // `.d.etch` (`etch-grammar.md` §20.4), which is never a scene or
                 // prefab source. The switch is `else`-terminated, so the
@@ -482,7 +484,7 @@ const Builder = struct {
     /// Build the full neutral model from the resolved scene. Direct entities cook
     /// from their component instances; `instance of "P"` children are flattened —
     /// the prefab's components are inherited from `P.prefab.bin` (via the resolver)
-    /// and the instance's overrides applied (M1.0.6 E3).
+    /// and the instance's overrides applied.
     fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
         // Scene cook collects entity→entity cross-references (an `Entity` field's
         // slot is left `dead` and a pending reference recorded); a prefab cook does
@@ -512,7 +514,7 @@ const Builder = struct {
                 },
             };
             try self.recordExtensions(eb.uuid_idx, ext_start, ext_len);
-            // Additive-conflict gate (§30.5, M1.1.1-HF4): a FATAL cook error unless
+            // Additive-conflict gate (§30.5): a FATAL cook error unless
             // the entity's {base components} ∪ {active extensions' components} is
             // conflict-free — three rejected forms: (a) two extensions declare the
             // same component, (b) an extension declares a component already carried
@@ -549,7 +551,7 @@ const Builder = struct {
         };
     }
 
-    /// Record an entity's `extensions:` clause (M1.0.6 E5) into the Entity
+    /// Record an entity's `extensions:` clause into the Entity
     /// Extensions Table: intern each extension name (by name, D-B) into the model
     /// strings + the deduplicated Prefab ID Table, and append an `ExtModelEntry`
     /// keyed by the entity's uuid ordinal. No-op for an empty/absent clause.
@@ -564,7 +566,7 @@ const Builder = struct {
         try self.ext_entries.append(self.gpa, .{ .uuid = uuid_idx, .prefab_ids = ids });
     }
 
-    /// Additive-conflict gate (§30.5, M1.1.1-HF4) — a FATAL cook error unless the
+    /// Additive-conflict gate (§30.5) — a FATAL cook error unless the
     /// set {entity base components} ∪ {each active extension's components} is
     /// conflict-free. The `extends` model is strictly additive; three forms are
     /// rejected (never resolved by list order), each a fatal `E1797
@@ -665,11 +667,13 @@ const Builder = struct {
         return gop.value_ptr.*;
     }
 
-    /// Phase 2 of the crossref pass: resolve every pending `target_name` against
+    /// Second half of the two-phase crossref pass: resolve every pending
+    /// `target_name` against
     /// the now-complete `name_to_uuid_idx` (a reference can name an entity declared
     /// later in the scene), producing the model's `CrossRef` slice. A target that
-    /// is not an entity of the scene → `error.UnresolvedCrossRef` (intra-scene
-    /// only; cross-scene references are a future milestone).
+    /// is not an entity of the scene → `error.UnresolvedCrossRef`. INTRA-SCENE
+    /// ONLY: a cross-scene reference has no representation in the model and no
+    /// resolution step anywhere, so it is refused here rather than deferred.
     fn resolveCrossRefs(self: *Builder, diag_out: ?*[]const u8) CookError![]format.CrossRef {
         const out = try self.a().alloc(format.CrossRef, self.pendings.items.len);
         for (self.pendings.items, 0..) |p, i| {
@@ -702,8 +706,8 @@ const Builder = struct {
         });
     }
 
-    /// Build the neutral model from a `prefab` construct (the M1.0.6 E2 twin of
-    /// `build`). Standalone prefabs cook their entities directly; an `of` variant
+    /// Build the neutral model from a `prefab` construct — the twin of `build`.
+    /// Standalone prefabs cook their entities directly; an `of` variant
     /// inherits the base prefab's flattened components (read from its cooked
     /// `.prefab.bin` via the accessor) then applies per-entity overrides. A prefab
     /// body is `{ entity_decl }` only — no `resources`/`instance` (§15 l.1624).
@@ -756,7 +760,7 @@ const Builder = struct {
         };
     }
 
-    /// Cook an `extends` prefab's hooks (M1.0.6 E5): validate `requires` against
+    /// Cook an `extends` prefab's hooks: validate `requires` against
     /// the base `X` (each required component must be present in `X.prefab.bin`),
     /// then render `on_attach`/`on_detach` to canonical Etch **text** (interned
     /// into the model strings; `null` if the hook is absent). Returns a one-element
@@ -772,7 +776,7 @@ const Builder = struct {
     }
 
     /// Render a hook statement-run to canonical Etch text and intern it into the
-    /// model strings, returning its index. The loader (E6) re-parses this text.
+    /// model strings, returning its index. The loader re-parses this text.
     fn renderHook(self: *Builder, body_start: u32, body_len: u32, diag_out: ?*[]const u8) CookError!u32 {
         const text = descriptor.renderStmtRunAlloc(self.gpa, self.ast, body_start, body_len) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1002,7 +1006,7 @@ const Builder = struct {
     /// single entity's components (from `P.prefab.bin` via the resolver), then
     /// apply the instance body's overrides in declaration order — both forms
     /// (`Comp { field: value }` field-merge and `Comp.field = value` per-field) and
-    /// added components. M1.0.6 instantiates only single-entity prefabs
+    /// added components. The cook instantiates only single-entity prefabs
     /// (`MultiEntityInstanceUnsupported` otherwise). The instance supplies the
     /// entity's name + uuid (the prefab's template uuid is discarded); instances
     /// are roots (the grammar's `instance_decl` has no `parent:`).
@@ -1130,8 +1134,11 @@ const Builder = struct {
         bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch return fail(diag_out, error.TypeMismatch, "field value type does not match the field kind");
     }
 
-    /// Group built entities by `ComponentSignature` (sorted ids) and transpose
-    /// each archetype's per-entity blobs into flat N-element SoA columns.
+    /// Group built entities by their FULL declared component set (sorted ids)
+    /// and transpose each group's per-entity blobs into flat N-element SoA
+    /// columns. The key is NOT an archetype signature once a component is
+    /// `.sparse`: an archetype signature is table-only, so a block's id list can
+    /// name an id that reaches no archetype at load.
     fn groupArchetypes(self: *Builder, entities: []const EntityBuild) CookError![]format.ArchetypeBlock {
         // Map signatureBytes → index into the building archetype list.
         var sig_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
@@ -1449,7 +1456,7 @@ fn decodeColumn(reg: *const Registry, block: format.ArchetypeBlock, id: Componen
     return bridge_mod.readBytesAsValue(fd.kind, fb);
 }
 
-test "cook builds the neutral model from a scene (E1)" {
+test "cook builds the neutral model from a scene" {
     const gpa = std.testing.allocator;
     var cooked = try cook(gpa, e1_fixture, null);
     defer cooked.deinit(gpa);

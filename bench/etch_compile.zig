@@ -1,15 +1,12 @@
-//! S5 compile-time bench.
+//! Etch compile-time bench.
 //!
 //! Reports three wall-clock metrics over the synthetic 100-file corpus at
-//! `bench/fixtures/synth_100/scripts/` (cf. `briefs/S5-etch-codegen-zig.md`
-//! Acceptance criteria / Benchmarks):
+//! `bench/fixtures/synth_100/scripts/`:
 //!
 //!   (a) Codegen only — the consolidated cook over the 100 inputs into
 //!       one `.zig` file, run IN-PROCESS through the
-//!       `weld_etch.codegen_zig.consolidate` library (M0.8 E3-D,
-//!       D-S5-etchcook-inproc — formerly an `etch_cook` child process;
-//!       the first in-process measurement is a new protocol baseline,
-//!       the child-spawn overhead is gone). Excludes the Zig compile.
+//!       `weld_etch.codegen_zig.consolidate` library, with no child
+//!       process on the timed path. Excludes the Zig compile.
 //!   (b) Cold `zig build` — `.zig-cache` wiped before each iteration,
 //!       then a `zig build-exe` stub that imports the cooked module is
 //!       compiled. Measures the Zig compile only (the cook output is
@@ -19,7 +16,7 @@
 //!       re-cook + re-compile.
 //!
 //! N=10 iterations per metric, median + stddev reported. The bench
-//! writes a Markdown report to `bench/results/S5-codegen-zig.md`. A
+//! writes a Markdown report to the path `report_path` names. A
 //! `--smoke` mode runs exactly one iteration per metric for CI sanity.
 //!
 //! Path layout assumed at runtime (relative to the working directory the
@@ -33,7 +30,7 @@
 //!     every program in `cooked.zig`
 //!   - `zig-out/etch-bench/.zig-cache-bench` — dedicated Zig cache wiped
 //!     between metric (b) iterations
-//!   - `bench/results/S5-codegen-zig.md` — the report file
+//!   - the report file `report_path` names
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -194,11 +191,10 @@ fn lexLess(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
-/// Run the consolidated cook IN-PROCESS over the corpus (M0.8 E3-D,
-/// D-S5-etchcook-inproc): read the sources, cook through the
-/// `consolidate` library, write `cooked.zig` plus the `.stats` sidecar —
-/// the exact work the former `etch_cook` child process did, minus the
-/// process spawn/exit overhead. The timed region covers the full cycle
+/// Run the consolidated cook IN-PROCESS over the corpus: read the sources,
+/// cook through the `consolidate` library, write `cooked.zig` plus the
+/// `.stats` sidecar — the work the `etch_cook` CLI does, minus the process
+/// spawn/exit overhead. The timed region covers the full cycle
 /// (reads + cook + writes), matching metric (a)'s definition.
 fn runCookInProcess(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, paths: []const []const u8) !u64 {
     const t0 = std.Io.Clock.now(.awake, io);

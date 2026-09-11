@@ -22,9 +22,9 @@
 //!     the two body-local surface anchors, the softness selection, and the warm-start
 //!     SEEDING).
 //!
-//! Import discipline (brief): `foundation`, `weld_forge` (handle types),
+//! Import discipline: `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
-//! since M1.1.8 `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
+//! `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
 //! so it needs the awake predicate; `rigid/island_manager.zig` already depends on
 //! the same file. NEVER `broadphase.zig`: candidate pairs are consumed as data
 //! (packed `u64` keys), never re-derived.
@@ -88,7 +88,7 @@ pub const TangentBasis = struct {
 /// |component| of `n` (fixed tie-breaks x ≥ y ≥ z) to pick a seed world axis
 /// guaranteed non-parallel to `n`, Gram-Schmidt it against `n` for `t1`, then
 /// `t2 = n × t1`. Continuous while `n` moves continuously, but DISCONTINUOUS
-/// across a dominant-axis flip — the warm-start tangent reprojection (E3)
+/// across a dominant-axis flip — the warm-start tangent reprojection
 /// compensates, so basis stability is never assumed.
 pub fn tangentBasis(n: Vec3r) TangentBasis {
     const a = n.toArray();
@@ -258,7 +258,7 @@ pub const ConstraintPoint = struct {
     /// Tangent effective mass on axis 2 = 1 / k_t2.
     tangent2_mass: Real,
     /// Pre-solve relative normal velocity `v_n⁻` captured in `prepare` (for the
-    /// restitution bias in E4). Negative when the bodies are approaching.
+    /// restitution bias). Negative when the bodies are approaching.
     rel_normal_velocity: Real,
     /// Surface penetration along the normal (≥ 0). Consumed ONCE, here at
     /// `prepare`, to derive the two surface anchors below; it is never re-read from
@@ -275,12 +275,12 @@ pub const ConstraintPoint = struct {
     /// prepare time; their world separation is what the position pass drives to
     /// `−penetration_slop`.
     local_anchor_b: Vec3r,
-    /// Per-contact feature id — the warm-start matching key (E3). Frame-stable
+    /// Per-contact feature id — the warm-start matching key. Frame-stable
     /// via `BodyManager.collidePair`'s BodyId order.
     feature_id: u32,
-    /// Accumulated normal impulse (warm-started in E3, clamped ≥ 0 in E4).
+    /// Accumulated normal impulse (warm-started, clamped ≥ 0).
     normal_impulse: Real = 0,
-    /// Accumulated tangent impulses on the `(t1, t2)` basis (E5).
+    /// Accumulated tangent impulses on the `(t1, t2)` basis.
     tangent1_impulse: Real = 0,
     tangent2_impulse: Real = 0,
     /// The per-tick normal-impulse sum the restitution predicate's second clause reads
@@ -316,20 +316,20 @@ pub const ContactConstraint = struct {
     /// Canonical body B (the max BodyId of the pair).
     body_b: BodyId,
     /// Packed canonical pair key `min(BodyId)<<32 | max` — the deterministic sort
-    /// key (ascending iteration order; M1.1.14).
+    /// key (ascending iteration order; determinism).
     pair_key: u64,
     /// The SUB-SHAPE this constraint came from — a mesh's triangle index, and `0` when
     /// neither body carries sub-shapes (§1.11.16).
     ///
-    /// **The second term of the warm-start cache key, which held `0` from M1.1.6 until
-    /// M1.1.11.1.** A mesh pair produces one constraint per contacting triangle, so without it
+    /// **The second term of the warm-start cache key, which held `0` until the mesh
+    /// landed.** A mesh pair produces one constraint per contacting triangle, so without it
     /// every triangle of one body would warm-start from whichever neighbour happened to share a
     /// `feature_id` — and `feature_id` is a LOCAL identity, unique within a manifold and not
     /// across them. Filling it makes the reheating per triangle and makes it survive a
     /// re-traversal that offers the candidates in a different order.
     ///
     /// ONE term suffices while at most one side of a pair carries sub-shapes, which is exactly
-    /// the case today: mesh↔mesh is an asserted precondition. Compounds (M1.1.20) put sub-shapes
+    /// the case today: mesh↔mesh is an asserted precondition. Compounds put sub-shapes
     /// on both sides and are the milestone that owes the key its second axis; the frozen spec
     /// key has one.
     subshape_id: u32 = 0,
@@ -352,7 +352,7 @@ pub const ContactConstraint = struct {
     /// refreshed inside the loop.
     ///
     /// The constraint caches NO copy of the bodies' LOCAL inverse inertia. Two such
-    /// copies existed from M1.1.7 to M1.1.13.1, for the NGS position pass, which
+    /// copies existed for the NGS position pass, which
     /// rebuilt a world tensor at the poses it had just moved; that pass is gone and the
     /// copies went with it at the closing review — 96 bytes of dead state per
     /// constraint, on memory-bound sweeps. `prepare` reads `MotionProperties` directly
@@ -431,7 +431,7 @@ fn prepare(
     // True-zero skip: both bodies have infinite mass (static/kinematic ⇒ inv_mass
     // and inv_inertia both zero), so the total inverse mass along the normal is
     // exactly zero and there is nothing to solve. A true-zero guard, not a
-    // geometric epsilon (M1.1.4 threshold discipline).
+    // geometric epsilon (the threshold discipline).
     if (mp_a.inv_mass + mp_b.inv_mass == 0) return null;
 
     const pos_a = bm.position(a).?;
@@ -551,15 +551,15 @@ fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
 }
 
 /// Build the contact constraints for `pairs` (canonical packed keys
-/// `min(BodyId)<<32 | max`, the M1.1.1 `computePairs` contract: sorted, and deduped so
+/// `min(BodyId)<<32 | max`, the `computePairs` contract: sorted, and deduped so
 /// that each unordered PAIR appears once) into `out`. `out` is cleared first. For each
 /// pair the narrowphase runs via `bm.collidePairEach` (canonical BodyId order →
 /// frame-stable feature ids), and EVERY manifold it offers becomes one
 /// `ContactConstraint` with per-point data precomputed by `prepare`.
 ///
 /// One manifold is one constraint, but one PAIR is not: a pair of sub-shape-free
-/// convexes yields at most one, while a mesh pair yields one PER CONTACTING TRIANGLE
-/// (M1.1.11.1). That is why the array's order needs a composite key and why
+/// convexes yields at most one, while a mesh pair yields one PER CONTACTING
+/// TRIANGLE. That is why the array's order needs a composite key and why
 /// `pair_key` alone stopped being unique across constraints — see
 /// `lessByConstraintKey`.
 ///
@@ -588,7 +588,7 @@ fn seedWarmStart(c: *ContactConstraint, cache: *ContactCache) void {
 /// deferred pair, including that list's allocation; what the skip removes is
 /// the narrowphase and the `prepare` of every one of those pairs, which is
 /// the whole of the saving. Should that per-tick buffer ever matter, it moves
-/// to the orchestrator's scratch when `step()` lands (M1.1.15) — it is not
+/// to the orchestrator's scratch when `step()` lands — it is not
 /// reusable from here, `build` owning no state.
 pub fn build(
     gpa: std.mem.Allocator,
@@ -640,8 +640,8 @@ pub fn build(
     // pair — never per constraint. A mesh pair contributes one constraint per
     // contacting triangle, and the sub-shape index is the term that separates them;
     // an earlier version of this comment inferred per-constraint uniqueness from the
-    // pair-level dedup, which has been false since M1.1.11. No hash containers
-    // anywhere on the path (M1.1.14).
+    // pair-level dedup, which the half-space made false. No hash containers
+    // anywhere on the path.
     std.mem.sort(ContactConstraint, out.items, {}, lessByConstraintKey);
 }
 
@@ -670,7 +670,7 @@ fn emitPair(
     // Pairs arrive canonical; the solver asserts the order, never re-derives it.
     std.debug.assert(a <= b);
 
-    // SEVERAL constraints per pair since M1.1.11.1: a mesh↔convex pair produces one manifold
+    // SEVERAL constraints per pair: a mesh↔convex pair produces one manifold
     // per contacting triangle, and that is the only shape change the mesh imposes on this
     // solver (§1.11.17). A pair with no sub-shapes still produces at most one, so the
     // convex↔convex path is unchanged in everything but the shape of the call.
@@ -732,13 +732,14 @@ const ConstraintCollector = struct {
 };
 
 /// Total order over constraints — `(pair_key, subshape_id)`, and the second term is load-bearing
-/// (M1.1.11.1 closure, finding F4).
+/// order.
 ///
-/// NAMED for what it orders, not for its first term. It was `lessByPairKey` until the M1.1.13.1
-/// closing review, which is a name that survives only while a pair means a constraint — the very
-/// equivalence M1.1.11.1 broke. `lessByCompositeKey` would have been the symmetric name, but
-/// `rigid/root.zig` already re-exports the ISLAND permutation's comparator under it, and two
-/// comparators of different argument types cannot share one name in the facade.
+/// NAMED for what it orders and NOT for its first term. A name carrying `pairKey` alone
+/// survives only while a pair means a constraint — the very equivalence the mesh broke — so it
+/// would read as a total order on `pair_key` and invite dropping the second term.
+/// `lessByCompositeKey` would have been the symmetric name, but `rigid/root.zig` already
+/// re-exports the ISLAND permutation's comparator under it, and two comparators of different
+/// argument types cannot share one name in the facade.
 ///
 /// `std.mem.sort` is `std.sort.block`, which is UNSTABLE. While a pair produced at most one
 /// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh
@@ -747,7 +748,7 @@ const ConstraintCollector = struct {
 /// behaviour. The contact solve is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
 /// determinism path, not a cosmetic one.
 ///
-/// M1.1.8 stated the invariant this restores, in these words: the constraints are ordered by an
+/// The invariant this restores was stated in these words: the constraints are ordered by an
 /// explicit composite key "so contiguity never rests on sort stability". Several constraints per
 /// pair had quietly annulled it, in the island ordering as well as here.
 ///

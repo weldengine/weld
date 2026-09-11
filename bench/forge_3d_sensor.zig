@@ -1,4 +1,4 @@
-//! forge_3d sensor pass throughput bench (M1.1.13).
+//! forge_3d sensor pass throughput bench.
 //!
 //! Three rows, and the first is the one the model owes a number for. §1.13.9 states the price
 //! explicitly — **sleep does not economise this pass** — so a fully resting scene pays it every
@@ -24,8 +24,7 @@
 //! that exercises a path without testing it, and the count is what makes it visible.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered: this is the first measurement of
-//! this path, and registering a bound before measuring its baseline is the failure mode recorded at
-//! M1.1.8.
+//! this path, and a bound registered before its baseline is invented rather than measured.
 //!
 //! ReleaseFast for the absolute ns. Writes `bench/results/forge_3d_sensor.md`.
 
@@ -160,8 +159,8 @@ fn buildScene(gpa: std.mem.Allocator, n_triggers: u32) !Scene {
             .is_trigger = true,
         });
         entity_index += 1;
-        // The layer is DERIVED, never a literal: the trigger lands in its class by the rule
-        // production will use (M1.1.13 gate B).
+        // The layer is DERIVED, never a literal: the trigger lands in its class by the same
+        // rule production uses.
         _ = try scene.bp.insert(
             gpa,
             BodyManager.broadLayerFor(true, .static),

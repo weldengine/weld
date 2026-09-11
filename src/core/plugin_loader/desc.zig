@@ -1,24 +1,24 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! M0.2 / E6 — fundamental C types for the Tier 3 plugin API and
+//! Fundamental C types for the Tier 3 plugin API and
 //! the plugin descriptor.
 //!
 //! Layout consistent with `engine-c-api.md` §2 (fundamental types) + §3
 //! (plugin lifecycle). The types are `extern` or aliases of C
 //! integers — ABI-compatible with plugins compiled in C / C++ /
 //! Rust / etc. via the `include/weld_api.h` header (generated in
-//! Phase 3, brief § Out-of-scope).
+//! unimplemented).
 //!
 //! All declarations are **frozen final signatures** in the sense
-//! of the C0.5 partial freeze (cf. brief § Scope). No runtime
+//! of the C0.5 partial freeze. No runtime
 //! wiring — `Loader` only loads the `.so` / `.dll`, reads the
 //! descriptor, and logs the declared capabilities. Runtime
 //! enforcement of capabilities (filesystem, network, threading)
-//! is Phase 3 (cf. brief § Out-of-scope).
+//! is unimplemented.
 
 const std = @import("std");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9). This semver
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5. This semver
 /// triple IS the PluginLoader's `*_PROTOCOL_VERSION` axis — the C0.5
 /// versioning rule reuses it rather than minting a separate constant
 /// (MAJOR = binary break, MINOR = additive, PATCH = fix).
@@ -147,19 +147,19 @@ pub const WeldResult = enum(c_int) {
     WELD_ERR_SERVICE_UNAVAILABLE = 9,
     /// Incompatible API version.
     WELD_ERR_VERSION_MISMATCH = 10,
-    /// Feature declared but not yet wired — M0.2 returns this
+    /// Feature declared but not yet wired — the loader returns this
     /// code for 100% of the callbacks of the 7 sub-APIs
-    /// (cf. brief § Out-of-scope, Phase 3 wiring).
+    /// (the wiring is unimplemented).
     WELD_ERR_NOT_IMPLEMENTED = 11,
 };
 
 // -- Plugin capabilities (cf. engine-c-api.md §3.2) -------------------
 
-/// Capabilities declared by the plugin at load time. M0.2 READS
+/// Capabilities declared by the plugin at load time. The loader READS
 /// these declarations and logs them; NO runtime check is
 /// performed — enforcement (refusing `component_get` on a
 /// component not declared in `reads_components`, etc.) is
-/// Phase 3 (brief § Out-of-scope).
+/// unimplemented.
 pub const WeldPluginCaps = extern struct {
     // ECS
     reads_components: ?[*]const WeldStr = null,
@@ -187,7 +187,7 @@ pub const WeldPluginCaps = extern struct {
 // -- Plugin lifecycle callbacks (cf. engine-c-api.md §3.3) ------------
 
 /// Plugin lifecycle callbacks. All optional (`null` =
-/// ignored). The M0.2 stub plugin leaves all callbacks `null`.
+/// ignored). The stub plugin leaves all callbacks `null`.
 ///
 /// The callbacks receive `*const anyopaque` rather than the
 /// concrete `*const WeldAPI` (defined in `api.zig`) — it is the

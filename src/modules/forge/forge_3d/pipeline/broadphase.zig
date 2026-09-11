@@ -1,6 +1,6 @@
 //! `forge_3d/pipeline/broadphase.zig` — the shared broadphase: a dynamic
 //! multi-layer AABB tree (BVH) producing the candidate pairs the narrowphase
-//! (M1.1.2–4) will consume.
+//! will consume.
 //!
 //! `Bvh(T)` is an incremental dynamic AABB tree in the Box2D `b2DynamicTree`
 //! tradition — SAH best-cost-child descent on insertion, rotation-based
@@ -8,21 +8,21 @@
 //! against Weld conventions, not ported. It is the proven shape for the plan's
 //! acceptance (incremental insert/remove/update with O(log n) queries); Jolt's
 //! 4-wide batch-rebuilt tree targets massive parallel rebuilds and is a poor
-//! fit here (brief Notes).
+//! fit here.
 //!
-//! **Dependency discipline (brief Notes).** This file imports `foundation`
+//! **Dependency discipline.** This file imports `foundation`
 //! (math) only — never `weld_forge`, never `body*.zig`, never `config.zig`.
 //! The scalar arrives as the comptime parameter `T`; `forge_3d` instantiates it
-//! at `config.Real` (E4). `user_data` is an opaque `u32` to the tree; only the
+//! at `config.Real`. `user_data` is an opaque `u32` to the tree; only the
 //! forge_3d side knows it is a packed `BodyId`.
 //!
-//! **Determinism by construction (anticipates M1.1.14).** No hash containers
+//! **Determinism by construction.** No hash containers
 //! anywhere: an index-based node pool with a LIFO free-list (same philosophy as
 //! `slot_alloc.zig`, but internal and without generation packing), and a tree
 //! shape that is a pure function of the op sequence. SAH ties resolve to the
 //! second child, balance ties to the shorter-rotation branch — both fixed.
 //!
-//! **Two collector contracts, three entries (M1.1.9, M1.1.10).** `queryAabb` asks
+//! **Two collector contracts, three entries.** `queryAabb` asks
 //! its collector for `add(user_data)` and nothing else. `queryCast` asks for `add`
 //! plus TWO more, both required of every collector: `maxDistance()`, which it
 //! re-reads before every descent and prunes on — turning the traversal into
@@ -98,8 +98,8 @@ pub fn BroadphaseConfig(comptime T: type) type {
         /// Fat-AABB margin in world units (meters). Each leaf's stored AABB is
         /// enlarged by this on every axis so a proxy that moves less than the
         /// margin stays inside its fat box and does not trigger a re-insert
-        /// (see `Bvh.update`, E2). Velocity-based expansion is out of scope
-        /// (lands with integration, M1.1.5).
+        /// (see `Bvh.update`). Velocity-based expansion is out of scope
+        /// (it belongs with integration).
         margin: T = 0.1,
     };
 }
@@ -171,7 +171,7 @@ pub fn Bvh(comptime T: type) type {
         /// indexed by proxy id, so it must cover this length, and the log itself can hold
         /// at most one entry per marked id. ONE bound serves both. A read-only datum that
         /// existed from the first day and had simply never been reachable — the same
-        /// class as `BodyManager.entity()` at M1.1.10 and `proxyAabb` at M1.1.14.
+        /// class as `BodyManager.entity()` and `proxyAabb`.
         pub fn poolLen(self: *const Self) u32 {
             return @intCast(self.nodes.items.len);
         }
@@ -394,7 +394,7 @@ pub fn Bvh(comptime T: type) type {
         ///     infinity are NaN, and the repair is unconditional.
         ///
         /// So the traversal's two observables — the visited count and the collected
-        /// set — are identical, which the M1.1.9 traversal suite asserts against
+        /// set — are identical, which the traversal suite asserts against
         /// counts measured before the refactor.
         ///
         /// `collector` is a pointer to any value exposing the `queryAabb`
@@ -507,7 +507,7 @@ pub fn Bvh(comptime T: type) type {
         }
 
         /// Return a slot to the LIFO free-list (pushed at the head, so an
-        /// identical op sequence reuses indices identically — M1.1.14).
+        /// identical op sequence reuses indices identically).
         fn freeNode(self: *Self, index: u32) void {
             self.nodes.items[index].parent = self.free_list;
             self.nodes.items[index].height = -1;
@@ -822,11 +822,11 @@ const null_slot: u32 = std.math.maxInt(u32);
 /// candidate pairs. Indexed by `@intFromEnum(BroadphaseLayer)`
 /// (static=0, dynamic=1, debris=2, trigger=3). Allowed: dynamic×dynamic,
 /// dynamic×static, dynamic×debris, debris×static.
-/// Overridable `CollisionConfig` wiring is a later milestone (out of scope);
-/// this `const` is the Phase-1 default.
+/// Overridable `CollisionConfig` wiring is out of scope here;
+/// this `const` is the default.
 ///
 /// **The `trigger` ROW AND COLUMN are `false` in full, and this REVISES a decision
-/// taken at M1.1.1**, which set `dynamic × trigger` to `true` and wrote a test
+/// REVERSED**: the earlier one set `dynamic × trigger` to `true` and wrote a test
 /// asserting it positively. That choice was reasonable then — nothing consumed the
 /// class, so the permissive cell cost nothing — and it is wrong now that the class
 /// has a meaning: a trigger detects without responding
@@ -851,7 +851,7 @@ pub const default_layer_pairs: [layer_count][layer_count]bool = .{
 /// Multi-layer broadphase: one `Bvh(T)` per `BroadphaseLayer`, per-layer
 /// moved-proxy tracking, and `computePairs` producing the deterministic,
 /// deduplicated candidate-pair list the narrowphase consumes. No hash
-/// containers anywhere (determinism by construction, M1.1.14).
+/// containers anywhere (determinism by construction).
 pub fn Broadphase(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -876,7 +876,7 @@ pub fn Broadphase(comptime T: type) type {
         /// structure-local id.
         pub const Proxy = struct {
             layer: BroadphaseLayer,
-            /// Added at M1.1.11. Every consumer switches on it exhaustively, so the
+            /// Every consumer switches on it exhaustively, so the
             /// third structure a later shape category might need is a compile error at
             /// each site rather than a silent mis-index into the wrong pool.
             kind: ProxyKind = .tree,
@@ -907,7 +907,7 @@ pub fn Broadphase(comptime T: type) type {
         /// free-list hands the same index back to a new shape and moves nothing — which is
         /// exactly what `Bvh` does one level up with `freeNode` / `allocateNodeAssumeCapacity`
         /// in this same file. Without the free-list the list grew monotonically with every
-        /// plane ever created, and its visit cost with it (M1.1.11/E7-J3); with it, the
+        /// plane ever created, and its visit cost with it; with it, the
         /// bound becomes the live PEAK, which is stated on the `unbounded` field.
         ///
         /// A dead slot links to the next free one through `user_data`, which is meaningless
@@ -948,7 +948,7 @@ pub fn Broadphase(comptime T: type) type {
         /// Per-layer log of proxy ids touched since the last `computePairs`
         /// (inserted, or re-inserted by `update`). Consumed (cleared) by `computePairs`.
         ///
-        /// **AT MOST ONE ENTRY PER PROXY ID PER CONSUMPTION EPOCH** (M1.1.15.1), enforced
+        /// **AT MOST ONE ENTRY PER PROXY ID PER CONSUMPTION EPOCH**, enforced
         /// by `moved_mark`. Before that invariant the log grew with the number of MOVES
         /// and its size was bounded by nothing: N moves of one proxy between two
         /// `computePairs` calls produced N entries, so no capacity could be reserved in
@@ -979,7 +979,7 @@ pub fn Broadphase(comptime T: type) type {
         moved_mark: [layer_count]std.ArrayListUnmanaged(bool),
         /// Per-layer flat list of UNBOUNDED shapes, outside the trees (§1.11.15). No hashed
         /// container, here as everywhere on this path (determinism by construction,
-        /// M1.1.14).
+        /// determinism).
         ///
         /// **Iteration follows the slot INDEX, which is not insertion order.** The contract
         /// §1.11.15 states is exactly three clauses: a slot's index never moves while a
@@ -988,7 +988,7 @@ pub fn Broadphase(comptime T: type) type {
         /// slot. That is the WANTED behaviour, not a tolerated side effect of the
         /// free-list.
         ///
-        /// It suffices because what M1.1.14 requires is not insertion order but that the
+        /// It suffices because what determinism requires is not insertion order but that the
         /// iteration order be a DETERMINISTIC FUNCTION OF THE OPERATION SEQUENCE — which
         /// LIFO recycling satisfies exactly, the free-list head being itself a function of
         /// that sequence. And no observable result depends on the order in the first place:
@@ -1153,7 +1153,7 @@ pub fn Broadphase(comptime T: type) type {
             const id = blk: {
                 // LIFO reuse first (the `Bvh.allocateNodeAssumeCapacity` shape): an
                 // identical op sequence therefore reuses indices identically, which is what
-                // keeps the whole path a pure function of that sequence (M1.1.14).
+                // keeps the whole path a pure function of that sequence.
                 if (head != null_slot) {
                     // `logged` is CARRIED ACROSS the reuse and not reset. A retired slot
                     // may still own an unconsumed log entry, and that entry resolves
@@ -1213,7 +1213,7 @@ pub fn Broadphase(comptime T: type) type {
         /// actually re-inserted it (the fat AABB changed); an in-margin nudge is
         /// a no-op with no pair consequence (hysteresis).
         ///
-        /// **INFALLIBLE, and allocation-free (M1.1.15.1).** This is what makes the three
+        /// **INFALLIBLE, and allocation-free.** This is what makes the three
         /// pose setters of `engine-tier-interfaces.md` §1 able to return `void` as the
         /// interface declares them: every one of them refreshes a proxy, so an allocating
         /// `update` forced an error union all the way up to a frozen surface that has none.
@@ -1244,15 +1244,15 @@ pub fn Broadphase(comptime T: type) type {
 
         /// The stored FAT AABB of a bounded proxy; `null` when `proxy` is unbounded.
         ///
-        /// M1.1.14, and READ-ONLY BY DESIGN. Its consumer is the retention rule of
+        /// determinism, and READ-ONLY BY DESIGN. Its consumer is the retention rule of
         /// §1.7 step 2 — "removal on fat-AABB separation only" — which lives in
         /// whoever owns the retained candidate set: the acceptance harness today,
-        /// `PhysicsWorld` at M1.1.15. The broadphase deliberately does NOT own that
+        /// `PhysicsWorld`. The broadphase deliberately does NOT own that
         /// rule: pair retention IS the wake graph (§1.8.7), so putting the policy
         /// here would move an islands-and-sleep behaviour into the acceleration
         /// structure. What is added is the DATUM the policy needs, which `Bvh`
         /// already exposed and the multi-layer aggregate did not forward — the same
-        /// class as `BodyManager.entity()` at M1.1.10, a column that existed from the
+        /// class as `BodyManager.entity()`, a column that existed from the
         /// first day and had simply never been reachable.
         ///
         /// The `null` is not a failure: an unbounded proxy has no box at all, and a
@@ -1294,7 +1294,7 @@ pub fn Broadphase(comptime T: type) type {
         }
 
         /// Offer every live unbounded shape the `query` box MEETS to `collector`
-        /// (M1.1.11, §1.11.1 point 3 as amended). Shared by the three query entries so
+        /// (§1.11.1 point 3 as amended). Shared by the three query entries so
         /// they cannot drift in which structures they visit.
         ///
         /// The returned visited-node count is deliberately NOT incremented by these
@@ -1337,12 +1337,13 @@ pub fn Broadphase(comptime T: type) type {
         /// for the same reason: nothing here has a second body, so no row of the pair matrix
         /// applies and every structure is visited.
         ///
-        /// **It was `queryHalfSpaceTrees` and visited only the trees**, named for its omission
-        /// because the sensor pass declared half-space against half-space out of domain. That
-        /// bound is RETRACTED (§1.13.6): it rested on a partition grouping half-space and mesh
-        /// by BODY TYPE where the question is whether the shape has an INTERIOR. A half-space
-        /// has one, its kernel against another half-space is two lines, and the omission had
-        /// no motive left — so it is the omission that goes, not merely the name.
+        /// **VISITING ONLY THE TREES WOULD BE WRONG, and the unbounded lists are not an
+        /// afterthought.** The bound that would have excused the omission — half-space against
+        /// half-space declared out of domain — is RETRACTED (§1.13.6): it rested on a partition
+        /// grouping half-space and mesh by BODY TYPE where the question is whether the shape
+        /// has an INTERIOR. A half-space has one and its kernel against another half-space is
+        /// two lines, so there is no motive left for the omission and no narrower entry to
+        /// carry it.
         ///
         /// The unbounded walk offers the caller's OWN proxy back when it is itself unbounded;
         /// excluding it is the caller's business, exactly as it is for `queryAabb`.
@@ -1390,7 +1391,7 @@ pub fn Broadphase(comptime T: type) type {
                 if (collector.shouldStop()) break;
                 visited += t.queryCast(ray, extent, collector);
             }
-            // The UNBOUNDED lists, after the trees (M1.1.11). Offered UNCONDITIONALLY —
+            // The UNBOUNDED lists, after the trees. Offered UNCONDITIONALLY —
             // there is no box to run the slab test against, which is the very reason a
             // half-space is not in a tree — so the collector's exact kernel decides, and
             // the bound cannot prune here. `shouldStop()` is still honoured, exactly as it
@@ -1423,7 +1424,7 @@ pub fn Broadphase(comptime T: type) type {
             var sink = PairSink{ .out = out, .gpa = gpa };
 
             // DIRECTION (1) — a moved BOUNDED proxy is crossed with the trees it may pair
-            // with, and (M1.1.11) with their UNBOUNDED LISTS as well. Omitting the second
+            // with, and with their UNBOUNDED LISTS as well. Omitting the second
             // half makes a body created after a plane collide with nothing.
             for (0..layer_count) |li| {
                 for (self.moved[li].items) |proxy| {

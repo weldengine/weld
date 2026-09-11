@@ -1,7 +1,7 @@
 //! Mesh cooker — intermediate → `.mesh.bin` (version 1).
 //!
-//! M0.6 payload is raw f32 vertices + u32 indices (no quantization — that
-//! is a Phase 1 `.mesh.bin` version bump, brief §Out-of-scope). Metadata
+//! The payload is raw f32 vertices + u32 indices. Quantization would be
+//! a `.mesh.bin` version bump. Metadata
 //! section: `vertex_count` u32, `index_count` u32, bounds min/max (6 × f32),
 //! all little-endian.
 

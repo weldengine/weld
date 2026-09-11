@@ -1,15 +1,15 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! GPU Abstraction Layer (GAL) — public entry point of the Render module, Phase 0 / M0.4.
+//! GPU Abstraction Layer (GAL) — public entry point of the Render module.
 //!
 //! Surface inspired by WebGPU (cf. `engine-render.md` §3) with escape hatches
 //! pre-wired day 1 for `TimelineSemaphore`, `BarrierExplicit`,
 //! `DescriptorIndexing` (cf. `escape_hatches.zig`).
 //!
-//! **Comptime backend selection via `BackendChoice`.** Phase 0 exposes
-//! `Null` (headless CI) and `Vulkan` (coming later in M0.4). Phase 2
-//! adds `Metal` + `D3D12`, Phase 3 `WebGPU`. The public surface stays
-//! identical cross-backend — only the concrete type behind `Device` changes.
+//! **Comptime backend selection via `BackendChoice`.** `Null` (headless CI)
+//! and `Vulkan` are implemented; `Metal`, `D3D12` and `WebGPU` are declared and
+//! return `@compileError`. The public surface stays identical cross-backend —
+//! only the concrete type behind `Device` changes.
 //!
 //! Usage pattern:
 //!
@@ -35,14 +35,14 @@ pub const interface = @import("interface.zig");
 pub const barriers = @import("barriers.zig");
 /// Null backend — no-op, used in headless CI and for API discipline.
 pub const null_backend = @import("null/device.zig");
-/// Vulkan backend — Phase 0+ implementation (cf. brief §Scope).
+/// Vulkan backend.
 pub const vulkan_backend = @import("vulkan/device.zig");
-/// Frame-capture helper (texture → PPM readback), M0.5 item 2. Backend-
+/// Frame-capture helper (texture → PPM readback). Backend-
 /// agnostic; each backend `Device` also exposes it as a `captureFrameToPPM`
 /// method (cf. `gal/capture.zig`).
 pub const capture = @import("capture.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen GAL cross-backend contract — the comptime
 /// `interface.required_methods` + `checkBackend`, the opaque handle +
 /// descriptor + `Error` types, and the colorspace/copy/subpass touch-points.
@@ -83,10 +83,9 @@ pub const Error = types.Error;
 /// Convenience re-export: enumeration of optional query-able features.
 pub const Feature = escape_hatches.Feature;
 
-/// Backend choice resolved at compile time. Phase 0 explicitly supports
-/// `null_backend`. `vulkan` comes later in M0.4. The other entries are
-/// declared day 1 to freeze the surface but return `@compileError` until
-/// their Phase 2-3 delivery.
+/// Backend choice resolved at compile time. `null_backend` and `vulkan` are
+/// implemented; the other entries are declared day 1 to freeze the surface
+/// and return `@compileError`.
 pub const BackendChoice = enum {
     null_backend,
     vulkan,
@@ -106,10 +105,9 @@ pub fn Device(comptime choice: BackendChoice) type {
     };
 }
 
-/// Default selection based on `builtin.os.tag`. Phase 0: `null_backend`
-/// since Vulkan is not yet wired in the M0.4 scaffolding. Updated to
-/// `.vulkan` once the Vulkan backend is delivered in the immediate
-/// follow-up of the milestone.
+/// Always `null_backend`, whatever the target. The Vulkan backend is wired
+/// and satisfies the interface (`checkBackend` below), so a consumer that
+/// wants the GPU names `.vulkan` explicitly.
 pub fn defaultBackend() BackendChoice {
     return .null_backend;
 }

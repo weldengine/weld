@@ -1,13 +1,9 @@
 //! `forge_3d/world.zig` — `PhysicsWorld`, the SOLE OWNER of the per-tick cycle
 //! (`engine-physics-solver.md` §1.7).
 //!
-//! Until M1.1.15 the cycle existed only as a set of callable halves plus one
-//! composition of them written inside an acceptance suite
-//! (`tests/solver_test.zig`), and nine call sites across the module named a
-//! `PhysicsWorld` that did not exist. This file is that owner. The composition is
-//! MOVED here, not rewritten: the call sequence, the arguments and the arithmetic
-//! are the ones the eight committed determinism witnesses were taken over, and the
-//! reparenting changes who calls, never what is computed.
+//! The composition is MOVED here, not rewritten: the call sequence, the arguments and
+//! the arithmetic are the ones the eight committed determinism witnesses were taken
+//! over, and the reparenting changes who calls, never what is computed.
 //!
 //! **The normative cycle, in order.** Step numbers are STABLE ANCHORS — §1.8 and
 //! §1.13 refer to them by number — and two of them carry no code:
@@ -20,12 +16,12 @@
 //!        in-tick), so they ARE the tick's accelerations and every substep reads
 //!        them directly. The uniform §2 reset is not here: it runs once at the END
 //!        of step 6, because clearing an accumulator before anything consumes it
-//!        delivers `F/m·0` (deviation B1, M1.1.13.1).
+//!        delivers `F/m·0`.
 //!   (4)  `cache.beginTick` → `build` (narrowphase `collidePair` per candidate,
 //!        `prepare` capturing `v_n⁻` PRE-GRAVITY, the local anchors, the softness
 //!        selection and the warm-start SEEDING, plus the wake fixpoint of §1.8.5)
 //!   (5)  island partition + activation (W2, W3) — never puts anything to sleep
-//!   (5 bis) the composite pre-solve seam (§1.7.3) — EMPTY in Phase 1, by design:
+//!   (5 bis) the composite pre-solve seam (§1.7.3) — EMPTY today, by design:
 //!        no consumer, no call, no line executed. Its first occupant is the
 //!        powered ragdoll. It is an anchor, not a step this file runs.
 //!   (6)  the SUBSTEP LOOP and (7) the restitution pass, both inside
@@ -54,9 +50,9 @@
 //!
 //! **What this file does NOT own.** The ECS publication lives one tier up
 //! (`../sync.zig`) and runs after step 11, so what reaches an entity is the pose
-//! the tick resolved. The ECS → solver direction is M1.1.15.2's, with the Tier 1
+//! the tick resolved. The ECS → solver direction belongs to the Tier 1
 //! service; nothing here reads a component. The
-//! resolution is SINGLE-WORKER: per-island parallel solving is M1.1.21.1, and the
+//! resolution is SINGLE-WORKER: per-island parallel solving is out of scope, and the
 //! scratch buffers below are therefore unique rather than per-island (§1.8.8).
 
 const std = @import("std");
@@ -181,7 +177,7 @@ pub const BodyKind = enum {
 /// A body registered in this world, with the broadphase proxy that represents it.
 pub const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy, kind: BodyKind };
 
-/// One slot of the dense `BodyId.index` -> proxy table (`M1.D.13`, M1.1.15.1).
+/// One slot of the dense `BodyId.index` -> proxy table.
 ///
 /// **AUTHORITY: `bodies[i].proxy` IS THE FACT. THIS TABLE IS DERIVED FROM IT.** The two are
 /// not two sources of truth and this is not pattern D11, which is about two INDEPENDENTLY
@@ -224,7 +220,7 @@ pub const PhysicsWorld = struct {
     gravity: Vec3r,
     dt: Real,
     bodies: std.ArrayListUnmanaged(BodyProxy) = .empty,
-    /// Dense side table `BodyId.index` -> `{ generation, proxy }`, closing `M1.D.13`.
+    /// Dense side table `BodyId.index` -> `{ generation, proxy }`.
     ///
     /// **AN ACCELERATOR BESIDE `bodies`, NEVER A REPLACEMENT FOR IT.** The list carries the
     /// deterministic ITERATION ORDER that the publisher election and step 10's proxy sweep
@@ -259,7 +255,7 @@ pub const PhysicsWorld = struct {
     /// broadphase PRESENCE has to be inserted, and the store that creates it cannot
     /// choose a layer — the `BodyType` → `BroadphaseLayer` derivation lives here.
     chars: CharacterStore = .{},
-    /// The sensor state, rebuilt in full at STEP 10 BIS of every tick (M1.1.13).
+    /// The sensor state, rebuilt in full at STEP 10 BIS of every tick.
     sensors: sensor.SensorState = .{},
     /// Where `step()` records the order it entered its stages, when a caller wants
     /// to read that order. `null` on a production world.
@@ -417,7 +413,7 @@ pub const PhysicsWorld = struct {
         self.chars.setPresenceProxy(id, proxy);
 
         // AND REGISTERED IN THIS WORLD'S OWN BODY LIST, which is a SECOND fact and not a
-        // restatement of the insertion — the defect found by the W4 test at gate C lived
+        // restatement of the insertion — the defect the W4 test found lived
         // exactly in the gap between the two. `pairStillOverlaps` resolves a retained
         // pair's endpoints through `proxyOf`, which searches this list; an unregistered
         // presence resolves to `null`, so step 2 pruned EVERY pair involving it on EVERY
@@ -584,7 +580,7 @@ pub const PhysicsWorld = struct {
     /// manufactured a silent false negative on a legal configuration — the thing §1.13.6
     /// refuses in as many words.
     ///
-    /// **`void`, matching the frozen signature, since M1.1.15.1 — and the rollback it used to
+    /// **`void`, matching the frozen signature — and the rollback it used to
     /// carry is GONE because what it protected against is gone.** The paragraph here used to
     /// read: the proxy refresh reserves and can fail, the pose had already been committed
     /// when it did, so the broadphase described a body that had moved and a caller who
@@ -646,7 +642,7 @@ pub const PhysicsWorld = struct {
     /// Composes the wake like any external pose write: the body, and W4 on its retained
     /// partners. No-op on a stale handle.
     ///
-    /// **`void`, matching the frozen signature, since M1.1.15.1 — and the rollback is GONE
+    /// **`void`, matching the frozen signature — and the rollback is GONE
     /// with the failure that motivated it.** It used to restore pose AND velocities, and the
     /// second half was the interesting one: both are derived FROM the current pose, so
     /// committing them before the fallible proxy refresh left a failed call with the target
@@ -706,11 +702,11 @@ pub const PhysicsWorld = struct {
     /// mirrors it here once per pass. What the regime IS is declared once, by
     /// `weld_forge`'s `PhysicsAuthority`, and this site refers to it.
     ///
-    /// **This declarant was named by no review and found by sweeping the class.** It
-    /// said "the single effect inside the solver is that the inverse mass is zero during
-    /// resolution" — one clause of three, and the formulation the corpus had already
-    /// replaced. The enumeration a reader produces is what that reader saw; the class is
-    /// what exists.
+    /// **A DECLARANT OF THIS REGIME REFERS AND NEVER PARAPHRASES.** Writing out "the single
+    /// effect inside the solver is that the inverse mass is zero during resolution" here
+    /// would be wrong twice: it is one clause of three, and it is a formulation the corpus
+    /// has replaced. A paraphrase records what its author saw; the regime is what exists,
+    /// and only the owner document carries it whole.
     ///
     /// **NO WAKE, deliberately, and it is the one setter of this file that composes
     /// none.** The three above compose one because they MOVE the body. This one moves
@@ -741,7 +737,7 @@ pub const PhysicsWorld = struct {
 
     /// The proxy of `id`, or `null` once the body has been removed.
     ///
-    /// **O(1) SINCE M1.1.15.1 (`M1.D.13`), and it was Θ(N).** It walked the registration
+    /// **O(1), and it was Θ(N).** It walked the registration
     /// list, and `pairStillOverlaps` resolves BOTH endpoints of EVERY retained pair through
     /// it, on every tick — step 2 of the eleven — so the retention cost was Θ(P·N) in the
     /// pairs and the bodies. `refreshProxy` calls it too, so every pose setter paid a scan
@@ -762,7 +758,7 @@ pub const PhysicsWorld = struct {
 
     /// Reserve room in the index for `id`'s slot. FALLIBLE, and it is called BEFORE any
     /// mutation the caller would have to undo — the transactional shape `addBody` and
-    /// `createCharacter` both hold, and which the closing review of M1.1.15 established for
+    /// `createCharacter` both hold, and which a closing review established for
     /// the two of them together.
     fn indexReserve(self: *PhysicsWorld, gpa: std.mem.Allocator, id: BodyId) !void {
         const idx: usize = api.PackedId.unpack(id).index;
@@ -829,7 +825,7 @@ pub const PhysicsWorld = struct {
     /// The FAT boxes are the ones compared, deliberately. Comparing the tight boxes
     /// would purge on a transient sub-margin separation and lose the contact until
     /// the body sank back past the margin — the defect `test "small hop within the
-    /// fat margin keeps the contact pair alive"` was written for at M1.1.6. The
+    /// fat margin keeps the contact pair alive"` was written for. The
     /// margin exists precisely so that this test has hysteresis.
     fn pairStillOverlaps(self: *const PhysicsWorld, a: BodyId, b: BodyId) bool {
         // A removed body's pair serves nothing: W4 has already woken whoever was
@@ -952,7 +948,7 @@ pub const PhysicsWorld = struct {
     /// (10) Broadphase proxy updates on the final poses — skipping sleepers, whose
     /// AABB is unchanged by construction.
     ///
-    /// **INFALLIBLE since M1.1.15.1, and this is one of the eight allocation sites the tick
+    /// **INFALLIBLE, and this is one of the eight allocation sites the tick
     /// carried.** `Broadphase.update` reserved a moved-log slot on every call; the moved
     /// log now carries at most one entry per proxy per consumption epoch and its capacity
     /// is reserved at proxy insertion, so this whole step allocates nothing. The other
@@ -1000,7 +996,7 @@ pub const PhysicsWorld = struct {
     /// §1.7.3, which costs nothing precisely because it has no call.
     ///
     /// **THE FAILURE CONTRACT — THE TICK IS NOT ATOMIC AND DOES NOT BECOME ATOMIC.**
-    /// Written at M1.1.15.1, when the error channel was made deliberate rather than
+    /// The error channel here is deliberate rather than
     /// incidental; no document of the corpus carried this before, `engine-tier-interfaces.md`,
     /// `engine-physics-solver.md` and `engine-physics-forge.md` all specifying that the tick
     /// may fail and none saying what it leaves behind.
@@ -1021,7 +1017,7 @@ pub const PhysicsWorld = struct {
     /// pair generation, the retained candidate set, the constraint array, the island
     /// partition, the warm-start cache, the sensor pass and the substep loop's harvest. The
     /// eighth — step 10's proxy update — was closed by the moved-log reservation seam of
-    /// M1.1.15.1, and it is the only one an up-front reservation could close without
+    /// and it is the only one an up-front reservation could close without
     /// bounding the scene itself.
     ///
     /// **This signature does NOT authorise allocating in steady state.** The seven are

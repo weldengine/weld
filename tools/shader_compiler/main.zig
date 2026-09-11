@@ -1,8 +1,7 @@
-//! Shader compiler tool — Phase 0 / M0.4.
+//! Shader compiler tool.
 //!
 //! Standalone tool invoked by `build.zig` via `zig build shaders` /
-//! `zig build shaders-check` (cf. brief §Files + §Observable
-//! behavior).
+//! `zig build shaders-check`.
 //!
 //! `shaders` mode:
 //! - Discovers all `.glsl` under `assets/shaders/`.
@@ -10,12 +9,12 @@
 //!   vertex, `*.frag.glsl` → fragment, `*.comp.glsl` → compute).
 //! - Compiles via a `glslc` CLI spawn (cf. `src/modules/render/shader_pipeline/compiler.zig`).
 //! - Writes the `.spv` next to the `.glsl`. Consistent with the committed
-//!   generated-artifact pattern (brief §Notes).
+//!   generated-artifact pattern.
 //!
 //! `shaders-check` mode:
 //! - Compiles into a temp folder.
 //! - Diff vs the committed `.spv`. Exit code 0 if diff empty, non-zero otherwise.
-//! - The CI step `shaders-check` (brief §CI) blocks the merge on a diff.
+//! - The CI step `shaders-check` blocks the merge on a diff.
 
 const std = @import("std");
 const shader = @import("shader_pipeline_compiler");

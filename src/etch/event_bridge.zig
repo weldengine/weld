@@ -1,13 +1,21 @@
 //! Typed bridge from a Tier 0 `EventQueue(T)` into the interpreter's per-tick
-//! event store (M1.1.15.2 G4).
+//! event store.
 //!
 //! **The deliverable is the ORDER, not the adapter.** The interpreter's store
-//! has a `Lifetime.tick` and is cleared at the head of every tick; a bridge that
-//! pushed on the wrong side of that clear would produce an event emitted, never
-//! observed, and no red anywhere. So the drain is not something a caller does
-//! before `runFor` — it is registered here and run BY `stepOnce`, after the
-//! clear and before rule dispatch, which makes the ordering a property of the
-//! engine instead of a discipline the caller has to remember.
+//! has a `Lifetime.tick` and is cleared at the head of every tick, so a bridge
+//! pushing on the wrong side of that clear would emit an event nothing ever
+//! observes. **THAT FAILURE IS RED**, and deliberately so: the ordering oracle
+//! in `tests/etch_events/event_bridge_test.zig` drives three events across three
+//! consecutive ticks and asserts the rule saw each one, which a
+//! drain-before-clear leaves at zero.
+//!
+//! The DRAIN is not something a caller performs before `runFor`: it runs
+//! inside `stepOnce`,
+//! after the clear and before rule dispatch, so the ordering is a property of
+//! the engine. What the caller owes is the REGISTRATION: `drainInto` is public,
+//! so a caller holding both can drain by hand — and land on the wrong side of
+//! the clear, which is the failure this header is about. Only
+//! `Interpreter.addEventSource` puts it on the right side.
 //!
 //! What crosses the boundary is a type NAME and a flat field list
 //! (`Interpreter.pushExternalEvent`). `EventStore` stays private to
@@ -25,9 +33,12 @@ const ExternalValue = interp_mod.ExternalValue;
 
 /// Bridge one Tier 0 `EventQueue(T)` to one Etch event type.
 ///
-/// `T` must be an `extern struct` of scalars — the same bound
-/// `services.event` enforces on the payload it derives a declaration from, and
-/// for the same reason: what crosses a module boundary must have a layout.
+/// `T` must be an `extern struct` — the same bound `services.event` enforces on
+/// the payload it derives a declaration from, and for the same reason: what
+/// crosses a module boundary must have a layout. The SCALAR set is narrower
+/// here: `valueOf` below has no `void` arm where `services.typeRefOf` does, and
+/// Zig 0.16 admits a `void` field in an `extern struct` (measured), so a payload
+/// carrying one declares through `services.event` and fails to compile here.
 /// `etch_type_name` is the Etch type the `.d.etch` declares, and it is passed
 /// rather than derived because `@typeName` carries a Zig path, not an Etch name.
 pub fn Bridge(comptime T: type) type {
@@ -45,8 +56,8 @@ pub fn Bridge(comptime T: type) type {
         pushed: usize = 0,
         /// Events the interpreter DROPPED because this program mentions no such
         /// type. Separated from `pushed` on purpose: a bridge wired to a program
-        /// that never observes the type is silent otherwise, and silence is the
-        /// failure mode this whole gate is written against.
+        /// that never observes the type is otherwise SILENT, and a silent drop
+        /// is the one failure this counter exists to make visible.
         dropped: usize = 0,
         /// Polls that failed because the queue was drained under the cursor.
         /// A Tier 0 drain between two ticks invalidates it; recorded rather than
@@ -77,8 +88,15 @@ pub fn Bridge(comptime T: type) type {
                     error.CursorInvalidated => {
                         self.invalidations += 1;
                         // Re-anchor on the current epoch and head rather than
-                        // spinning: the events the drain missed are gone, and
-                        // reporting the invalidation is what makes that visible.
+                        // spinning. **THIS SKIPS MORE THAN THE DRAIN REMOVED**:
+                        // `drain` resets head to 0, so anything enqueued AFTER
+                        // it and before this poll sits in `[0, head)` and is
+                        // dropped here too. Re-anchoring on 0 instead would
+                        // recover what is still inside the window — past
+                        // saturation `poll` snaps to `head - cap` anyway and the
+                        // overflow is already counted as a drop by the queue.
+                        // The counter is what makes THIS loss visible; it is a
+                        // policy, not an inevitability.
                         self.cursor = .{
                             .type_id = self.cursor.type_id,
                             .last_read = self.queue.currentHead(),
@@ -111,6 +129,6 @@ fn valueOf(comptime F: type, v: F) ExternalValue {
         []const u8 => .{ .string_ = v },
         u64 => .{ .entity_ = v },
         else => @compileError("event field type '" ++ @typeName(F) ++
-            "' has no Etch mapping; the Phase 1 scalar set is {i64, f64, bool, []const u8, u64}"),
+            "' has no Etch mapping; the scalar set is {i64, f64, bool, []const u8, u64}"),
     };
 }

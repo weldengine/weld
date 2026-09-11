@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Public surface of the M0.2 / E4 event subsystem.
+//! Public surface of the event subsystem.
 //!
 //! Heterogeneous bus of typed MPMC ring-buffer queues. Producers
 //! call `emit(T, event)`; consumers `subscribe(T)` to obtain a
@@ -44,7 +44,7 @@ pub const PollError = queue_mod.PollError;
 /// Per-drain drop warning threshold.
 pub const DROPS_WARN_THRESHOLD = bus_mod.DROPS_WARN_THRESHOLD;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen EventBus Tier-0 public surface (register/emit/
 /// subscribe/poll/drainAtBoundary/queueCount + EventCursor/Lifetime/
 /// BusError/PollError/DROPS_WARN_THRESHOLD). Bumped on any breaking change

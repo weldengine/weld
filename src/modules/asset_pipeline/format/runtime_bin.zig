@@ -1,16 +1,16 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Runtime `.<type>.bin` zero-copy container — the 40-byte header and its
 //! read / write / validate helpers.
 //!
-//! Layout frozen day 1 (M0.6, brief §Scope ▸ runtime format). 40 bytes,
+//! Layout frozen day 1. 40 bytes,
 //! 8-byte aligned, declared as an `extern struct` whose natural C layout
 //! matches the on-disk bytes exactly: the explicit `_reserved` u32 at
 //! offset 28 makes `hash` (u64) land at the 8-aligned offset 32, so
 //! `@sizeOf == 40` with no implicit padding and the struct can be read
-//! straight out of an mmap'd region with no repacking (E5).
+//! straight out of an mmap'd region with no repacking.
 //!
-//! Endianness: the format is little-endian. Both Phase 0 targets
+//! Endianness: the format is little-endian. Both current targets
 //! (x86_64, aarch64) are little-endian, so the in-memory `extern struct`
 //! and the on-disk bytes coincide; `read` / `writeTo` are nonetheless
 //! explicit per-field so a future big-endian port has a single place to
@@ -31,7 +31,7 @@ pub const current_version: u16 = 1;
 
 /// Target platform a `.bin` was cooked for. Stored in the header
 /// `platform` field. Non-exhaustive so future platforms read back without
-/// a format bump; M0.6 only cooks `pc`.
+/// a format bump; only `pc` is cooked.
 pub const Platform = enum(u16) {
     /// Desktop PC (Vulkan / D3D12).
     pc = 0,
@@ -55,7 +55,7 @@ pub const ReadError = error{
     BadMagic,
 };
 
-/// Errors surfaced by `validate` (M1.1.1-HF1 / D6).
+/// Errors surfaced by `validate`.
 pub const ValidateError = error{
     /// `version` is not `current_version`.
     UnsupportedVersion,
@@ -77,7 +77,7 @@ pub const RuntimeHeader = extern struct {
     asset_type: u16,
     /// Target platform (`Platform` value).
     platform: u16,
-    /// Reserved bit flags; zero in M0.6.
+    /// Reserved bit flags; always zero.
     flags: u16,
     /// Byte offset of the bulk data section from the start of the file.
     data_offset: u32,

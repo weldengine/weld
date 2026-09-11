@@ -13,7 +13,7 @@
 const std = @import("std");
 const weld_etch = @import("weld_etch");
 
-test "TIME_LITERAL in expression position: parses as time_lit + type-checks as Time (M0.8 E7)" {
+test "TIME_LITERAL in expression position: parses as time_lit + type-checks as Time" {
     const gpa = std.testing.allocator;
 
     // A bare `HH:MM` literal in expression position (dormant in a rule body —

@@ -3,11 +3,6 @@
 //! (`engine-physics-solver.md` §1.7): the substep loop of step 6 (§1.7.1) and the
 //! restitution pass of step 7 (§1.7.2).
 //!
-//! It was born in `velocity_solver.zig` at M1.1.6, moved here at M1.1.7 when a
-//! second pass began reading it, and outlived both of those passes at M1.1.13.1.
-//! The doc header cited `engine-physics-forge.md` §1.7 until then — stale since the
-//! M1.1.12 file split moved §1.7 into `engine-physics-solver.md`.
-//!
 //! **What the port removed, and why none of it is deferred.** `velocity_iterations`
 //! and `position_iterations` were budgets of a big-step model that no longer exists:
 //! each substep runs exactly one biased sweep and one relax sweep, a cost fixed BY
@@ -15,7 +10,7 @@
 //! `position_correction_factor` and `max_penetration_correction` were the NGS pass's
 //! under-relaxation and its per-pass error clamp; position error is now corrected by
 //! the velocity bias inside the loop, and its rate is bounded by
-//! `contact_push_max_speed` instead. The 16-iteration floor M1.1.7 MEASURED goes with
+//! `contact_push_max_speed` instead. The MEASURED 16-iteration floor goes with
 //! them — the five-box stack that established it is the acceptance oracle of the port
 //! and now comes to rest on `substep_count = 4`.
 //!
@@ -35,7 +30,7 @@
 //! the world the contact is.
 //!
 //! **A member of that family lives elsewhere, and deliberately.**
-//! `mesh.default_active_edge_cos_threshold` (M1.1.11.1, default `cos(5°)`) selects a
+//! `mesh.default_active_edge_cos_threshold` (default `cos(5°)`) selects a
 //! modelling behaviour, not a numerical tolerance, so the `k · floatEps(T) ·
 //! coordScale` discipline does not apply to it either. It is NOT declared here
 //! because a mesh's active-edge flags are BAKED AT CREATION: a field on this struct
@@ -74,7 +69,7 @@ pub const SolverConfig = struct {
     contact_push_max_speed: Real = 3.0,
     /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve relative
     /// normal speed reaches or exceeds this, approaching. Below it, low-speed contacts
-    /// settle without jitter. Unchanged since M1.1.6.
+    /// settle without jitter.
     restitution_threshold: Real = 1.0,
     /// Stationary overlap allowed at rest (m). Its role is contact PERSISTENCE: a
     /// small steady overlap keeps the contact — and therefore its warm-start cache

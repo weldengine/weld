@@ -1,4 +1,4 @@
-//! CommandEncoder + RenderPassEncoder + ComputePassEncoder Vulkan — Phase 0 / M0.4.
+//! CommandEncoder + RenderPassEncoder + ComputePassEncoder Vulkan.
 //!
 //! The GAL CommandEncoder wraps a `*vk.CommandBuffer` allocated from the
 //! Device's shared command pool. The semantics:
@@ -32,7 +32,7 @@ pub const CommandEncoder = struct {
     label: ?[]const u8 = null,
     finished: bool = false,
     /// Transient resources (render pass + framebuffer) to free in
-    /// `destroy`. Phase 0 simple: we keep only one at a time — the
+    /// `destroy`. Only one is kept at a time — the
     /// limitation corresponds to 1 begin/end render pass per encoder.
     active_pass: ?render_pass_mod.Transient = null,
     /// Tracks whether `vkCmdBeginRenderPass` has been issued without a
@@ -96,17 +96,16 @@ pub const CommandEncoder = struct {
     /// `.transfer_src_optimal` by the producing render pass's `final_layout`.
     /// An upload *destination* has no such hook: a freshly-created texture is
     /// in `.undefined` (no prior render pass to carry a `final_layout`), and
-    /// the Phase 0 GAL surface exposes no encoder-level barrier
+    /// the GAL surface exposes no encoder-level barrier
     /// (`RenderPassEncoder.barrier` / `ComputePassEncoder.barrier` are
     /// pass-scoped no-ops). The buffer→image asymmetry therefore forces this
     /// function to emit its own transitions: `.undefined → .transfer_dst_optimal`
     /// before the copy, then `.transfer_dst_optimal → .shader_read_only_optimal`
     /// after, so the destination is immediately samplable. `.undefined` as the
     /// pre-copy old layout discards prior contents — correct for a full-region
-    /// upload. Phase 1+ (when an encoder-level barrier + layout tracker lands)
-    /// may revisit this to let callers batch the transitions; until then the
-    /// internal barriers keep the upload path self-contained and
-    /// validation-clean.
+    /// upload. The internal barriers keep the upload path self-contained and
+    /// validation-clean; an encoder-level barrier plus a layout tracker would
+    /// let callers batch the transitions instead.
     pub fn copyBufferToTexture(
         self: *CommandEncoder,
         source: types.ImageCopyBuffer,
@@ -123,7 +122,7 @@ pub const CommandEncoder = struct {
         };
 
         // Subresource the copy + both barriers operate on. layer_count = 1
-        // matches the Phase 0 single-layer assumption of the neighbor.
+        // matches the single-layer assumption of the neighbor.
         const sub_range: vk.ImageSubresourceRange = .{
             .aspect_mask = aspect_mask,
             .base_mip_level = dest.mip_level,
@@ -210,7 +209,7 @@ pub const CommandEncoder = struct {
     }
 
     /// Copy a texture region into a host-visible buffer. WebGPU canonical
-    /// shape (source/dest/copy_size triple). Phase 0 contract: the source
+    /// shape (source/dest/copy_size triple). The contract: the source
     /// texture is assumed to already be in `.transfer_src_optimal` layout
     /// when the GPU executes the copy — render-pass `finalLayout` or a
     /// caller-emitted barrier must put it there. `dest.bytes_per_row` is
@@ -232,7 +231,7 @@ pub const CommandEncoder = struct {
         };
 
         // WebGPU `bytesPerRow` is bytes; Vulkan `buffer_row_length` is
-        // pixels. Phase 0 assumes RGBA8 (4 bpp) for the capture path; if
+        // pixels. RGBA8 (4 bpp) is assumed for the capture path; if
         // the caller passes 0 we let Vulkan tight-pack.
         const row_length: u32 = if (dest.bytes_per_row == 0) 0 else dest.bytes_per_row / 4;
 
@@ -286,7 +285,7 @@ pub const CommandEncoder = struct {
 /// a back-pointer to the parent so `end()` can mark the encoder's render
 /// pass slot as closed — without this, callers issuing `cmdCopy*` after a
 /// nominal `pass.end()` would fall inside the still-active Vulkan render
-/// pass (Bug 4 of the M0.4 stabilization session).
+/// pass.
 pub const RenderPassEncoder = struct {
     parent: *CommandEncoder,
     device: *Device,
@@ -385,8 +384,8 @@ pub const RenderPassEncoder = struct {
 
     pub fn barrier(self: *RenderPassEncoder, barrier_desc: escape.ExplicitBarrier) void {
         _ = .{ self, barrier_desc };
-        // Phase 0: explicit barriers not wired (auto-tracking by default).
-        // First use Phase 1+ (cf. brief §Notes decision 2).
+        // Explicit barriers are not wired; auto-tracking is the
+        // default, and no caller uses them yet.
     }
 
     pub fn end(self: *RenderPassEncoder) void {
@@ -405,7 +404,7 @@ pub const RenderPassEncoder = struct {
 };
 
 /// Vulkan ComputePassEncoder — delegated by `CommandEncoder.beginComputePass`.
-/// Phase 0 — used in Phase 1+ (GI compute, V-Buffer culling).
+/// No caller uses it yet; its uses are GI compute and V-Buffer culling.
 pub const ComputePassEncoder = struct {
     device: *Device,
     cb: *vk.CommandBuffer,
@@ -442,7 +441,7 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
     };
     var bufs: [1]*vk.CommandBuffer = undefined;
     device.vk_device.allocateCommandBuffers(&alloc_ci, &bufs) catch return error.BackendInternal;
-    // R14 (M1.1.1-HF3): free the command buffer back to the pool if anything below
+    // Free the command buffer back to the pool if anything below
     // fails (beginCommandBuffer or the encoder allocation) — otherwise it leaks,
     // since only `destroy` frees it and no encoder is returned.
     errdefer device.vk_device.freeCommandBuffers(device.command_pool, &bufs);
@@ -465,13 +464,12 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
 /// Frees a CommandEncoder: waits for the GPU, frees its command buffer back to
 /// the shared pool, and destroys any still-active transient pass + the encoder.
 ///
-/// R5a (M1.1.1-HF3): `waitIdle` is now UNCONDITIONAL. An encoder may have been
+/// `waitIdle` is UNCONDITIONAL. An encoder may have been
 /// submitted (the common `defer destroy` right after `device.submit`) and still
 /// be executing on the GPU; freeing an in-flight command buffer — or tearing
 /// down an active pass's framebuffer — is invalid. The device-wide wait is
 /// conservative (it also avoids Vulkan's `Framebuffer is currently in use`
-/// warning, and mirrors the S2 swapchain-recreate `waitIdle`); a per-encoder
-/// fence + retire queue will scope it more tightly in Phase 1+.
+/// warning); a per-encoder fence and retire queue would scope it more tightly.
 ///
 /// The command buffer IS now explicitly freed. Nothing resets this shared pool,
 /// so the previous "the pool reset handles it" claim was false — the pool grew

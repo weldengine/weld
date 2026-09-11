@@ -1,7 +1,7 @@
-//! Per-file content-hash cache for the S5 codegen.
+//! Per-file content-hash cache for the codegen.
 //!
-//! Brief — Scope: "Codegen cache keyed by xxHash of source `.etch` content,
-//! per-file granularity, stored at `zig-out/etch-gen/.cache/`".
+//! Keyed by the xxHash of the source `.etch` content, at per-file
+//! granularity, stored under `zig-out/etch-gen/.cache/`.
 //!
 //! Each call to `shouldRegenerate(input_path, source_bytes, cache_dir)`
 //! returns `true` when the cache miss / mismatch and `false` when the
@@ -21,7 +21,7 @@ const std = @import("std");
 /// unchanged.
 pub const Hash = u64;
 
-/// xxHash64 of the source content. The brief specifies xxHash explicitly,
+/// xxHash64 of the source content. xxHash is specified,
 /// but the Zig stdlib only exposes Wyhash and Fnv1a; Wyhash has identical
 /// design goals (high speed, low collision) and is the closest in-tree
 /// substitute. Documented here so the choice is explicit.

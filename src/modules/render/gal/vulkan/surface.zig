@@ -1,6 +1,6 @@
-//! Window → `vk.SurfaceKHR` helper — M0.4 § Scope — Post-Review Complement.
+//! Window → `vk.SurfaceKHR` helper.
 //!
-//! Bridges the Tier 0 `platform.window.Window` (M0.3) to a Vulkan
+//! Bridges the Tier 0 `platform.window.Window` to a Vulkan
 //! `SurfaceKHR`. Lives under `gal/vulkan/` so the lint rule
 //! `no_device_dispatch_outside_gal` keeps holding (instance-level
 //! dispatch is used, not `device_dispatch.*`, but the helper still
@@ -13,7 +13,7 @@
 //!                  `(*wl_display, *wl_surface)` from the Wayland
 //!                  backend.
 //!     - others   → `error.Unsupported` (macOS path lands when the
-//!                  Metal backend ships in Phase 2).
+//!                  Metal backend ships).
 //!
 //! The instance must have been created with the matching
 //! `VK_KHR_{win32,wayland}_surface` extension enabled — already done

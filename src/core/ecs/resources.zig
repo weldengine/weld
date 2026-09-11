@@ -1,9 +1,9 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Tier 0 resource store — singleton storage indexed by `ComponentId`.
 //! Each resource carries a `dirty` flag set by `getMutResource` and cleared
 //! by `tickBoundary`. Used by the `when resource T changed` filter (see
-//! `engine-ecs-internals.md` §5 — change detection; S4 implements a
+//! `engine-ecs-internals.md` §5 — change detection; this implements a
 //! degenerate per-resource dirty bit, full tick-based detection is Phase
 //! 0.5).
 //!
@@ -11,7 +11,7 @@
 //! `[]u8` (size from the registry) plus a dirty flag. The Etch bridge
 //! reads or writes fields through the registry's `FieldDesc` offsets.
 //!
-//! Every buffer is over-aligned to `ChunkAlignment` (M0.8 E3-C, Option A)
+//! Every buffer is over-aligned to `ChunkAlignment`
 //! so generated code can form a typed `*R` over the bytes — `@alignCast`
 //! sound in ReleaseSafe, ABI pointer identity (`etch-abi-zig.md` §3.1).
 //! UNCONDITIONAL: one alignment regime for every resource buffer regardless
@@ -100,8 +100,8 @@ pub const ResourceStore = struct {
     /// not a public runtime / Etch / plugin API: the scene loader's rollback path
     /// (a different Zig file — hence `pub`) restores the pre-load dirty state
     /// after a rejected transaction, because `getMutResource` (called during both
-    /// the failed load and the rollback) unconditionally sets `dirty = true`
-    /// (M1.1.1-HF2 C6). No-op if the resource is absent.
+    /// the failed load and the rollback) unconditionally sets `dirty = true`.
+    /// No-op if the resource is absent.
     pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
         const e = self.entries.getPtr(id) orelse return;
         e.dirty = value;
@@ -167,7 +167,7 @@ test "removing a resource clears its dirty bit" {
     try std.testing.expect(!store.isDirty(3));
 }
 
-test "resource buffers are chunk-aligned (M0.8 Option A)" {
+test "resource buffers are chunk-aligned (Option A)" {
     const gpa = std.testing.allocator;
     var store = ResourceStore.init();
     defer store.deinit(gpa);
@@ -190,7 +190,7 @@ test "addResource rejects duplicate id" {
     try std.testing.expectError(error.DuplicateResource, store.addResource(gpa, 0, &bytes));
 }
 
-test "setDirty restores an explicit dirty state (M1.1.1-HF2 C6)" {
+test "setDirty restores an explicit dirty state" {
     const gpa = std.testing.allocator;
     var store = ResourceStore.init();
     defer store.deinit(gpa);

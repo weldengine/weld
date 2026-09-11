@@ -1,4 +1,4 @@
-//! M1.1.15 acceptance suite for `PhysicsWorld` — the owner of the per-tick cycle.
+//! Acceptance suite for `PhysicsWorld` — the owner of the per-tick cycle.
 //!
 //! What this file measures is the ORCHESTRATION and never the physics: the order the
 //! stages of `engine-physics-solver.md` §1.7 run in, the substep cadence, the proxy
@@ -255,7 +255,7 @@ test "step 10 bis runs on a world that was never told about sensors" {
     defer world.deinit(gpa);
 
     // A trigger and a body inside it. Nothing switches the sensor pass on, because
-    // there is nothing to switch: step 10 bis is unconditional. Until M1.1.15 the
+    // there is nothing to switch: step 10 bis is unconditional. The
     // pass was gated on a `sensors_on` flag the harness carried and that defaulted to
     // FALSE, which for a production world would mean sensors silently do not work —
     // and the determinism scenario asserted that flag rather than this property. That
@@ -321,7 +321,7 @@ test "a world with no trigger produces an empty sensor state rather than skippin
     try testing.expectEqual(@as(usize, 0), world.sensors.exited.items.len);
 }
 
-// --- proxies and body lifetime (Gate B) ---------------------------------------
+// --- Proxies and body lifetime ---------------------------------------
 
 const BroadphaseLayer = @import("../pipeline/broadphase.zig").BroadphaseLayer;
 
@@ -457,7 +457,7 @@ test "a character created without a presence inserts no proxy" {
     try testing.expectEqual([4]u32{ 0, 1, 0, 0 }, classCounts(&world));
 }
 
-// --- wake composition (Gate C) -------------------------------------------------
+// --- Wake composition -------------------------------------------------
 
 /// Step until `id` is asleep, or fail. Sleeping is ON here, deliberately: these tests
 /// ask "does this wake?", which is the one question that needs a sleeper.
@@ -742,7 +742,7 @@ test "moveKinematic derives both velocities from the target pose over dt" {
 }
 
 test "addBody is transactional: no fail index leaves a body, a proxy or a registration" {
-    // EXHAUSTIVE FAIL-INDEX SWEEP, the shape M1.1.1-HF2 used on the ECS spawn path: a single
+    // EXHAUSTIVE FAIL-INDEX SWEEP, the shape the ECS spawn path uses: a single
     // chosen index proves one branch, and the branch that leaks is exactly the one nobody
     // chose. Every index up to the successful call's allocation count is driven, and after
     // each failure the world must be indistinguishable from one where nothing was attempted.
@@ -836,7 +836,7 @@ test "the derived index still agrees with its authoritative source on every live
 
     // A mixed population: rigid bodies, a removal that leaves a hole, and a character
     // presence — which is registered by a different entry and is exactly the body the
-    // M1.1.15 gate C defect went missing on.
+    // defect went missing on.
     var ids: [6]api.BodyId = undefined;
     for (&ids, 0..) |*slot, i| {
         // `f32` and NOT `Real`: `BodyDescriptor` is the PUBLIC surface, which follows the
@@ -912,7 +912,7 @@ test "the three pose setters are allocation-free and infallible" {
 
     // NON-VACUITY, in both directions. `addBody` legitimately keeps an allocator AND an
     // error union, so the walk above is not a predicate that never finds anything; and
-    // `resizeCharacter` keeps both too, which is the entry the brief names as unable to join
+    // `resizeCharacter` keeps both too, which is the entry named as unable to join
     // the three because it creates a shape.
     inline for (.{ @TypeOf(PhysicsWorld.addBody), @TypeOf(PhysicsWorld.resizeCharacter) }) |Entry| {
         const info = @typeInfo(Entry).@"fn";

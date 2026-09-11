@@ -1,5 +1,5 @@
 //! `forge_3d/query/overlap.zig` — the overlap, point-query and closest-point
-//! collectors (M1.1.10 / E5).
+//! collectors.
 //!
 //! **The three overlaps have no bound to tighten**, so they take the FIRST collector
 //! contract — `add(user_data)` and nothing more, the one the existing overlap
@@ -86,7 +86,7 @@ pub const OverlapCollector = struct {
         const accepted = switch (self.probe) {
             .shape => |s| self.bm.overlapShapeBody(self.store, body, s.shape, s.position, s.rotation, s.back_face_mode) orelse return,
             // Through the adapter, NOT `bodyAabb`: a candidate may be a half-space, which
-            // has no world AABB at all, and `bodyAabb` asserts the convex class (E5 item
+            // has no world AABB at all, and `bodyAabb` asserts the convex class (the
             // 6). The adapter's convex arm is still the body's TIGHT world box — the fat
             // leaf box would make the answer a function of a tuning constant (§1.11.12) —
             // and its half-space arm is the corner predicate.
@@ -193,7 +193,7 @@ pub fn pointAabb(point: Vec3r) Aabbr {
     return Aabbr.fromMinMax(point, point);
 }
 
-// ─── M1.1.15.2 G5a — the entity-major ordering proof ────────────────────────
+// ─── The entity-major ordering proof ───────────────────────────────────────
 
 const testing = std.testing;
 
@@ -219,8 +219,8 @@ const Fixture = struct {
             // `WorldVec3` and NOT `Vec3r`: `BodyDescriptor` is the FROZEN public surface and
             // its pose is the world scalar, which is `f32` until `large_world`. Spelling it
             // `Vec3r` compiled at the default precision and broke the build under
-            // `-Dphysics_f64` — the half of the precision guard the type system carries
-            // (M1.1.15), and the reason the six f64 cells exist.
+            // `-Dphysics_f64` — the half of the precision guard the type system carries,
+            // and the reason the six f64 cells exist.
             .position = api.precision.WorldVec3.zero,
             .body_type = .static,
             .entity = .{ .index = entity_index, .generation = 0 },

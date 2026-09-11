@@ -1,29 +1,29 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //! Frozen PlatformLayer window surface: `Window`, `Event`, `Desc`, `Error`,
 //! `KeyCode` (re-export), `MouseButton`, `MonitorInfo`, `QueryError`,
 //! `enumerateMonitors`, `currentMonitor`. EXCEPTION — `NativeHandles` /
-//! `Window.nativeHandles` are FROZEN-but-transient (the Phase-0.4 GAL
+//! `Window.nativeHandles` are FROZEN-but-transient (the GAL
 //! absorbs surface creation; see the `NativeHandles` doc). The
 //! `classAtom`/`classOpenCount` accessors are test-support diagnostics, not
 //! part of the frozen contract. Covered by `WELD_PLATFORM_PROTOCOL_VERSION`
 //! (and the input variants by `WELD_INPUT_PROTOCOL_VERSION`).
 //!
-//! Public `Window` interface for the S2 spike. Tier 0 from S2 onward —
+//! Public `Window` interface. Tier 0 —
 //! the surface defined here (`create`, `destroy`, `close`, `resize` event
-//! delivery, `dpi_changed` event delivery) is stable. Phase 0.3 extends
-//! the same struct with input events + an X11 backend; existing call
+//! delivery, `dpi_changed` event delivery) is stable. Input events and
+//! an X11 backend extend the same struct; existing call
 //! sites do not change.
 //!
 //! Comptime dispatch picks the OS backend:
 //!   - Windows  → `window/win32.zig`
-//!   - Linux    → `window/wayland.zig`  (wired in S2 step e)
+//!   - Linux    → `window/wayland.zig`
 //!   - other    → `window/stub.zig`     (compiles, returns
 //!                                       `error.UnsupportedPlatform` at
 //!                                       runtime — keeps the rest of the
 //!                                       engine buildable on macOS while
-//!                                       S2 is in progress)
+//!                                       engine buildable there)
 //!
-//! S2 scoped this surface tight (windowing only). M0.3 then added the
+//! The surface started tight, at windowing only, and gained the
 //! input/focus/minimize-restore/multi-monitor surface that is now part of
 //! the frozen contract: the `Event` union's key/mouse/focus/minimize/dpi
 //! variants, plus `MonitorInfo` + `enumerateMonitors`/`currentMonitor`.
@@ -86,12 +86,12 @@ pub const Event = union(enum) {
     /// Client area resized — both fields are physical pixels (HiDPI-aware).
     resize: struct { width: u32, height: u32 },
     /// Scale factor changed (1.0 = 100%, 1.5 = 150%, 2.0 = 200%). Derived
-    /// from per-monitor DPI on Win32; Wayland S2 only delivers integer
+    /// from per-monitor DPI on Win32; Wayland only delivers integer
     /// values. The window has already been moved/resized to track the new
     /// monitor; the caller is expected to recreate the swapchain.
     dpi_changed: f32,
 
-    // ============================ M0.3 additions ============================
+    // ============================== Input ===================================
 
     /// Physical key pressed. `code` is the normalized identifier (see
     /// `KeyCode`); `scancode` is the raw OS scan code for advanced
@@ -156,11 +156,11 @@ pub const Error = error{
 /// Wayland wants `(*wl_display, *wl_surface)`, and the stub backend
 /// returns an empty struct.
 ///
-/// Not part of the long-term Tier 0 surface — the Phase 0.4 GAL absorbs
+/// Not part of the long-term Tier 0 surface — the GAL absorbs
 /// surface creation behind a backend-agnostic API. Its consumer is the
 /// render GAL's Vulkan surface creation
 /// (`src/modules/render/gal/vulkan/surface.zig`). FROZEN-but-transient:
-/// slated for Phase-0.4 GAL re-evaluation, not a permanent contract.
+/// slated for GAL re-evaluation, not a permanent contract.
 pub const NativeHandles = backend.NativeHandles;
 
 /// Public Window handle — five-method front-end above the per-OS
@@ -189,13 +189,13 @@ pub const Window = struct {
         return self.impl.pollEvent();
     }
 
-    /// Transient S2 escape hatch — see `NativeHandles` doc above.
+    /// A transient escape hatch — see the `NativeHandles` doc above.
     pub fn nativeHandles(self: *const Window) NativeHandles {
         return self.impl.nativeHandles();
     }
 };
 
-// M0.3 — diagnostics surfaced for the Win32 thread safety stress test
+// Diagnostics surfaced for the Win32 thread safety stress test
 // (`tests/platform/win32_thread_safety_test.zig`). On non-Windows
 // backends both accessors return 0 — the test skips with
 // `error.SkipZigTest` so the values are never observed there.
@@ -207,7 +207,7 @@ pub fn classAtom() u16 {
     return if (@hasDecl(backend, "classAtom")) backend.classAtom() else 0;
 }
 
-/// Returns the current live-window refcount. Phase 0.3 Win32 backend
+/// Returns the current live-window refcount. The Win32 backend
 /// keeps the class registered for process lifetime; `class_open_count`
 /// goes back to 0 once all windows have been destroyed. Used by the
 /// thread-safety stress test to assert balanced create/destroy.

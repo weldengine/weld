@@ -1,4 +1,4 @@
-//! forge_3d shape-cast and overlap throughput bench (M1.1.10).
+//! forge_3d shape-cast and overlap throughput bench.
 //!
 //! Sphere / box / capsule casts and shape overlaps over a STATIC scene of 10 000
 //! bodies (spheres, boxes and capsules on a grid). The scene and the clock are the
@@ -9,13 +9,13 @@
 //! set — a zero-radius sphere cast, whose swept volume is a point, against the
 //! raycast entry on the same origins and directions. That pair separates the cast
 //! kernel's cost from the swept traversal's: at a zero extent the traversal is
-//! `queryRay` exactly (the M1.1.10/E2 bit-identity pin), so the difference is the GJK
+//! `queryRay` exactly (the zero-extent bit-identity pin), so the difference is the GJK
 //! march against the analytic ray kernels and nothing else.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered: no baseline for
-//! this path has ever been measured, and registering a bound before measuring it is
-//! the failure mode recorded at M1.1.8. The structural guarantees this milestone owes
-//! are carried by the acceptance suites — the swept traversal's pruning test, the
+//! this path has ever been measured, and a bound registered before its baseline is
+//! invented rather than measured. The structural guarantees are carried by the
+//! acceptance suites — the swept traversal's pruning test, the
 //! kernel's closed-form oracles — not by a figure here.
 //!
 //! ReleaseFast for the absolute ns (a Debug / ReleaseSafe run prints a warning and
@@ -91,8 +91,8 @@ const Scene = struct {
 /// 22 × 22 × 21 grid truncated to `n_bodies`, alternating spheres / boxes / capsules
 /// 3 m apart, all STATIC — which is the scene a query cares about, the tree being
 /// built once and never moved.
-/// With `with_plane`, one static half-space `{ y <= 0 }` joins the SAME scene — the
-/// M1.1.11 delta measurement (see `bench/forge_3d_raycast.zig` for the reasoning: an
+/// With `with_plane`, one static half-space `{ y <= 0 }` joins the SAME scene, which is
+/// the delta measurement (see `bench/forge_3d_raycast.zig` for the reasoning: an
 /// unbounded list has no box to prune on, so every query is offered it).
 fn buildScene(gpa: std.mem.Allocator, with_plane: bool) !Scene {
     var scene = Scene{ .bp = Broadphase.init(.{}) };
@@ -168,9 +168,8 @@ pub fn main(init: std.process.Init) !void {
     // `safety` is FORCED true. Its default is `std.debug.runtime_safety`, which is
     // FALSE in ReleaseFast — so `DebugAllocator(.{})` would track nothing and report
     // "no leaks" unconditionally, which is worse than no check at all because it
-    // reads like one. Verified the same way as at M1.1.9, by reintroducing a leak
-    // deliberately: with the default it stayed silent, with this it reports (see the
-    // brief's E7 entry for the run).
+    // reads like one. Verify it by reintroducing a leak deliberately: with the
+    // default the checker stays silent, with this one it reports.
     var debug_allocator: std.heap.DebugAllocator(.{ .safety = true }) = .init;
     const gpa = debug_allocator.allocator();
     defer {
@@ -280,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
     // --- (5, 6) what the cast costs over the ray, on the SAME query set --------
     //
     // A zero-radius sphere cast sweeps a point, so its swept traversal is `queryRay`
-    // exactly — the zero-extent bit-identity pin of E2 — and the whole difference
+    // exactly — the zero-extent bit-identity pin — and the whole difference
     // against the raycast entry is the GJK march replacing the analytic ray kernels.
     {
         var hits: usize = 0;
@@ -322,7 +321,7 @@ pub fn main(init: std.process.Init) !void {
         measures[5] = report("raycast (same rays)", best_ns, n_queries, hits / n_reps);
     }
 
-    // --- M1.1.11: the cost of one half-space in the scene, REPORTED, never gated ---
+    // --- the cost of one half-space in the scene, REPORTED, never gated ---
     //
     // The same queries, the same code, the same process — the grid alone against the grid
     // plus one static half-space in the layer's unbounded list. Both measured here rather
@@ -338,9 +337,9 @@ pub fn main(init: std.process.Init) !void {
 
         // A shape handle is PER STORE: the probe must be created in the store it is used
         // against. Passing `scene`'s handle to `scene_plane`'s store resolved the same slot
-        // index to a DIFFERENT shape — the plane — and the entry answered
-        // `error.UnsupportedShape`, which is the E3 channel doing exactly its job on a
-        // caller mistake. Found by running it, not by reading it.
+        // index to a DIFFERENT shape — the plane — and the entry answers
+        // `error.UnsupportedShape`, which is that error channel doing exactly its job
+        // on a caller mistake.
         const plane_probe = try scene_plane.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
         var out_ns: [2]f64 = .{ 0, 0 };
         // (a) sphere cast

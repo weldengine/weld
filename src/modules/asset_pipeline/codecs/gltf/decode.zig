@@ -3,9 +3,9 @@
 //! Parses the JSON with `std.json` (no hand-rolled JSON parser, no cgltf C
 //! binding) and extracts the first mesh primitive's POSITION / NORMAL /
 //! TEXCOORD_0 attributes and indices. Static only — no skinning, no
-//! animation, no morph targets (brief §Out-of-scope).
+//! animation, no morph targets.
 //!
-//! Buffers must be embedded base64 `data:` URIs (the M0.6 cooked path);
+//! Buffers must be embedded base64 `data:` URIs (the cooked path);
 //! external `.bin` files and `.glb` containers are deferred.
 
 const std = @import("std");
@@ -25,8 +25,8 @@ pub const Error = error{
     /// An accessor/bufferView reached past its buffer.
     Truncated,
     /// A table index (accessor / bufferView / buffer), a stride, an offset/size
-    /// computation, or an index value is out of range (R4, M1.1.1-HF3). Covers
-    /// every case that used to panic in safe builds or read out of bounds in
+    /// computation, or an index value is out of range. Covers
+    /// every case that would otherwise panic in safe builds or read out of bounds in
     /// ReleaseFast: a bad `accessors[i]`/`bufferViews[i]`/`buffers[i]` index, a
     /// stride below the element size, an accessor span past its bufferView, a
     /// bufferView past its buffer, an arithmetic overflow, or a mesh index ≥
@@ -181,7 +181,7 @@ const ResolvedAccessor = struct { buf: []const u8, base: usize, stride: usize };
 /// span within the bufferView, and the view span within its buffer. Every read
 /// from the returned `(buf, base, stride)` is then in-bounds.
 ///
-/// R13(a) (M1.1.1-HF3): the span bound is `byteOffset + stride×(count−1) + elem`
+/// The span bound is `byteOffset + stride×(count−1) + elem`
 /// (the LAST element needs only `elem` bytes, not a full trailing `stride`) —
 /// `count × stride` falsely rejected valid interleaved buffers. `count == 0`
 /// degenerates to `byteOffset ≤ byteLength`. The output stays bounded by the

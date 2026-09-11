@@ -2,12 +2,12 @@
 //!
 //! `createShape` builds a `Shape` (geometry at solver precision + precomputed
 //! local AABB + unit-mass local inertia diagonal) and stores it in a
-//! generational slot pool. M1.1.0 constructs sphere/box/capsule, M1.1.11 adds
-//! the infinite plane and M1.1.11.1 the static triangle mesh; every other
+//! generational slot pool. It constructs sphere, box and capsule, plus
+//! the infinite plane and the static triangle mesh; every other
 //! `ShapeType` is rejected with `error.UnsupportedShape`. Inertia is the unit-mass
 //! diagonal; `BodyManager` scales it by the body's mass at `addBody`.
 //!
-//! **The store holds three CATEGORIES, not one** (M1.1.11 / M1.1.11.1,
+//! **The store holds three CATEGORIES, not one** (
 //! `engine-physics-forge.md` §1.11.15, §1.11.17). Sphere, box and capsule are
 //! bounded convexes described by a support map; a half-space is not — its support
 //! map diverges in every direction but `−n`; a triangle SOUP has none at all,
@@ -21,7 +21,7 @@
 //! cast kernel's ray march all assume a finite point — the failure would be a NaN
 //! surfacing several modules away from its cause.
 //!
-//! **The store OWNS memory since M1.1.11.1**, and it is the mesh that changed that:
+//! **The store OWNS memory**, and it is the mesh that made it so:
 //! a mesh owns its vertices and its indices. Two consequences, neither of which
 //! touches the frozen interface signatures (`engine-tier-interfaces.md` §1):
 //! `createShape` is TRANSACTIONAL — every allocation is reserved before any slot is
@@ -37,7 +37,7 @@ const narrowphase = @import("pipeline/narrowphase/root.zig");
 const mesh_mod = @import("mesh.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
-/// The owned triangle-mesh payload of a `.triangle_mesh` shape (M1.1.11.1).
+/// The owned triangle-mesh payload of a `.triangle_mesh` shape.
 const MeshData = mesh_mod.MeshData;
 
 const Real = config.Real;
@@ -61,7 +61,7 @@ const ApiVec3 = @import("foundation").math.Vec3;
 /// compile error into a silent wrong answer, which is exactly the failure mode the
 /// taxonomy exists to prevent.
 ///
-/// M1.1.11 advertised that net while leaving FIVE HOLES in it, and M1.1.11.1 closed them all.
+/// That net was advertised with FIVE HOLES left in it, since closed.
 /// Four were found at the start: `addBody`'s static-only refusal, `bodyAabb`,
 /// `closestPointBody` and `worldAabb` each decided by an `if` on one variant or by a class
 /// ASSERT, neither of which a new variant breaks. `closestPointBody` was the dangerous one — a
@@ -71,7 +71,7 @@ const ApiVec3 = @import("foundation").math.Vec3;
 ///
 /// The FIFTH was found at the closing review: `gjkPair` passed either shape straight to
 /// `supportShape` and inherited that function's precondition in silence, so a half-space broke it
-/// identically from M1.1.11 onward. It now asserts "both bodies carry bounded convexes" AT ITS OWN
+/// identically. It now asserts "both bodies carry bounded convexes" AT ITS OWN
 /// SITE, which is the only place a caller can read the requirement against the handles it holds.
 ///
 /// This paragraph is the docstring saying what the code DOES, which is what an advertised safety
@@ -93,7 +93,7 @@ pub const ShapeClass = enum {
     /// trees and a defined sleep radius; what it lacks is a VOLUME, so it is
     /// static-only and it is never solid.
     ///
-    /// `HeightField` joins this same category at its own sub-milestone, with an
+    /// `HeightField` belongs to this same category, with an
     /// IMPLICIT acceleration structure instead of a built tree — hence no arm of its
     /// own here.
     triangle_soup,
@@ -174,13 +174,12 @@ pub const Shape = struct {
             .sphere, .box, .capsule => .convex,
             .plane => .half_space,
             .triangle_mesh => .triangle_soup,
-            // Bounded convexes, not yet constructible (M1.1.19).
+            // Bounded convexes, not yet constructible.
             .cylinder, .tapered_cylinder, .convex_hull => unreachable,
             // The same `.triangle_soup` category as the mesh, with an IMPLICIT
-            // acceleration structure instead of a built tree — not yet constructible
-            // (M1.1.20).
+            // acceleration structure instead of a built tree — not yet constructible.
             .height_field => unreachable,
-            // Composite / degenerate, not yet constructible (M1.1.20).
+            // Composite / degenerate, not yet constructible.
             .compound, .mutable_compound, .empty => unreachable,
         };
     }
@@ -213,7 +212,7 @@ pub const ShapeStore = struct {
     }
 
     /// Build and store a shape, returning its handle. Sphere/box/capsule/plane and —
-    /// since M1.1.11.1 — the static triangle mesh; any other variant returns
+    /// the static triangle mesh; any other variant returns
     /// `error.UnsupportedShape` (no slot allocated).
     ///
     /// **TRANSACTIONAL** (`engine-physics-forge.md` §1.11.17). The mesh made the store
@@ -247,7 +246,7 @@ pub const ShapeStore = struct {
     /// in particular it frees NOTHING there, which is what keeps a double destroy from
     /// double-freeing a mesh.
     ///
-    /// The `gpa` parameter is what M1.1.11.1 added. The frozen interface signature
+    /// The `gpa` parameter is what the mesh added. The frozen interface signature
     /// `destroyShape: fn (*Impl, ShapeId) void` is UNCHANGED: the interface tier holds
     /// the allocator and supplies it (`engine-tier-interfaces.md` §1).
     pub fn destroyShape(self: *ShapeStore, gpa: std.mem.Allocator, id: ShapeId) void {
@@ -266,12 +265,12 @@ pub const ShapeStore = struct {
 /// Convert an immutable `Shape` to the narrowphase `SupportShape` at solver
 /// precision: sphere → point core + radius, capsule → Y-segment(`half_height`)
 /// core + radius, box → box(`half_extents`) core + radius 0 (a box has no convex
-/// radius in M1.1.2).
+/// radius).
 ///
-/// **This is the CONVEX ARM, and its precondition is asserted** (M1.1.11,
-/// `engine-physics-forge.md` §1.11.15). It stopped being a total function of the
+/// **This is the CONVEX ARM, and its precondition is asserted**
+/// (`engine-physics-forge.md` §1.11.15). It stopped being a total function of the
 /// store the moment the store gained a half-space: the category is chosen upstream
-/// by `Shape.class()`, and calling this with a `.half_space` — or, since M1.1.11.1,
+/// by `Shape.class()`, and calling this with a `.half_space` — or
 /// with a `.triangle_soup`, whose triangles enter the narrowphase ONE AT A TIME and
 /// never as a whole shape — is a programming error, not an input to handle. Making a
 /// half-space a `Core` variant instead
@@ -443,7 +442,7 @@ fn buildShape(
                 // compiled OUT of ReleaseFast — which is the mode the benches run in,
                 // with a plane in the scene. `undefined` there is whatever the memory
                 // held; in Debug it is the 0xAA fill, which reads as a perfectly
-                // ordinary small number: MEASURED on the E1 commit, a plane's sleep
+                // ordinary small number: MEASURED, a plane's sleep
                 // radius came out 5.2510e-13 at f32 and 6.4444e-104 at f64 — finite,
                 // small and plausible, so nobody would ever see it go past. A NaN
                 // survives ReleaseFast and propagates loudly through every arithmetic

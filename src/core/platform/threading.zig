@@ -1,9 +1,9 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Threading helpers — `setAffinity` and `setPriority` OS-specific wrappers.
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
-//! (Threading section) and the M0.3 brief.
+//! Documented in `engine-platform.md` §4
+//! (Threading section).
 //!
 //! `std.Thread` / `std.atomic` / `std.Io.Mutex` etc. are propagated as-is.
 //! Weld only adds two helpers that are not in the stdlib:
@@ -11,8 +11,8 @@
 //!   - `setPriority(thread, .high | .normal | .low)` — adjusts scheduling
 //!     priority.
 //!
-//! Used by the M0.1 job system scheduler (worker pinning) and by the future
-//! audio thread (Tier 1, Phase 1) which needs high priority + dedicated
+//! Used by the job system scheduler (worker pinning) and by an eventual
+//! audio thread (Tier 1) which needs high priority + dedicated
 //! core.
 
 const std = @import("std");
@@ -141,8 +141,8 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
             // thread is already at default after spawn — we attempt the
             // call but tolerate non-zero rc as success. Elevating to
             // SCHED_FIFO / SCHED_RR with non-zero priority requires
-            // CAP_SYS_NICE + operator setup; M0.3 ships best-effort
-            // semantics, real-time priority lands Phase 1+ when the
+            // CAP_SYS_NICE + operator setup; this ships best-effort
+            // semantics, and real-time priority waits on the
             // audio thread arrives (cf. `engine-audio-pulse.md` §11).
             //
             // macOS: pthread_setschedparam on a regular thread without
@@ -151,15 +151,13 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
             // is the proper path, but it's a no-op hint on user-space
             // processes anyway.
             //
-            // PHASE 1+ TRANSFER NOTE — when the Phase 1 audio thread arrives
-            // with a real need for SCHED_FIFO/SCHED_RR priority (cf.
-            // engine-audio-pulse.md §11), this best-effort soft-success code must
-            // NOT be reused as-is. Silently ignoring EPERM would mask a critical
-            // realtime configuration failure. Add a dedicated
-            // `setRealtimePriority(thread, policy) !void` function that returns
-            // `error.NoCapability` explicitly on EPERM, and keep the current
-            // `setPriority` only for best-effort paths (background threads,
-            // non-critical job workers).
+            // TODO(a dedicated setRealtimePriority): an audio thread needing real
+            // SCHED_FIFO/SCHED_RR priority (cf. `engine-audio-pulse.md` §11) must NOT
+            // reuse this best-effort soft-success code — silently ignoring EPERM would
+            // mask a critical realtime configuration failure. It needs its own entry
+            // returning `error.NoCapability` on EPERM, and the current `setPriority`
+            // stays for best-effort paths only: background threads, non-critical job
+            // workers.
             const param: posix.sched_param = .{ .sched_priority = 0 };
             _ = posix.pthread_setschedparam(thread.getHandle(), posix.SCHED_OTHER, &param);
         },

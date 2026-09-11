@@ -1,5 +1,6 @@
-//! XML parser + Wayland-protocol model extractor for the S2 spike.
-//! Throwaway in S3 (cf. `engine-c-bindings.md` §10.1).
+//! XML parser + Wayland-protocol model extractor. LIVE: this is what
+//! `zig build bindgen-wayland` parses with; `engine-c-bindings.md` §10.1 plans
+//! its replacement, which has not happened.
 //!
 //! Wayland protocol XML format is far more regular than `vk.xml`:
 //! `<protocol name="X">` containing `<interface name="X" version="N">`

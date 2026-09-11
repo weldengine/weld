@@ -1,15 +1,15 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Frozen `AssetType` enum — the category tag shared by the runtime
 //! `.<type>.bin` header (`asset_type` field) and `AssetHandle.type_tag`.
 //!
-//! The variant list and explicit values are frozen day 1 (M0.6): the
+//! The variant list and explicit values are frozen day 1: the
 //! `asset_type` u16 is an on-disk field of every cooked `.bin`, so the
 //! numbering must never change. New categories append with the next free
 //! value (additive, no renumber). Mirrors the canonical list in
 //! `engine-asset-pipeline.md` §10.
 //!
-//! M0.6 only *populates* `texture`, `mesh`, and `audio` (PNG / static-glTF
+//! Only `texture`, `mesh` and `audio` are *populated* (PNG / static-glTF
 //! / WAV); the remaining variants are declared so the frozen numbering is
 //! already reserved for later phases.
 
@@ -18,15 +18,15 @@ const std = @import("std");
 /// Asset category. Backing type is `u16` to match the `.bin` header
 /// `asset_type` field and `AssetHandle.type_tag`. Values are frozen.
 pub const AssetType = enum(u16) {
-    /// Mesh (M0.6: static only).
+    /// Mesh (static only).
     mesh = 0,
     /// 2D texture / image.
     texture = 1,
-    /// Audio clip (raw PCM in M0.6).
+    /// Audio clip (raw PCM).
     audio = 2,
-    /// Skeletal animation clip (Phase 1).
+    /// Skeletal animation clip — declared, never populated.
     animation = 3,
-    /// Font (Phase 1).
+    /// Font — declared, never populated.
     font = 4,
     /// Scene graph.
     scene = 5,
@@ -77,7 +77,7 @@ pub const AssetType = enum(u16) {
     }
 };
 
-test "asset_type u16 round-trips for the populated M0.6 subset" {
+test "asset_type u16 round-trips for the populated subset" {
     inline for (.{ AssetType.texture, AssetType.mesh, AssetType.audio }) |t| {
         try std.testing.expectEqual(t, AssetType.fromU16(t.toU16()).?);
     }

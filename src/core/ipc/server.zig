@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! `IpcServer` — editor-side wrapper around the IPC stack.
 //!
@@ -8,7 +8,7 @@
 //! `ProtocolHelloAck`) is in the public API surface so the editor
 //! main loop can short-circuit on version mismatches.
 //!
-//! S6 lifecycle:
+//! Lifecycle:
 //!   1. `IpcServer.init(gpa)`
 //!   2. `server.listen(socket_path)` — binds and starts accepting.
 //!   3. (editor spawns runtime via `platform.process.spawnProcess`,

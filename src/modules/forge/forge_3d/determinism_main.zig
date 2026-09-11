@@ -1,8 +1,8 @@
 //! `zig build forge-determinism` — the instrument's command-line shell.
 //!
 //! DELIBERATELY THIN. Everything it reports is computed by `run.zig`, which is a
-//! library precisely because two later milestones replay it (M1.1.21.1 at N
-//! workers, M1.A on a rebuilt scheduler DAG). A harness whose logic lived in its
+//! library precisely because it is replayed under other conditions (at N
+//! workers, and on a rebuilt scheduler DAG). A harness whose logic lived in its
 //! `main` would have to be re-entered through a process to be replayed.
 //!
 //! Usage:
@@ -10,7 +10,7 @@
 //!   forge-determinism --write-witness DIR generate the witnesses into DIR
 //!
 //! Regeneration is a DECLARED ACT — it is a separate flag, never a side effect of
-//! a mismatch, and the brief requires it to be stated in the PR body with its
+//! a mismatch, and it must be stated in the PR body with its
 //! motive. A witness silently regenerated to make a cell green destroys exactly
 //! the property it carries.
 //!
@@ -47,7 +47,7 @@ fn writeFile(io: std.Io, dir_path: []const u8, name: []const u8, bytes: []const 
 }
 
 pub fn main(init: std.process.Init) !void {
-    // `ARCH-031` rule 5 — INSTALL, then let the module ASSERT. Until M1.1.14's own
+    // `ARCH-031` rule 5 — INSTALL, then let the module ASSERT. Until this instrument's own
     // review this entry point asserted through the harness and never installed, so
     // every witness in the set was produced under the environment the OS handed it.
     // The assertion passed because that inherited state happens to be the engine
@@ -128,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
 
     // THE CHAIN IS ALWAYS COMPARED, AND GATED ONLY WHERE LEVEL 1 APPLIES. The
     // earlier form SKIPPED the comparison outright on any non-x86_64 host, which
-    // threw away the strongest signal available: measured at M1.1.14's close, the
+    // threw away the strongest signal available: measured, the
     // eight committed witnesses are BIT-IDENTICAL between `ubuntu-24.04` (x86_64)
     // and aarch64-macOS, the 1000-frame chains included.
     //
@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
     // cosine pinned to a bit table, FTZ/DAZ off, the rounding mode installed, and
     // `-Dcpu=baseline`.
     //
-    // **NO PROMISE IS ADDED, and C1.1 does not move.** Level 3 stays out of Phase 1:
+    // **NO PROMISE IS ADDED, and C1.1 does not move.** Level 3 stays out of scope:
     // one measurement, one scenario, one machine pair of which one is not even in
     // the matrix, and the property holds by the ABSENCE of a single transcendental
     // on the path — the day a shape introduces one it would break, and a guard

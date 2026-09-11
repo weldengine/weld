@@ -1,9 +1,9 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! XInput gamepad polling for the Win32 platform layer.
 //!
-//! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
-//! in the M0.3 brief § Input system Tier 0 minimal :
+//! Minimal implementation. Documented
+//! in `engine-input-system.md` §1:
 //!
 //!   > Win32: `XInputGetState` polled every frame for the 4 gamepad
 //!   > slots.
@@ -12,8 +12,8 @@
 //! slots and is the most reliable Windows gamepad API for the common
 //! case (Xbox-style controllers + Steam Input transparent passthrough).
 //! DirectInput would be needed for legacy / non-Xbox layouts — out of
-//! scope for Phase 0 (the brief gates the Tier 1 mapping layer in
-//! Phase 1 for that).
+//! out of scope (the Tier 1 mapping layer
+//! owns it).
 //!
 //! ## Hot-plug
 //!
@@ -50,7 +50,7 @@ const XINPUT_STATE = extern struct {
 
 // Late-bound — XInput's DLL has had three names across Windows versions
 // (XInput1_4.dll on Win8+, XInput9_1_0.dll on Win7, XInput1_3.dll on
-// DirectX SDK installs). Resolved at runtime via DynamicLib so Phase 0
+// DirectX SDK installs). Resolved at runtime via DynamicLib so the build
 // builds run on all three.
 const XInputGetStateFn = *const fn (dwUserIndex: u32, pState: *XINPUT_STATE) callconv(.winapi) u32;
 

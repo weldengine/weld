@@ -1,17 +1,17 @@
-//! Capture Pass — Phase 0 / M0.4.
+//! Capture Pass.
 //!
-//! Third (conditional) pass of the Phase 0 render graph (cf. brief
-//! §Scope). Activated by the caller's `--smoke-test` flag (cf.
+//! Third (conditional) pass of the render graph. Activated by the caller's
+//! `--smoke-test` flag (cf.
 //! `examples/triangle/`). Blits the post-forward color target into a
 //! CPU-visible readback buffer, which is then converted to PPM RGB on the CPU.
 //!
-//! Consistent with brief §Notes decision 6: R8G8B8A8_UNORM format (not
+//! R8G8B8A8_UNORM format (not
 //! BGRA) — trivial CPU-to-PPM RGB conversion (drop alpha, write RGB
 //! byte by byte).
 //!
-//! Phase 0: the pass is conditionally added to the graph by the caller.
-//! Phase 1+: native integration into the render graph with a
-//! `transient.captured` flag on the resource declaration side.
+//! The pass is conditionally added to the graph by the caller; native
+//! integration would carry a `transient.captured` flag on the resource
+//! declaration side instead.
 
 const std = @import("std");
 const gal = @import("../../gal/root.zig");
@@ -30,12 +30,9 @@ pub const Config = struct {
     height: u32,
     /// Storage the returned `Pass.reads`/`Pass.writes` point at.
     ///
-    /// M1.1.14 — before this field, `buildPass` returned slices of an ANONYMOUS
-    /// LITERAL built in its own stack frame, so the `Pass` carried a dangling
-    /// pointer the moment it returned. Measured: `writes.ptr` was a stack address,
-    /// the access mask read `false` immediately after the call, and a fresh call at
-    /// the SAME address read `true`. Live since M0.4 and invisible because nothing
-    /// compiled this file's tests until the M1.1.14 dead-test sweep.
+    /// Without this field, `buildPass` would return slices of an ANONYMOUS
+    /// LITERAL built in its own stack frame, so the `Pass` would carry a
+    /// dangling pointer the moment it returned.
     ///
     /// The config owns it and introduces NO new lifetime constraint: the config is
     /// already the pass's `ctx`, so it had to outlive the pass by construction.
@@ -69,7 +66,7 @@ pub fn buildPass(config: *Config) pass_mod.Pass {
 
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0: the actual blit (`vkCmdCopyImageToBuffer`) is wired by
+    // The actual blit (`vkCmdCopyImageToBuffer`) is wired by
     // `examples/triangle/` which opens + maps + writes the PPM. The pass
     // body is a no-op at the render graph level — the native commands
     // are recorded outside the render pass via the CommandEncoder.

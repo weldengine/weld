@@ -1,6 +1,6 @@
 //! Minimal XML parser for vk.xml (and protocol XMLs).
 //!
-//! Throwaway code for S2. Handles only the subset of XML used by Khronos
+//! Handles only the subset of XML used by Khronos
 //! registries and Wayland protocols: tags with double-quoted attributes,
 //! mixed content, self-closing tags, comments, `<?xml ... ?>` declarations,
 //! `&lt; &gt; &amp; &quot; &apos;` entity references. No CDATA (not used by
@@ -339,7 +339,7 @@ const Parser = struct {
 // =====================================================================
 //
 // The model is a flat, lossy representation of the registry entries that
-// the S2 emitter cares about. Variadic functions, video codec entries,
+// the emitter cares about. Variadic functions, video codec entries,
 // and most pragmas are skipped on purpose.
 
 const Model = struct {
@@ -443,7 +443,7 @@ pub const Struct = struct {
     /// `sType` field, when present.
     s_type_value: ?[]const u8,
     /// `<type>` `returnedonly="true"` — emit no default `sType` and skip
-    /// from `pNext` chains (informational only for S2).
+    /// from `pNext` chains (informational only here).
     returned_only: bool = false,
 };
 
@@ -514,7 +514,7 @@ pub const CType = struct {
     base: []const u8,
     /// `const` qualifier on the immediate declaration (covers `const T`
     /// and `const T*`; we do not model `T* const` since the registry
-    /// never uses it on parameters that matter for S2).
+    /// never uses it on parameters that matter here).
     is_const: bool = false,
     /// 0 = value, 1 = `T*`, 2 = `T**`.
     pointer_depth: u8 = 0,
@@ -602,7 +602,7 @@ pub fn extractModel(gpa: std.mem.Allocator, tree: Tree) !Model {
             }
             const cat = t.attr("category").?;
             // vk.xml carries Vulkan SC duplicates of some flag types via
-            // `api="vulkansc"`. We only emit the desktop Vulkan surface in S2.
+            // `api="vulkansc"`. Only the desktop Vulkan surface is emitted.
             if (t.attr("api")) |a| if (!apiMatches(a)) continue;
             if (std.mem.eql(u8, cat, "handle")) {
                 // Body looks like `<type>VK_DEFINE_HANDLE</type>(<name>VkInstance</name>)`.
@@ -819,7 +819,7 @@ pub fn extractModel(gpa: std.mem.Allocator, tree: Tree) !Model {
     // The new vk.xml structure adds enums to feature `<require>` blocks the
     // same way extensions do. We collect them and apply them later in
     // applyEnumExtensions.
-    // For S2 these are only relevant if our whitelist pulls them in via the
+    // These are only relevant if the whitelist pulls them in via the
     // base feature set; we ingest them regardless and let the whitelist filter.
     var feature_enum_extensions: std.ArrayList(EnumExtension) = .empty;
     for (tree.root.children) |child| {
@@ -1021,7 +1021,7 @@ fn classifyCType(
 }
 
 /// Vulkan SC ships its own variants of some types/commands tagged via
-/// `api="vulkansc"`. The S2 generator only targets desktop Vulkan, so anything
+/// `api="vulkansc"`. This generator only targets desktop Vulkan, so anything
 /// that is *not* claimed by `vulkan` or `vulkanbase` is dropped.
 fn apiMatches(api: []const u8) bool {
     var it = std.mem.splitScalar(u8, api, ',');
@@ -1057,7 +1057,7 @@ fn splitCsv(A: std.mem.Allocator, src: []const u8) ![][]const u8 {
 // Whitelist application
 // =====================================================================
 
-/// Caller-supplied scope of the S2 spike's Vulkan surface. Drives
+/// Caller-supplied scope of the emitted Vulkan surface. Drives
 /// `applyWhitelist` to drop every feature / extension outside that
 /// scope plus the transitive closure of their types.
 pub const Whitelist = struct {
@@ -1163,11 +1163,11 @@ pub fn applyWhitelist(
     var platform_types: std.ArrayList(PlatformType) = .empty;
     for (model.platform_types) |pt| if (needed_types.contains(pt.name)) try platform_types.append(A, pt);
 
-    // M0.4 — whitelist closure extended to enum variants (brief
-    // §Scope D-S2-vk-whitelist). Filters `EnumGroup.values` by
-    // `source`: we keep the base enum's variants (`source == ""`),
-    // those added by the core features (`source == "core"`, we do not
-    // distinguish the Phase 0 minor versions), and those added by
+    // The whitelist closure reaches enum variants too. Filters
+    // `EnumGroup.values` by `source`: the base enum's variants
+    // (`source == ""`) are kept, as are those added by the core features
+    // (`source == "core"`; the core minor versions are not
+    // distinguished), and those added by
     // the whitelisted extensions. The variants of the non-whitelisted
     // extensions (hundreds of bits for VkStructureType, VkFormat,
     // VkAccessFlagBits2, etc.) are dropped — that is the main lever
@@ -1241,12 +1241,12 @@ fn stringInList(s: []const u8, list: []const []const u8) bool {
     return false;
 }
 
-/// M0.4 — determines whether an enum variant must be kept by the whitelist
-/// filter. Rules (cf. brief §Scope D-S2-vk-whitelist):
+/// Determines whether an enum variant must be kept by the whitelist
+/// filter:
 /// - `source == ""`: base enum variant (not via a feature/extension) → keep
 /// - `source == "core"`: variant added by a core feature (1.0-1.3) → keep
-///   (we do not discriminate by Phase 0 minor — all core versions are
-///   in the Phase 0 whitelist).
+///   (no discrimination by minor version — every core version is in the
+///   whitelist).
 /// - other: variant added by a named extension → keep iff the extension
 ///   is in `whitelist.extensions`.
 fn variantInWhitelist(source: []const u8, whitelist: Whitelist) bool {

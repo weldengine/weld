@@ -1,7 +1,7 @@
 //! Asset Pipeline `importers/` namespace — source → intermediate.
 //!
-//! Each importer decodes a source file (via the E3 codecs) and produces an
-//! `Import` = intermediate `AssetDoc` + referenced binary blob. M0.6: PNG
+//! Each importer decodes a source file (via the codecs) and produces an
+//! `Import` = intermediate `AssetDoc` + referenced binary blob: PNG
 //! (texture), glTF (static mesh), WAV (audio).
 
 /// Shared importer output (`Import` = document arena + blob).

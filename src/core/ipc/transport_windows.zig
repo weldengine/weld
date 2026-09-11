@@ -2,9 +2,9 @@
 //! byte mode via `CreateNamedPipeA` / `ConnectNamedPipe` /
 //! `CreateFileA` / `ReadFile` / `WriteFile` / `CloseHandle`. Out-of-
 //! band handle passing (`sendWithHandles` / `recvWithHandles`)
-//! returns `error.Unimplemented` in S6 per `engine-ipc.md` §4.7 +
-//! S6 brief — the `DuplicateHandle`-based implementation lands in
-//! Phase 3 when GPU shared framebuffers arrive.
+//! returns `error.Unimplemented` per `engine-ipc.md` §4.7 —
+//! the `DuplicateHandle`-based implementation waits on
+//! GPU shared framebuffers.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -90,7 +90,7 @@ pub const OsHandle = std.os.windows.HANDLE;
 pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
 /// Close a bare handle received out-of-band that the receiver will not
-/// retain. (M0.7: the Windows handoff path is by-name, so this is only
+/// retain. (The Windows handoff path is by-name, so this is only
 /// exercised on POSIX; present for cross-platform parity.)
 pub fn closeHandle(h: OsHandle) void {
     _ = sys.CloseHandle(h);
@@ -107,7 +107,7 @@ pub const Backend = struct {
     /// client owns the listener's pipe instance after the handshake;
     /// the listener's `accept` consumes the original handle and
     /// creates a fresh pipe instance for the next would-be client
-    /// (out of scope for S6 — only one connection is ever accepted).
+    /// (out of scope — only one connection is ever accepted).
     is_listener: bool = false,
 
     pub fn listen(path: []const u8) Error!Backend {
@@ -121,7 +121,7 @@ pub const Backend = struct {
             path_z,
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1, // S6: exactly one runtime client per editor
+            1, // exactly one runtime client per editor
             64 * 1024,
             64 * 1024,
             0,
@@ -220,7 +220,7 @@ pub const Backend = struct {
         _ = self;
         _ = bytes;
         _ = handles;
-        // Phase 3 — see engine-ipc.md §4.7 and the S6 brief § Scope.
+        // Unimplemented — see `engine-ipc.md` §4.7.
         return error.Unimplemented;
     }
 
@@ -232,7 +232,7 @@ pub const Backend = struct {
         _ = self;
         _ = buffer;
         _ = handles_out;
-        // Phase 3 — see engine-ipc.md §4.7 and the S6 brief § Scope.
+        // Unimplemented — see `engine-ipc.md` §4.7.
         return error.Unimplemented;
     }
 

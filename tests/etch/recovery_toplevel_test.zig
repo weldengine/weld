@@ -72,7 +72,7 @@ test "recovery resumes across multiple broken constructs (one diagnostic each)" 
     try std.testing.expectEqual(@as(usize, 3), good_count);
 }
 
-test "recovery resyncs at a top-level `type` alias after a broken construct (M0.8 lockstep)" {
+test "recovery resyncs at a top-level `type` alias after a broken construct (lockstep)" {
     const gpa = std.testing.allocator;
     // A broken component precedes a valid `type` alias. Because `kw_type` is
     // in recoverToTopLevel's stop-set — extended IN LOCKSTEP with the
@@ -103,7 +103,7 @@ test "recovery resyncs at a top-level `type` alias after a broken construct (M0.
     try std.testing.expect(saw_after);
 }
 
-test "recovery resyncs at a top-level `fn` after a broken construct (M0.8 E2 lockstep)" {
+test "recovery resyncs at a top-level `fn` after a broken construct (lockstep)" {
     const gpa = std.testing.allocator;
     // A broken component precedes a valid top-level `fn`. Because `kw_fn` joined
     // recoverToTopLevel's stop-set IN LOCKSTEP with the parseTopLevel `fn`
@@ -135,7 +135,7 @@ test "recovery resyncs at a top-level `fn` after a broken construct (M0.8 E2 loc
     try std.testing.expect(saw_after);
 }
 
-test "recovery resyncs at a top-level `async fn` after a broken construct (M0.8 E2 lockstep)" {
+test "recovery resyncs at a top-level `async fn` after a broken construct (lockstep)" {
     const gpa = std.testing.allocator;
     // The `async` starter also joined recoverToTopLevel's stop-set in lockstep
     // (an `async fn` is a top-level construct in E2). A broken construct before
@@ -155,7 +155,7 @@ test "recovery resyncs at a top-level `async fn` after a broken construct (M0.8 
     try std.testing.expect(saw_fn);
 }
 
-test "recovery keeps a rule exercising the E1 body constructs after a broken construct" {
+test "recovery keeps a rule exercising the whole body-construct set after a broken construct" {
     const gpa = std.testing.allocator;
     // A broken component precedes a rule whose body exercises every E1
     // foundation (arrays + indexing, closures + calls, for-in, loop/break,

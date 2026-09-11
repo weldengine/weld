@@ -129,9 +129,8 @@ pub fn Crossing(comptime Solver: type) type {
 
         /// Solver → world, SCALAR. The vector and rotation helpers above cover the aggregates;
         /// this covers the lone lengths that travel beside them — a hit distance, a
-        /// separation. Added at M1.1.15.1, when `Forge3DModule` became the first caller to
-        /// wrap the eight query entries and found that every one of them returns a `distance`
-        /// the aggregates do not carry.
+        /// separation. Every one of the eight query entries returns a `distance` the
+        /// aggregates do not carry, which is what this exists for.
         ///
         /// It exists so that those narrowings are AT the boundary rather than spelled at the
         /// adapter, which is what `no_precision_crossing` enforces over
@@ -152,13 +151,11 @@ pub fn Crossing(comptime Solver: type) type {
     };
 }
 
-// --- tests -------------------------------------------------------------------
-
 const std = @import("std");
 const testing = std.testing;
 
 test "the world scalar is f32 in this build, and moving it is a deliberate act" {
-    // A PIN, not a tautology. M1.1.15 states that the world scalar stays `f32` and that
+    // A PIN, not a tautology. The world scalar stays `f32` by decision and
     // `large_world` is a project of its own; this is what makes flipping it break a test
     // that names the decision, instead of sliding through as an edit to one alias.
     try testing.expectEqual(f32, WorldReal);

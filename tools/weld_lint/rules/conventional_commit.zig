@@ -6,6 +6,8 @@
 //! - scope       optional, matches `[a-z0-9-]+`
 //! - !           optional, marks a breaking change
 //! - description 1–72 chars, lowercase first letter, no trailing period
+//! - the WHOLE title, type and scope included, is bounded at 72 too — that is
+//!   the bound a long scope hits first
 //!
 //! Bypasses: titles that start with `Merge `, `Revert `, `fixup!`, or
 //! `squash!` are accepted unconditionally (mirrors the canonical regex
@@ -34,7 +36,7 @@ const allowed_types = [_][]const u8{
 
 /// Hook called by `main.runCommitMsg` from the lefthook `commit-msg`
 /// path. Reads the file at `path` (the staged commit-message file
-/// git points us at), extracts the title line, and appends one
+/// git names), extracts the title line, and appends one
 /// diagnostic per violation. Opening / reading errors surface as
 /// diagnostics too so the hook never aborts on transient I/O.
 pub fn validateFile(
@@ -101,7 +103,6 @@ fn validateTitle(
     title: []const u8,
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
-    // Bypass merge / revert / fixup / squash titles.
     const bypass_prefixes = [_][]const u8{ "Merge ", "Revert ", "fixup!", "squash!" };
     for (bypass_prefixes) |p| {
         if (std.mem.startsWith(u8, title, p)) return;
@@ -110,7 +111,6 @@ fn validateTitle(
     // Parse: <type>(<scope>)?!?: <description>
     var idx: usize = 0;
 
-    // type
     const type_start = idx;
     while (idx < title.len and isLower(title[idx])) idx += 1;
     const type_token = title[type_start..idx];
@@ -119,7 +119,6 @@ fn validateTitle(
         return;
     }
 
-    // optional scope
     if (idx < title.len and title[idx] == '(') {
         idx += 1;
         const scope_start = idx;
@@ -138,20 +137,17 @@ fn validateTitle(
             try addError(arena, path, title, out, "scope is empty — drop the parentheses or fill in [a-z0-9-]+");
             return;
         }
-        idx += 1; // consume `)`
+        idx += 1;
     }
 
-    // optional `!` for breaking change
     if (idx < title.len and title[idx] == '!') idx += 1;
 
-    // mandatory `: `
     if (idx + 2 > title.len or title[idx] != ':' or title[idx + 1] != ' ') {
         try addError(arena, path, title, out, "expected `: ` after type/scope");
         return;
     }
     idx += 2;
 
-    // description
     const desc = title[idx..];
     if (desc.len == 0) {
         try addError(arena, path, title, out, "description is empty");

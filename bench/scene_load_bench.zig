@@ -1,7 +1,7 @@
-//! M1.0.5 E2 — runtime scene loader benchmark.
+//! Runtime scene loader benchmark.
 //!
 //! Measures the wall time of `scene.loader.loadFromBytes` on a ~10k-entity
-//! scene. The image is produced in-process by the M1.0.4 `writer` (no
+//! scene. The image is produced in-process by the scene `writer` (no
 //! `.scene.etch` authoring, no file I/O) so the number isolates the load work:
 //! the per-entity `spawnDynamicWithValues` (archetype find/create + slot alloc +
 //! component memcpy), the schema-identity remap, and the `on_spawned` pass.

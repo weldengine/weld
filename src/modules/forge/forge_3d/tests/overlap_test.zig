@@ -1,5 +1,5 @@
 //! `forge_3d/tests/overlap_test.zig` — the overlap, point-query and closest-point
-//! acceptance suites (M1.1.10, opened at E5 and completed at E6).
+//! acceptance suites.
 //!
 //! Every expectation is written from the geometry, in the comment above it. The first
 //! section is the per-entry behaviour — what each one returns, and what it refuses —
@@ -8,10 +8,10 @@
 //! invariance under a permutation of creation order asserted on the IDENTITY of the
 //! bodies returned rather than on their count.
 //!
-//! Two E5 tests were removed at E6 rather than left beside their successors: a
+//! Two earlier tests were removed rather than left beside their successors: a
 //! sphere-only point-query test strictly subsumed by the three-shape one, and a
 //! closest-point test whose three claims each acquired a dedicated test. One item of
-//! the brief, one test.
+//! one test.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -116,7 +116,7 @@ test "overlapAabb rejects a body inside the fat margin but outside the tight box
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E6 — the overlap, point-query and closest-point acceptance suites
+// The overlap, point-query and closest-point acceptance suites
 // ---------------------------------------------------------------------------
 
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
@@ -375,7 +375,7 @@ fn buildCluster(gpa: std.mem.Allocator, world: *harness.World, order: []const us
     }
 }
 
-/// Fallible since M1.1.11/E3: `overlapShape` takes a caller-supplied shape handle and
+/// Fallible: `overlapShape` takes a caller-supplied shape handle and
 /// so carries `query.Error`, while the other two entries take none and stay total. The
 /// helper propagates rather than swallowing, so a stale probe or an inadmissible one
 /// would fail the calling test instead of reading as an empty answer.
@@ -480,7 +480,7 @@ test "every overlap entry is invariant under creation-order permutation" {
     const gpa = std.testing.allocator;
     // The same scene in six orders. The answer is a SEQUENCE OF ENTITIES and it must
     // be identical every time — identity, not merely cardinality, which is what the
-    // M1.1.9 ray test stopped short of asserting.
+    // ray test stopped short of asserting.
     const orders = [6][5]usize{
         .{ 0, 1, 2, 3, 4 }, .{ 4, 3, 2, 1, 0 }, .{ 2, 0, 4, 1, 3 },
         .{ 1, 4, 0, 3, 2 }, .{ 3, 2, 4, 0, 1 }, .{ 0, 4, 1, 2, 3 },
@@ -599,7 +599,7 @@ test "closestPoint answers a sleeping body and leaves it asleep" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E8 — the deep-band exterior answer (P1)
+// The deep-band exterior answer
 // ---------------------------------------------------------------------------
 //
 // **The band, MEASURED, and what bounds its reach.** GJK classifies `.deep` when the
@@ -709,7 +709,7 @@ test "max_distance zero answers only for a point inside the solid" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.10 / E9 — an inverted query box denotes the empty set (P1)
+// An inverted query box denotes the empty set
 // ---------------------------------------------------------------------------
 
 test "overlapAabb rejects an inverted query box and returns nothing" {
@@ -766,7 +766,7 @@ test "overlapAabb rejects an inverted query box and returns nothing" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.11 / E3 — the three-way outcome of `overlapShape`
+// The three-way outcome of `overlapShape`
 // ---------------------------------------------------------------------------
 
 test "overlapShape separates a stale handle, an inadmissible probe and an empty answer" {
@@ -775,7 +775,7 @@ test "overlapShape separates a stale handle, an inadmissible probe and an empty 
     defer world.deinit(gpa);
 
     // The mirror of the `shapeCast` case (`engine-physics-forge.md` §1.11.7), and the
-    // conflation was the same one: MEASURED on the pre-E3 tree, a stale probe handle
+    // conflation was the same one: MEASURED before the split, a stale probe handle
     // returned `0` and a live probe overlapping nothing returned `0`. A count cannot
     // carry a diagnosis, so the entry gains the channel instead of overloading its
     // return value.
@@ -828,7 +828,7 @@ test "overlapShape separates a stale handle, an inadmissible probe and an empty 
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 — the public queries KEEP SEEING triggers, and the asymmetry with the
+// The public queries KEEP SEEING triggers, and the asymmetry with the
 // character controller is deliberate (`engine-physics-solver.md` §1.13.7).
 // ---------------------------------------------------------------------------
 

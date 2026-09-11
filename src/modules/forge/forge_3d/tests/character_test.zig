@@ -1,6 +1,6 @@
-//! Acceptance suite for the kinematic character controller (M1.1.12).
+//! Acceptance suite for the kinematic character controller.
 //!
-//! Grows gate by gate. Gate B covers the seventh body-level adapter
+//! It covers the seventh body-level adapter
 //! (`BodyManager.collideShapeBody`) and the character STORE: creation, destruction, the
 //! domain rejections, transactional rollback, the three outcomes of
 //! `getCharacterInnerBody`, and the presence's visibility to queries. Nothing that moves —
@@ -43,7 +43,7 @@ const tol: Real = if (Real == f32) 1e-5 else 1e-12;
 /// then widened. It is `f32`-grade in BOTH builds, and deliberately so.
 ///
 /// `CharacterDescriptor` is `f32` and stays `f32` until the grouped widening decision of
-/// M1.1.15 (§1.11.8, §1.12.11), so a field authored as `0.3` is stored as `f32(0.3)` — which
+/// the interface tier (§1.11.8, §1.12.11), so a field authored as `0.3` is stored as `f32(0.3)` —
 /// widened is `0.30000001192…`, not `0.3`. Asserting such a value against a decimal literal
 /// at `tol` would be asserting a precision the descriptor CANNOT carry, and it is what made
 /// six of these tests fail at `-Dphysics_f64=true` while passing at `f32`, where the two
@@ -647,7 +647,7 @@ test "createCharacter is transactional: no allocation failure leaves a live slot
     //
     // A sweep rather than one hand-written case per allocation site: the number of sites is
     // then MEASURED instead of predicted, and a site added later is covered without the test
-    // being edited. The count it observes is reported in the brief.
+    // being edited.
     var failing_indices: u32 = 0;
     var fail_index: usize = 0;
     while (fail_index < 64) : (fail_index += 1) {
@@ -686,7 +686,7 @@ test "createCharacter is transactional: no allocation failure leaves a live slot
     // NEXT allocation: same error out, same empty stores. `std.testing.FailingAllocator` does
     // not advance its index on a failure, so from `fail_index` onwards every allocation
     // fails and a swallow is invisible to any "an error came out" oracle — the class
-    // measured at M1.1.15.1 / gate C, where a counter-factual on `stepAndPublish` passed
+    // measured, where a counter-factual on `stepAndPublish` passed
     // twice against a deliberate swallow before an instrument that could express the
     // question was written.
     //
@@ -707,7 +707,7 @@ test "createCharacter is transactional: no allocation failure leaves a live slot
 
 /// Create a character in `world` and insert its presence's broadphase proxy, which
 /// `createCharacter` deliberately does not do: no `BodyType → BroadphaseLayer` wiring exists
-/// — the layer is an insertion argument — and it arrives with `PhysicsWorld` at M1.1.15.
+/// — the layer is an insertion argument this store never derives, `PhysicsWorld` owning it.
 ///
 /// The proxy is inserted here rather than through `harness.World.addBody`, which would need
 /// the descriptor the store built internally. It is not registered in `world.bodies`, whose
@@ -1038,7 +1038,7 @@ test "a capsule over the void is in_air on all five quantities" {
     // is a contact between the probe and a body BIT-IDENTICAL to it at the same pose, whose
     // normal §3 declares geometrically UNDEFINED — and empirically that normal never qualifies
     // as ground. So the mechanism is required by §1.12.2 and implemented, but it is not
-    // observable at this gate; it becomes observable at gate D, where the same contact would
+    // observable here; it becomes observable in the slide suite, where the same contact would
     // block motion outright. Asserting it here would mean asserting on a value the narrowphase
     // documents as undefined.
     var desc = baseDescriptor();
@@ -1527,7 +1527,7 @@ test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.13 / gate C — the controller's three exclusions
+// The controller's three exclusions
 //
 // One case per collection path, each PAIRED WITH ITS POSITIVE CONTROL on geometry
 // identical to the byte: same shape, same pose, same displacement, `is_trigger` the
@@ -1544,7 +1544,7 @@ test "a move that starts interpenetrated is depenetrated by the MANIFOLD, not by
 
 /// The same box as `addBox`, carrying the SENSOR role. The harness derives its broad class
 /// from the descriptor, so this body lands in `trigger` by `broadLayerFor` and not by a
-/// literal (M1.1.13 gate B).
+/// literal.
 fn addTriggerBox(gpa: std.mem.Allocator, world: *harness.World, half: ApiVec3, centre: ApiVec3, entity_index: u32) !api.BodyId {
     const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = half } });
     return world.addBody(gpa, .{
@@ -1742,7 +1742,7 @@ test "self-exclusion is what lets a character move at all" {
 
     // Nothing in the scene but the character and its own presence, which sits exactly where the
     // probe does. Without self-exclusion the very first sweep hits it at distance zero, the
-    // advance is `max(0, 0 − padding) = 0`, and the character cannot move a millimetre. At gate C
+    // advance is `max(0, 0 − padding) = 0`, and the character cannot move a millimetre. Where
     // the mechanism was NOT observable — measured — and here it is, which is why the assertion
     // lives at this gate.
     var desc = baseDescriptor();
@@ -1847,7 +1847,7 @@ test "moveCharacter wakes a sleeping body it touches" {
     // zero while it crosses the scene, so W3's true-zero velocity test never sees it move
     // (§1.12.10). What this entry owes is the bodies it TOUCHED; the wider W4 — waking sleepers
     // merely RETAINED in a pair with the presence — belongs to the orchestrator that owns the
-    // retained set, at M1.1.15.
+    // retained set.
     try testing.expectEqual(false, world.bm.isSleeping(sleeper).?);
 }
 
@@ -1860,7 +1860,7 @@ test "the move consumes no predictive_contact_distance, and the ceilings stop sh
 
     // The sweep's distance is the REMAINING DISPLACEMENT and nothing else, so two characters
     // differing only in `predictive_contact_distance` reach the same place against the same wall.
-    // That is the answer to gate D's question about the field: the ground probe is still its only
+    // That is the answer about the field: the ground probe is still its only
     // consumer, and the move does not read it.
     _ = try addBox(gpa, &world, av(1, 5, 5), av(3, 0, 0), 150);
 
@@ -2117,7 +2117,7 @@ test "an intermediate wall buys no horizontal progress — the reference's v5.6.
 test "the slide is CONSTRAINED by the slope: four cases" {
     const gpa = testing.allocator;
 
-    // §1.12.6's rule, added at gate F: when the slide projects onto a plane whose normal FAILS the
+    // §1.12.6's rule: when the slide projects onto a plane whose normal FAILS the
     // slope test, the projected motion's up component is CAPPED at the pre-projection one. Before it,
     // a character climbed any face up to 90°−ε by walking into it — measured at 0.583 m of rise in
     // one call against a 50° face under a 45° limit, with the verdict correctly saying
@@ -2513,7 +2513,7 @@ test "setCharacterPosition teleports without resolving and invalidates the repor
 test "presence freshness on the second and third write paths, and resize reflects the SIZE" {
     const gpa = testing.allocator;
 
-    // Both assertions are written the same way as the move's, and for the reason measured at gate D:
+    // Both assertions are written the same way as the move's, and for the same measured reason:
     // a stale fat box the ray still crosses yields the CORRECT distance anyway, because the exact
     // answer comes from the body's pose. So each ray approaches the new pose from a direction the
     // OLD box does not intersect.
@@ -2911,7 +2911,7 @@ test "a doorway narrower than the character NEVER ejects it, whatever the iterat
 }
 
 // ---------------------------------------------------------------------------
-// Gate G closing round — six findings from external review
+// Closing round — six findings from external review
 // ---------------------------------------------------------------------------
 
 /// Counts how many broadphase candidates a box query is offered, and whether one of them is a
@@ -3028,7 +3028,7 @@ test "P1-1 setCharacterPosition cannot fail, and the push it precedes still happ
     // REPLACES `test "P1-1 a publication that fails leaves every body velocity untouched"`.
     // That test injected an allocation failure into `setCharacterPosition` and asserted that
     // nothing in the world had moved. Its object is gone: `syncPresenceTo`'s only fallible
-    // call was `Broadphase.update`, which became infallible at M1.1.15.1, so this entry has
+    // call was `Broadphase.update`, which is infallible, so this entry has
     // no failure to inject and its long comment about needing BOTH `fail_index` and
     // `resize_fail_index` describes a door that no longer exists.
     //
@@ -3240,7 +3240,7 @@ test "a base EXACTLY on the floor is no longer frozen — seven heights, both di
     // 0.05 m inside the floor was resolved to a base of exactly `0.000000000` and froze, so the
     // reachability was never authoring alone.
     //
-    // BOTH DIRECTIONS, and the second is the half whose absence let a slope bound through at gate F:
+    // BOTH DIRECTIONS, and the second is the half whose absence once let a slope bound through:
     // `0` now serves the whole metre like the others, AND the six clear heights keep exactly the
     // behaviour they had — a capsule already standing off is invisible to the overlap query, so
     // nothing lifts it.
@@ -3429,7 +3429,7 @@ test "DOMAIN TABLE — measured behaviour at every legal bound of the descriptor
     const gpa = testing.allocator;
 
     // **This table exists because NO gate of this milestone enumerated the legal bounds and asked what
-    // the code does at each.** Gate F decided which values to REJECT and never asked that question, and
+    // the code does at each.** An earlier pass decided which values to REJECT and never asked that, and
     // `padding = 0` and the `padding` upper region both fell into that hole — the first froze the
     // character, and it took three rounds and five `paddedAdvance` call sites to close.
     //
@@ -3589,7 +3589,7 @@ test "the stand-off floor never overrides a requested padding, and the stall is 
     // **AND THE STALL REGIME IS NOT A DISTANCE, which is what the measurement corrected.** The prediction
     // was that it returns where `padding` falls under the contact margin, at a `coordScale` beyond about
     // 10 km — and there is NO stall at 50 km, because `gjk.zig`'s coordScale is RELATIVE,
-    // `|Δpos| + coreExtent(a) + coreExtent(b)`, which the M1.1.2/P1c symmetry fixed and which does not
+    // `|Δpos| + coreExtent(a) + coreExtent(b)`, which the symmetry fix settled and which does not
     // grow with distance from the origin. What grows it is the OTHER BODY'S SIZE.
     //
     // Measured boundary at f32: a 100 m half-extent collider serves every call, a 500 m one stalls from

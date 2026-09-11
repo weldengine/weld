@@ -1,4 +1,4 @@
-//! Who owns a body's pose and velocity (M1.1.15.2 G5b).
+//! Who owns a body's pose and velocity.
 //!
 //! **Three previous attempts failed, and all three asked the same wrong
 //! question: WHO wrote this `Transform`.** The ECS stores values, not
@@ -36,17 +36,6 @@ pub const PhysicsAuthority = enum(u8) {
     ///      its island**, as a kinematic body has none, and follows the kinematic
     ///      regime on every predicate that asks what kind of body this is: it is not a
     ///      sleep candidate, and it counts as a motion source only when it is MOVING.
-    ///
-    /// **Two superseded formulations are recorded because each cost a defect.** The
-    /// text carried at G5b said the body *"keeps its mass, participates in manifolds"*
-    /// AND that it *"behaves as an infinitely heavy body"* — the two cannot both be
-    /// true, the solver followed the first, and momentum vanished at every contact.
-    /// The text that replaced it said the inverse mass is zero *"during resolution"*,
-    /// which was exact and named ONE path of three: measured, the flag had a single
-    /// reader in the whole repository, so the body fell under gravity while nothing
-    /// published its pose and the character controller pushed it with its stored
-    /// inverse mass. *A contradiction is visible on a re-read; an incompleteness only
-    /// on wiring.*
     ///
     /// **The TRANSITIONS are `syncIn`'s and not a wrapper's**, because
     /// `authority` is a PUBLIC field: a rule writes

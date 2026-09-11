@@ -10,24 +10,24 @@
 //! world closest points. Depth/normal here are on the CORES; the inflation radii
 //! and per-point depth are applied downstream by the manifold generator.
 //!
-//! **Frame of A + world mapping (brief Notes).** EPA computes in A's frame, then
+//! **Frame of A + world mapping.** EPA computes in A's frame, then
 //! maps the normal and closest points to world via `rot_a` / `pos_a` (the GJK
 //! closest-point pattern, `gjk.zig`). The signature therefore carries `pos_a` /
-//! `rot_a` in addition to the frozen `relpose` (see the brief RD-2): the frozen
+//! `rot_a` in addition to the frozen `relpose`: the frozen
 //! `EpaResult` fields are documented world-space "mapped via rot_a", which is not
 //! expressible without them.
 //!
-//! **Low-dimensional seeds (brief flag-6 contract).** A `simplex_count < 4` seed
+//! **Low-dimensional seeds (the flag-6 contract).** A `simplex_count < 4` seed
 //! (coincident cores, point-on-segment, crossing segments) is tetra-expanded to a
 //! non-degenerate tetrahedron around the seed before the loop — origin-enclosing
-//! for a genuine deep seed; an RD-4 band seed (m1.1.3-hf) may expand to a
+//! for a genuine deep seed; a rounding-band seed may expand to a
 //! NON-enclosing tetra (origin marginally outside; the downstream depth clamp
 //! returns ≈ 0). When the Minkowski difference is genuinely < 3-D (the cores touch
 //! along a point / line / plane — a zero core penetration), no tetra exists; EPA
 //! returns the best lower-dimensional feature: a unit separation normal and depth
 //! 0 (the deep↔shallow boundary; the manifold's deep depth is then `0 + r_sum`).
 //!
-//! **Dependency discipline (brief Notes).** Imports `foundation` (math) + the
+//! **Dependency discipline.** Imports `foundation` (math) + the
 //! sibling `support.zig` / `gjk.zig` ONLY. Determinism by construction: no hash
 //! containers, no trigonometry (dot/cross only), fixed face-evaluation order,
 //! bounded iterations (`max_epa_iterations`), every division guarded (never a NaN;
@@ -38,8 +38,8 @@ const math = @import("foundation").math;
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 
-/// Named iteration ceiling for the EPA expansion (brief Notes, anticipates the
-/// M1.1.14 determinism freeze): the loop always terminates within this many
+/// Named iteration ceiling for the EPA expansion (anticipates the
+/// determinism freeze): the loop always terminates within this many
 /// support queries. A well-formed penetration converges in a handful; the bound
 /// backstops adversarial near-tangent configurations.
 pub const max_epa_iterations: u32 = 32;
@@ -60,10 +60,10 @@ pub fn EpaResult(comptime T: type) type {
     };
 }
 
-/// Optional diagnostics for a single `epa()` call (brief E2(g)) — a test/tooling
+/// Optional diagnostics for a single `epa()` call — a test/tooling
 /// seam, NOT part of the frozen `EpaResult` contract. Written only when a non-null
-/// pointer is passed; `epa` holds no retained state otherwise (M1.1.14
-/// no-hidden-state / M1.1.8 island-parallel-safe). The production call site
+/// pointer is passed; `epa` holds no retained state otherwise (no hidden state,
+/// island-parallel-safe). The production call site
 /// (`collideOrderedGeneric`) passes `null`.
 pub const EpaDiagnostics = struct {
     /// How the expansion terminated.
@@ -91,8 +91,8 @@ pub const EpaDiagnostics = struct {
 /// One polytope face over the Minkowski difference of the cores: three vertex
 /// indices (CCW as seen from outside), the outward unit normal (away from the
 /// enclosed origin), and the origin-to-plane distance (`normal · vertex`): ≥ 0 for
-/// an enclosing polytope; may be marginally NEGATIVE on a non-enclosing RD-4 band
-/// seed (m1.1.3-hf), where the origin lies just outside — the downstream depth
+/// an enclosing polytope; may be marginally NEGATIVE on a non-enclosing rounding-band
+/// seed, where the origin lies just outside — the downstream depth
 /// clamp handles it.
 fn Face(comptime T: type) type {
     return struct {
@@ -112,16 +112,16 @@ const max_verts: usize = 4 + max_epa_iterations; // 36
 const max_faces: usize = 4 * max_epa_iterations; // 128 (> 2·36 − 4 = 68)
 const max_silhouette: usize = 4 * max_epa_iterations; // 128
 
-// Coplanar-tolerance factor for `expandPolytope` visibility (brief E2(a)). A
+// Coplanar-tolerance factor for `expandPolytope` visibility. A
 // support within `vis_k · floatEps(T) · loop_scale` of a face's plane counts as
 // beyond it — so a support COPLANAR-within-noise with faces it should replace
-// removes them instead of stranding stale interior faces (the S1 depth-0
+// removes them instead of stranding stale interior faces (the depth-0
 // corruption). Bounds only float noise at the polytope coordinate scale; a
 // distinct constant from the surface-convergence tolerance `rel`, matching the
 // gjk.zig `conv_k` magnitude.
 const vis_k = 16;
 
-// Coplanarity factor for `terminalFace` (brief E2 / Codex P3): a candidate face
+// Coplanarity factor for `terminalFace`: a candidate face
 // whose normal has `n·n_sel >= 1 - term_k·floatEps(T)` counts as on the SAME plane
 // as the converged/selected face. Coplanar re-fan triangles differ only by
 // per-triangle normalization noise (a few ULP), far inside this band; a genuinely
@@ -129,13 +129,13 @@ const vis_k = 16;
 // noise only.
 const term_k = 64;
 
-/// Realizable-fallback accumulator (brief E2(e)): the minimum-depth supporting
+/// Realizable-fallback accumulator: the minimum-depth supporting
 /// hyperplane seen across the expansion's support queries. Each recorded
 /// candidate `(n, d = support(n)·n)` defines a supporting plane of the Minkowski
 /// difference, so `d` is a conservative (≥ true) penetration depth along a valid
-/// separation axis — never the S1 under-estimate of a corrupt interior face.
+/// separation axis — never the under-estimate of a corrupt interior face.
 /// `consider` keeps the strict minimum, first-wins on ties (deterministic).
-/// Extracted as a struct so E2(h) can unit-test the selection rule directly.
+/// Extracted as a struct so the selection rule can be unit-tested directly.
 fn Fallback(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -163,7 +163,7 @@ fn Fallback(comptime T: type) type {
 /// the result to world via `rot_a`/`pos_a`. See the file header for the frame,
 /// the low-dimensional-seed contract, and determinism. `rot_b` (B's world
 /// rotation, exact input bits) is consumed ONLY by the point⊖segment degenerate
-/// branch (E3): it derives the world normal intrinsically from the segment
+/// branch: it derives the world normal intrinsically from the segment
 /// owner's rotation so the two call orders bit-negate — a quantity `relpose`
 /// (which folds in `conj(rot_a)`) cannot reproduce bit-exactly.
 pub fn epa(
@@ -219,7 +219,7 @@ pub fn epa(
     const loop_scale = polytopeScale(T, verts[0..vcount]);
     const loop_tol = rel * loop_scale;
     const loop_tol_sq = loop_tol * loop_tol;
-    // Coplanar-tolerant visibility margin (brief E2(a)); bounds float noise only.
+    // Coplanar-tolerant visibility margin; bounds float noise only.
     const vis_eps: T = vis_k * std.math.floatEps(T) * loop_scale;
 
     // --- Build the initial tetrahedron faces ---
@@ -238,7 +238,7 @@ pub fn epa(
         return degenerateResult(T, shape_a, rot_a, pos_a, relpose, shape_b, rot_b, verts[0..vcount]);
     }
 
-    // --- Expanding-polytope loop (brief E2(d)/(e)/(f)) ---
+    // --- Expanding-polytope loop ---
     // Convergence is tested FIRST and is the ONLY path that returns a face's
     // polytope distance as the depth. A face that hits a non-convergence event —
     // the support duplicates an existing vertex, the transactional expansion
@@ -282,7 +282,7 @@ pub fn epa(
         // compaction (kept faces keep their flag, new fan faces start fresh), so a
         // face that failed duplicate-progress STAYS skipped rather than being
         // resurrected to re-fail identically — its support/dist are unchanged since
-        // vertices are only ever appended (Codex P2).
+        // vertices are only ever appended.
         if (!expandPolytope(T, &verts, &vcount, &faces, &fcount, skipped[0..], w, sel, vis_eps)) {
             skipped[sel] = true;
             faces_skipped += 1;
@@ -310,7 +310,7 @@ pub fn epa(
 }
 
 /// Write EPA diagnostics through a caller-owned pointer; a no-op on `null`
-/// (brief E2(g) — no retained state when diagnostics are off).
+/// (no retained state when diagnostics are off).
 fn writeDiag(diag: ?*EpaDiagnostics, exit: EpaDiagnostics.Exit, iterations: u32, faces_skipped: u32, fallback_used: bool) void {
     if (diag) |p| p.* = .{
         .exit = exit,
@@ -337,8 +337,8 @@ fn triClosestSq(comptime T: type, verts: []const support.Vertex(T), f: Face(T)) 
 /// Restricting to `sel`'s PLANE (not merely near-minimal distance) guarantees we
 /// never adopt a DIFFERENT-normal face that was never proven converged, and never
 /// move the depth (a coplanar face shares `sel.dist`). SKIPPED faces are excluded
-/// (returning a skipped face's distance is the S1 form E2(d) forbids). Falls back
-/// to `sel` when no coplanar candidate is closer (Codex P3). Deterministic (first
+/// (a skipped face's distance is never adopted). Falls back
+/// to `sel` when no coplanar candidate is closer. Deterministic (first
 /// wins on ties).
 fn terminalFace(comptime T: type, verts: []const support.Vertex(T), faces: []const Face(T), skipped: []const bool, sel: Face(T), tol: T) Face(T) {
     const coplanar_min: T = 1 - term_k * std.math.floatEps(T);
@@ -431,8 +431,8 @@ fn makeFace(comptime T: type, verts: *const [max_verts]support.Vertex(T), ia: u3
 
 /// Build a fan face — a silhouette edge `ia→ib` closed to the new vertex, whose
 /// index will be `ic` and whose position is `cpos` (passed explicitly because the
-/// transactional expansion validates ALL fan faces BEFORE the vertex is appended,
-/// brief E2(c)). PRESERVES the inherited horizon winding: the silhouette edges
+/// transactional expansion validates ALL fan faces BEFORE the vertex is appended).
+/// PRESERVES the inherited horizon winding: the silhouette edges
 /// come from consistently outward-wound removed faces, so `(ia, ib, new)` is
 /// already outward-CCW and the fan is winding-consistent with the kept neighbours
 /// by construction — no interior sign test, which can flip for a face near-tangent
@@ -449,7 +449,7 @@ fn makeWoundFaceAt(comptime T: type, verts: *const [max_verts]support.Vertex(T),
 
 /// Index of the closest NON-SKIPPED face (minimum `dist`; first wins on ties —
 /// deterministic). Null when every face is skipped — the exhaustion signal that
-/// drives the realizable fallback (brief E2(d)/(e)). A skipped face is never
+/// drives the realizable fallback. A skipped face is never
 /// selected.
 fn closestNonSkipped(comptime T: type, faces: []const Face(T), skipped: []const bool) ?usize {
     var best: ?usize = null;
@@ -474,13 +474,13 @@ fn duplicate(comptime T: type, verts: []const support.Vertex(T), w: math.Vec(3, 
     return false;
 }
 
-/// One EPA expansion step (brief E2(a)/(b)/(c)): re-triangulate so the new
+/// One EPA expansion step: re-triangulate so the new
 /// support `w` becomes a vertex. COMMIT-ON-SUCCESS — every fan face is validated
 /// in scratch first, and the polytope is mutated only if the whole expansion is
 /// valid; on ANY failure it is observably UNMODIFIED, so the caller can skip this
 /// face and retry another. Steps:
 ///  (a) visibility with a coplanar tolerance `vis_eps` — a support coplanar
-///      within noise removes the face instead of stranding it (the S1 fix);
+///      within noise removes the face instead of stranding it;
 ///  (b) restrict the removal set to the edge-connected component of visible faces
 ///      containing `closest` (visible by construction), so a relaxed visibility
 ///      cannot carve a disconnected region into multiple horizon loops (Jolt);
@@ -489,7 +489,7 @@ fn duplicate(comptime T: type, verts: []const support.Vertex(T), w: math.Vec(3, 
 /// silhouette is empty, a fan face is a sliver, or the buffers cannot hold it.
 /// On commit, `skipped` is remapped in lockstep with the face compaction — a kept
 /// face carries its flag to its new index, a new fan face starts unskipped — so a
-/// face known to fail is not resurrected (Codex P2).
+/// face known to fail is not resurrected.
 fn expandPolytope(
     comptime T: type,
     verts: *[max_verts]support.Vertex(T),
@@ -603,7 +603,7 @@ fn faceWithEdge(comptime FaceT: type, faces: []const FaceT, skip: usize, x: u32,
 
 /// Progressively add supports to reach a non-degenerate tetrahedron around the
 /// seed from a 1..4-vertex seed — origin-enclosing for a genuine deep seed; for an
-/// RD-4 band seed (m1.1.3-hf) the origin may lie marginally outside (the
+/// rounding-band seed the origin may lie marginally outside (the
 /// downstream depth clamp handles it). Returns false when the Minkowski difference
 /// is genuinely < 3-D (no tetra exists) — the caller then returns a degenerate
 /// (zero-penetration) result. Blow-up directions are deterministic.
@@ -701,7 +701,7 @@ fn distToLineSq(comptime T: type, p: math.Vec(3, T), a: math.Vec(3, T), b: math.
 
 /// If exactly one core is a segment and the other a point, returns whether the
 /// segment is `shape_a` (`true`) or `shape_b` (`false`); `null` otherwise. Drives
-/// the E3 intrinsic world-space degenerate normal (point⊖segment only).
+/// the intrinsic world-space degenerate normal (point⊖segment only).
 fn pointSegmentPair(comptime T: type, shape_a: support.SupportShape(T), shape_b: support.SupportShape(T)) ?bool {
     const Tag = std.meta.Tag(support.SupportShape(T).Core);
     const ta = std.meta.activeTag(shape_a.core);
@@ -745,7 +745,7 @@ fn degenerateResult(
                 cb = cb.add(verts[seg.indices[i]].support_b.scale(seg.bary[i]));
             }
             const depth = @max(@sqrt(seg.closest.dot(seg.closest)), 0);
-            // E3 — point⊖segment (a 1-D Minkowski difference) derives its
+            // point⊖segment (a 1-D Minkowski difference) derives its
             // perpendicular normal INTRINSICALLY in world from the segment-owning
             // shape's world rotation with EXACT input bits and an explicit
             // ownership sign, so `v_world(B,A) = −v_world(A,B)` and (perpAxis being
@@ -814,7 +814,7 @@ fn worldResult(comptime T: type, rot_a: math.Quat(T), pos_a: math.Vec(3, T), nor
     };
 }
 
-// --- In-file fallback / skip unit tests (brief E2(h)) ---
+// --- In-file fallback / skip unit tests ---
 
 test "epa skipped faces are never selected" {
     const F = Face(f32);
@@ -861,7 +861,7 @@ test "epa terminalFace ignores a skipped coplanar face with a smaller closest" {
     // sel (face 0): plane y = 1, a FAR triangle whose closest-to-origin (~4.4) is
     // clamped to its edge (projection outside it). Face 1: a COPLANAR sibling on
     // y = 1 containing the projection (closest 1.0), but SKIPPED. terminalFace must
-    // return sel — a skipped face's distance is never adopted (E2(d)).
+    // return sel — a skipped face's distance is never adopted.
     const verts = [_]Vx{
         .{ .w = V.fromArray(.{ 3, 1, 3 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ 4, 1, 3 }), .support_a = z, .support_b = z },
@@ -884,7 +884,7 @@ test "epa terminalFace rejects a different-normal face in the distance band" {
     // sel (face 0): plane x = 1, closest-to-origin 1.0. Face 1: plane y = 0.7
     // (a DIFFERENT normal) within the distance band, whose closest 0.7 is smaller
     // — a plane-agnostic scan would adopt it, but its normal was never proven
-    // converged, so terminalFace must reject it and keep sel's plane (Codex P3).
+    // converged, so terminalFace must reject it and keep sel's plane .
     const verts = [_]Vx{
         .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ 1, 1, -1 }), .support_a = z, .support_b = z },
@@ -906,7 +906,7 @@ test "epa expandPolytope keeps a kept face's skip flag through a successful expa
     const z = V.zero;
     // A regular tetra around the origin; expand beyond face 0 only (faces 1-3 kept).
     // Mark kept face 1 skipped BEFORE the expansion — the lockstep remap must carry
-    // the flag to its new compacted index (Codex P2: no resurrection).
+    // the flag to its new compacted index (no resurrection).
     var verts: [max_verts]Vx = undefined;
     verts[0] = .{ .w = V.fromArray(.{ 1, 1, 1 }), .support_a = z, .support_b = z };
     verts[1] = .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z };

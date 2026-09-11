@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! M0.1 / E6 — per-system command buffer.
+//! Per-system command buffer.
 //!
 //! Records deferred structural mutations (`spawn`, `despawn`,
 //! `add_component`, `remove_component`) during a phase's systems and
@@ -9,7 +9,7 @@
 //! built before the phase continue to see the same chunks, slots,
 //! and entity locations.
 //!
-//! Mutation rules during a phase (cf. brief E6):
+//! Mutation rules during a phase:
 //!
 //! - Inside a system body, structural mutations MUST go through the
 //!   command buffer (`ctx.cmd.spawn(...)` etc.). Calling
@@ -31,7 +31,7 @@
 //! happen on the main thread inside the `SystemFn` body — the worker
 //! trampolines that run chunk bodies do **not** get the cmd buffer,
 //! so they cannot record. Per-worker buffers + merge-at-flush is a
-//! Phase 1 refinement; not needed for E6 acceptance.
+//! a later refinement.
 //!
 //! Allocation: each `CommandBuffer` owns an arena. Payload bytes and
 //! per-spawn id/payload slices are duplicated into the arena so the
@@ -99,7 +99,7 @@ pub const RemoveComponentCommand = struct {
     component_id: ComponentId,
 };
 
-/// Deferred tag bit set/clear (M0.8 E3, `etch-grammar.md` §4.4). `tagset_id`
+/// Deferred tag bit set/clear (`etch-grammar.md` §4.4). `tagset_id`
 /// is the registered `TagSet` component id; `bit_index` is the leaf's global
 /// bit. Applied via `World.applyTagMutation`, which adds `TagSet` to the
 /// entity (an archetype transition) when a `set_tag` lands on an entity that
@@ -251,7 +251,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `add_tag` (M0.8 E3) — set `bit_index` of `entity`'s
+    /// Record a deferred `add_tag` — set `bit_index` of `entity`'s
     /// `TagSet` at flush time. `tagset_id` is the registered `TagSet`
     /// component id.
     pub fn setTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
@@ -262,7 +262,7 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Record a deferred `remove_tag` (M0.8 E3) — clear `bit_index` of
+    /// Record a deferred `remove_tag` — clear `bit_index` of
     /// `entity`'s `TagSet` at flush time.
     pub fn clearTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
         try self.commands.append(self.gpa, .{ .clear_tag = .{

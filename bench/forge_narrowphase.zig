@@ -1,4 +1,4 @@
-//! forge_3d narrowphase fast-path microbench (M1.1.4).
+//! forge_3d narrowphase fast-path microbench.
 //!
 //! For each of the four fast pairs (sphere/sphere, sphere/box, box/box,
 //! capsule/capsule) it times the REAL dispatched `collideOrdered` (which routes

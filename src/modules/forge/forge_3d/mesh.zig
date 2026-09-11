@@ -146,7 +146,7 @@ const stack_capacity: usize = max_tree_depth + 2;
 /// CONFIGURABLE is `ShapeDescriptor.triangle_mesh.active_edge_cos_threshold`, whose
 /// default this is: `createShape` passes the descriptor's field and never this constant,
 /// so a caller of the public surface can override it per mesh. Without that field there
-/// would be no path to it at all, and after the M1.1.15 freeze there could be none.
+/// would be no path to it at all, and after the freeze there could be none.
 ///
 /// **`f32`, and NOT `Real` — the descriptor's precision is what fixes the value.** Typed
 /// `Real` it renders as `0.9961947202682495` in an `f32` build and `0.9961946980917455` in

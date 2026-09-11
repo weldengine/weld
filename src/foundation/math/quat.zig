@@ -4,7 +4,7 @@
 //! `core.ecs.components.Transform.rot`'s `[4]f32` layout. Rotations are
 //! right-handed: `fromAxisAngle(+Y, π/2)` sends (1,0,0) to (0,0,−1). Trig is
 //! `std.math`-grade (`@sin`/`@cos`); the deterministic trig forge_3d needs is
-//! pinned later inside the solver (M1.1.14), not here.
+//! pinned later inside the solver, not here.
 
 const std = @import("std");
 const vec = @import("vec.zig");
@@ -53,7 +53,7 @@ pub fn Quat(comptime T: type) type {
         }
 
         /// Magnitude `sqrt(x² + y² + z² + w²)` — internal helper consumed by
-        /// `normalize` (a public quaternion norm is not part of the E1 surface).
+        /// `normalize` (a public quaternion norm is not part of the frozen surface).
         fn length(self: Self) T {
             return @sqrt(self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w);
         }

@@ -1,14 +1,14 @@
-//! S3 Etch lexer — UTF-8 byte stream tokenizer producing the subset of
-//! tokens listed in `briefs/S3-etch-parser-subset.md` Scope / Lexer.
+//! Etch lexer — UTF-8 byte stream tokenizer producing the token kinds
+//! `token.zig` declares.
 //!
 //! Behaviour summary:
 //! - Identifiers and keywords are ASCII-only (per `etch-grammar.md` §1.2).
 //! - String literals (simple-quote) accept arbitrary UTF-8 verbatim.
 //! - Comments (`//`, `/* */`, `///`) are skipped; their byte spans are
-//!   collected in `comment_spans` for future Phase 0.2 trivia attachment.
+//!   collected in `comment_spans`; nothing attaches them to nodes.
 //! - Invalid UTF-8 emits an `error_utf8` token; the parser maps it to
 //!   `E0001 ParseError`.
-//! - Unknown Etch keywords outside the S3 subset are tokenised as
+//! - Etch keywords outside `s3_keywords` are tokenised as
 //!   `error_unknown_keyword`; parser raises `E0001` at the use site.
 
 const std = @import("std");
@@ -19,17 +19,17 @@ const TokenKind = token.TokenKind;
 const SourceSpan = token.SourceSpan;
 
 /// Etch lexer — produces a stream of `Token`s and accumulates a
-/// parallel slab of comment spans for the future `TriviaMap`
-/// (Phase 0.2). Owns no heap memory beyond `comment_spans`.
+/// parallel slab of comment spans for the future `TriviaMap`.
+/// Owns no heap memory beyond `comment_spans`.
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,
     /// Byte spans of every plain `//` line comment and `/* */` block
     /// comment encountered, in source order. Consumed by the parser's
-    /// `TriviaMap` post-pass (M0.8 D-S3-trivia).
+    /// `TriviaMap` post-pass.
     comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
     /// Byte spans of every `///` doc comment, in source order. Kept
-    /// separate from `comment_spans` (M0.8 D-S3-doccomment) so the parser
+    /// separate from `comment_spans` so the parser
     /// can attach them to declaration nodes as semantic doc comments rather
     /// than discardable trivia.
     doc_comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
@@ -70,7 +70,7 @@ pub const Lexer = struct {
                 },
                 '+' => return self.singleOrCompound(start, .plus, .plus_eq),
                 '-' => {
-                    // `-` / `-=` / `->` (fn return type arrow, M0.8 E2).
+                    // `-` / `-=` / `->` (fn return type arrow).
                     self.pos += 1;
                     if (self.pos < self.source.len) {
                         if (self.source[self.pos] == '=') {
@@ -87,7 +87,7 @@ pub const Lexer = struct {
                 '*' => return self.singleOrCompound(start, .star, .star_eq),
                 '%' => return self.singleOrCompound(start, .percent, .percent_eq),
                 '=' => {
-                    // `=` / `==` / `=>` (fat arrow for match arms, M0.8).
+                    // `=` / `==` / `=>` (fat arrow for match arms).
                     self.pos += 1;
                     if (self.pos < self.source.len) {
                         if (self.source[self.pos] == '=') {
@@ -107,8 +107,8 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .bang_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
                     }
-                    // Bare `!` — the postfix force-unwrap operator (M0.8 E3-C
-                    // tranche 4, part1 §6.6). `!=` is handled above by maximal
+                    // Bare `!` — the postfix force-unwrap operator (a later slice,
+                    // part1 §6.6). `!=` is handled above by maximal
                     // munch, so this never splits a comparison.
                     return .{ .kind = .bang, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
@@ -125,7 +125,7 @@ pub const Lexer = struct {
                 ':' => return self.consumeOne(.colon),
                 ',' => return self.consumeOne(.comma),
                 '.' => {
-                    // `.` / `..` / `..=` (range operators, M0.8). `lexNumber`
+                    // `.` / `..` / `..=` (range operators). `lexNumber`
                     // only treats `.` as a decimal point when a digit follows,
                     // so `0..10` already lexes the `0` as an int before here.
                     self.pos += 1;
@@ -141,8 +141,8 @@ pub const Lexer = struct {
                 },
                 '@' => return self.consumeOne(.at),
                 // `?` / `?.` / `??` — the optional type suffix `T?` plus the
-                // optional-chain and null-coalesce operators (M0.8 E3-C
-                // tranche 4, part1 §6.6). Maximal munch: `?.` and `??` never
+                // optional-chain and null-coalesce operators (part1
+                // §6.6). Maximal munch: `?.` and `??` never
                 // appear in type positions, so the longest match is safe.
                 '?' => {
                     self.pos += 1;
@@ -158,8 +158,8 @@ pub const Lexer = struct {
                 },
                 '#' => return self.lexColor(start),
                 '"' => {
-                    // Triple-quote `"""…"""` multiline string (M0.9 E2-A,
-                    // `etch-grammar.md` §1.4): three contiguous quotes open a
+                    // Triple-quote `"""…"""` multiline string (`etch-grammar.md`
+                    // §1.4): three contiguous quotes open a
                     // newline-spanning literal closed by the next `"""` — the
                     // DURATION/COLOR greedy-contiguous precedent. A lone or
                     // double `"` falls through to the single-line `lexString`.
@@ -175,7 +175,7 @@ pub const Lexer = struct {
                 else => {
                     // Anything else is either invalid UTF-8 (continuation
                     // byte without leader, or malformed sequence) or a
-                    // byte outside the S3 lexicon. Either way: error
+                    // byte outside the lexicon. Either way: error
                     // token covering exactly one byte (or the full bad
                     // UTF-8 run). The parser will surface `E0001`.
                     if (c < 0x80) {
@@ -212,8 +212,8 @@ pub const Lexer = struct {
 
     fn skipLineComment(self: *Lexer, gpa: std.mem.Allocator) !void {
         const start = self.pos;
-        // Distinguish a `///` doc comment from a plain `//` line comment
-        // (M0.8 D-S3-doccomment): exactly three slashes followed by a
+        // Distinguish a `///` doc comment from a plain `//` line comment:
+        // exactly three slashes followed by a
         // non-slash is a doc comment; `////`+ is a plain comment (Rust
         // convention). Doc spans feed the per-node doc map, plain comments
         // the trivia slab.
@@ -257,7 +257,7 @@ pub const Lexer = struct {
         const lexeme = self.source[start..self.pos];
         const span: SourceSpan = .{ .byte_start = start, .byte_end = self.pos };
 
-        // Keyword lookup (S3 subset first).
+        // Keyword lookup.
         for (token.s3_keywords) |kw| {
             if (std.mem.eql(u8, kw.lexeme, lexeme)) {
                 return .{ .kind = kw.kind, .span = span };
@@ -293,8 +293,8 @@ pub const Lexer = struct {
             const c = self.source[self.pos];
             if (!((c >= '0' and c <= '9') or c == '_')) break;
         }
-        // TIME_LITERAL `DD:DD` (M0.8 E4 routine triggers, `etch-grammar.md`
-        // §1.4): exactly two digits, ':', exactly two digits, contiguous —
+        // TIME_LITERAL `DD:DD` (routine triggers, `etch-grammar.md` §1.4):
+        // exactly two digits, ':', exactly two digits, contiguous —
         // the §1.4 greedy-lexer rule (like DURATION_LIT). `06:003` stays
         // INT ':' INT; `6:00` (one digit) stays INT ':' INT.
         if (self.pos - start == 2 and isDigit(self.source[start]) and isDigit(self.source[start + 1]) and
@@ -319,7 +319,7 @@ pub const Lexer = struct {
                 }
             }
         }
-        // DURATION_LIT `FLOAT "s"` (M0.8 E4 gate fix, `etch-grammar.md` §1.4):
+        // DURATION_LIT `FLOAT "s"` (gate fix, `etch-grammar.md` §1.4):
         // the greedy-lexer rule — a float immediately followed by a lone `s`
         // (no identifier character after it) is one duration token. FLOAT
         // only per the EBNF: `3s` stays INT + IDENT; `0.3 s` (space) stays
@@ -354,9 +354,9 @@ pub const Lexer = struct {
             // Validate UTF-8 byte-by-byte: arbitrary continuation bytes are
             // allowed inside the literal but a malformed sequence still
             // surfaces as an error token via lexUtf8 from the outer loop.
-            // For S3 we accept all non-newline bytes verbatim inside the
+            // All non-newline bytes are accepted verbatim inside the
             // string literal — explicit UTF-8 validation is only enforced
-            // outside string literals (per brief).
+            // outside string literals.
             self.pos += 1;
         }
         // Unterminated string: surface as error_byte at the opening quote.
@@ -368,7 +368,7 @@ pub const Lexer = struct {
     /// (unlike `lexString`) until the next contiguous `"""`. The greedy-
     /// contiguous open/close mirrors the DURATION_LIT / COLOR_LITERAL lift.
     /// The lexer keeps the full raw span; the parser owns escape decoding,
-    /// interpolation, and the §1.4 common-indent strip (M0.9 E2-A).
+    /// interpolation, and the §1.4 common-indent strip.
     fn lexMultilineString(self: *Lexer, start: u32) Token {
         self.pos += 3; // opening """
         while (self.pos < self.source.len) {
@@ -397,7 +397,7 @@ pub const Lexer = struct {
 
     /// `COLOR_LITERAL = "#" HEX_DIGIT{6} [HEX_DIGIT{2}]` (`etch-grammar.md`
     /// §1.4 l.211) — exactly 6 (RGB) or 8 (RGBA) hex digits; the
-    /// DURATION_LIT-precedent §1.4 literal lift (M0.8 E5). A `#` followed by
+    /// DURATION_LIT-precedent §1.4 literal lift. A `#` followed by
     /// any other count of hex digits is `error_byte` over the run (the parser
     /// surfaces it); a color followed by a non-hex char lexes as the color
     /// then that char (e.g. `#FFFFFFz` → color + ident).
@@ -435,14 +435,12 @@ pub const Lexer = struct {
             }
         }
         // UTF-8 outside an identifier / string literal isn't part of the
-        // S3 lexicon (identifiers ASCII-only, no character literals). It's
+        // lexicon (identifiers ASCII-only, no character literals). It's
         // an error token regardless.
         self.pos = start + expected_len;
         return .{ .kind = .error_utf8, .span = .{ .byte_start = start, .byte_end = self.pos } };
     }
 };
-
-// ──────────────────────────── tests ─────────────────────────────────────
 
 test "lexer tokenizes minimal component declaration" {
     const gpa = std.testing.allocator;
@@ -475,7 +473,7 @@ test "lexer skips line and block comments, records spans in comment_spans" {
     try std.testing.expectEqualStrings("// header", src[lex.comment_spans.items[0].byte_start..lex.comment_spans.items[0].byte_end]);
 }
 
-test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomment)" {
+test "lexer routes triple-slash doc comments to doc_comment_spans" {
     const gpa = std.testing.allocator;
     const src = "/// doc\nlet x = 1";
     var lex = Lexer.init(src);
@@ -492,7 +490,7 @@ test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomme
     try std.testing.expectEqualStrings("/// doc", src[d.byte_start..d.byte_end]);
 }
 
-test "lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)" {
+test "lexer distinguishes //, ///, //// comment kinds" {
     const gpa = std.testing.allocator;
     // `//` plain, `///` doc, `////` plain (4+ slashes is not a doc comment).
     var lex = Lexer.init("// plain\n/// doc\n//// also plain\nlet x = 1");
@@ -525,12 +523,10 @@ test "lexer disambiguates integer vs float literal" {
 
 test "lexer flags unknown Etch keyword from full grammar as error_unknown_keyword" {
     const gpa = std.testing.allocator;
-    // `fn` graduated with the M0.8 E2 call mechanism, `ability` with its E4
-    // Level-B slice; the whole E6 render/anim/audio/cinematic family graduated,
-    // `scene`/`prefab` graduated with the E7 Level-C scene slice, `import` with
-    // M1.0.7 cross-file import, and `const`/`private`/`test` with M1.0.8. The
-    // single remaining reserved top-level keyword is `override` (M1.0.8 keeps it
-    // reserved until a Tier-1 overridable module exists).
+    // `fn` and `ability` lex to their own kinds. `override` is the SINGLE
+    // remaining reserved top-level keyword, and it stays reserved until a
+    // Tier-1 overridable module exists — which is what makes the third
+    // expectation `error_unknown_keyword`.
     var lex = Lexer.init("fn ability override");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_fn);
@@ -540,8 +536,8 @@ test "lexer flags unknown Etch keyword from full grammar as error_unknown_keywor
 
 test "lexer promotes const/private/test" {
     const gpa = std.testing.allocator;
-    // M1.0.8: the three reserved keywords now lex to their own kinds (the
-    // identifier→keyword logic is unchanged — only the keyword tables moved).
+    // The three formerly reserved keywords lex to their own kinds; the
+    // identifier→keyword logic is unchanged, only the keyword tables moved.
     var lex = Lexer.init("const private test");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_const);
@@ -550,7 +546,7 @@ test "lexer promotes const/private/test" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
+test "lexer recognizes the import keyword (graduated from reserved)" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("import a.b");
     defer lex.deinit(gpa);
@@ -561,7 +557,7 @@ test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)" {
+test "lexer recognizes the scene + prefab keywords (graduated from reserved)" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("scene prefab");
     defer lex.deinit(gpa);
@@ -570,7 +566,7 @@ test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reser
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M0.8 E2 keywords and the `->` arrow" {
+test "lexer recognizes the async/fn/throws keywords and the `->` arrow" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("async fn f() -> int { return throws }");
     defer lex.deinit(gpa);
@@ -631,7 +627,7 @@ fn expectKind(lex: *Lexer, gpa: std.mem.Allocator, kind: TokenKind) !void {
     try std.testing.expectEqual(kind, t.kind);
 }
 
-test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
+test "lexer lexes DD:DD as a time literal, greedy-contiguous only" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("06:00 6:00 06:003 22:30");
     // `06:00` → one time literal.
@@ -649,7 +645,7 @@ test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)" {
+test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only" {
     const gpa = std.testing.allocator;
     // `0.3s` → one DURATION_LIT; `3s` stays INT + IDENT (FLOAT-only per
     // §1.4); `0.3 s` (space) and `0.3sec` (ident continues) stay FLOAT +
@@ -665,7 +661,7 @@ test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 
     try expectKind(&lex, gpa, .ident);
 }
 
-test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)" {
+test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (§1.4)" {
     const gpa = std.testing.allocator;
     // `#2E6BBF` (6) and `#12345678` (8) are colors; `#FFF` (3) and `#1234567`
     // (7) are malformed → error_byte; `#FFFFFFz` is a 6-hex color then `z`.

@@ -1,41 +1,34 @@
 //! Rule `no_device_dispatch_outside_gal` — `vk.device_dispatch.*`
 //! accesses are only allowed from files inside `src/modules/render/gal/vulkan/`.
 //!
-//! Architectural discipline, brief §CI: no GAL call site references
-//! `device_dispatch` directly — everything goes through the idiomatic wrappers
-//! or the `*Raw` variants (cf. brief §Scope D-S2-dispatch-bypass).
-//! The Vulkan backend itself is the only legitimate site since it
-//! implements the GAL on top of the dynamic dispatch.
-//!
-//! Strategy: tokenize the source and look for the identifier `vk` followed
-//! by `.` then `device_dispatch`. Skip if the file lives under
-//! `src/modules/render/gal/vulkan/`.
+//! No call site references `device_dispatch` directly — everything goes through
+//! the idiomatic wrappers or the `*Raw` variants. The Vulkan backend is the only
+//! legitimate site, since it implements the GAL on top of the dynamic dispatch,
+//! and it is the one place the rule skips.
 
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
 const name = "no_device_dispatch_outside_gal";
-/// Accepted path forms for the "legitimate" prefix. `scan.zig` joins the
-/// paths via `std.fs.path.join`, which produces `/` on POSIX and `\` on
-/// Win32 — hence the two variants. Without the backslash version, the rule
-/// would trigger on the Vulkan backend itself when `weld_lint` runs
-/// under Windows (cf. the Windows-Debug bug of run 26473017061).
+/// Accepted path forms for the legitimate prefix, one per separator.
+///
+/// `scan.zig` joins paths with `std.fs.path.join`, which yields `/` on POSIX and
+/// `\` on Win32. WITHOUT THE BACKSLASH VARIANT the rule fires on the Vulkan
+/// backend itself under Windows, and on Windows alone.
 const allowed_prefix_posix = "src/modules/render/gal/vulkan/";
 const allowed_prefix_win = "src\\modules\\render\\gal\\vulkan\\";
 
-/// The legacy `WELD_LEGACY_VK_DISPATCH` grandfather marker. M0.5 (item 4)
-/// migrated the last `device_dispatch` site (`src/editor/vk_blit.zig`) onto
-/// the idiomatic `vk.*` wrappers, so the marker is now FORBIDDEN: its presence
-/// in a file header is itself a lint error — no file may opt out of the
-/// dispatch-discipline rule any more.
+/// The legacy grandfather marker, which is FORBIDDEN rather than honoured.
+///
+/// Every `device_dispatch` site has been migrated onto the idiomatic wrappers, so
+/// the marker's presence in a file header is itself a lint error: no file may opt
+/// out of this rule.
 const legacy_marker = "WELD_LEGACY_VK_DISPATCH";
 
-/// Hook called by `main.runLint` once per `.zig` file. Files under
-/// `gal/vulkan/` are the legitimate dispatch site and are skipped entirely.
-/// For every other file: emit a diagnostic if the now-forbidden
-/// `WELD_LEGACY_VK_DISPATCH` grandfather marker is present (M0.5 — no opt-out),
-/// then scan the source for the `vk.device_dispatch` pattern and emit one
-/// diagnostic per occurrence.
+/// Hook called by `main.runLint` once per `.zig` file.
+///
+/// Files under `gal/vulkan/` are skipped ENTIRELY, marker included: they are the
+/// legitimate dispatch site.
 pub fn check(
     arena: std.mem.Allocator,
     file: []const u8,
@@ -48,9 +41,8 @@ pub fn check(
     if (std.mem.indexOf(u8, file, allowed_prefix_posix) != null) return;
     if (std.mem.indexOf(u8, file, allowed_prefix_win) != null) return;
 
-    // M0.5 (item 4): the `WELD_LEGACY_VK_DISPATCH` grandfather escape is
-    // removed. The marker is forbidden outright — flag its presence, then keep
-    // scanning so any `device_dispatch` access in the same file is also caught.
+    // Flag the marker, then KEEP SCANNING: a file carrying it may also carry a
+    // real access, and returning here would report the opt-out and hide the use.
     if (legacyMarkerOffset(source)) |off| {
         const pos = diag.lineColFromOffset(source, off);
         try out.append(arena, .{

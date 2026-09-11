@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Chase-Lev work-stealing deque (Chase & Lev, SPAA 2005), with the C11
 //! memory orderings refined by Lê, Pop, Cohen, Nardelli (PPoPP 2013).
@@ -16,7 +16,7 @@
 //! the counter itself is not possible. The buffer slots are reused as the
 //! deque circles, but every slot read happens-before its consuming
 //! `cmpxchg(top)`, and the slot won't be overwritten by the owner until
-//! `top` has advanced past it (Chase-Lev correctness invariant). For S1 with
+//! `top` has advanced past it (Chase-Lev correctness invariant). At
 //! capacity 1024 and ~135 chunks per worker, the deque is never near full,
 //! so this invariant holds with margin.
 //!

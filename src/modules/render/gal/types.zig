@@ -1,13 +1,13 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! GAL public types — Phase 0 / M0.4.
+//! GAL public types.
 //!
 //! Public surface of the GPU Abstraction Layer (cf. `engine-render.md` §3).
 //! Inspired by WebGPU / Mach sysgpu, adapted for Weld (right-handed Y-up,
 //! escape hatches pre-wired day 1 for `TimelineSemaphore`, `BarrierExplicit`,
 //! `DescriptorIndexing`).
 //!
-//! **Absolute isolation rule (brief §Notes known pitfalls)**: no native
+//! **Absolute isolation rule**: no native
 //! Vulkan type (`vk.VkBuffer`, etc.) must appear here. The GAL types are
 //! opaque on the caller side — each backend maps to its native types via
 //! its own `conv.zig` (cf. `gal/vulkan/conv.zig`).
@@ -132,8 +132,8 @@ pub const SwapchainHandle = extern struct {
 // Formats & enums
 // ============================================================================
 
-/// Phase 0 formats (cf. brief §Scope GAL — limited formats). Phase 1+
-/// extends the list (BC compressed, ASTC, BC7, etc.).
+/// The supported texture formats. Compressed formats (BC, ASTC, BC7) are
+/// deliberately absent.
 pub const TextureFormat = enum(u32) {
     undef = 0,
 
@@ -149,7 +149,7 @@ pub const TextureFormat = enum(u32) {
     d32_sfloat,
     d24_unorm_s8_uint,
 
-    // 16-bit / 32-bit float (Phase 0 minimum — HDR readback)
+    // 16-bit / 32-bit float — the minimum set, for HDR readback
     r16_sfloat,
     rg16_sfloat,
     rgba16_sfloat,
@@ -159,7 +159,7 @@ pub const TextureFormat = enum(u32) {
     rgba32_sfloat,
 };
 
-/// Queue type. Phase 0: Vulkan typically exposes a single graphics+present
+/// Queue type. Vulkan typically exposes a single graphics+present
 /// queue on the target GPUs. Dedicated compute + transfer are query-able
 /// but not required.
 pub const QueueType = enum(u8) {
@@ -168,7 +168,7 @@ pub const QueueType = enum(u8) {
     transfer,
 };
 
-/// Swapchain present mode. Phase 0: `fifo` (vsync) guaranteed, others
+/// Swapchain present mode: `fifo` (vsync) is guaranteed, others
 /// best-effort (negotiated at swapchain init).
 pub const PresentMode = enum(u8) {
     fifo,
@@ -177,7 +177,7 @@ pub const PresentMode = enum(u8) {
     mailbox,
 };
 
-/// Primitive topology (triangle list by default in Phase 0).
+/// Primitive topology (triangle list by default).
 pub const PrimitiveTopology = enum(u8) {
     point_list,
     line_list,
@@ -187,7 +187,7 @@ pub const PrimitiveTopology = enum(u8) {
 };
 
 /// Face culling. Right-handed Y-up + counter-clockwise winding = the
-/// Weld convention (consistent with glTF). Phase 0: `back` by default.
+/// Weld convention (consistent with glTF); `back` by default.
 pub const CullMode = enum(u8) {
     none,
     front,
@@ -266,7 +266,7 @@ pub const Extent3D = extern struct {
 };
 
 /// Aspect of a texture view/copy (color | depth | stencil | all).
-/// Phase 0: `color` suffices for the PPM capture; `depth` exposed for the
+/// `color` suffices for the PPM capture; `depth` exposed for the
 /// future depth prepass; `stencil` unused.
 pub const TextureAspect = enum(u8) {
     all,
@@ -277,7 +277,7 @@ pub const TextureAspect = enum(u8) {
 
 /// The texture endpoint of an image↔buffer copy (WebGPU canonical).
 /// It is the SOURCE in `copyTextureToBuffer` and the DESTINATION in
-/// `copyBufferToTexture` (the E4 reverse direction).
+/// `copyBufferToTexture` (the reverse direction).
 pub const ImageCopyTexture = struct {
     texture: TextureHandle,
     mip_level: u32 = 0,
@@ -287,7 +287,7 @@ pub const ImageCopyTexture = struct {
 
 /// The buffer endpoint of an image↔buffer copy (WebGPU canonical).
 /// It is the DESTINATION in `copyTextureToBuffer` and the SOURCE in
-/// `copyBufferToTexture` (the E4 reverse direction).
+/// `copyBufferToTexture` (the reverse direction).
 /// `bytes_per_row` must be aligned per the backend's constraints
 /// (Vulkan: 256 bytes typical). `rows_per_image` only applies to
 /// 3D / array textures; ignored for simple 2D ones.
@@ -299,9 +299,7 @@ pub const ImageCopyBuffer = struct {
 };
 
 /// Submit a CommandEncoder to a queue. WebGPU-aligned shape extended
-/// with the explicit Vulkan-style sync triple — Phase 1+ the wait/signal
-/// pair may move behind an automatic frame manager and this descriptor
-/// will collapse to the WebGPU `submit(commandBuffers)` form.
+/// with the explicit Vulkan-style sync triple.
 pub const SubmitDescriptor = struct {
     /// Semaphore to wait on before the GPU starts executing the
     /// submitted command buffer (typically the `image_ready` from
@@ -346,7 +344,7 @@ pub const BufferDescriptor = struct {
     label: ?[]const u8 = null,
     size: u64,
     usage: BufferUsage,
-    /// If true, the buffer is CPU-visible (host-mappable). Phase 0 limited to
+    /// If true, the buffer is CPU-visible (host-mappable), limited to
     /// staging + uniform — most GPU Buffers stay device-local.
     host_visible: bool = false,
 };
@@ -360,8 +358,8 @@ pub const TextureDescriptor = struct {
     height: u32,
     depth_or_array_layers: u32 = 1,
     mip_levels: u32 = 1,
-    /// Phase 0: `sample_count` > 1 returns `error.Unsupported`
-    /// (cf. brief §Out-of-scope MSAA).
+    /// `sample_count` > 1 returns `error.Unsupported`
+    /// (no MSAA).
     sample_count: u32 = 1,
     usage: TextureUsage,
 };
@@ -419,7 +417,7 @@ pub const BindGroupDescriptor = struct {
     entries: []const BindGroupEntry,
 };
 
-/// ShaderModule descriptor (SPIR-V only in Phase 0, cf. brief §Notes
+/// ShaderModule descriptor (SPIR-V only
 /// decision 3: no HLSL/WGSL source, no runtime reflection).
 pub const ShaderModuleDescriptor = struct {
     label: ?[]const u8 = null,
@@ -457,7 +455,7 @@ pub const RenderPipelineDescriptor = struct {
     depth_write_enabled: bool = false,
     depth_compare: CompareOp = .less,
     color_targets: []const ColorTargetState = &.{},
-    /// Phase 0: > 1 returns `error.Unsupported`.
+    /// > 1 returns `error.Unsupported`.
     sample_count: u32 = 1,
 };
 
@@ -467,8 +465,8 @@ pub const ColorTargetState = struct {
     blend: ?BlendState = null,
 };
 
-/// Blending state. Phase 0: opaque forward only (no blend), preserved
-/// for Phase 1 (transparents).
+/// Blending state: opaque forward only (no blend). The field is preserved
+/// deliberately, for transparents.
 pub const BlendState = struct {
     color_op: enum { add, subtract, min, max } = .add,
     color_src: enum { zero, one, src_alpha, one_minus_src_alpha } = .one,
@@ -492,7 +490,7 @@ pub const SwapchainDescriptor = struct {
     height: u32,
     format: TextureFormat = .bgra8_unorm,
     present_mode: PresentMode = .fifo,
-    /// Phase 0: 2 (double-buffer) or 3 (triple-buffer). The backend picks
+    /// 2 (double-buffer) or 3 (triple-buffer). The backend picks
     /// the closest supported value.
     min_image_count: u32 = 2,
 };
@@ -527,7 +525,7 @@ pub const AttachmentFinalLayout = enum(u8) {
 /// Color attachment for a render pass.
 pub const ColorAttachment = struct {
     view: TextureViewHandle,
-    /// If present, resolve to this view at end of pass (MSAA Phase 1+).
+    /// If present, resolve to this view at end of pass (MSAA).
     resolve_view: ?TextureViewHandle = null,
     load_op: LoadOp = .clear,
     store_op: StoreOp = .store,
@@ -559,10 +557,10 @@ pub const ComputePassDescriptor = struct {
 };
 
 // ============================================================================
-// Device selection (consistent with --gpu-prefer / --vulkan-driver, brief §Scope)
+// Device selection (consistent with --gpu-prefer / --vulkan-driver)
 // ============================================================================
 
-/// Hardware selection preference. Preserves the S2 semantics.
+/// Hardware selection preference.
 pub const GpuPreference = union(enum) {
     auto,
     discrete,
@@ -570,7 +568,7 @@ pub const GpuPreference = union(enum) {
     index: u32,
 };
 
-/// Vulkan implementation selector (new in M0.4, cf. brief §Notes decision 11).
+/// Vulkan implementation selector.
 /// Orthogonal to `GpuPreference`.
 pub const VulkanDriver = enum {
     /// Enumerates all devices and applies `--gpu-prefer`.

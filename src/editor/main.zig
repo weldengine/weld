@@ -3,9 +3,9 @@
 //! Vulkan window, and presents the runtime-written mire each frame
 //! via a fullscreen blit pipeline (cf. `src/editor/vk_blit.zig`).
 //!
-//! S6 lifecycle (per brief § Scope and § Observable behavior):
+//! Lifecycle:
 //!   1. Create the shm region (`/weld-shm-viewport-<pid>`).
-//!   2. Open the Vulkan-capable window at the brief's resolution.
+//!   2. Open the Vulkan-capable window at the configured resolution.
 //!   3. Initialise the blit renderer (instance, device, swapchain,
 //!      sampled image bound to the viewport, fullscreen pipeline).
 //!   4. Listen on the IPC socket, spawn the runtime (unless
@@ -18,7 +18,7 @@
 //! Argv:
 //!   --runtime=<path>     path to the runtime binary
 //!   --frames=<N>         render-loop frame budget (default: 3600 ≈ 60 s)
-//!   --no-heartbeat       debug aid (no-op in S6 — runtime side
+//!   --no-heartbeat       debug aid (a no-op — the runtime side
 //!                        replies inline)
 //!   --no-spawn           do not spawn the runtime; print argv and
 //!                        wait for an external invocation. Used to
@@ -28,8 +28,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const weld_core = @import("weld_core");
-// M1.1.14 — the engine float environment (`ARCH-031` rule 5): the main thread
-// is not born of a spawn, so it is installed here rather than by the job system.
+// The engine float environment (`ARCH-031` rule 5): the main thread is not
+// born of a spawn, so it is installed here rather than by the job system.
 const foundation = @import("foundation");
 const ipc = weld_core.ipc;
 const framing = ipc.framing;
@@ -89,7 +89,7 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    // M1.1.14 — the main thread is not born of a spawn, so it does not pass
+    // The main thread is not born of a spawn, so it does not pass
     // through the job system's worker entry and receives the engine float
     // environment here instead (`ARCH-031` rule 5, `engine-platform.md` §4).
     // First statement, before anything can compute.
@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer vp.close();
 
-    // ---- Window (S2 platform layer) ----
+    // ---- Window (platform layer) ----
     var window = try window_mod.Window.create(gpa, .{
         .title = "Weld Editor — S6 viewport blit",
         .width = viewport.default_resolution.width,
@@ -245,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
                 renderer.swapchain_dirty = true;
             },
             .dpi_changed => renderer.swapchain_dirty = true,
-            // M0.3 — new Event variants ignored by the S6 editor stub.
+            // New Event variants are ignored by the editor stub.
             else => {},
         };
         if (should_close) break;

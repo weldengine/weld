@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! `IpcClient` — runtime-side wrapper around the IPC stack.
 //!
@@ -8,12 +8,12 @@
 //! `ProtocolHelloAck`, then either drives the IPC loop or exits
 //! cleanly when the editor rejects.
 //!
-//! S6 lifecycle:
+//! Lifecycle:
 //!   1. `IpcClient.init(gpa)`
 //!   2. `client.connect(socket_path)`
 //!   3. `client.sendHello(engine_version, build_hash, capabilities)`
 //!   4. `client.recvHelloAck(scratch)` — fatal on `accepted == 0`.
-//!   5. `client.connection()` drives the rest of the S6 traffic.
+//!   5. `client.connection()` drives the rest of the traffic.
 //!   6. `client.deinit()` — closes the socket.
 
 const std = @import("std");

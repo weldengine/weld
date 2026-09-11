@@ -1,16 +1,16 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Input Tier 0 — `InputRawState` resource (`@transient`).
 //!
-//! Phase 0.3 / M0.3 deliverable. Documented in `engine-input-system.md`
-//! §1 (Hardware Layer Tier 0) and the M0.3 brief.
+//! Documented in `engine-input-system.md`
+//! §1 (Hardware Layer Tier 0).
 //!
 //! ## Model
 //!
 //! `InputRawState` is a per-frame snapshot of raw input devices —
 //! keyboard, mouse, up to 4 gamepad slots. Surfaced as a Tier 0 ECS
 //! resource (`@transient`, reset every frame). Consumed by the Input
-//! Tier 1 module (`engine-input-system.md` Mapping Layer, Phase 1) to
+//! Tier 1 module (`engine-input-system.md` Mapping Layer) to
 //! derive `Action<T>` outputs according to the active `input_mapping`.
 //!
 //! ## Per-frame lifecycle
@@ -24,26 +24,24 @@
 //!   3. The gamepad polling routine (`win32_xinput` or `linux_evdev`)
 //!      reads the current state of each slot and calls
 //!      `applyGamepadSnapshot(self, slot, snapshot)`.
-//!   4. Gameplay systems (Phase 1+) read `InputRawState` and derive
+//!   4. Gameplay systems read `InputRawState` and derive
 //!      typed actions.
 //!
 //! ## Bitset layout
 //!
-//! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total
-//! (256+256+256 = 768 bytes for the keyboard alone), the memory cost
-//! is irrelevant compared to the readability win of a direct
-//! `state.keyboard.pressed[scancode]` index over a packed-bitset
-//! shift-and-mask. The brief gates "pressed bitset (256 scancodes)" —
-//! `[256]bool` keyed by **raw scancode** is the literal interpretation.
-//! Logical-key access in Phase 0 is `window.Event.code` (the frozen
-//! `KeyCode` contract); a KeyCode-keyed steady-state view is the
-//! Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
+//! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total (256+256+256 = 768
+//! bytes for the keyboard alone), the memory cost is irrelevant compared to the
+//! readability win of a direct `state.keyboard.pressed[scancode]` index over a
+//! packed-bitset shift-and-mask. The contract is a pressed bitset over 256 scancodes —
+//! `[256]bool` keyed by **raw scancode** is the literal interpretation. Logical-key
+//! access is `window.Event.code` (the frozen `KeyCode` contract); a KeyCode-keyed
+//! steady-state view is the Input Tier-1 mapping layer (`engine-input-system.md`).
 
 const std = @import("std");
 const window = @import("../window.zig");
 const keycode = @import("keycode.zig");
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Version of the frozen InputModule (Tier-1, exercised) public surface —
 /// the logical `KeyCode` enum + `window.Event.code` contract, the
 /// `InputRawState` extern-struct layout, and the `apply*`/`pollAllSlots`
@@ -60,7 +58,7 @@ pub const KeyboardState = extern struct {
     /// scancodes on Win32 vs evdev). This is the raw hardware layer: for
     /// logical-key input read `window.Event.code` (the frozen `KeyCode`
     /// contract); cross-backend logical-key steady-state querying is the
-    /// Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
+    /// Input Tier-1 mapping layer (`engine-input-system.md`).
     pressed: [256]bool = [_]bool{false} ** 256,
     /// 1 on the frame the key transitioned from up to down (rising edge).
     /// Cleared at the start of each frame.
@@ -94,8 +92,8 @@ pub const GamepadState = extern struct {
     connected: bool = false,
     /// Bitset of currently-held buttons (32 button slots max). The bit
     /// layout is backend-dependent — XInput's wButtons mask on Win32,
-    /// evdev's KEY_BTN_* layout on Linux. Phase 0 ships the raw bits;
-    /// Phase 1 Input Tier 1 normalizes via per-controller mappings.
+    /// evdev's KEY_BTN_* layout on Linux. The raw bits ship as-is;
+    /// an Input Tier 1 module normalizes via per-controller mappings.
     buttons: u32 = 0,
     /// Rising edge bitset, cleared each frame.
     buttons_this_frame: u32 = 0,
@@ -146,7 +144,7 @@ pub fn applyEvent(self: *InputRawState, event: window.Event) void {
     switch (event) {
         .key_down => |ev| {
             const idx = @as(usize, ev.scancode) & 0xFF;
-            // Auto-repeat events don't fire pressed_this_frame (the brief
+            // Auto-repeat events don't fire pressed_this_frame (the
             // gate is rising-edge only).
             if (!self.keyboard.pressed[idx] and !ev.repeat) {
                 self.keyboard.pressed_this_frame[idx] = true;
@@ -299,7 +297,7 @@ test "InputRawState: gamepad snapshot computes button transitions" {
     });
     try std.testing.expect((s.gamepads[0].buttons & 0b0001) != 0);
     try std.testing.expect((s.gamepads[0].buttons_this_frame & 0b0001) != 0);
-    // Sticks pass raw — no deadzone applied at Tier 0 (per brief).
+    // Sticks pass raw — no deadzone is applied at Tier 0.
     try std.testing.expectApproxEqAbs(@as(f32, 0.05), s.gamepads[0].sticks[0][0], 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), s.gamepads[0].triggers[0], 0.001);
 

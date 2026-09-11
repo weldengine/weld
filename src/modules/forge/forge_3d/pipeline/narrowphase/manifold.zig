@@ -1,11 +1,11 @@
 //! `forge_3d/pipeline/narrowphase/manifold.zig` — the contact manifold types and
-//! (M1.1.3/E3) the supporting-face clipping generator.
+//! the supporting-face clipping generator.
 //!
-//! M1.1.3/E1 landed the FROZEN `ContactManifold(T)` / `ContactPoint(T)` types and
-//! the normal / depth / feature-id convention. E3 adds the single-shot generator
+//! It carries the FROZEN `ContactManifold(T)` / `ContactPoint(T)` types,
+//! the normal / depth / feature-id convention, and the single-shot generator
 //! and the `collide` entry that drives both regimes.
 //!
-//! **The generator runs in A's frame (brief Notes, Guy's E3 kickoff).** It takes
+//! **The generator runs in A's frame.** It takes
 //! a WORLD contact normal (shallow: `normalize(closest_b − closest_a)`; deep:
 //! `EpaResult.normal`), converts it ONCE to A's frame (`conj(rot_a)·n`, a unit
 //! vector rotation), takes `supportingFace(+n_a)` on A and `supportingFace(−n_a)`
@@ -15,7 +15,7 @@
 //! against the reference's side planes (Sutherland-Hodgman), keeps the
 //! penetrating points, reduces to ≤ 4, applies the inflation radii, and maps the
 //! final normal + points to WORLD once. No clipping in world space — that would
-//! reintroduce the large-coordinate cancellation the frame-of-A choice (M1.1.14)
+//! reintroduce the large-coordinate cancellation the frame-of-A choice
 //! avoids.
 //!
 //! **Per-point penetration (both regimes, continuous).** `r_sum − s`, where `s`
@@ -28,12 +28,12 @@
 //! pair in a caller-independent CANONICAL order (a deterministic key on
 //! shape+pose) and negates the normal for the swapped caller, so `collide(A,B)`
 //! and `collide(B,A)` give the same points/depths with negated normals. Ratified
-//! exception (brief RD-4): two shapes with bit-identical pose AND geometry have no
+//! exception: two shapes with bit-identical pose AND geometry have no
 //! geometric A→B axis (measure-zero), so `collide` returns the SAME arbitrary
 //! normal in both orders there rather than a negated pair; `BodyManager.collidePair`
 //! restores full order-independence for real bodies via a canonical body-id order.
 //!
-//! **Dependency discipline (brief Notes).** Imports `foundation` (math) and the
+//! **Dependency discipline.** Imports `foundation` (math) and the
 //! sibling `support.zig` / `gjk.zig` / `epa.zig` ONLY — never `weld_forge`,
 //! `body*.zig`, `config.zig`, or `broadphase.zig`. The scalar is the comptime
 //! `T`; `forge_3d` instantiates it at `config.Real`.
@@ -44,13 +44,13 @@ const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
 const fast_paths = @import("fast_paths.zig");
-// M1.1.11 — the half-space geometry the plane arm works on. A sibling import: `plane.zig`
+// The half-space geometry the plane arm works on. A sibling import: `plane.zig`
 // does not import this file, so there is no cycle.
 const plane_mod = @import("plane.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
-/// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
-/// produced by the M1.1.3/E3 supporting-face clipper.
+/// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention;
+/// produced by the supporting-face clipper.
 pub fn ContactManifold(comptime T: type) type {
     return struct {
         /// Unit, world-space, points from A to B — the axis along which to
@@ -63,7 +63,7 @@ pub fn ContactManifold(comptime T: type) type {
     };
 }
 
-/// One contact point of a `ContactManifold`. FROZEN convention (brief Notes).
+/// One contact point of a `ContactManifold`. FROZEN convention.
 pub fn ContactPoint(comptime T: type) type {
     return struct {
         /// World-space point on the contact plane (midpoint of the two
@@ -71,7 +71,7 @@ pub fn ContactPoint(comptime T: type) type {
         position: math.Vec(3, T),
         /// Surface penetration along `normal`, >= 0 when overlapping.
         penetration: T,
-        /// Deterministic per-contact identity for M1.1.6 warm-starting:
+        /// Deterministic per-contact identity for warm-starting:
         /// `(reference-feature id << 16) | incident-feature id`, each 16-bit half
         /// class-tagged in its top 2 bits so the contact kinds occupy DISJOINT id
         /// ranges — kept vertex `(class_a, class_a)`, edge×plane crossing
@@ -82,7 +82,7 @@ pub fn ContactPoint(comptime T: type) type {
         /// `BodyManager.collidePair` (fixed body-id order); the bare `collide`
         /// entry is POSE-canonical, so reference/incident ownership flips at a
         /// pose-order boundary and the id is NOT inter-frame stable there.
-        /// Populated now; consumed at M1.1.6. Packing is an impl detail.
+        /// Populated here; consumed by the warm-start cache. Packing is an impl detail.
         feature_id: u32,
     };
 }
@@ -92,10 +92,10 @@ pub fn ContactPoint(comptime T: type) type {
 /// through one generator — `.shallow` supplies the normal from the GJK closest
 /// points, `.deep` from EPA. Order-independence is guaranteed by computing the
 /// pair in a caller-independent canonical POSE order and negating the normal for
-/// the swapped caller (with the ratified RD-4 exception for bit-identical
+/// the swapped caller (with the ratified exception for bit-identical
 /// pose+geometry). Because the canonical order is by POSE, the `feature_id`
 /// reference/incident ownership flips at a pose-order boundary — a caller that
-/// needs a FRAME-STABLE `feature_id` (M1.1.6 warm-starting) must drive the fixed
+/// needs a FRAME-STABLE `feature_id` (warm-starting) must drive the fixed
 /// `collideOrdered` in a stable external order instead; `BodyManager.collidePair`
 /// does this by body id.
 pub fn collide(
@@ -121,10 +121,10 @@ pub fn collide(
 /// normal is A→B and its `feature_id` reference/incident ownership follows the
 /// given `(a, b)` order. Callers that own a stable external key (e.g. body ids)
 /// use this directly so the feature_id stays frame-stable across a pose change
-/// that would flip `collide`'s pose-based order (Codex P1b); `BodyManager`'s
+/// that would flip `collide`'s pose-based order; `BodyManager`'s
 /// `collidePair` drives it in a canonical body-id order.
 ///
-/// M1.1.4: an analytic fast path is dispatched first (`fast_paths.fastSeed`).
+/// An analytic fast path is dispatched first (`fast_paths.fastSeed`).
 /// `.not_handled` falls through to the generic GJK/EPA oracle
 /// (`collideOrderedGeneric`); `.separated` returns `null`; `.contact` feeds the
 /// seed to the SAME `generateManifold` the generic path uses — so the manifold
@@ -152,7 +152,7 @@ pub fn collideOrdered(
 
 /// `collideOrdered` with the fast-path dispatcher BYPASSED — always the generic
 /// GJK → shallow/deep → `generateManifold` path. This is the differential ORACLE
-/// the M1.1.4 fast-path tests compare against (and the bench baseline): a fast
+/// the fast-path tests compare against (and the bench baseline): a fast
 /// pair's `collideOrdered` must be geometrically equivalent to its
 /// `collideOrderedGeneric` (within a named tolerance on normal/points/depth,
 /// exact `count`/`feature_id` away from documented topological-flip bands). It
@@ -192,7 +192,7 @@ pub fn collideOrderedGeneric(
         // n = normalize(closest_b − closest_a); `normalize` is scale-equivariant,
         // so the only guard needed is 0/0 — fall back to the centre-to-centre
         // direction ONLY at true coincidence (`|sep|² ≤ floatMin`, the underflow
-        // floor, never a geometric scale) — E8 class A.
+        // floor, never a geometric scale).
         n_world = if (sep_len_sq > std.math.floatMin(T)) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
         base_penetration = r_sum - g.distance;
     }
@@ -206,7 +206,7 @@ pub fn collideOrderedGeneric(
 /// feed the single-point (point-core) path; the multi-point path derives per-
 /// point penetration from the clip.
 ///
-/// File-`pub` (M1.1.4): consumed by `collideOrdered`'s fast-path arm as well as
+/// File-`pub`: consumed by `collideOrdered`'s fast-path arm as well as
 /// the generic arm, so a fast kernel's seed produces a manifold identical to the
 /// generic one. NOT re-exported by the package facade — it stays package-internal.
 pub fn generateManifold(
@@ -239,7 +239,7 @@ pub fn generateManifold(
         return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
     }
 
-    // Segment × segment (M1.1.4): a NON-parallel (crossed) segment/segment pair
+    // Segment × segment: a NON-parallel (crossed) segment/segment pair
     // is an edge-edge contact → a SINGLE witness contact along the EPA/GJK axis,
     // NOT a 2-point clip. A segment reference forces `rn = n_a` (`faceNormalA`
     // returns the axis for a count-2 feature), so FIX-1's `|rn·n_a|` test never
@@ -293,7 +293,7 @@ pub fn generateManifold(
         const s = v.sub(ref_pt).dot(rn);
         const pen = r_sum - s;
         // Keep points on the boundary within float noise; SCALE-RELATIVE (never an
-        // absolute metric constant, E7): the rounding of `pen = r_sum − s` is
+        // absolute metric constant): the rounding of `pen = r_sum − s` is
         // `~floatEps·(r_sum + |v − ref_pt|)`, so a point more negative than that is
         // genuinely outside and dropped.
         const keep_eps = 16 * std.math.floatEps(T) * (r_sum + v.sub(ref_pt).length());
@@ -442,7 +442,7 @@ fn oneContact(comptime T: type, normal: math.Vec(3, T), position: math.Vec(3, T)
 /// feature (a sphere point, or an end-on capsule endpoint) is a VERTEX (its
 /// `vert_id`), otherwise a FACE (its `face_id`) — so a capsule's `+Y` (vert 0)
 /// and `−Y` (vert 1) endpoints, and an end-on endpoint (here) vs a side segment
-/// (`clipSegment`), get distinct ids (Codex FIX-12). The `(class_a, class_c)`
+/// (`clipSegment`), get distinct ids. The `(class_a, class_c)`
 /// class pair is used by NO clip producer (kept vertex `(class_a, class_a)`, edge
 /// crossing `(class_edge, class_edge)`, reference corner `(class_c, class_c)`,
 /// `clipSegment` endpoints `(class_a, class_a)`), so a single-contact id can never
@@ -457,7 +457,7 @@ fn singleContactFid(comptime T: type, ref_face: support.Face(T), inc_face: suppo
 /// segments — the sole regime where a 2-point segment clip is a correct manifold
 /// (parallel-projection overlap, e.g. two side-by-side capsules). A zero-length
 /// segment (a `half_height == 0` capsule → a point) or a non-parallel (crossed)
-/// pair returns false, so the caller takes the single-witness path (M1.1.4).
+/// pair returns false, so the caller takes the single-witness path.
 ///
 /// Threshold: `sin²θ = |u×v|² / (|u|²·|v|²) ≤ parallel_rel`, the same relative
 /// float-noise form as `support.supportingFace`'s end-on `aligned_rel` (not a
@@ -490,7 +490,7 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
 
 // Feature-id classes, per 16-bit half (top two bits). A contact's `feature_id`
 // is `(reference_feature << 16) | incident_feature`; the class bits keep the
-// three contact kinds in DISTINCT id ranges so they never alias (Codex FIX-9):
+// three contact kinds in DISTINCT id ranges so they never alias:
 //   reference half: face (`class_a`), side plane / edge (`class_edge`), vertex /
 //     corner (`class_c`);  incident half: vertex (`class_a`), edge (`class_edge`),
 //     face (`class_c`).
@@ -500,7 +500,7 @@ pub const class_a: u16 = 0x0000;
 pub const class_edge: u16 = 0x4000;
 /// Class tag: a reference VERTEX (a corner), or an incident FACE.
 pub const class_c: u16 = 0x8000;
-/// The HALF-SPACE producer's reference tag (M1.1.11): the plane's boundary face.
+/// The HALF-SPACE producer's reference tag: the plane's boundary face.
 ///
 /// A FOURTH class value rather than a free PAIR of the existing three, and the
 /// difference is what makes the disjointness structural: the four existing producers
@@ -544,8 +544,8 @@ fn featureId(ref16: u16, inc16: u16) u32 {
 /// `p` AND `qid` — a REFERENCE CORNER (a ref vertex), whose incident feature is
 /// the incident FACE (`class_c | inc_face_id` — carrying which incident face, so
 /// a supporting-face flip inter-frame changes the id and warm-starting cannot
-/// mis-match two corners at the same ref vertex on different faces; Codex FIX-10).
-/// It must NOT inherit a neighbour's incident edge (Codex FIX-9: that aliased
+/// mis-match two corners at the same ref vertex on different faces).
+/// It must NOT inherit a neighbour's incident edge (FIX-9: that aliased
 /// distinct contacts). Otherwise the point is an incident-edge × ref-edge crossing.
 fn intersectionFid(qid: u16, cur_fid: u32, nxt_fid: u32, inc_face_id: u16) u32 {
     const cur_ref: u16 = @intCast(cur_fid >> 16);
@@ -795,7 +795,7 @@ fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
 fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
     // Coincidence tolerance for the dedup: PER-AXIS relative to the candidates'
     // own EXTENT on that axis (`eps[k] = 16·floatEps·(max−min) of pos[k]`), NEVER
-    // `max|pos[k]|` and NEVER an isotropic scalar (E9, class B). The extent is the
+    // `max|pos[k]|` and NEVER an isotropic scalar (class B). The extent is the
     // only form invariant under all three: TRANSLATION (the contact-zone position
     // in A's frame cancels in `max − min` — a small off-centre feature on a large
     // body keeps a tiny eps), SCALE (covariant), and ANISOTROPY (per-axis). Two
@@ -900,7 +900,7 @@ fn fallbackNormal(comptime T: type, pos_a: math.Vec(3, T), pos_b: math.Vec(3, T)
 /// Two distinct shapes/poses always compare unequal, so the winner is caller-
 /// independent — the basis of order-independence.
 ///
-/// Degenerate exception (RATIFIED, brief RD-4 / `engine-physics-forge.md`
+/// Degenerate exception (RATIFIED, `engine-physics-forge.md`
 /// narrowphase §): two shapes with BIT-IDENTICAL pose AND geometry compare equal
 /// (neither `poseAfter(a,b)` nor `poseAfter(b,a)` is true). Then both call orders
 /// run the same `collideOrdered` and return the SAME normal — for coincident

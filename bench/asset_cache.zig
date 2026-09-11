@@ -1,17 +1,17 @@
-//! Bench: asset cooking-cache hit differential — M0.6 / E4.
+//! Bench: asset cooking-cache hit differential.
 //!
 //! Measures the wall-clock differential between a *cold cook* (cache miss:
 //! BLAKE3 over the payload + assemble + write the `.bin`) and a *warm cache
 //! hit* (a directory lookup that skips the cook entirely). This is the
-//! performance half of the brief's cache criterion; the correctness half
+//! performance half of the cache criterion; the correctness half
 //! (a miss → hit transition that returns byte-identical bytes) is the
 //! deterministic gate `tests/assets/cache_diff.zig`.
 //!
 //! The differential is host- and load-dependent, so it lives here — measured
 //! under the opposable protocol on the reference machine — not inside
 //! `zig build test`, where a single cache-hit sample spiking on a page
-//! fault / AV scan / cold directory would red-fail the gate. The brief's
-//! reference figure is ≥ 100 ms cold cook / < 10 ms hit for a real
+//! fault / AV scan / cold directory would red-fail the gate. The reference
+//! figure is ≥ 100 ms cold cook / < 10 ms hit for a real
 //! decode-heavy asset; this synthetic 16 MiB RGBA8 cook is hash- and
 //! write-bound rather than decode-bound, so the absolute cold time is
 //! smaller — the *ratio* (cook ≫ lookup) is the signal.

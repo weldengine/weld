@@ -1,13 +1,13 @@
 //! `forge_3d/pipeline/narrowphase/root.zig` — the narrowphase package facade.
 //!
-//! M1.1.3/E1 promoted the single-file `narrowphase.zig` to this package so the
+//! The single-file `narrowphase.zig` was promoted to this package so the
 //! GJK stack (`support.zig` + `gjk.zig`), EPA (`epa.zig`), and the contact
 //! manifold (`manifold.zig`) live as sibling files without one 1300-line file.
 //! This root re-exports every public name the old file exposed — unchanged — so
 //! consumers change only their import path (`pipeline/narrowphase.zig` →
 //! `pipeline/narrowphase/root.zig`).
 //!
-//! **Dependency discipline (brief Notes).** The whole package imports
+//! **Dependency discipline.** The whole package imports
 //! `foundation` (math) ONLY — never `weld_forge`, never `body*.zig`, never
 //! `config.zig`, never `broadphase.zig`. The scalar arrives as the comptime
 //! parameter `T`; `forge_3d` instantiates it at `config.Real`.
@@ -20,7 +20,7 @@ const fast_paths = @import("fast_paths.zig");
 const raycast_mod = @import("raycast.zig");
 const shapecast_mod = @import("shapecast.zig");
 const plane_mod = @import("plane.zig");
-// M1.1.11.1 — the analytic ray↔triangle kernel + the back-face predicate. Re-exported as
+// The analytic ray↔triangle kernel + the back-face predicate. Re-exported as
 // a namespace below; the comptime pin analyses its inline tests.
 const triangle_mod = @import("triangle.zig");
 
@@ -77,7 +77,7 @@ pub const ContactPoint = manifold.ContactPoint;
 pub const collide = manifold.collide;
 /// `collide` for a FIXED shape order (no pose canonicalization) — for callers
 /// that own a stable external key (body ids) and need a frame-stable feature_id.
-/// Dispatches the M1.1.4 analytic fast paths, falling through to
+/// Dispatches the analytic fast paths, falling through to
 /// `collideOrderedGeneric`.
 pub const collideOrdered = manifold.collideOrdered;
 /// The HALF-SPACE arm of the manifold generator — a half-space against a bounded
@@ -91,7 +91,7 @@ pub const feature_class_plane = manifold.class_plane;
 pub const feature_class_mask = manifold.class_mask;
 
 /// `collideOrdered` with the fast-path dispatcher bypassed — the generic GJK/EPA
-/// manifold path. The differential oracle + bench baseline for the M1.1.4 fast
+/// manifold path. The differential oracle + bench baseline for the fast
 /// paths. (`generateManifold` stays package-internal — not re-exported here.)
 pub const collideOrderedGeneric = manifold.collideOrderedGeneric;
 
@@ -105,14 +105,10 @@ pub const FastResult = fast_paths.FastResult;
 /// Analytic per-pair narrowphase dispatcher (`.not_handled` until a kernel lands).
 pub const fastSeed = fast_paths.fastSeed;
 
-// --- Ray kernels (analytic ray↔core, raycast.zig) ---
-
-/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
-/// Precondition: `raySupportsShape` (no error channel since M1.1.11).
-/// The shallow/separated contact margin at a coordinate scale, and the symmetric coordinate
-/// scale of a pair — the two quantities a CANDIDATE FILTER upstream of GJK must reuse rather than
-/// re-derive, so the filter and the classification cannot disagree about where the band ends
-/// (M1.1.11.1 closure, finding F1).
+/// The shallow/separated contact margin at a coordinate scale, and the symmetric
+/// coordinate scale of a pair — the two quantities a CANDIDATE FILTER upstream of GJK
+/// must reuse rather than re-derive, so the filter and the classification cannot
+/// disagree about where the band ends.
 pub const contactMargin = gjk_mod.contactMargin;
 /// The symmetric coordinate scale of a pair — `|Δpos| + coreExtent(a) + coreExtent(b)`.
 pub const coordScale = gjk_mod.coordScale;
@@ -121,11 +117,13 @@ pub const coreExtent = gjk_mod.coreExtent;
 /// ULP multiplier of the contact margin — the accumulated-rounding bound, not a tolerance.
 pub const contact_margin_conv_k = gjk_mod.contact_margin_conv_k;
 
+// --- Ray kernels (analytic ray↔core, raycast.zig) ---
+
 /// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
-/// Precondition: `raySupportsShape` (no error channel since M1.1.11).
+/// Precondition: `raySupportsShape` (no error channel).
 pub const rayShape = raycast_mod.rayShape;
-/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
-/// `engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
+/// The analytic ray↔triangle kernel and the shared back-face predicate
+/// (`engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
 /// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
 pub const triangle = triangle_mod;
 /// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed

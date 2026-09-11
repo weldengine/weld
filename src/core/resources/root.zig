@@ -1,6 +1,6 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Public surface of the M0.2 / E3 resource subsystem.
+//! Public surface of the resource subsystem.
 //!
 //! Resources are singleton-entity components — exactly one value of
 //! each resource type lives in the world (cf. `ARCH-006`).
@@ -8,7 +8,7 @@
 //! `setResource(world, gpa, value)` spawns a dedicated entity in a
 //! singleton-flagged archetype, `getResource` / `getResourceMut`
 //! route through the existing component access machinery, and
-//! change detection reuses the M0.1 tick-based mechanism.
+//! change detection reuses the tick-based mechanism.
 //!
 //! The module convention follows `src/core/ecs/root.zig` and
 //! `src/core/rtti/root.zig` — single canonical entry point. No
@@ -34,8 +34,8 @@ pub const ResourceMarker = registry_mod.ResourceMarker;
 /// `removeResource`).
 pub const ResourceError = api_mod.ResourceError;
 
-/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
-/// Version of the frozen Resources (M0.2 singleton-entity) Tier-0 public
+/// FROZEN — see `engine-phase-0-criteria.md` C0.5.
+/// Version of the frozen singleton-entity Resources Tier-0 public
 /// surface (ResourceError + the set/get/getMut/has/remove/changed fns).
 /// Bumped on any breaking change — a tracked migration, not a freeze
 /// failure (the `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).

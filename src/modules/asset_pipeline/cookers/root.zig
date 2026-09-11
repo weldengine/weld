@@ -1,7 +1,7 @@
 //! Asset Pipeline `cookers/` namespace — intermediate → runtime `.<type>.bin`.
 //!
-//! Each cooker assembles the E1-frozen 40-byte header + a small metadata
-//! section + the bulk payload. M0.6 payloads are raw (RGBA8 / f32 vertices /
+//! Each cooker assembles the frozen 40-byte header + a small metadata
+//! section + the bulk payload. Payloads are raw (RGBA8 / f32 vertices /
 //! PCM); compression and quantization are later phases.
 
 /// Shared `.bin` assembly + cook `Error`.

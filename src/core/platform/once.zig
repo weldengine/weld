@@ -1,13 +1,13 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Once-init primitive — tri-state CAS on `std.atomic.Value(u32)`.
 //!
 //! Zig 0.16.0 has **no** `std.once` / `std.Thread.Once` primitive (verified
-//! at M0.3 kick-off, 2026-05-25, via `@hasDecl(std, "once")` and
+//! via `@hasDecl(std, "once")` and
 //! `@hasDecl(std.Thread, "Once")` — both return false). This module
-//! implements the CAS-based fallback documented in the M0.3 brief.
+//! implements a CAS-based fallback.
 //!
-//! Used by three sites in the Phase 0 platform layer:
+//! Used by three sites in the platform layer:
 //!   - `window/win32.zig` : `class_atom` (RegisterClassExW), `dpi_awareness_set`
 //!     (SetProcessDpiAwarenessContext).
 //!   - `time.zig` : `timeBeginPeriod(1)` activation on Win32.

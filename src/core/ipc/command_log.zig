@@ -10,9 +10,9 @@
 //! `last_clean_line` that the runtime never acked (§7.2). No idempotence
 //! is attempted (§7.3): a replay that nacks or times out stops hard.
 //!
-//! M0.7 scope: this is the IPC-replay materialization the brief E4 calls
+//! This is the IPC-replay materialization option 1 names;
 //! for. The richer Islandz `Command` model (`engine-tools-editor.md`
-//! §2.4) is Phase 2 — here an entry is just the wire frame + status.
+//! §2.4) is unimplemented — here an entry is just the wire frame + status.
 
 const std = @import("std");
 

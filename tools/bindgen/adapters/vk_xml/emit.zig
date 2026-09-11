@@ -17,7 +17,8 @@
 //!  13. Top-level functions (loader-level commands)
 //!  14. Methods on handle types
 //!
-//! Throwaway code for S2. Replaced in S3 by the unified emitter.
+//! This emitter is what `zig build bindgen-vk` runs. `core/emitter.zig` is a
+//! skeleton no adapter goes through — see `tools/bindgen/main.zig`.
 
 const std = @import("std");
 const parser = @import("parser.zig");
@@ -161,7 +162,7 @@ fn writeBasetypes(ctx: *Ctx) !void {
 
 fn mapBasetypeDecl(c_decl: []const u8) ?[]const u8 {
     // Only map a handful of known basetypes — others are platform handles
-    // (ANativeWindow, IOSurfaceRef, …) that S2 doesn't need.
+    // (ANativeWindow, IOSurfaceRef, …) the whitelist does not need.
     if (std.mem.indexOf(u8, c_decl, "uint32_t") != null and std.mem.indexOf(u8, c_decl, "VkBool32") != null) return "u32";
     if (std.mem.indexOf(u8, c_decl, "uint64_t") != null and std.mem.indexOf(u8, c_decl, "VkDeviceSize") != null) return "u64";
     if (std.mem.indexOf(u8, c_decl, "uint64_t") != null and std.mem.indexOf(u8, c_decl, "VkDeviceAddress") != null) return "u64";
@@ -174,7 +175,7 @@ fn mapBasetypeDecl(c_decl: []const u8) ?[]const u8 {
 // =========================================================== platform types =
 //
 // vk.xml lists categoryless platform-specific types (`HINSTANCE`, `wl_display`,
-// …) as forward declarations. The S2 whitelist only pulls Wayland and Win32
+// …) as forward declarations. The whitelist only pulls Wayland and Win32
 // types; we emit a small hardcoded mapping per name. Other targets fall back
 // to a plain `opaque {}` so the binding still compiles when transitively
 // referenced — the call sites are guarded by `builtin.os.tag` anyway.
@@ -582,9 +583,8 @@ fn writeErrorSet(ctx: *Ctx) !void {
         \\
     );
 
-    // M0.4 — dynamic emission of the checkResult switch: only the arms
-    // whose variant exists in the post-closure Result enum are emitted
-    // (cf. brief §Scope D-S2-vk-whitelist).
+    // Dynamic emission of the checkResult switch: only the arms
+    // whose variant exists in the post-closure Result enum are emitted.
     const result_group = findEnumGroup(ctx.model.enum_groups, "VkResult");
     const success_arms = [_]struct { variant: []const u8 }{
         .{ .variant = "success" },        .{ .variant = "not_ready" },   .{ .variant = "timeout" },
@@ -729,7 +729,7 @@ fn classifyCommand(ctx: *Ctx, c: parser.Command) Dispatch {
     for (dev_set) |d| if (std.mem.eql(u8, first, d)) return .device;
     if (ctx.model.findHandle(first)) |h| {
         // Other dispatchable handles — we don't have a per-instance/per-device
-        // categorization for them in S2, default to device.
+        // categorization for them, default to device.
         if (h.dispatchable) return .device;
     }
     return .base;
@@ -1089,9 +1089,9 @@ fn emitWrapper(ctx: *Ctx, c: parser.Command, dispatch: Dispatch, _self: ?parser.
 
     const plan = try buildPlan(ctx, c, has_self);
 
-    // M0.4 — also emits a `*Raw` variant for the whitelisted functions
-    // whose idiomatic wrapper hides parameters (brief §Scope
-    // D-S2-dispatch-bypass). Explicit target: vkAcquireNextImageKHR,
+    // Also emits a `*Raw` variant for the whitelisted functions
+    // whose idiomatic wrapper hides parameters. Explicit target:
+    // vkAcquireNextImageKHR,
     // vkQueuePresentKHR, vkAcquireNextImage2KHR. These functions need
     // to be called in raw mode on the swapchain.zig side to observe the
     // `.suboptimal_khr` / `.error_out_of_date_khr` codes separately.
@@ -1377,7 +1377,7 @@ fn mapCType(
         return if (optional) "?[*]const [*:0]const u8" else "[*]const [*:0]const u8";
     }
 
-    // Pointer → handle dispatchable: `*T` (S2 keeps handles as opaque pointers).
+    // Pointer → handle dispatchable: `*T` (handles stay opaque pointers).
     if (handle_kind == .handle_dispatchable and ct.pointer_depth == 0) {
         return try std.fmt.allocPrint(ctx.A, "*{s}", .{base});
     }
@@ -1577,7 +1577,7 @@ fn stripBitSuffix(A: std.mem.Allocator, s: []const u8) ![]const u8 {
 // =============================================================== *Raw =====
 
 /// Explicit list of the commands for which to emit a `*Raw` variant.
-/// Brief §Scope D-S2-dispatch-bypass: these functions are called in raw
+/// These functions are called in raw
 /// mode on the `gal/vulkan/swapchain.zig` side (acquire/present) to observe
 /// the intermediate codes `.suboptimal_khr` / `.error_out_of_date_khr`
 /// without `checkResult` folding them into an error.

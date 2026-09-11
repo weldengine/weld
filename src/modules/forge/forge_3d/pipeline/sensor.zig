@@ -26,7 +26,7 @@
 //! separately and A may see B without B seeing A. It is therefore never a pair predicate
 //! and must never be consulted symmetrically.
 //!
-//! **The pass cannot consult `default_layer_pairs`**: after M1.1.13 that matrix reads
+//! **The pass cannot consult `default_layer_pairs`**: that matrix reads
 //! `false` on the whole `trigger` row and column (§1.13.3), which is what keeps a trigger
 //! out of constraint construction. The two mechanisms never substitute for each other —
 //! the matrix governs the physical RESPONSE, absolutely, and the mask governs what is SEEN
@@ -222,7 +222,7 @@ const CandidateSink = struct {
         // trigger. The overlap boolean is symmetric in exact arithmetic, so no orientation
         // changes the answer there; but nothing guarantees bit equality of the two orders in
         // floating point, and a rule left to whichever side happened to be usable would make
-        // the boundary depend on a choice the spec does not state. M1.1.14 must be able to
+        // the boundary depend on a choice the spec does not state. Cross-platform determinism must be able to
         // VERIFY this order, not establish it.
         //
         // **THE DISPATCH IS TOTAL, and no pair is out of domain.** A trigger is convex or a
@@ -302,7 +302,7 @@ fn pairEql(a: EntityPair, b: EntityPair) bool {
 /// warm-start cache (§1.13.11): the set is a sorted flat array, deduplication is an
 /// adjacent pass, and the two differences are linear merges. The output order is therefore a
 /// pure function of the SET — independent of tree visit order, of worker count and of body
-/// insertion order — which is the condition for M1.1.14 to VERIFY it rather than establish
+/// insertion order — which is the condition for the determinism instrument to VERIFY it rather than establish
 /// it.
 pub const SensorState = struct {
     /// The current set, sorted and deduplicated by the §1.13.11 key.

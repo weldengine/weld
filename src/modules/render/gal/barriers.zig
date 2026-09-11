@@ -1,19 +1,17 @@
-//! Barrier tracker — Phase 0 / M0.4.
+//! Barrier tracker.
 //!
 //! Maintains the layout/access-mask state of each texture/buffer to
 //! automatically insert Vulkan/Metal/D3D12 barriers between passes that
-//! share a resource. Consistent with brief §Notes decision 2:
-//! auto-tracking by default, `BarrierMode.explicit` opt-in.
+//! share a resource: auto-tracking by default, `BarrierMode.explicit`
+//! opt-in.
 //!
-//! Phase 0: minimalist implementation — one `std.AutoHashMap` per resource
+//! A minimalist implementation — one `std.AutoHashMap` per resource
 //! type mapping handle → last (layout, stage, access). On each usage
 //! declaration by a pass, the tracker compares the current state to the
 //! required state and emits a `RecordedBarrier` if a transition is needed.
 //!
-//! Phase 1+: enriched for pass merging (merging compatible passes that
-//! share a barrier), resource aliasing (reuse of a transient texture by
-//! several non-overlapping passes), and multi-queue support (cross-queue
-//! barriers with timeline semaphores).
+//! What it does NOT do: pass merging, resource aliasing, and multi-queue
+//! support with cross-queue timeline-semaphore barriers.
 //!
 //! The tracker is internal to the render graph — not exported on the caller
 //! side. The caller consumes only the `BarrierMode` via the pass descriptor
@@ -200,7 +198,7 @@ pub const BarrierTracker = struct {
 };
 
 /// Determines whether a barrier is needed between two successive usages
-/// of a resource. Phase 0 rule (simplified but correct):
+/// of a resource. The rule, simplified but correct:
 ///   - first occurrence (last_access empty) → no barrier, but a layout
 ///     transition if needed (handled by the caller via the initial state)
 ///   - write → read = mandatory barrier (read-after-write)

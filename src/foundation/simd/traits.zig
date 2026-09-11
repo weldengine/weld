@@ -1,7 +1,7 @@
 //! Capability bitflags + comptime target detection for `foundation/simd`.
 //!
-//! M0.6 ships portable `@Vector` kernels only (no ISA-specific asm,
-//! brief §Notes), so nothing dispatches on these flags yet. They exist to
+//! Only portable `@Vector` kernels exist (no ISA-specific asm), so nothing
+//! dispatches on these flags yet. They exist to
 //! stand up the dispatch infrastructure: `dispatch.zig` will branch on
 //! `traits.current` once arch variants land in a later phase.
 

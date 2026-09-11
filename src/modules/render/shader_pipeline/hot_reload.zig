@@ -1,16 +1,16 @@
-//! Shader hot-reload — Phase 0 / M0.4.
+//! Shader hot-reload.
 //!
 //! Filewatch on `assets/shaders/` + recompile in a dedicated thread +
-//! pipeline recreate via GAL. Target latency < 200 ms (brief §Scope).
+//! pipeline recreate via GAL. Target latency < 200 ms.
 //!
-//! Phase 0: polling-based watcher (stat every N ms). Phase 1+: switch
+//! A polling-based watcher (stat every N ms). Switching
 //! to inotify/FSEvents/ReadDirectoryChangesW depending on OS via `std.fs.Watch`
 //! once the stdlib stabilizes it.
 //!
 //! If `glslc` is absent from PATH when the watcher starts, we log a warn
 //! (`glslc not found, hot-reload disabled, runtime continues with cached
-//! .spv`) and `start` returns without starting the thread (cf. brief §Observable
-//! behavior + §Notes decision 7).
+//! .spv`) and `start` returns without starting the thread (see
+//! the compiler's keeper policy).
 
 const std = @import("std");
 const foundation = @import("foundation");
@@ -20,7 +20,7 @@ const cache = @import("cache.zig");
 const log = std.log.scoped(.shader_hot_reload);
 
 /// Callback invoked when a shader is re-compiled (or fails).
-/// Phase 0: receives the path + new SPIR-V (or diagnostic). Phase 1+:
+/// Receives the path + new SPIR-V (or diagnostic).
 /// also receives a GAL.ShaderModule handle for pipeline recreation.
 pub const OnRecompile = *const fn (ctx: ?*anyopaque, path: []const u8, spv: ?[]const u8, diag: ?[]const u8) void;
 
@@ -30,7 +30,7 @@ pub const Config = struct {
     io: std.Io,
     /// Root directory to watch (typically `assets/shaders/`).
     root: []const u8 = "assets/shaders",
-    /// Poll interval in milliseconds Phase 0. Trade-off latency vs CPU.
+    /// Poll interval in milliseconds. Trade-off latency vs CPU.
     poll_interval_ms: u32 = 50,
     /// Recompile (or failure) callback.
     on_recompile: OnRecompile,

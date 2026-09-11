@@ -1,15 +1,14 @@
-//! Etch type → Zig type mapping for the S5 codegen.
+//! Etch type → Zig type mapping for the codegen.
 //!
-//! Type mapping is **fixed for S5 and Phase 0.2** per
-//! `briefs/S5-etch-codegen-zig.md` Scope — "`int` → `i64`, `float` → `f64`,
-//! `bool` → `bool`". Values in generated code are native Zig types, never
-//! a `Value` tagged union on the hot path.
+//! The mapping is FIXED: `int` → `i64`, `float` → `f64`, `bool` → `bool`.
+//! Values in generated code are native Zig types, never a `Value` tagged
+//! union on the hot path.
 //!
 //! The integer-family variants (`i32`, `u32`, `f32`, `f64`) are mapped to
-//! themselves — the S3 type-checker only registers `int`/`float`/`bool` as
+//! themselves — the type-checker only registers `int`/`float`/`bool` as
 //! recognised builtin POD types for components (cf. `etch/types.zig`
 //! `BuiltinType`), but the lexer accepts the wider names so we map them to
-//! avoid surprises if a future Phase 0.2 widening reaches the codegen
+//! avoid surprises if a later widening reaches the codegen
 //! before the type-checker is updated.
 
 const std = @import("std");
@@ -28,8 +27,8 @@ pub const ZigTypeName = []const u8;
 ///
 /// For user types (`Health`, `Position`, ...) the caller passes through the
 /// original name — Etch component names map 1:1 to Zig struct names per the
-/// brief's "Component / resource Etch declarations mapped 1:1 to `extern
-/// struct` Zig declarations under matching names (no prefix)".
+/// rule that a component or resource maps 1:1 to an `extern
+/// struct` under a matching name, with no prefix.
 pub fn mapBuiltin(name: []const u8) ?ZigTypeName {
     if (std.mem.eql(u8, name, "int")) return "i64";
     if (std.mem.eql(u8, name, "float")) return "f64";

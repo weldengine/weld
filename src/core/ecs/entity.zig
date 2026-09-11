@@ -1,4 +1,4 @@
-//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
 //! Generational entity identity for the Tier 0 ECS.
 //!
@@ -10,12 +10,12 @@
 //!
 //! The 64-bit layout is stable — Etch's `Value.entity_id` stores it as a
 //! raw u64 via `@bitCast`, and the chunk `entity_ids[]` array remains a
-//! `[*]EntityId` with the same 8-byte stride S1 committed to (cf.
+//! `[*]EntityId` with the committed 8-byte stride (cf.
 //! `chunk.zig`'s capacity test). Changing the layout requires bumping
 //! every chunk capacity reference.
 //!
 //! `EntityIdentityStore` owns the slot table + free-list. Both world spawn
-//! paths — the S1 comptime archetype (`world.spawn`) and the S4 dynamic
+//! paths — the comptime archetype (`world.spawn`) and the dynamic
 //! archetypes (`world.spawnDynamic`) — allocate identity through this
 //! single store so the generation counter is unique across the world
 //! regardless of which storage path the entity lives in.
@@ -84,7 +84,7 @@ pub const EntityIdentityStore = struct {
     /// one is available (returning the bumped generation captured by the
     /// previous `release`), otherwise appends a new slot with generation 0.
     ///
-    /// Establishes the C1 invariant *`free_indices.capacity >= slots.len` at
+    /// Establishes the invariant *`free_indices.capacity >= slots.len` at
     /// all times*, which is what lets `release` be an infallible
     /// `appendAssumeCapacity`: the recycled path frees a free-list slot the
     /// re-push reuses (`pop` drops `len` under an unchanged capacity), and the
@@ -92,7 +92,7 @@ pub const EntityIdentityStore = struct {
     /// growing `slots`. On the fresh path `free_indices.items.len == 0`, so
     /// `ensureTotalCapacity(slots.len + 1)` makes `capacity >= slots.len + 1`
     /// (`ensureUnusedCapacity(1)` would only guarantee `capacity >= 1` and
-    /// freeze there — see brief B1).
+    /// freeze there).
     ///
     /// Reserve-then-mutate: an `OutOfMemory` from the free-list reservation
     /// leaves `slots` untouched and returns no handle; an `OutOfMemory` from
@@ -138,14 +138,14 @@ pub const EntityIdentityStore = struct {
     /// prior; this still asserts liveness in debug.
     ///
     /// Infallible and allocation-free by construction: `allocate` already
-    /// reserved the free-list slot this push reuses (C1 invariant
+    /// reserved the free-list slot this push reuses (invariant
     /// `free_indices.capacity >= slots.len`), so this is a bare
     /// `appendAssumeCapacity` — no allocator parameter, no error. See
     /// `allocate` for the reservation that backs it.
     ///
     /// Generation arithmetic uses wrapping increment — the u32 counter is
     /// only at risk after 4 G releases of the same slot, which is well
-    /// past the Phase 0 horizon. A future-phase milestone can introduce a
+    /// past any current horizon. A later milestone can introduce a
     /// guard that retires the slot once `generation == maxInt(u32) - 1`.
     pub fn release(self: *EntityIdentityStore, id: EntityId) void {
         std.debug.assert(id.index < self.slots.items.len);
@@ -284,8 +284,8 @@ test "100k allocate then release back to zero live count" {
 }
 
 test "allocate reserves release capacity; release is allocation-free" {
-    // C1 acceptance test. N is deliberately large (1000) so the buggy
-    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation (brief B1) would
+    // N is deliberately large (1000) so the buggy
+    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation would
     // freeze `free_indices.capacity` far below `slots.len` and overflow the
     // infallible `appendAssumeCapacity` in `release` (repro: overflow at
     // release #33). The corrected `ensureTotalCapacity(gpa, slots.len + 1)`

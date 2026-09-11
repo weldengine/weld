@@ -1,4 +1,4 @@
-//! Pass — Phase 0 / M0.4.
+//! Pass.
 //!
 //! Abstraction of a render graph pass. A Pass declares its
 //! read + written resources (Buffers and Textures) and provides a
@@ -32,7 +32,7 @@ pub const ResourceUsage = struct {
     layout: ?escape.TextureLayout = null,
 };
 
-/// Signature of a pass's body function. Phase 0: GAL
+/// Signature of a pass's body function. GAL
 /// `RenderPassEncoder` encoder + opaque user context.
 pub const PassBody = *const fn (encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void;
 
@@ -48,12 +48,12 @@ pub const Pass = struct {
     writes: []const ResourceUsage = &.{},
     /// Body function — executed when recording the command buffer.
     body: PassBody,
-    /// User context passed to `body`. Phase 0: opaque, the caller
-    /// casts to its concrete type. Phase 1+: RTTI-typed.
+    /// User context passed to `body`. Opaque: the caller casts it to its
+    /// concrete type, with no RTTI typing.
     ctx: ?*anyopaque = null,
     /// Depth ordering hint (used for front-to-back sorting by
     /// the forward pass — lower passes execute first).
-    /// Phase 0: not used by the strict topological sort.
+    /// Not used by the strict topological sort.
     depth_hint: f32 = 0,
 };
 

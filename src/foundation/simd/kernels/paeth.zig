@@ -6,7 +6,7 @@
 //! already-unfiltered previous scanline (all zeros for the first row);
 //! `prev.len == curr.len`.
 //!
-//! Same discipline as `adler32` (brief §Notes — inaugural SIMD kernels):
+//! Same discipline as `adler32`:
 //! scalar `reference` oracle + portable `@Vector` `vectorized`, **no
 //! ISA-specific asm**, baseline only. The Paeth recurrence is sequential
 //! along pixels (each pixel's left neighbour is a just-computed output), so
@@ -28,7 +28,7 @@ pub fn reference(prev: []const u8, curr: []u8, bpp: u8) void {
 }
 
 /// Portable `@Vector` form — parallelizes the `bpp` channels of each pixel.
-/// Falls back to `reference` for `bpp` outside 1..4 (M0.6 never exceeds 4).
+/// Falls back to `reference` for `bpp` outside 1..4.
 pub fn vectorized(prev: []const u8, curr: []u8, bpp: u8) void {
     std.debug.assert(prev.len == curr.len);
     switch (bpp) {

@@ -1,5 +1,4 @@
-//! `forge_3d/pipeline/narrowphase/raycast.zig` — the analytic ray↔shape kernels
-//! (M1.1.9).
+//! `forge_3d/pipeline/narrowphase/raycast.zig` — the analytic ray↔shape kernels.
 //!
 //! **Cores + inflation radius, the same convention and never a second one.** A
 //! sphere is a point of radius `r`, a capsule a Y-segment of radius `r`, a box
@@ -8,7 +7,7 @@
 //! rounded box (`radius > 0` on a box core) is outside this kernel's shape set: it
 //! is an ASSERTED PRECONDITION (`raySupportsShape`), never silently approximated.
 //! The typed refusal lives where a CALLER can provoke one, at the two query entries
-//! taking a caller-supplied shape handle (§1.11.7, M1.1.11) — through this kernel
+//! taking a caller-supplied shape handle (§1.11.7) — through this kernel
 //! the error was reachable by no path at all, every stored box converting with
 //! `radius = 0`. A core this file does not know cannot exist silently either — the
 //! `switch` is exhaustive, so a future `Core` case is a compile error here, which is
@@ -16,7 +15,7 @@
 //!
 //! **Everything is in the shape's LOCAL frame.** The caller transports the ray
 //! by the inverse pose and rotates the returned normal back to world (that is
-//! `BodyManager.raycastBody`'s job, E4). Local framing keeps the algebra centred
+//! `BodyManager.raycastBody`'s job). Local framing keeps the algebra centred
 //! on the shape, which is where the precision is, and mirrors the narrowphase's
 //! frame-of-A discipline.
 //!
@@ -44,7 +43,7 @@
 const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
-// The analytic ray↔triangle kernel, one sibling wider than the M1.1.9 dependency set and
+// The analytic ray↔triangle kernel, one sibling wider than the inherited dependency set and
 // deliberately so: the triangle is a `Core` variant, so its arm is reached through the
 // switch below rather than by a class dispatch above, and the kernel belongs beside the
 // back-face predicate it shares a convention with (§1.11.17). No cycle — `triangle.zig`
@@ -52,7 +51,7 @@ const support = @import("support.zig");
 const triangle_mod = @import("triangle.zig");
 
 /// A ray hit on one shape, in that shape's local frame. Defined in `support.zig`
-/// since M1.1.11: `plane.zig` produces the same type for the half-space, and the
+/// `plane.zig` produces the same type for the half-space, and the
 /// `BodyId`-level adapter that dispatches between the two by shape class returns one
 /// type rather than two identical ones.
 const LocalHit = support.LocalHit;
@@ -68,7 +67,7 @@ const unit_k: comptime_int = 16;
 /// below — the box arm would under-report it by the radius — so it is not part of
 /// this kernel's shape set.
 ///
-/// **The PRECONDITION of `rayShape`, exposed as a predicate** (M1.1.11). Two things
+/// **The PRECONDITION of `rayShape`, exposed as a predicate**. Two things
 /// it makes structural rather than merely tested: it takes no origin, so the
 /// rejection provably belongs to the SHAPE and not to the trajectory; and the two
 /// callers that need to decide admissibility ahead of a call test the same condition
@@ -90,7 +89,7 @@ pub fn raySupportsShape(comptime T: type, shape: support.SupportShape(T)) bool {
 /// unit (asserted).
 ///
 /// **PRECONDITION: `raySupportsShape(T, shape)`.** It was a typed
-/// `error.UnsupportedShape` until M1.1.11, and the error was reachable through no
+/// `error.UnsupportedShape` once, and the error was reachable through no
 /// path at all: `shape.supportShape` gives every box `radius = 0` unconditionally, so
 /// no `SupportShape` built from a stored shape can be a rounded box, and a control
 /// that has never been seen to fire is a comment with syntax rather than a check

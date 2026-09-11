@@ -1,11 +1,11 @@
 //! Etch parser — recursive descent for declarations, statements and
 //! `when` clauses; Pratt parsing for expressions using the full
-//! `etch-grammar.md` §3.1 precedence table. Grown from the S3 subset to
-//! the complete EBNF v0.6 grammar in M0.8; the incremental hybrid
-//! LR(1)+Pratt rewrite is a separate milestone (M1.9, `etch-parser.md`
+//! `etch-grammar.md` §3.1 precedence table. Grown from an initial subset to
+//! the complete EBNF v0.6 grammar; the incremental hybrid
+//! LR(1)+Pratt rewrite is a separate milestone (`etch-parser.md`
 //! §23) — until that switch this file is the batch parser.
 //!
-//! Produces an `AstArena` directly (no intermediate CST). Since the M0.8
+//! Produces an `AstArena` directly (no intermediate CST). Since the
 //! top-level recovery sync-point the parser no longer stops at the first
 //! error: it advances to the next top-level keyword and resumes, so a
 //! broken file yields one diagnostic per broken construct while the sane
@@ -33,8 +33,8 @@ const Lexer = lexer_mod.Lexer;
 /// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
-/// Which grammatical subset the parser accepts (M1.1.15.2 G1,
-/// `etch-grammar.md` §20.3). RE-EXPORT: the mode is a property of the parsed
+/// Which grammatical subset the parser accepts (`etch-grammar.md` §20.3).
+/// RE-EXPORT: the mode is a property of the parsed
 /// UNIT, not of the parser, so it is declared next to `AstArena` and travels
 /// with the arena into the type-checker, the interpreter and the cook — none of
 /// which would otherwise be able to tell a declaration file from a source file.
@@ -57,7 +57,7 @@ pub fn modeForPath(path: []const u8) ParseMode {
 }
 
 /// Container returned by `parse` — the populated arena plus the list of
-/// diagnostics collected during the parse. With the M0.8 top-level
+/// diagnostics collected during the parse. With the top-level
 /// recovery sync-point the parser no longer stops at the first error:
 /// after a diagnostic it advances to the next top-level keyword (or EOF)
 /// and resumes, so a file with several broken constructs yields one
@@ -79,7 +79,7 @@ pub const ParseResult = struct {
     }
 };
 
-/// Result of `parseStmtBlock` (M1.0.9 E1): a bare statement-run fragment parsed
+/// Result of `parseStmtBlock`: a bare statement-run fragment parsed
 /// into its own `AstArena`. `body_start` / `body_len` index the parsed run in
 /// `ast.extra` using the same encoding rule / `fn` bodies use (a slice of raw
 /// `StmtId` values), so the interpreter walks it with the existing
@@ -106,8 +106,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     return parseWithMode(gpa, source, .standard);
 }
 
-/// `parse` with an explicit grammatical subset (M1.1.15.2 G1, `etch-grammar.md`
-/// §20.3). Callers that know the file's path pass `modeForPath(path)`; callers
+/// `parse` with an explicit grammatical subset (`etch-grammar.md` §20.3).
+/// Callers that know the file's path pass `modeForPath(path)`; callers
 /// that hold only a buffer keep using `parse`, which is this function at
 /// `.standard`.
 ///
@@ -161,8 +161,8 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
     try parser.parseFile();
 
     // Transfer the lexer's source-ordered comment / doc-comment slabs into
-    // the arena, then bucket them onto top-level items (M0.8 D-S3-trivia /
-    // D-S3-doccomment). `lexer.deinit` is the LAST statement so the armed
+    // the arena, then bucket them onto top-level items. `lexer.deinit` is
+    // the LAST statement so the armed
     // `errdefer lexer.deinit` never double-frees: every fallible op (the
     // appendSlices, `attachTrivia`, `toOwnedSlice`) runs before the lexer is
     // explicitly torn down.
@@ -174,7 +174,7 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
     return .{ .ast = arena, .diagnostics = diags };
 }
 
-/// Parse a bare statement-run fragment (M1.0.9 E1) into a fresh `AstArena`.
+/// Parse a bare statement-run fragment into a fresh `AstArena`.
 /// The fragment is the canonical text a cooked extension hook body carries
 /// (`descriptor.renderStmtRunAlloc`): zero or more statements separated by a
 /// `";"`, with NO enclosing braces. This is a new ENTRY POINT over the same
@@ -221,12 +221,12 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
 }
 
 /// Bucket the arena's source-ordered comment / doc-comment slabs onto the
-/// top-level items they precede (M0.8 D-S3-trivia / D-S3-doccomment).
+/// top-level items they precede.
 ///
 /// Both slabs and `arena.items` are in source order, so two forward cursors
 /// suffice. For each item, comments lying inside the *previous* item's span
 /// are skipped (intra-body trivia is not attached at top-level granularity
-/// in M0.8 — that is Phase 2 pretty-printer work); the remaining comments
+/// — that is pretty-printer work); the remaining comments
 /// up to the item's start become its leading trivia / doc comments.
 fn attachTrivia(arena: *AstArena, gpa: std.mem.Allocator) ParseError!void {
     const item_spans = arena.items.items(.span);
@@ -262,7 +262,7 @@ fn attachTrivia(arena: *AstArena, gpa: std.mem.Allocator) ParseError!void {
 }
 
 /// Explicit parser state — exposed for callers that want to drive the
-/// parse incrementally (Phase 0.2 / language-server use case).
+/// parse incrementally (a language-server use case).
 /// `parse(gpa, source)` is the canonical batch entry point.
 pub const Parser = struct {
     gpa: std.mem.Allocator,
@@ -283,13 +283,13 @@ pub const Parser = struct {
     /// to `parseFile`), so each broken construct contributes exactly one
     /// entry before the parser resyncs to the next top-level keyword.
     diagnostics: std.ArrayListUnmanaged(Diagnostic) = .empty,
-    /// Stack of loop labels currently in scope (M0.8 loop/break). `break IDENT`
+    /// Stack of loop labels currently in scope. `break IDENT`
     /// treats IDENT as a label only when it names an enclosing loop — this
     /// resolves the `break [IDENT] [expression]` ambiguity without a statement
     /// separator (an IDENT that is not an active label starts the break value).
     active_labels: std.ArrayListUnmanaged(StringId) = .empty,
-    /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal (M0.8
-    /// E2 block 3). Set while parsing the head expression of `if` / `while` /
+    /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal. Set
+    /// while parsing the head expression of `if` / `while` /
     /// `for` / `match` (where the `{` opens the body / arms, not a struct
     /// literal — the classic struct-literal-vs-block ambiguity, resolved as in
     /// Rust). Reset inside delimited contexts (`( … )`, `[ … ]`, a `{ … }`
@@ -297,12 +297,12 @@ pub const Parser = struct {
     no_struct_lit: bool = false,
     /// True while parsing a when clause in a position NOT followed by a
     /// construct-body brace (dialogue line / choice / emit conditions,
-    /// M0.8 E4): a `{` after `has T` / `resource T` is then unambiguously
+    /// the grammar): a `{` after `has T` / `resource T` is then unambiguously
     /// the §6 filter. The matching-brace scan (`braceOpensWhenFilter`)
     /// serves the braced positions (rules, behavior composites, quest
     /// branches), where the construct body follows the clause.
     when_brace_is_filter: bool = false,
-    /// Grammatical subset in force for this file (M1.1.15.2 G1). Set once by
+    /// Grammatical subset in force for this file. Set once by
     /// `parseWithMode` from the file's extension and never mutated: a mode that
     /// could change mid-file would make "no body node is constructed" a claim
     /// about the parser's history rather than about the file.
@@ -323,8 +323,6 @@ pub const Parser = struct {
             else => false,
         };
     }
-
-    // ─── Token stream helpers ────────────────────────────────────────────
 
     fn advance(self: *Parser) !Token {
         const t = self.current;
@@ -374,7 +372,7 @@ pub const Parser = struct {
         return self.recordOwnedDiag(span, .parse_error, owned);
     }
 
-    /// Record a diagnostic under an explicit code and unwind (M1.1.15.2 G1).
+    /// Record a diagnostic under an explicit code and unwind.
     /// Every parser diagnostic funnels through `recordOwnedDiag`, so a coded one
     /// takes the same ownership and cleanup path as an `E0001` — there is one
     /// emission site, not two.
@@ -404,8 +402,6 @@ pub const Parser = struct {
         return self.parseErrCoded(span, .parse_error, fmt, args);
     }
 
-    // ─── Source slice helpers ────────────────────────────────────────────
-
     fn sliceOf(self: *const Parser, span: SourceSpan) []const u8 {
         return self.source[span.byte_start..span.byte_end];
     }
@@ -415,14 +411,14 @@ pub const Parser = struct {
     }
 
     fn internStringLiteral(self: *Parser, span: SourceSpan) !StringId {
-        // Trim the surrounding quotes; S3 string literals are simple-quote.
+        // Trim the surrounding quotes; string literals are simple-quote.
         const raw = self.sliceOf(span);
         const body = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
             raw[1 .. raw.len - 1]
         else
             raw;
         // Process the grammar's escape sequences (`etch-grammar.md` §1.4
-        // `escape_seq`: \" \\ \n \t \r \{ — M0.8 E3-C tranche 1c; forced by
+        // `escape_seq`: \" \\ \n \t \r \{ — forced by
         // interpolation, where `\{` must NOT open an embedded expression).
         // Escape-free fast path interns the body bytes verbatim.
         if (std.mem.indexOfScalar(u8, body, '\\') == null) {
@@ -446,7 +442,7 @@ pub const Parser = struct {
     /// Append the byte an `escape_seq` denotes (`etch-grammar.md` §1.4:
     /// `\"`, `\\`, `\n`, `\t`, `\r`, `\{`). A backslash before any other
     /// byte is not a grammar escape — kept verbatim (lenient; strict
-    /// rejection is a diagnostics refinement, Phase 1+).
+    /// rejection is a diagnostics refinement).
     fn appendEscaped(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c: u8) !void {
         switch (c) {
             '"' => try buf.append(gpa, '"'),
@@ -463,7 +459,7 @@ pub const Parser = struct {
     }
 
     /// Whether the (quote-trimmed) string body contains an unescaped `{` —
-    /// i.e. the literal is interpolated (M0.8 E3-C tranche 1c).
+    /// i.e. the literal is interpolated.
     fn hasUnescapedBrace(body: []const u8) bool {
         var i: usize = 0;
         while (i < body.len) {
@@ -478,8 +474,8 @@ pub const Parser = struct {
     }
 
     /// Parse a `string_literal` token into either a plain `string_lit` or,
-    /// when the body holds an unescaped `{`, a `string_interp` node (M0.8
-    /// E3-C tranche 1c, `etch-grammar.md` §1.4 `simple_string = '"' {
+    /// when the body holds an unescaped `{`, a `string_interp` node
+    /// (`etch-grammar.md` §1.4 `simple_string = '"' {
     /// string_char | interpolation } '"'`). Approach (a) of the resume
     /// marker: the lexer keeps one token; the embedded `{expr}` spans are
     /// sub-parsed here, at parse time, into the same arena.
@@ -576,7 +572,7 @@ pub const Parser = struct {
 
     /// Parse a `multiline_string_literal` token (`"""…"""`) into a `string_lit`
     /// or `string_interp` node — the triple-quote counterpart of
-    /// `parseStringLiteralExpr` (M0.9 E2-A, `etch-grammar.md` §1.4). Two
+    /// `parseStringLiteralExpr` (`etch-grammar.md` §1.4). Two
     /// differences from the single-line form: the body is the span minus the
     /// `"""` fences, and the §1.4 common indentation is stripped from each line
     /// as the literal segments are emitted. Interpolation reuses the exact
@@ -715,8 +711,8 @@ pub const Parser = struct {
                 // A construct failed to parse: its diagnostic is already
                 // recorded (the unwind carried it here). Skip to the next
                 // top-level keyword (or EOF) and resume so later constructs
-                // still parse. This is the M0.8 top-level recovery sync-point
-                // — not a full panic-mode cascade (Phase 1 / S2+).
+                // still parse. This is the top-level recovery sync-point
+                // — not a full panic-mode cascade.
                 error.ParseError => try self.recoverToTopLevel(),
             };
         }
@@ -727,7 +723,7 @@ pub const Parser = struct {
     fn parseOneTopLevel(self: *Parser) ParseError!void {
         try self.surfaceTokenErrors();
         const annotations = try self.parseAnnotations();
-        // M1.0.8 — optional `private` visibility prefix (grammar §5.1:
+        // optional `private` visibility prefix (grammar §5.1:
         // `{ annotation } ( ... | visibility_modifier , declaration_body )`).
         // `private` is consumed AFTER annotations and BEFORE the construct
         // dispatch, and applies ONLY to a declaration_body — never to a bare
@@ -760,13 +756,12 @@ pub const Parser = struct {
     /// cannot loop. The stop-set MUST list every top-level starter the
     /// parser accepts, in lockstep with `parseTopLevel` — otherwise a valid
     /// construct following a parse error is silently skipped. Current set:
-    /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
-    /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
-    /// declaration layer) + `enum` / `trait` (E2 block 3 tranches B/C) +
-    /// `event` / `tags` (E3 ECS layer) + `import` (M1.0.7) + `const` / `test`
-    /// (M1.0.8). `private` is NOT a stop-set member — it is a prefix consumed
+    /// The set (`component` / `resource` / `rule`) + `type` + `fn` /
+    /// `async` + `struct` / `impl` + `enum` / `trait` +
+    /// `event` / `tags` + `import` + `const` / `test`.
+    /// `private` is NOT a stop-set member — it is a prefix consumed
     /// before dispatch, and the declaration_body it precedes already is one.
-    /// M1.1.15.2 G1 adds `service`: it is a stop-set member in BOTH modes, not
+    /// `service` is a stop-set member in BOTH modes, not
     /// only in `.d.etch`. A `service` in a standard `.etch` is refused by
     /// `parseServiceDecl`, and if recovery did not resync on it the refusal
     /// would be followed by every subsequent declaration of the file being
@@ -788,8 +783,8 @@ pub const Parser = struct {
             .error_utf8 => return self.parseErr(self.peekSpan(), "invalid UTF-8 sequence"),
             .error_unknown_keyword => {
                 const lexeme = self.sliceOf(self.peekSpan());
-                // §4.3 `quantize_stmt` stays reserved (M1.0.13): its beat/bar
-                // musical clock (Sequencer / Pulse) is absent from the Phase-1
+                // §4.3 `quantize_stmt` stays reserved: its beat/bar
+                // musical clock (Sequencer / Pulse) is absent from the
                 // runtime — explicit fail-loud pointing at the milestone that
                 // owns it, instead of the generic reserved-keyword message.
                 if (std.mem.eql(u8, lexeme, "quantize")) {
@@ -838,7 +833,7 @@ pub const Parser = struct {
             .kw_prefab => try self.parsePrefabDecl(annotations),
             .kw_service => try self.parseServiceDecl(annotations),
             .kw_async => {
-                // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
+                // `async fn` and `async rule`:
                 // the two top-level `async` constructs. `kw_async` is already in
                 // the `recoverToTopLevel` stop-set; `kw_rule`/`kw_fn` likewise —
                 // so `async rule` adds no new stop-set member (LOCKSTEP no-op).
@@ -854,7 +849,7 @@ pub const Parser = struct {
         }
     }
 
-    /// Parse a top-level `type Name = Type` alias (M0.8 v0.6 foundations).
+    /// Parse a top-level `type Name = Type` alias.
     /// `Name` is a PascalCase type identifier; `Type` is any type node. The
     /// `kw_type` starter is mirrored in `recoverToTopLevel`'s stop-set.
     fn parseTypeAliasDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -871,7 +866,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse a top-level `const` declaration (M1.0.8, `etch-grammar.md` §4.1):
+    /// Parse a top-level `const` declaration (`etch-grammar.md` §4.1):
     ///   `const_stmt = "const" ( IDENT | TYPE_IDENT ) ":" type "=" const_expression`.
     /// The name accepts BOTH `.ident` and `.type_ident` — a canonical
     /// `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT` (the case rule is a
@@ -902,11 +897,11 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end });
     }
 
-    /// Parse a top-level `test` block (M1.0.8, `etch-grammar.md` §17):
+    /// Parse a top-level `test` block (`etch-grammar.md` §17):
     ///   `test_decl = "test" STRING_LITERAL block`.
     /// The body reuses the ordinary block/statement parser (`parseBlockExpr`).
     /// `@tag` / `@skip` / `@only` annotations flow through `parseAnnotations`
-    /// before dispatch; the range is preserved on the `TestDecl` (M1.0.15 — the
+    /// before dispatch; the range is preserved on the `TestDecl` (the
     /// resolver validates applicability + args). The `kw_test` starter is
     /// mirrored in `recoverToTopLevel`'s stop-set + the `parseTopLevel` error
     /// enumeration.
@@ -996,7 +991,7 @@ pub const Parser = struct {
             const lhs = try self.arena.addExpr(self.gpa, .ident, ident_id, saved.span);
             // Route through the postfix chain first so `@requires(self.health)`
             // (ident + `.field`) parses; then the binary continuation
-            // (D-S3-annot-field-access).
+            // (the annotation field-access rule).
             const after_postfix = try self.continuePostfix(lhs);
             const continued = try self.continuePostfixAndBinary(after_postfix, 0);
             return .{ .name = 0, .value = continued };
@@ -1071,10 +1066,10 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E3,
-    /// `etch-grammar.md` §5.10). Same shape as `parseComponentDecl` /
-    /// `parseResourceDecl` — an event is a POD struct of fields. `kw_event`
-    /// is mirrored in `parseTopLevel` AND `recoverToTopLevel`'s stop-set.
+    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (`etch-grammar.md` §5.10).
+    /// Same shape as `parseComponentDecl` / `parseResourceDecl` — an event is a POD
+    /// struct of fields. `kw_event` is mirrored in `parseTopLevel` AND
+    /// `recoverToTopLevel`'s stop-set.
     fn parseEventDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'event'
@@ -1106,8 +1101,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `tags "{" { tag_namespace } "}"` (M0.8 E3, `etch-grammar.md`
-    /// §5.11). The top-level body is zero-or-more `tag_namespace`s (leaves
+    /// Parse `tags "{" { tag_namespace } "}"` (`etch-grammar.md` §5.11).
+    /// The top-level body is zero-or-more `tag_namespace`s (leaves
     /// cannot sit directly under `tags`). Namespaces + leaves are appended to
     /// the shared `tag_namespaces` / `tag_leaves` slabs in pre-order (= the
     /// depth-first declaration order the global tag-table pass relies on); the
@@ -1143,7 +1138,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse one `tag_namespace = IDENT "{" tag_body "}"` (M0.8 E3,
+    /// Parse one `tag_namespace = IDENT "{" tag_body "}"` (
     /// `etch-grammar.md` §5.11). The namespace node is appended BEFORE its
     /// children (pre-order), so its index is a stable parent handle passed
     /// down. `tag_body` is homogeneous — leaves OR sub-namespaces, never mixed
@@ -1170,8 +1165,7 @@ pub const Parser = struct {
             }
         } else {
             // Leaf mode: `tag_leaf { "," tag_leaf } [ "," ]`. Leaf names
-            // accept keywords contextually, like namespace names (M0.8 E4 —
-            // graduated construct keywords stay legal tag words).
+            // accept keywords contextually, like namespace names.
             while (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
                 const leaf_tok = try self.advance();
                 try self.arena.tag_leaves.append(self.gpa, .{
@@ -1206,7 +1200,7 @@ pub const Parser = struct {
     // ─── Type ────────────────────────────────────────────────────────────
 
     fn parseType(self: *Parser) ParseError!NodeId {
-        // Map sugar `[K : V]` (M0.8 collections, `etch-grammar.md` §278): a
+        // Map sugar `[K : V]` (collections, `etch-grammar.md` §278): a
         // type beginning with `[` is always a map type — array / slice are the
         // postfix `T[...]` form handled below.
         if (self.peek() == .lbracket) {
@@ -1228,7 +1222,7 @@ pub const Parser = struct {
                 .byte_end = closing.span.byte_end,
             });
         }
-        // Optional suffix `T?` (M0.8 E2 block 5, `etch-grammar.md` §267).
+        // Optional suffix `T?` (`etch-grammar.md` §267).
         if (self.peek() == .question) {
             const q = try self.advance();
             const base_span = self.arena.typeNodeSpan(base);
@@ -1242,8 +1236,8 @@ pub const Parser = struct {
 
     /// Parse a base type: a primitive / engine / user type identifier, with
     /// the `Set<T>` and `Map<K, V>` generic collection forms recognised
-    /// specially (full generic parsing is E2; only these two builtin
-    /// containers are accepted in E1, `etch-grammar.md` §270).
+    /// specially (full generic parsing came later; only these two builtin
+    /// containers are accepted here, `etch-grammar.md` §270).
     fn parseBaseType(self: *Parser) ParseError!NodeId {
         switch (self.peek()) {
             .type_ident,
@@ -1257,8 +1251,8 @@ pub const Parser = struct {
             .ident,
             => {
                 const tok = try self.advance();
-                // Qualified type path `alias.Member` (M1.0.16, `etch-grammar.md`
-                // §2.1 `qualified_path = IDENT , "." , TYPE_IDENT`). Only a
+                // Qualified type path `alias.Member` (`etch-grammar.md` §2.1
+                // `qualified_path = IDENT , "." , TYPE_IDENT`). Only a
                 // lowercase IDENT alias followed by `.` then a TYPE_IDENT — a
                 // TYPE_IDENT/primitive receiver followed by `.` is the separate
                 // (out-of-scope) `Type.CONST` associated-access gap, left alone.
@@ -1276,8 +1270,7 @@ pub const Parser = struct {
                     const name = self.sliceOf(tok.span);
                     if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
                     if (std.mem.eql(u8, name, "Map")) return try self.parseMapGeneric(tok.span);
-                    // General `Name<T, …>` generic type (M0.8 E2 block 4,
-                    // `etch-grammar.md` §270).
+                    // General `Name<T, …>` generic type (`etch-grammar.md` §270).
                     return try self.parseGenericTypeApp(try self.internSlice(tok.span), tok.span);
                 }
                 const name_id = try self.internSlice(tok.span);
@@ -1325,8 +1318,8 @@ pub const Parser = struct {
         });
     }
 
-    /// `Name < type , … >` — a generic type application in type position (M0.8
-    /// E2 block 4, `etch-grammar.md` §270). The caller has consumed `Name`
+    /// `Name < type , … >` — a generic type application in type position
+    /// (`etch-grammar.md` §270). The caller has consumed `Name`
     /// (span passed in) and confirmed `peek() == <`. `Set` / `Map` keep their
     /// dedicated nodes (handled by the caller before this).
     fn parseGenericTypeApp(self: *Parser, name_id: StringId, name_span: SourceSpan) ParseError!NodeId {
@@ -1344,7 +1337,7 @@ pub const Parser = struct {
         });
     }
 
-    // ─── Generic parameters (M0.8 E2 block 4) ────────────────────────────────
+    // ─── Generic parameters ────────────────────────────────
 
     /// One type parameter being parsed; its bounds (inline `<T: A + B>` and/or
     /// `where`) accumulate here before being committed contiguously to the
@@ -1384,7 +1377,7 @@ pub const Parser = struct {
     }
 
     /// `TYPE_IDENT` (trait) | `component` | `resource`. The `event` generic
-    /// bound (`T: event`) stays out of scope in the M0.8 event vertical — its
+    /// bound (`T: event`) stays out of scope in the event vertical — its
     /// satisfaction check needs events usable as type arguments (event-as-value
     /// plumbing), absent here; `kw_event` here errors as an unsupported bound.
     fn parseOneBound(self: *Parser) ParseError!ast_mod.GenericBound {
@@ -1463,7 +1456,7 @@ pub const Parser = struct {
     fn parseRuleDecl(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!void {
         // On entry the current token is `rule` (an optional `async` was already
         // consumed by `parseTopLevel`). `is_async` marks an `async rule` whose
-        // body may `await` (M0.8 E3 sub-slice B).
+        // body may `await`.
         const kw_span = self.current.span;
         const parsed = try self.parseRuleDeclInner(annotations, is_async);
         _ = try self.arena.addItem(self.gpa, .rule_decl, parsed.idx, .{
@@ -1473,7 +1466,7 @@ pub const Parser = struct {
     }
 
     /// Parse a `rule` declaration into the `rule_decls` slab WITHOUT adding a
-    /// top-level item (M0.8 E4 §8.5: the ability-embedded rule is construct
+    /// top-level item (§8.5: the ability-embedded rule is construct
     /// STRUCTURE — validated through the normal rule path but never
     /// registered for ticking; the top-level wrapper adds the item).
     fn parseRuleDeclInner(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!struct { idx: u32, end_byte: u32 } {
@@ -1525,7 +1518,7 @@ pub const Parser = struct {
         return .{ .idx = data_idx, .end_byte = closing.span.byte_end };
     }
 
-    // ─── Functions (M0.8 E2 call mechanism) ──────────────────────────────
+    // ─── Functions ──────────────────────────────
 
     /// Parse a top-level `fn` (no `async` prefix). `kw_fn` is the lockstep
     /// stop-set member added to `recoverToTopLevel` in the same commit.
@@ -1533,8 +1526,8 @@ pub const Parser = struct {
         return self.parseFnDeclFrom(annotations, is_async, self.current.span);
     }
 
-    /// Parse a top-level `fn` and add it as a `.fn_decl` item (M0.8 E2 call
-    /// mechanism). On entry the current token is `fn` (the optional `async` was
+    /// Parse a top-level `fn` and add it as a `.fn_decl` item. On entry the
+    /// current token is `fn` (the optional `async` was
     /// already consumed by the caller, its span passed as `start_span`). Shares
     /// the signature/body machinery with `impl` methods via `parseFnLike`; a
     /// top-level `fn` takes no `self` receiver (`allow_self = false`).
@@ -1553,13 +1546,13 @@ pub const Parser = struct {
     /// span — without adding an item (`etch-grammar.md` §5.3). On entry the
     /// current token is `fn`. The body is a value-block: the trailing bare
     /// expression is the implicit return (`etch-grammar.md` §4.1 l.645).
-    /// `allow_self` lets the first parameter be a `self` / `mut self` receiver
-    /// (M0.8 E2 block 3 `impl` methods); a top-level `fn` passes `false`.
-    /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected.
-    /// `async` is parsed (interp E3, codegen Phase 2); `throws` is parsed
-    /// (codegen folds into the E3 gate).
+    /// `allow_self` lets the first parameter be a `self` / `mut self` receiver;
+    /// a top-level `fn` passes `false`.
+    /// Generics (`<...>`) + the `where` clause are rejected.
+    /// `async` is parsed (its codegen rejects it); `throws` is parsed
+    /// (its codegen folds into error handling).
     ///
-    /// M1.1.15.2 G1 — the bodyless `.d.etch` form is NO LONGER out of scope
+    /// the bodyless `.d.etch` form is NO LONGER out of scope
     /// (this sentence used to say it was). Under `ParseMode.declaration_file`
     /// every `fn` is signature-only, and one that carries a body is refused with
     /// `E1900` at its opening brace.
@@ -1568,7 +1561,7 @@ pub const Parser = struct {
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
         const name_id = try self.internSlice(name_tok.span);
 
-        // Generic parameters `<T: bound, …>` (M0.8 E2 block 4). Buffered so the
+        // Generic parameters `<T: bound, …>`. Buffered so the
         // `where` clause (after the return type) can extend their bounds.
         var temp_generics: std.ArrayListUnmanaged(TempGenericParam) = .empty;
         defer self.deinitTempGenerics(&temp_generics);
@@ -1614,18 +1607,17 @@ pub const Parser = struct {
             sig_end_span = self.arena.typeNodeSpan(return_type);
         }
 
-        // `where T: bound, …` (M0.8 E2 block 4) — `where` is a plain identifier,
+        // `where T: bound, …` — `where` is a plain identifier,
         // detected by lexeme; it extends the buffered params' bounds.
         if (self.atWhere()) {
             try self.parseWhereInto(&temp_generics);
         }
         const generics = try self.commitGenerics(&temp_generics);
 
-        // An abstract trait member (`function_signature`, M0.8 E2 block 3
-        // tranche C) ends without a body. Outside a trait, a missing body is the
-        // existing "expected '{'" error.
+        // An abstract trait member: a `function_signature` that ends without a body.
+        // Outside a trait, a missing body is the existing "expected '{'" error.
         //
-        // M1.1.15.2 G1 — in a `.d.etch` EVERY `fn` is signature-only, whatever
+        // in a `.d.etch` EVERY `fn` is signature-only, whatever
         // the caller's own rule (`etch-grammar.md` §20.1: `function_decl_no_body`
         // covers the top-level form, the `impl_member_no_body` form and the
         // `service_decl` form alike). The mode widens the caller's permission; it
@@ -1654,7 +1646,7 @@ pub const Parser = struct {
             };
         }
 
-        // M1.1.15.2 G1 — `E1900 DeclarationFileBodyNotAllowed`. Reaching this
+        // `E1900 DeclarationFileBodyNotAllowed`. Reaching this
         // line in `.d.etch` mode means a `{` follows the signature (the
         // `signature_only` branch above already returned otherwise), so the body
         // is refused HERE, at its opening brace, and NOTHING is built. This
@@ -1699,7 +1691,7 @@ pub const Parser = struct {
     }
 
     /// Recognise and consume a leading `self` / `mut self` method receiver
-    /// (M0.8 E2 block 3, `etch-grammar.md` §5.3 `self_param = [mut] self`).
+    /// (`etch-grammar.md` §5.3 `self_param = [mut] self`).
     /// `self` is a plain identifier (not a keyword), so the receiver is detected
     /// by lexeme. Returns `.none` (consuming nothing) when the first parameter
     /// is an ordinary `IDENT : type`.
@@ -1721,10 +1713,9 @@ pub const Parser = struct {
         return .none;
     }
 
-    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E2 block 3,
-    /// `etch-grammar.md` §5.7). Same field machinery as a component / resource;
-    /// a struct is a by-value type (not registered with the world). Generics
-    /// (`<...>`) are block 4 and rejected here.
+    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (`etch-grammar.md` §5.7).
+    /// Same field machinery as a component / resource; a struct is a by-value type (not
+    /// registered with the world). Generics (`<...>`) are rejected here.
     fn parseStructDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'struct'
@@ -1754,7 +1745,7 @@ pub const Parser = struct {
 
     /// Parse an optional `< generic_param, … >` (no `where` — only `fn`/methods
     /// have a where clause) and commit it, returning the `(start, len)` run.
-    /// `(0, 0)` when there are no generic parameters (M0.8 E2 block 4).
+    /// `(0, 0)` when there are no generic parameters.
     fn parseOptionalGenerics(self: *Parser) ParseError!GenericsRange {
         if (self.peek() != .lt) return .{ .start = 0, .len = 0 };
         var temp: std.ArrayListUnmanaged(TempGenericParam) = .empty;
@@ -1764,12 +1755,12 @@ pub const Parser = struct {
     }
 
     /// Parse `enum TYPE_IDENT "{" enum_variant {"," enum_variant} [","] "}"`
-    /// (M0.8 E2 block 3 tranche B, `etch-grammar.md` §5.8). C-like variants
+    /// (`etch-grammar.md` §5.8). C-like variants
     /// (`easy`) are the supported end-to-end form; struct-like
     /// (`Physical { amount: float }`) and tuple-like (`ok(T)`) variants are
     /// parsed so the grammar is accepted, with their data recorded for a
     /// fail-loud downstream (construction / destructuring are deferred).
-    /// Generics (`<...>`) are block 4 and rejected here, as for `struct`.
+    /// Generics (`<...>`) are rejected here, as for `struct`.
     fn parseEnumDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'enum'
@@ -1839,10 +1830,10 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `data TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"` (M0.8 E4
-    /// Level B, `etch-grammar.md` §14). `data_entry = IDENT ":"
+    /// Parse `data TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"` (Level
+    /// B, `etch-grammar.md` §14). `data_entry = IDENT ":"
     /// struct_literal_body [","]` — the body reuses the §3.2 `field_init`
-    /// forms INCLUDING the spread `".." expression` (l.491): the E2 spread
+    /// forms INCLUDING the spread `".." expression` (l.491): the spread
     /// deferral is homed here (data-table inheritance); general struct
     /// literals keep rejecting it. A TYPE_IDENT-shaped entry id is accepted
     /// at parse and flagged by validation (`E1768 IdInvalidFormat`). Each
@@ -1891,12 +1882,12 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (M0.8 E5 Level B,
-    /// `etch-grammar.md` §10.2). The name is a string literal (the grammar
-    /// shape — E5 ruling 1, NOT the validation-ecs §16.1 TYPE_IDENT); entries
-    /// are `IDENT ":" expression` pairs. `no_struct_lit` is cleared for the
-    /// body so an inline `.{ … }` style value parses. Theme slabs are fed
-    /// only from theme context (themes do not nest) → contiguous appends.
+    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (`etch-grammar.md` §10.2).
+    /// The name is a string literal (the grammar shape — ruling 1, NOT the
+    /// validation-ecs §16.1 TYPE_IDENT); entries are `IDENT ":" expression` pairs.
+    /// `no_struct_lit` is cleared for the body so an inline `.{ … }` style value
+    /// parses. Theme slabs are fed only from theme context (themes do not nest) →
+    /// contiguous appends.
     fn parseThemeDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'theme'
@@ -1932,8 +1923,8 @@ pub const Parser = struct {
     }
 
     /// Parse `motion TYPE_IDENT "{" [motion_states] motion_transitions "}"`
-    /// (M0.8 E5 Level B, `etch-grammar.md` §10.3). `states` / `transitions`
-    /// are contextual sub-keywords (the S3 sub-construct doctrine — never
+    /// (`etch-grammar.md` §10.3). `states` / `transitions`
+    /// are contextual sub-keywords (the sub-construct doctrine — never
     /// reserved): the `states { … }` block is OPTIONAL, `transitions { … }`
     /// is mandatory. State bodies reuse `parseDataEntryBody`
     /// (`struct_literal_body`). Motion slabs are fed only from motion context
@@ -1945,8 +1936,8 @@ pub const Parser = struct {
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.lbrace, "expected '{' to start the motion body");
 
-        // Optional `states { motion_state }` block (E5 ruling 2: states are
-        // optional, E1660 RESERVED).
+        // Optional `states { motion_state }` block: states are optional
+        // (E1660 RESERVED).
         const states_start: u32 = @intCast(self.arena.motion_states.items.len);
         if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "states")) {
             _ = try self.advance(); // 'states'
@@ -2130,10 +2121,10 @@ pub const Parser = struct {
     }
 
     /// Parse `input_mapping STRING_LITERAL "{" {property} {action} {combo} "}"`
-    /// (M0.8 E5 Level B STRICT — NO input execution, `etch-grammar.md` §16).
+    /// (STRICT — NO input execution, `etch-grammar.md` §16).
     /// `context`/`priority`/`consume_input`/`action`/`combo` are CONTEXTUAL
-    /// sub-keywords (the S3 sub-construct doctrine — never reserved); `context`
-    /// is a PROPERTY (E5 ruling 7, NOT a named block). Dispatched on the head
+    /// sub-keywords (the sub-construct doctrine — never reserved); `context`
+    /// is a PROPERTY. Dispatched on the head
     /// ident; the strict EBNF grouping (`{property} {action} {combo}`) is
     /// accepted as a superset (any order) — no code enforces the grouping.
     /// STRING-named → no symbol (the theme precedent). Slabs are fed only from
@@ -2339,15 +2330,14 @@ pub const Parser = struct {
         return try self.internSlice(self.arena.typeNodeSpan(ty));
     }
 
-    /// Parse a `widget` declaration (M0.8 E5 Level B presentation,
-    /// `etch-grammar.md` §10.1: `widget_decl = "widget" TYPE_IDENT "(" [param_list]
-    /// ")" [when_clause] "{" ui_tree "}"`). TYPE_IDENT-named (the motion
-    /// precedent). The optional `[when_clause]` mirrors `impl`'s optional when
-    /// (default `when_brace_is_filter` — the body `{` is NOT a filter, resolved
-    /// by `braceOpensWhenFilter`'s matching-brace scan). The recursive `ui_tree`
-    /// is parsed by `parseUiTree`. `@screen`/`@worldspace` arrive as `.custom`
-    /// annotations validated in `validateWidget` (E1621). The `kw_widget` starter
-    /// is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
+    /// Parse a `widget` declaration (presentation, `etch-grammar.md` §10.1:
+    /// `widget_decl = "widget" TYPE_IDENT "(" [param_list] ")" [when_clause] "{" ui_tree "}"`).
+    /// TYPE_IDENT-named (the motion precedent). The optional `[when_clause]` mirrors
+    /// `impl`'s optional when (default `when_brace_is_filter` — the body `{` is NOT a
+    /// filter, resolved by `braceOpensWhenFilter`'s matching-brace scan). The recursive
+    /// `ui_tree` is parsed by `parseUiTree`. `@screen`/`@worldspace` arrive as
+    /// `.custom` annotations validated in `validateWidget` (E1621). The `kw_widget`
+    /// starter is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
     fn parseWidgetDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'widget'
@@ -2535,9 +2525,9 @@ pub const Parser = struct {
         return .{ .kind = .for_, .index = idx };
     }
 
-    /// Parse a `locale` declaration (M0.8 E5 Level B presentation,
-    /// `etch-grammar.md` §10.4: `locale_decl = "locale" IDENT "{" {locale_entry}
-    /// "}"`, `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named →
+    /// Parse a `locale` declaration (presentation, `etch-grammar.md`
+    /// §10.4: `locale_decl = "locale" IDENT "{" {locale_entry} "}"`,
+    /// `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named →
     /// registers a symbol. Entries are flat key/value string pairs (the theme
     /// precedent, with a STRING key + `=` + STRING value). The `kw_locale`
     /// starter is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
@@ -2573,7 +2563,7 @@ pub const Parser = struct {
     }
 
     /// `effect_decl = "effect" TYPE_IDENT "{" [params_block] {emitter_decl}
-    /// {effect_event_handler} "}"` (M0.8 E6, `etch-grammar.md` §9.2). VFX-only
+    /// {effect_event_handler} "}"` (`etch-grammar.md` §9.2). VFX-only
     /// since v0.6. `params`/`emitter`/`on` are CONTEXTUAL idents (matched by
     /// lexeme — `effect` is the only graduated keyword). The optional params
     /// block reuses `parseField` (the canonical `annotated_field` consumer)
@@ -2642,7 +2632,7 @@ pub const Parser = struct {
         const start_span = self.peekSpan();
         _ = try self.advance(); // 'emitter'
         // Emitter names are TYPE_IDENT-shaped in practice (`Flash`, `Debris`)
-        // where the grammar says IDENT — the ratified E4 `ident | type_ident`
+        // where the grammar says IDENT — the ratified `ident | type_ident`
         // name-position deviation (journal deviation (d)).
         const name_tok = switch (self.peek()) {
             .ident, .type_ident => try self.advance(),
@@ -2675,7 +2665,7 @@ pub const Parser = struct {
         const start_span = self.peekSpan();
         _ = try self.advance(); // 'on'
         // `on Debris.collision` — the emitter ref is TYPE_IDENT-shaped, the
-        // event name IDENT-shaped; accept either at both (the ratified E4
+        // event name IDENT-shaped; accept either at both (the ratified
         // name-position deviation (d)).
         const emitter_tok = switch (self.peek()) {
             .ident, .type_ident => try self.advance(),
@@ -2699,7 +2689,7 @@ pub const Parser = struct {
     }
 
     /// `audio_graph_decl = "audio_graph" TYPE_IDENT "{" [params_block]
-    /// {statement} audio_output "}"` (M0.8 E6, `etch-grammar.md` §12.2). The
+    /// {statement} audio_output "}"` (`etch-grammar.md` §12.2). The
     /// DSP node-building statements run until the MANDATORY `output(expr)` sink
     /// (`output` is a contextual ident, the sink recognised by the `output (`
     /// two-token lookahead). A missing sink is a parse error (E1700 RESERVED);
@@ -2762,7 +2752,7 @@ pub const Parser = struct {
     }
 
     /// `audio_score_decl = "audio_score" STRING_LITERAL "{" {audio_score_element}
-    /// "}"` (M0.8 E6, `etch-grammar.md` §12.1). STRING-named (the
+    /// "}"` (`etch-grammar.md` §12.1). STRING-named (the
     /// `theme`/`input_mapping` precedent). `score_property`s (`tempo`/`IDENT ":"
     /// expression`, STRICT no annotation) are BUFFERED and committed contiguously
     /// at the end — sections/stems also write `struct_lit_fields` during the
@@ -2910,8 +2900,8 @@ pub const Parser = struct {
     }
 
     /// `sequence_decl = "sequence" TYPE_IDENT "{" {sequence_property}
-    /// {sequence_track} "}"` (M0.8 E6, `etch-grammar.md` §13). `sequence` is the
-    /// graduated `kw_sequence` (it doubles as the E4 behavior composite) —
+    /// {sequence_track} "}"` (`etch-grammar.md` §13). `sequence` is the
+    /// graduated `kw_sequence` (it doubles as the behavior composite) —
     /// matched at top level by TOKEN KIND (the input_combo precedent). COMPLETE:
     /// `on_start` / `on_finish` are emit statements (the §13 patched form, ruling
     /// 1). Properties are BUFFERED + committed contiguously (tracks' keyframe
@@ -3048,7 +3038,7 @@ pub const Parser = struct {
     }
 
     /// `anim_graph_decl = "anim_graph" TYPE_IDENT "{" [params_block] {anim_state}
-    /// {anim_layer} "}"` (M0.8 E6, §11). The grammar shape wins (state-nested
+    /// {anim_layer} "}"` (§11). The grammar shape wins (state-nested
     /// transitions, additive-only layers). `state`/`layer` are CONTEXTUAL idents.
     fn parseAnimGraphDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
@@ -3147,7 +3137,7 @@ pub const Parser = struct {
                 _ = try self.expect(.colon, "expected ':' after 'clip'");
                 const path = try self.expect(.string_literal, "expected a clip path (string literal)");
                 clip_path = try self.internStringLiteral(path.span);
-                if (self.peek() == .kw_loop) { // `loop` lexes as kw_loop (the M0.8 loop expression keyword)
+                if (self.peek() == .kw_loop) { // `loop` lexes as kw_loop (the loop expression keyword)
                     _ = try self.advance();
                     clip_loop = true;
                 }
@@ -3330,7 +3320,7 @@ pub const Parser = struct {
     }
 
     /// `shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn]
-    /// fragment_fn "}"` (M0.8 E6, §9.1). NO compute (the ruling). `fragment` is
+    /// fragment_fn "}"` (§9.1). NO compute (the ruling). `fragment` is
     /// parser-mandatory; `vertex` optional. `params`/`vertex`/`fragment` are
     /// CONTEXTUAL idents.
     fn parseShaderDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -3411,11 +3401,11 @@ pub const Parser = struct {
         };
     }
 
-    // ── M0.8 E7 Level C — scene / prefab (`etch-grammar.md` §15) ───────────
+    // ── Level C — scene / prefab (`etch-grammar.md` §15) ──────────────────
     // STRING-named (the audio_score/theme precedent). Sub-keywords (`of`,
     // `extends`, `requires`, `version`, `metadata`, `resources`, `entity`,
     // `instance`, `uuid`, `parent`, `on_attach`, `on_detach`) stay CONTEXTUAL
-    // idents matched by lexeme (the E6 doctrine — never keyword tokens). Relation
+    // idents matched by lexeme (the doctrine — never keyword tokens). Relation
     // / requires / hook legality (`of` vs `extends`) is VALIDATION, not parse —
     // parse permissively, fail loud later.
 
@@ -3618,7 +3608,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse a top-level `import` directive (M1.0.7, `etch-grammar.md` §5.2):
+    /// Parse a top-level `import` directive (`etch-grammar.md` §5.2):
     ///   `import_decl = "import" module_path [ import_spec ]`. Four forms:
     ///     import a.b              (whole module — implicit alias = last segment)
     ///     import a.b as m         (whole module, explicit alias)
@@ -3711,7 +3701,7 @@ pub const Parser = struct {
     /// Appends one `SceneEntity`, returns its index. Components append directly
     /// (the body closes before the next sibling — contiguous run).
     /// Parse the optional `extensions: [ STRING_LITERAL {, STRING_LITERAL} [,] ]`
-    /// clause (M1.0.6 E5, Claude.ai amendment). Active-extension prefab names, by
+    /// clause. Active-extension prefab names, by
     /// name; trailing comma tolerated; empty list allowed. Appends each name to
     /// `arena.scene_extensions` and returns the `(start, len)` run.
     fn parseExtensionsClause(self: *Parser) ParseError!struct { start: u32, len: u32 } {
@@ -3911,16 +3901,15 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (M0.8 E4 Level B,
-    /// `etch-grammar.md` §8.2). Elements are segments (`segment Name { … }`)
-    /// and interrupts (`on_xxx -> target`), dispatched on the head
-    /// identifier: `segment` is a contextual keyword (the S3 sub-construct
-    /// doctrine); an interrupt head is lexically one IDENT starting `on_`
-    /// (the EBNF's `"on_" , IDENT` split is not lexable — E4 bound (f)).
+    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (`etch-grammar.md` §8.2).
+    /// Elements are segments (`segment Name { … }`) and interrupts
+    /// (`on_xxx -> target`), dispatched on the head identifier: `segment` is a
+    /// contextual keyword (the sub-construct doctrine); an interrupt head is lexically
+    /// one IDENT starting `on_` (the EBNF's `"on_" , IDENT` split is not lexable).
     /// Interrupt targets accept `ident | type_ident` (behavior names are
-    /// TYPE_IDENT-shaped — E4 bound (d)); `pause_segment` is matched by
-    /// lexeme. Direct slab appends stay contiguous: routine slabs are only
-    /// fed from routine context and routines do not nest.
+    /// TYPE_IDENT-shaped); `pause_segment` is matched by lexeme. Direct slab appends
+    /// stay contiguous: routine slabs are only fed from routine context and routines do
+    /// not nest.
     fn parseRoutineDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'routine'
@@ -3967,11 +3956,11 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `@loc…` (§3.2 `loc_expr`, M0.8 E4 — item-10 ruling). Two
+    /// Parse `@loc…` (§3.2 `loc_expr` — item-10 ruling). Two
     /// forms: fingerprint `@loc[:"meaning"][|"desc"][@@id.path]:"text"`
     /// (the LAST colon-string is the text; an earlier one is the meaning)
     /// and key `@loc("key" {, IDENT ":" expression})`. Structural only —
-    /// the fingerprint model lands in E5 with `locale`.
+    /// the fingerprint model comes with `locale`.
     fn parseLocExpr(self: *Parser) ParseError!NodeId {
         const at_tok = try self.advance(); // '@'
         if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "loc")) {
@@ -4069,8 +4058,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `dialogue TYPE_IDENT "{" {dialogue_element} "}"` (M0.8 E4
-    /// Level B, `etch-grammar.md` §8.4 PATCHED — items 10/11). `speaker` /
+    /// Parse `dialogue TYPE_IDENT "{" {dialogue_element} "}"` (
+    /// `etch-grammar.md` §8.4 PATCHED — items 10/11). `speaker` /
     /// `line` / `choice` / `end` are contextual identifiers; `branch` is
     /// the graduated keyword.
     fn parseDialogueDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -4276,7 +4265,7 @@ pub const Parser = struct {
     }
 
     /// Parse `ability TYPE_IDENT "{" {ability_property} [rule_decl] "}"`
-    /// (M0.8 E4 Level B, `etch-grammar.md` §8.5 — items 12-15 ruling: the
+    ///  (`etch-grammar.md` §8.5 — items 12-15 ruling: the
     /// grammar shape WINS over the validation-ecs §12 handler shape; no
     /// handlers, no property annotations). `cost` takes a
     /// `struct_literal_body`, `tags_required` / `tags_blocked` take an
@@ -4375,11 +4364,11 @@ pub const Parser = struct {
     }
 
     /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
-    /// (M0.8 E4 Level B, `etch-grammar.md` §8.3 PATCHED — items 7/8).
+    /// (`etch-grammar.md` §8.3 PATCHED — items 7/8).
     /// Properties come first (`IDENT ":" expression`, incl. `requires`);
     /// stages follow (`[async] stage IDENT { elements }`). `stage` /
-    /// `objective` / the handler heads are contextual identifiers (the S3
-    /// doctrine) — a statement starting with one of those identifiers
+    /// `objective` / the handler heads are contextual identifiers (the
+    /// sub-construct doctrine) — a statement starting with one of those identifiers
     /// inside a stage is claimed by the construct form (journaled bound).
     fn parseQuestDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
@@ -4613,14 +4602,12 @@ pub const Parser = struct {
         return idx;
     }
 
-    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (M0.8 E4 Level B,
-    /// `etch-grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
-    /// bt_condition | bt_action`, item-1 ruling) — `E1500` enforces the
-    /// composite root at validation. `selector` / `condition` / `action`
-    /// are contextual identifiers (the S3 sub-construct doctrine);
-    /// `sequence` is the graduated `kw_sequence` (it doubles as the E6
-    /// top-level construct keyword, which stays out of scope via the
-    /// default top-level error).
+    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (`etch-grammar.md` §8.1 PATCHED).
+    /// The root accepts a leaf (`bt_leaf = bt_condition | bt_action`, item-1 ruling) —
+    /// `E1500` enforces the composite root at validation. `selector` / `condition` /
+    /// `action` are contextual identifiers (the sub-construct doctrine); `sequence` is
+    /// the graduated `kw_sequence` (it doubles as the top-level construct keyword,
+    /// which stays out of scope via the default top-level error).
     fn parseBehaviorDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'behavior'
@@ -4685,7 +4672,7 @@ pub const Parser = struct {
     /// Parse a §8.1 leaf: `condition: expression` or `action: ( let_stmt |
     /// expression | emit_stmt )` (the item-2 PATCHED action forms — an
     /// action `let` binds for later actions, scope pinned by Cortex
-    /// Phase 1+).
+    /// today).
     fn parseBTLeaf(self: *Parser, kind: ast_mod.BTNodeKind) ParseError!u32 {
         const kw = try self.advance(); // 'condition' / 'action'
         _ = try self.expect(.colon, "expected ':' after the behavior leaf keyword");
@@ -4717,7 +4704,7 @@ pub const Parser = struct {
     /// Parse one `segment IDENT { trigger: … actions: … until: … }` (§8.2).
     /// The three clauses are mandatory and ordered (the EBNF fixes the
     /// order). Segment names accept `ident | type_ident` (the grammar's own
-    /// examples are PascalCase — E4 bound (d)).
+    /// examples are PascalCase).
     fn parseRoutineSegment(self: *Parser) ParseError!void {
         const kw = try self.advance(); // 'segment' (contextual)
         const name_tok = switch (self.peek()) {
@@ -4761,7 +4748,7 @@ pub const Parser = struct {
     /// `arena.routine_triggers` alternatives: `at TIME_LITERAL` /
     /// `after IDENT` / `on_event TYPE_IDENT`. `at` and `on_event` are
     /// contextual identifiers (`on_event` must stay an ident — graduating
-    /// it would break the `@on_event(T)` annotation parse, E4 bound (g));
+    /// it would break the `@on_event(T)` annotation parse);
     /// `after` is the graduated `kw_after`.
     fn parseTriggerAlternatives(self: *Parser) ParseError!SlabRange {
         const start: u32 = @intCast(self.arena.routine_triggers.items.len);
@@ -4838,11 +4825,11 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(temp.items.len) };
     }
 
-    /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (M0.8 E2 block 3 tranche
-    /// C, `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
+    /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (a later slice,
+    /// `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
     /// — no body, `has_body = false`) `| function_decl` (default body). Members
     /// reuse `parseFnLike` (`allow_self = true`, `allow_signature_only = true`)
-    /// and are stored in `arena.impl_methods`. Generics (`<...>`) are block 4.
+    /// and are stored in `arena.impl_methods`. Generics (`<...>`) are a later slice.
     fn parseTraitDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'trait'
@@ -4878,18 +4865,17 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (M1.1.15.2 G1,
-    /// `etch-grammar.md` §20.4). A service declares the calling surface of a
-    /// Tier 1 module to Etch; its `.d.etch` is generated from the module's Zig
-    /// `bindgen.ServiceSpec` and is never hand-written (`engine-c-bindings.md`
-    /// §8.4).
+    /// Parse `service IDENT "{" { function_decl_no_body } "}"` (`etch-grammar.md`
+    /// §20.4). A service declares the calling surface of a Tier 1 module to Etch; its
+    /// `.d.etch` is generated from the module's Zig `bindgen.ServiceSpec` and is never
+    /// hand-written (`engine-c-bindings.md` §8.4).
     ///
     /// **Valid in a `.d.etch` and nowhere else** (§20.4, §20.5). In a standard
     /// `.etch` the construct is refused with a plain parse error naming the
     /// constraint — deliberately NOT `E1901`, whose canonical name is
     /// `ConstructNotAllowedInDeclarationFile` and which says the opposite thing.
     /// Minting a code for the reverse direction is not warranted: the `private
-    /// import` refusal (M1.0.8) set the precedent that a positional constraint
+    /// import` refusal set the precedent that a positional constraint
     /// with one clear message needs no code of its own.
     ///
     /// The body is the trait body verbatim — a run of bodyless `FnDecl`s in
@@ -4936,15 +4922,15 @@ pub const Parser = struct {
     }
 
     /// Parse `impl TYPE_IDENT [when_clause] "{" {fn_method} "}"` — an inherent
-    /// impl (M0.8 E2 block 3 tranche A, `etch-grammar.md` §5.9). The trait form
-    /// `impl Trait for Type` lands in tranche C; a `for` after the first type
+    /// impl (`etch-grammar.md` §5.9). The trait form
+    /// `impl Trait for Type` is a conditional impl; a `for` after the first type
     /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
     /// `allow_self = true` and are stored in `arena.impl_methods`.
     fn parseImplDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
         _ = annotations; // inherent impl carries no annotations in this subset
         const kw_span = self.current.span;
         _ = try self.advance(); // 'impl'
-        // Optional impl-level generic params `impl<T> …` (M0.8 E2 block 4); in
+        // Optional impl-level generic params `impl<T> …`; in
         // scope for every method body.
         const impl_generics = try self.parseOptionalGenerics();
         const first_tok = try self.expect(.type_ident, "expected type or trait name (TYPE_IDENT) after 'impl'");
@@ -4952,7 +4938,7 @@ pub const Parser = struct {
         // An optional `<type_list>` after the first name: the trait's generic
         // args in `impl Trait<T> for Type` (EBNF `impl_trait_for_type`) OR the
         // inherent target's args in `impl<T> Range<T>` (EBNF `generic_type`
-        // target, §891 patch). Either way the args are erased in M0.8 (no
+        // target, §891 patch). Either way the args are erased (no
         // monomorphisation codegen — the impl-level `<T>` carries the params).
         _ = try self.skipGenericArgs();
         // `impl Trait for Type` (trait impl) vs `impl [Type | Type<…>]` (inherent).
@@ -5007,9 +4993,9 @@ pub const Parser = struct {
     }
 
     /// Consume an optional `< type { "," type } >` generic-argument list,
-    /// returning whether one was present (M0.8 E2 block 4). The arguments are
-    /// parsed (and land in the arena) but erased — M0.8 has no monomorphisation
-    /// codegen, so trait-arg / type-arg tracking is Phase 2.
+    /// returning whether one was present. The arguments are
+    /// parsed (and land in the arena) but erased — there is no monomorphisation
+    /// codegen, so trait-arg / type-arg tracking is not done.
     fn skipGenericArgs(self: *Parser) ParseError!bool {
         if (self.peek() != .lt) return false;
         _ = try self.advance(); // '<'
@@ -5126,8 +5112,8 @@ pub const Parser = struct {
                 kind = .resource_changed;
                 end_byte = changed_tok.span.byte_end;
             } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
-                // `resource T { expression }` (M0.8 E4 — §6 general resource
-                // filter; mutually exclusive with `changed`, like `has`). The
+                // `resource T { expression }` (§6 general resource filter;
+                // mutually exclusive with `changed`, like `has`). The
                 // resource's fields are in scope inside the braces. The
                 // brace-vs-body ambiguity is resolved by the matching-brace
                 // scan (`braceOpensWhenFilter`).
@@ -5151,7 +5137,7 @@ pub const Parser = struct {
             try self.arena.when_nodes.append(self.gpa, node);
             return idx;
         }
-        // §6 last arm: a bare boolean expression condition (M0.8 E4). The
+        // §6 last arm: a bare boolean expression condition. The
         // structured `entity has …` / `entity tag_op …` arms are gated by
         // lookahead — anything else (including an identifier followed by a
         // postfix chain, a literal, `get(R)`, a paren that is not a when
@@ -5178,8 +5164,8 @@ pub const Parser = struct {
         // `entity has T [{ filter }]` or `entity tag_op tag_operand`.
         const entity_tok = try self.expect(.ident, "expected entity binding in when clause");
         const entity_name = try self.internSlice(entity_tok.span);
-        // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (M0.8 E3 tag
-        // filter, `etch-grammar.md` §6 l.945). The tag op stands where `has`
+        // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (tag filter,
+        // `etch-grammar.md` §6 l.945). The tag op stands where `has`
         // would; dispatch before the `has` path.
         if (isTagOp(self.peek())) {
             return try self.parseTagFilterWhen(entity_name, entity_tok.span);
@@ -5192,7 +5178,7 @@ pub const Parser = struct {
         var field_name: StringId = 0;
         var filter_value: NodeId = NodeId.none;
         var end_byte = type_tok.span.byte_end;
-        // `entity has T changed` (M0.8 E3) — change-detection filter, the exact
+        // `entity has T changed` — change-detection filter, the exact
         // mirror of `resource T changed` (`etch-grammar.md` §6, patched). Tested
         // before the `{ filter }` form: the two are mutually exclusive (the EBNF
         // `has T changed` carries no field filter).
@@ -5210,9 +5196,9 @@ pub const Parser = struct {
             end_byte = closing.span.byte_end;
             kind = .has_with_filter;
         } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
-            // `has T { expression }` (M0.8 E4 — §6 general field filter; the
-            // narrow `{ field == value }` fast path above keeps the delivered
-            // E3 representation byte-for-byte). T's fields are in scope
+            // `has T { expression }` (§6 general field filter; the narrow
+            // `{ field == value }` fast path above keeps the delivered
+            // representation byte-for-byte). T's fields are in scope
             // inside the braces. The brace-vs-body ambiguity is resolved by
             // the matching-brace scan (`braceOpensWhenFilter`).
             _ = try self.advance(); // '{'
@@ -5237,8 +5223,7 @@ pub const Parser = struct {
     }
 
     /// Expect an identifier-LIKE token: a plain ident or any keyword used
-    /// contextually as a word (M0.8 E4 — tag segments / namespace names may
-    /// spell graduated construct keywords like `quest` or `data`).
+    /// contextually as a word.
     fn expectWord(self: *Parser, comptime msg: []const u8) ParseError!token_mod.Token {
         if (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
             return try self.advance();
@@ -5248,7 +5233,7 @@ pub const Parser = struct {
 
     /// Whether the `{` at the current token opens a §6 when-filter
     /// expression rather than the construct body that follows the when
-    /// clause (M0.8 E4). Disambiguated by scanning a SCRATCH lexer from the
+    /// clause. Disambiguated by scanning a SCRATCH lexer from the
     /// brace to its matching `}` and checking the next token: a filter
     /// brace is always followed by `{` (the body / a composite's children),
     /// `and`, or `or`; a body brace is followed by anything else (next
@@ -5278,7 +5263,7 @@ pub const Parser = struct {
         }
     }
 
-    /// True when `k` is one of the five tag query operator keywords (M0.8 E3).
+    /// True when `k` is one of the five tag query operator keywords.
     fn isTagOp(k: token_mod.TokenKind) bool {
         return switch (k) {
             .kw_has_tag, .kw_has_no_tag, .kw_has_any_tag, .kw_has_all_tags, .kw_has_no_tags => true,
@@ -5297,8 +5282,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse a `TAG_PATH = "." IDENT {"." IDENT}` (M0.8 E3, `etch-grammar.md`
-    /// §1.3) into a `tag_path` expression. Parsed only in tag-operand position,
+    /// Parse a `TAG_PATH = "." IDENT {"." IDENT}` (`etch-grammar.md` §1.3) into
+    /// a `tag_path` expression. Parsed only in tag-operand position,
     /// so the leading `.` never collides with the `.variant` enum shorthand.
     fn parseTagPathExpr(self: *Parser) ParseError!NodeId {
         const dot = try self.expect(.dot, "expected '.' to start a tag path");
@@ -5338,8 +5323,8 @@ pub const Parser = struct {
         return .{ .start = start, .len = @as(u32, @intCast(self.arena.tag_operands.items.len)) - start };
     }
 
-    /// Parse `entity tag_op tag_operand` into a `.tag_filter` when-node (M0.8
-    /// E3). The receiver `entity` ident is already consumed; the current token
+    /// Parse `entity tag_op tag_operand` into a `.tag_filter` when-node. The
+    /// receiver `entity` ident is already consumed; the current token
     /// is the tag op.
     fn parseTagFilterWhen(self: *Parser, entity_name: StringId, entity_span: token_mod.SourceSpan) ParseError!u32 {
         const op_tok = try self.advance(); // the tag op keyword
@@ -5372,7 +5357,7 @@ pub const Parser = struct {
     }
 
     /// Parse the tail of a `tag_mutation_stmt` (`expression "."
-    /// ("add_tag"|"remove_tag") "(" TAG_PATH ")"`, M0.8 E3, `etch-grammar.md`
+    /// ("add_tag"|"remove_tag") "(" TAG_PATH ")"`, `etch-grammar.md`
     /// §4.4 l.697). The `receiver` and the `add_tag`/`remove_tag` keyword are
     /// already consumed; the current token is `(`. Produces a `.stmt`-category
     /// `tag_mutation_stmt` node — a mutation has no value, so it is a statement,
@@ -5411,8 +5396,8 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len) };
     }
 
-    /// Parse a brace-less statement run terminated by EOF (M1.0.9 E1, used by
-    /// `parseStmtBlock`). Like `parseStmtRun` but: (a) the run ends at `.eof`
+    /// Parse a brace-less statement run terminated by EOF. Like
+    /// `parseStmtRun` but: (a) the run ends at `.eof`
     /// (there is no closing `}`), and (b) a single `.semicolon` separator is
     /// skipped after each statement — the cooked hook text
     /// (`descriptor.renderStmtRunAlloc`) joins statements with `"; "`, whereas
@@ -5441,12 +5426,12 @@ pub const Parser = struct {
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
             .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return, .kw_emit => true,
-            // The concurrency statements (M1.0.12 E2, §4.2) — never a block's
+            // The concurrency statements (§4.2) — never a block's
             // trailing value. `spawn` only in its `spawn {` task form; the
             // structural `spawn (` stays on the expression path.
             .kw_race, .kw_sync, .kw_branch => true,
             .kw_spawn => self.peekNext() == .lbrace,
-            // The §4.3 timer statements (M1.0.13 E3) — never a block's
+            // The §4.3 timer statements — never a block's
             // trailing value.
             .kw_after, .kw_every, .kw_after_unscaled => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
@@ -5454,8 +5439,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse a value-block body `{ statement } [ expression ]` (M0.8 control
-    /// flow, `etch-grammar.md` §4.1 l.645). Returns the statement run plus the
+    /// Parse a value-block body `{ statement } [ expression ]` (control flow,
+    /// `etch-grammar.md` §4.1 l.645). Returns the statement run plus the
     /// trailing expression that is the block's value (`NodeId.none` when
     /// value-less). Etch has no statement separator, so the last expression-led
     /// item immediately before `}` — not an assignment, not a keyword statement
@@ -5477,7 +5462,7 @@ pub const Parser = struct {
             const expr_start = self.current.span;
             const expr = try self.parseExpr(0);
             // A `tag_mutation_stmt` (`entity.add_tag(.x)`) parses as a
-            // `.stmt`-category node inside `continuePostfix` (M0.8 E3); it is a
+            // `.stmt`-category node inside `continuePostfix`; it is a
             // statement, never a block's trailing value.
             if (expr.category == .stmt) {
                 try stmts.append(self.gpa, expr.raw());
@@ -5501,7 +5486,7 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len), .value = value };
     }
 
-    /// Parse a block expression `{ ... }` in expression position (M0.8 control
+    /// Parse a block expression `{ ... }` in expression position (control
     /// flow, `etch-grammar.md` §3.2 l.520 — `block_expr = block`). The block's
     /// value is its trailing expression (or `unit` when value-less). Used
     /// directly (`let x = { ...; v }`), as `if` / `match` arm bodies, and as
@@ -5516,7 +5501,7 @@ pub const Parser = struct {
         });
     }
 
-    /// `measure { block }` (M1.0.15, §17 erratum). Reuses the ordinary block-body
+    /// `measure { block }` (§17 erratum). Reuses the ordinary block-body
     /// parser (statement run + optional trailing value); the `measure` keyword
     /// tags the node so the type-checker types it as `Duration` (test-body only,
     /// E0910 elsewhere) and the interpreter times the block on the wall clock.
@@ -5531,7 +5516,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `if cond block {else if cond block} [else block]` (M0.8 control
+    /// Parse `if cond block {else if cond block} [else block]` (control
     /// flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). Parsed as an
     /// if-expression in `parsePrimary`; in statement position it is wrapped as
     /// an expr-statement (mirroring `loop`). The condition is an ordinary
@@ -5540,9 +5525,8 @@ pub const Parser = struct {
     /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
     fn parseIf(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'if'
-        // `if let <name> = <optional> { … } [else { … }]` (M0.8 E2 block 5,
-        // `etch-grammar.md` §501) — unwraps an optional, binding `<name>` to its
-        // payload in the then-block.
+        // `if let <name> = <optional> { … } [else { … }]` (`etch-grammar.md` §501) —
+        // unwraps an optional, binding `<name>` to its payload in the then-block.
         var let_binding: StringId = 0;
         if (self.peek() == .kw_let) {
             _ = try self.advance(); // 'let'
@@ -5554,7 +5538,7 @@ pub const Parser = struct {
         return try self.finishIf(kw_span, let_binding, cond);
     }
 
-    /// Finish an `if` whose condition is already parsed (M1.0.12 E2 split): the
+    /// Finish an `if` whose condition is already parsed: the
     /// then-block, the else-if chain, and the node. Lets the `race`/`sync`
     /// branch parser resolve `if expr =>` (conditional branch guard) vs
     /// `if expr { … }` (an if-statement branch) AFTER the expression — the two
@@ -5576,9 +5560,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `for IDENT [, IDENT] in iterable { body }` (M0.8 v0.6
-    /// foundations, `etch-grammar.md` §621). E1 iterates ranges; array / map
-    /// iterables arrive with collections.
+    /// Parse `for IDENT [, IDENT] in iterable { body }` (v0.6 foundations,
+    /// `etch-grammar.md` §621). Ranges, arrays and maps are all iterable.
     fn parseForStmt(self: *Parser) ParseError!NodeId {
         const for_span = (try self.advance()).span; // 'for'
         const var_tok = try self.expect(.ident, "expected loop variable after 'for'");
@@ -5603,15 +5586,15 @@ pub const Parser = struct {
         }, .{ .byte_start = for_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `while cond block` (M0.8 control flow, `etch-grammar.md` §4.1
+    /// Parse `while cond block` (`etch-grammar.md` §4.1
     /// l.622). The condition is an ordinary expression (it stops before the
     /// body's `{`); the body is a statement run (no value, like a loop body).
-    /// `break` / `continue` inside target this loop (unlabeled in M0.8); the
+    /// `break` / `continue` inside target this loop (unlabeled); the
     /// `while let` Optional-destructuring form lands with the Optional tranche.
     fn parseWhileStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'while'
-        // `while let <name> = <optional> { … }` (M0.8 E2 block 5,
-        // `etch-grammar.md` §623) — re-evaluates the optional each iteration,
+        // `while let <name> = <optional> { … }` (`etch-grammar.md`
+        // §623) — re-evaluates the optional each iteration,
         // binding `<name>` to its payload in the body; stops on `none`.
         var let_binding: StringId = 0;
         if (self.peek() == .kw_let) {
@@ -5632,7 +5615,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `loop { body }` (M0.8 loop/break, `etch-grammar.md` §522/§624).
+    /// Parse `loop { body }` (loop/break, `etch-grammar.md` §522/§624).
     /// `label` is `0` for an unlabeled loop; a labeled loop pushes its label so
     /// nested `break`/`continue` can target it.
     fn parseLoop(self: *Parser, label: StringId) ParseError!NodeId {
@@ -5648,8 +5631,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `IDENT ":" loop { ... }` (M0.8 loop/break). Only `loop` can be
-    /// labeled in E1 (labeled `for` is a later refinement).
+    /// Parse `IDENT ":" loop { ... }`. Only `loop` can be
+    /// labeled (labeled `for` is a later refinement).
     fn parseLabeledLoop(self: *Parser) ParseError!NodeId {
         const label_tok = try self.advance(); // IDENT
         const label = try self.internSlice(label_tok.span);
@@ -5664,7 +5647,7 @@ pub const Parser = struct {
         return try self.arena.addExprStmt(self.gpa, loop_node, self.arena.exprSpan(loop_node));
     }
 
-    /// Parse `break [label] [value]` (M0.8 loop/break, `etch-grammar.md` §632).
+    /// Parse `break [label] [value]` (loop/break, `etch-grammar.md` §632).
     /// A leading IDENT is the label only when it names an active loop label
     /// (else it begins the value expression).
     fn parseBreakStmt(self: *Parser) ParseError!NodeId {
@@ -5687,7 +5670,7 @@ pub const Parser = struct {
         return try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
     }
 
-    /// Parse `continue [label]` (M0.8 loop/break, `etch-grammar.md` §633).
+    /// Parse `continue [label]` (loop/break, `etch-grammar.md` §633).
     fn parseContinueStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'continue'
         var label: StringId = 0;
@@ -5703,7 +5686,7 @@ pub const Parser = struct {
         return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
     }
 
-    /// Parse `throw expression` (M0.8 error handling, `etch-grammar.md` §641).
+    /// Parse `throw expression` (error handling, `etch-grammar.md` §641).
     fn parseThrowStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'throw'
         const value = try self.parseExpr(0);
@@ -5713,11 +5696,11 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `return [expression]` (M0.8 E2 call mechanism, `etch-grammar.md`
-    /// §4.1 l.630). Etch has no statement separator, so a `return` immediately
+    /// Parse `return [expression]` (call mechanism, `etch-grammar.md` §4.1
+    /// l.630). Etch has no statement separator, so a `return` immediately
     /// before `}` (or EOF) is a bare/void return; otherwise the following
     /// expression is the return value. Dead-code `return` mid-block (followed by
-    /// more statements) is not in the block-2 surface.
+    /// more statements) is not in the surface.
     fn parseReturnStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'return'
         if (self.peek() == .rbrace or self.peek() == .eof) {
@@ -5730,7 +5713,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `try { ... } catch IDENT { ... }` (M0.8 error handling,
+    /// Parse `try { ... } catch IDENT { ... }` (error handling,
     /// `etch-grammar.md` §640). Both bodies are statement runs.
     fn parseTryCatchStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'try'
@@ -5752,8 +5735,8 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `emit TYPE_IDENT "{" {field_init} "}"` (M0.8 E3, `etch-grammar.md`
-    /// §4.1 `emit_stmt` + §5.10). `field_init = IDENT ":" expression`; the
+    /// Parse `emit TYPE_IDENT "{" {field_init} "}"` (`etch-grammar.md` §4.1
+    /// `emit_stmt` + §5.10). `field_init = IDENT ":" expression`; the
     /// field-init loop mirrors `parseStructLiteral` (an event is a POD struct).
     /// The spread form `..base` is rejected. Field initializers are stored in a
     /// `(start, len)` run of `arena.struct_lit_fields`.
@@ -5785,7 +5768,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse the branch list of a `race` / `sync` body (M1.0.12 E2,
+    /// Parse the branch list of a `race` / `sync` body (
     /// `etch-grammar.md` §4.2 `race_branch = [ "if" expression "=>" ]
     /// statement`). A branch starting with `if` is ambiguous until after the
     /// expression: a following `=>` makes the expression a conditional-branch
@@ -5827,10 +5810,10 @@ pub const Parser = struct {
         }
     }
 
-    /// Parse `race "{" { race_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
-    /// §4.2 `race_stmt`). An empty body parses (zero admitted branches — the
-    /// parent continues immediately, E4); async-context legality is the
-    /// type-checker's job (E3).
+    /// Parse `race "{" { race_branch } "}"` (`etch-grammar.md` §4.2
+    /// `race_stmt`). An empty body parses (zero admitted branches — the
+    /// parent continues immediately); async-context legality is the
+    /// type-checker's job.
     fn parseRaceStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'race'
         _ = try self.expect(.lbrace, "expected '{' to open the race body");
@@ -5844,8 +5827,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `sync "{" { sync_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
-    /// §4.2 `sync_stmt`). Same branch grammar as `race`.
+    /// Parse `sync "{" { sync_branch } "}"` (`etch-grammar.md` §4.2
+    /// `sync_stmt`). Same branch grammar as `race`.
     fn parseSyncStmt(self: *Parser) ParseError!NodeId {
         const kw = try self.advance(); // 'sync'
         _ = try self.expect(.lbrace, "expected '{' to open the sync body");
@@ -5859,7 +5842,7 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `branch block` (M1.0.12 E2, `etch-grammar.md` §4.2 `branch_stmt`)
+    /// Parse `branch block` (`etch-grammar.md` §4.2 `branch_stmt`)
     /// — the fire-and-forget task statement. The body is a statement run (the
     /// rule-body layout). Only reached from statement position; the
     /// quest/dialogue `branch` sub-constructs are parsed inside their own
@@ -5875,7 +5858,7 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `spawn block` (M1.0.12 E2, `etch-grammar.md` §4.2 `spawn_stmt`),
+    /// Parse `spawn block` (`etch-grammar.md` §4.2 `spawn_stmt`),
     /// the async task statement. `binding` is the `let` name for the bound form
     /// `let h = spawn { }` (dispatched from `parseLetStmt`; `0` = discarded
     /// handle); `start_span` is the statement's first token (`let` or `spawn`).
@@ -5892,7 +5875,7 @@ pub const Parser = struct {
         }, .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// True when `kind` heads a §4.3 timer statement (M1.0.13 E3).
+    /// True when `kind` heads a §4.3 timer statement.
     fn isTimerKindToken(kind: TokenKind) bool {
         return switch (kind) {
             .kw_after, .kw_every, .kw_after_unscaled => true,
@@ -5900,15 +5883,15 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse `timer_kind "(" expression ")" block` (M1.0.13 E3,
-    /// `etch-grammar.md` §4.3 `timer_stmt`). `binding` is the `let` name for
+    /// Parse `timer_kind "(" expression ")" block` (`etch-grammar.md` §4.3
+    /// `timer_stmt`). `binding` is the `let` name for
     /// the bound form `let t = after(d) { }` (dispatched from `parseLetStmt`;
     /// `0` = discarded handle); `start_span` is the statement's first token
     /// (`let` or the timer keyword). The duration argument is a FULL
-    /// expression, evaluated once at scheduling time (E5) — not restricted to
-    /// a literal, unlike `await wait` (M1.0.11). The body is a statement run
+    /// expression, evaluated once at scheduling time — not restricted to
+    /// a literal, unlike `await wait`. The body is a statement run
     /// (the branch/spawn layout); its synchronous-context enforcement (`await`
-    /// inside → `E0901`) is the type-checker's job (E4).
+    /// inside → `E0901`) is the type-checker's job.
     fn parseTimerStmt(self: *Parser, binding: StringId, start_span: SourceSpan) ParseError!NodeId {
         const kw = try self.advance(); // 'after' / 'every' / 'after_unscaled'
         const kind: ast_mod.TimerKind = switch (kw.kind) {
@@ -5934,7 +5917,7 @@ pub const Parser = struct {
 
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_branch) {
-            // The async `branch { }` statement (M1.0.12 E2, §4.2 branch_stmt).
+            // The async `branch { }` statement (§4.2 branch_stmt).
             // The quest/dialogue `branch` sub-constructs never reach here —
             // they are parsed inside their own construct parsers.
             return try self.parseBranchStmt();
@@ -5945,15 +5928,15 @@ pub const Parser = struct {
         if (self.peek() == .kw_sync) {
             return try self.parseSyncStmt();
         }
-        // `spawn {` at statement head is the async task statement (M1.0.12 E2,
-        // §4.2 spawn_stmt, binding-less form). `spawn (` falls through to the
+        // `spawn {` at statement head is the async task statement (§4.2
+        // spawn_stmt, binding-less form). `spawn (` falls through to the
         // expression path (structural spawn, §3.2); the bound form
         // `let h = spawn { }` is dispatched inside `parseLetStmt`.
         if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
             return try self.parseSpawnStmt(0, self.peekSpan());
         }
         if (isTimerKindToken(self.peek())) {
-            // §4.3 timer statement, unbound form (M1.0.13 E3) — the bound form
+            // §4.3 timer statement, unbound form — the bound form
             // `let t = after(d) { }` is dispatched inside `parseLetStmt`. The
             // routine-trigger `after Segment` context is parsed inside the
             // routine construct parser and never reaches statement position.
@@ -5989,7 +5972,7 @@ pub const Parser = struct {
         if (self.peek() == .kw_emit) {
             return try self.parseEmitStmt();
         }
-        // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
+        // Labeled loop: `IDENT ":" loop { ... }`.
         if (self.peek() == .ident and self.peekNext() == .colon) {
             return try self.parseLabeledLoop();
         }
@@ -5997,7 +5980,7 @@ pub const Parser = struct {
         const expr_start = self.current.span;
         const expr = try self.parseExpr(0);
         // `entity.add_tag(.x)` / `entity.remove_tag(.x)` parse as a complete
-        // statement inside `continuePostfix` (M0.8 E3) — a `.stmt`-category
+        // statement inside `continuePostfix` — a `.stmt`-category
         // node. Return it directly; it is neither an assignment target nor an
         // expression statement to be wrapped.
         if (expr.category == .stmt) return expr;
@@ -6033,11 +6016,11 @@ pub const Parser = struct {
             type_annotation = try self.parseType();
         }
         _ = try self.expect(.eq, "expected '=' in let binding");
-        // `let h = spawn { }` — the bound spawn task statement (M1.0.12 E2,
-        // §4.2 `spawn_stmt = [ "let" IDENT "=" ] "spawn" block`): the binding
+        // `let h = spawn { }` — the bound spawn task statement (§4.2
+        // `spawn_stmt = [ "let" IDENT "=" ] "spawn" block`): the binding
         // is PART of the spawn statement, not a let-stmt whose initializer is
         // a spawn. The grammar admits neither `mut` nor a type annotation on
-        // this form (the handle types as the builtin `TaskHandle`, E3).
+        // this form (the handle types as the builtin `TaskHandle`).
         if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
             if (is_mut) {
                 return self.parseErr(self.peekSpan(), "a spawn task binding takes the form 'let IDENT = spawn { ... }' — 'mut' is not part of the spawn_stmt grammar (§4.2)");
@@ -6047,12 +6030,12 @@ pub const Parser = struct {
             }
             return try self.parseSpawnStmt(name_id, let_span);
         }
-        // `let t = after(d) { }` — the bound timer statement (M1.0.13 E3, §4.3
+        // `let t = after(d) { }` — the bound timer statement (§4.3
         // `timer_stmt = [ "let" IDENT "=" ] timer_kind "(" expression ")"
         // block`): as with `spawn_stmt`, the binding is PART of the timer
         // statement, not a let-stmt whose initializer is a timer. The grammar
         // admits neither `mut` nor a type annotation on this form (the handle
-        // types as the builtin `TimerHandle`, E4).
+        // types as the builtin `TimerHandle`).
         if (isTimerKindToken(self.peek())) {
             if (is_mut) {
                 return self.parseErr(self.peekSpan(), "a timer binding takes the form 'let IDENT = after(d) { ... }' — 'mut' is not part of the timer_stmt grammar (§4.3)");
@@ -6075,10 +6058,9 @@ pub const Parser = struct {
         }, span);
     }
 
-    /// Parse `assert ( cond [, "message"] )` (M0.8 v0.6 foundations,
-    /// `etch-reference-part1.md` §10.3). The optional message is a string
-    /// literal dev diagnostic; the condition is checked to be `bool` by the
-    /// type-checker.
+    /// Parse `assert ( cond [, "message"] )` (v0.6 foundations,
+    /// `etch-reference-part1.md` §10.3). The optional message is a string literal dev
+    /// diagnostic; the condition is checked to be `bool` by the type-checker.
     fn parseAssertStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'assert'
         _ = try self.expect(.lparen, "expected '(' after 'assert'");
@@ -6123,7 +6105,7 @@ pub const Parser = struct {
     }
 
     /// Parse an expression with struct literals suppressed at the top level
-    /// (M0.8 E2 block 3) — used for `if` / `while` / `for` / `match` head
+    /// — used for `if` / `while` / `for` / `match` head
     /// expressions, where a trailing `{` opens the body, not a `TYPE_IDENT {`
     /// struct literal. Delimited sub-contexts re-enable struct literals.
     fn parseExprNoStruct(self: *Parser, min_bp: u8) ParseError!NodeId {
@@ -6200,8 +6182,8 @@ pub const Parser = struct {
         return self.continueCast(after_postfix);
     }
 
-    /// Continue a left-associative `expr as Type` cast chain (M0.8 v0.6
-    /// foundations). `as` binds tighter than the binary operators and
+    /// Continue a left-associative `expr as Type` cast chain. `as`
+    /// binds tighter than the binary operators and
     /// looser than the `.field` / `.get` postfix chain, so `a.b as f32 + c`
     /// parses as `((a.b) as f32) + c`.
     fn continueCast(self: *Parser, expr_in: NodeId) ParseError!NodeId {
@@ -6222,7 +6204,7 @@ pub const Parser = struct {
     /// Continue a postfix `.field` / `.get(T)` / `.get_mut(T)` chain on an
     /// already-parsed receiver. Extracted from `parsePostfix` so annotation
     /// arguments that begin with an identifier (`@requires(self.health)`)
-    /// also pick up the postfix chain (D-S3-annot-field-access): the
+    /// also pick up the postfix chain (the annotation field-access rule): the
     /// named-arg lookahead in `parseAnnotationArg` consumes the leading
     /// ident before the normal `parsePrimary` postfix path can run, so the
     /// ident must be threaded back through this helper.
@@ -6243,7 +6225,7 @@ pub const Parser = struct {
                             expr = try self.parseGetCall(expr, .method_get_mut);
                         },
                         // `entity.add_tag(.path)` / `entity.remove_tag(.path)`
-                        // (M0.8 E3, `etch-grammar.md` §4.4 l.697). These are
+                        // (`etch-grammar.md` §4.4 l.697). These are
                         // keywords, not idents, so they never form a
                         // `method_call`; the whole form is a `tag_mutation_stmt`
                         // (a statement, not an expression — it has no value). The
@@ -6259,8 +6241,8 @@ pub const Parser = struct {
                             _ = try self.advance();
                             return try self.parseTagMutation(expr, .remove);
                         },
-                        // `world.emit(T {…})` — the test-world event method
-                        // (M1.0.15). `emit` is a keyword, so the `.ident` arm below
+                        // `world.emit(T {…})` — the test-world event method.
+                        // `emit` is a keyword, so the `.ident` arm below
                         // never sees it; route it explicitly to a `method_call`
                         // (`parseMethodCall` interns the token slice → "emit"). Only
                         // valid as a call form.
@@ -6272,11 +6254,11 @@ pub const Parser = struct {
                         },
                         .ident => {
                             // `recv.method(args)` → the reserved `method_call`
-                            // kind (M0.8 E2 call mechanism, `etch-grammar.md`
-                            // postfix_op §421); `recv.field` (no `(`) stays a
+                            // kind (call mechanism, `etch-grammar.md` postfix_op §421);
+                            // `recv.field` (no `(`) stays a
                             // field access. The 4-kind method dispatch
                             // (`etch-resolver-types.md §5`) is exercised in block
-                            // 3 once `impl` provides methods — block 2 only
+                            // 3 once `impl` provides methods — a later slice only
                             // produces the node.
                             if (self.peekNext() == .lparen) {
                                 expr = try self.parseMethodCall(expr);
@@ -6293,14 +6275,14 @@ pub const Parser = struct {
                         else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
                     }
                 },
-                // Index / slice access `receiver[index]` (M0.8 collections,
+                // Index / slice access `receiver[index]` (collections,
                 // `etch-grammar.md` postfix_op §425). A range index expression
-                // (`arr[0..3]`) lowers to a slice; any other index to a single
-                // element — disambiguated downstream from the index expr kind.
+                // (`arr[0..3]`) lowers to a slice; any other index to a single element
+                // — disambiguated downstream from the index expr kind.
                 .lbracket => {
                     _ = try self.advance(); // '['
-                    // A bracketed index re-enables struct literals (M0.8 E2
-                    // block 3) even inside an `if`/`while`/`for`/`match` head.
+                    // A bracketed index re-enables struct literals even inside an
+                    // `if`/`while`/`for`/`match` head.
                     const saved = self.no_struct_lit;
                     self.no_struct_lit = false;
                     const index = try self.parseExpr(0);
@@ -6312,12 +6294,12 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
-                // Call `callee(args)` (M0.8 closures, `etch-grammar.md`
-                // postfix_op §424). E1 resolves calls on closure-typed locals;
-                // named arguments per §3.3 (M0.8 E4, item-16 ruling).
+                // Call `callee(args)` (closures, `etch-grammar.md` postfix_op
+                // §424). Calls on closure-typed locals resolve;
+                // named arguments per §3.3.
                 .lparen => {
                     _ = try self.advance(); // '('
-                    // Call arguments re-enable struct literals (M0.8 E2 block 3)
+                    // Call arguments re-enable struct literals
                     // even inside an `if`/`while`/`for`/`match` head.
                     const saved = self.no_struct_lit;
                     self.no_struct_lit = false;
@@ -6332,10 +6314,10 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
-                // `recv?.method(args)` / `recv?.field` — optional chain (M0.8
-                // E3-C tranche 4, part1 §6.6): `none` short-circuits, `some`
+                // `recv?.method(args)` / `recv?.field` — optional chain
+                // (part1 §6.6): `none` short-circuits, `some`
                 // dispatches on the payload. `?.get` / `?.get_mut` (optional
-                // ECS access) are out of the M0.8 subset — fail loud at parse.
+                // ECS access) are out of the accepted subset — fail loud at parse.
                 .question_dot => {
                     _ = try self.advance();
                     switch (self.peek()) {
@@ -6358,7 +6340,7 @@ pub const Parser = struct {
                     }
                 },
                 // Postfix tag query `expr tag_op operand` (§3.2 `tag_expr`,
-                // M0.8 E4). When-clause tag conditions keep their dedicated
+                // the grammar). When-clause tag conditions keep their dedicated
                 // WhenNode path (gated ahead of the bare-expression arm);
                 // this expression form serves B-construct conditions
                 // (`requires: player has_tag .x`). Evaluation is fail-loud
@@ -6385,8 +6367,8 @@ pub const Parser = struct {
                         .byte_end = end_byte,
                     });
                 },
-                // Postfix `!` — force unwrap, panic on `none` (M0.8 E3-C
-                // tranche 4, part1 §6.6). `!=` lexes as one token (maximal
+                // Postfix `!` — force unwrap, panic on `none` (a later slice,
+                // part1 §6.6). `!=` lexes as one token (maximal
                 // munch), so this never splits a comparison.
                 .bang => {
                     const bang_tok = try self.advance();
@@ -6402,8 +6384,8 @@ pub const Parser = struct {
         return expr;
     }
 
-    /// Buffered call-argument lists (M0.8 E4 named arguments, §3.3 —
-    /// item-16 ruling). `names` runs parallel to `args` (`0` = positional);
+    /// Buffered call-argument lists (named arguments, §3.3 — item-16
+    /// ruling). `names` runs parallel to `args` (`0` = positional);
     /// `any_named` selects whether the add-helper stores a names run.
     const CallArgsBuf = struct {
         args: std.ArrayListUnmanaged(u32) = .empty,
@@ -6421,9 +6403,9 @@ pub const Parser = struct {
     };
 
     /// Parse a §3.3 `arg_list` into `out` — `arg = expression | IDENT ":"
-    /// expression` (M0.8 E4, item-16 ruling). The label lookahead is
+    /// expression`. The label lookahead is
     /// `(IDENT | soft keyword) ':'` — unambiguous, `:` heads no expression
-    /// continuation. Soft keywords double as labels per the S3 contextual
+    /// continuation. Soft keywords double as labels per the contextual
     /// doctrine (item 6: minimum `type` — the §8.2 `type: .work` form).
     /// §3.3 ordering rule enforced: once an argument is named, every
     /// following argument must be named.
@@ -6459,16 +6441,16 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `receiver.method(args)` into the reserved `method_call` kind (M0.8
-    /// E2 call mechanism, `etch-grammar.md` postfix_op §421). On entry the
+    /// Parse `receiver.method(args)` into the reserved `method_call` kind (call
+    /// mechanism, `etch-grammar.md` postfix_op §421). On entry the
     /// current token is the method-name identifier and the next is `(`.
-    /// Named arguments per §3.3 (M0.8 E4, item-16 ruling). The dispatch
-    /// (`etch-resolver-types.md §5`) lands in block 3 with `impl`.
+    /// Named arguments per §3.3. The dispatch
+    /// (`etch-resolver-types.md §5`) lands in a later slice with `impl`.
     fn parseMethodCall(self: *Parser, receiver: NodeId) ParseError!NodeId {
         const name_tok = try self.advance(); // method name
         const method_name = try self.internSlice(name_tok.span);
         _ = try self.advance(); // '('
-        // Method-call arguments re-enable struct literals (M0.8 E2 block 3).
+        // Method-call arguments re-enable struct literals.
         const saved = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved;
@@ -6484,7 +6466,7 @@ pub const Parser = struct {
     }
 
     /// Parse a receiver-less `get(T)` / `get_mut(T)` resource accessor
-    /// (D-S3-resource-receiver). Stored as a `method_get` / `method_get_mut`
+    /// (the resource-receiver rule). Stored as a `method_get` / `method_get_mut`
     /// expression with `receiver == NodeId.none`; the type-checker resolves
     /// `T` as a resource (E0301 if `T` names a component) and the
     /// interpreter / codegen dispatch on the absent receiver. The span
@@ -6502,14 +6484,14 @@ pub const Parser = struct {
 
     const ParsedPattern = struct { kind: ast_mod.PatternKind, payload: u32 };
 
-    /// Parse the E1 pattern subset (`etch-grammar.md` §pattern): `_`
+    /// Parse the pattern subset (`etch-grammar.md` §pattern): `_`
     /// (wildcard), a literal, or an `IDENT` binding. Enum-variant, optional,
     /// tuple, and struct-destructure patterns arrive with their types later.
     fn parsePattern(self: *Parser) ParseError!ParsedPattern {
         switch (self.peek()) {
             .ident => {
-                // `none` / `some(v)` optional patterns (M0.8 E3-C tranche 4,
-                // part1 §7.6). Like the literals, `some` / `none` are detected
+                // `none` / `some(v)` optional patterns (part1
+                // §7.6). Like the literals, `some` / `none` are detected
                 // by lexeme (not keywords); a bare `some` with no `(` stays an
                 // ordinary binding.
                 const lexeme = self.sliceOf(self.peekSpan());
@@ -6541,8 +6523,8 @@ pub const Parser = struct {
                 return .{ .kind = .literal, .payload = lit.raw() };
             },
             .dot => {
-                // Enum-variant shorthand pattern `.variant` (M0.8 E2 block 3
-                // tranche B, `etch-grammar.md` §3.2 l.510). Type-driven from the
+                // Enum-variant shorthand pattern `.variant` (a later slice,
+                // `etch-grammar.md` §3.2 l.510). Type-driven from the
                 // scrutinee enum at resolve time (`type_name = 0`).
                 _ = try self.advance(); // '.'
                 const variant_tok = try self.expect(.ident, "expected enum variant name after '.'");
@@ -6552,10 +6534,10 @@ pub const Parser = struct {
                 return .{ .kind = .enum_variant, .payload = idx };
             },
             .type_ident => {
-                // Qualified enum-variant pattern `Difficulty.easy` (M0.8 E2 block
-                // 3 tranche B, `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
+                // Qualified enum-variant pattern `Difficulty.easy` (a later slice
+                // `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
                 // struct-destructure pattern (l.512) and a bare `TYPE_IDENT` are
-                // the post-Phase-1 advanced pattern set — rejected with a pointer.
+                // the advanced pattern set — rejected with a pointer.
                 const type_tok = try self.advance();
                 const type_name = try self.internSlice(type_tok.span);
                 if (self.peek() != .dot) {
@@ -6579,8 +6561,8 @@ pub const Parser = struct {
         return .{ .pattern_kind = pat.kind, .pattern_payload = pat.payload, .body = body };
     }
 
-    /// Parse `match scrutinee { pattern => expr, ... }` (M0.8 v0.6
-    /// foundations). Arm bodies are expressions in the E1 subset.
+    /// Parse `match scrutinee { pattern => expr, ... }`. Arm bodies
+    /// are expressions in the accepted subset.
     fn parseMatch(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'match'
         const scrutinee = try self.parseExprNoStruct(0);
@@ -6603,13 +6585,13 @@ pub const Parser = struct {
     }
 
     /// Parse `[ ... ]` in expression position — disambiguated into an array
-    /// literal or a map literal (M0.8 collections, `etch-grammar.md`
+    /// literal or a map literal (collections, `etch-grammar.md`
     /// §493-498). `[]` is an empty array; `[:]` an empty map; a first
     /// expression followed by `:` is a map, by `;` a fill array, otherwise a
     /// comma array.
     fn parseArrayOrMapLiteral(self: *Parser) ParseError!NodeId {
         const open = try self.advance(); // '['
-        // Array / map elements re-enable struct literals (M0.8 E2 block 3).
+        // Array / map elements re-enable struct literals.
         const saved_nsl = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved_nsl;
@@ -6663,8 +6645,8 @@ pub const Parser = struct {
         return try self.arena.addArrayLit(self.gpa, elems.items, false, NodeId.none, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
-    /// Parse `|a, b| expr` / `|| expr` closure (M0.8 closures, `etch-grammar.md`
-    /// §524). E1 takes an expression body; a `{ block }` body arrives with
+    /// Parse `|a, b| expr` / `|| expr` closure (closures, `etch-grammar.md`
+    /// §524). A closure takes an expression body; a `{ block }` body comes with
     /// block expressions (loop/break tranche).
     fn parseClosure(self: *Parser) ParseError!NodeId {
         const open = try self.advance(); // '|'
@@ -6691,9 +6673,9 @@ pub const Parser = struct {
     }
 
     /// Parse the `{ field_init {"," field_init} [","] }` body of a struct
-    /// literal `TYPE_IDENT { … }` (M0.8 E2 block 3, `etch-grammar.md` §3.2
-    /// l.486). `field_init = IDENT ":" expression`. The spread form `..base`
-    /// (data-table inheritance, E4) is rejected. The caller has consumed the
+    /// literal `TYPE_IDENT { … }` (`etch-grammar.md` §3.2 l.486).
+    /// `field_init = IDENT ":" expression`. The spread form `..base`
+    /// (data-table inheritance) is rejected. The caller has consumed the
     /// type name and confirmed `peek() == {`. Field values re-enable struct
     /// literals (a `no_struct_lit` head context does not propagate inside).
     fn parseStructLiteral(self: *Parser, type_name: StringId, name_span: SourceSpan) ParseError!NodeId {
@@ -6722,7 +6704,7 @@ pub const Parser = struct {
 
     /// Parse the optional `{ field_init {"," field_init} [","] }` payload-filter
     /// body of an event await target (`entity_event(e, T { … })` /
-    /// `global_event(T { … })`, M1.0.14, `etch-grammar.md` §4.2). Shares the
+    /// `global_event(T { … })`, `etch-grammar.md` §4.2). Shares the
     /// `struct_lit_fields` slab and the struct-literal loop shape: each
     /// `IDENT : expression` is an equality predicate; the spread form `..base`
     /// is rejected (the filter is field-equality only). The caller has
@@ -6749,7 +6731,7 @@ pub const Parser = struct {
         return .{ .start = start, .len = len };
     }
 
-    /// Parse `await <target>` (M0.8 E3 sub-slice B, `etch-grammar.md` §4.2
+    /// Parse `await <target>` (`etch-grammar.md` §4.2
     /// `await_target`). `wait` / `wait_unscaled` / `entity_event` /
     /// `global_event` are contextual builtins recognised by lexeme when
     /// followed by `(` (they are NOT keywords); anything else is the
@@ -6783,8 +6765,8 @@ pub const Parser = struct {
                 _ = try self.expect(.comma, "expected ',' between entity and event type in entity_event(...)");
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in entity_event(...)");
                 const event_type = try self.internSlice(ty.span);
-                // Optional `entity_event(e, T { … })` payload filter (M1.0.14,
-                // §4.2): a field-equality predicate run into `struct_lit_fields`.
+                // Optional `entity_event(e, T { … })` payload filter (§4.2): a
+                // field-equality predicate run into `struct_lit_fields`.
                 var filter_start: u32 = 0;
                 var filter_len: u32 = 0;
                 if (self.peek() == .lbrace) {
@@ -6807,8 +6789,8 @@ pub const Parser = struct {
                 _ = try self.advance(); // '('
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in global_event(...)");
                 const event_type = try self.internSlice(ty.span);
-                // Optional `global_event(T { … })` payload filter (M1.0.14, §4.2
-                // erratum aligning the grammar on the §9.4 example).
+                // Optional `global_event(T { … })` payload filter (§4.2 erratum
+                // aligning the grammar on the §9.4 example).
                 var filter_start: u32 = 0;
                 var filter_len: u32 = 0;
                 if (self.peek() == .lbrace) {
@@ -6841,10 +6823,10 @@ pub const Parser = struct {
     }
 
     /// Parse the structural spawn expression `spawn(...)` (§3.2
-    /// `structural_spawn`, M1.0.10). The token after `spawn` disambiguates:
+    /// `structural_spawn`). The token after `spawn` disambiguates:
     ///   `spawn (` → STRUCTURAL spawn — `spawn(C1 {…}, …)` component-literal
     ///               varargs, or `spawn("Prefab")` prefab name.
-    ///   `spawn {` → the async task STATEMENT (§4.2 `spawn_stmt`, M1.0.12 E2)
+    ///   `spawn {` → the async task STATEMENT (§4.2 `spawn_stmt`)
     ///               — dispatched at statement head (`parseStmt`) and in the
     ///               `let h = spawn { }` binding form (`parseLetStmt`); it
     ///               never reaches this expression parser from those sites.
@@ -6852,9 +6834,9 @@ pub const Parser = struct {
     ///               sub-expression position, which the grammar does not admit
     ///               (spawn_stmt is a statement) → precise parse error.
     /// Statement-position only (no body handle, §4.5) is enforced by the
-    /// type-checker (M1.0.10 E2); the parser produces the node in any expression
+    /// type-checker; the parser produces the node in any expression
     /// position. The prefab form parses + is recognized but is refused at
-    /// type-check in Phase 1 (E2).
+    /// type-check.
     fn parseStructuralSpawn(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'spawn'
         if (self.peek() == .lbrace) {
@@ -6921,21 +6903,21 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .float_lit, id, tok.span);
             },
             .duration_literal => {
-                // DURATION_LIT (M0.8 E4 gate fix, §1.4 / §3.2 literal). The
+                // DURATION_LIT (gate fix, §1.4 / §3.2 literal). The
                 // expr carries the full lexeme (`3.0s`); it types as
                 // `Duration`. EVALUATION is fail-loud in BOTH backends (the
                 // tag_query precedent) — duration runtime semantics are
-                // Tier-1/E5+ material, Level B needs the canonical text.
+                // Tier-1 material; Level B needs the canonical text.
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .duration_lit, id, tok.span);
             },
             .time_literal => {
-                // TIME_LITERAL (M0.8 E7 gate, §1.4 / §3.2 literal — the
-                // DURATION_LIT-precedent lift; builtin `Time` §2.2). The expr
+                // TIME_LITERAL (gate, §1.4 / §3.2 literal — the DURATION_LIT-
+                // precedent lift; builtin `Time` §2.2). The expr
                 // carries the full `HH:MM` lexeme; it types as `Time`.
                 // EVALUATION is fail-loud in BOTH backends (the duration/color
-                // precedent) — time runtime semantics are Tier-1/E5+ material;
+                // precedent) — time runtime semantics are Tier-1 material;
                 // Level B needs the canonical text. (Routine `at HH:MM` triggers
                 // keep their own dedicated parse path, unchanged.)
                 const tok = try self.advance();
@@ -6943,11 +6925,11 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .time_lit, id, tok.span);
             },
             .color_literal => {
-                // COLOR_LITERAL (M0.8 E5, §1.4 l.211 / §3.2 literal — the
-                // DURATION_LIT-precedent lift, E5 ruling). The expr carries the
+                // COLOR_LITERAL (§1.4 l.211 / §3.2 literal — the DURATION_LIT-
+                // precedent lift, a ruling). The expr carries the
                 // full `#RRGGBB[AA]` lexeme; it types as `Color`. EVALUATION is
                 // fail-loud in BOTH backends — colour runtime semantics are
-                // UI Phase 1, Level B needs only the canonical text.
+                // UI material; Level B needs only the canonical text.
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .color_lit, id, tok.span);
@@ -6966,11 +6948,11 @@ pub const Parser = struct {
                 return try self.parseMultilineStringLiteralExpr(tok);
             },
             .ident => {
-                // `none` / `some(x)` optional literals (M0.8 E2 block 5,
-                // `etch-grammar.md` §480-481). `none` / `some` are not keywords
-                // (they appear in identifier positions in annotations) — detected
-                // by lexeme. `some(` opens a some-literal; a bare `some` / `none`
-                // identifier elsewhere stays a plain ident (`none` → `none_lit`).
+                // `none` / `some(x)` optional literals (`etch-grammar.md` §480-481).
+                // `none` / `some` are not keywords (they appear in identifier positions
+                // in annotations) — detected by lexeme. `some(` opens a some-literal; a
+                // bare `some` / `none` identifier elsewhere stays a plain ident (`none`
+                // → `none_lit`).
                 const lexeme = self.sliceOf(self.current.span);
                 if (std.mem.eql(u8, lexeme, "none")) {
                     const tok = try self.advance();
@@ -6992,7 +6974,7 @@ pub const Parser = struct {
             },
             .type_ident => {
                 // A TYPE_IDENT in expression position is either a struct literal
-                // `T { f: v }` (M0.8 E2 block 3) or a path-like value (an
+                // `T { f: v }` or a path-like value (an
                 // associated-fn receiver `T.assoc()`, an enum scrutinee, an
                 // annotation arg). The `{` lookahead picks the struct literal —
                 // suppressed inside an `if`/`while`/`for`/`match` head, where the
@@ -7007,7 +6989,7 @@ pub const Parser = struct {
             .lparen => {
                 _ = try self.advance();
                 // A parenthesized sub-expression re-enables struct literals even
-                // inside an `if`/`while`/`for`/`match` head (M0.8 E2 block 3).
+                // inside an `if`/`while`/`for`/`match` head.
                 const saved = self.no_struct_lit;
                 self.no_struct_lit = false;
                 const inner = try self.parseExpr(0);
@@ -7016,24 +6998,23 @@ pub const Parser = struct {
                 return inner;
             },
             .at => {
-                // `@loc…` localized text (§3.2 `loc_expr`, M0.8 E4 item 10 —
-                // structural parse; fingerprint/extraction = E5). The only
+                // `@loc…` localized text (§3.2 `loc_expr`, item 10 —
+                // structural parse; fingerprint/extraction comes later). The only
                 // `@…` form legal in expression position.
                 return try self.parseLocExpr();
             },
             .dot => {
                 // Enum variant shorthand `.foo` (e.g. annotation arg
-                // `.update`). S3 stores it as a `tag_path` kind expression
+                // `.update`). It is stored as a `tag_path` kind expression
                 // with the bare identifier interned — the resolver in
-                // Phase 0.2 disambiguates enum variant vs tag path from
+                // A later pass disambiguates enum variant vs tag path from
                 // the surrounding context. Tag path literals with
                 // multiple segments (`.foo.bar`) remain out-of-scope.
                 const dot_span = (try self.advance()).span;
-                // Anonymous struct literal `.{ f: v, … }` (M0.8 E3-C tranche
-                // 8, `etch-grammar.md` §3.2): `type_name == 0` is the anon
-                // sentinel — the resolver supplies the type from the expected
-                // context (check mode, resolver-types §4). The dot prefix
-                // makes the form unambiguous in `if`/`while`/`for`/`match`
+                // Anonymous struct literal `.{ f: v, … }` (`etch-grammar.md` §3.2):
+                // `type_name == 0` is the anon sentinel — the resolver supplies the
+                // type from the expected context (check mode, resolver-types §4). The
+                // dot prefix makes the form unambiguous in `if`/`while`/`for`/`match`
                 // heads, so `no_struct_lit` does not apply.
                 if (self.peek() == .lbrace) {
                     return try self.parseStructLiteral(0, dot_span);
@@ -7050,7 +7031,7 @@ pub const Parser = struct {
             },
             .kw_event => {
                 // `event` in expression position is the implicit event binding
-                // of an `@on_event(T)` observer rule (M0.8 E3) — self-style, like
+                // of an `@on_event(T)` observer rule — self-style, like
                 // `self` in a method (resolver-types §12, the ruling: `event`
                 // stays a keyword, the observer payload is an implicit binding
                 // named `event`, NOT a declared param). Lex it as an `.ident`
@@ -7063,7 +7044,7 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .ident, id, ev_tok.span);
             },
             .kw_get => {
-                // Receiver-less `get(T)` — resource read (D-S3-resource-receiver).
+                // Receiver-less `get(T)` — resource read (the resource-receiver rule).
                 const get_span = (try self.advance()).span;
                 return try self.parseResourceGetCall(.method_get, get_span);
             },
@@ -7076,7 +7057,7 @@ pub const Parser = struct {
         }
     }
 
-    // Precedence table — values picked so that S3's left-associative
+    // Precedence table — values picked so that the left-associative
     // operators behave correctly via the `rbp = lbp + 1` trick.
     const InfixInfo = struct { lbp: u8, rbp: u8 };
 
@@ -7086,7 +7067,7 @@ pub const Parser = struct {
             .kw_and => .{ .lbp = 3, .rbp = 4 },
             .eq_eq, .bang_eq, .lt, .gt, .lt_eq, .gt_eq => .{ .lbp = 5, .rbp = 6 },
             // `??` binds tighter than comparison, looser than additive
-            // (part1 §6.1 level 6, M0.8 E3-C tranche 4).
+            // (part1 §6.1 level 6).
             .question_question => .{ .lbp = 6, .rbp = 7 },
             .plus, .minus => .{ .lbp = 7, .rbp = 8 },
             .star, .slash, .percent => .{ .lbp = 9, .rbp = 10 },
@@ -7114,8 +7095,6 @@ pub const Parser = struct {
         };
     }
 };
-
-// ─────────────────────────────── tests ──────────────────────────────────
 
 test "parser builds ComponentDecl with two annotated fields" {
     const gpa = std.testing.allocator;
@@ -7208,7 +7187,7 @@ test "parser handles binary expression precedence per grammar subset" {
 
 test "parser rejects unsupported top-level construct with E0001" {
     const gpa = std.testing.allocator;
-    // `behavior` is still out of scope (E4); `fn` graduated with the M0.8 E2
+    // `behavior` is still out of scope; `fn` lexes to its own kind since the
     // call mechanism, so it no longer rejects here.
     var result = try parse(gpa,
         \\behavior Foo {}
@@ -7220,7 +7199,7 @@ test "parser rejects unsupported top-level construct with E0001" {
 
 test "parse top-level const decl" {
     const gpa = std.testing.allocator;
-    // M1.0.8: `const Name : type = value`. The name accepts both an ident and a
+    // `const Name : type = value`. The name accepts both an ident and a
     // type_ident — a canonical SCREAMING_SNAKE_CASE const lexes as type_ident.
     var result = try parse(gpa,
         \\const MAX_PLAYERS: int = 16
@@ -7291,14 +7270,14 @@ test "parse test block" {
     try std.testing.expectEqual(ast_mod.ItemKind.test_decl, result.ast.items.items(.kind)[0]);
     const td = result.ast.test_decls.items[result.ast.items.items(.data)[0]];
     try std.testing.expectEqualStrings("math works", result.ast.strings.slice(td.name));
-    // M1.0.15 — the annotation range is preserved (no longer discarded): the
+    // the annotation range is preserved (no longer discarded): the
     // single `@tag(.unit)` is reachable through the decl's annotation slab.
     try std.testing.expectEqual(@as(u32, 1), td.annotations_len);
     const annot = result.ast.annot_pool.items[td.annotations_extra];
     try std.testing.expectEqual(ast_mod.AnnotationKind.tag, annot.kind);
 }
 
-test "parse measure expression (M1.0.15)" {
+test "parse measure expression" {
     const gpa = std.testing.allocator;
     // `measure { block }` parses as a primary expression (§17 erratum); the
     // parser produces one `measure_exprs` slab entry, no diagnostics.
@@ -7315,7 +7294,7 @@ test "parse measure expression (M1.0.15)" {
 test "recovery after broken const/private/test preserves following valid decl" {
     const gpa = std.testing.allocator;
     // Broken leading constructs must resync at the following `const` / `test`
-    // — both are recoverToTopLevel stop-set members as of M1.0.8.
+    // — both are recoverToTopLevel stop-set members.
     var result = try parse(gpa,
         \\@@@@bad
         \\const ROOM_CAP: int = 8
@@ -7343,7 +7322,7 @@ test "parser recovers at top level and returns partial AST" {
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     // First component should be parsed; the trailing broken annotation is
-    // recovered from at the top-level sync-point (M0.8) rather than
+    // recovered from at the top-level sync-point rather than
     // aborting the whole file.
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
     try std.testing.expectEqual(ast_mod.ItemKind.component_decl, result.ast.items.items(.kind)[0]);
@@ -7377,14 +7356,14 @@ test "parser captures annotation kind and args" {
         \\}
     );
     defer result.deinit(gpa);
-    // We don't currently parse `.foo` patterns; for S3 we accept named or
-    // bare expressions as annotation args. The brief notes annotation
+    // We don't currently parse `.foo` patterns; we accept named or
+    // bare expressions as annotation args. Annotation
     // applicability is deferred — only "kind + args reachable" is required.
     try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
 }
 
-test "D-S3-trivia: doc comments and leading comments attach to top-level items" {
+test "doc comments and leading comments attach to top-level items" {
     const gpa = std.testing.allocator;
     const src =
         "// leading plain comment\n" ++
@@ -7416,7 +7395,7 @@ test "D-S3-trivia: doc comments and leading comments attach to top-level items" 
     try std.testing.expectEqual(@as(usize, 0), result.ast.leadingCommentsOf(bravo_id).len);
 }
 
-test "D-S3-annot-field-access: annotation arg accepts a field access expression" {
+test "annotation arg accepts a field access expression" {
     const gpa = std.testing.allocator;
     // `@requires(self.health)` — annotation positional arg that is a field
     // access. Pre-fix, the annotation-arg path built the ident then called
@@ -7440,7 +7419,7 @@ test "D-S3-annot-field-access: annotation arg accepts a field access expression"
     try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
 }
 
-test "parser builds array literals, fill, and index/slice access (M0.8 collections)" {
+test "parser builds array literals, fill, and index/slice access (collections)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7470,7 +7449,7 @@ test "parser builds array literals, fill, and index/slice access (M0.8 collectio
     try std.testing.expectEqual(@as(usize, 1), fill_count); // exactly the `[0; 4]` literal
 }
 
-test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
+test "parser builds map type, map literal, and Set<T> type (collections)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7499,7 +7478,7 @@ test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
     try std.testing.expect(saw_set_type);
 }
 
-test "parser builds closures and calls (M0.8 closures)" {
+test "parser builds closures and calls (closures)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7524,7 +7503,7 @@ test "parser builds closures and calls (M0.8 closures)" {
     try std.testing.expectEqual(@as(usize, 1), calls); // f(10)
 }
 
-test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)" {
+test "parser builds top-level fn declarations, free calls, and return" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\fn double(x: int) -> int {
@@ -7569,10 +7548,10 @@ test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)"
     try std.testing.expectEqual(@as(usize, 1), returns); // the `return x * 2`
 }
 
-test "parser builds method-call postfix into the reserved method_call kind (M0.8 E2)" {
+test "parser builds method-call postfix into the reserved method_call kind" {
     const gpa = std.testing.allocator;
     // `recv.method(args)` → method_call; `recv.field` (no parens) → field_access.
-    // Parser-only: the 4-kind dispatch is block 3.
+    // Parser-only: the 4-kind dispatch is a later slice.
     var result = try parse(gpa,
         \\rule r(entity: Entity) {
         \\  let a = entity.normalize()
@@ -7601,7 +7580,7 @@ test "parser builds method-call postfix into the reserved method_call kind (M0.8
     try std.testing.expectEqual(@as(usize, 2), calculate_args); // (target, 5)
 }
 
-test "structural spawn parses component-literal varargs (M1.0.10)" {
+test "structural spawn parses component-literal varargs" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7631,7 +7610,7 @@ test "structural spawn parses component-literal varargs (M1.0.10)" {
     try std.testing.expectEqual(ast_mod.ExprKind.struct_lit, result.ast.exprKind(arg1));
 }
 
-test "structural spawn parses a prefab name (M1.0.10)" {
+test "structural spawn parses a prefab name" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7657,7 +7636,7 @@ test "structural spawn parses a prefab name (M1.0.10)" {
     try std.testing.expectEqual(@as(u32, 0), ss.args_len);
 }
 
-test "spawn { } in a sub-expression position is a parse error (M1.0.12 E2)" {
+test "spawn { } in a sub-expression position is a parse error" {
     const gpa = std.testing.allocator;
     // `spawn_stmt` is a STATEMENT (§4.2): statement head and the
     // `let h = spawn { }` binding form are its only sites. A `spawn { }`
@@ -7678,8 +7657,8 @@ test "spawn { } in a sub-expression position is a parse error (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 0), spawns);
 }
 
-/// Collect the statement kinds of the first rule's body run (M1.0.12 E2 test
-/// helper) — the rule body is a `(start, len)` statement run in `arena.extra`.
+/// Collect the statement kinds of the first rule's body run — the rule body is
+/// a `(start, len)` statement run in `arena.extra`.
 fn firstRuleBodyKinds(result: *const ParseResult, buf: []ast_mod.StmtKind) []ast_mod.StmtKind {
     var rule: ast_mod.RuleDecl = undefined;
     var found = false;
@@ -7699,7 +7678,7 @@ fn firstRuleBodyKinds(result: *const ParseResult, buf: []ast_mod.StmtKind) []ast
     return buf[0..n];
 }
 
-test "race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)" {
+test "race/sync parse: branches, conditional branches, empty body" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7742,7 +7721,7 @@ test "race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)" 
     try std.testing.expectEqual(@as(u32, 0), result.ast.sync_stmts.items[1].branches_len);
 }
 
-test "race branch starting with an if-statement is unconditional (M1.0.12 E2)" {
+test "race branch starting with an if-statement is unconditional" {
     const gpa = std.testing.allocator;
     // `if cond { … }` at branch head is the branch STATEMENT (an if-statement),
     // not a conditional-branch guard — the token after the expression (`{` vs
@@ -7778,7 +7757,7 @@ test "race branch starting with an if-statement is unconditional (M1.0.12 E2)" {
     try std.testing.expect(ife.let_binding != 0);
 }
 
-test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
+test "branch/spawn statements parse incl. binding + empty bodies" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7819,10 +7798,10 @@ test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 0), spawns);
 }
 
-test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
+test "spawn ( stays structural next to spawn { task form" {
     const gpa = std.testing.allocator;
-    // Token-based disambiguation (§3.2 note): `spawn (` → structural expr
-    // (M1.0.10 surface untouched), `spawn {` → async task statement.
+    // Token-based disambiguation (§3.2 note): `spawn (` → structural expr,
+    // `spawn {` → async task statement.
     var result = try parse(gpa,
         \\component Pos { x: int = 0 }
         \\rule r() {
@@ -7843,7 +7822,7 @@ test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
 }
 
-test "nested concurrency constructs parse (M1.0.12 E2)" {
+test "nested concurrency constructs parse" {
     const gpa = std.testing.allocator;
     // A `race` inside a `sync` branch block, a `spawn` inside a `branch` body,
     // and a `branch` inside a race branch — the shared branch slab stays
@@ -7883,7 +7862,7 @@ test "nested concurrency constructs parse (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
 }
 
-test "async branch statement coexists with quest/dialogue branches (M1.0.12 E2)" {
+test "async branch statement coexists with quest/dialogue branches" {
     const gpa = std.testing.allocator;
     // `kw_branch` serves three disjoint parse contexts: the quest branch
     // (inside `parseQuestBranch`), the dialogue branch (inside
@@ -7927,7 +7906,7 @@ test "async branch statement coexists with quest/dialogue branches (M1.0.12 E2)"
     try std.testing.expectEqual(@as(u32, 1), result.ast.branch_stmts.items[0].body_len);
 }
 
-test "spawn binding form rejects mut and type annotation (M1.0.12 E2)" {
+test "spawn binding form rejects mut and type annotation" {
     const gpa = std.testing.allocator;
     // §4.2: `spawn_stmt = [ "let" IDENT "=" ] "spawn" block` — no `mut`, no
     // type annotation on the binding.
@@ -7949,7 +7928,7 @@ test "spawn binding form rejects mut and type annotation (M1.0.12 E2)" {
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
 }
 
-test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
+test "parser builds loops, labels, break value, and continue (loop/break)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7988,7 +7967,7 @@ test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" 
     try std.testing.expectEqual(@as(usize, 1), labeled);
 }
 
-test "parser builds throw and try/catch (M0.8 error handling)" {
+test "parser builds throw and try/catch (error handling)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8017,7 +7996,7 @@ test "parser builds throw and try/catch (M0.8 error handling)" {
     try std.testing.expectEqualStrings("err", result.ast.strings.slice(result.ast.try_catch_stmts.items[0].catch_name));
 }
 
-test "parser builds block expressions with a trailing value (M0.8 control flow)" {
+test "parser builds block expressions with a trailing value (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8047,7 +8026,7 @@ test "parser builds block expressions with a trailing value (M0.8 control flow)"
     try std.testing.expectEqual(@as(usize, 1), with_value);
 }
 
-test "parser builds if/else with an else-if chain (M0.8 control flow)" {
+test "parser builds if/else with an else-if chain (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8075,7 +8054,7 @@ test "parser builds if/else with an else-if chain (M0.8 control flow)" {
     try std.testing.expectEqual(@as(usize, 2), with_else);
 }
 
-test "parser builds a while statement (M0.8 control flow)" {
+test "parser builds a while statement (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8097,7 +8076,7 @@ test "parser builds a while statement (M0.8 control flow)" {
     try std.testing.expectEqual(@as(usize, 1), whiles);
 }
 
-test "parser accepts block bodies in closures and match arms (M0.8 control flow)" {
+test "parser accepts block bodies in closures and match arms (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8128,7 +8107,7 @@ test "parser accepts block bodies in closures and match arms (M0.8 control flow)
     try std.testing.expectEqual(@as(usize, 2), blocks);
 }
 
-test "parser builds struct + inherent impl + struct literal + method calls (M0.8 E2 block 3)" {
+test "parser builds struct + inherent impl + struct literal + method calls" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\struct V2 { x: int = 0, y: int = 0 }
@@ -8168,7 +8147,7 @@ test "parser builds struct + inherent impl + struct literal + method calls (M0.8
     try std.testing.expectEqual(@as(usize, 2), method_calls);
 }
 
-test "parser recovers and a valid struct/impl after a broken construct survives (M0.8 E2 block 3 lockstep)" {
+test "parser recovers and a valid struct/impl after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // A broken leading annotation forces the top-level resync; the `struct` and
     // `impl` that follow must still land in the AST (the lockstep stop-set now
@@ -8184,7 +8163,7 @@ test "parser recovers and a valid struct/impl after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.impl_decls.items.len);
 }
 
-test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 block 3)" {
+test "parser suppresses struct literals in if/while/for/match heads" {
     const gpa = std.testing.allocator;
     // `while Cond { … }` must parse `Cond` as a path (a value) and `{ … }` as
     // the loop body, NOT as a `Cond { … }` struct literal. With a struct
@@ -8208,9 +8187,9 @@ test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 blo
     try std.testing.expectEqual(@as(usize, 0), struct_lits);
 }
 
-test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0.8 E2)" {
+test "parser accepts a trait impl and a generic struct" {
     const gpa = std.testing.allocator;
-    // `impl Trait for T` parses in tranche C — the first name is the trait, the
+    // `impl Trait for T` — the first name is the trait, the
     // post-`for` name the target type (trait existence is a resolver concern).
     {
         var result = try parse(gpa,
@@ -8233,7 +8212,7 @@ test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0
         try std.testing.expectEqual(@as(u32, 1), td.methods_len);
         try std.testing.expectEqual(false, result.ast.impl_methods.items[td.methods_start].has_body);
     }
-    // Generic struct now parses (M0.8 E2 block 4) — `Box<T>` carries one param.
+    // Generic struct parses — `Box<T>` carries one param.
     {
         var result = try parse(gpa,
             \\struct Box<T> { value: int = 0 }
@@ -8244,7 +8223,7 @@ test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0
     }
 }
 
-test "parser builds trait decl with abstract + default members + survives lockstep (M0.8 E2 block 3 tranche C)" {
+test "parser builds trait decl with abstract + default members + survives lockstep" {
     const gpa = std.testing.allocator;
     {
         var result = try parse(gpa,
@@ -8278,7 +8257,7 @@ test "parser builds trait decl with abstract + default members + survives lockst
     }
 }
 
-test "parser builds optional type + none/some + if let / while let (M0.8 E2 block 5)" {
+test "parser builds optional type + none/some + if let / while let" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has Acc {
@@ -8318,7 +8297,7 @@ test "parser builds optional type + none/some + if let / while let (M0.8 E2 bloc
     try std.testing.expect(result.ast.while_stmts.items[0].let_binding != 0);
 }
 
-test "parser builds generic params + bounds + where + generic type (M0.8 E2 block 4)" {
+test "parser builds generic params + bounds + where + generic type" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\trait Comparable { fn cmp(self, other: int) -> int }
@@ -8350,7 +8329,7 @@ test "parser builds generic params + bounds + where + generic type (M0.8 E2 bloc
     try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
 }
 
-test "parser builds a qualified type path in type position (M1.0.16)" {
+test "parser builds a qualified type path in type position" {
     const gpa = std.testing.allocator;
     // `m.Health` as a type-alias target parses to the reserved `.path`
     // TypeNode carrying { alias = "m", member = "Health" }.
@@ -8371,9 +8350,9 @@ test "parser builds a qualified type path in type position (M1.0.16)" {
     try std.testing.expectEqualStrings("Health", result.ast.strings.slice(path.member));
 }
 
-test "parser leaves a qualified path in expression position a parse error (M1.0.16 type-position boundary)" {
+test "parser leaves a qualified path in expression position a parse error (type-position boundary)" {
     const gpa = std.testing.allocator;
-    // The M1.0.16 grammar addition is type-position only: a qualified access
+    // The qualified-access grammar addition is type-position only: a qualified access
     // in expression position (`let x = m.Health`) still fails to parse — a
     // TYPE_IDENT after `.` is not a field/method name (documents the boundary
     // that keeps expression-position qualified access out of scope).
@@ -8384,7 +8363,7 @@ test "parser leaves a qualified path in expression position a parse error (M1.0.
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891, M0.8 E2)" {
+test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891)" {
     const gpa = std.testing.allocator;
     // `impl<T> Range<T>` — a generic-type inherent target, now grammatical
     // (`etch-grammar.md §891`: `impl_decl` target = impl_trait_for_type |
@@ -8428,7 +8407,7 @@ test "parser accepts inherent impl generic + bare targets, rejects generic trait
     }
 }
 
-test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)" {
+test "parser builds enum decl + enum-variant match patterns" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\enum Difficulty { easy, normal, hard }
@@ -8466,7 +8445,7 @@ test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tra
     try std.testing.expectEqual(@as(usize, 1), shorthand);
 }
 
-test "parser recovers and a valid enum after a broken construct survives (M0.8 E2 block 3 tranche B lockstep)" {
+test "parser recovers and a valid enum after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_enum`: a broken leading construct
     // resyncs at the `enum` that follows, which lands in the AST.
@@ -8479,7 +8458,7 @@ test "parser recovers and a valid enum after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.enum_decls.items.len);
 }
 
-test "parser parses data-carrying + generic enum variants (M0.8 E2 block 3 tranche B / block 4)" {
+test "parser parses data-carrying + generic enum variants" {
     const gpa = std.testing.allocator;
     // Struct-like + tuple-like variant shapes parse (construction / patterns are
     // deferred; the grammar is accepted). Variant names are `IDENT` per
@@ -8499,7 +8478,7 @@ test "parser parses data-carrying + generic enum variants (M0.8 E2 block 3 tranc
         try std.testing.expectEqual(ast_mod.EnumVariantShape.tuple_like, result.ast.enum_variants.items[ed.variants_start + 1].shape);
         try std.testing.expectEqual(ast_mod.EnumVariantShape.c_like, result.ast.enum_variants.items[ed.variants_start + 2].shape);
     }
-    // Generic enum now parses (M0.8 E2 block 4) — `Opt<T>` carries one param.
+    // Generic enum parses — `Opt<T>` carries one param.
     {
         var result = try parse(gpa,
             \\enum Opt<T> { some_, none_ }
@@ -8545,7 +8524,7 @@ test "parser does not leak comment spans on OOM during init" {
     }
 }
 
-test "parser builds event declaration + emit statement (M0.8 E3)" {
+test "parser builds event declaration + emit statement" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Damage { amount: int, crit: bool }
@@ -8568,7 +8547,7 @@ test "parser builds event declaration + emit statement (M0.8 E3)" {
     try std.testing.expectEqual(@as(u32, 2), em.fields_len);
 }
 
-test "parser builds an @on_event observer rule with the implicit `event` binding (M0.8 E3)" {
+test "parser builds an @on_event observer rule with the implicit `event` binding" {
     const gpa = std.testing.allocator;
     // `event` is a keyword (the declaration); in expression position inside an
     // observer body it parses as the implicit `event` binding (self-style) — so
@@ -8598,7 +8577,7 @@ test "parser builds an @on_event observer rule with the implicit `event` binding
     try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(ev_type));
 }
 
-test "parser builds `entity has T changed` change-detection filter (M0.8 E3)" {
+test "parser builds `entity has T changed` change-detection filter" {
     const gpa = std.testing.allocator;
     // `changed` is a reserved keyword; `has T changed` mirrors `resource T
     // changed` (`etch-grammar.md` §6, patched) and produces a `has_changed`
@@ -8622,7 +8601,7 @@ test "parser builds `entity has T changed` change-detection filter (M0.8 E3)" {
     try std.testing.expect(found);
 }
 
-test "parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)" {
+test "parser recovers and a valid event after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_event`: a broken leading construct
     // resyncs at the `event` that follows, which lands in the AST.
@@ -8635,7 +8614,7 @@ test "parser recovers and a valid event after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.event_decls.items.len);
 }
 
-test "parser builds a hierarchical tags declaration (M0.8 E3)" {
+test "parser builds a hierarchical tags declaration" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags {
@@ -8681,7 +8660,7 @@ test "parser builds a hierarchical tags declaration (M0.8 E3)" {
     try std.testing.expectEqual(@as(u32, 7), td.leaf_len);
 }
 
-test "parser recovers and a valid tags after a broken construct survives (M0.8 E3 lockstep)" {
+test "parser recovers and a valid tags after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_tags`: a broken leading construct
     // resyncs at the `tags` that follows, which lands in the AST.
@@ -8694,7 +8673,7 @@ test "parser recovers and a valid tags after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.tags_decls.items.len);
 }
 
-test "parser builds tag-filter when conditions (M0.8 E3)" {
+test "parser builds tag-filter when conditions" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags { character { status { alive, stunned } } }
@@ -8722,7 +8701,7 @@ test "parser builds tag-filter when conditions (M0.8 E3)" {
     try std.testing.expectEqualStrings("stunned", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start + 2]));
 }
 
-test "parser builds tag mutation statements (M0.8 E3)" {
+test "parser builds tag mutation statements" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags { character { status { alive, stunned } } }
@@ -8753,7 +8732,7 @@ test "parser builds tag mutation statements (M0.8 E3)" {
     try std.testing.expectEqual(ast_mod.StmtKind.tag_mutation_stmt, result.ast.stmtKind(first_stmt));
 }
 
-test "parser: async rule parses with await wait + global_event targets (M0.8 E3 sub-slice B)" {
+test "parser: async rule parses with await wait + global_event targets" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Done { }
@@ -8789,7 +8768,7 @@ test "parser: async rule parses with await wait + global_event targets (M0.8 E3 
     try std.testing.expectEqual(@as(u32, 0), aw1.filter_len); // bare form: no payload filter
 }
 
-test "parser: await entity_event(entity, T) parses bare and with payload filter (M1.0.14 E1)" {
+test "parser: await entity_event(entity, T) parses bare and with payload filter" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Hit { }
@@ -8812,8 +8791,8 @@ test "parser: await entity_event(entity, T) parses bare and with payload filter 
     try std.testing.expect(!aw.entity_expr.isNone());
     try std.testing.expectEqual(@as(u32, 0), aw.filter_len); // bare form: no payload filter
 
-    // M1.0.14: the optional `entity_event(e, T { … })` payload-filter body now
-    // PARSES (the M0.8 rejection is lifted), recording an equality-predicate run.
+    // The optional `entity_event(e, T { … })` payload-filter body
+    // PARSES, recording an equality-predicate run.
     var filtered = try parse(gpa,
         \\event Hit { }
         \\async rule watch(target: Entity) {
@@ -8836,7 +8815,7 @@ test "parser: await entity_event(entity, T) parses bare and with payload filter 
     try std.testing.expectEqual(ast_mod.ExprKind.int_lit, filtered.ast.exprKind(ffield.value));
 }
 
-test "parser: await global_event(T) parses bare and with payload filter + trailing comma (M1.0.14 E1)" {
+test "parser: await global_event(T) parses bare and with payload filter + trailing comma" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Quest { }
@@ -8872,7 +8851,7 @@ test "parser: await global_event(T) parses bare and with payload filter + traili
     try std.testing.expectEqualStrings("tier", result.ast.strings.slice(f1.name));
 }
 
-test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
+test "parser builds a data table declaration with entries + spread" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data ItemDatabase: Item {
@@ -8915,7 +8894,7 @@ test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
     try std.testing.expectEqualStrings("value", result.ast.strings.slice(override_field.name));
 }
 
-test "parser keeps data entry field runs contiguous around nested struct literals (M0.8 E4)" {
+test "parser keeps data entry field runs contiguous around nested struct literals" {
     const gpa = std.testing.allocator;
     // The `pos` value is a struct literal whose own fields land in
     // `struct_lit_fields` DURING the entry parse; the entry's run must stay
@@ -8939,7 +8918,7 @@ test "parser keeps data entry field runs contiguous around nested struct literal
     try std.testing.expectEqualStrings("hp", result.ast.strings.slice(f1.name));
 }
 
-test "parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)" {
+test "parser accepts a PascalCase data entry id, recorded for E1768" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data Foo: Bar {
@@ -8953,7 +8932,7 @@ test "parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)" {
     try std.testing.expect(entry.id_pascal);
 }
 
-test "parser rejects a data table without its entry type (M0.8 E4)" {
+test "parser rejects a data table without its entry type" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data ItemDatabase {
@@ -8965,7 +8944,7 @@ test "parser rejects a data table without its entry type (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.ast.data_decls.items.len);
 }
 
-test "parser recovers and a valid data after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid data after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_data`: a broken leading construct
     // resyncs at the `data` that follows, which lands in the AST.
@@ -8978,7 +8957,7 @@ test "parser recovers and a valid data after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.data_decls.items.len);
 }
 
-test "parser builds a routine with segments + interrupts (M0.8 E4)" {
+test "parser builds a routine with segments + interrupts" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\routine BlacksmithDaily {
@@ -9036,7 +9015,7 @@ test "parser builds a routine with segments + interrupts (M0.8 E4)" {
     try std.testing.expect(int1.is_pause);
 }
 
-test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
+test "parser rejects routine clause-order and shape violations" {
     const gpa = std.testing.allocator;
     // `actions` before `trigger` — the §8.2 clause order is fixed.
     var bad_order = try parse(gpa,
@@ -9078,7 +9057,7 @@ test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
     try std.testing.expect(bad_time.diagnostics.len > 0);
 }
 
-test "timer statements parse: unbound forms, expression arg (M1.0.13 E3)" {
+test "timer statements parse: unbound forms, expression arg" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has Health {
@@ -9113,7 +9092,7 @@ test "timer statements parse: unbound forms, expression arg (M1.0.13 E3)" {
     try std.testing.expectEqual(ast_mod.ExprKind.ident, result.ast.exprKind(timers[3].arg));
 }
 
-test "bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)" {
+test "bound timer parses as a TimerStmt, not a let_stmt" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Boom { }
@@ -9138,7 +9117,7 @@ test "bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)" {
     try std.testing.expectEqual(@as(usize, 0), result.ast.let_stmts.items.len);
 }
 
-test "timer statement routes inside a value block (M1.0.13 E3)" {
+test "timer statement routes inside a value block" {
     const gpa = std.testing.allocator;
     // `startsKeywordStmt` must route the timer keywords to `parseStmt` in a
     // value-block body so the trailing value stays detectable.
@@ -9159,7 +9138,7 @@ test "timer statement routes inside a value block (M1.0.13 E3)" {
     try std.testing.expectEqual(ast_mod.TimerKind.every, result.ast.timer_stmts.items[0].kind);
 }
 
-test "timer binding form rejects mut and type annotation (M1.0.13 E3)" {
+test "timer binding form rejects mut and type annotation" {
     const gpa = std.testing.allocator;
     // §4.3: `timer_stmt = [ "let" IDENT "=" ] timer_kind "(" expression ")"
     // block` — no `mut`, no type annotation on the binding.
@@ -9181,7 +9160,7 @@ test "timer binding form rejects mut and type annotation (M1.0.13 E3)" {
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
 }
 
-test "quantize still fail-louds at the statement head (M1.0.13 E3)" {
+test "quantize still fail-louds at the statement head" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -9191,14 +9170,13 @@ test "quantize still fail-louds at the statement head (M1.0.13 E3)" {
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, result.diagnostics[0].code);
-    // The message is re-pointed at the Sequencer-adjacent milestone — the
-    // stale "Phase 2" wording is gone.
+    // The message points at the Sequencer-adjacent milestone.
     const msg = result.diagnostics[0].primary_message;
     try std.testing.expect(std.mem.indexOf(u8, msg, "Sequencer") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "Phase 2") == null);
 }
 
-test "parser recovers and a valid routine after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid routine after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_routine`: a broken leading
     // construct resyncs at the `routine` that follows, which lands in the AST.
@@ -9217,7 +9195,7 @@ test "parser recovers and a valid routine after a broken construct survives (M0.
     try std.testing.expectEqual(@as(usize, 1), result.ast.routine_decls.items.len);
 }
 
-test "parser builds the §6 when-surface extension forms (M0.8 E4 item 4)" {
+test "parser builds the §6 when-surface extension forms" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\component Counter { value: int = 0 }
@@ -9262,7 +9240,7 @@ test "parser builds the §6 when-surface extension forms (M0.8 E4 item 4)" {
     try std.testing.expectEqual(ast_mod.WhenNodeKind.resource_filter, result.ast.when_nodes.items[n3.lhs].kind);
 }
 
-test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
+test "parser keeps the body brace out of the §6 general filter" {
     const gpa = std.testing.allocator;
     // `has Counter` directly followed by the rule body: the matching-brace
     // scan sees the body's `}` followed by EOF → NOT a filter.
@@ -9282,7 +9260,7 @@ test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
     try std.testing.expectEqual(@as(u32, 2), rule.body_len);
 }
 
-test "parser builds named call arguments + soft keyword label (M0.8 E4 item 16)" {
+test "parser builds named call arguments + soft keyword label" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\fn use_smart_object(name: string, type_: int) { }
@@ -9308,7 +9286,7 @@ test "parser builds named call arguments + soft keyword label (M0.8 E4 item 16)"
     try std.testing.expect(found_named);
 }
 
-test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
+test "parser rejects a positional argument after a named one (§3.3)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has C {
@@ -9319,7 +9297,7 @@ test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser builds a behavior tree with composites, when, and leaf forms (M0.8 E4)" {
+test "parser builds a behavior tree with composites, when, and leaf forms" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\behavior CombatBehavior {
@@ -9361,7 +9339,7 @@ test "parser builds a behavior tree with composites, when, and leaf forms (M0.8 
     try std.testing.expect(!cond.payload_is_stmt);
 }
 
-test "parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)" {
+test "parser accepts a leaf behavior root (E1500 is validation's call)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\behavior JustAct {
@@ -9374,7 +9352,7 @@ test "parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)
     try std.testing.expectEqual(ast_mod.BTNodeKind.action, result.ast.bt_nodes.items[decl.root].kind);
 }
 
-test "parser recovers and a valid behavior after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid behavior after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9385,7 +9363,7 @@ test "parser recovers and a valid behavior after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.behavior_decls.items.len);
 }
 
-test "parser builds a quest with properties, stages, objectives, handlers, branches (M0.8 E4)" {
+test "parser builds a quest with properties, stages, objectives, handlers, branches" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\quest EscortMerchant {
@@ -9462,7 +9440,7 @@ test "parser builds a quest with properties, stages, objectives, handlers, branc
     try std.testing.expect(!block_h.payload_is_stmt);
 }
 
-test "parser recovers and a valid quest after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid quest after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9473,7 +9451,7 @@ test "parser recovers and a valid quest after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.quest_decls.items.len);
 }
 
-test "parser builds a dialogue with speakers, choices, branches, emit-when, gotos (M0.8 E4)" {
+test "parser builds a dialogue with speakers, choices, branches, emit-when, gotos" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\dialogue MerchantGreeting {
@@ -9532,7 +9510,7 @@ test "parser builds a dialogue with speakers, choices, branches, emit-when, goto
     try std.testing.expect(result.ast.dialogue_gotos.items[result.ast.dialogue_elems.items[br.elems_start + 2].index].is_end);
 }
 
-test "parser recovers and a valid dialogue after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid dialogue after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9543,7 +9521,7 @@ test "parser recovers and a valid dialogue after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.dialogue_decls.items.len);
 }
 
-test "parser builds an ability with properties and embedded rule (M0.8 E4)" {
+test "parser builds an ability with properties and embedded rule" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\ability Fireball {
@@ -9580,7 +9558,7 @@ test "parser builds an ability with properties and embedded rule (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), rule_items);
 }
 
-test "parser recovers and a valid ability after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid ability after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9591,7 +9569,7 @@ test "parser recovers and a valid ability after a broken construct survives (M0.
     try std.testing.expectEqual(@as(usize, 1), result.ast.ability_decls.items.len);
 }
 
-test "parser builds a theme with string name and key:expr entries (M0.8 E5)" {
+test "parser builds a theme with string name and key:expr entries" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\theme "dark" {
@@ -9606,7 +9584,7 @@ test "parser builds a theme with string name and key:expr entries (M0.8 E5)" {
     try std.testing.expectEqual(@as(u32, 3), result.ast.theme_decls.items[0].entries_len);
 }
 
-test "parser recovers and a valid theme after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid theme after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9617,7 +9595,7 @@ test "parser recovers and a valid theme after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.theme_decls.items.len);
 }
 
-test "parser builds a motion with states, wildcard transitions, and recursive animators (M0.8 E5)" {
+test "parser builds a motion with states, wildcard transitions, and recursive animators" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\motion MenuPanel {
@@ -9645,7 +9623,7 @@ test "parser builds a motion with states, wildcard transitions, and recursive an
     try std.testing.expectEqual(@as(usize, 5), result.ast.motion_animators.items.len);
 }
 
-test "parser recovers and a valid motion after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid motion after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9656,7 +9634,7 @@ test "parser recovers and a valid motion after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.motion_decls.items.len);
 }
 
-test "parser builds an input_mapping with properties, actions, binds, and a combo (M0.8 E5)" {
+test "parser builds an input_mapping with properties, actions, binds, and a combo" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\input_mapping "Gameplay" {
@@ -9686,7 +9664,7 @@ test "parser builds an input_mapping with properties, actions, binds, and a comb
     try std.testing.expectEqual(@as(usize, 3), result.ast.input_binds.items.len);
 }
 
-test "parser recovers and a valid input_mapping after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid input_mapping after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9697,7 +9675,7 @@ test "parser recovers and a valid input_mapping after a broken construct survive
     try std.testing.expectEqual(@as(usize, 1), result.ast.input_mapping_decls.items.len);
 }
 
-test "parser builds a widget with params, when clause, recursive ui_tree, and control flow (M0.8 E5)" {
+test "parser builds a widget with params, when clause, recursive ui_tree, and control flow" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\widget HealthBar(entity: Entity)
@@ -9731,7 +9709,7 @@ test "parser builds a widget with params, when clause, recursive ui_tree, and co
     try std.testing.expectEqual(@as(usize, 1), result.ast.ui_fors.items.len);
 }
 
-test "parser recovers and a valid widget after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid widget after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9742,7 +9720,7 @@ test "parser recovers and a valid widget after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.widget_decls.items.len);
 }
 
-test "parser builds a locale with string key=value entries (M0.8 E5)" {
+test "parser builds a locale with string key=value entries" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\locale fr {
@@ -9757,7 +9735,7 @@ test "parser builds a locale with string key=value entries (M0.8 E5)" {
     try std.testing.expectEqual(@as(u32, 3), result.ast.locale_decls.items[0].entries_len);
 }
 
-test "parser recovers and a valid locale after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid locale after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9768,7 +9746,7 @@ test "parser recovers and a valid locale after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.locale_decls.items.len);
 }
 
-test "parser builds an effect with params, emitters, and an event handler (M0.8 E6)" {
+test "parser builds an effect with params, emitters, and an event handler" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\effect Explosion {
@@ -9799,7 +9777,7 @@ test "parser builds an effect with params, emitters, and an event handler (M0.8 
     try std.testing.expectEqual(@as(u32, 1), decl.handlers_len);
 }
 
-test "parser recovers and a valid effect after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid effect after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9810,7 +9788,7 @@ test "parser recovers and a valid effect after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.effect_decls.items.len);
 }
 
-test "parser builds an audio_graph with params, statements, and the output sink (M0.8 E6)" {
+test "parser builds an audio_graph with params, statements, and the output sink" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_graph LaserBlast {
@@ -9831,7 +9809,7 @@ test "parser builds an audio_graph with params, statements, and the output sink 
     try std.testing.expect(!decl.output.isNone());
 }
 
-test "parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)" {
+test "parser rejects an audio_graph missing the mandatory output sink" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_graph Silent {
@@ -9842,7 +9820,7 @@ test "parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)"
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser recovers and a valid audio_graph after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid audio_graph after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9853,7 +9831,7 @@ test "parser recovers and a valid audio_graph after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_graph_decls.items.len);
 }
 
-test "parser builds an audio_score with tempo, sections, and stems (M0.8 E6)" {
+test "parser builds an audio_score with tempo, sections, and stems" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_score "exploration" {
@@ -9892,7 +9870,7 @@ test "parser builds an audio_score with tempo, sections, and stems (M0.8 E6)" {
     try std.testing.expect(tension.has_on_finish);
 }
 
-test "parser recovers and a valid audio_score after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid audio_score after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9903,7 +9881,7 @@ test "parser recovers and a valid audio_score after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_score_decls.items.len);
 }
 
-test "parser builds a sequence with properties, on_start/finish, tracks, and keyframes (M0.8 E6)" {
+test "parser builds a sequence with properties, on_start/finish, tracks, and keyframes" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\sequence IntroCinematic {
@@ -9935,7 +9913,7 @@ test "parser builds a sequence with properties, on_start/finish, tracks, and key
     try std.testing.expectEqual(@as(u32, 2), cam.keyframes_len);
 }
 
-test "parser recovers and a valid sequence after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid sequence after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9946,7 +9924,7 @@ test "parser recovers and a valid sequence after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.sequence_decls.items.len);
 }
 
-test "parser builds an anim_graph with params, state bodies, transitions, and a layer (M0.8 E6)" {
+test "parser builds an anim_graph with params, state bodies, transitions, and a layer" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\anim_graph HumanoidLocomotion {
@@ -9998,7 +9976,7 @@ test "parser builds an anim_graph with params, state bodies, transitions, and a 
     try std.testing.expect(attack.has_on_finish);
 }
 
-test "parser recovers and a valid anim_graph after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid anim_graph after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10009,7 +9987,7 @@ test "parser recovers and a valid anim_graph after a broken construct survives (
     try std.testing.expectEqual(@as(usize, 1), result.ast.anim_graph_decls.items.len);
 }
 
-test "parser builds a shader with params, optional vertex, and mandatory fragment (M0.8 E6)" {
+test "parser builds a shader with params, optional vertex, and mandatory fragment" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\shader StandardPBR {
@@ -10039,7 +10017,7 @@ test "parser builds a shader with params, optional vertex, and mandatory fragmen
     try std.testing.expect(decl.fragment.body_len > 0);
 }
 
-test "parser: a fragment-only shader is valid (vertex optional, M0.8 E6)" {
+test "parser: a fragment-only shader is valid (vertex optional)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\shader Unlit {
@@ -10054,7 +10032,7 @@ test "parser: a fragment-only shader is valid (vertex optional, M0.8 E6)" {
     try std.testing.expect(!result.ast.shader_decls.items[0].has_vertex);
 }
 
-test "parser recovers and a valid shader after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid shader after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10065,9 +10043,9 @@ test "parser recovers and a valid shader after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.shader_decls.items.len);
 }
 
-// ── M0.8 E7 Level C — scene / prefab parser tests ─────────────────────────
+// ── Level C — scene / prefab parser tests ────────────────────────────────
 
-test "parser parses a scene with version, metadata, resources, entity, instance (M0.8 E7)" {
+test "parser parses a scene with version, metadata, resources, entity, instance" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\scene "Village" {
@@ -10106,7 +10084,7 @@ test "parser parses a scene with version, metadata, resources, entity, instance 
     try std.testing.expectEqual(@as(usize, 1), result.ast.field_overrides.items.len);
 }
 
-test "parser parses prefab autonomous, of-variant, and extends with requires + hooks (M0.8 E7)" {
+test "parser parses prefab autonomous, of-variant, and extends with requires + hooks" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\prefab "WallTorch" {
@@ -10147,7 +10125,7 @@ test "parser parses prefab autonomous, of-variant, and extends with requires + h
     try std.testing.expect(extension.has_on_detach);
 }
 
-test "parser recovers and a valid scene after a broken construct survives (M0.8 E7 lockstep)" {
+test "parser recovers and a valid scene after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10158,7 +10136,7 @@ test "parser recovers and a valid scene after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.scene_decls.items.len);
 }
 
-test "parser recovers and a valid prefab after a broken construct survives (M0.8 E7 lockstep)" {
+test "parser recovers and a valid prefab after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10169,12 +10147,12 @@ test "parser recovers and a valid prefab after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.prefab_decls.items.len);
 }
 
-test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
+test "parseStmtBlock parses a bare statement run" {
     const gpa = std.testing.allocator;
     // Exactly the shape `descriptor.renderStmtRunAlloc` emits for an extension
     // hook body: statements joined by "; ", no enclosing braces. The emit body
     // uses `field: expr` form — Etch struct-literal fields have no bare-name
-    // shorthand (`etch-grammar.md` §4.3 `field_init`), so the brief's spec-style
+    // shorthand (`etch-grammar.md` §4.3 `field_init`), so the spec-style
     // `{ entity }` is written `{ source: entity }` here (same 2-statement shape).
     var result = try parseStmtBlock(gpa, "entity.get_mut(Health).max += 50; emit ExtensionAttached { source: entity }");
     defer result.deinit(gpa);
@@ -10186,7 +10164,7 @@ test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
     try std.testing.expectEqual(ast_mod.StmtKind.emit_stmt, result.ast.stmtKind(s1));
 }
 
-test "parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)" {
+test "parseStmtBlock on empty body yields a zero-statement block" {
     const gpa = std.testing.allocator;
     var result = try parseStmtBlock(gpa, "");
     defer result.deinit(gpa);
@@ -10194,7 +10172,7 @@ test "parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
 }
 
-// ─── M1.1.15.2 G1 — `.d.etch` parse mode + the `service` construct ──────────
+// ─── `.d.etch` parse mode + the `service` construct ───────────────────────
 
 test "modeForPath detects the declaration-file extension by longest match" {
     // §20.3: matching runs from the most specific extension to the least, so a

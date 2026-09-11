@@ -1,4 +1,4 @@
-//! Paeth-filter-decode throughput baseline (brief §Acceptance ▸ Benchmarks).
+//! Paeth-filter-decode throughput baseline.
 //!
 //! **Baseline only — no parity target** (cold path; PNG defiltering runs
 //! once at cook time). Tracks gross regressions, nothing more.
