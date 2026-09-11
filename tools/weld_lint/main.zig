@@ -35,7 +35,7 @@ const comment_identifiers = @import("rules/comment_identifiers.zig");
 const comment_tags = @import("rules/comment_tags.zig");
 const comment_scan = @import("comment_scan.zig");
 
-const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
+const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools", "build.zig" };
 
 /// Default subtrees for `census` and `fingerprint`.
 ///
