@@ -702,11 +702,11 @@ pub const PhysicsWorld = struct {
     /// mirrors it here once per pass. What the regime IS is declared once, by
     /// `weld_forge`'s `PhysicsAuthority`, and this site refers to it.
     ///
-    /// **This declarant was named by no review and found by sweeping the class.** It
-    /// said "the single effect inside the solver is that the inverse mass is zero during
-    /// resolution" — one clause of three, and the formulation the corpus had already
-    /// replaced. The enumeration a reader produces is what that reader saw; the class is
-    /// what exists.
+    /// **A DECLARANT OF THIS REGIME REFERS AND NEVER PARAPHRASES.** Writing out "the single
+    /// effect inside the solver is that the inverse mass is zero during resolution" here
+    /// would be wrong twice: it is one clause of three, and it is a formulation the corpus
+    /// has replaced. A paraphrase records what its author saw; the regime is what exists,
+    /// and only the owner document carries it whole.
     ///
     /// **NO WAKE, deliberately, and it is the one setter of this file that composes
     /// none.** The three above compose one because they MOVE the body. This one moves

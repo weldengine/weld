@@ -1089,7 +1089,7 @@ fn tryStepUp(
     // So the squeeze-onto-level-ground mode is NOT guarded, and that is recorded rather than
     // papered over: telling it from a legitimate step-over needs a test that the landed pose is
     // clear of the obstacle it was blocked by, which is a different mechanism from a height
-    // comparison. Named for whoever ports the reference's stair-walking in full.
+    // comparison. That test belongs with a full port of the reference's stair-walking.
     if (drop <= 0) return null;
 
     return .{ .centre = landed, .advance = forward_advance };

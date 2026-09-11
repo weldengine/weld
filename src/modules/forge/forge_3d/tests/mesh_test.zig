@@ -386,8 +386,8 @@ test "a mesh forces a static body" {
 
     const mesh = try store.createShape(gpa, oneTriangle());
 
-    // The refusal is the invariant's error, reused rather than a second one
-    // minted for the mesh — the reason it was named for the invariant back then.
+    // The refusal is the invariant's error and NOT one minted for the mesh. The rule
+    // that makes it reusable lives where it is raised, in `body_manager.addBody`.
     inline for (.{ api.BodyType.dynamic, api.BodyType.kinematic }) |bt| {
         try testing.expectError(error.ShapeMustBeStatic, bm.addBody(gpa, &store, .{
             .entity = entityOf(0),

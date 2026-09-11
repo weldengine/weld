@@ -572,10 +572,10 @@ test "gjk oriented tangency stays shallow" {
         const p = vr(-3.6000001, 2.16, 0.65999997);
         // Exact core distance = |p_local − clamp(p_local, −he, he)| in the box's
         // local frame (box at origin), computed at `Real` precision so the sphere
-        // radius makes an EXACT tangency at BOTH f32 and f64. (The reviewer's
-        // hardcoded 2.8698921 is the f32 analytic value; recomputing keeps f64
-        // exact — a hardcoded f32 radius is off by ~1e-7 at f64, far above the f64
-        // margin, and would read `.separated`.) At f32 this ≈ 2.8698921.
+        // radius makes an EXACT tangency at BOTH f32 and f64. DO NOT hardcode the
+        // 2.8698921 this evaluates to: that is the f32 analytic value, off by ~1e-7
+        // at f64 — far above the f64 margin — so the case would read `.separated`
+        // on the leg it exists to cover.
         const p_local = box_rot.conjugate().rotateVec3(p);
         const dist_analytic = p_local.sub(p_local.max(he.neg()).min(he)).length();
         const r = narrowphase.gjk(Real, boxShape(0.7, 1.1, 0.6), vr(0, 0, 0), box_rot, sphereShape(dist_analytic), p, Quatr.identity);

@@ -26,7 +26,7 @@
 //! 3. **Two groups starting apart and colliding partway through.** The island
 //!    partition changes in BOTH DIRECTIONS ON THESE TWO GROUPS — separate, then one
 //!    island, then separate again — established by following island MEMBERSHIP and
-//!    not by any count. MEASURED after the review: they never met inside the window
+//!    not by any count. MEASURED: they never met inside the window
 //!    at all, the gap closing to 2.272 m and reopening, and `max_islands >
 //!    min_islands` passed on the sleeper alone, which is why that predicate is now
 //!    an unattributed coverage probe rather than this element's witness. Now
@@ -41,8 +41,8 @@
 //!    (`subshape_id`) — without a mesh the key's totality is never
 //!    exercised and a two-term key would pass every trace.
 //! 6. **One sensor and one body entering then leaving it.** Sensor state and both
-//!    deltas (`engine-physics-solver.md` §1.13.11) — SERIALISED INTO THE CHAIN since
-//!    the review, because a trigger resolves no impulse: all three sets can diverge
+//!    deltas (`engine-physics-solver.md` §1.13.11) — SERIALISED INTO THE CHAIN, and
+//!    they must be, because a trigger resolves no impulse: all three sets can diverge
 //!    without displacing a body, so every artifact stayed identical while the sensor
 //!    pass disagreed. The visitor now crosses INSIDE the 60-frame window.
 //! 7. **A lone box that settles at once and sleeps early.** Sleep state and the
@@ -912,8 +912,8 @@ test "scenario: every one of the nine elements actually fires" {
 
     // (8) + (9) THE TERRAIN. **EACH CLAUSE ASSERTS THAT THE CHARACTER REACHED THE
     // OBSTACLE, not that the obstacle exists**, and that distinction is the whole
-    // point: the review's finding was "no step and no slope nearby", and a step and a
-    // slope the character never touches satisfy those words and nothing else.
+    // point: "a step and a slope are nearby" is satisfied by a step and a slope the
+    // character never touches, which exercises nothing.
     //
     // It STOOD ON the riser — the controller's own `ground.body`, so `tryStepUp`
     // demonstrably fired and carried it onto the tread. This is the arm the

@@ -734,11 +734,12 @@ const ConstraintCollector = struct {
 /// Total order over constraints — `(pair_key, subshape_id)`, and the second term is load-bearing
 /// order.
 ///
-/// NAMED for what it orders, not for its first term. It was `lessByPairKey` until the
-/// closing review, which is a name that survives only while a pair means a constraint — the very
-/// equivalence the mesh broke. `lessByCompositeKey` would have been the symmetric name, but
-/// `rigid/root.zig` already re-exports the ISLAND permutation's comparator under it, and two
-/// comparators of different argument types cannot share one name in the facade.
+/// NAMED for what it orders and NOT for its first term. A name carrying `pairKey` alone
+/// survives only while a pair means a constraint — the very equivalence the mesh broke — so it
+/// would read as a total order on `pair_key` and invite dropping the second term.
+/// `lessByCompositeKey` would have been the symmetric name, but `rigid/root.zig` already
+/// re-exports the ISLAND permutation's comparator under it, and two comparators of different
+/// argument types cannot share one name in the facade.
 ///
 /// `std.mem.sort` is `std.sort.block`, which is UNSTABLE. While a pair produced at most one
 /// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh

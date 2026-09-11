@@ -1337,12 +1337,13 @@ pub fn Broadphase(comptime T: type) type {
         /// for the same reason: nothing here has a second body, so no row of the pair matrix
         /// applies and every structure is visited.
         ///
-        /// **It was `queryHalfSpaceTrees` and visited only the trees**, named for its omission
-        /// because the sensor pass declared half-space against half-space out of domain. That
-        /// bound is RETRACTED (§1.13.6): it rested on a partition grouping half-space and mesh
-        /// by BODY TYPE where the question is whether the shape has an INTERIOR. A half-space
-        /// has one, its kernel against another half-space is two lines, and the omission had
-        /// no motive left — so it is the omission that goes, not merely the name.
+        /// **VISITING ONLY THE TREES WOULD BE WRONG, and the unbounded lists are not an
+        /// afterthought.** The bound that would have excused the omission — half-space against
+        /// half-space declared out of domain — is RETRACTED (§1.13.6): it rested on a partition
+        /// grouping half-space and mesh by BODY TYPE where the question is whether the shape
+        /// has an INTERIOR. A half-space has one and its kernel against another half-space is
+        /// two lines, so there is no motive left for the omission and no narrower entry to
+        /// carry it.
         ///
         /// The unbounded walk offers the caller's OWN proxy back when it is itself unbounded;
         /// excluding it is the caller's business, exactly as it is for `queryAabb`.

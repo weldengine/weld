@@ -2171,8 +2171,9 @@ pub const Interpreter = struct {
             report.rules_evaluated += 1;
             // `async rule`: drive its suspend/resume task
             // at this position in the rule order, so events it emits/consumes
-            // interleave with the other rules exactly like the observer drain
-            // (the producer-before-consumer ordering — Guy's ruling).
+            // interleave with the other rules exactly like the observer drain.
+            // The ordering is producer-before-consumer, and moving the drive out
+            // of the rule order would break it.
             if (rd.is_async) {
                 try self.runAsyncRule(world, i, report);
                 continue;
