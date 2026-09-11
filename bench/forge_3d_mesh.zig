@@ -1,4 +1,4 @@
-//! forge_3d static-triangle-mesh bench (M1.1.11.1).
+//! forge_3d static-triangle-mesh bench.
 //!
 //! Three things are measured, and only the third exists to settle a decision:
 //!
@@ -16,8 +16,8 @@
 //!      not, nothing is added and the figures say why.
 //!
 //! **Reported, not gated** for rows 1 and 2: no baseline for this path has ever been
-//! measured, and registering an envelope before measuring it is the failure mode recorded
-//! at M1.1.8.
+//! measured, and an envelope registered before its baseline is invented rather than
+//! measured.
 //!
 //! ReleaseFast for the absolute ns (a Debug / ReleaseSafe run prints a warning and stays
 //! useful for relative comparisons). Writes `bench/results/forge_3d_mesh.md`.

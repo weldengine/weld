@@ -1,4 +1,4 @@
-//! S4 Etch tree-walking interpreter benchmark.
+//! Etch tree-walking interpreter benchmark.
 //!
 //! Drives the fixed 5-rule program at `bench/fixtures/demo_5_rules.etch`
 //! over two configurations:
@@ -13,7 +13,7 @@
 //!
 //! Pass `--smoke` for a CI sanity short-circuit (single tick, no report).
 //! The full bench is not run in CI — the verdict is captured on the
-//! physical reference machine (cf. S2 / S3 convention).
+//! physical reference machine (`engine-development-workflow.md` §17).
 
 const std = @import("std");
 const builtin = @import("builtin");

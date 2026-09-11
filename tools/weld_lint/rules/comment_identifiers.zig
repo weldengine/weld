@@ -429,5 +429,4 @@ test "the rule speaks on a read file and is silent on the two silenced kinds" {
     if (comment_scan.anUnreadExample(&buf)) |unread| {
         try std.testing.expectEqual(@as(usize, 0), try countOn(unread, src));
     }
-    try std.testing.expectEqual(@as(usize, 0), try countOn("bench/x.zig", src));
 }

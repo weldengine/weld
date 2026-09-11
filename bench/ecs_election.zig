@@ -1,4 +1,4 @@
-//! M1.B / P2-1 — what the per-walk driver election costs, and how often it flips.
+//! What the per-walk driver election costs, and how often it flips.
 //!
 //! REPORTED, NOT GATED, and permanently: `engine-ecs-internals.md` §2 refuses to
 //! engrave a threshold for the mixed-query planner and names a bench as what
@@ -263,13 +263,13 @@ fn measureFlips(gpa: std.mem.Allocator, mode: ChurnMode, churn: u32) !FlipCell {
     }
 
     // EVERY MODE STARTS ONE ENTITY FROM THE BOUNDARY, or the cell measures the
-    // wrong thing. Two figures were read off a first version that did not, and
-    // both were vacuous: `oscillating` started AT equality and swung to
-    // 1000/1001, where the declaration-order tie-break keeps the table member on
-    // both sides, so it reported ZERO flips — the one cell whose purpose is to
-    // produce the maximum. And `moving` started at half the table population, so
-    // at churn 1 sixty ticks never reached the crossing and it reported zero for
-    // want of distance rather than for want of a flip.
+    // wrong thing, and both ways of getting it wrong report a vacuous zero.
+    // Starting `oscillating` AT equality swings it to 1000/1001, where the
+    // declaration-order tie-break keeps the table member on both sides, so the
+    // one cell whose purpose is to produce the MAXIMUM reports ZERO flips.
+    // Starting `moving` at half the table population puts the crossing out of
+    // reach of sixty ticks at churn 1, so it reports zero for want of distance
+    // rather than for want of a flip.
     //
     // `moving` starts half the window short of the boundary so the crossing
     // falls INSIDE the window at the slowest rate on the axis; the other two sit

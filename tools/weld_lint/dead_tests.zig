@@ -584,11 +584,8 @@ fn closureOf(
 /// `read` supplies file contents so the analysis is testable against fixtures
 /// without touching the filesystem layout the tool normally walks.
 ///
-/// `live_tests` is the sum over roots and therefore a MULTISET count: a file two
-/// targets both reach is counted twice, because the suite compiles it twice and
-/// runs its tests twice. That is what makes it comparable to the suite's own
-/// collected total. `in_closure` and `closure` are the UNION, which is the right
-/// basis for the dead verdict — a file is dead only if no root reaches it.
+/// `live_tests` is a MULTISET count and `in_closure` / `closure` are the UNION,
+/// for the reasons the file header gives.
 pub fn analyze(
     gpa: std.mem.Allocator,
     roots: []const []const u8,

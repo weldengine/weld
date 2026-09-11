@@ -1,4 +1,4 @@
-//! forge_3d kinematic character controller throughput bench (M1.1.12).
+//! forge_3d kinematic character controller throughput bench.
 //!
 //! Five rows, one per path the controller has: `moveCharacter` on a flat half-space, on a flight of
 //! stairs, against a wall, on a tessellated triangle mesh, and `resizeCharacter`. Each row is a
@@ -18,8 +18,9 @@
 //! measure the plane path under the stairs' name.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered — no baseline for this path has
-//! ever been measured, and registering a bound before measuring it is the failure mode recorded at
-//! M1.1.8. The controller's guarantees are carried by its acceptance suite, not by a figure here.
+//! ever been measured, and a bound registered before its baseline is invented rather than
+//! measured. The controller's guarantees are carried by its acceptance suite, not by a figure
+//! here.
 //!
 //! ReleaseFast for the absolute ns (a Debug or ReleaseSafe run stays useful for relative
 //! comparisons). Writes `bench/results/forge_3d_character.md`.
@@ -289,7 +290,7 @@ fn runBatch(gpa: std.mem.Allocator, scene: *Scene, mode: Mode, checksum: *f64) !
 pub fn main() !void {
     // `safety` FORCED true: its default is `std.debug.runtime_safety`, false in ReleaseFast, which
     // is the mode this bench runs in — a default-configured checker reports "no leaks"
-    // unconditionally there, proven in both directions at M1.1.10 and M1.1.11.
+    // unconditionally there, which reads like a check and is not one.
     var debug_allocator: std.heap.DebugAllocator(.{ .safety = true }) = .init;
     // Declared FIRST so it runs LAST — after the scenes' own `defer`, which is the only order in
     // which the leak verdict sees a torn-down world.

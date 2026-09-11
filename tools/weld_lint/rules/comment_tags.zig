@@ -367,8 +367,8 @@ test "both rules speak on a read file and are silent on the two silenced kinds" 
     var buf: [256]u8 = undefined;
     if (comment_scan.anUnreadExample(&buf)) |unread| {
         try std.testing.expectEqual(@as(usize, 0), try countRule(phase_name, unread, src));
+        try std.testing.expectEqual(@as(usize, 0), try countRule(tags_name, unread, src));
     }
-    try std.testing.expectEqual(@as(usize, 0), try countRule(tags_name, "bench/x.zig", src));
 }
 
 test "a phase mention in a string literal is not reported" {

@@ -1,5 +1,4 @@
-//! Standalone build for the S5 synthetic 100-file corpus (M0.8 E3-D,
-//! D-S5-synth100-proper — formerly a placeholder).
+//! Standalone build for the synthetic 100-file corpus.
 //!
 //! A real Zig sub-project on the `examples/triangle` idiom: it consumes the
 //! parent Weld engine via the `weld` path dependency (`build.zig.zon`),
@@ -10,7 +9,7 @@
 //! force-referenced so the Zig compiler builds each one end-to-end).
 //!
 //! `zig build` here is the proof artifact — the repo-root
-//! `zig build verify-synth-100` step drives it. The S5 bench harness
+//! `zig build verify-synth-100` step drives it. The compile-time bench harness
 //! (`zig build bench-etch-compile`) keeps its own direct `zig build-exe`
 //! measurement path untouched: that incantation is the opposable bench
 //! protocol, not this sub-project.
@@ -21,7 +20,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Dependency on the Weld engine (local path in the Phase 0 monolithic
+    // Dependency on the Weld engine (local path in the monolithic
     // repo, three levels up — same rationale as `examples/triangle`).
     const weld = b.dependency("weld", .{
         .target = target,
