@@ -4,10 +4,12 @@
 //! whole compilation set is merged into ONE hierarchy, then each leaf is
 //! assigned a globally-unique `bit_index` by a depth-first walk in declaration
 //! order. STABLE CROSS-BUILD, and the property is structural rather than
-//! promised: the walk is over ArrayList roots and children with no hashing
-//! anywhere, so a bit index is a pure function of declaration order. Anything
-//! that persists a bit index — a save file, a replicated tag set — depends on
-//! that, so a hashed container introduced here would break it silently.
+//! promised: THE NUMBERING WALK is over ArrayList roots and children, so a bit
+//! index is a pure function of declaration order. The module does use hashed
+//! containers — the finished `map` and a build-time path index — and they are
+//! harmless precisely because neither is iterated to assign a number. Anything
+//! persisting a bit index depends on that, so iterating a hash to number would
+//! break it silently where adding one does not.
 //!
 //! This module is the single source of the algorithm: the resolver (path
 //! validation + overflow), the interpreter (runtime bit lookup) and the codegen
@@ -81,10 +83,12 @@ pub const TagTable = struct {
     ///
     /// **THERE IS NO ONE-WORD FLOOR HERE: zero leaves gives ZERO words**, the
     /// division being truncating. What makes that harmless is the CALLERS, each
-    /// gated on `leaf_count > 0` before it asks — `interp.zig`'s
-    /// `registerComponentRaw` and `lower.zig`'s `emitTagSetStruct`. A third
-    /// caller without that gate would register a zero-sized `TagSet`, and no
-    /// test covers the zero case: the only assertion here is at seven leaves.
+    /// gated on `leaf_count > 0` before it asks — `interp.zig`'s `compile` and
+    /// `lower.zig`'s `generateFile`. Neither `registerComponentRaw` nor
+    /// `emitTagSetStruct` calls this: both RECEIVE the word count, the first
+    /// across a module boundary, so neither is a place to add the gate. A third
+    /// caller without it would register a zero-sized `TagSet`, and no test
+    /// covers the zero case: the only assertion here is at seven leaves.
     pub fn words(self: *const TagTable) u32 {
         return (self.leaf_count + 63) / 64;
     }

@@ -84,9 +84,10 @@ fn collectInTrivia(
 /// **THE PERIMETER IS WRITTEN HERE AND NOT INHERITED FROM THE CALLER'S PATH
 /// LIST, and the exclusion below is a decision rather than an oversight.**
 ///
-/// `main.runLint` walks `src bench tests tools`. The comment rules apply to
-/// three of those four: `src/`, `tools/` and `bench/` carry the conservation
-/// pass that gives a reworded comment somewhere to go, and `tests/` does not.
+/// `main.runLint` walks `src bench tests tools build.zig`. The comment rules
+/// apply to four of those five: `src/`, `tools/`, `bench/` and `build.zig`
+/// carry the conservation pass that gives a reworded comment somewhere to go,
+/// and `tests/` does not.
 /// Its identifier occurrences are real and are recorded as a debt against the
 /// pass that will read those files; firing here would make the rule green only by
 /// leaving those files permanently red instead.
@@ -162,8 +163,8 @@ pub fn isCovered(file: []const u8) bool {
 /// `git diff --quiet` — turns it into a blocked push.
 ///
 /// The identifiers such a file carries are real, and they are fixed in the
-/// EMITTER under `tools/bindgen/`, which is a separate subtree with its own
-/// entry in the ledger above.
+/// EMITTER under `tools/bindgen/` — a separate subtree, READ like the rest and
+/// holding no ledger entry, the ledger being empty.
 ///
 /// `doc_comments` and `c_module_isolation` each carry their own copy of this
 /// predicate. This one is the comment family's single copy rather than a third

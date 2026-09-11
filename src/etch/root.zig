@@ -19,16 +19,20 @@
 const std = @import("std");
 
 const lexer = @import("lexer.zig");
-/// Exposed at the module surface because four out-of-module test files drive
-/// `parser.parseWithMode` directly — `.d.etch` mode has no helper on this
-/// surface. The recursive-descent entry `parser.parse` is the canonical batch
-/// path, and `parseSource` below wraps it for an ordinary file.
+/// Exposed at the module surface because FIVE out-of-module consumers drive
+/// `parser.parseWithMode` directly — four test files and `examples/arena/`,
+/// which is a standalone sub-project and not a test. `.d.etch` mode has no
+/// helper on this surface. The recursive-descent entry `parser.parse` is the
+/// canonical batch path, and `parseSource` below wraps it for an ordinary file.
 pub const parser = @import("parser.zig");
 const ast = @import("ast.zig");
-/// Exposed at the module surface for out-of-module consumers — five test files
-/// reach `weld_etch.types` for `StorageKind`, the diagnostic codes and the
-/// checker entry. NOT for the codegen, which imports `../types.zig` directly
-/// and never needed this.
+/// Exposed at the module surface for SIX out-of-module consumers — five test
+/// files and `examples/arena/` — and what they reach is `types.TypeChecker` and
+/// `types.requiresNamesOf`, the only `pub` decls of that file they name.
+/// `StorageKind` and `DiagnosticCode` are NOT pub there and are not reachable
+/// this way; a consumer needing them goes through `weld_core.ecs` and the
+/// sibling `diagnostics` re-export. NOT for the codegen, which imports
+/// `../types.zig` directly and never needed this.
 pub const types = @import("types.zig");
 /// Exposed at the module surface so callers can construct / inspect
 /// `Diagnostic` values (build a tooling test harness, assert
@@ -81,23 +85,29 @@ comptime {
     // THIS LINE IS LOAD-BEARING, and do NOT conclude otherwise from removing it
     // and watching the count hold: `types.zig` is ALSO reached through
     // `interp.zig`, pinned above, so the count is insensitive to this line alone
-    // and that insensitivity proves nothing. **A PUBLIC RE-EXPORT DOES NOT
-    // FORCE-ANALYSE A FILE'S TESTS.** Measured on four cases: with
-    // `pub const leaf = @import("leaf.zig")` alone the root collects ZERO of
-    // leaf's tests, with or without a test of its own; only a
-    // `comptime { _ = leaf; }` reference collects them.
+    // and that insensitivity proves nothing. **AN UNREFERENCED PUBLIC RE-EXPORT
+    // DOES NOT FORCE-ANALYSE A FILE'S TESTS** — the qualifier is the whole rule,
+    // since a re-export that IS referenced elsewhere in the root's closure does
+    // pull the file. Measured on four cases: with `pub const leaf =
+    // @import("leaf.zig")` ALONE the root collects ZERO of leaf's tests, with or
+    // without a test of its own; only a reference collects them.
     _ = @import("types.zig");
     // `zig_codegen/root.zig` carries the correct reference guard for its own
-    // three test files, and nothing runs it: the only path to it is
-    // `pub const codegen_zig`, the form that does not analyse. Thirty-seven test
-    // blocks, `lower_test.zig`'s twenty-six among them, do not execute.
+    // three test files, and nothing runs it — but NOT because of the binding
+    // form: `codegen_zig` IS referenced, from five call sites. **Zig collects no
+    // tests ACROSS A MODULE BOUNDARY**, and every one of those sites reaches it
+    // through the `weld_etch` module rather than from inside it. Thirty-seven
+    // test blocks, `lower_test.zig`'s twenty-six among them, do not execute.
     //
     // **THE COMMENTED LINE BELOW IS READ AS DATA.** `dead_tests` extracts every
     // `@import` literal from this file's source and skips it only because it
     // sits inside a `//` comment; its head ending in `_ =` is the exact shape
     // that tool takes for a reference guard. Keep the `//` on the same line and
-    // keep the text intact — moving it into code, or into a multiline string,
-    // flips `src/etch/zig_codegen/` from a declared exclusion to a false ALIVE.
+    // keep the text intact — moving it into a MULTILINE STRING flips
+    // `src/etch/zig_codegen/` to a FALSE alive, `inComment` bailing only on `"`
+    // and so reading a `\\`-prefixed line as code. UNCOMMENTING it is the other
+    // case and not the same one: that edge becomes REAL, which is a true alive
+    // and a loud build failure on `cache.zig` — see the paragraph below.
     //
     // THE WIRE-IN IS HELD, NOT FORGOTTEN, and the reason is a bigger finding than
     // the dead tests: `zig_codegen/cache.zig` does not COMPILE under the pinned
@@ -123,16 +133,17 @@ pub const scene_cook = @import("scene_cook.zig");
 /// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
 
-/// Level-B descriptor surface — typed domain descriptors
+/// Descriptor surface — Level B and the Level C scene/prefab arms, typed domain
+/// descriptors
 /// (`etch-ast-ir.md` §3.5) + the canonical serializer backing the
 /// serialized-IR differential. The interpreter builds them at compile
 /// (`Interpreter.descriptors`); the differential harness serializes both
 /// backends through this surface.
 pub const descriptor = @import("descriptor.zig");
 
-/// Exposed at the module surface so out-of-tree spike tests that
-/// drive the lexer alone (without a full parser run) can construct
-/// one without depending on the internal path.
+/// Exposed at the module surface for TWO out-of-module consumers that drive the
+/// lexer alone, without a full parser run: `bench/etch_parse.zig` — a bench, not
+/// a test — and `tests/etch/lexer_triple_quote_test.zig`. Both are in-tree.
 pub const Lexer = lexer.Lexer;
 /// Exposed at the module surface so the corpus driver and the
 /// codegen / interpreter runners can declare `*Ast` parameters

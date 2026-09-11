@@ -30,8 +30,9 @@ const std = @import("std");
 /// An Etch type as a service signature names it (`etch-abi-zig.md` §8.1). The
 /// scalar set is what the tree-walker converts; `ref` names a declared
 /// Etch type and is REFUSED at registration rather than at the call, so an
-/// unconvertible type can never reach a running rule. Widening it is additive
-/// and belongs to the gate that needs the type.
+/// unconvertible type can never reach a running rule. Widening the scalar set is
+/// ADDITIVE — a new arm here plus its `argToZig` case — so it costs nothing to
+/// defer and belongs with the first module that needs the type.
 pub const TypeRef = union(enum) {
     void_,
     int_,
@@ -65,10 +66,13 @@ pub const TypeRef = union(enum) {
 };
 
 /// One declared parameter. The NAME cannot be derived — Zig's `@typeInfo` does
-/// not carry parameter names — so it is declared here. The TYPE is not checked
-/// against anything: `method` DERIVES it from the implementation's own
-/// signature, so this field records what the emitter renders and never a second
-/// opinion the compiler could confront.
+/// not carry parameter names — so it is declared here. The TYPE is DERIVED by
+/// `method` from the implementation's own signature, so nothing confronts it
+/// with a second opinion — but it is not bookkeeping: `interp.valueToArg` reads
+/// it per argument to pick the conversion arm, and rejects the call when the
+/// value does not fit. A hand-written `MethodSpec` (this struct is public and
+/// constructible without `method`) that names the wrong type here changes what
+/// the call converts, silently and at run time.
 pub const ParamSpec = struct {
     name: []const u8,
     type: TypeRef,
@@ -120,7 +124,7 @@ pub const MethodSpec = struct {
     /// Rendered as `throws` in the `.d.etch` and read by the type-checker to
     /// decide `E0902`. DERIVED from the implementation's return type by
     /// `method`, never declared: a hand-written `throws` that disagreed with the
-    /// Zig signature is the drift class this milestone exists to close.
+    /// Zig signature is exactly the drift this derivation removes.
     throws: bool,
     /// Propagated to the `.d.etch` as a `///` doc comment (§8.2).
     doc: ?[]const u8 = null,
@@ -134,11 +138,12 @@ pub const MethodSpec = struct {
 /// (§8.4), which is what would let a second invocation path reuse it whole.
 pub const ServiceSpec = struct {
     name: []const u8,
-    /// §8.5 semantics: minor bump = additive, major = breaking. It has EXACTLY
-    /// ONE reader, `tools/bindgen/emit_detch.zig`, which renders it as
-    /// `@version(n)` into the committed `.d.etch`. Nothing confronts it: the
-    /// load-time check §8.5 describes keys on a `.etchc`, and no `.etchc` loader
-    /// exists — so a wrong bump here is caught by a reader and by nothing else.
+    /// §8.5 semantics: minor bump = additive, major = breaking. Two readers:
+    /// `tools/bindgen/emit_detch.zig` renders it as `@version(n)` into the
+    /// committed `.d.etch`, and the emitter's own test bumps it to prove the
+    /// rendering follows. What does NOT exist is the load-time confrontation
+    /// §8.5 describes — it keys on a `.etchc` and no `.etchc` loader exists — so
+    /// a bump that is wrong AGAINST THE SURFACE is caught by a reader alone.
     version: u32,
     methods: []const MethodSpec,
 };
@@ -265,12 +270,16 @@ fn argToZig(comptime T: type, a: Arg) !T {
         i64 => if (a == .int_) a.int_ else error.ServiceArgTypeMismatch,
         f64 => switch (a) {
             .float_ => |f| f,
-            // An `int` argument reaching a `float` parameter widens HERE, and
-            // that is local to this boundary: the type-checker requires exact
-            // equality and states "no implicit numeric coercion", an `int`
-            // literal fitting a float parameter only as a `float_lit`. So this
-            // arm is a convenience of the call path, NOT an instance of a
-            // language rule — do not cite it as precedent elsewhere.
+            // An `int` argument reaching a `float` parameter widens here — and
+            // NOT on the path a rule takes: `interp.valueToArg` has already
+            // widened it, so from `callService` this arm never runs. It is
+            // reached only through `Registry.call`, which this file records
+            // below as having no production caller. What has no second home is
+            // the ABSENCE of a check: `checkServiceCall` synthesises each
+            // argument and DISCARDS the type (`_ = try synthExprE`), so nothing
+            // compares an argument against its declared parameter and the
+            // widening is accepted with no diagnostic. Delete this arm and the
+            // language does not change; delete `valueToArg`'s and it does.
             .int_ => |i| @floatFromInt(i),
             else => error.ServiceArgTypeMismatch,
         },

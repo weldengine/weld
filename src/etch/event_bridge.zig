@@ -12,9 +12,10 @@
 //! The DRAIN is not something a caller performs before `runFor`: it runs
 //! inside `stepOnce`,
 //! after the clear and before rule dispatch, so the ordering is a property of
-//! the engine. What the caller does owe is the REGISTRATION — without
-//! `Interpreter.addEventSource` nothing drains at all — and that obligation is
-//! restated at `source()` below.
+//! the engine. What the caller owes is the REGISTRATION: `drainInto` is public,
+//! so a caller holding both can drain by hand — and land on the wrong side of
+//! the clear, which is the failure this header is about. Only
+//! `Interpreter.addEventSource` puts it on the right side.
 //!
 //! What crosses the boundary is a type NAME and a flat field list
 //! (`Interpreter.pushExternalEvent`). `EventStore` stays private to
@@ -32,9 +33,12 @@ const ExternalValue = interp_mod.ExternalValue;
 
 /// Bridge one Tier 0 `EventQueue(T)` to one Etch event type.
 ///
-/// `T` must be an `extern struct` of scalars — the same bound
-/// `services.event` enforces on the payload it derives a declaration from, and
-/// for the same reason: what crosses a module boundary must have a layout.
+/// `T` must be an `extern struct` — the same bound `services.event` enforces on
+/// the payload it derives a declaration from, and for the same reason: what
+/// crosses a module boundary must have a layout. The SCALAR set is narrower
+/// here: `valueOf` below has no `void` arm where `services.typeRefOf` does, and
+/// Zig 0.16 admits a `void` field in an `extern struct` (measured), so a payload
+/// carrying one declares through `services.event` and fails to compile here.
 /// `etch_type_name` is the Etch type the `.d.etch` declares, and it is passed
 /// rather than derived because `@typeName` carries a Zig path, not an Etch name.
 pub fn Bridge(comptime T: type) type {
@@ -86,10 +90,13 @@ pub fn Bridge(comptime T: type) type {
                         // Re-anchor on the current epoch and head rather than
                         // spinning. **THIS SKIPS MORE THAN THE DRAIN REMOVED**:
                         // `drain` resets head to 0, so anything enqueued AFTER
-                        // it and before this poll is live in `[0, head)` and is
+                        // it and before this poll sits in `[0, head)` and is
                         // dropped here too. Re-anchoring on 0 instead would
-                        // recover exactly those. The counter is what makes the
-                        // loss visible; it is a policy, not an inevitability.
+                        // recover what is still inside the window — past
+                        // saturation `poll` snaps to `head - cap` anyway and the
+                        // overflow is already counted as a drop by the queue.
+                        // The counter is what makes THIS loss visible; it is a
+                        // policy, not an inevitability.
                         self.cursor = .{
                             .type_id = self.cursor.type_id,
                             .last_read = self.queue.currentHead(),

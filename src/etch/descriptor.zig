@@ -2,7 +2,10 @@
 //! serialized-IR differential. **THE PROOF CONTRACT IS A TEST AND NOT A
 //! DOCUMENT**: `tests/etch_interp/levelb_ir_diff_test.zig` compares
 //! `interp.descriptors.serialize` against the cooked backend's own dump and
-//! fails on a byte, so a rewording here that changes the emitted text goes red.
+//! fails on a byte. **It does NOT cover the shared renderers**: the expression
+//! and statement leaves are the SAME code on both sides, so a change there moves
+//! both dumps identically and the differential stays green. What it catches is a
+//! divergence between the two build paths, never a drift of the text itself.
 //!
 //! `build` walks a parsed-and-validated AST and constructs one typed descriptor
 //! per construct — Level B, and Level C too: the scene and prefab arms are
@@ -275,7 +278,8 @@ fn freeData(gpa: std.mem.Allocator, t: types.Data) void {
     gpa.free(t.entries);
 }
 
-/// Build every Level-B descriptor from `arena`, in declaration order. The
+/// Build every descriptor from `arena`, in declaration order — Level B AND the
+/// Level C scene/prefab arms, which have their own banner below. The
 /// AST is expected validated (the type-checker ran clean) — `build` does
 /// not re-validate, it constructs.
 pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descriptors {

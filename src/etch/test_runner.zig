@@ -131,10 +131,13 @@ pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
             },
             .fail => |f| {
                 // Copy the borrowed message into report memory BEFORE THIS
-                // iteration's `defer interp.deinit()` frees the buffer it points
-                // into. Not the next test's interpreter — there is none yet when
-                // this runs — so moving the `dupe` after the `deinit` would be
-                // wrong for a reason the ordering here already settles.
+                // iteration's `defer interp.deinit()`. The message has two
+                // provenances (`interp.TestBodyOutcome`) and only one of them,
+                // `test_msg_buf`, is freed there; an `assert` literal points at
+                // AST-stable bytes the caller keeps alive. Copying covers both.
+                // Not the next test's interpreter — there is none yet when this
+                // runs — so moving the `dupe` after the `deinit` would be wrong
+                // for a reason the ordering here already settles.
                 try results.append(a, .{
                     .name = name,
                     .status = .failed,

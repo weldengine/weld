@@ -194,7 +194,9 @@ fn runCoverage(arena: std.mem.Allocator, out: *std.Io.Writer) !u8 {
     );
     for (comment_scan.pending) |p| try out.print("  unread: {s}\n", .{p.prefix});
     if (comment_scan.pending.len == 0) {
-        try out.writeAll("the pass has read the whole perimeter\n");
+        try out.writeAll("no subtree is declared unread — note that a leading " ++
+            "`tests` segment and an AUTO-GENERATED first line are excluded by " ++
+            "the rules themselves, not by this ledger\n");
     }
     return 0;
 }
@@ -583,7 +585,9 @@ const usage_text =
     \\
     \\  weld_lint coverage
     \\      Print the subtrees the comment rules do not report on yet.
-    \\      Empty means the conservation pass has read the whole perimeter.
+    \\      Empty means no subtree is DECLARED unread. Two exclusions
+    \\      survive an empty ledger: a leading `tests` path segment,
+    \\      and a file whose first line marks it AUTO-GENERATED.
     \\
     \\  weld_lint census [path]...
     \\      Report per-file code lines, comment lines, doc lines, comment

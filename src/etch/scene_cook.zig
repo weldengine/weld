@@ -123,7 +123,8 @@ pub const CookError = error{
     /// cook instantiates only single-entity prefabs: the instance supplies one uuid and
     /// the spec defines no remapping for a multi-entity prefab's internal uuids at
     /// instantiation (`engine-scene-serialization.md` §2/§5). Multi-entity
-    /// instantiation (and its hierarchy) is a dedicated later milestone (D-D).
+    /// instantiation, and the hierarchy it would need, is not implemented
+    /// anywhere: this error is the whole of the treatment.
     MultiEntityInstanceUnsupported,
     /// A `Comp.field = value` per-field override targets a component the flattened
     /// instance does not carry (neither inherited from the prefab nor added by an
@@ -670,8 +671,9 @@ const Builder = struct {
     /// `target_name` against
     /// the now-complete `name_to_uuid_idx` (a reference can name an entity declared
     /// later in the scene), producing the model's `CrossRef` slice. A target that
-    /// is not an entity of the scene → `error.UnresolvedCrossRef` (intra-scene
-    /// only; cross-scene references are a future milestone).
+    /// is not an entity of the scene → `error.UnresolvedCrossRef`. INTRA-SCENE
+    /// ONLY: a cross-scene reference has no representation in the model and no
+    /// resolution step anywhere, so it is refused here rather than deferred.
     fn resolveCrossRefs(self: *Builder, diag_out: ?*[]const u8) CookError![]format.CrossRef {
         const out = try self.a().alloc(format.CrossRef, self.pendings.items.len);
         for (self.pendings.items, 0..) |p, i| {
