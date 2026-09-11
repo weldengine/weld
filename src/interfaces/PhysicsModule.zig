@@ -3,17 +3,14 @@
 //!
 //! **THIS FILE IS FROZEN.** `WELD_PHYSICS_PROTOCOL_VERSION` is declared below and the
 //! comptime surface guard covers all thirty-two entries; no entry may be added, removed or
-//! re-typed without bumping the constant. The freeze had already moved twice before landing
-//! here — M1.1.15, then M1.1.15.1 — and it does not move a third time.
+//! re-typed without bumping the constant.
 //!
-//! **THIS PARAGRAPH AND THE TEST BELOW MOVE TOGETHER, and it is written here because they did
-//! not.** Until M1.1.15.2 G7 this header said the file was NOT frozen and that the protocol
-//! constant was absent, with a test asserting exactly that absence — a claim built to go red
-//! the day the constant appeared. At G7 the constant landed and the TEST was inverted, in the
-//! same file and the same commit, while this prose was not re-read. The guard moved and the
-//! declaration it guarded stayed: "a correction added without deleting what it replaces",
-//! and the fact that both halves were open in one editor at one moment is the datum —
-//! proximity does not help, it masks. Corrected at G8 on the external review's finding.
+//! **THIS PARAGRAPH AND THE TEST BELOW MOVE TOGETHER.** They are two halves of one claim,
+//! and inverting one without the other is how this header came to state the opposite of what
+//! its own guard asserted. A test asserting a fact ABOUT the file, while the file says the
+//! opposite in prose, is a guard that cannot see the thing it guards. Do NOT trust proximity
+//! to catch that: both halves fit in one editor window, and adjacency is what MASKS the
+//! divergence rather than what prevents it.
 //!
 //! **The count, and the two numbers are distinct rather than one of them being wrong.**
 //! `engine-tier-interfaces.md` §12 disambiguates them: the surface carries **thirty-two**
@@ -23,19 +20,18 @@
 //! surface guard exists to close. Both are exported below so a consumer reads them rather than
 //! recounting.
 //!
-//! **AND THE THIRTY-TWO IS NOW MEASURED, which it was not until G7 was replayed.** The
-//! constant declared a size and nothing put it in front of the block: deleting one
-//! `assertFn` line left the whole tree green at 2029 of 2029, the adapter still declaring
-//! the entry so every walk over its declarations passed. `guardedNames` reads the block's
-//! own text, so the size, the absence of a duplicate, and the agreement between what is
-//! GUARDED and what is DELEGATED are all confronted rather than declared.
+//! **AND THE THIRTY-TWO IS MEASURED, not declared.** A constant stating a size with nothing
+//! in front of the block is a size nobody checks: delete one `assertFn` line and the whole
+//! tree stays green, the adapter still declaring the entry so every walk over its
+//! declarations passes. `guardedNames` reads the block's own text, so the size, the absence
+//! of a duplicate, and the agreement between what is GUARDED and what is DELEGATED are all
+//! confronted rather than declared.
 //!
-//! **The wrapper delegates, and it did not.** §1 declares one function per entry on the
-//! returned type; until G8 this returned `struct { impl: Impl }` and nothing else — a type that
-//! validated an implementation and exposed none of it. The freeze test could not see it,
-//! having asserted only that the field exists. `hasCapability` rides along and is NOT a
-//! thirty-third entry: it answers `false` for an implementation declaring none, which is why it
-//! is absent from the assert block.
+//! **The wrapper DELEGATES.** §1 declares one function per entry on the returned type, so a
+//! `struct { impl: Impl }` carrying nothing else validates an implementation and exposes none
+//! of it — and a freeze test asserting only that the field exists cannot see that.
+//! `hasCapability` rides along and is NOT a thirty-third entry: it answers `false` for an
+//! implementation declaring none, which is why it is absent from the assert block.
 //!
 //! What DOES land here is the thing the freeze cannot wait for: the contract of the three
 //! body pose and velocity entries, which lived in `forge/api/types.zig` as a day-1 mirror
@@ -60,8 +56,9 @@ const WorldQuat = api.precision.WorldQuat;
 
 // --- Body pose and velocity entries — semantics frozen here ---
 //
-// Moved from `forge/api/types.zig`, which held them as a day-1 mirror while this file did
-// not exist and which named this move as its destination.
+// These semantics live HERE and nowhere else. `forge/api/types.zig` points at this file
+// and must not carry a second copy: two copies of a contract are two things that can
+// disagree, which is the whole subject of the contract.
 //
 //   - `setBodyTransform(id, position, rotation)` is a TELEPORTATION. It writes the pose
 //     and derives NO velocity: a kinematic body moved through it keeps velocity columns
@@ -78,17 +75,15 @@ const WorldQuat = api.precision.WorldQuat;
 //
 //   - `moveKinematic(id, target_position, target_rotation, dt)` is what DERIVES both
 //     velocities from a target pose over a `dt`, on the shape of
-//     `BodyInterface::MoveKinematic`. Its signature froze at M1.1.12; its body was a typed
-//     stub until M1.1.15, deriving a velocity belonging to the tick cycle and the wake
-//     composition, which arrive with `PhysicsWorld`. It is now realised
-//     (`forge_3d/world.zig`): `ω = 2 · vec(q_target · conj(q_current)) / dt`, sign
-//     normalised for the short path.
+//     `BodyInterface::MoveKinematic`. The derivation belongs to the tick cycle and the
+//     wake composition, so it is realised in `forge_3d/world.zig`:
+//     `ω = 2 · vec(q_target · conj(q_current)) / dt`, sign normalised for the short path.
 //
-//   - `setAngularVelocity(id, ω)` closes a gap dating from M1.1.0: `PhysicsModule2D`
-//     carries `setAngularVelocity2D` and the reference carries both, while 3D carried only
-//     the linear setter — so `ω` was authorable by NO caller at all, and the rotational
-//     term of `ground_velocity` had no source. `BodyManager` has had the column setter
-//     since M1.1.8; what was missing is the interface entry.
+//   - `setAngularVelocity(id, ω)` closes an asymmetry: `PhysicsModule2D` carries
+//     `setAngularVelocity2D` and the reference carries both, so a 3D surface with only
+//     the linear setter leaves `ω` authorable by NO caller at all and the rotational
+//     term of `ground_velocity` with no source. `BodyManager` carries the column setter;
+//     what this entry adds is the interface half.
 //
 // Write intent, unchanged from §1.8.4: a pose or velocity WRITE is non-activating (it is
 // the solver's own path), while an external mutation — force, torque, impulse — wakes. The
@@ -107,19 +102,19 @@ pub const SetAngularVelocity = fn (BodyId, WorldVec3) void;
 
 // --- The tick, and what its error channel means -------------------------------
 //
-// `step` is `anyerror!void` and NOT `void`, on eight allocation sites measured inside the
-// cycle at M1.1.15.1 — pair generation, the retained candidate set, the constraint array,
-// the island partition, the warm-start cache, the sensor pass and the two the substep loop
-// reaches. The reservation seam of that milestone closed exactly one, step 10's proxy
-// update; the other seven grow structures whose size follows the scene, and no up-front
-// reservation bounds them without bounding the scene. A `void` signature would have only
+// `step` is `anyerror!void` and NOT `void`, on eight allocation sites MEASURED inside the
+// cycle — pair generation, the retained candidate set, the constraint array, the island
+// partition, the warm-start cache, the sensor pass and the two the substep loop reaches.
+// A reservation seam closes exactly one of them, step 10's proxy update; the other seven
+// grow structures whose size follows the scene, and no up-front reservation bounds them
+// without bounding the scene. A `void` signature would have only
 // two exits, both refused: swallow the failure and return a tick whose result is wrong
 // without saying so, or panic and turn memory pressure into a process abort.
 //
 // **THE FAILURE CONTRACT — the tick is NOT atomic and does not become atomic.** This is the
-// half a signature cannot state, and neither `engine-tier-interfaces.md`,
-// `engine-physics-solver.md` nor `engine-physics-forge.md` carried it before M1.1.15.1: an
-// `error.OutOfMemory` out of `step` leaves the world **UNSPECIFIED but NOT CORRUPTED**. The
+// half a signature cannot state, and it is stated HERE rather than inherited — do NOT
+// delete it on the assumption that an owner document carries it. An `error.OutOfMemory`
+// out of `step` leaves the world **UNSPECIFIED but NOT CORRUPTED**. The
 // structural invariants hold — no dangling index, no orphan proxy, no retained pair naming
 // a dead body — and the simulation semantics do not, some of the eleven steps having run
 // and others not.
@@ -140,7 +135,7 @@ pub const SetAngularVelocity = fn (BodyId, WorldVec3) void;
 /// precaution, and what it leaves behind is specified.
 pub const Step = fn (f32) anyerror!void;
 
-// --- THE FREEZE (M1.1.15.2 G7) -----------------------------------------------
+// --- THE FREEZE ---------------------------------------------------------------
 
 /// **THE SURFACE IS FROZEN AT THIS VERSION.**
 ///
@@ -149,19 +144,12 @@ pub const Step = fn (f32) anyerror!void;
 /// possible at all: a Tier 3 solver compiles against a surface, and a surface
 /// that can move under it is not one.
 ///
-/// The freeze had already moved twice before landing here (M1.1.15, then
-/// M1.1.15.1), and it does not move a third time. Everything the freeze could
-/// not wait for landed in the gates before it: the joint type family without
-/// which three entries were unwritable, `getTriggerOverlaps`, the error channel
-/// on `getBodyTransform`, and the two preconditions M1.1.15.1 closed —
-/// `core.ModuleContext` and the `void`-vs-fallible arbitration on the pose
-/// setters.
 pub const WELD_PHYSICS_PROTOCOL_VERSION: u32 = 1;
 
 /// The comptime surface guard: `PhysicsModule(Impl)` fails to compile unless
 /// `Impl` presents all **thirty-two** entries with the exact declared signature.
 ///
-/// **THIRTY-TWO AND NOT TWENTY-NINE, and confusing the two has already cost.**
+/// **THIRTY-TWO AND NOT TWENTY-NINE, and the two are easy to confuse.**
 /// `engine-tier-interfaces.md` §12 carries both numbers: the surface has 32
 /// `assertFn` of which 29 exclude `init`, `deinit` and `step`. The block guards
 /// the SURFACE, so it is the 32 that bound it — a guard built on 29 passes an
@@ -225,15 +213,14 @@ pub fn PhysicsModule(comptime Impl: type) type {
     return struct {
         impl: Impl,
 
-        // --- The delegated surface (M1.1.15.2 G8) --------------------------------
+        // --- The delegated surface ------------------------------------------------
         //
-        // **§1 declares ONE function per entry, and this returned nothing but the
-        // field.** A type that validates an implementation and exposes none of it is
-        // half the interface: the assert block is the CONTRACT, and these are the
-        // SURFACE a caller holds. Without them `PhysicsModule(Impl)` is a compile-time
-        // predicate wearing the name of a type, and no caller can use the thing it
-        // guards — which the freeze test could not see, having asserted only that the
-        // field exists.
+        // **§1 declares ONE function per entry.** Returning nothing but the field gives
+        // a type that validates an implementation and exposes none of it — half the
+        // interface: the assert block is the CONTRACT, and these are the SURFACE a
+        // caller holds. Without them `PhysicsModule(Impl)` is a compile-time predicate
+        // wearing the name of a type, and no caller can use the thing it guards — which
+        // a freeze test asserting only that the field exists cannot see.
         //
         // Each body is the delegation and nothing else: no defaulting, no logging, no
         // conversion. A wrapper that did anything of its own would be a second place
@@ -358,14 +345,13 @@ pub fn PhysicsModule(comptime Impl: type) type {
 
 /// The entry names the assert block guards, READ FROM THE BLOCK'S OWN TEXT.
 ///
-/// **A constant declaring a size, never confronted with the thing it sizes, is
-/// the defect class this milestone has closed at every gate — and it was sitting
-/// inside the freeze.** Measured at G7-replayed: deleting one `assertFn` line
-/// from the block left the whole tree green, 2029 of 2029, because
-/// `frozen_entry_count` is a number and the block is a list, and nothing put the
-/// two in front of each other. The adapter still declares the entry, so the
-/// delegation walk passes; the guard simply stops guarding it, in silence, which
-/// is exactly what a surface guard exists to make impossible.
+/// **A constant declaring a size, never confronted with the thing it sizes, guards
+/// nothing.** Delete one `assertFn` line from the block and the whole tree stays
+/// green: `frozen_entry_count` is a number and the block is a list, and without
+/// this function nothing puts the two in front of each other. The adapter still
+/// declares the entry, so the delegation walk passes; the guard simply stops
+/// guarding it, in silence, which is exactly what a surface guard exists to make
+/// impossible.
 ///
 /// The block's text is therefore the source and the constant is what it is
 /// confronted with. Nothing else in this file can substitute: the block runs at
@@ -456,13 +442,9 @@ fn assertFn(comptime T: type, comptime name: []const u8, comptime Expected: type
 const testing = std.testing;
 
 test "the interface IS frozen, and the surface guard has the size of the surface" {
-    // **THIS TEST WAS AN ATTESTATION OF ABSENCE UNTIL G7, and its going red is what
-    // it existed for.** Until this gate it asserted `!@hasDecl(…,
-    // "WELD_PHYSICS_PROTOCOL_VERSION")`, with the reason written on it: declaring the
-    // constant early would make the surface irreversible a milestone ahead of the
-    // decision to make it so. The freeze is that decision, so the claim inverts —
-    // the test is CHANGED and not deleted, because a deleted attestation leaves no
-    // record that the state it described was left deliberately.
+    // **THE FREEZE'S ATTESTATION.** It asserts the constant is PRESENT and carries the
+    // value the header claims. That looks obvious, and the obviousness is the point: it
+    // is the record that the surface was frozen by a decision rather than by accretion.
     try testing.expect(@hasDecl(@This(), "WELD_PHYSICS_PROTOCOL_VERSION"));
     try testing.expectEqual(@as(u32, 1), WELD_PHYSICS_PROTOCOL_VERSION);
 
@@ -521,7 +503,7 @@ test "step declares an error channel, and the three pose setters do not" {
     // The two halves of the allocator/fallibility contract of `engine-tier-interfaces.md`
     // §0, asserted against each other so neither can drift alone: `step` can allocate and
     // says so; the three pose setters cannot and say so. The `void` half is CONDITIONAL on
-    // the moved-log uniqueness invariant (M1.1.15.1) — if that invariant falls, these
+    // the broadphase moved-log uniqueness invariant — if that invariant falls, these
     // signatures are what must change, and this test is what makes that visible.
     const st = @typeInfo(Step).@"fn";
     try testing.expect(@typeInfo(st.return_type.?) == .error_union);
@@ -559,21 +541,21 @@ test "the three signatures are written at the world scalar, not at a literal f32
 }
 
 test "the header's claim and this test are one thing, checked against the file" {
-    // **THE ORACLE FOR THE DRIFT THAT PRODUCED G8.** At G7 this test was inverted and
-    // the header prose it guarded was not, in the same file and the same commit. A test
-    // asserting a fact ABOUT the file, while the file states the opposite in prose, is
-    // a guard that cannot see the thing it guards.
+    // **THE ORACLE FOR A DRIFT THIS FILE HAS ALREADY SEEN.** A test asserting a fact
+    // ABOUT the file, while the file states the opposite in prose, is a guard that
+    // cannot see the thing it guards — and inverting one half without the other is how
+    // the two come apart inside a single commit.
     //
-    // So the claim is confronted with the header's own bytes. A future edit that says
-    // "NOT FROZEN" again, or that removes the frozen statement, reddens here — which
-    // the previous shape could not do at any price.
-    // **BOTH NEEDLES ARE BUILT BY CONCATENATION, and that is not a style choice.**
-    // This file embeds ITSELF, so a literal needle appears in the searched corpus by
-    // virtue of being written here: the negative would fire on its own text — it did,
-    // on the first run — and, worse, the POSITIVE would pass on its own text even if
-    // the header had lost the claim entirely. A tautology and a false alarm from the
-    // same cause. Concatenated at comptime, neither string exists contiguously in the
-    // source, so the only matches are the header's.
+    // So the claim is confronted with the header's own bytes. An edit that declares the
+    // file unfrozen, or that removes the frozen statement, reddens here.
+    //
+    // **EVERY NEEDLE OVER THIS CORPUS IS BUILT BY CONCATENATION, and that is not a
+    // style choice.** This file embeds ITSELF, so a literal needle appears in the
+    // searched corpus by virtue of being written here: a negative fires on its own text,
+    // and — worse — a POSITIVE passes on its own text even when the header has lost the
+    // claim entirely. A false alarm and a tautology from one cause. Concatenated at
+    // comptime, neither string exists contiguously in the source, so the only matches
+    // are the header's.
     const header = @embedFile("PhysicsModule.zig");
     const frozen_claim = "**THIS FILE IS " ++ "FROZEN.**";
     const stale_claim = "THIS FILE IS " ++ "NOT FROZEN";
@@ -585,20 +567,23 @@ test "the header's claim and this test are one thing, checked against the file" 
     try testing.expectEqual(@as(u32, 1), WELD_PHYSICS_PROTOCOL_VERSION);
 
     // NON-VACUITY, and its needle is CONCATENATED TOO — which is the point rather than
-    // a repetition. The first version of this control was a literal, and it failed:
-    // written here, it was in the file. Every needle over a self-embedded corpus has
-    // the same hazard, the control included, and patching only the two that carry the
-    // claim would have left the control the one thing that could not fail honestly.
+    // a repetition. A literal control over a self-embedded corpus is IN the corpus, so
+    // it cannot fail. Every needle here carries that hazard, the controls included:
+    // patching only the ones that carry the claim leaves the control as the one thing
+    // that cannot fail honestly.
     const absent = "THIS FILE IS " ++ "MADE OF CHEESE";
     try testing.expect(std.mem.indexOf(u8, header, absent) == null);
-    try testing.expect(std.mem.indexOf(u8, header, "the Tier 1 physics interface") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "the Tier 1 " ++ "physics interface") != null);
 
     // **THE HEADER'S NUMBER, confronted with the constant rather than left as prose.**
-    // It is the second thing that drifted in this file and it drifted first: the header
-    // carried THIRTY `assertFn` of which twenty-seven were non-lifecycle — the count
-    // before `getTriggerOverlaps` and `setJointMotor` — and G5a corrected it. So the
-    // wrong values are known, and they are what is excluded, because a stale count is a
-    // claim a reader acts on rather than a typo.
+    // The two excluded values are the KNOWN wrong ones and not arbitrary: a header
+    // carrying THIRTY `assertFn` of which twenty-seven are non-lifecycle holds the count
+    // from before `getTriggerOverlaps` and `setJointMotor`, and a stale count is a claim
+    // a reader acts on rather than a typo.
+    //
+    // THE CAPITALS ABOVE ARE LOAD-BEARING. The needle below is lower-case and the search
+    // is case-sensitive, so lower-casing that phrase here makes this block match its own
+    // text and the assertion fires on the comment that explains it.
     try testing.expect(std.mem.indexOf(u8, header, "thirty" ++ "-two") != null);
     try testing.expect(std.mem.indexOf(u8, header, "thirty " ++ "`assertFn`") == null);
     try testing.expect(std.mem.indexOf(u8, header, "thirty" ++ "-three") == null);
