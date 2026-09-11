@@ -188,8 +188,10 @@ const PendingExtension = struct {
     op: ExtOp,
 };
 
-/// Resolved view of a `when` clause node. The interpreter walks
-/// `predicate_pool` at iteration time to filter archetypes.
+/// Resolved view of a `when` clause node. The pool of these is a LOCAL of
+/// `compileRule`, consumed once by `buildSelection` and gone when compilation
+/// returns — nothing walks it at iteration time, where the walk switches on the
+/// prebuilt plan instead.
 const PredicateNodeKind = enum {
     and_,
     or_,
@@ -211,10 +213,14 @@ const PredicateNode = struct {
 const RuleDesc = struct {
     rule_idx: u32,
     name: StringId,
-    /// the rule's archetype selection: one Tier-0 `DynamicQuery`
-    /// per conjunctive term of the `when` clause's DNF (`has T` → `with`,
-    /// `not entity has T` → `without`). The rule's matched-archetype set is
-    /// the UNION of the terms' results. A pure-`and` `when` yields one term;
+    /// the rule's selection: one `QueryPlan` per conjunctive term of the `when`
+    /// clause's DNF (`has T` → `with`, `not entity has T` → `without`). A plan
+    /// is not an archetype query — it carries the term's TABLE ids in a Tier-0
+    /// `DynamicQuery` plus one sparse-driven form per sparse member, and the
+    /// sparse ids are admitted PER ENTITY. So the rule's matched set is the
+    /// union of the terms' archetype results only while no term names a sparse
+    /// component, and a term whose driver is sparse selects no archetype at
+    /// all. A pure-`and` `when` yields one term;
     /// `or` yields one per disjunct. Empty for a non-entity-bound rule (the
     /// global / resource-only / event path never selects archetypes) and for
     /// an entity-bound rule whose every term is structurally unsatisfiable
@@ -305,7 +311,9 @@ const RuleDesc = struct {
     }
 };
 
-/// Free a rule's archetype selection — every `DynamicQuery` plus the slice.
+/// Free a rule's selection — every `QueryPlan` plus the slice. A plan releases
+/// its own id set, its table form AND each of its sparse forms, so this covers
+/// more than the per-term archetype query.
 fn freeSelection(gpa: std.mem.Allocator, selection: []QueryPlan) void {
     for (selection) |*q| q.deinit(gpa);
     gpa.free(selection);
@@ -2367,47 +2375,56 @@ pub const Interpreter = struct {
         // per-rule breakdown of `report.entities_iterated`. Reset before the
         // walk; incremented per matched entity in `iterateArchetype`.
         rd.matched_entities = 0;
-        // entity selection is driven by the rule's DNF of dynamic
-        // queries (one `DynamicQuery` per conjunctive term). Each query lazily
-        // re-scans the `world.archetypes` tail through the SAME shared matcher
-        // + rescan as the comptime `Query` (`query.archetypeMatches` +
+        // entity selection is driven by the rule's DNF of query PLANS, one per
+        // conjunctive term. A term walked by its TABLE form lazily re-scans the
+        // `world.archetypes` tail through the SAME shared matcher + rescan as
+        // the comptime `Query` (`query.archetypeMatches` +
         // `query.rescanNewArchetypes`, option-β `engine-ecs-internals.md §4`):
         // O(0) in the steady state, O(new archetypes) after a spawn into a new
         // shape. Sound because an archetype's component set is immutable after
         // creation and `world.archetypes` is append-only with stable order — a
-        // cached match never goes stale.
+        // cached match never goes stale. A term walked by its SPARSE form
+        // rescans NOTHING: it keeps no archetype cache and has nothing to
+        // rescan.
         //
-        // The parenthetical that used to carry this — "add/remove transitions
-        // the entity to a DIFFERENT archetype" — is FALSE for a sparse
-        // component, and `world.zig`'s sparse add says so in as many words: "NO
-        // archetype transition at all". The conclusion survives because a sparse
-        // member is admitted PER ENTITY and never at archetype grain, so the
-        // cached archetype set is not what would have to change. A single term iterates its matches directly
-        // (ascending archetype-creation order, preserving the historical
-        // direct-walk order → interp↔codegen parity); `or` unions the terms.
+        // Do NOT justify the cache by "add/remove transitions the entity to a
+        // DIFFERENT archetype": that is false for a sparse component, whose add
+        // performs no archetype transition at all. What makes the cache sound is
+        // that a sparse member is admitted PER ENTITY and never at archetype
+        // grain, so the cached archetype set is not what would have to change.
+        //
+        // A single term iterates its matches directly (ascending
+        // archetype-creation order, preserving the historical direct-walk
+        // order → interp↔codegen parity); `or` unions the terms.
         try self.iterateSelection(world, rd, &rule_matched, report, null);
         if (rule_matched) report.rules_matched += 1;
     }
 
-    /// Iterate the archetypes a rule's `when` clause selects, dispatching the
-    /// body on every matching entity. The selection is the union of
-    /// the rule's DNF terms (`rd.selection`, one `DynamicQuery` each):
+    /// Iterate what a rule's `when` clause selects, dispatching the body on
+    /// every matching entity. The selection is `rd.selection`, one `QueryPlan`
+    /// per DNF term — and the walk is over archetypes only when the elected
+    /// form is the table one; a sparse-driven term walks its driver's dense
+    /// array and touches no archetype.
     ///
     /// - 0 terms — a non-entity-bound rule reaches here only by mistake (the
     ///   global path returns earlier), or an entity-bound rule whose every
     ///   term is unsatisfiable: nothing to iterate.
-    /// - 1 term — the common case (a pure-`and` `when`): iterate the term's
-    ///   matches directly, no merge.
-    /// - N terms (`or`) — rescan each term, then k-way merge their matching
-    ///   lists by ascending `archetype_id`, dispatching each archetype once
-    ///   (an archetype satisfying several disjuncts must not run the body
-    ///   twice). The lists are ascending because every scan appends in
-    ///   `world.archetypes` creation order.
+    /// - 1 term — the common case (a pure-`and` `when`): iterate the term
+    ///   directly, no merge.
+    /// - N terms (`or`) — TWO arms. When no term needs entity dedup, rescan
+    ///   each and k-way merge their matching lists by ascending `archetype_id`,
+    ///   dispatching each archetype once (an archetype satisfying several
+    ///   disjuncts must not run the body twice); the lists are ascending
+    ///   because every scan appends in `world.archetypes` creation order. When
+    ///   ANY term carries a sparse member, that merge is abandoned — there is no
+    ///   common archetype grain to merge on — and the de-duplication runs by
+    ///   ENTITY instead.
     ///
     /// `query.maybeRescan` returns the archetypes it scanned this call (0 in
     /// the steady state); summing them into `predicate_archetype_evals` keeps
     /// the tail-only-rescan observable the cache test asserts.
-    /// Walk a rule's selected entities in deterministic order. When `collect`
+    ///
+    /// When `collect`
     /// is non-null the matched `EntityId`s are appended to it and NOTHING runs
     /// (entity-bound async spawn); when null, the sync path runs
     /// `execBody` per match. The order and `when`-guard semantics are identical
@@ -6752,10 +6769,8 @@ fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     return true;
 }
 
-/// Whether every per-rule field filter passes for `(chunk, slot)`: flat-AND
-/// over the rule's `field_filters`. Trivially
-/// true for a filter-free rule.
-/// Whether every field filter passes for `loc`.
+/// Whether every per-rule field filter passes for `loc`: flat-AND over the
+/// rule's `field_filters`, trivially true for a filter-free rule.
 ///
 /// Takes a STORAGE-AGNOSTIC LOCATOR, not an
 /// `(archetype, chunk, slot)` triple: a sparse-driven walk has no chunk, so a
@@ -7466,18 +7481,25 @@ fn enumVariantIndex(ast: *const AstArena, edecl: ast_mod.EnumDecl, variant: Stri
 // ─── when → DNF of archetype-selection terms ──────────────────────
 //
 // `lowerWhen` lowers a `when` clause's structural skeleton to a boolean tree
-// of `has` literals over `arch.hasComponent` (the `PredicateNode` pool). The
-// archetype set it denotes IS that boolean function. Converting the tree to
+// of `has` literals (the `PredicateNode` pool). Converting the tree to
 // disjunctive normal form — an OR of conjunctive terms, each a set of positive
-// literals (`with`) and negative literals (`without`) — maps each term onto
-// one Tier-0 `DynamicQuery`, the rule's selection being the union of the
-// terms. DNF ≡ the original formula, so the archetype set is provably
-// identical to the earlier `evalPredicate` walk: differential parity is
+// literals (`with`) and negative literals (`without`) — maps each term onto one
+// `QueryPlan`. DNF ≡ the original formula, so the ENTITY SET is provably
+// identical to the earlier `evalPredicate` walk and differential parity is
 // preserved by construction.
+//
+// The entity set and not an archetype set: only a TABLE literal is answered by
+// `arch.hasComponent`. A sparse literal is partitioned out of the archetype
+// query and answered per entity, because a sparse component is in no archetype
+// signature — a sparse `without` handed to a `DynamicQuery` would exclude
+// nothing at all.
 
-/// One conjunctive term of a `when` DNF: components the archetype must contain
+/// One conjunctive term of a `when` DNF: components the entity must carry
 /// (`with`) and must not (`without`). Owns growable id sets during the build;
-/// the final slices are dup'd into the `DynamicQuery`.
+/// the final slices are handed to the plan builder, which dups the whole
+/// with-set and then PARTITIONS by storage mode — table ids to the
+/// `DynamicQuery`, sparse ids to the per-entity sets and to one sparse-driven
+/// form each. A sparse id never reaches the `DynamicQuery`.
 const DnfTerm = struct {
     with: std.ArrayListUnmanaged(ComponentId) = .empty,
     without: std.ArrayListUnmanaged(ComponentId) = .empty,
@@ -7578,8 +7600,10 @@ fn crossProduct(gpa: std.mem.Allocator, lhs: Dnf, rhs: Dnf) !Dnf {
     return out;
 }
 
-/// Build a rule's archetype selection: one `DynamicQuery` per satisfiable DNF
-/// term of its `when` predicate. `predicate_root == null` (no
+/// Build a rule's selection: one `QueryPlan` per satisfiable DNF term of its
+/// `when` predicate — a plan and not an archetype query, since the driver is
+/// elected here and a term whose smallest member is sparse is walked by that
+/// member's dense array. `predicate_root == null` (no
 /// structural predicate — a negative-tag-only / resource-only `when`) yields a
 /// single empty term matching every archetype, with the per-entity filters
 /// carrying the selection. Unsatisfiable terms (`has T` ∧ `not has T`) are
@@ -15189,7 +15213,10 @@ fn countEntitiesWith(world: *World, cid: ComponentId) usize {
     return total;
 }
 
-/// The first live entity carrying `cid`, or `null` if none.
+/// The first live entity carrying `cid` IN TABLE STORAGE, or `null` if none.
+/// It scans archetypes and skips any without a column for `cid`, so it can
+/// never see a `.sparse` component — which is in no archetype signature and
+/// whose rows live in its own store.
 fn firstEntityWith(world: *World, cid: ComponentId) ?CoreEntityId {
     for (world.archetypes.items) |arch| {
         if (arch.componentIndex(cid) == null) continue;

@@ -442,11 +442,13 @@ pub fn syncIn(
         // looked at.
         //
         // **THE TICK IS THE SIGNAL, and the value comparison only removes a certain
-        // false positive.** `changed_tick` is stamped by `World.getMut` and by nothing
-        // else, so it answers exactly "was this ECS component written" — an API call
-        // moving the same body never touches it. What the tick cannot tell is a
-        // `getMut` that changed nothing, which is why the value is consulted wherever
-        // the solver's own value is authoritative.
+        // false positive.** `changed_tick` answers "was this ECS component written",
+        // and `World.getMut` is the writer on THIS path — but not the only writer in
+        // the tree: `markComponentChangedDyn` and `Archetype.markChanged` are public,
+        // and a spawn stamps it too, which is what the short-circuit note below
+        // measures. What the tick cannot tell is a `getMut` that changed nothing,
+        // which is why the value is consulted wherever the solver's own value is
+        // authoritative.
         //
         // **THE VALUE COMPARISON IS SIGNIFICANT FOR EVERY BODY TYPE, and a
         // short-circuit on the kinematic case would rest on the wrong fact**

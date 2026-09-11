@@ -47,9 +47,11 @@
 //! signature is stable when it lands.
 //!
 //! Topological levels. Computed lazily on first `dispatchFrame` via
-//! Kahn's algorithm and cached per phase. The DAG's edges are
-//! frozen after the first dispatch — re-registration between
-//! frames is a programmer error and asserts in debug.
+//! Kahn's algorithm and cached per phase. Registering a system BETWEEN frames
+//! is legal: it drops the affected phase's cached levels and the next
+//! `dispatchFrame` recomputes them. Nothing freezes the DAG and nothing
+//! asserts, so do not write a caller on the assumption that a late
+//! registration is refused — it is honoured.
 //!
 //! Concurrency. Within a level, every system stages chunks into a
 //! shared `JobBuilder`. The builder's arena owns a per-system args
@@ -279,11 +281,12 @@ pub const JobBuilder = struct {
     ) !void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
-        // No job body receives a command buffer. This entry hands
-        // `args` to a body the worker pool runs, so it is one of the TWO real
-        // dispatch points; the bound lives on the TYPE
-        // (`command_buffer.refuseCommandBufferInArgs`) precisely so both reach
-        // it from their own imports rather than one of them carrying it alone.
+        // No job body receives a command buffer. This entry hands `args` to a
+        // body the worker pool runs, and it is one of FOUR such entries — the
+        // count is not a remark: a derived enumeration in the suite asserts it,
+        // so adding a fifth without its bound goes red. The bound lives on the
+        // TYPE (`command_buffer.refuseCommandBufferInArgs`) precisely so each
+        // reaches it from its own imports rather than one carrying it alone.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const Trampoline = struct {

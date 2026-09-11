@@ -427,11 +427,12 @@ pub const Registry = struct {
         return self.entries.items[id].closure;
     }
 
-    /// Whether any registered component names `id` among its DIRECT requisites.
-    /// The removal guard's question, and it is over direct requisites and not
-    /// the closure: a component is "still required" iff something that carries
-    /// it names it, and the closure of a third party does not make it required
-    /// by that third party's own dependents.
+    /// Whether `by` reaches `id` through its `@requires` CLOSURE — transitive,
+    /// not the direct list. That is the removal guard's question, and the direct
+    /// list would answer it wrongly: with `A @requires(B)` and `B @requires(C)`,
+    /// an entity carrying `A` cannot lose `C` without breaking `B` and therefore
+    /// `A`. Do NOT narrow this to `desc.requires`: the guard would then pass a
+    /// removal that leaves a requisite of a requisite missing.
     pub fn isRequiredBy(self: *const Registry, id: ComponentId, by: ComponentId) bool {
         if (by >= self.entries.items.len) return false;
         for (self.entries.items[by].closure) |t| if (t == id) return true;

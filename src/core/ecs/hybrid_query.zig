@@ -96,7 +96,11 @@ pub const Locator = union(enum) {
 
 /// Which member drives the walk.
 pub const Driver = union(enum) {
-    /// No sparse member in the with-set: archetype iteration, unchanged.
+    /// The archetype walk. Elected when the with-set names no sparse member —
+    /// and ALSO when it does, whenever the smallest-population member is a
+    /// table one. So `.table` does not mean "no sparse member", and the walk
+    /// is not the bare archetype iteration either: the sparse half of both id
+    /// sets is then tested per entity through `admits`.
     table,
     /// A sparse member drives: walk its dense array.
     sparse: ComponentId,
@@ -227,8 +231,10 @@ pub const SparseDrivenQuery = struct {
     };
 
     /// How many dense ranges the driver's population splits into, for a target
-    /// of `target` ranges. Never zero, and never more than the population: a
-    /// range is a unit of work, and an empty one is not one.
+    /// of `target` ranges. Zero iff the driver's store is absent or empty, and
+    /// otherwise never more than the population: a range is a unit of work, and
+    /// an empty one is not one. Consumers depend on the zero — `forEachDenseRange`
+    /// dispatches nothing on it — so it is an answer and not a failure.
     pub fn rangeCount(self: *const SparseDrivenQuery, world: *World, target: usize) usize {
         const store = world.sparse_stores.getConst(self.driver) orelse return 0;
         const n = store.len();

@@ -21,10 +21,11 @@ pub const EntityId = u64;
 /// bridge to distinguish a missing handle from any valid entity.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
-/// A handle into a component slot inside a dynamic archetype chunk. The
-/// interpreter resolves `entity.get(T)` / `entity.get_mut(T)` into one of
-/// these, which the bridge dereferences when the rule body reads or writes
-/// a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
+/// A handle onto a component's bytes for one entity. NOT chunk-anchored: the
+/// `where` field below is bimodal, and a `.sparse` component designates no chunk
+/// and no slot. The interpreter resolves `entity.get(T)` / `entity.get_mut(T)`
+/// into one of these, which the bridge dereferences when the rule body reads or
+/// writes a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
     component_id: u32,
     mutable: bool,

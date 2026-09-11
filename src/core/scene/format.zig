@@ -16,8 +16,11 @@
 //!      imports `weld_etch`).
 //!
 //! SoA layout contract (a correctness contract with the loader):
-//!   * Component columns are flat N-element SoA arrays (chunk-agnostic); the
-//!     loader slices them across 16 KB chunks.
+//!   * Component columns are flat N-element SoA arrays (chunk-agnostic). Where
+//!     a column LANDS is decided at spawn by the component's storage mode, not
+//!     by the loader: a `.table` column is sliced across 16 KB chunks, while a
+//!     `.sparse` one never reaches a chunk at all and its bytes go to that
+//!     component's own row buffer.
 //!   * Column order = ascending component order (`archetype.sortComponentIds`).
 //!   * Column stride = `Registry.componentSize(component)`.
 //!   * Each column start is aligned to the component alignment
@@ -288,7 +291,11 @@ pub const EntityEntry = struct {
 /// its components laid out as flat N-element SoA columns.
 pub const ArchetypeBlock = struct {
     /// Sorted-ascending component ids (`archetype.sortComponentIds`) — the
-    /// in-memory archetype identity. These are the cook's runtime `ComponentId`s;
+    /// entity's FULL declared set, with no storage filter. It is the in-memory
+    /// archetype identity only for a block naming no `.sparse` component: an
+    /// archetype signature is table-only by construction, so for any other block
+    /// this list is no archetype's identity and an id it names may never reach
+    /// one. These are the cook's runtime `ComponentId`s;
     /// the writer re-encodes them as file-local Schema Registry indices on
     /// disk (the on-disk component mask is never raw `ComponentId`s — see the
     /// component-identity note in the file header).

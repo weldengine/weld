@@ -4806,10 +4806,11 @@ pub const TypeChecker = struct {
     }
 
     /// Validate a `@storage` annotation's single argument against the storage-mode
-    /// domain. Four refusals, each with its own message because each names a
+    /// domain. Five refusals, each with its own message because each names a
     /// DIFFERENT fault: a wrong arity, a named argument where the schema declares a
-    /// positional one, a tag path outside the domain, and a bare enumeration value
-    /// written without its sigil. Anything else is a non-constant argument. The
+    /// positional one, a tag path outside the domain, a bare enumeration value
+    /// written without its sigil, and a const-evaluable argument that is not a
+    /// storage mode at all. Only the fall-through answers "non-constant". The
     /// bare-name and named-argument branches exist so the answer is not the
     /// fall-through `E0504 must be a constant`, which is false about the value and
     /// silent about the real fault.

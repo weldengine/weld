@@ -1,21 +1,32 @@
 //! Structural mutation observers.
 //!
-//! Hooks that fire during the per-system command-buffer flush, in
-//! lock-step with the four deferrable mutations:
+//! Hooks that fire during the per-system command-buffer flush. `CommandKind`
+//! carries SIX deferrable mutations and this file's flush applies all six —
+//! `set_tag` and `clear_tag` are siblings of add/remove-component, not a
+//! separate mechanism — while FIVE observer kinds exist:
 //!
 //! - `on_spawned` (global, one list)
 //! - `on_despawned` (global, one list)
 //! - `on_add[ComponentId]` (per-component, hash-keyed)
 //! - `on_remove[ComponentId]` (per-component, hash-keyed)
+//! - `on_replaced[ComponentId]` (per-component, add landing on a present `cid`)
 //!
 //! Dispatch timing relative to each command:
 //!
 //! | Command            | Pre-apply observers              | Post-apply observers       |
 //! |--------------------|----------------------------------|----------------------------|
 //! | `spawn`            | —                                | on_spawned + on_add[cid]*  |
-//! | `add_component`    | —                                | on_add[cid]                |
+//! | `add_component`    | —                                | see below                  |
 //! | `remove_component` | on_remove[cid]                   | —                          |
 //! | `despawn`          | on_remove[cid]* + on_despawned   | —                          |
+//!
+//! `add_component`'s post-apply set is not one entry and cannot be written as
+//! a cell. `addComponentDynamic` expands the `@requires` closure, so `on_add`
+//! fires for EVERY component the transaction added and not for the command's id
+//! alone — firing for the id alone left a requisite added here with no `on_add`
+//! at all. And an add landing on a component the entity ALREADY has is a
+//! replacement: it fires `on_replaced[cid]`, carrying old and new values, and
+//! no `on_add`.
 //!
 //! The pre-apply position for remove / despawn is critical: it lets
 //! `on_despawned` callbacks read the entity's components one last
@@ -133,7 +144,7 @@ pub const ComponentUnionIter = struct {
     }
 };
 
-/// Registry holding the four kinds of observer lists. Lives next to
+/// Registry holding the five kinds of observer lists. Lives next to
 /// the `World` (typically as a field) and is consulted during every
 /// command buffer flush.
 pub const ObserverRegistry = struct {
@@ -627,8 +638,10 @@ test "on_removed receives the pre-removal value" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Two components so the entity survives the remove (the source archetype
-    // must keep >= 1 component — `removeComponentDynamic` asserts len >= 2).
+    // Two components so the observer has a surviving sibling to read. NOT
+    // because one would be illegal: the empty archetype is legal, so dropping an
+    // entity's last table component is a transition to it and
+    // `removeComponentDynamic` asserts only len >= 1.
     const keep = try e3RegisterRawI32(gpa, &world, "Keep");
     const drop = try e3RegisterRawI32(gpa, &world, "Drop");
     var kv: i32 = 1;

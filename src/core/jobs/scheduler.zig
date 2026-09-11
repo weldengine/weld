@@ -9,12 +9,12 @@
 //! `[1024]chunks` layout, and it owns both sleep/wake and a dynamic
 //! `MaxChunksPerDispatch`.
 //!
-//! Wake-up. Workers used to busy-yield on `pending_count`; now they
-//! park on a `std.Io.Condition` ("work_available") when they cannot
-//! find work locally and no new generation has been published yet.
-//! The main thread broadcasts on `work_available` after every
-//! dispatch and waits on a second condition ("work_completed") until
-//! every chunk has been processed.
+//! Wake-up is ASYMMETRIC, and writing it as a pair would be wrong. Workers
+//! park on the one `std.Io.Condition` ("work_available") when they find no
+//! local work and no new generation has been published; the main thread
+//! broadcasts on it after every dispatch. There is no matching
+//! "work_completed" — the dispatcher busy-yields on `pending_count`, and the
+//! reason is recorded at the field itself.
 //!
 //! Ownership invariant preserved. Chase-Lev assumes a single
 //! owner per deque; the dispatch still has each worker push its own
@@ -141,11 +141,12 @@ pub const Scheduler = struct {
     gen_and_n: std.atomic.Value(u64) align(64) = .init(0),
 
     /// Number of chunks still in flight in the current dispatch.
-    /// Atomic so each worker can decrement without contending on
-    /// `mu` per chunk — only the worker that brings the counter to
-    /// zero takes the lock + signals `work_completed`. The
-    /// dispatcher takes `mu` once around its `cond.wait` loop so
-    /// the standard "check under lock + wait" pattern is preserved.
+    /// Atomic so each worker can decrement without contending on `mu` per
+    /// chunk. The drain signals NOTHING — the worker that brings the counter to
+    /// zero takes no lock — and the dispatcher does not wait on a condition: it
+    /// releases `mu` and busy-yields on this counter, observing the zero on its
+    /// next round. Adding a signal here would need the dispatcher to be waiting
+    /// for it, which is the design `work_available`'s doc declines.
     pending_count: std.atomic.Value(u64) align(64) = .init(0),
 
     /// Set at deinit to make workers exit cleanly. **Atomic** because the
@@ -224,11 +225,13 @@ pub const Scheduler = struct {
         return self.workers.len;
     }
 
-    /// Distribute the chunks of `query` across worker deques and wait
-    /// for completion. Sugar over `dispatchBatch` for the common
-    /// single-body case (one trampoline, one args tuple) — used by
-    /// the bench, the scheduler tests, and by `JobBuilder.addJob`
-    /// when a system has nothing else to bundle into the same level.
+    /// Distribute the chunks of `query` across worker deques and wait for
+    /// completion: one trampoline, one args tuple. It does NOT go through
+    /// `dispatchBatch` — it fills the wave buffer itself and publishes it — and
+    /// the production path does not go through IT either: `JobBuilder` stages
+    /// into its own list and dispatches the accumulated batch. Every caller in
+    /// the tree is a test, so a change here is felt by the suite before it is
+    /// felt by a frame.
     ///
     /// Returns `error.TooManyChunks` when
     /// `query.chunkCount() > workers.len * per_worker_capacity` — the

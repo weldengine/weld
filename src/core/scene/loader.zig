@@ -558,7 +558,9 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 ///      conflict-check each against the entity.
 ///   2. Reserve the extension-record capacity (fallible, no observable mutation).
 ///   3. Grouped add — the SINGLE fallible component mutation, itself atomic
-///      (`world.addComponentsDynamic`): one archetype migration, not N.
+///      (`world.addComponentsDynamic`): at most ONE archetype migration, never
+///      N — and none at all for an extension declaring only `.sparse`
+///      components, whose target signature equals the source's.
 ///   4. Record the extension (infallible) then fire `on_attach`.
 /// On any failure through step 3 the entity is left untouched (no partial
 /// extension — the defect this rewrite closes). The activation is committed

@@ -4,8 +4,10 @@
 //! generational identity store, the runtime registry, and the resource
 //! store. Two earlier storage paths — one hardcoded archetype and a
 //! list of dynamic archetypes — are collapsed into a single byte-level
-//! archetype layer (`archetype.zig`); both spawn paths and every query
-//! now resolve to one entry in `archetypes`.
+//! archetype layer (`archetype.zig`); both spawn paths resolve to one entry in
+//! `archetypes`. A QUERY no longer has to: a term driven by a sparse member
+//! holds no archetype list at all and walks that member's dense array, which is
+//! a distinct iteration type and not a second mode of `DynamicQuery`.
 //!
 //! Identity, archetype storage, and location maps are now consolidated:
 //!
@@ -1292,9 +1294,11 @@ pub const World = struct {
         // function.
     }
 
-    /// Read-only typed access to component `T` on `entity`. Returns
-    /// `null` when the entity is stale or its archetype does not
-    /// hold `T`. Does **not** mark the slot as changed.
+    /// Read-only typed access to component `T` on `entity`. Returns `null` when
+    /// the entity is stale or does not CARRY `T` — carry, not "its archetype
+    /// holds": a `.sparse` `T` is in no archetype signature by construction and
+    /// this entry still answers for it, from its own store. Does **not** mark
+    /// the slot as changed.
     pub fn get(self: *const World, comptime T: type, entity: EntityId) ?*const T {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
@@ -1311,12 +1315,14 @@ pub const World = struct {
         return @ptrCast(@alignCast(bytes.ptr));
     }
 
-    /// Mutable typed access to component `T` on `entity`. **Auto-marks**
-    /// `changed_tick[T][slot] = current_tick` and sets the slot's dirty
-    /// bit before returning the pointer — every write through this
-    /// pointer is observable by a `Changed<T>` query whose
-    /// `last_run_tick < current_tick`. Returns `null` for stale handles
-    /// or missing components.
+    /// Mutable typed access to component `T` on `entity`. **Auto-marks** the
+    /// slot's `changed_tick` at `current_tick` before returning the pointer, so
+    /// every write through it is observable by a `Changed<T>` query whose
+    /// `last_run_tick < current_tick`. The DIRTY BIT is set on the table arm
+    /// only: sparse storage carries no bitset — an invariant that file enforces
+    /// at comptime — so change detection there is per entry and never a
+    /// block-granularity skip. Returns `null` for stale handles or missing
+    /// components.
     pub fn getMut(self: *World, comptime T: type, entity: EntityId) ?*T {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
@@ -1340,8 +1346,10 @@ pub const World = struct {
     /// Dynamic (by `ComponentId`) read of `entity`'s component bytes — the
     /// runtime analogue of `get`, used by the observer dispatch.
     /// Returns the live storage slice (`componentSize(cid)` long), or `null`
-    /// when the entity is stale or its archetype lacks `cid`. Does not mark
-    /// the slot changed.
+    /// when the entity is stale or does not CARRY `cid`. It is the entry that
+    /// answers for BOTH backends, which is why the condition is carriage and
+    /// not archetype membership: a sparse `cid` is in no signature. Does not
+    /// mark the slot changed.
     pub fn componentBytes(self: *World, entity: EntityId, cid: ComponentId) ?[]u8 {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
@@ -1386,17 +1394,22 @@ pub const World = struct {
 
     // ─── Add / remove component (transition cache) ──────────
 
-    /// Insert component `T` on `entity`. Routes through the current
-    /// archetype's `TransitionCache`: the first add of `T` from this
-    /// archetype performs the signature lookup and caches the target
-    /// archetype id; subsequent adds hit the cache. Existing
-    /// components are byte-copied into the target archetype's slot;
-    /// the source slot is freed via swap-and-pop and the trailing
-    /// entity's location is updated atomically.
+    /// Insert component `T` on `entity`. For a `.table` `T` this routes through
+    /// the current archetype's `TransitionCache`: the first add of `T` from this
+    /// archetype performs the signature lookup and caches the target archetype
+    /// id; subsequent adds hit the cache. Existing components are byte-copied
+    /// into the target archetype's slot; the source slot is freed via
+    /// swap-and-pop and the trailing entity's location is updated atomically.
     ///
-    /// `error.StaleEntityHandle` is returned when the handle does not
-    /// match the identity store. Adding a component the entity already
-    /// has is a programmer error and panics in debug.
+    /// For a `.sparse` `T` NONE of that happens and the entry returns early: the
+    /// component's presence is a row in its own store, so the entity's
+    /// signature — with it its location, its chunk, and every other component's
+    /// address — is untouched.
+    ///
+    /// `error.StaleEntityHandle` is returned when the handle does not match the
+    /// identity store. Adding a component the entity already has returns
+    /// `error.DuplicateComponent` on BOTH arms — an active check and not an
+    /// assert, so it holds in ReleaseFast too.
     pub fn addComponent(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1740,10 +1753,13 @@ pub const World = struct {
         });
     }
 
-    /// Add SEVERAL components to `entity` in a SINGLE archetype migration,
-    /// expanding every `@requires` closure first. Either the whole set lands (the
-    /// entity moves once to the target archetype with every new column written) or
-    /// nothing changes: the only fallible steps — target-archetype creation,
+    /// Add SEVERAL components to `entity` in AT MOST ONE archetype migration,
+    /// expanding every `@requires` closure first. At most one and not exactly
+    /// one: when every added id is sparse the target signature equals the
+    /// source's, so the entity does not move at all and only the sparse rows are
+    /// written — reachable from `loader.activateExtension` for an extension
+    /// declaring only sparse components. Either the whole set lands (with every
+    /// new column written) or nothing changes: the only fallible steps — target-archetype creation,
     /// `entity_locations` reservation, and the destination slot allocation — all
     /// run BEFORE the first observable mutation (the source `removeSwap` +
     /// location update), and the value writes are infallible `memcpy`. This
@@ -1753,10 +1769,13 @@ pub const World = struct {
     ///
     /// `cids[i]` pairs with `values[i]` (`values[i].len == componentSize(cids[i])`,
     /// a programmer contract — asserted). `cids` length 0 is a no-op.
-    /// Precondition: every `cids[i]` must be ABSENT from `entity`'s current
-    /// archetype AND DISTINCT within `cids` — a real check (`error.DuplicateComponent`),
-    /// not an assert; a duplicate would put the id twice in the target archetype
-    /// (corruption) and mis-map values.
+    /// Precondition: every `cids[i]` must be ABSENT FROM THE ENTITY and DISTINCT
+    /// within `cids` — a real check (`error.DuplicateComponent`), not an assert;
+    /// a duplicate would put the id twice in the target archetype (corruption)
+    /// and mis-map values. From the ENTITY and not from its archetype: the
+    /// archetype answers `false` for a sparse component the entity actually
+    /// carries, so the archetype form let an already-present sparse component
+    /// through.
     pub fn addComponentsDynamic(
         self: *World,
         gpa: std.mem.Allocator,
@@ -2126,8 +2145,10 @@ pub const World = struct {
     /// `tagset_id` is the registered `TagSet` component — a `[words]u64`
     /// bitfield, one slot per tagged entity. If the entity already has
     /// `TagSet`, the bit is flipped in place (no structural change); if it
-    /// lacks one and `set` is true, `TagSet` is added (an archetype transition)
-    /// with the bit set; clearing a bit on an entity without `TagSet` is a
+    /// lacks one and `set` is true, `TagSet` is added with the bit set — an
+    /// archetype transition only if `TagSet` is a `.table` component, the add
+    /// being delegated and the sparse arm moving nothing; clearing a bit on an
+    /// entity without `TagSet` is a
     /// no-op. A stale handle is dropped silently (the entity despawned before
     /// the deferred flush). Call only at a flush point, never mid-iteration.
     pub fn applyTagMutation(
@@ -2163,10 +2184,12 @@ pub const World = struct {
         }
     }
 
-    /// Remove component `T` from `entity`. Routes through the source
-    /// archetype's `TransitionCache.remove`. The destination archetype
-    /// is the source's signature minus `cid`. Component data for the
-    /// removed type is dropped; remaining components are byte-copied.
+    /// Remove component `T` from `entity`. For a `.table` `T` this routes
+    /// through the source archetype's `TransitionCache.remove`; the destination
+    /// archetype is the source's signature minus `cid`, the removed type's data
+    /// is dropped and the remaining components are byte-copied. A `.sparse` `T`
+    /// reaches neither the cache nor a destination archetype: its row leaves its
+    /// own store and the entity stays where it is.
     pub fn removeComponent(
         self: *World,
         gpa: std.mem.Allocator,

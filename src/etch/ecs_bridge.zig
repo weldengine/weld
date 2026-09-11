@@ -117,8 +117,10 @@ pub const Bridge = struct {
 
     // ─── Component access ────────────────────────────────────────────────
 
-    /// Resolve `entity.get(T)` (or `get_mut`). Returns a `ComponentRef`
-    /// pointing at the slot in the archetype's chunk.
+    /// Resolve `entity.get(T)` (or `get_mut`). Returns a `ComponentRef` whose
+    /// arm follows the component's storage mode: `(chunk, slot)` for a `.table`
+    /// component, the ENTITY alone for a `.sparse` one, which has no chunk to
+    /// point at and is re-resolved per access.
     pub fn componentRefOf(
         world: *World,
         entity: EntityId,
@@ -203,8 +205,10 @@ pub const Bridge = struct {
     }
 
     /// Stamp `ref`'s slot as modified at `tick` — writes the `changed_tick`
-    /// sidecar + sets the dirty bit (change detection,
-    /// `engine-ecs-internals.md` §5). Called by the interpreter right after a
+    /// sidecar, and sets the dirty bit on the TABLE arm only (change detection,
+    /// `engine-ecs-internals.md` §5): sparse storage allocates no bitset, so
+    /// there the tick sidecar is the whole record and no block-granularity skip
+    /// exists. Called by the interpreter right after a
     /// `writeComponentField` when the program uses `changed` filters. This is
     /// the SAME logical point (post component write) at which the codegen emits
     /// `markChanged`, so the stamped tick is identical across backends → the

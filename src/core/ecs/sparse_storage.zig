@@ -50,10 +50,13 @@ const Tick = tick_mod.Tick;
 pub const absent: u32 = std.math.maxInt(u32);
 
 /// Errors this storage can raise. `add` on an entity already present is a
-/// programmer error and asserts rather than erroring, mirroring
-/// `World.addComponent`'s treatment of the same mistake — the add-on-present
-/// case is a REPLACEMENT, decided one layer up by the observer-dispatching
-/// apply, and a storage that silently accepted it would hide that decision.
+/// programmer error and ASSERTS rather than erroring: the add-on-present case is
+/// a REPLACEMENT, decided one layer up by the observer-dispatching apply, and a
+/// storage that silently accepted it would hide that decision. This does NOT
+/// mirror `World.addComponent`, which returns `error.DuplicateComponent` on both
+/// backends — an ACTIVE check, taken there precisely because an assert is
+/// compiled to nothing in ReleaseFast. So the guarantee here holds in Debug and
+/// ReleaseSafe only, and the caller above is what makes it hold everywhere.
 pub const SparseError = error{
     OutOfMemory,
 };

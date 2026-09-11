@@ -147,14 +147,20 @@ pub const Archetype = struct {
     transitions: TransitionCache = .{},
     /// `true` iff this archetype hosts a singleton-entity
     /// resource. Set by `resources.setResource` after spawning the
-    /// resource's entity. `Query.maybeRescan` skips singleton
-    /// archetypes so user queries never see resource entities.
+    /// resource's entity. Read at ITERATION time by `Query.maybeRescan` (the
+    /// tail rescan) and by `ComptimeQuery.next`, both of which skip the
+    /// archetype.
+    ///
+    /// It is NOT read by the initial scan `World.queryFiltered` performs when a
+    /// typed `Query` is CONSTRUCTED, so a resource already flagged at that
+    /// moment enters that query's match list. The exclusion is therefore weaker
+    /// than this flag's name suggests, and a reader must not take it for an
+    /// invariant over every query.
     is_singleton: bool = false,
 
-    /// Initialise the archetype with the given sorted component list.
-    /// Asserts the list is non-empty (an empty archetype is the
-    /// no-component archetype, reachable via `World.spawnEmpty` once
-    /// something exposes it).
+    /// Initialise the archetype with the given sorted component list. An EMPTY
+    /// list is accepted and yields the archetype of an entity whose whole set is
+    /// sparse; nothing here asserts against it, and the body says why.
     pub fn init(
         gpa: std.mem.Allocator,
         registry: *const Registry,

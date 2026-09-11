@@ -12,10 +12,14 @@ const std = @import("std");
 /// Closed error set surfaced by the Etch → Zig codegen. Each variant
 /// names a precise failure mode reachable from the lowering pass.
 pub const CodegenError = error{
-    /// A construct outside the emitted subset (`component`, `resource`, `rule`,
-    /// `when`, arithmetic expressions, `get`/`get_mut`/`has` accessors)
-    /// reached the lowering pass. Unreachable after a type-check,
-    /// but reported here as a typed error rather than a panic.
+    /// A construct the lowering pass does not emit. The emitted subset is wider
+    /// than a top-level list suggests — `component`, `resource`, `event`,
+    /// `struct`, `enum`, top-level `fn`, `rule`/`when`, arithmetic expressions
+    /// and the `get`/`get_mut`/`has` accessors — and this error is raised from
+    /// INSIDE those emitters for the shapes they decline (a generic enum, a
+    /// data-carrying variant, an impl method), so do not read it as "the
+    /// declaration kind is unknown". Unreachable after a type-check, but
+    /// reported here as a typed error rather than a panic.
     UnsupportedConstruct,
     /// A `component` declaration carries `@storage(.sparse)`.
     ///

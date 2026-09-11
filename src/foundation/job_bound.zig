@@ -22,17 +22,27 @@
 //! imports `foundation` for the float environment — and the guard becomes
 //! reachable from any tier without moving a single import edge.
 //!
-//! The walk is ONE LEVEL DEEP on pointers and recurses on optionals. `**T` and
-//! `[3]T` are refused, which is the stated limit and not an oversight.
+//! The walk follows EVERY composite — pointer, array, vector, optional, error
+//! union, and each field of a struct or union — so `**T`, `[3]T` and a marked
+//! type buried in a caller's own struct are all caught. Anything narrower is a
+//! rule applied to a subset of what it must cover, which is the shape
+//! `carriesMarkedIn` states at its own site.
 
 const std = @import("std");
 
 /// The declaration a type adds to refuse reaching a dispatched job body.
 ///
 /// Its VALUE is the reason, a `[]const u8`, so a type that refuses also says
-/// why and the compile error stays exactly as informative as one written beside
-/// a single dispatch entry. A type declaring this name with any other type is a
-/// contract breach and fails loudly where the reason is read.
+/// why. A type declaring this name with any other type is a contract breach and
+/// fails loudly where the reason is read.
+///
+/// **The reason does NOT travel as far as the refusal.** `reasonOf` below
+/// follows only pointers and optionals, while `carriesMarkedIn` enters every
+/// composite, so a marker reached through a struct, union, array or vector field
+/// refuses correctly and reports `"no reason declared"` — including
+/// `SystemContext`, whose `cmd: *CommandBuffer` field is the case the walk was
+/// widened for. Reading the two as symmetric is the mistake; widening one
+/// without the other is what produces it.
 pub const marker_decl_name = "weld_no_job_body";
 
 /// Whether `T` itself carries the marker. False for every non-container type,
@@ -44,11 +54,11 @@ pub inline fn declaresMarker(comptime T: type) bool {
     };
 }
 
-/// Whether `T` is a marked type, a pointer or slice to one, or an optional of
-/// either. One level deep on pointers, by the same design as the form this
-/// replaces: a marked type buried inside a caller's own struct is NOT caught,
-/// and that is stated rather than implied — closing it would need a recursive
-/// walk of every field of every argument, for a shape no call site has.
+/// Whether `T` reaches a marked type at all: itself, or through any number of
+/// pointers, slices, optionals, arrays, vectors, error unions, and struct or
+/// union fields. A marked type buried inside a caller's own struct IS caught —
+/// the shape is not hypothetical, `SystemContext` carries `cmd: *CommandBuffer`
+/// as a field — and the walk's own doc below carries the reason.
 /// The `comptime T: type` parameter is what makes this comptime-decidable; the
 /// body deliberately carries NO `comptime {}` block, because such a block
 /// forces every CALL into a comptime return context and a test asserting the

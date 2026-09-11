@@ -30,11 +30,14 @@
 //! The query does a **lazy archetype re-scan**. After construction it caches
 //! `last_seen_archetype_count` plus the resolved `required_ids` / `with_ids` /
 //! `without_ids` lists plus an opaque accessor to the world's archetype slice. Every
-//! external iteration entry point (`chunkCount`, `chunkAt`, `forEachChunk`,
-//! `runChunkAt`) compares `world.archetypes.items.len` against
+//! entry point that OWNS the index space (`matchCount`, `chunkCount`,
+//! `forEachChunk`) compares `world.archetypes.items.len` against
 //! `last_seen_archetype_count` and, if different, scans only the new slice
 //! `world.archetypes.items[last_seen_archetype_count..]`, applies the same filter set
-//! as construction, and appends new matches. Cost in steady-state: `usize == usize` per
+//! as construction, and appends new matches. `chunkAt` and `runChunkAt`
+//! deliberately do NOT — they index a space the caller is expected to have
+//! stabilised by calling `chunkCount` first, which is the dispatch protocol
+//! `JobBuilder` follows. Cost in steady-state: `usize == usize` per
 //! entry. No registry side, no notification mechanism on the world — pure polling at
 //! iteration time. It closes a debt accepted when command buffers made mid-frame
 //! archetype creation real.
@@ -125,9 +128,10 @@ pub fn Changed(comptime T: type) type {
 ///   list; the per-archetype `Match.column_indices` map their tuple
 ///   index to the archetype's sorted column.
 /// - `filters` — a tuple of filter spec types built from `With(T)`,
-///   `Without(T)`, and `Predicate(fn)`. The order of filters does not
-///   affect matching; the comptime parser inlined below splits them
-///   into three buckets (with-list, without-list, optional predicate).
+///   `Without(T)`, `Changed(T)` and `Predicate(fn)` — the four `FilterKind`
+///   variants. The order of filters does not affect matching; the comptime
+///   parser inlined below splits them into four buckets, the `Changed(T)` one
+///   materialising its own component-index array.
 ///
 /// The split is computed inside this function and copied into fixed
 /// arrays so the resulting struct never captures a pointer to a
@@ -280,8 +284,10 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// no heap traffic. The rescan loop itself is `O(new)` over
         /// archetype count.
         ///
-        /// Called automatically from every iteration entry point —
-        /// callers do not need to invoke it explicitly. No-op when
+        /// Called from the entry points that own the index space
+        /// (`matchCount`, `chunkCount`, `forEachChunk`), and deliberately NOT
+        /// from `chunkAt` / `runChunkAt`, which index a space the caller has
+        /// already stabilised. No-op when
         /// `archetype_view` is null (test queries built via
         /// `Self.empty()` directly).
         pub fn maybeRescan(self: *Self) void {
@@ -555,9 +561,13 @@ pub fn rescanNewArchetypes(
 /// (archetype must contain none) — reusing `archetypeMatches` and the same
 /// lazy re-scan (`rescanNewArchetypes`) as the comptime path.
 ///
-/// Composition is the caller's job: a rule's `when` clause lowers to a DNF
-/// of conjunctive terms, one `DynamicQuery` per term, and the rule's matched
-/// set is the union of the terms' `matching` lists (cf. `interp.zig`).
+/// Composition is the caller's job, and a `DynamicQuery` is only HALF of a
+/// term: the interpreter builds one hybrid plan per DNF term, and this query
+/// carries that term's TABLE ids alone. A sparse id is in no archetype
+/// signature, so it is tested per entity instead, and a term whose driver is
+/// sparse produces no archetype list at all — which is why the rule's matched
+/// set is a union of `matching` lists only while no term names a sparse
+/// component, and an entity-keyed set otherwise (cf. `interp.zig`).
 ///
 /// `matching` is in archetype-creation order (== ascending `archetype_id`),
 /// because both the initial scan and every tail rescan append in
