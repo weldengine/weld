@@ -1,4 +1,4 @@
-//! Level-B descriptor types + canonical serialization (M0.8 E4–E6).
+//! Level-B descriptor types + canonical serialization.
 //!
 //! SELF-CONTAINED BY CONTRACT: this file imports `std` only. It is compiled
 //! twice from the same source bytes — (1) imported by `weld_etch`
@@ -9,8 +9,8 @@
 //! weld_core-only import surface and the serialized-IR differential compares
 //! one canonical form produced by the same serializer on both backends.
 //!
-//! Canonical serialization form (engraved at the E4 launch, M0.8 brief
-//! journal 2026-06-10): line-oriented indented text dump, declaration order
+//! Canonical serialization form, engraved and not to be renegotiated per
+//! descriptor: line-oriented indented text dump, declaration order
 //! only (never hash order), named fields in fixed descriptor-schema order,
 //! expression leaves pre-rendered to canonical text by ONE renderer
 //! (`descriptor.zig`), LF endings, two-space indent. An internal proof tool,
@@ -78,12 +78,11 @@ pub const Routine = struct {
 /// Kind of one behavior-tree descriptor node (§8.1).
 pub const BehaviorNodeKind = enum { selector, sequence, condition, action };
 
-/// One behavior-tree node (M0.8 E4, `etch-ast-ir.md` §3.5: `Behavior {
+/// One behavior-tree node (`etch-ast-ir.md` §3.5: `Behavior {
 /// root }` tree). `when` / `payload` are canonical-rendered texts ("" when
 /// absent); `children` recurse for composites. NOTE (item-2 ruling): an
 /// action `let` binds for later actions of its composite — the binding's
-/// runtime SCOPE is pinned by Cortex Phase 1+, the descriptor carries the
-/// structure only.
+/// runtime SCOPE belongs to Cortex; the descriptor carries the structure only.
 pub const BehaviorNode = struct {
     kind: BehaviorNodeKind,
     when: []const u8,
@@ -210,10 +209,10 @@ pub const Ability = struct {
     rule: []const u8,
 };
 
-/// `theme` descriptor (`etch-ast-ir.md` §3.5: `Theme { tokens }`; M0.8 E5,
+/// `theme` descriptor (`etch-ast-ir.md` §3.5: `Theme { tokens }`;
 /// `etch-grammar.md` §10.2). `name` is the decoded string-literal name;
 /// `entries` are `key = rendered-value` pairs in declaration order (the
-/// grammar shape — E5 ruling 1, untyped `key: expression`).
+/// grammar shape — the ruling: untyped `key: expression`).
 pub const Theme = struct {
     name: []const u8,
     entries: []const ThemeEntry,
@@ -226,10 +225,10 @@ pub const ThemeEntry = struct {
 };
 
 /// `motion` descriptor (`etch-ast-ir.md` §3.5: `Motion { states, transitions }`;
-/// M0.8 E5, `etch-grammar.md` §10.3). State field values are
+/// `etch-grammar.md` §10.3). State field values are
 /// canonical-rendered; transition animators are pre-rendered to FLAT
-/// canonical text (E5 ruling 3: keyframes / easings stay at the descriptor,
-/// E6 `anim_graph` not prefigured — the descriptor stays flat).
+/// canonical text (the ruling: keyframes / easings stay at the descriptor and
+/// `anim_graph` is not prefigured — the descriptor stays flat).
 pub const Motion = struct {
     name: []const u8,
     states: []const MotionStateDesc,
@@ -257,8 +256,8 @@ pub const MotionTransitionDesc = struct {
 };
 
 /// `input_mapping` descriptor (`etch-ast-ir.md` §3.5: `InputMapping { actions,
-/// combos, contexts }`; M0.8 E5, `etch-grammar.md` §16, Level-B STRICT). The
-/// grammar shape WINS (E5 ruling 7): `context`/`priority`/`consume_input` are
+/// combos, contexts }`; `etch-grammar.md` §16, Level-B STRICT). The
+/// grammar shape WINS (the ruling): `context`/`priority`/`consume_input` are
 /// properties (rendered text, `""` if absent). No input executes.
 pub const InputMapping = struct {
     name: []const u8,
@@ -296,7 +295,7 @@ pub const InputComboDesc = struct {
 };
 
 /// `widget` descriptor (`etch-ast-ir.md` §3.5: `Widget { tree, bindings,
-/// annotations: @screen/@worldspace }`; M0.8 E5, `etch-grammar.md` §10.1). The
+/// annotations: @screen/@worldspace }`; `etch-grammar.md` §10.1). The
 /// recursive `ui_tree` is a slice of `UiNodeDesc`; `annotations` is the
 /// space-joined placement-annotation names (the meaningful Level-B bit — args
 /// are structural), `when` is the rendered optional `@worldspace` when clause.
@@ -332,10 +331,10 @@ pub const UiNodeDesc = struct {
 };
 
 /// `locale` descriptor (`etch-ast-ir.md` §3.5: `Locale { code, entries }`;
-/// M0.8 E5, `etch-grammar.md` §10.4). `name` is the locale code (IDENT, bare —
+/// `etch-grammar.md` §10.4). `name` is the locale code (IDENT, bare —
 /// the motion precedent); `entries` are quoted `key = value` string pairs in
 /// declaration order. Fingerprint generation is the extractor tool's job
-/// (E5 ruling 5: deferred — Level B is declaration + IR only).
+/// (the ruling: deferred — Level B is declaration + IR only).
 pub const Locale = struct {
     name: []const u8,
     entries: []const LocaleEntryDesc,
@@ -348,12 +347,12 @@ pub const LocaleEntryDesc = struct {
 };
 
 /// `effect` descriptor (`etch-ast-ir.md` §3.5: `Effect { params, emitters,
-/// event_handlers }`; M0.8 E6, `etch-grammar.md` §9.2, Level-B VFX-only). The
+/// event_handlers }`; `etch-grammar.md` §9.2, Level-B VFX-only). The
 /// optional `params` block is annotated fields (`name: type [= default]`);
 /// emitters carry bare `name: value` properties (STRICT, no annotation — the
 /// ability ruling-15 precedent); handlers are `on Emitter.event { body }` with
-/// the body rendered to canonical text (never executed — Ember semantics are
-/// Phase 2+). All field/property/body values flow through the shared canonical
+/// the body rendered to canonical text — never executed here, Ember owning the
+/// semantics. All field/property/body values flow through the shared canonical
 /// renderer on both backends.
 pub const Effect = struct {
     name: []const u8,
@@ -390,7 +389,7 @@ pub const EffectHandlerDesc = struct {
 };
 
 /// `audio_graph` descriptor (`etch-ast-ir.md` §3.5: `AudioGraph { nodes,
-/// connections }`; M0.8 E6, `etch-grammar.md` §12.2, Level-B DSP). Declaration-
+/// connections }`; `etch-grammar.md` §12.2, Level-B DSP). Declaration-
 /// only: the optional annotated params, the DSP node-building statements
 /// rendered "; "-joined (the rule-body precedent), and the mandatory `output`
 /// sink expression — all canonical text, never executed.
@@ -409,7 +408,7 @@ pub const AudioGraphParamDesc = struct {
 };
 
 /// `audio_score` descriptor (`etch-ast-ir.md` §3.5: `AudioScore { sections,
-/// stems, transitions }`; M0.8 E6, `etch-grammar.md` §12.1, Level-B adaptive
+/// stems, transitions }`; `etch-grammar.md` §12.1, Level-B adaptive
 /// music). STRING-named. Score properties (`tempo` + others), sections (plain
 /// `key: value` props + the `can_transition_to` section list + the `on_finish`
 /// target), and stems (a `key: value` body) — all canonical text, never played.
@@ -442,7 +441,7 @@ pub const AudioScoreStemDesc = struct {
 };
 
 /// `sequence` descriptor (`etch-ast-ir.md` §3.5: `Sequence { tracks, duration,
-/// fps }`; M0.8 E6, `etch-grammar.md` §13, Level-B cinematic). TYPE_IDENT-named.
+/// fps }`; `etch-grammar.md` §13, Level-B cinematic). TYPE_IDENT-named.
 /// Properties (`duration`/`fps`, reusing `ScorePropDesc`), the `on_start` /
 /// `on_finish` rendered emit statements, and tracks of keyframes — all canonical
 /// text, never run.
@@ -470,7 +469,7 @@ pub const SequenceKeyframeDesc = struct {
 };
 
 /// `anim_graph` descriptor (`etch-ast-ir.md` §3.5: `AnimGraph { states,
-/// transitions, layers, params }`; M0.8 E6, `etch-grammar.md` §11, Level-B
+/// transitions, layers, params }`; `etch-grammar.md` §11, Level-B
 /// animation). The grammar shape: state-nested transitions, additive-only
 /// layers. Each state's body (clip / motion_matching / chooser / warping /
 /// distance_matching / blend_space_2d) is pre-rendered to one canonical text
@@ -517,11 +516,12 @@ pub const AnimLayerPropDesc = struct {
     bones: []const []const u8,
 };
 
-/// `shader` descriptor (`etch-ast-ir.md` §3.5; M0.8 E6, `etch-grammar.md` §9.1,
+/// `shader` descriptor (`etch-ast-ir.md` §3.5; `etch-grammar.md` §9.1,
 /// Level-B render). Params (uniforms), then the optional vertex + mandatory
 /// fragment stages each pre-rendered to one canonical `head(params) -> Ret {
 /// body }` string. Bodies are shader-mode-validated (resolver §15) but never
-/// executed — SPIR-V/MSL/DXIL emission is Phase 2+. No compute stage (the ruling).
+/// executed here — nothing in this tree emits SPIR-V, MSL or DXIL. No compute
+/// stage (the ruling).
 pub const Shader = struct {
     name: []const u8,
     params: []const ShaderParamDesc,
@@ -537,7 +537,7 @@ pub const ShaderParamDesc = struct {
     default: []const u8, // "" if no `= default`
 };
 
-// ── M0.8 E7 Level C — scene / prefab descriptors (`etch-ast-ir.md` §3.5) ──
+// ── Level C — scene / prefab descriptors (`etch-ast-ir.md` §3.5) ──
 // Serialization-only IR. Expression / statement leaves are pre-rendered to
 // canonical text by the shared `descriptor.zig` renderers — the byte-identical
 // proof contract (both backends render the same leaves the same way).
@@ -567,7 +567,7 @@ pub const SceneEntityDesc = struct {
     name: []const u8,
     uuid: []const u8, // "" if absent
     parent: []const u8, // "" if absent
-    /// Active-extension prefab names (M1.0.6 E5 `extensions:` clause), by name.
+    /// Active-extension prefab names (the `extensions:` clause), by name.
     /// Empty if the clause is absent.
     extensions: []const []const u8,
     components: []const ComponentInstanceDesc,
@@ -578,7 +578,7 @@ pub const SceneInstanceDesc = struct {
     prefab: []const u8,
     name: []const u8,
     uuid: []const u8, // "" if absent
-    /// Active-extension prefab names (M1.0.6 E5 `extensions:` clause), by name.
+    /// Active-extension prefab names (the `extensions:` clause), by name.
     /// Empty if the clause is absent.
     extensions: []const []const u8,
     components: []const ComponentInstanceDesc,
@@ -751,7 +751,7 @@ pub fn writeInputMapping(m: InputMapping, gpa: std.mem.Allocator, out: *std.Arra
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `widget` descriptor (M0.8 E5): placement
+/// Canonical serialization of one `widget` descriptor: placement
 /// annotations, params, an optional when clause, then the recursive `ui_tree`
 /// (depth-indented — the behavior `writeBTNode` precedent).
 pub fn writeWidget(w: Widget, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -804,7 +804,7 @@ fn writeUiNode(node: UiNodeDesc, depth: u32, gpa: std.mem.Allocator, out: *std.A
     }
 }
 
-/// Canonical serialization of one `locale` descriptor (M0.8 E5): a bare IDENT
+/// Canonical serialization of one `locale` descriptor: a bare IDENT
 /// code name (the motion precedent), then quoted `key = value` entries in
 /// declaration order.
 pub fn writeLocale(l: Locale, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -815,7 +815,7 @@ pub fn writeLocale(l: Locale, gpa: std.mem.Allocator, out: *std.ArrayListUnmanag
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `effect` descriptor (M0.8 E6): params,
+/// Canonical serialization of one `effect` descriptor: params,
 /// then emitters with their bare properties, then `on Emitter.event` handlers.
 pub fn writeEffect(e: Effect, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "effect {s} {{\n", .{e.name});
@@ -839,7 +839,7 @@ pub fn writeEffect(e: Effect, gpa: std.mem.Allocator, out: *std.ArrayListUnmanag
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `audio_graph` descriptor (M0.8 E6): params,
+/// Canonical serialization of one `audio_graph` descriptor: params,
 /// then the "; "-joined DSP statements (if any), then the mandatory output sink.
 pub fn writeAudioGraph(ag: AudioGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "audio_graph {s} {{\n", .{ag.name});
@@ -857,7 +857,7 @@ pub fn writeAudioGraph(ag: AudioGraph, gpa: std.mem.Allocator, out: *std.ArrayLi
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `audio_score` descriptor (M0.8 E6): score
+/// Canonical serialization of one `audio_score` descriptor: score
 /// properties, then sections (plain props + can_transition_to + on_finish),
 /// then stems with their bodies.
 pub fn writeAudioScore(asc: AudioScore, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -893,7 +893,7 @@ pub fn writeAudioScore(asc: AudioScore, gpa: std.mem.Allocator, out: *std.ArrayL
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `sequence` descriptor (M0.8 E6): properties,
+/// Canonical serialization of one `sequence` descriptor: properties,
 /// on_start / on_finish emits, then tracks with their keyframes.
 pub fn writeSequence(seq: Sequence, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "sequence {s} {{\n", .{seq.name});
@@ -920,7 +920,7 @@ pub fn writeSequence(seq: Sequence, gpa: std.mem.Allocator, out: *std.ArrayListU
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `anim_graph` descriptor (M0.8 E6): params,
+/// Canonical serialization of one `anim_graph` descriptor: params,
 /// states (rendered body + transitions + on_finish), then additive-aware layers.
 pub fn writeAnimGraph(ag: AnimGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "anim_graph {s} {{\n", .{ag.name});
@@ -969,7 +969,7 @@ pub fn writeAnimGraph(ag: AnimGraph, gpa: std.mem.Allocator, out: *std.ArrayList
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `shader` descriptor (M0.8 E6): uniforms, then
+/// Canonical serialization of one `shader` descriptor: uniforms, then
 /// the optional vertex + mandatory fragment stages (each pre-rendered).
 pub fn writeShader(sh: Shader, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "shader {s} {{\n", .{sh.name});
@@ -1002,7 +1002,7 @@ fn writeComponentInstanceDesc(ci: ComponentInstanceDesc, gpa: std.mem.Allocator,
     try out.appendSlice(gpa, " }\n");
 }
 
-/// Canonical serialization of one `scene` descriptor (M0.8 E7 Level C): version,
+/// Canonical serialization of one `scene` descriptor (Level C): version,
 /// metadata, resources, then entities and instances in declaration order.
 pub fn writeScene(sc: Scene, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     try appendFmt(gpa, out, "scene \"{s}\" {{\n", .{sc.name});
@@ -1026,7 +1026,7 @@ pub fn writeScene(sc: Scene, gpa: std.mem.Allocator, out: *std.ArrayListUnmanage
     try out.appendSlice(gpa, "}\n");
 }
 
-/// Canonical serialization of one `prefab` descriptor (M0.8 E7 Level C):
+/// Canonical serialization of one `prefab` descriptor (Level C):
 /// relation header, requires, version, metadata, entities, on_attach/on_detach.
 pub fn writePrefab(pf: Prefab, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
     switch (pf.relation) {
