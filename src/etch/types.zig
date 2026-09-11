@@ -8379,7 +8379,7 @@ test "well-formed top-level const checks clean" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "duplicate test names collide within the test namespace" {
+test "duplicate test names collide within the test namespace (E0101)" {
     const gpa = std.testing.allocator;
     // Intra-namespace uniqueness: two top-level `test` blocks with the same name
     // collide → E0101 (contextual "duplicate test 'X'"). The "not exported" half
@@ -8891,7 +8891,7 @@ test "optional if let / while let binding + non-optional rejection" {
     try expectNoCode(wl.diagnostics.items, .type_mismatch);
 }
 
-test "generic fn inference + bounds" {
+test "generic fn inference + bounds (E0601/E0603/E0604)" {
     const gpa = std.testing.allocator;
 
     // `id<T>(x: T) -> T` inferred from the arg; no diagnostic, result is int.
@@ -10397,7 +10397,7 @@ test "type-checker rejects misused Optional ops" {
     try expectAnyCode(bad_default.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker rejects float map keys at both gates" {
+test "type-checker rejects float map keys at both gates (E0601)" {
     const gpa = std.testing.allocator;
     // stdlib §14 pins `K: Hash + Eq` and §4.3 excludes float/f32/f64 from
     // the builtin Hash set — a float map key is an INVALID program for both
@@ -10464,7 +10464,7 @@ test "type-checker resolves the Set builtin associated calls + method subset" {
     try std.testing.expectEqual(@as(usize, 0), user.diagnostics.items.len);
 }
 
-test "type-checker rejects float set elements at both gates" {
+test "type-checker rejects float set elements at both gates (E0601)" {
     const gpa = std.testing.allocator;
     // stdlib §15 pins `T: Hash + Eq` on set elements and §4.3 excludes
     // float/f32/f64 from the builtin Hash set — a float set element is an

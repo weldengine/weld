@@ -1,6 +1,10 @@
 # G10 — every renamed test name, enumerated.
-# Predicate: rule 1's, replicated from tools/weld_lint/rules/comment_identifiers.zig.
-# file	line	old name	new name	hand-written
+# Predicate: rule 1's, replicated from tools/weld_lint/rules/comment_identifiers.zig
+# and counter-proved against that rule's own acceptance table.
+# `hand` marks a name WRITTEN BY HAND: nine where the identifier was a sentence
+# constituent rather than a tag, and four where a diagnostic code had to be
+# restored after a predicate defect ate it.
+# file	line	old name	new name	hand
 src/core/root.zig	252	runtime-query abstraction stays dropped (D-S4-runtime-query)	runtime-query abstraction stays dropped	
 src/core/ecs/chunk.zig	324	computeLayout ACCEPTS an empty component list (M1.B/G2)	computeLayout ACCEPTS an empty component list	
 src/core/ecs/chunk.zig	343	computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars	computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries sidecars	
@@ -172,7 +176,7 @@ src/etch/lexer.zig	476	lexer routes triple-slash doc comments to doc_comment_spa
 src/etch/lexer.zig	493	lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)	lexer distinguishes //, ///, //// comment kinds	
 src/etch/lexer.zig	549	lexer recognizes the M1.0.7 import keyword (graduated from reserved)	lexer recognizes the import keyword (graduated from reserved)	
 src/etch/lexer.zig	560	lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)	lexer recognizes the scene + prefab keywords (graduated from reserved)	
-src/etch/lexer.zig	569	lexer recognizes the M0.8 E2 keywords and the `->` arrow	lexer recognizes the async/fn/throws keywords and the `->` arrow	yes
+src/etch/lexer.zig	569	lexer recognizes the M0.8 E2 keywords and the `->` arrow	lexer recognizes the async/fn/throws keywords and the `->` arrow	hand
 src/etch/lexer.zig	630	lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)	lexer lexes DD:DD as a time literal, greedy-contiguous only	
 src/etch/lexer.zig	648	lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)	lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only	
 src/etch/lexer.zig	664	lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)	lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (§1.4)	
@@ -286,7 +290,7 @@ src/etch/token.zig	388	spawn graduates to s3 keyword (M1.0.10)	spawn graduates t
 src/etch/token.zig	414	race/sync graduate to s3 keywords (M1.0.12 E2)	race/sync graduate to s3 keywords	
 src/etch/token.zig	445	every/after_unscaled graduate to s3 keywords (M1.0.13 E1)	every/after_unscaled graduate to s3 keywords	
 src/etch/types.zig	8107	scene + prefab: a well-formed scene and prefab type-check clean (M0.8 E7)	scene + prefab: a well-formed scene and prefab type-check clean	
-src/etch/types.zig	8382	duplicate test names collide within the test namespace (E0101, M1.0.15)	duplicate test names collide within the test namespace	
+src/etch/types.zig	8382	duplicate test names collide within the test namespace (E0101, M1.0.15)	duplicate test names collide within the test namespace (E0101)	hand
 src/etch/types.zig	8396	test name does not collide with a component of the same name (M1.0.15)	test name does not collide with a component of the same name	
 src/etch/types.zig	8408	test annotation applicability + args (M1.0.15)	test annotation applicability + args	
 src/etch/types.zig	8440	await in a test body is E0901 (sync context, M1.0.15)	await in a test body is E0901 (sync context)	
@@ -302,7 +306,7 @@ src/etch/types.zig	8710	enum match exhaustiveness and variant resolution (M0.8 E
 src/etch/types.zig	8764	trait dispatch, E0220 mut-self receiver, E0214 incomplete impl (M0.8 E2 block 3 tranche C)	trait dispatch, E0220 mut-self receiver, E0214 incomplete impl	
 src/etch/types.zig	8821	conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)	conditional trait impl proof E0215 (§7.3)	
 src/etch/types.zig	8855	optional if let / while let binding + non-optional rejection (M0.8 E2 block 5)	optional if let / while let binding + non-optional rejection	
-src/etch/types.zig	8894	generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)	generic fn inference + bounds	
+src/etch/types.zig	8894	generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)	generic fn inference + bounds (E0601/E0603/E0604)	hand
 src/etch/types.zig	8976	assert requires a bool condition (M0.8 assert foundation)	assert requires a bool condition (assert foundation)	
 src/etch/types.zig	9004	if requires a bool condition and unifies its branch types (M0.8 control flow)	if requires a bool condition and unifies its branch types (control flow)	
 src/etch/types.zig	9046	while requires a bool condition (M0.8 control flow)	while requires a bool condition (control flow)	
@@ -340,9 +344,9 @@ src/etch/types.zig	10265	type-checker rejects out-of-subset collection methods a
 src/etch/types.zig	10299	type-checker checks collection method argument types (M0.8 E3-C tranche 3)	type-checker checks collection method argument types	
 src/etch/types.zig	10322	type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)	type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k]	
 src/etch/types.zig	10349	type-checker rejects misused Optional ops (M0.8 E3-C tranche 4)	type-checker rejects misused Optional ops	
-src/etch/types.zig	10400	type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)	type-checker rejects float map keys at both gates	
+src/etch/types.zig	10400	type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)	type-checker rejects float map keys at both gates (E0601)	hand
 src/etch/types.zig	10433	type-checker resolves the Set builtin associated calls + method subset (M0.8 E3-C tranche 3bis)	type-checker resolves the Set builtin associated calls + method subset	
-src/etch/types.zig	10467	type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tranche 3bis)	type-checker rejects float set elements at both gates	
+src/etch/types.zig	10467	type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tranche 3bis)	type-checker rejects float set elements at both gates (E0601)	hand
 src/etch/types.zig	10490	type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis)	type-checker rejects the out-of-subset Set surface	
 src/etch/types.zig	10530	anonymous struct literal resolves in check mode, rejected without an expected type (M0.8 E3-C tranche 8)	anonymous struct literal resolves in check mode, rejected without an expected type	
 src/etch/types.zig	10617	data table: a fully valid table with spread is clean (M0.8 E4)	data table: a fully valid table with spread is clean	
@@ -383,7 +387,7 @@ src/etch/types.zig	11146	when-surface: non-bool general filter is E1211, fields-
 src/etch/types.zig	11171	when-surface: non-bool bare condition is E0200 (M0.8 E4)	when-surface: non-bool bare condition is E0200	
 src/etch/types.zig	11185	when-surface: the differential-64 shapes check clean (M0.8 E4)	when-surface: the differential-64 shapes check clean	
 src/etch/types.zig	11212	named args: binding failures are E0203, valid bindings clean (M0.8 E4 item 16)	named args: binding failures are E0203, valid bindings clean	
-src/etch/types.zig	11248	named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)	named args: closure and builtin callees are refused, not bound, E0203	yes
+src/etch/types.zig	11248	named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)	named args: closure and builtin callees are refused, not bound, E0203	hand
 src/etch/types.zig	11269	behavior: canonical tree with ambient self/target checks clean (M0.8 E4)	behavior: canonical tree with ambient self/target checks clean	
 src/etch/types.zig	11310	behavior: E1500/E1501/E1503/E1504/E1505 structural codes (M0.8 E4)	behavior: E1500/E1501/E1503/E1504/E1505 structural codes	
 src/etch/types.zig	11347	behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)	behavior: E1502 unknown intrinsic targets + E1506 recursion	
@@ -429,8 +433,8 @@ src/etch/zig_codegen/tests/lower_test.zig	768	lowers throwing closures with thei
 src/etch/zig_codegen/tests/lower_test.zig	812	throwing closure call outside a let initializer fails loud (M0.8 E3-C tranche 6)	throwing closure call outside a let initializer fails loud	
 src/modules/asset_pipeline/loader/Loader.zig	381	finish under payload-reservation OOM allocates no handle and frees the buffer (M1.1.1-HF2 C3)	finish under payload-reservation OOM allocates no handle and frees the buffer	
 src/modules/asset_pipeline/format/asset_type.zig	80	asset_type u16 round-trips for the populated M0.6 subset	asset_type u16 round-trips for the populated subset	
-src/modules/forge/forge_3d/pipeline/narrowphase/fast_paths.zig	590	fastSeed dispatch routing (E3 handles sphere and box pairs)	fastSeed dispatch routing covers every fast pair	yes
-src/modules/forge/forge_3d/tests/broadphase_test.zig	1407	queryRay at zero extent is bit-identical to M1.1.9	queryRay is queryCast at a zero extent, bit for bit	yes
+src/modules/forge/forge_3d/pipeline/narrowphase/fast_paths.zig	590	fastSeed dispatch routing (E3 handles sphere and box pairs)	fastSeed dispatch routing covers every fast pair	hand
+src/modules/forge/forge_3d/tests/broadphase_test.zig	1407	queryRay at zero extent is bit-identical to M1.1.9	queryRay is queryCast at a zero extent, bit for bit	hand
 src/modules/forge/forge_3d/tests/epa_robustness_test.zig	316	deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)	deep-boundary GJK stall classifies deep, not near-zero shallow	
 src/modules/forge/forge_3d/tests/epa_robustness_test.zig	388	separated radius-0 boxes stay separated (RD-4 band lower boundary)	separated radius-0 boxes stay separated (band lower boundary)	
 src/modules/forge/forge_3d/tests/fast_paths_test.zig	867	off-center small feature on a large body keeps four points (P2 class B, E9)	off-center small feature on a large body keeps four points (P2 class B)	
@@ -447,14 +451,14 @@ tests/etch/qualified_import_test.zig	195	public trait impl for public type is no
 tests/etch/recovery_toplevel_test.zig	75	recovery resyncs at a top-level `type` alias after a broken construct (M0.8 lockstep)	recovery resyncs at a top-level `type` alias after a broken construct (lockstep)	
 tests/etch/recovery_toplevel_test.zig	106	recovery resyncs at a top-level `fn` after a broken construct (M0.8 E2 lockstep)	recovery resyncs at a top-level `fn` after a broken construct (lockstep)	
 tests/etch/recovery_toplevel_test.zig	138	recovery resyncs at a top-level `async fn` after a broken construct (M0.8 E2 lockstep)	recovery resyncs at a top-level `async fn` after a broken construct (lockstep)	
-tests/etch/recovery_toplevel_test.zig	158	recovery keeps a rule exercising the E1 body constructs after a broken construct	recovery keeps a rule exercising the whole body-construct set after a broken construct	yes
+tests/etch/recovery_toplevel_test.zig	158	recovery keeps a rule exercising the E1 body constructs after a broken construct	recovery keeps a rule exercising the whole body-construct set after a broken construct	hand
 tests/etch/storage_mode_test.zig	476	G8: the planner elects SPARSE, and the effect applies exactly once per matching entity	the planner elects SPARSE, and the effect applies exactly once per matching entity	
 tests/etch/storage_mode_test.zig	578	G9: the skip counter resets per tick even with NO `changed` filter	the skip counter resets per tick even with NO `changed` filter	
 tests/etch/time_literal_test.zig	16	TIME_LITERAL in expression position: parses as time_lit + type-checks as Time (M0.8 E7)	TIME_LITERAL in expression position: parses as time_lit + type-checks as Time	
 tests/integration/vertical_slice_test.zig	89	vertical slice cross-file scene/prefab validation (E2-B)	vertical slice cross-file scene/prefab validation	
 tests/integration/vertical_slice_test.zig	111	vertical slice asset: PNG import → cook → .texture.bin (M0.6)	vertical slice asset: PNG import → cook → .texture.bin	
 tests/integration/vertical_slice_test.zig	133	vertical slice input: SPACE toggles pause, gating the sim (M0.3)	vertical slice input: SPACE toggles pause, gating the sim	
-tests/integration/vertical_slice_test.zig	162	vertical slice IPC: ModifyComponent over M0.7 applies to the live world (C0.8)	vertical slice IPC: ModifyComponent over the transport applies to the live world (C0.8)	yes
+tests/integration/vertical_slice_test.zig	162	vertical slice IPC: ModifyComponent over M0.7 applies to the live world (C0.8)	vertical slice IPC: ModifyComponent over the transport applies to the live world (C0.8)	hand
 tests/ecs/hybrid_query_test.zig	320	G7: the ECS protocol stays at 1, over an ENUMERATED surface	the ECS protocol stays at 1, over an ENUMERATED surface	
 tests/ecs/hybrid_query_test.zig	450	G8: the dense split covers the population exactly once, evenly	the dense split covers the population exactly once, evenly	
 tests/ecs/hybrid_query_test.zig	490	G8: a target above the population yields one range per entity, never an empty one	a target above the population yields one range per entity, never an empty one	
@@ -471,8 +475,8 @@ tests/ecs/requires_test.zig	205	G9/2d: the closure applies identically to a SPAR
 tests/ecs/requires_test.zig	230	G9/3: removing the REQUIRER removes nothing else	removing the REQUIRER removes nothing else	
 tests/ecs/requires_test.zig	250	G9/4: removing a still-required requisite is SKIPPED and SIGNALLED	removing a still-required requisite is SKIPPED and SIGNALLED	
 tests/ecs/requires_test.zig	281	G9/5: a GROUPED removal of the requisite with its dependents is allowed	a GROUPED removal of the requisite with its dependents is allowed	
-tests/ipc/handshake.zig	180	GPU_SHARED_FB capability defaults to 0 in S6	GPU_SHARED_FB capability defaults to 0	yes
-tests/physics/transform_sync_test.zig	847	no component write reaches the solver: the inward direction is M1.1.15.2's	no component write reaches the solver: the inward direction is not wired	yes
+tests/ipc/handshake.zig	180	GPU_SHARED_FB capability defaults to 0 in S6	GPU_SHARED_FB capability defaults to 0	hand
+tests/physics/transform_sync_test.zig	847	no component write reaches the solver: the inward direction is M1.1.15.2's	no component write reaches the solver: the inward direction is not wired	hand
 tests/scene/crossref_test.zig	134	G6: a cross-ref resolves into a SPARSE component's row	a cross-ref resolves into a SPARSE component's row	
 tests/scene/crossref_test.zig	200	G6: @storage(.sparse) changes NOTHING in the cooked bytes	@storage(.sparse) changes NOTHING in the cooked bytes	
 tests/scene/crossref_test.zig	227	G6: the Etch-cooked scene loads under EITHER host registration	the Etch-cooked scene loads under EITHER host registration	
@@ -487,4 +491,4 @@ tests/scene/load_resources_test.zig	81	loader rejects a resource collection fiel
 tests/scene/load_roundtrip_test.zig	313	G6: a cooked scene loads a SPARSE component into its own store	a cooked scene loads a SPARSE component into its own store	
 tests/scene/load_roundtrip_test.zig	350	G6: the SAME cooked bytes give the same values under either mode	the SAME cooked bytes give the same values under either mode	
 tests/scene/load_roundtrip_test.zig	394	G6: two blocks whose TABLE subset coincides land in one archetype	two blocks whose TABLE subset coincides land in one archetype	
-tools/bindgen/core/resolver.zig	42	resolveImports is a no-op skeleton in M0.2	resolveImports is a no-op skeleton	yes
+tools/bindgen/core/resolver.zig	42	resolveImports is a no-op skeleton in M0.2	resolveImports is a no-op skeleton	hand
