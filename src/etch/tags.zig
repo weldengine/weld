@@ -247,7 +247,6 @@ pub const TagTable = struct {
             try emitDiag(diagnostics, gpa, .tag_bitfield_overflow, .{ .byte_start = 0, .byte_end = 0 }, "tag bitfield overflow: {d} tags declared, bound is {d} (consolidate tags: the bound is not settable from a project today)", .{ table.leaf_count, max_tags });
         }
 
-        // Materialise the persistent path → entry map from the numbered nodes.
         for (nodes.items) |n| {
             try table.map.put(gpa, n.path, .{ .is_leaf = n.is_leaf, .bit_index = n.bit_index });
         }
