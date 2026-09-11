@@ -1,4 +1,4 @@
-//! M1.1.15.1 / gate C — acceptance for `Forge3DModule` and for the `step` failure contract.
+//! Acceptance for `Forge3DModule` and for the `step` failure contract.
 //!
 //! Two subjects, and they are not the same claim. The FIRST is the SHAPE of the Tier 1
 //! surface: no allocator on any entry, `void` where the frozen interface says `void`, an
@@ -84,13 +84,11 @@ const Fixture = struct {
 /// than derived from `@typeInfo`'s declaration list, so that an entry DISAPPEARING is a
 /// failure here instead of a silently shorter walk.
 ///
-/// **THIRTY-TWO, the whole frozen surface, since M1.1.15.2 G5a.**
-/// `engine-tier-interfaces.md` §12 puts the total at 32 `assertFn`, of which 29 exclude
-/// `init`, `deinit` and `step`. At M1.1.15.1 this list held twenty-eight and asserted the
-/// ABSENCE of `createJoint` and `destroyJoint`, whose parameter types no file declared;
-/// G5a mints those types, and `getTriggerOverlaps` and `setJointMotor` joined the frozen
-/// surface at §12 versions 0.12 and 0.14. The absence assertions are gone with the absence
-/// — see the milestone brief, where the removal is declared.
+/// **THIRTY-TWO, the whole frozen surface.** `engine-tier-interfaces.md` §12 puts the
+/// total at 32 `assertFn`, of which 29 exclude `init`, `deinit` and `step`;
+/// `getTriggerOverlaps` and `setJointMotor` joined it at §12 versions 0.12 and 0.14.
+/// This list asserts PRESENCE only. Do NOT add an assertion of ABSENCE here: it outlives
+/// the absence it describes and then guards nothing.
 const frozen_entries = [_][]const u8{
     "init",                  "deinit",             "step",
     "addBody",               "removeBody",         "setBodyTransform",
@@ -111,7 +109,7 @@ const frozen_entries = [_][]const u8{
 const void_pose_entries = [_][]const u8{ "setBodyTransform", "moveKinematic", "setCharacterPosition" };
 
 /// The four entries that fill a caller slice, and that `engine-tier-interfaces.md` §1 types
-/// `anyerror!u32` since M1.1.15.1. They share ONE staging path which allocates the moment the
+/// `anyerror!u32`. They share ONE staging path which allocates the moment the
 /// caller's slice exceeds the stack buffer, so an entry among them without a channel returns,
 /// under exhaustion, a truncated success indistinguishable from a complete answer.
 const fallible_query_entries = [_][]const u8{ "raycastAll", "overlapShape", "overlapAabb", "pointQuery" };
@@ -124,9 +122,9 @@ test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
     const frozen_total: usize = 32; // `engine-tier-interfaces.md` §12
     try testing.expectEqual(frozen_total, frozen_entries.len);
 
-    // THE PRESENCE IS ASSERTED, and it replaces the absence M1.1.15.1 asserted here. The
-    // seven types are what make the three joint entries presentable at all, so they are
-    // checked alongside the entries rather than assumed by them.
+    // THE PRESENCE IS ASSERTED, never the absence: the seven types are what make the three
+    // joint entries presentable at all, so they are checked alongside the entries rather
+    // than assumed by them.
     try testing.expect(module.joint_entries_present);
     inline for ([_][]const u8{
         "JointId",     "JointType",  "JointLimits",     "JointMotorMode",
@@ -170,9 +168,9 @@ test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
 test "the four multi-result query entries carry an error channel" {
     // THE STRONGEST FORM AVAILABLE, and it complements rather than repeats the runtime probe
     // below: a starved-allocator test shows that an entry DID report on one call; this shows
-    // it CANNOT fail to. Three of these four were bare `u32` and survived two rounds of
-    // external review under the circular argument that the signature did not permit
-    // reporting — an argument the unfrozen interface refutes by existing.
+    // it CANNOT fail to. Do NOT let one of these four back to a bare `u32` on the argument
+    // that its signature does not permit reporting: the signature is what this milestone
+    // changes, so that argument assumes its own conclusion.
     inline for (fallible_query_entries) |name| {
         const info = @typeInfo(@TypeOf(@field(Forge3DModule, name))).@"fn";
         try testing.expect(@typeInfo(info.return_type.?) == .error_union);
@@ -192,8 +190,8 @@ test "the frozen void entries are void, and resizeCharacter is not" {
         try testing.expectEqual(void, info.return_type.?);
     }
 
-    // The control, and it is named in the brief for this exact reason: `resizeCharacter`
-    // CREATES a capsule, an allocation with nothing to do with the moved log, so it cannot
+    // THE CONTROL: `resizeCharacter` CREATES a capsule, an allocation with nothing to do
+    // with the moved log, so it cannot
     // join the three however the broadphase is bounded.
     const rc = @typeInfo(@TypeOf(Forge3DModule.resizeCharacter)).@"fn";
     try testing.expect(@typeInfo(rc.return_type.?) == .error_union);
@@ -245,7 +243,7 @@ test "the adapter owns the allocator across a body lifecycle" {
     m.destroyShape(shape);
 }
 
-// --- the step failure contract (RD-3) ----------------------------------------
+// --- the step failure contract ------------------------------------------------
 
 /// An allocator that fails the n-th allocation attempt **once** and then passes everything
 /// through.
@@ -515,8 +513,8 @@ test "a failed step propagates, and the ECS publication does not run after it" {
 
 // --- the surface's BEHAVIOUR -------------------------------------------------
 //
-// **THE HALF THAT WAS MISSING, AND ITS ABSENCE IS THE CAUSE OF F1 AND F2.** Everything
-// above asserts that the twenty-eight entries EXIST and have the declared shape. Not one of
+// **A SIGNATURE WALK IS HALF A SURFACE, AND THE OTHER HALF IS WHERE THE DEFECTS LIVE.**
+// Everything above asserts that the entries EXIST and have the declared shape. Not one of
 // them asserts what an entry ANSWERS. Two defects lived in exactly that gap: `entitiesOf`
 // projected bodies onto entities without deduplicating, which
 // `engine-physics-queries.md` §1.11.14 makes MANDATORY at the projecting tier, and a
@@ -640,8 +638,8 @@ test "no entry caps its answer below the caller's slice" {
     const by_box = try s.m.overlapAabb(av3(-2, -2, -2), av3(900, 2, 2), .{}, &out);
     try testing.expectEqual(n_bodies, by_box);
 
-    // THE PROBE IS CUBIC ON PURPOSE, and the first version of this test was not.
-    // A 1000 x 2 x 2 box is a 500:1 aspect ratio, which is past the ~30:1 the GJK path is
+    // THE PROBE IS CUBIC ON PURPOSE. Do NOT stretch it: a 1000 x 2 x 2 box is a 500:1
+    // aspect ratio, which is past the ~30:1 the GJK path is
     // documented reliable to for radius-0 box cores. Measured, same 400 bodies and the same
     // query with only the probe's shape changed: 500:1 answers 265, 1:1 answers 400. That is
     // the known narrowphase limit and NOT the staging under test, so the probe is chosen to
@@ -664,12 +662,11 @@ test "no entry caps its answer below the caller's slice" {
 
 // --- the class sweep ---------------------------------------------------------
 //
-// **F1 AND F2 ARE NOT TWO DEFECTS, THEY ARE THE FIRST TWO OF NINETEEN.** Classified by
-// reading the file rather than by grepping it, the twenty-eight entries stood at 9
-// behaviour-asserted, 8 called with their answer never asserted, and 11 never called at
-// all. Fixing the two named instances and stopping would have left seventeen entries whose
-// only guarantee is that they compile — which is how the two named ones got through in the
-// first place. The tests below take the remaining surface to behaviour.
+// **A NAMED DEFECT ON THIS SURFACE IS NEVER ONE DEFECT.** Classified by reading the file
+// rather than by grepping it, most entries were once called with their answer never
+// asserted, or never called at all. Fixing the named instances and stopping leaves the
+// rest with no guarantee but that they compile — which is how the named ones got through
+// in the first place. The tests below take the whole surface to behaviour.
 //
 // What stays deliberately un-asserted is named at each site, so a reader can see the
 // residual instead of inferring coverage from the absence of a gap.
@@ -721,8 +718,8 @@ test "the read-back mutators move what they claim to move" {
 }
 
 test "addForce is a force and not an impulse, and destroyShape really destroys" {
-    // G2. Both entries were CALLED by the lifecycle test and neither effect was ever
-    // observed. An oracle that only proves the call did not crash is a smoke test wearing a
+    // Both entries are CALLED by the lifecycle test and neither effect is observed there.
+    // An oracle that only proves the call did not crash is a smoke test wearing a
     // behaviour test's name.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
@@ -734,14 +731,14 @@ test "addForce is a force and not an impulse, and destroyShape really destroys" 
     // further. A ratio near ONE would mean the entry is applying an impulse; a ratio near
     // zero would mean it is applying nothing.
     //
-    // **THE BAND IS DELIBERATE AND THE EXACT VALUE IS NOT ASSERTED.** A first version of this
-    // oracle predicted 1/dt = 60 from single-step Euler and MEASURED 95.99, because `step`
-    // runs four TGS Soft substeps: over `h = dt/4` the force accumulates
-    // `x = F*h^2/m * (1+2+3+4) = 0.625*F*dt^2/m` while the impulse gives `x = F*dt/m`, so the
-    // ratio is `1.6/dt = 96`. The derivation matches the measurement exactly — and pinning 96
-    // in an ADAPTER test would pin the solver's substep cadence, which is not this file's
-    // subject and would break it for a reason unrelated to the adapter. The band is what
-    // discriminates the two entries and nothing more, which is the right scope.
+    // **THE BAND IS DELIBERATE. Do NOT pin the exact value.** Single-step Euler predicts
+    // 1/dt = 60 and the measurement is 95.99, because `step` runs four TGS Soft substeps:
+    // over `h = dt/4` the force accumulates `x = F*h^2/m * (1+2+3+4) = 0.625*F*dt^2/m`
+    // while the impulse gives `x = F*dt/m`, so the ratio is `1.6/dt = 96` and the
+    // derivation matches the measurement exactly. Pinning 96 in an ADAPTER test pins the
+    // solver's substep cadence, which is not this file's subject and breaks it for a
+    // reason unrelated to the adapter. The band discriminates the two entries and nothing
+    // more, which is the right scope.
     const forced = try s.m.addBody(.{
         .entity = .{ .index = 10, .generation = 0 },
         .body_type = .dynamic,
@@ -798,7 +795,7 @@ test "the four single-result query entries answer about the scene" {
     const q = api.RaycastQuery{ .origin = av3(-5, 0, 0), .direction = av3(1, 0, 0), .max_distance = 100 };
 
     // raycast — never called before. Asserted on the ENTITY and on the DISTANCE, because a
-    // projection defect of the F1 family would show up in the first and a scalar-crossing
+    // projection defect would show up in the first and a scalar-crossing
     // defect in the second. The box spans [4.5, 5.5], so the near face is at 9.5 from -5.
     const hit = s.m.raycast(q) orelse return error.ExpectedHit;
     try testing.expectEqual(@as(u32, 11), hit.entity.index);
@@ -897,10 +894,10 @@ test "pointQuery does not cap either, and deduplicates at the same time" {
 }
 
 test "under an exhausted allocator all four multi-result entries REPORT" {
-    // I2, and it replaces an oracle that pinned the wrong contract. Three of the four were
-    // frozen bare `u32`, so this test used to assert that they DEGRADED to a correct prefix
-    // while `overlapShape` alone reported — a difference of shape on one staging path, one
-    // failure, four entries. `engine-tier-interfaces.md` §1 now types all four
+    // ALL FOUR REPORT, and an oracle asserting that three DEGRADE to a correct prefix while
+    // `overlapShape` alone reports would pin the wrong contract — a difference of shape on
+    // one staging path, one failure, four entries. `engine-tier-interfaces.md` §1 types
+    // all four
     // `anyerror!u32`: §0's prohibition is the entry that ALLOCATES AND HAS NO CHANNEL, and a
     // `u32` truncating in silence is that entry under a different return type.
     const gpa = testing.allocator;
@@ -952,10 +949,10 @@ test "under an exhausted allocator all four multi-result entries REPORT" {
     m2.gpa = healthy; // teardown must not run against a refusing allocator
 }
 test "moveKinematic derives a velocity where setBodyTransform teleports" {
-    // G2, and the oracle it replaces did NOT discriminate. `moveKinematic` DERIVES both
+    // THE ORACLE MUST DISCRIMINATE, not merely observe. `moveKinematic` DERIVES both
     // velocities from a target pose over `dt` while `setBodyTransform` teleports and derives
-    // nothing — that split is the contract — and an implementation that quietly teleported
-    // reached the same pose and passed.
+    // nothing — that split is the contract — and an implementation that quietly teleports
+    // reaches the same pose, so a pose oracle passes it.
     //
     // MEASURED before this oracle was written: after one step both forms sit at 4.0000, and
     // after a SECOND step both are STILL at 4.0000. So the derived velocity is not readable
@@ -1021,14 +1018,14 @@ test "moveKinematic derives a velocity where setBodyTransform teleports" {
 test "three more oracles that discriminate rather than merely observe" {
     // Found by re-counting the class with the RIGHT predicate — not "is the entry called"
     // and not even "is its effect observed", but "does its oracle tell it apart from a
-    // plausible NEIGHBOURING entry". Three entries failed that predicate while passing the
-    // weaker one, which is the same shape as the F1/F2 family one level up.
+    // plausible NEIGHBOURING entry". Three entries fail that predicate while passing the
+    // weaker one — the same shape as the projection defects one level up.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
 
     // init — its allocator half is covered by the leak check, but nothing observed the WORLD
-    // it opens. An `init` that stored a zero gravity passed every other test in this file,
+    // it opens. An `init` that stores a zero gravity passes every other test in this file,
     // because they either use static bodies or set `gravity_factor = 0`.
     const falling = try s.m.addBody(.{
         .entity = .{ .index = 30, .generation = 0 },
@@ -1040,10 +1037,10 @@ test "three more oracles that discriminate rather than merely observe" {
     try s.m.step(fixed_dt);
     try testing.expect((try s.m.getBodyTransform(falling)).position.toArray()[1] < 100);
 
-    // setLinearVelocity — SETS, where addImpulse ADDS, and with unit mass the two were
+    // setLinearVelocity — SETS, where addImpulse ADDS, and with unit mass the two are
     // indistinguishable in the read-back test above: both leave the body at velocity v. The
-    // discriminating sequence is to impulse FIRST and then set: an entry that added would
-    // leave 11 m/s, one that sets leaves 1.
+    // discriminating sequence is to impulse FIRST and then set: an entry that adds leaves
+    // 11 m/s, one that sets leaves 1.
     const rider = try s.m.addBody(.{
         .entity = .{ .index = 31, .generation = 0 },
         .body_type = .dynamic,
@@ -1059,8 +1056,8 @@ test "three more oracles that discriminate rather than merely observe" {
     try testing.expect(travelled > 0); // not a no-op
     try testing.expect(travelled < 10 * fixed_dt); // and it REPLACED rather than added
 
-    // resizeCharacter — its `true` was asserted and its EFFECT never was, so an entry that
-    // answered `true` and resized nothing passed. The presence body's world box is the
+    // resizeCharacter — asserting its `true` and never its EFFECT passes an entry that
+    // answers `true` and resizes nothing. The presence body's world box is the
     // observable: a probe at head height finds the tall character and must not find the
     // short one.
     const hero = try s.m.createCharacter(.{
@@ -1111,11 +1108,12 @@ test "pointQuery tests the SOLID where overlapAabb tests the box" {
 }
 
 test "the public path answers under truncation, and the guard stays silent" {
-    // K1, and this test exists to attest a LIMIT rather than a guarantee.
+    // THIS TEST ATTESTS A LIMIT, never a guarantee.
     //
-    // Five successive formulations promised something about the run — never wrong, then no
-    // duplicate, then duplicate-free AND ordered, then true unless the premise broke during
-    // the run. All were too wide for one structural reason: `dedupEntities` does not see the
+    // Do NOT promise anything about the RUN — not "never wrong", not "no duplicate", not
+    // "duplicate-free and ordered", not "true unless the premise broke during the run".
+    // Every such form is too wide for one structural reason: `dedupEntities` does not see
+    // the
     // run, it sees the window it is handed. With `out.len == 2` and an owner sequence
     // `[3, 5, 1]`, the first pass receives `[3, 5]`, finds it ordered — because it IS — fills
     // the slice and returns before `want` ever doubles. The `1` never enters an observed
@@ -1188,7 +1186,7 @@ test "the guard refuses what it OBSERVES broken, and that detection is windowed"
     try testing.expectEqual(before, s.m.unordered_projections);
 }
 
-// --- M1.1.15.2 G5a — the entries this gate adds -------------------------------
+// --- the entries the joint family adds ----------------------------------------
 
 test "getBodyTransform separates a stale handle from a body at the origin" {
     const gpa = testing.allocator;
@@ -1196,8 +1194,8 @@ test "getBodyTransform separates a stale handle from a body at the origin" {
     defer s.deinit(gpa);
 
     // THE DEFECT THE ERROR CHANNEL CLOSES, made visible by the pair. A body AT the
-    // origin answers the identity pose; a body that was removed answers an error. Before
-    // M1.1.15.2 both answered the identity pose and the two were indistinguishable — which
+    // origin answers the identity pose; a body that was removed answers an error. Without
+    // that channel both answer the identity pose and the two are indistinguishable — which
     // is why one body here sits exactly at the origin rather than somewhere convenient.
     const at_origin = try s.place(1, 0);
     const removed = try s.place(2, 5);
@@ -1274,9 +1272,8 @@ test "the three joint entries are presentable and fail loud" {
         },
     }));
     try testing.expectError(error.JointsNotImplemented, s.m.setJointMotor(0, null));
-    // `destroyJoint` is `void` by the frozen signature and cannot report; it is a no-op
-    // because no id can exist for it to destroy, every path that could mint one having
-    // failed first. Called so the entry is exercised rather than only declared.
+    // Called so the entry is EXERCISED rather than only declared. Why it is a no-op here
+    // is stated once, on the adapter's own `destroyJoint`.
     s.m.destroyJoint(0);
 
     // The descriptor's own defaults are the spec's, checked on the fields a caller is
@@ -1296,12 +1293,11 @@ test "the three joint entries are presentable and fail loud" {
         try testing.expect(!std.mem.eql(u8, f.name, "off"));
     }
 
-    // FOUR scalars per MOTOR, never per axis. **TWO ceilings since 0.15, and the
-    // structural pin survives the correction rather than being replaced by it**: naming
-    // two ceilings by axis NATURE is not naming them per axis. A single `max_force`
-    // could not govern `six_dof`, which drives three linear and three angular axes at
-    // once — a scalar cannot be in newtons and in newton-metres together — and that is
-    // the variant the exclusion mattered for.
+    // FOUR scalars per MOTOR, never per axis. **TWO ceilings, by axis NATURE and not per
+    // axis** (§12 version 0.15) — which is why the structural pin below counts fields
+    // rather than naming them. A single `max_force` could not govern `six_dof`, which
+    // drives three linear and three angular axes at once — a scalar cannot be in newtons
+    // and in newton-metres together — and that is the variant the exclusion matters for.
     inline for ([_][]const u8{ "max_linear_force", "max_angular_torque", "frequency_hz", "damping_ratio" }) |name| {
         try testing.expectEqual(f32, @FieldType(api.JointMotor, name));
     }
@@ -1325,7 +1321,7 @@ test "the three joint entries are presentable and fail loud" {
     try testing.expect(@typeInfo(@FieldType(api.JointTarget, "six_dof")).@"struct".fields.len > 0);
 }
 
-// --- M1.1.15.2 G7 — the freeze -----------------------------------------------
+// --- the freeze ---------------------------------------------------------------
 
 const iface = @import("weld_interfaces_physics");
 
@@ -1347,20 +1343,19 @@ test "Forge3DModule satisfies the frozen surface guard" {
     try testing.expectEqual(frozen_entries.len, iface.frozen_entry_count);
     try testing.expectEqual(coverage.len, iface.frozen_non_lifecycle_count);
 
-    // THE SURFACE IS FROZEN, and the attestation of ABSENCE this file carried until
-    // G7 is now an attestation of PRESENCE.
+    // THE SURFACE IS FROZEN, and this is the attestation of PRESENCE.
     try testing.expect(@hasDecl(iface, "WELD_PHYSICS_PROTOCOL_VERSION"));
     try testing.expectEqual(@as(u32, 1), iface.WELD_PHYSICS_PROTOCOL_VERSION);
 
     // **WHAT VERSION 1 FREEZES IS THE CORRECTED SURFACE, and the three corrections are
-    // confronted with the version HERE rather than only where each was made.** G7 ran
-    // once before the external review and froze a surface carrying three defects: a
-    // wrapper that delegated nothing, `getTriggerOverlaps` refusing the empty slice a
+    // confronted with the version HERE rather than only where each was made.** A freeze
+    // can be taken over a surface that still carries defects, and this one nearly was:
+    // a wrapper delegating nothing, `getTriggerOverlaps` refusing the empty slice a
     // caller uses to ask for the count, and a `JointMotor` whose single `max_force`
-    // could not be both newtons and newton-metres for `six_dof`. Each is now pinned by
-    // its own test — but a pin that lives only beside its correction says nothing about
-    // the VERSION, and the version is the promise: undoing one of the three without
-    // bumping the constant is precisely the move the freeze exists to forbid.
+    // could not be both newtons and newton-metres for `six_dof`. Each is pinned by its
+    // own test — but a pin that lives only beside its correction says nothing about the
+    // VERSION, and the version is the promise: undoing one of the three without bumping
+    // the constant is precisely the move the freeze exists to forbid.
     //
     // Restated at their smallest here, so the freeze itself reddens.
     try testing.expectEqual(@as(usize, 5), @typeInfo(api.JointMotor).@"struct".fields.len);
@@ -1374,14 +1369,14 @@ test "Forge3DModule satisfies the frozen surface guard" {
     );
 }
 
-// --- M1.1.15.2 G8 — the corrections of the external review ---------------------
+// --- the corrections the freeze must not undo ---------------------------------
 
 test "the wrapper DELEGATES every entry, and delegation reaches the implementation" {
-    // **F1.** `engine-tier-interfaces.md` §1 declares one function per entry on the
-    // returned type; until G8 it returned `struct { impl: Impl }` and nothing else — a
-    // type that validated an implementation and exposed none of it. The G7 test could
-    // not see that, having asserted only that the field exists, which is why the
-    // assertion below is on the DECLARATIONS and the one after it on the EFFECT.
+    // `engine-tier-interfaces.md` §1 declares one function per entry on the returned
+    // type. Returning `struct { impl: Impl }` and nothing else gives a type that
+    // validates an implementation and exposes none of it, and a freeze test asserting
+    // only that the field exists cannot see that — which is why the assertion below is
+    // on the DECLARATIONS and the one after it on the EFFECT.
     const Wrapped = iface.PhysicsModule(Forge3DModule);
     inline for (frozen_entries) |name| {
         if (!@hasDecl(Wrapped, name)) std.debug.print("NOT DELEGATED: {s}\n", .{name});
@@ -1423,11 +1418,10 @@ test "the wrapper DELEGATES every entry, and delegation reaches the implementati
 }
 
 test "getTriggerOverlaps answers the required count on an empty slice" {
-    // **F6.** §12: "`error.BufferTooSmall` quand l'ensemble ne tient pas, avec le compte
-    // requis obtenable en passant une tranche vide". The first half was transcribed at
-    // G5a and the second was not, so an empty slice — a caller ASKING how big a buffer
-    // must be — got the refusal instead of the answer, leaving it with the question it
-    // came with.
+    // §12: "`error.BufferTooSmall` quand l'ensemble ne tient pas, avec le compte requis
+    // obtenable en passant une tranche vide". BOTH halves or neither: transcribing only
+    // the refusal makes an empty slice — a caller ASKING how big a buffer must be — get
+    // the refusal instead of the answer, leaving it with the question it came with.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
@@ -1464,7 +1458,7 @@ test "getTriggerOverlaps answers the required count on an empty slice" {
     try testing.expectEqual(@as(u32, 0), try empty_scene.m.getTriggerOverlaps(&none));
 }
 
-// --- M1.1.15.2 G6b — the coverage proof ---------------------------------------
+// --- the coverage proof -------------------------------------------------------
 
 /// One row of the coverage map: an entry, the test that DISCRIMINATES it, and
 /// the NEIGHBOUR it is told apart from.
@@ -1592,10 +1586,9 @@ test "setAngularVelocity turns about the axis it was given" {
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
 
-    // THE GAP M1.1.15.1 NAMED AND LEFT: its oracle asserted that the orientation
-    // CHANGED, not which axis — so an entry spinning about a fixed axis whatever it
-    // was asked passed it. Two bodies, same everything, different axis, is what
-    // tells them apart.
+    // AN ORIENTATION ORACLE IS NOT AN AXIS ORACLE: asserting that the orientation
+    // CHANGED passes an entry that spins about a fixed axis whatever it is asked. Two
+    // bodies, same everything, different axis, is what tells them apart.
     const about_y = try s.m.addBody(.{
         .entity = .{ .index = 1, .generation = 0 },
         .body_type = .dynamic,
@@ -1620,10 +1613,10 @@ test "setAngularVelocity turns about the axis it was given" {
     const ry = (try s.m.getBodyTransform(about_y)).rotation.toArray();
     const rx = (try s.m.getBodyTransform(about_x)).rotation.toArray();
 
-    // Each turned, which is what the old oracle asserted...
+    // Each turned, which is all a weaker oracle asserts...
     try testing.expect(!std.mem.eql(f32, &ry, &[_]f32{ 0, 0, 0, 1 }));
     try testing.expect(!std.mem.eql(f32, &rx, &[_]f32{ 0, 0, 0, 1 }));
-    // ...and they turned DIFFERENTLY, which is what it could not. An entry ignoring
+    // ...and they turned DIFFERENTLY, which is what it cannot see. An entry ignoring
     // the axis produces the same quaternion for both.
     try testing.expect(!std.mem.eql(f32, &ry, &rx));
 
@@ -1641,10 +1634,9 @@ test "overlapShape tests the SHAPE where overlapAabb tests its box" {
     var s = try Scene.init(gpa);
     defer s.deinit(gpa);
 
-    // THE SECOND GAP THE AUDIT FOUND. `overlapShape` was asserted for deduplication
-    // and for the absence of a cap, and never for the probe's GEOMETRY mattering —
-    // so an implementation testing the probe's bounding box would have passed every
-    // assertion the file carried.
+    // THE GEOMETRY OF THE PROBE MUST MATTER. Asserting `overlapShape` for deduplication
+    // and for the absence of a cap, and never for the probe's GEOMETRY, passes an
+    // implementation that tests the probe's bounding box instead.
     //
     // A unit box at the origin spans [-0.5, 0.5]. A radius-0.5 sphere centred at
     // (0.9, 0.9, 0) has a bounding box of [0.4, 1.4] on both axes, which OVERLAPS

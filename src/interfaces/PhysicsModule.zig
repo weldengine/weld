@@ -33,10 +33,9 @@
 //! `hasCapability` rides along and is NOT a thirty-third entry: it answers `false` for an
 //! implementation declaring none, which is why it is absent from the assert block.
 //!
-//! What DOES land here is the thing the freeze cannot wait for: the contract of the three
-//! body pose and velocity entries, which lived in `forge/api/types.zig` as a day-1 mirror
-//! and named this file as its destination. It is MOVED and not copied — two copies of a
-//! contract are two things that can disagree, which is the whole subject of the contract.
+//! The contract of the three body pose and velocity entries lands HERE and not in
+//! `forge/api/types.zig`, which points at this file. The reason is written at the block
+//! below, where the three are declared.
 //!
 //! **The scalar.** `engine-tier-interfaces.md` §1 states that the positions and poses of
 //! this section are written at the WORLD scalar and are not literally `f32` — reading them
@@ -107,8 +106,8 @@ pub const SetAngularVelocity = fn (BodyId, WorldVec3) void;
 // partition, the warm-start cache, the sensor pass and the two the substep loop reaches.
 // A reservation seam closes exactly one of them, step 10's proxy update; the other seven
 // grow structures whose size follows the scene, and no up-front reservation bounds them
-// without bounding the scene. A `void` signature would have only
-// two exits, both refused: swallow the failure and return a tick whose result is wrong
+// without bounding the scene. A `void` signature would have only two exits, both
+// refused: swallow the failure and return a tick whose result is wrong
 // without saying so, or panic and turn memory pressure into a process abort.
 //
 // **THE FAILURE CONTRACT — the tick is NOT atomic and does not become atomic.** This is the
@@ -591,9 +590,9 @@ test "the header's claim and this test are one thing, checked against the file" 
 }
 
 test "the guard block has the size it declares, and every entry it guards is delegated" {
-    // **THE HOLE THIS CLOSES WAS MEASURED, not suspected.** Deleting one `assertFn`
-    // line from the block left the tree green at 2029 of 2029: `frozen_entry_count`
-    // declared a size and nothing ever put it in front of the block. Every other
+    // **THE HOLE THIS CLOSES IS REAL, not suspected.** Delete one `assertFn` line from
+    // the block and the tree stays green without this test: `frozen_entry_count`
+    // declares a size and nothing else puts it in front of the block. Every other
     // assertion in this file and in `forge_module_test.zig` reads the CONSTANT or the
     // adapter's own declarations, both of which survive an entry silently leaving the
     // guard.

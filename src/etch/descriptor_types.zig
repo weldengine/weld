@@ -9,9 +9,9 @@
 //! weld_core-only import surface and the serialized-IR differential compares
 //! one canonical form produced by the same serializer on both backends.
 //!
-//! Canonical serialization form, engraved and not to be renegotiated per
-//! descriptor: line-oriented indented text dump, declaration order
-//! only (never hash order), named fields in fixed descriptor-schema order,
+//! Canonical serialization form, engraved and not to be renegotiated per descriptor:
+//! line-oriented indented text dump, declaration order only (never hash order), named
+//! fields in fixed descriptor-schema order,
 //! expression leaves pre-rendered to canonical text by ONE renderer
 //! (`descriptor.zig`), LF endings, two-space indent. An internal proof tool,
 //! not a public file format.
