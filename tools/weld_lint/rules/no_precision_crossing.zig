@@ -2,16 +2,16 @@
 //! nowhere else in the perimeter this rule governs.
 //!
 //! `engine-physics-queries.md` §1.11.8 states that the world/solver precision boundary is
-//! unique and is crossed by ONE named conversion point, and by it alone. The forge module
-//! once carried four private helpers of identical semantics under two names — `widen`,
-//! `convVec3` twice, `convQuat` — and two of the three vector copies had already diverged:
-//! one short-circuited when the two scalars coincided and the others did not. They now all
-//! route through `forge/api/precision.zig`.
+//! unique and is crossed by ONE named conversion point, and by it alone. Every crossing in
+//! the forge routes through `forge/api/precision.zig`. Do NOT write a second private
+//! helper beside it: two copies of one conversion diverge, and the shape they diverge into
+//! is a short-circuit when the two scalars coincide — correct at the default precision and
+//! silently wrong at the other.
 //!
-//! **WHY THE RULE EXISTS AT ALL, rather than the unification alone.** The four sites were
-//! collapsed in one pass and nothing would stop the fifth. That is the same argument
-//! `no_float_reduce` makes about its thirteenth site, and it is the reason a rule written
-//! down without a check is an intention.
+//! **WHY THE RULE EXISTS AT ALL, rather than the unification alone.** A unification is a
+//! pass over the sites that exist, and nothing stops the next one. That is the same
+//! argument `no_float_reduce` makes, and it is the reason a rule written down without a
+//! check is an intention.
 //!
 //! **WHAT IS FLAGGED, and the asymmetry is the whole design.** `@floatCast` — the narrowing
 //! direction, solver → world. The widening direction has NO token to flag: `f32` coerces to
@@ -290,21 +290,19 @@ fn governs(file: []const u8) bool {
 /// absolute and a relative spelling of the same file agree, and SEPARATOR-INSENSITIVELY so a
 /// POSIX-spelled declaration matches the `\\`-spelled path the runner passes on Windows.
 ///
-/// The first version compared with `std.mem.endsWith` against a POSIX-spelled entry, which on
-/// Windows can never match: the escape would silently stop exempting, the site would be
-/// reported as an undeclared marker, and the tree would go red on one platform only. The
-/// awareness already existed one function below — `isTest` handles `\\tests\\` beside
-/// `/tests/` — and this one had lost it.
+/// Do NOT compare with `std.mem.endsWith` against a POSIX-spelled entry: on Windows it can
+/// never match, so the escape silently stops exempting, the site is reported as an
+/// undeclared marker, and the tree goes red on one platform only. `isTest` one function
+/// below handles `\\tests\\` beside `/tests/` for the same reason.
 fn declaredIndexFor(file: []const u8) ?usize {
     return declaredIndexIn(&declared_escapes, file);
 }
 
 /// The lookup itself, over an explicit list. Split for the same reason as `reportStale`: the
 /// tree's list is EMPTY, so this function never iterates and a test driving `declaredIndexFor`
-/// could not tell a separator-aware match from a POSIX-only one. Measured — the first
-/// counter-factual written for the separator fix reverted the comparison here and failed no
-/// test at all, because the only test on it drove `endsWithPath` directly and proved the
-/// helper correct without proving the call site used it.
+/// could not tell a separator-aware match from a POSIX-only one. Do NOT cover this through
+/// `endsWithPath` alone: that proves the helper correct without proving the call site uses
+/// it, and a counter-factual reverting the comparison here then fails no test at all.
 fn declaredIndexIn(declared: []const DeclaredEscape, file: []const u8) ?usize {
     for (declared, 0..) |e, i| {
         if (endsWithPath(file, e.file)) return i;

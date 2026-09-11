@@ -3,8 +3,8 @@
 //! Two subcommands wire into `build.zig`:
 //!   - `lint [path]...`         — walk the given paths (default
 //!     `src/ bench/ tests/ tools/`, including the linter's own
-//!     sources so it stays exemplary) and apply rules 1–6. Exits
-//!     non-zero if any rule fires.
+//!     sources so it stays exemplary) and apply every rule in
+//!     `rules/`. Exits non-zero if any rule fires.
 //!   - `commit-msg <file>`      — validate the title of the commit
 //!     message at `file` against the Conventional Commits subset
 //!     enforced by Weld. Exits non-zero on the first violation.
@@ -139,11 +139,11 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
             "comment rules: {d} subtree(s) not read yet by the conservation pass, so a clean run above covers the rest only:\n",
             .{comment_scan.pending.len},
         );
-        // MEASURED, AND IT REFUTES WHAT THIS BLOCK WAS FIRST WRITTEN TO CLAIM:
-        // the build runner suppresses this step's captured stdout on success, so
-        // "printed on every run" is false under `zig build lint`. What is true:
-        // it prints when the step FAILS, when the binary is run directly, and on
-        // the `comment-coverage` step, which exists for exactly that reason.
+        // Do NOT claim this prints on every run: the build runner suppresses a
+        // step's captured stdout on success, so under `zig build lint` it does
+        // not. What is true: it prints when the step FAILS, when the binary is
+        // run directly, and on the `comment-coverage` step, which exists for
+        // exactly that reason.
         // Each entry is CONFRONTED with the files this run walked. An entry that
         // matches nothing is stale — the subtree was renamed or removed — and a
         // stale entry silences a rule over a path nobody is watching, which is the

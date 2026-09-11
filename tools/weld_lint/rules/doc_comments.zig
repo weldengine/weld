@@ -5,32 +5,24 @@
 //! required independently of the conservation criterion that arbitrates internal
 //! comments: its reader is the caller, and the caller does not run the test.
 //!
-//! **PERIMETER — every file the linter walks, written out here rather than
-//! inherited.** The rule has no path logic and takes whatever `runLint` hands
-//! it: `src`, `bench`, `tests` and `tools`. That is deliberate and wider than
-//! the comment rules beside it, which stop at three subtrees. A public
-//! declaration in a test file has callers too — the other test files of its
-//! module — so the contract its `///` carries has a reader there as well.
+//! **PERIMETER.** The rule has no path logic and takes whatever `runLint` hands
+//! it, `tests` included — wider than the comment rules beside it, which
+//! `comment_scan.isCovered` narrows. Do NOT add a `tests` exclusion by symmetry
+//! with them: a public declaration in a test file has callers, the other test
+//! files of its module, so the contract its `///` carries has a reader there.
 //!
-//! **THE ORPHAN, and what is detectable.** Measured against the compiler: a
-//! `///` before a container doc comment, at the end of a container body, or at
-//! end of file are all compile errors, so the compiler owns them and this rule
-//! would only duplicate the diagnostic. What the compiler ACCEPTS silently is a
-//! `///` run separated from its declaration by a blank line or by a plain
-//! comment — the doc re-attaches across the gap. That gap is the structural
-//! precursor of the damaging form: insert a declaration into it and the doc
-//! silently documents the newcomer while the declaration it was written for goes
-//! undocumented. This rule flags the gap.
+//! **THE ORPHAN.** A `///` before a container doc comment, at the end of a
+//! container body, or at end of file is a compile error, so the compiler owns
+//! those three and this rule would only duplicate the diagnostic. What the
+//! compiler ACCEPTS silently is a `///` run separated from its declaration by a
+//! blank line or by a plain comment — the doc re-attaches across the gap. That
+//! gap is the structural precursor of the damaging form: insert a declaration
+//! into it and the doc silently documents the newcomer while the declaration it
+//! was written for goes undocumented. This rule flags the gap.
 //!
-//! What it does NOT reach is the damaging form itself once it has happened. A
+//! What it does NOT reach is the damaging form itself once it has happened: a
 //! doc whose text belongs to a different declaration is a question about
-//! CONTENT, and no token or tree predicate expresses it; the tree holds
-//! instances of it, found by comparing paragraphs against an earlier revision,
-//! and they are content work rather than lint findings.
-//!
-//! **THE THREE SUPPRESSIONS, each with its reason, and the fourth that is the
-//! scope itself.** An exemption whose reason is that some document asked for it
-//! is not justified, and an unjustified one is removed rather than inherited.
+//! CONTENT, and no token or tree predicate expresses it.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -54,11 +46,11 @@ pub fn check(
     defer tree.deinit(arena);
 
     // SUPPRESSION 2 — an unparseable file, whole, and this rule is BLIND there
-    // rather than deferring to something else. The reason once written here was
-    // that the compiler surfaces the parse error during the normal build; that
-    // holds for the 402 files inside a build closure and not for the 164 the
-    // walker reaches which no target elaborates. What is true without asserting
-    // anything about another mechanism: no tree, no declarations, no findings.
+    // rather than deferring to something else. Do NOT write that the compiler
+    // surfaces the parse error during the normal build: the walker reaches files
+    // no target elaborates, and for those it does not. What is true without
+    // asserting anything about another mechanism: no tree, no declarations, no
+    // findings.
     if (tree.errors.len > 0) return;
 
     const token_tags = tree.tokens.items(.tag);
@@ -101,10 +93,9 @@ pub fn check(
     }
 
     // SUPPRESSION 4 — the scope. `rootDecls` is root level only, so every
-    // container-internal `pub` is exempt by omission rather than by decision. The
-    // tree holds 512 such declarations; making them blocking belongs to the
-    // milestone that re-types those contracts anyway, and a completeness rule
-    // over 512 sites produces filler.
+    // container-internal `pub` is exempt by OMISSION and not by decision.
+    // Widening the walk makes hundreds of sites blocking at once; that is a
+    // re-typing of those contracts and not a lint change.
 }
 
 /// Whether the trivia between a doc token and the declaration is a single line break.
@@ -196,8 +187,8 @@ test "a documented public declaration passes and an undocumented one fires" {
 }
 
 test "a blank line between a doc and its declaration is an orphan" {
-    // Measured against the compiler: it ACCEPTS this and re-attaches the doc, so
-    // nothing else in the build reports it.
+    // The compiler ACCEPTS this and re-attaches the doc, so nothing else in the
+    // build reports it.
     try std.testing.expectEqual(@as(usize, 1), try countDetached("/// what it is\n\npub const x = 1;\n"));
 }
 
@@ -209,8 +200,8 @@ test "indentation after the line break is not a gap" {
     // NON-VACUITY for the gap test: whitespace after the line break is ordinary
     // indentation, and treating it as a gap would fire on almost every file. The
     // container is documented so the only finding this fixture can produce is an
-    // orphan — and the assertion is on the orphan count, not on the total, which
-    // is what the first version of this test got wrong.
+    // orphan. Assert on the orphan count and NOT on the total: a total makes this
+    // pass for the wrong reason.
     try std.testing.expectEqual(@as(usize, 0), try countDetached(
         "/// the container\npub const S = struct {\n    /// what it is\n    pub const x = 1;\n};\n",
     ));
@@ -232,11 +223,10 @@ test "the orphan message names the doc and not the declaration" {
 }
 
 test "an inserted declaration between a doc and its intended owner is NOT reported" {
-    // THE BOUND, asserted rather than left to a reader. The compiler accepts this
-    // and the doc re-attaches to the newcomer; whether the text belongs to it is a
-    // question about content that no tree predicate expresses. Two findings come
-    // out — both declarations are undocumented in the eyes of a token test — and
-    // neither is the orphan.
+    // THE BOUND of the header's last paragraph, asserted rather than left to a
+    // reader. The compiler accepts this and the doc re-attaches to the newcomer.
+    // Two findings come out — both declarations are undocumented in the eyes of a
+    // token test — and neither is the orphan.
     const src: [:0]const u8 =
         \\/// documents the second one
         \\pub const inserted = 0;

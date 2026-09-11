@@ -1,18 +1,16 @@
 //! Dead-test analysis — every in-tree file holding a `test` block must belong to
 //! the analysis closure of some test target, or be a DECLARED exclusion.
 //!
-//! WHY A STATIC CLOSURE AND NOT A COUNT. Two other methods were tried and both
-//! failed: a per-binary enumeration blew a ten-minute budget, and pairing the
-//! ordered spec list against the summary tree produced 79 mismatches because that
-//! tree does not follow declaration order. What the class needs is a check that
-//! builds nothing and runs nothing.
+//! WHY A STATIC CLOSURE AND NOT A COUNT. Do NOT replace it with a per-binary
+//! enumeration, which blows the job's time budget, nor with a pairing of the ordered
+//! spec list against the summary tree, which mismatches because that tree does not
+//! follow declaration order. What the class needs is a check that builds nothing and
+//! runs nothing.
 //!
 //! WHY IT MATTERS MORE THAN SLEEPING ASSERTIONS. An uncollected `test` block is
 //! never ANALYSED, so the code it instantiates gets no elaboration and no
-//! type-checking. That one mechanism explains both areas the sweep found:
-//! `zig_codegen/cache.zig` stopped compiling when `std.fs.cwd()` was removed at
-//! Zig 0.16 and nobody learned it, and a use-after-return in the render graph
-//! survived ten milestones. A dead test switches off COMPILATION coverage.
+//! type-checking. A dead test switches off COMPILATION coverage, which is how a
+//! file can stop compiling, or hold a use-after-return, with nothing to say so.
 //!
 //! THE EDGE CRITERION, and it is a criterion rather than a heuristic — it was
 //! derived from measurements that discriminate all four observed cases:
@@ -36,61 +34,56 @@
 //! missed edge yields a false DEAD, noisy and visible; an invented edge yields a
 //! false ALIVE, which says green. The hostile fixtures exist to refuse the second.
 //!
-//! THE CLOSURE IS PER ROOT, AND THAT IS THE CORRECTION THAT MADE IT BELIEVABLE.
-//! A single closure over all roots at once let a reference made from ANOTHER
-//! module license an edge inside this one: `tests/etch/keyword_ident_test.zig`
-//! names `codegen_zig`, but it reaches it through the `weld_etch` MODULE, and
-//! Zig collects no tests across a module boundary. Thirty-seven blocks that no
-//! binary runs were counted live. Per root, growth is monotone — files only
-//! enter, a reference counts only from a file already admitted HERE, and no two
-//! files vouch for each other into the closure.
+//! THE CLOSURE IS PER ROOT. A single closure over all roots at once lets a reference
+//! made from ANOTHER module license an edge inside this one:
+//! `tests/etch/keyword_ident_test.zig` names `codegen_zig`, but it reaches it through
+//! the `weld_etch` MODULE, and Zig collects no tests across a module boundary. Per
+//! root, growth is monotone — files only enter, a reference counts only from a file
+//! already admitted HERE, and no two files vouch for each other into the closure.
 //!
 //! `live_tests` is therefore the sum over roots, a MULTISET count: a file two
 //! targets reach is counted twice, because the suite compiles and runs it twice.
 //! That is what makes it comparable to the suite's own collected total. The dead
 //! verdict is taken against the UNION — a file is dead only if NO root reaches it.
 //!
-//! TWO FALSE-ALIVE DEFECTS, both found by measurement and neither by the
-//! fixtures, recorded because each is a class rather than an instance:
+//! TWO FALSE-ALIVE TRAPS, each a class rather than an instance, and neither
+//! reachable by the fixtures alone:
 //!
-//!   1. A BINDING COUNTED AS A REFERENCE TO ITSELF. The cross-file search
+//!   1. A BINDING MUST NOT COUNT AS A REFERENCE TO ITSELF. The cross-file search
 //!      re-reads every live file including the one under analysis, passing
 //!      `osrc.len` as the binding-line start — a sentinel meaning "nothing to
-//!      skip". With the binding file as its own candidate the exclusion window
-//!      was empty, so `pub const codegen_zig = @import(…)` was its own
-//!      justification. The same-file test was POINTER IDENTITY, which never
-//!      fired: the production reader allocates a fresh buffer per call. It is now
-//!      by PATH. The fixture harness returned the map's own stable pointer, so
-//!      the bug was unreachable there — a harness differing from production in
-//!      the exact property under test agrees with the code instead of judging it.
-//!      It now allocates per call too.
-//!   2. A COMMENTED-OUT IMPORT READ AS AN IMPORT. `src/etch/root.zig` shows the
-//!      guard that WOULD wire the subtree, `//   _ = @import("zig_codegen/root.zig");`,
-//!      and the head of that line ends in `_ =`. The reference search had been
-//!      taught to skip comments earlier in this milestone, for the same file and
-//!      nearly the same sentence; the IMPORT site had not. A correction applied
-//!      at one site and not at its twin is the motif this repository sweeps.
+//!      skip". With the binding file as its own candidate the exclusion window is
+//!      empty and `pub const codegen_zig = @import(…)` becomes its own
+//!      justification. The same-file test is by PATH: do NOT make it pointer
+//!      identity, which never fires, the production reader allocating a fresh
+//!      buffer per call. The fixture harness allocates per call for the same
+//!      reason — a harness differing from production in the exact property under
+//!      test agrees with the code instead of judging it.
+//!   2. A COMMENTED-OUT IMPORT MUST NOT READ AS AN IMPORT. `src/etch/root.zig`
+//!      shows the guard that WOULD wire the subtree,
+//!      `//   _ = @import("zig_codegen/root.zig");`, and the head of that line
+//!      ends in `_ =`. BOTH searches skip comments, the reference one and the
+//!      import site: teaching one and not its twin is the motif this repository
+//!      sweeps.
 //!
 //! ROOT DISCOVERY IS ANCHORED ON THE WIRING, not on path syntax: a table is read
 //! only when a `for` loop over it calls `addTest`, and a module's
-//! `root_source_file` is read only inside that declaration's own initializer.
-//! The previous forms invented roots out of `zig fmt` arguments and out of the
-//! next declaration's literal. See `loopRoots` and `modulePath`.
+//! `root_source_file` is read only inside that declaration's own initializer. Do NOT
+//! anchor it on the shape of a path literal: that shape also matches a `zig fmt`
+//! argument and the next declaration's literal, and an invented root is the
+//! false-ALIVE direction. See `loopRoots` and `modulePath`.
 //!
 //! THE BILATERAL CONTROL IS WHAT AUTHORISES THIS GUARD, and it is not the fixture
 //! count. Two independent computations must land on one number: this closure, and
 //! `zig build test --summary all`. Too permissive overshoots, too strict
-//! undershoots, and only equality excludes both — a property twenty-odd passing
-//! fixtures did not have, and which caught a real defect on its first
-//! application. Every term of the difference is declared IN ADVANCE in
-//! `uncollected`: a predicted gap is a result, the same gap unannounced reads as
-//! a broken guard. The three platforms reconcile exactly, and reaching that
-//! refuted the hypothesis the gap was first written on: `conv.zig` is collected
-//! on NO platform, not just macOS.
+//! undershoots, and only equality excludes both — a property no number of passing
+//! fixtures has. Every term of the difference is declared IN ADVANCE in
+//! `uncollected`: a predicted gap is a result, the same gap unannounced reads as a
+//! broken guard, and each entry carries its own measurement there.
 //!
 //! Only relative `.zig` imports are followed. A module-name import (`std`,
 //! `weld_core`) crosses into a module that owns its own test target and its own
-//! closure — and, as the per-root correction above shows, its own references.
+//! closure — and, as the per-root rule above shows, its own references.
 
 const std = @import("std");
 
@@ -318,11 +311,11 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
             continue;
         }
         // The DISCRIMINANT IS THE REFERENCE, never the syntax of the import.
-        // An earlier version refused `@import("f.zig").decl` outright, which is
-        // wrong: `pub const Graph = @import("graph.zig").Graph;` DOES pull that
-        // file's tests once `Graph` is referenced, while `triangleIsFlat` pulled
-        // nothing because nothing referenced it. Same syntax, opposite outcomes,
-        // one rule. So the syntax test folds INTO the reference test rather than
+        // Do NOT refuse `@import("f.zig").decl` outright:
+        // `pub const Graph = @import("graph.zig").Graph;` DOES pull that file's
+        // tests once `Graph` is referenced, while the same shape bound to a name
+        // nothing references pulls nothing. Same syntax, opposite outcomes, one
+        // rule. So the syntax test folds INTO the reference test rather than
         // preceding it, and an unbound inline access simply has no name to check.
         const name = bindingName(head) orelse continue;
         if (isReferenced(source, name, line_start)) try out.append(gpa, .{ .rel = rel });
@@ -332,22 +325,20 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
 /// Edges of `source` where a bound name counts as referenced if it appears in
 /// `source` itself OR in any OTHER file of `live` — and in nothing else.
 ///
-/// `path` is the file `source` was read from, and it is what identifies it.
-/// THE SAME-FILE TEST USED TO BE POINTER IDENTITY, `osrc.ptr == source.ptr`,
-/// AND IT NEVER FIRED IN PRODUCTION: the real reader allocates a fresh buffer on
-/// every call, so re-reading the very file under analysis yielded a different
-/// pointer. The cross-file loop then scanned the binding file as though it were
-/// another file, with `binding_line_start = osrc.len` — a sentinel meaning "no
-/// binding line to skip" — so the empty exclusion window let the binding line
-/// count as a reference to itself. `pub const codegen_zig = @import(…)` was
-/// therefore its own justification, and all of `src/etch/zig_codegen/` entered
-/// the closure: a SELF-REFERENTIAL rule, and the false-ALIVE direction.
+/// `path` is the file `source` was read from, and it is what identifies it. THE
+/// SAME-FILE TEST IS BY PATH: do NOT make it pointer identity, `osrc.ptr ==
+/// source.ptr`, which never fires in production, the real reader allocating a
+/// fresh buffer on every call. The cross-file loop would then scan the binding
+/// file as though it were another file, with `binding_line_start = osrc.len` — a
+/// sentinel meaning "no binding line to skip" — so the empty exclusion window
+/// lets the binding line count as a reference to itself and
+/// `pub const codegen_zig = @import(…)` becomes its own justification: a
+/// SELF-REFERENTIAL rule, and the false-ALIVE direction.
 ///
-/// The fixtures could not see it. `Fixture.read` returns a stable pointer out of
-/// a hash map, so pointer identity worked there and only there — a harness that
-/// differed from production in the exact property under test. It now returns a
-/// fresh copy per call, like the real reader, and the comparison is by PATH,
-/// which is correct whatever the reader does with memory.
+/// The fixtures cannot see it unless `Fixture.read` allocates per call like the
+/// real reader. A harness returning a stable pointer out of a hash map makes
+/// pointer identity work there and only there — differing from production in the
+/// exact property under test.
 fn edgesOfLive(
     gpa: std.mem.Allocator,
     path: []const u8,
@@ -735,10 +726,10 @@ test "an inline field access whose name is NEVER referenced is DEAD" {
     // `pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;` and
     // referenced by nothing, so its two tests never ran.
     //
-    // This fixture ORIGINALLY bound `f` and then wrote `pub const g = f;`, which
-    // references it — it therefore encoded the refuted rule (syntax decides) and
-    // passed only because the implementation shared the mistake. Corrected here
-    // with its sibling below, which is the same syntax with the reference present.
+    // Do NOT give this fixture a reference to `f`, such as `pub const g = f;`: it
+    // would encode the refuted rule — syntax decides — and pass by sharing the
+    // implementation's mistake. The sibling below is the same syntax WITH the
+    // reference, and the pair is what discriminates.
     const gpa = std.testing.allocator;
     var r = try runFixture(gpa, &.{
         .{ "m/root.zig", "pub const f = @import(\"leaf.zig\").f;\n" },
@@ -827,27 +818,24 @@ pub fn rootsFromBuildZig(gpa: std.mem.Allocator, build_zig: []const u8) !std.Arr
 
 /// Extracts the literal paths of every table a loop turns into test targets.
 ///
-/// A target whose `root_source_file` is a LOOP VARIABLE has no literal to find
-/// at its `createModule`, so the first version of this file missed every one of
-/// them and reported all of `tests/` dead. The paths are still literals — in the
-/// table the loop walks — so they are read from there.
+/// A target whose `root_source_file` is a LOOP VARIABLE has no literal to find at
+/// its `createModule`, so reading only those literals misses every one of them and
+/// reports all of `tests/` dead. The paths are still literals — in the table the
+/// loop walks — so they are read from there.
 ///
-/// ANCHORED ON THE WIRING, NOT ON THE PATH SYNTAX, and that is a correction.
-/// Two shapes used to be matched independently — `.path = "…"` entries anywhere,
-/// and any line that was a quoted `.zig` path followed by a comma — neither of
-/// them scoped to a table that feeds `addTest`. The second INVENTED THREE ROOTS:
-/// the arguments of a `zig fmt` `addSystemCommand`, which are exactly that shape
-/// and are not test roots at all. An invented root is the false-ALIVE direction
-/// — it silently admits whatever it reaches and can mask a genuinely dead file —
-/// and the fixture that was supposed to catch it only checked that a
-/// `b.path("…")` call was NOT matched, a different syntax, so it agreed with the
-/// implementation's blind spot instead of testing it.
+/// ANCHORED ON THE WIRING, NOT ON THE PATH SYNTAX. Do NOT match path shapes
+/// independently — `.path = "…"` entries anywhere, or any line that is a quoted
+/// `.zig` path followed by a comma — since neither is scoped to a table that feeds
+/// `addTest` and the second also describes the arguments of a `zig fmt`
+/// `addSystemCommand`. An invented root is the false-ALIVE direction: it silently
+/// admits whatever it reaches and can mask a genuinely dead file. A fixture
+/// checking only that a `b.path("…")` call is NOT matched tests a different
+/// syntax and agrees with that blind spot instead of judging it.
 ///
-/// The rule is now one rule and it asks the question that actually decides:
-/// does a `for` loop over this table build test targets? A table is read only
-/// when its name is the subject of a loop whose body calls `addTest`, and then
-/// EVERY quoted `.zig` literal inside the table is taken — which covers both
-/// shapes without naming either.
+/// ONE rule, asking the question that decides: does a `for` loop over this table
+/// build test targets? A table is read only when its name is the subject of a loop
+/// whose body calls `addTest`, and then EVERY quoted `.zig` literal inside the
+/// table is taken — which covers both shapes without naming either.
 pub fn loopRoots(gpa: std.mem.Allocator, build_zig: []const u8, out: *std.ArrayList([]const u8)) !void {
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, build_zig, i, "for (")) |at| {
@@ -1008,10 +996,10 @@ test "a literal root_source_file in the declaration's own initializer IS taken" 
 }
 
 test "a root whose path is a loop variable is still discovered" {
-    // DEFECT 1, pinned. The first version read only literal `root_source_file`
-    // arguments, so every target built by the `test_specs` loop was invisible and
-    // all of `tests/` reported dead. The paths ARE literals — in the table the
-    // loop walks — and that is where they are read from.
+    // TRAP 1 of the header, pinned. Reading only literal `root_source_file`
+    // arguments makes every target built by the `test_specs` loop invisible and
+    // reports all of `tests/` dead. The paths ARE literals — in the table the loop
+    // walks — and that is where they are read from.
     const gpa = std.testing.allocator;
     const src =
         \\const test_specs = [_]Spec{
@@ -1035,7 +1023,7 @@ test "a root whose path is a loop variable is still discovered" {
 }
 
 test "an inline field access whose name IS referenced is ALIVE" {
-    // DEFECT 2, pinned, and it is the counterpart of the third fixture above:
+    // TRAP 2 of the header, pinned, the counterpart of the third fixture above:
     // same syntax, opposite outcome, decided by the reference alone. This is
     // `render_graph.Graph` — `pub const Graph = @import("graph.zig").Graph;` with
     // a `comptime { _ = render_graph.Graph; }` guard — whose six tests ARE
@@ -1213,16 +1201,16 @@ test "a name occurring only in a COMMENT is not a reference" {
 }
 
 test "a binding is not a reference to ITSELF, scanned as another file" {
-    // THE SELF-REFERENTIAL RULE, pinned. The cross-file search re-reads every
-    // live file including the one under analysis, and it passes `osrc.len` as the
+    // THE SELF-REFERENTIAL RULE, pinned. The cross-file search re-reads every live
+    // file including the one under analysis, and it passes `osrc.len` as the
     // binding-line start — a sentinel meaning "no binding line to skip". So when
     // the file scanned is the binding file, the exclusion window is empty and the
     // binding line answers for itself: `pub const held = @import("held.zig");`
-    // became its own justification.
+    // becomes its own justification.
     //
-    // It is the false-ALIVE direction and it admitted 37 blocks in the tree. The
-    // same-file test is now by PATH; it used to be pointer identity, which the
-    // production reader defeats by allocating a fresh buffer per call.
+    // It is the false-ALIVE direction, so it admits whole subtrees at once. The
+    // same-file test is by PATH; pointer identity is what the production reader
+    // defeats by allocating a fresh buffer per call.
     //
     // The root is deliberately the ONLY live file, so the sole candidate the
     // cross-file loop can find the name in is the binding file itself.

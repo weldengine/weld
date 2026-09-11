@@ -14,7 +14,7 @@ const name = "no_device_dispatch_outside_gal";
 ///
 /// `scan.zig` joins paths with `std.fs.path.join`, which yields `/` on POSIX and
 /// `\` on Win32. WITHOUT THE BACKSLASH VARIANT the rule fires on the Vulkan
-/// backend itself under Windows — measured, on a red Windows cell.
+/// backend itself under Windows, and on Windows alone.
 const allowed_prefix_posix = "src/modules/render/gal/vulkan/";
 const allowed_prefix_win = "src\\modules\\render\\gal\\vulkan\\";
 

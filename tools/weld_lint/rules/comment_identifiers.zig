@@ -13,21 +13,22 @@
 //!   - a milestone: an upper- or lower-case `M`, digits, then at least one
 //!     dot-component that is digits, one capital, or a lower-case x. THE DOT IS
 //!     REQUIRED, and that is the bound: a bare capital-M-plus-digits has zero
-//!     milestone uses in the tree and eleven other ones — an Apple CPU model, a
-//!     bench component type, a local scalar — so catching it buys nothing and
-//!     costs false positives. Requiring a milestone-shaped component after the
-//!     dot is what lets the lower-case spelling in without catching a field
-//!     access written in prose.
+//!     milestone uses in the tree and real non-identifier ones — an Apple CPU
+//!     model, a bench component type, a local scalar — so catching it buys
+//!     nothing and costs false positives. Requiring a milestone-shaped component
+//!     after the dot is what lets the lower-case spelling in without catching a
+//!     field access written in prose.
 //!   - a spike: a capital S and one digit from zero to six. The range is CLOSED —
 //!     the seven spikes exist and no eighth will — so this list cannot go stale.
 //!   - a gate: a capital G, digits, and an optional single lower-case letter for
 //!     a split gate. Both boundaries are load-bearing: without the left one the
-//!     rule fires inside a packed colour-format name, five real occurrences.
+//!     rule fires inside a packed colour-format name.
 //!   - a step or review: a capital E and ONE digit from one to nine, with an
 //!     optional sub-part; or the recorded-deviation prefix and digits. The single
 //!     digit plus a right boundary is what separates these from the four-digit
-//!     diagnostic codes, of which the tree holds 1220 — a right-unbounded form
-//!     would fire on 697 of them.
+//!     diagnostic codes: without it the rule fires on every one of them whose
+//!     first digit is not zero. THIS HEADER CANNOT SPELL AN EXAMPLE — the rule
+//!     reads comments, so any illustrative token it wrote would fire on itself.
 //!
 //! **WHAT THE RULE DELIBERATELY DOES NOT COVER, each with its reason.** Review
 //! passes, findings, hypotheses, hotfixes and decisions are also written as a
@@ -112,9 +113,9 @@ pub fn check(
     if (!comment_scan.isCovered(file)) return;
     // A generated file's comments belong to its emitter — see
     // `comment_scan.isGenerated`. The sibling rules `doc_comments` and
-    // `c_module_isolation` suppress on the same marker; this rule did not, and
-    // the omission invited a hand-edit that the bindgen round-trip guard
-    // correctly refused.
+    // `c_module_isolation` suppress on the same marker. Do NOT drop this: a
+    // finding here names a defect nobody may fix in place, and the hand-edit it
+    // invites is what the bindgen round-trip guard refuses.
     if (comment_scan.isGenerated(source)) return;
 
     var spans: std.ArrayList(comment_scan.Span) = .empty;

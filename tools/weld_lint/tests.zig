@@ -1,17 +1,15 @@
 //! Test root for the linter's own unit tests.
 //!
 //! A `test` block runs only if the compiler ANALYSES the file holding it, and
-//! Zig analyses declarations lazily. Two forms were tried and only one works —
-//! measured, by appending a deliberately failing test to a rule and watching
-//! for red:
+//! Zig analyses declarations lazily. Only the third form below runs anything, and
+//! the other two must NOT be restored — a green run over them means nothing ran:
 //!
-//!   - `addTest` rooted at `main.zig`, which reaches the rules through plain
-//!     `const` imports: ran NOTHING and reported success.
-//!   - This file as the root with `pub const` re-exports: also ran nothing —
-//!     `zig test` reported "All 0 tests passed" over nine re-exported files, one
-//!     of them holding eight test blocks. A `pub` declaration nobody references
-//!     is still not analysed.
-//!   - The `comptime` block below, which REFERENCES each import: runs them.
+//!   - `addTest` rooted at `main.zig`, reaching the rules through plain `const`
+//!     imports: runs NOTHING and reports success.
+//!   - this file as the root with `pub const` re-exports: also runs nothing —
+//!     `zig test` reports "All 0 tests passed" over every re-exported file. A
+//!     `pub` declaration nobody references is still not analysed.
+//!   - the `comptime` block below, which REFERENCES each import: runs them.
 //!
 //! `usingnamespace` is forbidden (`engine-zig-conventions.md`), and it would not
 //! have helped either — the question is analysis, not namespacing.

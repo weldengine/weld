@@ -1,11 +1,10 @@
 //! Shared comment extraction and perimeter for the comment rules.
 //!
 //! ONE DEFINITION OF WHAT A COMMENT IS, and it is not a search for `//`.
-//! Measured on this tree: 210 lines carry a `//` inside a string literal, a
-//! char literal, or after a `\\` multiline-string opener, where locating the
-//! comment by the first `//` gives the wrong span. None of them currently
-//! carries a token any comment rule forbids, so a naive scan is *incidentally*
-//! right today and would break on the next such line.
+//! Hundreds of lines carry a `//` inside a string literal, a char literal, or
+//! after a `\\` multiline-string opener, where locating the comment by the first
+//! `//` gives the wrong span. A naive scan is right on them only for as long as
+//! none happens to carry a token a comment rule forbids.
 //!
 //! The extraction is therefore structural: `std.zig.Tokenizer` is run, and the
 //! bytes BETWEEN consecutive tokens can only be whitespace and comments, so any
@@ -13,9 +12,9 @@
 //! they are collected from the token stream itself. A `//` inside a string
 //! literal is inside a token and is never seen.
 //!
-//! Trailing comments are collected like any other. A rule that looked only at
-//! lines STARTING with `//` would miss them, and on this tree that is 2181
-//! trailing comments, 16 of which carry a gate identifier.
+//! Trailing comments are collected like any other. A rule looking only at lines
+//! STARTING with `//` would miss thousands of them, and they carry forbidden
+//! tokens like any other comment.
 
 const std = @import("std");
 
@@ -88,9 +87,9 @@ fn collectInTrivia(
 /// `main.runLint` walks `src bench tests tools`. The comment rules apply to
 /// three of those four: `src/`, `tools/` and `bench/` carry the conservation
 /// pass that gives a reworded comment somewhere to go, and `tests/` does not.
-/// Its 720 identifier occurrences on 516 lines are real and are recorded as a
-/// debt against the pass that will read those files; firing here would make the
-/// rule green only by leaving 149 files permanently red instead.
+/// Its identifier occurrences are real and are recorded as a debt against the
+/// pass that will read those files; firing here would make the rule green only by
+/// leaving those files permanently red instead.
 ///
 /// A `tests` segment INSIDE the perimeter stays in — `src/modules/forge/forge_3d/tests/`
 /// is production source under `src/`. Only a leading `tests` segment is out, which
@@ -121,7 +120,7 @@ pub fn inPerimeter(file: []const u8) bool {
 /// list, and `lint` prints it too whenever its output surfaces. A subtree here is
 /// not exempt — it is unread, and a green lint means "green outside this list".
 ///
-/// TODO(coverage of the three subtrees): this list must reach EMPTY, and the
+/// TODO(coverage ledger empty): this list must reach EMPTY, and the
 /// assertion below it then inverts — from "these paths are unread" to "no path is
 /// unread", pinned by `noPathOutsideCoverage`. A growing allowlist with no removal
 /// condition becomes permanent, so the condition is written here rather than left
@@ -143,8 +142,7 @@ pub const Pending = struct {
 /// narrower removal a no-op, which is how a ledger comes to lie about progress.
 ///
 /// Omitting a path is the SAFE direction and is deliberate: anything not listed
-/// is covered, so a subtree nobody thought of goes red rather than silent. That
-/// is how the file below this list was found.
+/// is covered, so a subtree nobody thought of goes red rather than silent.
 pub const pending = [_]Pending{
     .{ .prefix = "src/etch/descriptor.zig" },
     .{ .prefix = "src/etch/root.zig" },
@@ -182,9 +180,7 @@ pub fn isCovered(file: []const u8) bool {
 /// A generated file's comments are written by its generator, so a finding here
 /// names a defect nobody may fix IN PLACE: the edit is reverted by the next
 /// regeneration, and `bindgen-verify` — which regenerates then asserts
-/// `git diff --quiet` — turns it into a blocked push. That is not a prediction:
-/// hand-edits to `platform/vk.zig` and the three `wayland_protocols/*.zig` did
-/// exactly that, and the guard was right to refuse them.
+/// `git diff --quiet` — turns it into a blocked push.
 ///
 /// The identifiers such a file carries are real, and they are fixed in the
 /// EMITTER under `tools/bindgen/`, which is a separate subtree with its own

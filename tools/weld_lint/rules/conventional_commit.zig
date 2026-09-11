@@ -6,6 +6,8 @@
 //! - scope       optional, matches `[a-z0-9-]+`
 //! - !           optional, marks a breaking change
 //! - description 1–72 chars, lowercase first letter, no trailing period
+//! - the WHOLE title, type and scope included, is bounded at 72 too — that is
+//!   the bound a long scope hits first
 //!
 //! Bypasses: titles that start with `Merge `, `Revert `, `fixup!`, or
 //! `squash!` are accepted unconditionally (mirrors the canonical regex

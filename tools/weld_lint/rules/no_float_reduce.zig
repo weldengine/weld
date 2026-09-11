@@ -18,9 +18,9 @@
 //! for it, because determinism that rests on someone else's release is not a
 //! property the engine holds.
 //!
-//! WHY THIS RULE EXISTS AT ALL, rather than the fix alone: the twelve production
-//! sites were replaced in one pass, and nothing would stop the thirteenth. A
-//! rule written down without a check is an intention.
+//! WHY THIS RULE EXISTS AT ALL, rather than the fix alone: a replacement pass
+//! covers the sites that exist, and nothing stops the next one. A rule written
+//! down without a check is an intention.
 //!
 //! WHAT IS FLAGGED. `.Add`, `.Mul`, `.Min` and `.Max` — the four operations
 //! meaningful on floats. `.And`, `.Or` and `.Xor` are boolean and integer only,
@@ -128,9 +128,7 @@ fn isArithmetic(op: []const u8) bool {
 /// on the statement. The pure-comment restriction is what keeps that from
 /// leaking: without it a trailing `// WELD_INTEGER_LANES` on one statement
 /// silently exempts the NEXT one, which is how two adjacent reductions come to
-/// share a single claim that was only ever made about the first. Found by a
-/// failing test whose own premise was wrong — it expected per-site scoping from
-/// two adjacent lines, and the rule as first written did not have it.
+/// share a single claim that was only ever made about the first.
 fn hasIntegerMarker(source: []const u8, offset: usize) bool {
     const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..offset], '\n')) |i| i + 1 else 0;
     const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
@@ -193,10 +191,10 @@ test "the marker exempts only the site it sits on" {
 }
 
 test "a trailing marker does not leak onto the statement below it" {
-    // The case that made the test above fail when the line-above allowance was
-    // unconditional: line 1's marker is a trailing comment on a STATEMENT line,
-    // so it is a claim about line 1 and about nothing else. Only a line that is
-    // wholly a comment may speak for the statement beneath it.
+    // The case the line-above allowance must NOT admit: line 1's marker is a
+    // trailing comment on a STATEMENT line, so it is a claim about line 1 and
+    // about nothing else. Only a line that is wholly a comment may speak for the
+    // statement beneath it.
     try std.testing.expectEqual(@as(usize, 1), try countOn(
         \\const a = @reduce(.Add, v); // WELD_INTEGER_LANES
         \\const b = @reduce(.Add, w);

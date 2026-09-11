@@ -9,20 +9,19 @@
 //! **WHAT `comment_tags` DOES NOT DO, and why.** It does not police which words
 //! may open a comment. The convention enumerates five forms and proscribes no
 //! other vocabulary, so a word like a note or a review used in a sentence is
-//! prose — measured, the tree's six such occurrences are all prose. What the
-//! rule does police is the SHAPE of the five, wherever they appear.
+//! prose and must not fire. What the rule does police is the SHAPE of the five,
+//! wherever they appear.
 //!
 //! It fires on a bare tag word used as a noun in prose, and that is deliberate
 //! rather than tolerated: writing one bare is exactly the ambiguity the mandatory
-//! parenthesis removes. One occurrence in the tree is of that kind, and it reads
-//! better naming the tag below it than naming the word.
+//! parenthesis removes.
 //!
 //! **`comment_phase` IS CASE-SENSITIVE ON TWO SPELLINGS, and the third is the
 //! reason.** A capitalised or upper-case phase mention is the project's phase, a
 //! deferral in prose with no detectable expiry: it survives the implementation it
 //! announced. An all-lower-case one is the ordinary noun — a two-phase commit, a
-//! phase of an algorithm — and the tree holds four, none of them a deferral. A
-//! case-insensitive rule would impose a vocabulary instead of detecting a debt.
+//! phase of an algorithm — and is not a deferral. A case-insensitive rule would
+//! impose a vocabulary instead of detecting a debt.
 //!
 //! The exemption is the parenthesised argument of a tag: what is temporary
 //! carries a tag, and a tag may name the phase that will remove it.
