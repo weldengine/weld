@@ -3,11 +3,16 @@
 //! A `tags { ... }` block declares a hierarchy of namespaces and leaves. The
 //! whole compilation set is merged into ONE hierarchy, then each leaf is
 //! assigned a globally-unique `bit_index` by a depth-first walk in declaration
-//! order — stable cross-build (deterministic), which the saves and CRDT layers
-//! rely on. This module is the single source of that algorithm: the resolver
-//! (path validation + overflow), the interpreter (runtime bit lookup) and the
-//! codegen (`TagSet` extern struct + bit constants) all build the table the
-//! same way, so interpreter↔codegen parity is structural.
+//! order. STABLE CROSS-BUILD, and the property is structural rather than
+//! promised: the walk is over ArrayList roots and children with no hashing
+//! anywhere, so a bit index is a pure function of declaration order. Anything
+//! that persists a bit index — a save file, a replicated tag set — depends on
+//! that, so a hashed container introduced here would break it silently.
+//!
+//! This module is the single source of the algorithm: the resolver (path
+//! validation + overflow), the interpreter (runtime bit lookup) and the codegen
+//! (the `TagSet` extern struct) all build the table the same way, so
+//! interpreter↔codegen parity is structural.
 //!
 //! Cross-block merge matters: two blocks may both extend `character.status`
 //! with different leaves (`etch-validation-ecs.md` §5.6). Because of that, the
@@ -30,9 +35,10 @@ const SourceSpan = token_mod.SourceSpan;
 const Diagnostic = diag_mod.Diagnostic;
 
 /// Default per-project bitfield bound (`etch-validation-ecs.md` §5.3): 256 tags
-/// → 4 u64 words (32 bytes / entity). Overridable via
-/// `RuntimeConfig.tag_bitfield_max` (Phase 2); exposed as a `build` parameter
-/// so the bound is testable without 257 declared tags.
+/// → 4 u64 words (32 bytes / entity). The bound is a PARAMETER of `build` and
+/// not a constant read inside it, which is what lets a test drive the overflow
+/// arm without declaring 257 tags — every production caller passes this default,
+/// so that parameter has exactly one non-default consumer and it is the suite.
 pub const default_max_tags: u32 = 256;
 
 /// One resolved entry in the global table: a leaf carries its `bit_index`; a
@@ -48,7 +54,10 @@ pub const TagTable = struct {
     arena: std.heap.ArenaAllocator,
     /// Canonical dotted path (`"character.status.alive"`) → entry.
     map: std.StringHashMapUnmanaged(Entry) = .empty,
-    /// Number of leaves = number of assigned bits.
+    /// Number of leaves = number of assigned bits — on the path where `build`
+    /// emitted no diagnostic. It returns the table PARTIALLY BUILT on error so
+    /// the resolver keeps going, so a reader must not take this as an invariant
+    /// over a table whose `diagnostics` are non-empty.
     leaf_count: u32 = 0,
     /// Configured upper bound; `leaf_count > max_tags` is `E0832`.
     max_tags: u32 = default_max_tags,
@@ -69,8 +78,13 @@ pub const TagTable = struct {
     }
 
     /// `TAG_BITFIELD_WORDS = (total + 63) / 64` (`etch-validation-ecs.md` §5.3).
-    /// At least one word so a `tags`-free program with a stray `TagSet` is well
-    /// formed (callers that emit `TagSet` only do so when leaves exist).
+    ///
+    /// **THERE IS NO ONE-WORD FLOOR HERE: zero leaves gives ZERO words**, the
+    /// division being truncating. What makes that harmless is the CALLERS, each
+    /// gated on `leaf_count > 0` before it asks — `interp.zig`'s
+    /// `registerComponentRaw` and `lower.zig`'s `emitTagSetStruct`. A third
+    /// caller without that gate would register a zero-sized `TagSet`, and no
+    /// test covers the zero case: the only assertion here is at seven leaves.
     pub fn words(self: *const TagTable) u32 {
         return (self.leaf_count + 63) / 64;
     }
@@ -230,7 +244,7 @@ pub const TagTable = struct {
 
         // E0832: the compilation set exceeds the configured bound.
         if (table.leaf_count > max_tags) {
-            try emitDiag(diagnostics, gpa, .tag_bitfield_overflow, .{ .byte_start = 0, .byte_end = 0 }, "tag bitfield overflow: {d} tags declared, bound is {d} (raise RuntimeConfig.tag_bitfield_max or consolidate tags)", .{ table.leaf_count, max_tags });
+            try emitDiag(diagnostics, gpa, .tag_bitfield_overflow, .{ .byte_start = 0, .byte_end = 0 }, "tag bitfield overflow: {d} tags declared, bound is {d} (consolidate tags: the bound is not settable from a project today)", .{ table.leaf_count, max_tags });
         }
 
         // Materialise the persistent path → entry map from the numbered nodes.

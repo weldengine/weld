@@ -120,16 +120,13 @@ pub fn inPerimeter(file: []const u8) bool {
 /// list, and `lint` prints it too whenever its output surfaces. A subtree here is
 /// not exempt — it is unread, and a green lint means "green outside this list".
 ///
-/// TODO(coverage ledger empty): this list must reach EMPTY, and the
-/// assertion below it then inverts — from "these paths are unread" to "no path is
-/// unread", pinned by `noPathOutsideCoverage`. A growing allowlist with no removal
-/// condition becomes permanent, so the condition is written here rather than left
-/// to whoever reads the list last. A closure reached with an entry still present is
-/// not a residual: it is a subtree nobody read.
-///
-/// No entry names the step that removes it: an identifier written here would go
-/// stale at a renumbering and the rule beside it forbids one anyway. The order
-/// lives in the milestone's own journal.
+/// **THE LIST IS EMPTY AND MUST STAY EMPTY**, which is what
+/// `noPathOutsideCoverage` below asserts: the claim has inverted from "these
+/// paths are unread" to "no path is unread", so a green lint now means green
+/// over the whole perimeter rather than green outside a list. Re-adding an entry
+/// reddens that test, deliberately — an allowlist with no removal condition
+/// becomes permanent, and re-opening one is a decision that should cost a
+/// conversation rather than a line.
 pub const Pending = struct {
     /// Repo-relative path prefix, `/`-separated.
     prefix: []const u8,
@@ -143,14 +140,7 @@ pub const Pending = struct {
 ///
 /// Omitting a path is the SAFE direction and is deliberate: anything not listed
 /// is covered, so a subtree nobody thought of goes red rather than silent.
-pub const pending = [_]Pending{
-    .{ .prefix = "src/etch/descriptor.zig" },
-    .{ .prefix = "src/etch/root.zig" },
-    .{ .prefix = "src/etch/scene_cook.zig" },
-    .{ .prefix = "src/etch/services.zig" },
-    .{ .prefix = "src/etch/tags.zig" },
-    .{ .prefix = "src/etch/test_runner.zig" },
-};
+pub const pending = [_]Pending{};
 /// Whether `file` is inside a subtree the pass has not read yet.
 pub fn isPending(file: []const u8) bool {
     for (pending) |p| {
@@ -441,8 +431,9 @@ test "the coverage assertion inverts when the ledger empties" {
     // reached with a non-zero answer is a subtree nobody read.
     //
     // Driven over a FIXTURE rather than over the tree's own list, so it exercises
-    // both states: the tree's list is non-empty today, so a test reading it alone
-    // could never see the empty case it exists to pin.
+    // BOTH states from one test. The tree's list is empty today, so a test
+    // reading it alone would see only the empty case and could never show that
+    // the predicate answers differently when an entry is present.
     const some = [_]Pending{.{ .prefix = "src/core" }};
     const none = [_]Pending{};
     try std.testing.expectEqual(@as(usize, 1), unreadCount(&some, "src/core/ecs/world.zig"));
@@ -471,4 +462,15 @@ fn countCovering() usize {
         if (!hasPathPrefix("src/core/ecs/world.zig", p.prefix)) n += 1;
     }
     return n;
+}
+
+test "noPathOutsideCoverage" {
+    // THE MILESTONE'S EXIT CRITERION, asserted on the TREE'S OWN list and not on
+    // a fixture. While `pending` held entries, `isCovered` answered false for
+    // them and both comment rules returned before scanning — so a diagnostic in
+    // one of those files was real by predicate and invisible by perimeter. With
+    // the list empty there is no such gap, and this test is what makes re-opening
+    // one visible: adding an entry reddens HERE, where the reason can be read,
+    // rather than silently narrowing what a green lint covers.
+    try std.testing.expectEqual(@as(usize, 0), pending.len);
 }

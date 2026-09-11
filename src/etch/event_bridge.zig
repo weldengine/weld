@@ -2,12 +2,19 @@
 //! event store.
 //!
 //! **The deliverable is the ORDER, not the adapter.** The interpreter's store
-//! has a `Lifetime.tick` and is cleared at the head of every tick; a bridge that
-//! pushed on the wrong side of that clear would produce an event emitted, never
-//! observed, and no red anywhere. So the drain is not something a caller does
-//! before `runFor` — it is registered here and run BY `stepOnce`, after the
-//! clear and before rule dispatch, which makes the ordering a property of the
-//! engine instead of a discipline the caller has to remember.
+//! has a `Lifetime.tick` and is cleared at the head of every tick, so a bridge
+//! pushing on the wrong side of that clear would emit an event nothing ever
+//! observes. **THAT FAILURE IS RED**, and deliberately so: the ordering oracle
+//! in `tests/etch_events/event_bridge_test.zig` drives three events across three
+//! consecutive ticks and asserts the rule saw each one, which a
+//! drain-before-clear leaves at zero.
+//!
+//! The DRAIN is not something a caller performs before `runFor`: it runs
+//! inside `stepOnce`,
+//! after the clear and before rule dispatch, so the ordering is a property of
+//! the engine. What the caller does owe is the REGISTRATION — without
+//! `Interpreter.addEventSource` nothing drains at all — and that obligation is
+//! restated at `source()` below.
 //!
 //! What crosses the boundary is a type NAME and a flat field list
 //! (`Interpreter.pushExternalEvent`). `EventStore` stays private to
@@ -45,8 +52,8 @@ pub fn Bridge(comptime T: type) type {
         pushed: usize = 0,
         /// Events the interpreter DROPPED because this program mentions no such
         /// type. Separated from `pushed` on purpose: a bridge wired to a program
-        /// that never observes the type is silent otherwise, and silence is the
-        /// failure mode this whole gate is written against.
+        /// that never observes the type is otherwise SILENT, and a silent drop
+        /// is the one failure this counter exists to make visible.
         dropped: usize = 0,
         /// Polls that failed because the queue was drained under the cursor.
         /// A Tier 0 drain between two ticks invalidates it; recorded rather than
@@ -77,8 +84,12 @@ pub fn Bridge(comptime T: type) type {
                     error.CursorInvalidated => {
                         self.invalidations += 1;
                         // Re-anchor on the current epoch and head rather than
-                        // spinning: the events the drain missed are gone, and
-                        // reporting the invalidation is what makes that visible.
+                        // spinning. **THIS SKIPS MORE THAN THE DRAIN REMOVED**:
+                        // `drain` resets head to 0, so anything enqueued AFTER
+                        // it and before this poll is live in `[0, head)` and is
+                        // dropped here too. Re-anchoring on 0 instead would
+                        // recover exactly those. The counter is what makes the
+                        // loss visible; it is a policy, not an inevitability.
                         self.cursor = .{
                             .type_id = self.cursor.type_id,
                             .last_read = self.queue.currentHead(),
@@ -111,6 +122,6 @@ fn valueOf(comptime F: type, v: F) ExternalValue {
         []const u8 => .{ .string_ = v },
         u64 => .{ .entity_ = v },
         else => @compileError("event field type '" ++ @typeName(F) ++
-            "' has no Etch mapping; the Phase 1 scalar set is {i64, f64, bool, []const u8, u64}"),
+            "' has no Etch mapping; the scalar set is {i64, f64, bool, []const u8, u64}"),
     };
 }

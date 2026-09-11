@@ -1,33 +1,40 @@
-//! Public surface of the `weld_etch` module — the S3 Etch parser + minimal
-//! type-checker. Designed to survive Phase 0.2 with additive changes only
-//! per `briefs/S3-etch-parser-subset.md` Scope / Public surface.
+//! Public surface of the `weld_etch` module — the Etch parser, type-checker,
+//! interpreter and codegen. **ADDITIVE CHANGES ONLY**: a removal or a rename
+//! here is a breaking change for every out-of-module consumer, and the AST
+//! contract block below states which half of the surface that binds.
 //!
 //! High-level helpers:
-//! - `parse(gpa, source) !ParseResult` — runs the lexer + parser, returns
-//!   the AST plus at most one parse diagnostic.
+//! - `parseSource(gpa, source) !ParseResult` — runs the lexer + parser and
+//!   returns the AST plus the parse diagnostics, of which there may be SEVERAL:
+//!   top-level recovery continues past a broken construct, so an empty slice is
+//!   the only signal of a clean parse.
 //! - `typeCheck(gpa, ast, diags_out) !void` — runs pass 1 + pass 2 on a
 //!   resolved arena, accumulating diagnostics in `diags_out`.
 //!
-//! No public type exposes parser internal state, allocator-stored fields,
-//! or pointers into the arena.
+//! The surface is NOT encapsulated, and writing that it is would mislead: the
+//! frozen AST contract below publishes the `items`/`stmts`/`exprs`/`type_nodes`
+//! SoA columns and the `strings` intern pool, and `parser.Parser` is reachable
+//! through the `parser` re-export. What holds instead is the contract below.
 
 const std = @import("std");
 
 const lexer = @import("lexer.zig");
-/// Exposed at the module surface so callers can drive the parser
-/// incrementally (LSP, future Phase 0.2 hybrid LR(1)+Pratt). The
-/// recursive-descent entry `parser.parse` is the canonical batch path.
+/// Exposed at the module surface because four out-of-module test files drive
+/// `parser.parseWithMode` directly — `.d.etch` mode has no helper on this
+/// surface. The recursive-descent entry `parser.parse` is the canonical batch
+/// path, and `parseSource` below wraps it for an ordinary file.
 pub const parser = @import("parser.zig");
 const ast = @import("ast.zig");
-/// Exposed at the module surface so the S5 codegen and Phase 0.2
-/// passes can iterate the AST through the type-checker's pass 2
-/// without re-importing the internals.
+/// Exposed at the module surface for out-of-module consumers — five test files
+/// reach `weld_etch.types` for `StorageKind`, the diagnostic codes and the
+/// checker entry. NOT for the codegen, which imports `../types.zig` directly
+/// and never needed this.
 pub const types = @import("types.zig");
 /// Exposed at the module surface so callers can construct / inspect
 /// `Diagnostic` values (build a tooling test harness, assert
 /// `DiagnosticCode`s) without pulling the internals directly.
 pub const diagnostics = @import("diagnostics.zig");
-/// Tier 1 service registry and the Phase 1 tree-walker invocation path
+/// Tier 1 service registry and the tree-walker invocation path
 /// (`etch-abi-zig.md` §8.7). Exposed at the module surface
 /// because a Tier 1 module declares its `ServiceSpec` and registers it from
 /// outside `src/etch/`.
@@ -36,12 +43,12 @@ pub const services = @import("services.zig");
 /// event store. Exposed because a Tier 1 module owns the queue.
 pub const event_bridge = @import("event_bridge.zig");
 
-// S4 interpreter surface.
+// Interpreter surface.
 const value = @import("value.zig");
 const ecs_bridge = @import("ecs_bridge.zig");
 const interp = @import("interp.zig");
 
-// Pull the S4 interpreter surface files into the module's test import graph
+// Pull the interpreter surface files into the module's test import graph
 // so `zig build test` collects their inline tests. The type aliases below
 // (`Interpreter`, `RuntimeReport`) reference `interp.zig`'s declarations but
 // do NOT force analysis of these files' `test` blocks — under Zig 0.16 lazy
@@ -54,8 +61,9 @@ comptime {
     _ = @import("interp.zig");
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
-    // M1.0.5 — `persistent.zig` moved to Tier 0 (`src/core/memory`); it is now
-    // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
+    // `persistent.zig` lives in Tier 0 (`src/core/memory`) and is pinned by
+    // `src/core/memory/root.zig`, reached here via `weld_core.memory` — so it
+    // needs no entry of its own below.
     // pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
     // the service registry's inline tests. The `pub const
@@ -67,26 +75,29 @@ comptime {
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
     // explicit wire-in of `types.zig`'s inline tests (E0101,
-    // scene/prefab/const validation, the M1.0.17 resource-collection acceptance
-    // tests, …), consistent with the sibling entries above.
+    // scene/prefab/const validation, the resource-collection acceptance tests,
+    // …), consistent with the sibling entries above.
     //
-    // THIS LINE IS LOAD-BEARING, and the note that said otherwise was
-    // wrong on its MECHANISM while right on its observation. It claimed "a public
-    // re-export of the root module is force-analyzed, tests included", which
-    // directly contradicts the paragraph above this block, in this same file. A
-    // four-case experiment settles it: with `pub const leaf = @import("leaf.zig")`
-    // alone the root collects ZERO of leaf's tests, with or without a test of its
-    // own; only a `comptime { _ = leaf; }` reference collects them. The original
-    // probe's observation was sound — removing this line left the count unchanged
-    // — because `types.zig` is ALSO reached through `interp.zig`, which is pinned
-    // above and uses its declarations. Attributing that to the re-export turned a
-    // true measurement into a false general rule, and the rule is what a later
-    // reader would have acted on.
+    // THIS LINE IS LOAD-BEARING, and do NOT conclude otherwise from removing it
+    // and watching the count hold: `types.zig` is ALSO reached through
+    // `interp.zig`, pinned above, so the count is insensitive to this line alone
+    // and that insensitivity proves nothing. **A PUBLIC RE-EXPORT DOES NOT
+    // FORCE-ANALYSE A FILE'S TESTS.** Measured on four cases: with
+    // `pub const leaf = @import("leaf.zig")` alone the root collects ZERO of
+    // leaf's tests, with or without a test of its own; only a
+    // `comptime { _ = leaf; }` reference collects them.
     _ = @import("types.zig");
-    // `zig_codegen/root.zig` carries the correct reference guard for its
-    // own three test files, and nothing ever ran it: the only path to it was
+    // `zig_codegen/root.zig` carries the correct reference guard for its own
+    // three test files, and nothing runs it: the only path to it is
     // `pub const codegen_zig`, the form that does not analyse. Thirty-seven test
-    // blocks — including `lower_test.zig`'s twenty-six — had never executed.
+    // blocks, `lower_test.zig`'s twenty-six among them, do not execute.
+    //
+    // **THE COMMENTED LINE BELOW IS READ AS DATA.** `dead_tests` extracts every
+    // `@import` literal from this file's source and skips it only because it
+    // sits inside a `//` comment; its head ending in `_ =` is the exact shape
+    // that tool takes for a reference guard. Keep the `//` on the same line and
+    // keep the text intact — moving it into code, or into a multiline string,
+    // flips `src/etch/zig_codegen/` from a declared exclusion to a false ALIVE.
     //
     // THE WIRE-IN IS HELD, NOT FORGOTTEN, and the reason is a bigger finding than
     // the dead tests: `zig_codegen/cache.zig` does not COMPILE under the pinned
@@ -100,14 +111,14 @@ comptime {
     //   _ = @import("zig_codegen/root.zig");
 }
 
-/// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model
+/// Scene cook — `.scene.etch` source → the neutral Tier-0 scene model
 /// (`weld_core.scene.format.CookModel`) the writer serializes to `.scene.bin`.
 /// World-free: registers types into a standalone RTTI `Registry` and const-evals
 /// the scene's values. Imports `weld_core.scene`; the Tier-0 side never imports
 /// `weld_etch` (tier discipline).
 pub const scene_cook = @import("scene_cook.zig");
 
-/// S5 Zig codegen surface — exposed at the module surface so
+/// Zig codegen surface — exposed at the module surface so
 /// `tools/etch_cook` and downstream consumers can drive the codegen
 /// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
@@ -135,7 +146,7 @@ pub const TypeChecker = types.TypeChecker;
 /// `Diagnostic` values across the parser / type-checker boundary.
 pub const Diagnostic = diagnostics.Diagnostic;
 
-/// Public entry point of the S4 tree-walking interpreter. Consumers
+/// Public entry point of the tree-walking interpreter. Consumers
 /// instantiate one per Etch program and drive ticks through it.
 pub const Interpreter = interp.Interpreter;
 /// Public tick-level report — exposed at the surface so bench
@@ -163,14 +174,14 @@ pub const TestStatus = test_runner.TestStatus;
 // AST stable interface — Level 1 (frozen cross-phase)
 //
 // Mirrors `etch-parser.md` §10.3.1 "Interface contract stable cross-phase".
-// M0.8 (the full v0.6 grammar) settles every Item/Stmt/Expr/TypeNode kind
-// variant, so the public AST surface is frozen HERE: the Phase 1 / S0 parser
-// rewrite (recursive-descent → LR(1)) must preserve this surface byte-for-byte
+// The full v0.6 grammar settles every Item/Stmt/Expr/TypeNode kind variant, so
+// the public AST surface is FROZEN HERE: a parser rewrite
+// (recursive-descent → LR(1)) must preserve this surface byte-for-byte
 // so the ~5000 lines of consumers (interpreter, codegen, ECS bridge, validate,
 // LS) compile unchanged.
 //
-// FROZEN — Level 1 (a removal/rename is a breaking change forbidden Phase 0 →
-// Phase 1; ADDING an enum variant or an accessor is non-breaking):
+// FROZEN — Level 1. A removal or a rename is a BREAKING change and is
+// forbidden; ADDING an enum variant or an accessor is non-breaking:
 //
 //   • Discrimination enums — `ItemKind`, `StmtKind`, `ExprKind`,
 //     `TypeNodeKind`, `BinaryOp`, `UnaryOp`, `AssignOp`, `NodeCategory`.
@@ -184,11 +195,11 @@ pub const TestStatus = test_runner.TestStatus;
 //     pool (`strings.slice(id)` → []const u8, `.find`, `.intern`), and
 //     `docCommentsOf`/`leadingCommentsOf`.
 //
-// NOT frozen — Level 2 (Phase 1 may mutate freely): the `NodeId` 4+28-bit
+// NOT frozen — Level 2, mutable at will: the `NodeId` 4+28-bit
 // packing, the `MultiArrayList` column layout, the `extra` slabs, the `add*`
 // builder methods (parser-side writes, not consumer reads).
 //
-// NOTE — §10.3.1 drift (KB-patch at M0.8 close): the spec prose names an
+// NOTE — §10.3.1 drift: the spec prose names an
 // idealized single `NodeKind` (~150 variants) + a `LiteralKind` + four tagged
 // unions (`TopLevelDecl`/`Expression`/`Statement`/`Type`). The delivered AST is
 // a tabular SoA instead: the FOUR per-category kind enums above are the
@@ -198,8 +209,8 @@ pub const TestStatus = test_runner.TestStatus;
 // frozen surface; §10.3.1 is to be re-aligned to the SoA reality at the close.
 //
 // Guard: `tests/etch/ast_stable_interface.zig` exercises ≥20 distinct Level-1
-// entry points; its COMPILATION is the invariant. A Phase 1 change that breaks
-// it blocks the LR transition and demands an explicit AST-API semver bump.
+// entry points; its COMPILATION is the invariant. A change that breaks it
+// blocks the LR transition and demands an explicit AST-API semver bump.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Frozen Level-1 discriminator for top-level declarations.
@@ -228,14 +239,14 @@ pub const SourceSpan = @import("token.zig").SourceSpan;
 /// Parse a full Etch source file. The returned `ParseResult` owns its
 /// `AstArena` and its `diagnostics` slice — call `result.deinit(gpa)`
 /// when done (or move `ast` / `diagnostics` out and free them yourself).
-/// With the M0.8 top-level recovery sync-point the result may carry
+/// With the top-level recovery sync-point the result may carry
 /// several diagnostics (one per broken construct); an empty slice means a
 /// clean parse.
 pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !parser.ParseResult {
     return try parser.parse(gpa, source);
 }
 
-/// Run pass 1 + pass 2 of the S3 type-checker on an already-parsed AST.
+/// Run pass 1 + pass 2 of the type-checker on an already-parsed AST.
 /// Accumulates diagnostics in `diags_out` (caller-owned). Each appended
 /// diagnostic owns its `primary_message` slice.
 pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListUnmanaged(Diagnostic)) !void {
@@ -359,8 +370,8 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
 ///     two scenes (same or different file).
 ///
 /// Every file's parse + type-check diagnostics accumulate in `diags_out`
-/// (caller-owned; each owns its `primary_message`). Bounded to the E2-B sizing
-/// guard — enumerate files, index prefab names + scene UUIDs, resolve the three
+/// (caller-owned; each owns its `primary_message`). Deliberately BOUNDED —
+/// enumerate files, index prefab names + scene UUIDs, resolve the three
 /// references. No general dependency graph, no watch mode, no incremental
 /// invalidation.
 pub fn validateProject(
@@ -410,7 +421,7 @@ pub fn validateProject(
     var uuids: std.StringHashMapUnmanaged(void) = .empty;
     defer uuids.deinit(gpa);
 
-    // ── M1.0.7 E4 — module graph + topological order + cycle detection ──
+    // ── module graph + topological order + cycle detection ──
     // Derive each file's module path and build module-path → index map.
     const n = asts.items.len;
     var module_paths: std.ArrayListUnmanaged([]u8) = .empty;
@@ -425,13 +436,13 @@ pub fn validateProject(
         const mp = try deriveModulePath(gpa, f.name);
         module_paths.appendAssumeCapacity(mp);
         // A duplicate module path (an out-of-scope edge case) maps to the last
-        // file; E4 only needs a consistent node identity for the graph.
+        // file; the graph only needs a consistent node identity.
         try module_index.put(gpa, mp, idx);
     }
 
     // Build the directed import-dependency graph: edge importer → imported, for
     // each import whose target module resolves to a file in the set. Targets that
-    // resolve to no file are an E5 concern, not a cycle edge.
+    // resolve to no file are an import-resolution concern, not a cycle edge.
     const Edge = struct { to: usize, span: SourceSpan };
     var adj: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Edge)) = .empty;
     defer {

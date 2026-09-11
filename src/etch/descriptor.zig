@@ -1,9 +1,13 @@
-//! Level-B descriptor builder — the interpreter's build-structure side of
-//! the M0.8 E4–E6 serialized-IR differential (LEVEL-B PROOF CONTRACT,
-//! M0.8 brief journal 2026-06-10).
+//! Descriptor builder — the interpreter's build-structure side of the
+//! serialized-IR differential. **THE PROOF CONTRACT IS A TEST AND NOT A
+//! DOCUMENT**: `tests/etch_interp/levelb_ir_diff_test.zig` compares
+//! `interp.descriptors.serialize` against the cooked backend's own dump and
+//! fails on a byte, so a rewording here that changes the emitted text goes red.
 //!
-//! `build` walks a parsed-and-validated AST and constructs one typed
-//! descriptor per Level-B construct (`etch-ast-ir.md` §3.5 domain sub-ASTs).
+//! `build` walks a parsed-and-validated AST and constructs one typed descriptor
+//! per construct — Level B, and Level C too: the scene and prefab arms are
+//! built here as well, under their own banner below
+//! (`etch-ast-ir.md` §3.5 domain sub-ASTs).
 //! `Descriptors.serialize` emits the canonical text form via the shared
 //! serializer in `descriptor_types.zig` (compiled into BOTH backends from
 //! the same source bytes — see that file's header).
@@ -1430,7 +1434,7 @@ fn buildSequence(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.S
     };
 }
 
-// ── M0.8 E7 Level C — scene / prefab descriptor build + free ──────────────
+// ── Level C — scene / prefab descriptor build + free ──────────────────────
 // Expression / statement leaves go through the SHARED renderers (`renderExprAlloc`
 // / `renderStmtRunAlloc`) — the byte-identical proof contract with the codegen
 // emit side (`lower.zig`).
@@ -2369,8 +2373,8 @@ pub fn renderAbilityCostAlloc(gpa: std.mem.Allocator, arena: *const AstArena, fi
 
 /// Render the ability-embedded rule canonically, single line:
 /// `rule name(p: T, ...) [when <when>] { stmt; stmt }`. Param types are
-/// bounded to NAMED type nodes (the E1 rule-param surface: scalar /
-/// Entity) — anything else fails loud. SHARED by both backends.
+/// bounded to NAMED type nodes — a scalar or `Entity`, refused otherwise by
+/// `typeNodeKind(...) != .named`. SHARED by both backends.
 pub fn renderAbilityRuleAlloc(gpa: std.mem.Allocator, arena: *const AstArena, rule_idx: u32) BuildError![]u8 {
     const rule = arena.rule_decls.items[rule_idx];
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -2440,9 +2444,12 @@ fn renderQuestHandlerPayload(gpa: std.mem.Allocator, arena: *const AstArena, h: 
     return try buf.toOwnedSlice(gpa);
 }
 
-/// Render one statement to canonical text. Bounded to the script-shaped
-/// kinds (`let` /
-/// `emit` / expression / assignment); anything else fails loud.
+/// Render one statement to canonical text. Bounded to the script-shaped kinds —
+/// `let`, `emit`, an expression, an assignment, and `return` / `return <expr>`,
+/// which a shader
+/// vertex or fragment body uses explicitly. Anything else fails loud, and the
+/// bound is the switch below rather than this list: adding an arm without
+/// adding it here leaves the list wrong and nothing goes red.
 pub fn renderStmtAlloc(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId) BuildError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(gpa);
@@ -2494,8 +2501,10 @@ fn renderStmt(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId, out:
             try renderExpr(gpa, arena, a.value, out);
         },
         .return_stmt => {
-            // M0.8 E6 gap-fill: shader vertex/fragment bodies use explicit
-            // `return <expr>`. `return_stmt`'s data is the value NodeId.
+            // A shader vertex or fragment body returns explicitly, which is why
+            // this arm exists. `return_stmt`'s data IS the value NodeId, and
+            // `NodeId.none` for a bare `return` — the `@bitCast` below depends
+            // on that and has no other way to know it.
             try out.appendSlice(gpa, "return");
             const value: NodeId = @bitCast(arena.stmtData(stmt));
             if (!value.isNone()) {
