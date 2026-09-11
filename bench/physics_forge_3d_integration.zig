@@ -431,8 +431,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("    a Theta(P*N) step 2 would cost {d} resolutions/frame at B against {d} at A (x{d:.2})\n", .{
         2 * ret_b.pairs * ret_b.n_bodies, 2 * ret_a.pairs * ret_a.n_bodies, rn,
     });
-    // The confounded pair, shown BECAUSE it is confounded: it is the reading the first
-    // version of this bench offered, and on its own it discriminates nothing.
+    // The confounded pair, shown BECAUSE it is confounded: growing the floor is the
+    // reading that comes first to mind, and on its own it discriminates nothing.
     std.debug.print("    (confounded, for contrast: growing the FLOOR moves N and P together —\n", .{});
     std.debug.print("     N={d} P={d} -> {d} ns  vs  N={d} P={d} -> {d} ns)\n", .{
         ret_a.n_bodies, ret_a.pairs, ret_a.median_ns, gated.n_bodies, gated.pairs, gated.median_ns,

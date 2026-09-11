@@ -304,8 +304,8 @@ fn edgesOf(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Edge)
         const head = std.mem.trim(u8, source[line_start..at], " \t");
 
         // `head` is trimmed on BOTH ends, so the trailing space of `_ = ` is gone.
-        // Comparing against `"_ = "` matched nothing and reported the pinned file
-        // dead — caught by this file's own fixture, which is what they are for.
+        // Do NOT compare against `"_ = "`: it matches nothing and reports the pinned
+        // file dead. This file's own fixture catches it, which is what they are for.
         if (std.mem.endsWith(u8, head, "_ =")) {
             try out.append(gpa, .{ .rel = rel }); // explicit reference guard
             continue;

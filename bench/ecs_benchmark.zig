@@ -2,7 +2,7 @@
 //!
 //! Hosts two cases, selectable via `--case=<name>`:
 //!
-//! 1. **The `s1` non-regression case** (default): 100 000 entities ×
+//! 1. **The `--case=s1` non-regression case** (default): 100 000 entities ×
 //!    1 archetype × 1000 measured iterations after 100 warm-up
 //!    iterations through the comptime-generated
 //!    `(*Transform, *Velocity)` query and the work-stealing scheduler.

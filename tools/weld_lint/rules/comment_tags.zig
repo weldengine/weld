@@ -324,8 +324,8 @@ test "a capitalised phase mention is rejected" {
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// Phase 2 will do X\n"));
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// PHASE 1 transfer note\n"));
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// the pre-zero Phase -1 archive\n"));
-    // The COMPOUND form is the same mention and was escaping: the separator used to
-    // have to begin with whitespace, so a hyphen alone fell through.
+    // The COMPOUND form is the same mention. Do NOT require the separator to begin
+    // with whitespace: a hyphen alone then falls through.
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// this `const` is the Phase-1 default\n"));
     try std.testing.expectEqual(@as(usize, 1), try phaseCount("// PHASE-2 lowering\n"));
     // …and a separator is still REQUIRED, so a bare compound word is not a mention.

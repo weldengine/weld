@@ -70,7 +70,7 @@ pub fn specsOf(comptime entry: Entry) []const services.ServiceSpec {
     }
 }
 
-/// Every `EventSpec` an entry's module declares, in declaration order
+/// Every `EventSpec` an entry's module declares, in declaration order.
 /// Same walk as `specsOf`, different type — an event a Tier 1
 /// module publishes is guarded exactly as its services are.
 pub fn eventsOf(comptime entry: Entry) []const services.EventSpec {

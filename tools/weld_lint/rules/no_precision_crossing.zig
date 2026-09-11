@@ -42,9 +42,8 @@
 //! reduction in a bench CORRUPTS the measurement, so exempting a file there would hide a
 //! defect; a `@floatCast` in a test is the assertion's own arithmetic — a test comparing a
 //! solver value against a published `Transform` must narrow one of them to compare them at
-//! all, and it is measuring the boundary rather than breaching it. Twenty-one such sites
-//! exist across seven files. The residual: a production-grade helper written inside a test
-//! file escapes this rule.
+//! all, and it is measuring the boundary rather than breaching it. The residual: a
+//! production-grade helper written inside a test file escapes this rule.
 //!
 //! **THE ESCAPE IS DECLARED, NEVER SILENT.** `WELD_NOT_A_WORLD_CROSSING` on the site's own
 //! line exempts that site — but only if the FILE also appears in `declared_escapes` below,
@@ -55,21 +54,20 @@
 //!
 //! The control is bilateral in the same sense: an escape used without a declaration is
 //! reported at its site, and a declaration whose file was READ and carried no marker is
-//! reported as stale. The list is EMPTY today — measured, not assumed: zero `@floatCast`
-//! survives in the perimeter and the marker occurs nowhere in the tree outside this file's own
-//! test sources. Zero is the cheapest moment in the project's life to install the mechanism,
-//! and both directions are exercised by this file's tests rather than by the tree's silence.
+//! reported as stale. Installing the mechanism while the list is EMPTY is the cheapest moment
+//! in the project's life, and both directions are exercised by this file's tests rather than
+//! by the tree's silence, which could exercise neither.
 //!
 //! **THE STALE HALF FOLLOWS VISITED FILES, and that is what makes it correct under a partial
 //! scan.** `lint` also accepts an explicit path list — the `pre-commit` hook passes staged
 //! files — and a declaration whose file was not read says NOTHING: it is neither used nor
 //! stale, because nobody looked. Two earlier forms tried to establish COMPLETENESS of the scan
-//! instead, first from an empty argument list and then from a set of root names, and each
-//! traded one wrong verdict for another; the second was defended with a claim that
-//! canonicalising the paths was impossible at Zig 0.16, which was FALSE —
-//! `std.process.currentPathAlloc` and `std.Io.Dir.realPathFileAbsoluteAlloc` both exist. The
-//! question does not need asking: a per-file fact answers it with neither a false positive nor
-//! a false negative, whatever the caller's spelling.
+//! instead — neither from an empty argument list nor from a set of root names: each form
+//! trades one wrong verdict for another, and the claim that canonicalising the paths is
+//! impossible at Zig 0.16 is FALSE, `std.process.currentPathAlloc` and
+//! `std.Io.Dir.realPathFileAbsoluteAlloc` both existing. The question does not need asking:
+//! a per-file fact answers it with neither a false positive nor a false negative, whatever
+//! the caller's spelling.
 //!
 //! The one residual that reasoning leaves is a declaration whose file has been DELETED — never
 //! visited, hence never stale, hence immortal. Closed by testing that the declared path
