@@ -8104,7 +8104,7 @@ test "the guard's bound, tested in BOTH directions" {
 
 // ── Scene / prefab validation tests ──────────────────────────────────────
 
-test "scene + prefab: a well-formed scene and prefab type-check clean (M0.8 E7)" {
+test "scene + prefab: a well-formed scene and prefab type-check clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Health { current: float = 100.0 }
@@ -8379,7 +8379,7 @@ test "well-formed top-level const checks clean" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "duplicate test names collide within the test namespace (E0101, M1.0.15)" {
+test "duplicate test names collide within the test namespace" {
     const gpa = std.testing.allocator;
     // Intra-namespace uniqueness: two top-level `test` blocks with the same name
     // collide → E0101 (contextual "duplicate test 'X'"). The "not exported" half
@@ -8393,7 +8393,7 @@ test "duplicate test names collide within the test namespace (E0101, M1.0.15)" {
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
 }
 
-test "test name does not collide with a component of the same name (M1.0.15)" {
+test "test name does not collide with a component of the same name" {
     const gpa = std.testing.allocator;
     // A `test "Foo"` lives in a
     // dedicated namespace, so it no longer clashes with `component Foo`.
@@ -8405,7 +8405,7 @@ test "test name does not collide with a component of the same name (M1.0.15)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "test annotation applicability + args (M1.0.15)" {
+test "test annotation applicability + args" {
     const gpa = std.testing.allocator;
 
     // `@phase` is rule-only — on a test it is misapplied (E0502).
@@ -8437,7 +8437,7 @@ test "test annotation applicability + args (M1.0.15)" {
     try expectAnyCode(bad_tag.diagnostics.items, .annotation_misapplied);
 }
 
-test "await in a test body is E0901 (sync context, M1.0.15)" {
+test "await in a test body is E0901 (sync context)" {
     const gpa = std.testing.allocator;
     // A `test` body is a sync context (§32): `await` there is a coloring error.
     var result = try parseAndCheck(gpa,
@@ -8449,7 +8449,7 @@ test "await in a test body is E0901 (sync context, M1.0.15)" {
     try expectAnyCode(result.diagnostics.items, .async_call_in_non_async_context);
 }
 
-test "measure outside a test body is E0910; inside checks clean (M1.0.15)" {
+test "measure outside a test body is E0910; inside checks clean" {
     const gpa = std.testing.allocator;
     // `measure { }` in a `fn` body → E0910 (wall-clock stays out of gameplay).
     var outside = try parseAndCheck(gpa,
@@ -8469,7 +8469,7 @@ test "measure outside a test body is E0910; inside checks clean (M1.0.15)" {
     try std.testing.expectEqual(@as(usize, 0), inside.diagnostics.items.len);
 }
 
-test "assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)" {
+test "assert_eq rejects non-comparable aggregate operands" {
     const gpa = std.testing.allocator;
     // A struct value has no structural equality — comparing it would false-fail
     // assert_eq / false-pass assert_neq, so it is rejected at type-check.
@@ -8491,7 +8491,7 @@ test "assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)" 
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "assert_approx constrains its operands to float at type-check (M1.0.15 review fix)" {
+test "assert_approx constrains its operands to float at type-check" {
     const gpa = std.testing.allocator;
     // Int operands → type_mismatch at check (symmetric with the rest of the
     // family), not a generic runtime failure.
@@ -8509,7 +8509,7 @@ test "assert_approx constrains its operands to float at type-check (M1.0.15 revi
     try std.testing.expectEqual(@as(usize, 0), floats.diagnostics.items.len);
 }
 
-test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
+test "type-checker emits E0502 when an annotation is applied to the wrong target" {
     const gpa = std.testing.allocator;
 
     // `@config` is resource-only — on a component it must be flagged.
@@ -8548,7 +8548,7 @@ test "type-checker emits E0502 when an annotation is applied to the wrong target
     try expectNoCode(ok.diagnostics.items, .annotation_misapplied);
 }
 
-test "type-checker emits E0301/E0302 on get receiver/kind mismatch (D-S3-resource-receiver)" {
+test "type-checker emits E0301/E0302 on get receiver/kind mismatch" {
     const gpa = std.testing.allocator;
 
     // Receiver-less `get(Health)` where Health is a component → E0301.
@@ -8592,7 +8592,7 @@ test "type-checker emits E0301/E0302 on get receiver/kind mismatch (D-S3-resourc
     try expectNoCode(ok.diagnostics.items, .component_expected_resource_given);
 }
 
-test "type-checker emits E1213 on receiver-less get of a resource absent from the when clause (D-S3-resource-receiver)" {
+test "type-checker emits E1213 on receiver-less get of a resource absent from the when clause" {
     const gpa = std.testing.allocator;
     // `get(Score)` is valid only when Score is in the when clause.
     var result = try parseAndCheck(gpa,
@@ -8608,7 +8608,7 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
 }
 
-test "for-in requires an integer range iterable (M0.8 ranges + for-in)" {
+test "for-in requires an integer range iterable (ranges + for-in)" {
     const gpa = std.testing.allocator;
 
     // Valid integer range for-in → no type error.
@@ -8650,7 +8650,7 @@ test "for-in requires an integer range iterable (M0.8 ranges + for-in)" {
     try expectAnyCode(float_range.diagnostics.items, .type_mismatch);
 }
 
-test "match exhaustiveness and arm typing (M0.8 match foundation)" {
+test "match exhaustiveness and arm typing (match foundation)" {
     const gpa = std.testing.allocator;
 
     // Exhaustive via wildcard → no exhaustiveness or typing error.
@@ -8707,7 +8707,7 @@ test "match exhaustiveness and arm typing (M0.8 match foundation)" {
     try expectAnyCode(mixed.diagnostics.items, .type_mismatch);
 }
 
-test "enum match exhaustiveness and variant resolution (M0.8 E2 block 3 tranche B)" {
+test "enum match exhaustiveness and variant resolution" {
     const gpa = std.testing.allocator;
 
     // All variants covered (no `_`) → exhaustive (E1230 not emitted), no E0105.
@@ -8761,7 +8761,7 @@ test "enum match exhaustiveness and variant resolution (M0.8 E2 block 3 tranche 
     try expectAnyCode(unknown.diagnostics.items, .enum_variant_not_found);
 }
 
-test "trait dispatch, E0220 mut-self receiver, E0214 incomplete impl (M0.8 E2 block 3 tranche C)" {
+test "trait dispatch, E0220 mut-self receiver, E0214 incomplete impl" {
     const gpa = std.testing.allocator;
 
     // Trait method on a struct dispatches cleanly (no inherent method of that
@@ -8818,7 +8818,7 @@ test "trait dispatch, E0220 mut-self receiver, E0214 incomplete impl (M0.8 E2 bl
     try expectAnyCode(incomplete.diagnostics.items, .incomplete_trait_impl);
 }
 
-test "conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)" {
+test "conditional trait impl proof E0215 (§7.3)" {
     const gpa = std.testing.allocator;
 
     // A conditional impl `when self has Health` called from a rule whose `when`
@@ -8852,7 +8852,7 @@ test "conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)" {
     try expectNoCode(proven.diagnostics.items, .conditional_impl_condition_not_proven);
 }
 
-test "optional if let / while let binding + non-optional rejection (M0.8 E2 block 5)" {
+test "optional if let / while let binding + non-optional rejection" {
     const gpa = std.testing.allocator;
 
     // `if let x = <int?>` binds `x` to the int payload; `x + 1` type-checks.
@@ -8891,7 +8891,7 @@ test "optional if let / while let binding + non-optional rejection (M0.8 E2 bloc
     try expectNoCode(wl.diagnostics.items, .type_mismatch);
 }
 
-test "generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)" {
+test "generic fn inference + bounds" {
     const gpa = std.testing.allocator;
 
     // `id<T>(x: T) -> T` inferred from the arg; no diagnostic, result is int.
@@ -8973,7 +8973,7 @@ test "generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)" {
     try expectNoCode(generic_struct.diagnostics.items, .undefined_symbol);
 }
 
-test "assert requires a bool condition (M0.8 assert foundation)" {
+test "assert requires a bool condition (assert foundation)" {
     const gpa = std.testing.allocator;
 
     // Non-bool assert condition → E0200.
@@ -9001,7 +9001,7 @@ test "assert requires a bool condition (M0.8 assert foundation)" {
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 }
 
-test "if requires a bool condition and unifies its branch types (M0.8 control flow)" {
+test "if requires a bool condition and unifies its branch types (control flow)" {
     const gpa = std.testing.allocator;
 
     // Non-bool condition → E0200.
@@ -9043,7 +9043,7 @@ test "if requires a bool condition and unifies its branch types (M0.8 control fl
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 }
 
-test "while requires a bool condition (M0.8 control flow)" {
+test "while requires a bool condition (control flow)" {
     const gpa = std.testing.allocator;
 
     // Non-bool while condition → E0200.
@@ -9074,7 +9074,7 @@ test "while requires a bool condition (M0.8 control flow)" {
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 }
 
-test "type aliases resolve through to the underlying type (M0.8 type alias foundation)" {
+test "type aliases resolve through to the underlying type (type alias foundation)" {
     const gpa = std.testing.allocator;
 
     // `Meters` aliases `float` and is used as a field type and a cast target.
@@ -9107,7 +9107,7 @@ test "type aliases resolve through to the underlying type (M0.8 type alias found
     try expectAnyCode(dup.diagnostics.items, .duplicate_symbol);
 }
 
-test "type-checker accepts numeric casts and rejects non-numeric ones (M0.8 cast foundation)" {
+test "type-checker accepts numeric casts and rejects non-numeric ones (cast foundation)" {
     const gpa = std.testing.allocator;
 
     // Numeric → numeric cast chain is accepted.
@@ -9253,7 +9253,7 @@ test "type-checker rejects string field on component (POD enforcement)" {
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
 }
 
-test "type-checker accepts string .len() as int, rejects other string methods (M0.8 sub-slice C)" {
+test "type-checker accepts string .len() as int, rejects other string methods" {
     const gpa = std.testing.allocator;
     // `.len()` resolves to int — the minimal faithful string subset; the
     // assignment to an int field type-checks clean.
@@ -9294,7 +9294,7 @@ test "type-checker accepts top-level declarations in any order via pass 1 / pass
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "array literal element typing, indexing, and slicing (M0.8 collections)" {
+test "array literal element typing, indexing, and slicing (collections)" {
     const gpa = std.testing.allocator;
 
     // Indexing a homogeneous array yields the element type — assigning it to
@@ -9359,7 +9359,7 @@ test "array literal element typing, indexing, and slicing (M0.8 collections)" {
     try expectAnyCode(coll_field.diagnostics.items, .undefined_symbol);
 }
 
-test "map literal typing and map for-in bindings (M0.8 collections)" {
+test "map literal typing and map for-in bindings (collections)" {
     const gpa = std.testing.allocator;
 
     // A two-binding map for-in (`for k, v in m`) is clean.
@@ -9389,7 +9389,7 @@ test "map literal typing and map for-in bindings (M0.8 collections)" {
     try expectAnyCode(single.diagnostics.items, .type_mismatch);
 }
 
-test "closure call arity, return typing, and non-callable (M0.8 closures)" {
+test "closure call arity, return typing, and non-callable (closures)" {
     const gpa = std.testing.allocator;
 
     // A closure returning int, called and assigned to an int field — clean.
@@ -9432,7 +9432,7 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
     try expectAnyCode(noncallable.diagnostics.items, .type_mismatch);
 }
 
-test "closure body cannot mutate a capture, E0221 (M0.8 E3-C tranche 6)" {
+test "closure body cannot mutate a capture, E0221" {
     const gpa = std.testing.allocator;
 
     // Mutating a captured binding inside the body → E0221, even though the
@@ -9490,7 +9490,7 @@ test "closure body cannot mutate a capture, E0221 (M0.8 E3-C tranche 6)" {
     try expectNoCode(read_ok.diagnostics.items, .type_mismatch);
 }
 
-test "free-function call arity, arg, and return typing (M0.8 E2)" {
+test "free-function call arity, arg, and return typing" {
     const gpa = std.testing.allocator;
 
     // A top-level fn returning int, called and assigned to an int field — clean.
@@ -9541,7 +9541,7 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     try expectAnyCode(retty.diagnostics.items, .return_type_mismatch);
 }
 
-test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E2 block 3)" {
+test "struct inherent methods: dispatch, struct literal, and error cases" {
     const gpa = std.testing.allocator;
 
     // Valid: an associated fn builds the struct via a literal, an instance
@@ -9629,7 +9629,7 @@ test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E
     try expectAnyCode(arity.diagnostics.items, .arg_count_mismatch);
 }
 
-test "type-checker validates event declaration + emit (M0.8 E3)" {
+test "type-checker validates event declaration + emit" {
     const gpa = std.testing.allocator;
 
     // Clean: a declared event emitted with matching fields → no diagnostics.
@@ -9669,7 +9669,7 @@ test "type-checker validates event declaration + emit (M0.8 E3)" {
     try expectAnyCode(not_event.diagnostics.items, .undefined_symbol);
 }
 
-test "type-checker validates entity_event / global_event await targets (M1.0.14 E2)" {
+test "type-checker validates entity_event / global_event await targets" {
     const gpa = std.testing.allocator;
 
     // Non-Entity first operand of `entity_event` → E0200 (the operand was
@@ -9805,7 +9805,7 @@ test "type-checker validates entity_event / global_event await targets (M1.0.14 
     try std.testing.expectEqual(@as(usize, 0), filtered_global.diagnostics.items.len);
 }
 
-test "type-checker validates @networked on event, rejects @config on event (M0.8 E3)" {
+test "type-checker validates @networked on event, rejects @config on event" {
     const gpa = std.testing.allocator;
 
     // `@networked` is valid on an event (`etch-grammar.md` §18.2) → no E0502.
@@ -9825,7 +9825,7 @@ test "type-checker validates @networked on event, rejects @config on event (M0.8
     try expectAnyCode(misapplied.diagnostics.items, .annotation_misapplied);
 }
 
-test "type-checker validates @on_event observer: E1203 on non-event, accepts declared event + event-field access (M0.8 E3)" {
+test "type-checker validates @on_event observer: E1203 on non-event, accepts declared event + event-field access" {
     const gpa = std.testing.allocator;
 
     // Valid: `@on_event(Damage)` on a declared event; the implicit `event`
@@ -9865,7 +9865,7 @@ test "type-checker validates @on_event observer: E1203 on non-event, accepts dec
     try expectAnyCode(malformed.diagnostics.items, .on_event_type_mismatch);
 }
 
-test "type-checker validates tag-filter when conditions (M0.8 E3)" {
+test "type-checker validates tag-filter when conditions" {
     const gpa = std.testing.allocator;
 
     // Valid: a declared leaf path in a `has_tag` filter → no E1212.
@@ -9886,7 +9886,7 @@ test "type-checker validates tag-filter when conditions (M0.8 E3)" {
     try expectAnyCode(unknown.diagnostics.items, .unknown_tag);
 }
 
-test "type-checker accepts `has T changed` on a component, E1210 on a non-component (M0.8 E3)" {
+test "type-checker accepts `has T changed` on a component, E1210 on a non-component" {
     const gpa = std.testing.allocator;
 
     // Valid: `has Health changed` where Health is a declared component → no
@@ -9928,7 +9928,7 @@ test "type-checker accepts `has T changed` on a component, E1210 on a non-compon
     try expectNoCode(cat.diagnostics.items, .unknown_tag);
 }
 
-test "entity structural methods type-check on an Entity receiver (M1.0.10 E2)" {
+test "entity structural methods type-check on an Entity receiver" {
     const gpa = std.testing.allocator;
     // `entity.add(T { … })` / `entity.remove(T)` / `entity.despawn()` on an
     // Entity receiver with declared components → zero diagnostics.
@@ -9946,7 +9946,7 @@ test "entity structural methods type-check on an Entity receiver (M1.0.10 E2)" {
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "structural spawn of component literals type-checks (M1.0.10 E2)" {
+test "structural spawn of component literals type-checks" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\component Marker { x: i32 = 0 }
@@ -9960,7 +9960,7 @@ test "structural spawn of component literals type-checks (M1.0.10 E2)" {
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "binding a structural spawn result is rejected (M1.0.10 E2)" {
+test "binding a structural spawn result is rejected" {
     const gpa = std.testing.allocator;
     // `let e = spawn(…)` uses the spawn result as a value → E0304 (no body
     // handle, statement-position only, v0.6).
@@ -9975,7 +9975,7 @@ test "binding a structural spawn result is rejected (M1.0.10 E2)" {
     try expectAnyCode(bad.diagnostics.items, .spawn_handle_unavailable);
 }
 
-test "prefab-name spawn is refused in Phase 1 (M1.0.10 E2)" {
+test "prefab-name spawn is refused in Phase 1" {
     const gpa = std.testing.allocator;
     // `spawn("Name")` parses + is recognized but is refused → E0305 (gating on
     // the prefab runtime).
@@ -9989,7 +9989,7 @@ test "prefab-name spawn is refused in Phase 1 (M1.0.10 E2)" {
     try expectAnyCode(bad.diagnostics.items, .prefab_spawn_not_executable);
 }
 
-test "structural component-literal unknown field is rejected (M1.0.10 E2 completion)" {
+test "structural component-literal unknown field is rejected" {
     const gpa = std.testing.allocator;
     // via spawn(...)
     var s = try parseAndCheck(gpa,
@@ -10013,7 +10013,7 @@ test "structural component-literal unknown field is rejected (M1.0.10 E2 complet
     try expectAnyCode(a.diagnostics.items, .structural_component_field_unknown);
 }
 
-test "structural component-literal mistyped field is rejected (M1.0.10 E2 completion)" {
+test "structural component-literal mistyped field is rejected" {
     const gpa = std.testing.allocator;
     // `max: i32` given a float literal → E0307 (same field-type path as scene/prefab).
     var bad = try parseAndCheck(gpa,
@@ -10027,7 +10027,7 @@ test "structural component-literal mistyped field is rejected (M1.0.10 E2 comple
     try expectAnyCode(bad.diagnostics.items, .structural_component_field_type_invalid);
 }
 
-test "structural mutation of a non-component type is rejected (M1.0.10 E3 carry-over)" {
+test "structural mutation of a non-component type is rejected" {
     const gpa = std.testing.allocator;
     // A resource (not a component) given to `entity.add(...)` → E0200 (the
     // "not a declared component" path; scene/prefab collapse the same way).
@@ -10052,7 +10052,7 @@ test "structural mutation of a non-component type is rejected (M1.0.10 E3 carry-
     try expectAnyCode(rm.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker validates tag mutations (M0.8 E3)" {
+test "type-checker validates tag mutations" {
     const gpa = std.testing.allocator;
 
     // Valid: an Entity receiver + declared leaf paths → no E0830 / E0833.
@@ -10092,7 +10092,7 @@ test "type-checker validates tag mutations (M0.8 E3)" {
     try expectAnyCode(bad_recv.diagnostics.items, .tag_invalid_operation);
 }
 
-test "type-checker accepts string + enum fields on struct + resource, keeps component rejection (M1.0.3)" {
+test "type-checker accepts string + enum fields on struct + resource, keeps component rejection" {
     const gpa = std.testing.allocator;
 
     // `string` + enum-typed struct fields are the Error-layer unlock (the
@@ -10139,7 +10139,7 @@ test "type-checker accepts string + enum fields on struct + resource, keeps comp
     try expectNoCode(res_enum.diagnostics.items, .undefined_symbol);
 }
 
-test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranche 2)" {
+test "type-checker resolves the builtin Error struct end-to-end" {
     const gpa = std.testing.allocator;
     // Construct, throw, catch, read fields — every step through the synthetic
     // declarations; `err.message.len()` types as int, `err.code` as ErrorCode.
@@ -10160,7 +10160,7 @@ test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranc
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "struct-literal field values resolve the enum shorthand in check mode (M0.8 E3-C tranche 4)" {
+test "struct-literal field values resolve the enum shorthand in check mode" {
     const gpa = std.testing.allocator;
     // The part1 §10.2 canonical form `Error { code: .io_fail }` plus a user
     // enum field — the declared field type is the expected type (check
@@ -10200,7 +10200,7 @@ test "struct-literal field values resolve the enum shorthand in check mode (M0.8
     try expectAnyCode(bad.diagnostics.items, .enum_variant_not_found);
 }
 
-test "type-checker rejects throwing a non-Error value (M0.8 E3-C tranche 2)" {
+test "type-checker rejects throwing a non-Error value" {
     const gpa = std.testing.allocator;
     // part1 §10.2: no custom error hierarchy — the thrown value is an Error.
     var bad = try parseAndCheck(gpa,
@@ -10216,7 +10216,7 @@ test "type-checker rejects throwing a non-Error value (M0.8 E3-C tranche 2)" {
     try expectAnyCode(bad.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker requires message and code on an Error literal (M0.8 E3-C tranche 2)" {
+test "type-checker requires message and code on an Error literal" {
     const gpa = std.testing.allocator;
     // part1 §10.2 declares no defaults for message/code; `source` is the
     // omittable chaining field.
@@ -10233,7 +10233,7 @@ test "type-checker requires message and code on an Error literal (M0.8 E3-C tran
     try expectAnyCode(bad.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker rejects a user declaration colliding with the builtin Error (M0.8 E3-C tranche 2)" {
+test "type-checker rejects a user declaration colliding with the builtin Error" {
     const gpa = std.testing.allocator;
     var bad = try parseAndCheck(gpa,
         \\struct Error { value: int }
@@ -10242,7 +10242,7 @@ test "type-checker rejects a user declaration colliding with the builtin Error (
     try expectAnyCode(bad.diagnostics.items, .duplicate_symbol);
 }
 
-test "type-checker accepts the minimal collection method subset (M0.8 E3-C tranche 3)" {
+test "type-checker accepts the minimal collection method subset" {
     const gpa = std.testing.allocator;
     // stdlib §13.2/§14.2 minimal subset: array push/len, map insert/len —
     // mutating methods on `let mut` receivers, `len` typing as int.
@@ -10262,7 +10262,7 @@ test "type-checker accepts the minimal collection method subset (M0.8 E3-C tranc
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "type-checker rejects out-of-subset collection methods and immutable receivers (M0.8 E3-C tranches 3-4)" {
+test "type-checker rejects out-of-subset collection methods and immutable receivers" {
     const gpa = std.testing.allocator;
     // `remove` is §13.2 but outside the minimal subset (unimplemented stdlib).
     var rem = try parseAndCheck(gpa,
@@ -10296,7 +10296,7 @@ test "type-checker rejects out-of-subset collection methods and immutable receiv
     try expectAnyCode(pop_immut.diagnostics.items, .immutable_receiver_for_mut_self);
 }
 
-test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)" {
+test "type-checker checks collection method argument types" {
     const gpa = std.testing.allocator;
     // A pushed value must fit the array element type...
     var bad_push = try parseAndCheck(gpa,
@@ -10319,7 +10319,7 @@ test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)
     try expectAnyCode(bad_insert.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
+test "type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k]" {
     const gpa = std.testing.allocator;
     // The full optional op surface (part1 §6.6, stdlib §16.2/§16.3): `??` unwraps to
     // the payload, `!` force-unwraps, `?.len()` re-wraps the string-method result,
@@ -10346,7 +10346,7 @@ test "type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "type-checker rejects misused Optional ops (M0.8 E3-C tranche 4)" {
+test "type-checker rejects misused Optional ops" {
     const gpa = std.testing.allocator;
     // `??` requires an optional lhs.
     var bad_coalesce = try parseAndCheck(gpa,
@@ -10397,7 +10397,7 @@ test "type-checker rejects misused Optional ops (M0.8 E3-C tranche 4)" {
     try expectAnyCode(bad_default.diagnostics.items, .type_mismatch);
 }
 
-test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)" {
+test "type-checker rejects float map keys at both gates" {
     const gpa = std.testing.allocator;
     // stdlib §14 pins `K: Hash + Eq` and §4.3 excludes float/f32/f64 from
     // the builtin Hash set — a float map key is an INVALID program for both
@@ -10430,7 +10430,7 @@ test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranch
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "type-checker resolves the Set builtin associated calls + method subset (M0.8 E3-C tranche 3bis)" {
+test "type-checker resolves the Set builtin associated calls + method subset" {
     const gpa = std.testing.allocator;
     // stdlib §15.1/§15.2 minimal subset: `Set.new()` is typed by the let
     // annotation (empty-map-literal policy), `Set.from([...])` takes the
@@ -10464,7 +10464,7 @@ test "type-checker resolves the Set builtin associated calls + method subset (M0
     try std.testing.expectEqual(@as(usize, 0), user.diagnostics.items.len);
 }
 
-test "type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tranche 3bis)" {
+test "type-checker rejects float set elements at both gates" {
     const gpa = std.testing.allocator;
     // stdlib §15 pins `T: Hash + Eq` on set elements and §4.3 excludes
     // float/f32/f64 from the builtin Hash set — a float set element is an
@@ -10487,7 +10487,7 @@ test "type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tr
     try expectAnyCode(ann.diagnostics.items, .bound_not_satisfied);
 }
 
-test "type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis)" {
+test "type-checker rejects the out-of-subset Set surface" {
     const gpa = std.testing.allocator;
     // `with_capacity` (a generic call form), `remove` (§15.2 remainder), set
     // for-in (no differential requires it), a non-array `from` argument, and
@@ -10527,7 +10527,7 @@ test "type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis
     }
 }
 
-test "anonymous struct literal resolves in check mode, rejected without an expected type (M0.8 E3-C tranche 8)" {
+test "anonymous struct literal resolves in check mode, rejected without an expected type" {
     const gpa = std.testing.allocator;
 
     // The two wired contexts — let annotation and typed field value (the
@@ -10614,7 +10614,7 @@ test "anonymous struct literal resolves in check mode, rejected without an expec
     try expectAnyCode(podcomp.diagnostics.items, .undefined_symbol);
 }
 
-test "data table: a fully valid table with spread is clean (M0.8 E4)" {
+test "data table: a fully valid table with spread is clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\enum Rarity { common, uncommon, rare }
@@ -10633,7 +10633,7 @@ test "data table: a fully valid table with spread is clean (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "data table: E1760 empty entries + E0102 unknown entry type (M0.8 E4)" {
+test "data table: E1760 empty entries + E0102 unknown entry type" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\data EmptyTable: Missing { }
@@ -10643,7 +10643,7 @@ test "data table: E1760 empty entries + E0102 unknown entry type (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
 }
 
-test "theme: E1640 empty + valid control (M0.8 E5)" {
+test "theme: E1640 empty + valid control" {
     const gpa = std.testing.allocator;
     var empty = try parseAndCheck(gpa,
         \\theme "dark" { }
@@ -10661,7 +10661,7 @@ test "theme: E1640 empty + valid control (M0.8 E5)" {
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "theme: E1641 duplicate entry key (M0.8 E5)" {
+test "theme: E1641 duplicate entry key" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\theme "dark" {
@@ -10673,7 +10673,7 @@ test "theme: E1641 duplicate entry key (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .duplicate_token_name);
 }
 
-test "motion: valid control parses + checks clean (M0.8 E5)" {
+test "motion: valid control parses + checks clean" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\motion MenuPanel {
@@ -10691,7 +10691,7 @@ test "motion: valid control parses + checks clean (M0.8 E5)" {
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "motion: E1661 duplicate state name (M0.8 E5)" {
+test "motion: E1661 duplicate state name" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\motion M {
@@ -10703,7 +10703,7 @@ test "motion: E1661 duplicate state name (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .motion_duplicate_state_name);
 }
 
-test "motion: E1664 transition references an undeclared state (M0.8 E5)" {
+test "motion: E1664 transition references an undeclared state" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\motion M {
@@ -10715,7 +10715,7 @@ test "motion: E1664 transition references an undeclared state (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .transition_state_not_found);
 }
 
-test "motion: E1666 unknown easing (M0.8 E5)" {
+test "motion: E1666 unknown easing" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\motion M {
@@ -10727,7 +10727,7 @@ test "motion: E1666 unknown easing (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .transition_easing_unknown);
 }
 
-test "motion: E1665 negative-literal duration (M0.8 E5)" {
+test "motion: E1665 negative-literal duration" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\motion M {
@@ -10739,7 +10739,7 @@ test "motion: E1665 negative-literal duration (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .transition_duration_invalid);
 }
 
-test "input_mapping: valid control parses + checks clean (M0.8 E5)" {
+test "input_mapping: valid control parses + checks clean" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\input_mapping "Gameplay" {
@@ -10762,7 +10762,7 @@ test "input_mapping: valid control parses + checks clean (M0.8 E5)" {
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "input_mapping: E1800 empty (only properties) (M0.8 E5)" {
+test "input_mapping: E1800 empty (only properties)" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "Empty" { context: .gameplay priority: 0 }
@@ -10771,7 +10771,7 @@ test "input_mapping: E1800 empty (only properties) (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .mapping_empty);
 }
 
-test "input_mapping: E1801 duplicate action name (M0.8 E5)" {
+test "input_mapping: E1801 duplicate action name" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "M" {
@@ -10783,7 +10783,7 @@ test "input_mapping: E1801 duplicate action name (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .duplicate_action_name);
 }
 
-test "input_mapping: E1804 unknown modifier (M0.8 E5)" {
+test "input_mapping: E1804 unknown modifier" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "M" {
@@ -10794,7 +10794,7 @@ test "input_mapping: E1804 unknown modifier (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .modifier_type_unknown);
 }
 
-test "input_mapping: E1805 unknown trigger (M0.8 E5)" {
+test "input_mapping: E1805 unknown trigger" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "M" {
@@ -10805,7 +10805,7 @@ test "input_mapping: E1805 unknown trigger (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .trigger_type_unknown);
 }
 
-test "input_mapping: E1806 non-int priority (M0.8 E5)" {
+test "input_mapping: E1806 non-int priority" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "M" {
@@ -10817,7 +10817,7 @@ test "input_mapping: E1806 non-int priority (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .priority_invalid);
 }
 
-test "input_mapping: E1808 non-positive combo window (M0.8 E5)" {
+test "input_mapping: E1808 non-positive combo window" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\input_mapping "M" {
@@ -10828,7 +10828,7 @@ test "input_mapping: E1808 non-positive combo window (M0.8 E5)" {
     try expectAnyCode(result.diagnostics.items, .combo_timing_invalid);
 }
 
-test "data table: E1762 entry type is not a struct (M0.8 E4)" {
+test "data table: E1762 entry type is not a struct" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Health { current: float = 100.0 }
@@ -10840,7 +10840,7 @@ test "data table: E1762 entry type is not a struct (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .entry_type_mismatch);
 }
 
-test "data table: E1761 duplicate entry id (M0.8 E4)" {
+test "data table: E1761 duplicate entry id" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -10853,7 +10853,7 @@ test "data table: E1761 duplicate entry id (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .duplicate_entry_id);
 }
 
-test "data table: E1763 unknown field + E1764 field value type (M0.8 E4)" {
+test "data table: E1763 unknown field + E1764 field value type" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -10867,7 +10867,7 @@ test "data table: E1763 unknown field + E1764 field value type (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .entry_field_type_invalid);
 }
 
-test "data table: E1764 enum-typed field rejects a numeric value (M0.8 E4)" {
+test "data table: E1764 enum-typed field rejects a numeric value" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\enum Rarity { common, rare }
@@ -10880,7 +10880,7 @@ test "data table: E1764 enum-typed field rejects a numeric value (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .entry_field_type_invalid);
 }
 
-test "data table: E0105 unknown enum variant in entry value (M0.8 E4)" {
+test "data table: E0105 unknown enum variant in entry value" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\enum Rarity { common, rare }
@@ -10893,7 +10893,7 @@ test "data table: E0105 unknown enum variant in entry value (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .enum_variant_not_found);
 }
 
-test "data table: E1765 required field missing, spread entry exempt (M0.8 E4)" {
+test "data table: E1765 required field missing, spread entry exempt" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int }
@@ -10912,7 +10912,7 @@ test "data table: E1765 required field missing, spread entry exempt (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "data table: E1766 spread reference forms (M0.8 E4)" {
+test "data table: E1766 spread reference forms" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -10930,7 +10930,7 @@ test "data table: E1766 spread reference forms (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 3), count);
 }
 
-test "data table: E1762 cross-table spread with a different entry type (M0.8 E4)" {
+test "data table: E1762 cross-table spread with a different entry type" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct SpecA { value: int = 0 }
@@ -10946,7 +10946,7 @@ test "data table: E1762 cross-table spread with a different entry type (M0.8 E4)
     try expectAnyCode(result.diagnostics.items, .entry_type_mismatch);
 }
 
-test "data table: E1767 spread cycle detected, acyclic chain clean (M0.8 E4)" {
+test "data table: E1767 spread cycle detected, acyclic chain clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -10970,7 +10970,7 @@ test "data table: E1767 spread cycle detected, acyclic chain clean (M0.8 E4)" {
     try expectNoCode(ok.diagnostics.items, .spread_cycle);
 }
 
-test "data table: E1768 id format (PascalCase and camelCase rejected) (M0.8 E4)" {
+test "data table: E1768 id format (PascalCase and camelCase rejected)" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -10988,7 +10988,7 @@ test "data table: E1768 id format (PascalCase and camelCase rejected) (M0.8 E4)"
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "data table: E0101 collision with another top-level symbol (M0.8 E4)" {
+test "data table: E0101 collision with another top-level symbol" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\struct Spec { value: int = 0 }
@@ -11001,7 +11001,7 @@ test "data table: E0101 collision with another top-level symbol (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
 }
 
-test "routine: a fully valid routine is clean (M0.8 E4)" {
+test "routine: a fully valid routine is clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\event MealCallReceived { }
@@ -11026,7 +11026,7 @@ test "routine: a fully valid routine is clean (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "routine: E1520 empty + E1521 duplicate segment names (M0.8 E4)" {
+test "routine: E1520 empty + E1521 duplicate segment names" {
     const gpa = std.testing.allocator;
     var empty = try parseAndCheck(gpa,
         \\routine Empty { }
@@ -11049,7 +11049,7 @@ test "routine: E1520 empty + E1521 duplicate segment names (M0.8 E4)" {
     try expectAnyCode(dup.diagnostics.items, .duplicate_segment_name);
 }
 
-test "routine: E1522 trigger / E1523 until time out of range (M0.8 E4)" {
+test "routine: E1522 trigger / E1523 until time out of range" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn go_to(place: string) { }
@@ -11066,7 +11066,7 @@ test "routine: E1522 trigger / E1523 until time out of range (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .until_invalid);
 }
 
-test "routine: E1524 unknown 'after' segment reference (M0.8 E4)" {
+test "routine: E1524 unknown 'after' segment reference" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn go_to(place: string) { }
@@ -11082,7 +11082,7 @@ test "routine: E1524 unknown 'after' segment reference (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .segment_reference_not_found);
 }
 
-test "routine: E1525 on_event references no declared event (M0.8 E4)" {
+test "routine: E1525 on_event references no declared event" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn go_to(place: string) { }
@@ -11103,7 +11103,7 @@ test "routine: E1525 on_event references no declared event (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "routine: E1526 interrupt target neither behavior nor pause_segment (M0.8 E4)" {
+test "routine: E1526 interrupt target neither behavior nor pause_segment" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn go_to(place: string) { }
@@ -11126,7 +11126,7 @@ test "routine: E1526 interrupt target neither behavior nor pause_segment (M0.8 E
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "routine: E1527 action calling a non-void fn + E0102 unknown action (M0.8 E4)" {
+test "routine: E1527 action calling a non-void fn + E0102 unknown action" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn returns_int() -> int { 42 }
@@ -11143,7 +11143,7 @@ test "routine: E1527 action calling a non-void fn + E0102 unknown action (M0.8 E
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
 }
 
-test "when-surface: non-bool general filter is E1211, fields-only scope (M0.8 E4)" {
+test "when-surface: non-bool general filter is E1211, fields-only scope" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Counter { value: int = 0 }
@@ -11168,7 +11168,7 @@ test "when-surface: non-bool general filter is E1211, fields-only scope (M0.8 E4
     try expectAnyCode(unknown.diagnostics.items, .undefined_symbol);
 }
 
-test "when-surface: non-bool bare condition is E0200 (M0.8 E4)" {
+test "when-surface: non-bool bare condition is E0200" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Counter { value: int = 0 }
@@ -11182,7 +11182,7 @@ test "when-surface: non-bool bare condition is E0200 (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .type_mismatch);
 }
 
-test "when-surface: the differential-64 shapes check clean (M0.8 E4)" {
+test "when-surface: the differential-64 shapes check clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Counter {
@@ -11209,7 +11209,7 @@ test "when-surface: the differential-64 shapes check clean (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "named args: binding failures are E0203, valid bindings clean (M0.8 E4 item 16)" {
+test "named args: binding failures are E0203, valid bindings clean" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\component Acc { out: int = 0 }
@@ -11245,7 +11245,7 @@ test "named args: binding failures are E0203, valid bindings clean (M0.8 E4 item
     try std.testing.expectEqual(@as(usize, 4), count);
 }
 
-test "named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)" {
+test "named args: closure and builtin callees are refused, not bound, E0203" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Acc { out: int = 0 }
@@ -11266,7 +11266,7 @@ test "named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "behavior: canonical tree with ambient self/target checks clean (M0.8 E4)" {
+test "behavior: canonical tree with ambient self/target checks clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Health {
@@ -11307,7 +11307,7 @@ test "behavior: canonical tree with ambient self/target checks clean (M0.8 E4)" 
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "behavior: E1500/E1501/E1503/E1504/E1505 structural codes (M0.8 E4)" {
+test "behavior: E1500/E1501/E1503/E1504/E1505 structural codes" {
     const gpa = std.testing.allocator;
     var leaf_root = try parseAndCheck(gpa,
         \\fn f() { }
@@ -11344,7 +11344,7 @@ test "behavior: E1500/E1501/E1503/E1504/E1505 structural codes (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 2), e1504);
 }
 
-test "behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)" {
+test "behavior: E1502 unknown intrinsic targets + E1506 recursion" {
     const gpa = std.testing.allocator;
     var unknown = try parseAndCheck(gpa,
         \\behavior B {
@@ -11384,7 +11384,7 @@ test "behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)" {
     try expectNoCode(acyclic.diagnostics.items, .behavior_recursion);
 }
 
-test "quest: canonical quest with ambient player checks clean (M0.8 E4)" {
+test "quest: canonical quest with ambient player checks clean" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\component Health { current: float = 100.0 }
@@ -11419,7 +11419,7 @@ test "quest: canonical quest with ambient player checks clean (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548 (M0.8 E4)" {
+test "quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548" {
     const gpa = std.testing.allocator;
     var empty = try parseAndCheck(gpa,
         \\quest Q { }
@@ -11451,7 +11451,7 @@ test "quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548 (M0.8 E4)" {
     try expectAnyCode(bad.diagnostics.items, .duplicate_stage_name);
 }
 
-test "quest: E1543/E1545/E1550 reference codes + W1541 warning (M0.8 E4)" {
+test "quest: E1543/E1545/E1550 reference codes + W1541 warning" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
         \\fn check() -> bool { true }
@@ -11473,7 +11473,7 @@ test "quest: E1543/E1545/E1550 reference codes + W1541 warning (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .no_main_objective);
 }
 
-test "dialogue: canonical dialogue checks clean, structural codes fire (M0.8 E4)" {
+test "dialogue: canonical dialogue checks clean, structural codes fire" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\component Health { current: float = 100.0 }
@@ -11527,7 +11527,7 @@ test "dialogue: canonical dialogue checks clean, structural codes fire (M0.8 E4)
     try expectAnyCode(empty.diagnostics.items, .dialogue_empty);
 }
 
-test "ability: canonical ability checks clean, structural codes fire (M0.8 E4)" {
+test "ability: canonical ability checks clean, structural codes fire" {
     const gpa = std.testing.allocator;
     var ok = try parseAndCheck(gpa,
         \\resource ManaPool { mana: float = 100.0 }
@@ -11597,7 +11597,7 @@ test "ability: canonical ability checks clean, structural codes fire (M0.8 E4)" 
     try std.testing.expect(gated.diagnostics.items.len > 0);
 }
 
-test "extension methods type-check on an Entity receiver (M1.0.9 B2)" {
+test "extension methods type-check on an Entity receiver" {
     const gpa = std.testing.allocator;
     // A real (NOT checker-skipped) rule body calling all four extension methods
     // must type-check clean — no `type_mismatch` "no method on an Entity".
@@ -11625,7 +11625,7 @@ test "extension methods type-check on an Entity receiver (M1.0.9 B2)" {
     try std.testing.expect(bad.diagnostics.items.len > 0);
 }
 
-test "E0904 fires on a sub-expression await, not on the statement-head forms (M1.0.11 E3)" {
+test "E0904 fires on a sub-expression await, not on the statement-head forms" {
     const gpa = std.testing.allocator;
     // The four statement-head positions — expr-stmt, `let` init, simple assign
     // RHS, `return` operand — are the allowed placement: no E0904.
@@ -11667,7 +11667,7 @@ test "E0904 fires on a sub-expression await, not on the statement-head forms (M1
     try expectAnyCode(sub.diagnostics.items, .await_not_statement_head);
 }
 
-test "E0904 fires on a statement-head await inside a value-position block, not a statement-position one (M1.0.11 E3)" {
+test "E0904 fires on a statement-head await inside a value-position block, not a statement-position one" {
     const gpa = std.testing.allocator;
     // An `if` used as a VALUE (a `let` initializer) is evaluated synchronously by
     // the tree-walker — a statement-head `await` in its branch is inexecutable → E0904.
@@ -11726,7 +11726,7 @@ test "E0904 fires on a statement-head await inside a value-position block, not a
     try expectNoCode(sif.diagnostics.items, .await_not_statement_head);
 }
 
-test "E0901 fires on an async call / await in a non-async context, not on a legal async→async await (M1.0.11 E4)" {
+test "E0901 fires on an async call / await in a non-async context, not on a legal async→async await" {
     const gpa = std.testing.allocator;
     const af =
         \\resource Out { n: int = 0 }
@@ -11789,7 +11789,7 @@ test "E0901 fires on an async call / await in a non-async context, not on a lega
     try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
 }
 
-test "E0901 fires on the four concurrency constructs outside an async context (M1.0.12 E3)" {
+test "E0901 fires on the four concurrency constructs outside an async context" {
     const gpa = std.testing.allocator;
     // §4.2 (the async constructs are only available in an async context) —
     // each of the four forms in a SYNC rule is E0901.
@@ -11829,7 +11829,7 @@ test "E0901 fires on the four concurrency constructs outside an async context (M
     try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
 }
 
-test "E0905 fires on every bare async call; await is the sole consumer (M1.0.12 E3)" {
+test "E0905 fires on every bare async call; await is the sole consumer" {
     const gpa = std.testing.allocator;
     const af =
         \\resource Out { n: int = 0 }
@@ -11903,7 +11903,7 @@ test "E0905 fires on every bare async call; await is the sole consumer (M1.0.12 
     try expectNoCode(ok.diagnostics.items, .unconsumed_async_effect);
 }
 
-test "E0906 rejects return in sync/branch/spawn, accepts it in a race branch (M1.0.12 E3)" {
+test "E0906 rejects return in sync/branch/spawn, accepts it in a race branch" {
     const gpa = std.testing.allocator;
     // `return` in a sync branch / branch body / spawn body → E0906 each.
     var bad = try parseAndCheck(gpa,
@@ -11946,7 +11946,7 @@ test "E0906 rejects return in sync/branch/spawn, accepts it in a race branch (M1
     try expectNoCode(ok.diagnostics.items, .illegal_return_in_concurrency_branch);
 }
 
-test "E0907 rejects break/continue crossing the task boundary, accepts in-branch loops (M1.0.12 E3)" {
+test "E0907 rejects break/continue crossing the task boundary, accepts in-branch loops" {
     const gpa = std.testing.allocator;
     // An unlabeled `break`/`continue` with no in-branch loop, and a labeled
     // `break` targeting a loop OUTSIDE the construct, cross the boundary —
@@ -12001,7 +12001,7 @@ test "E0907 rejects break/continue crossing the task boundary, accepts in-branch
     try expectNoCode(ok.diagnostics.items, .control_flow_escapes_task_branch);
 }
 
-test "TaskHandle: binding typed, cancel/await accepted, misuse rejected (M1.0.12 E3)" {
+test "TaskHandle: binding typed, cancel/await accepted, misuse rejected" {
     const gpa = std.testing.allocator;
     // The bound spawn types `h` as the builtin TaskHandle: `h.cancel()` and
     // `await h` are its two operations (§9.8) — clean.
@@ -12056,7 +12056,7 @@ test "TaskHandle: binding typed, cancel/await accepted, misuse rejected (M1.0.12
     try expectAnyCode(badh.diagnostics.items, .type_mismatch);
 }
 
-test "TaskHandle is rejected as a component/resource field type (M1.0.12 E3)" {
+test "TaskHandle is rejected as a component/resource field type" {
     const gpa = std.testing.allocator;
     // Non-POD builtin (§2.2) — like `string` on components, a `TaskHandle`
     // field is rejected on both a component and a resource.
@@ -12073,7 +12073,7 @@ test "TaskHandle is rejected as a component/resource field type (M1.0.12 E3)" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "timer: binding typed TimerHandle, cancel accepted, expression arg, non-async rule (M1.0.13 E4)" {
+test "timer: binding typed TimerHandle, cancel accepted, expression arg, non-async rule" {
     const gpa = std.testing.allocator;
     // A bound timer types `t` as the builtin TimerHandle; `cancel()` is its
     // only operation (§9.10). Timers carry no `{async}` effect: they are
@@ -12118,7 +12118,7 @@ test "timer: binding typed TimerHandle, cancel accepted, expression arg, non-asy
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "timer: await on a TimerHandle is rejected — a timer is not a task (M1.0.13 E4)" {
+test "timer: await on a TimerHandle is rejected — a timer is not a task" {
     const gpa = std.testing.allocator;
     var bad = try parseAndCheck(gpa,
         \\resource Out { n: int = 0 }
@@ -12134,7 +12134,7 @@ test "timer: await on a TimerHandle is rejected — a timer is not a task (M1.0.
     try expectAnyCode(bad.diagnostics.items, .type_mismatch);
 }
 
-test "TimerHandle is rejected as a component/resource field type (M1.0.13 E4)" {
+test "TimerHandle is rejected as a component/resource field type" {
     const gpa = std.testing.allocator;
     // Non-POD builtin (§2.2) — the TaskHandle precedent: a `TimerHandle`
     // field is rejected on both a component and a resource.
@@ -12151,7 +12151,7 @@ test "TimerHandle is rejected as a component/resource field type (M1.0.13 E4)" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "timer: non-Duration argument is rejected (M1.0.13 E4)" {
+test "timer: non-Duration argument is rejected" {
     const gpa = std.testing.allocator;
     var bad = try parseAndCheck(gpa,
         \\resource Out { n: int = 0 }
@@ -12171,7 +12171,7 @@ test "timer: non-Duration argument is rejected (M1.0.13 E4)" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "timer body is a synchronous context: await/async call inside is E0901 (M1.0.13 E4)" {
+test "timer body is a synchronous context: await/async call inside is E0901" {
     const gpa = std.testing.allocator;
     // §9.10: the timer body carries no `{async}` effect — an `await` or an
     // async call inside it is E0901 even when the SCHEDULING rule is async.
@@ -12219,7 +12219,7 @@ test "timer body is a synchronous context: await/async call inside is E0901 (M1.
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "builtin time resources resolve by name from the descriptor table (M1.0.13 E4)" {
+test "builtin time resources resolve by name from the descriptor table" {
     const gpa = std.testing.allocator;
     // `get(GameTime).dt` / `get_mut(GameTime).time_scale` resolve against
     // `builtin_resources` — no declaration, no `when resource` clause (the
@@ -12258,7 +12258,7 @@ test "builtin time resources resolve by name from the descriptor table (M1.0.13 
     try expectAnyCode(bad.diagnostics.items, .invalid_field_filter);
 }
 
-test "conditional branch guards type-check as bool in the parent scope (M1.0.12 E3)" {
+test "conditional branch guards type-check as bool in the parent scope" {
     const gpa = std.testing.allocator;
     // A bool guard referencing a parent local is clean; a non-bool guard is
     // E0200. Guards are evaluated in the parent scope at construct entry

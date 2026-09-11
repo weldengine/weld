@@ -595,7 +595,7 @@ fn e3RegisterRawI32(gpa: std.mem.Allocator, world: *World, name: []const u8) !Co
     });
 }
 
-test "add on entity already having the component fires on_replaced with old and new (M1.0.2 E3)" {
+test "add on entity already having the component fires on_replaced with old and new" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -622,7 +622,7 @@ test "add on entity already having the component fires on_replaced with old and 
     try testing.expectEqual(@as(i32, 42), stored);
 }
 
-test "on_removed receives the pre-removal value (M1.0.2 E3)" {
+test "on_removed receives the pre-removal value" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -668,7 +668,7 @@ fn spawnCountObserver(
     SpawnCounter.count += 1;
 }
 
-test "dispatchOnSpawned fires on_spawned once for an already-spawned entity (M1.0.5 E2)" {
+test "dispatchOnSpawned fires on_spawned once for an already-spawned entity" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

@@ -8077,7 +8077,7 @@ test "runProgram on minimal component + rule mutates entity" {
     try std.testing.expectApproxEqAbs(@as(f64, 103.0), current, 0.0001);
 }
 
-test "runProgram resource get/get_mut without receiver reads and writes the resource (D-S3-resource-receiver)" {
+test "runProgram resource get/get_mut without receiver reads and writes the resource" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8143,7 +8143,7 @@ fn expectResourceStringField(
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "resource string field compiles and reads its default (M1.0.3 E2)" {
+test "resource string field compiles and reads its default" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8190,7 +8190,7 @@ test "resource string field compiles and reads its default (M1.0.3 E2)" {
     try std.testing.expectEqual(@as(i64, 5), n);
 }
 
-test "resource string field with no default reads empty (M1.0.3 E2)" {
+test "resource string field with no default reads empty" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8214,7 +8214,7 @@ test "resource string field with no default reads empty (M1.0.3 E2)" {
     try expectResourceStringField(&world, "S", "name", "");
 }
 
-test "resource string field is mutable and the previous value is released (M1.0.3 E2)" {
+test "resource string field is mutable and the previous value is released" {
     // An allocation-tracking allocator (backed by the leak-detecting testing
     // allocator) confirms two things: (a) every overwrite releases the previous
     // non-immortal value — proven by a `free_count` increase across writes 2→3;
@@ -8263,7 +8263,7 @@ test "resource string field is mutable and the previous value is released (M1.0.
     try expectResourceStringField(&world, "S", "name", "boss_arena");
 }
 
-test "world+interp teardown frees resource strings once (M1.1.1-HF2 C4)" {
+test "world+interp teardown frees resource strings once" {
     // The resource-payload decref walk is owned by Tier-0
     // `World.releaseResourcePayloads`, called from BOTH `Interpreter.deinit`
     // (before its immortal `persistent_literals` are destroyed) and
@@ -8927,7 +8927,7 @@ fn expectResourceEnumDiscriminant(
     try std.testing.expectEqual(expected, disc);
 }
 
-test "resource enum field compiles, reads its default, and is mutable (M1.0.3 E3)" {
+test "resource enum field compiles, reads its default, and is mutable" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8968,7 +8968,7 @@ test "resource enum field compiles, reads its default, and is mutable (M1.0.3 E3
     try expectResourceEnumDiscriminant(&world, "S", "diff", 2);
 }
 
-test "resource enum field with no default reads the first variant (M1.0.3 E3)" {
+test "resource enum field with no default reads the first variant" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -8996,7 +8996,7 @@ test "resource enum field with no default reads the first variant (M1.0.3 E3)" {
     try expectResourceEnumDiscriminant(&world, "S", "diff", 0);
 }
 
-test "GameState end-state program mutates string + enum + int end-to-end (M1.0.3)" {
+test "GameState end-state program mutates string + enum + int end-to-end" {
     // The exercise: `string` + enum + `int` fields mutated in
     // one rule body, leak-free. Runs under the leak-detecting allocator.
     const gpa = std.testing.allocator;
@@ -9049,7 +9049,7 @@ test "GameState end-state program mutates string + enum + int end-to-end (M1.0.3
     try std.testing.expectEqual(@as(i64, 1), n);
 }
 
-test "runProgram type-alias field resolves to the underlying primitive (M0.8 type alias)" {
+test "runProgram type-alias field resolves to the underlying primitive (type alias)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9097,7 +9097,7 @@ test "runProgram type-alias field resolves to the underlying primitive (M0.8 typ
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), x, 0.0001);
 }
 
-test "runProgram for-in over a range accumulates (M0.8 ranges + for-in)" {
+test "runProgram for-in over a range accumulates (ranges + for-in)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9142,7 +9142,7 @@ test "runProgram for-in over a range accumulates (M0.8 ranges + for-in)" {
     try std.testing.expectEqual(@as(i64, 10), total);
 }
 
-test "runProgram block expression yields its trailing value (M0.8 control flow)" {
+test "runProgram block expression yields its trailing value (control flow)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9188,7 +9188,7 @@ test "runProgram block expression yields its trailing value (M0.8 control flow)"
     try std.testing.expectEqual(@as(i64, 30), out);
 }
 
-test "runProgram while loop with a conditional break (M0.8 control flow)" {
+test "runProgram while loop with a conditional break (control flow)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9239,7 +9239,7 @@ test "runProgram while loop with a conditional break (M0.8 control flow)" {
     try std.testing.expectEqual(@as(i64, 10), out);
 }
 
-test "runProgram closure with a block body (M0.8 control flow)" {
+test "runProgram closure with a block body (control flow)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9290,7 +9290,7 @@ test "runProgram closure with a block body (M0.8 control flow)" {
     try std.testing.expectEqual(@as(i64, 10), out);
 }
 
-test "runProgram return inside a closure exits the closure only (M0.8 closures)" {
+test "runProgram return inside a closure exits the closure only (closures)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9344,7 +9344,7 @@ test "runProgram return inside a closure exits the closure only (M0.8 closures)"
     try std.testing.expectEqual(@as(i64, 42), out);
 }
 
-test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
+test "runProgram match dispatches on literal and binding arms (match)" {
     const gpa = std.testing.allocator;
 
     // Literal dispatch: sel = 1 selects the `1 => 200` arm.
@@ -9417,7 +9417,7 @@ test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
     }
 }
 
-test "runProgram enum value + match selects the right arm (M0.8 E2 block 3 tranche B)" {
+test "runProgram enum value + match selects the right arm" {
     const gpa = std.testing.allocator;
     // `let d = Difficulty.normal` builds an enum value; the match selects the
     // `.normal => 2` arm (the middle of the if-else chain). out = 2.
@@ -9455,7 +9455,7 @@ test "runProgram enum value + match selects the right arm (M0.8 E2 block 3 tranc
     try std.testing.expectEqual(@as(i64, 2), out);
 }
 
-test "runProgram trait method on Entity mutates via get_mut (M0.8 E2 block 3 tranche C)" {
+test "runProgram trait method on Entity mutates via get_mut" {
     const gpa = std.testing.allocator;
     // A conditional trait impl on Entity; the rule's `when` guarantees Health,
     // so the call type-checks and the interpreter dispatches it (Entity trait
@@ -9495,7 +9495,7 @@ test "runProgram trait method on Entity mutates via get_mut (M0.8 E2 block 3 tra
     try std.testing.expectEqual(@as(i64, 70), current);
 }
 
-test "runProgram generic fn + generic struct run type-erased (M0.8 E2 block 4)" {
+test "runProgram generic fn + generic struct run type-erased" {
     const gpa = std.testing.allocator;
     // The tree-walker monomorphises trivially at runtime: a generic `fn` binds
     // its args by name (types erased) and a generic `struct` materialises like
@@ -9535,7 +9535,7 @@ test "runProgram generic fn + generic struct run type-erased (M0.8 E2 block 4)" 
     try std.testing.expectEqual(@as(i64, 142), out);
 }
 
-test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891, M0.8 E2)" {
+test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891)" {
     const gpa = std.testing.allocator;
     // The §891-patched grammar accepts a generic-type inherent impl target. A
     // method on `Range<T>` dispatches + runs type-erased: `lower()` on
@@ -9585,7 +9585,7 @@ test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§
     try std.testing.expectEqual(@as(i64, 2), out);
 }
 
-test "runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)" {
+test "runProgram while let unwraps an optional each iteration" {
     const gpa = std.testing.allocator;
     // `while let y = <optional>` re-evaluates the optional each iteration: a
     // counter yields `some(n)` while n > 0, then `none` to stop. sum = 3+2+1 = 6.
@@ -9627,7 +9627,7 @@ test "runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)"
     try std.testing.expectEqual(@as(i64, 6), out);
 }
 
-test "user fn named test_world is not shadowed by the builtin outside a test (M1.0.15 review fix)" {
+test "user fn named test_world is not shadowed by the builtin outside a test" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9652,7 +9652,7 @@ test "user fn named test_world is not shadowed by the builtin outside a test (M1
     try std.testing.expectEqual(@as(i32, 42), v);
 }
 
-test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {
+test "runProgram assert passes on true, reports a runtime error on false (assert)" {
     const gpa = std.testing.allocator;
 
     // assert(true-ish) → no runtime error.
@@ -9710,7 +9710,7 @@ test "runProgram assert passes on true, reports a runtime error on false (M0.8 a
     }
 }
 
-test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {
+test "runProgram numeric cast int-to-float (cast foundation)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9759,7 +9759,7 @@ test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), current, 0.0001);
 }
 
-test "runProgram for-in over a dynamic array iterates each element (M0.8 collections)" {
+test "runProgram for-in over a dynamic array iterates each element (collections)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9805,7 +9805,7 @@ test "runProgram for-in over a dynamic array iterates each element (M0.8 collect
     try std.testing.expectEqual(@as(i64, 45), total);
 }
 
-test "runProgram map literal + for-in sums values (M0.8 collections)" {
+test "runProgram map literal + for-in sums values (collections)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9852,7 +9852,7 @@ test "runProgram map literal + for-in sums values (M0.8 collections)" {
     try std.testing.expectEqual(@as(i64, 60), total);
 }
 
-test "runProgram dynamic array push and len (M0.8 E3-C tranche 3)" {
+test "runProgram dynamic array push and len" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9898,7 +9898,7 @@ test "runProgram dynamic array push and len (M0.8 E3-C tranche 3)" {
     try std.testing.expectEqual(@as(i64, 409), total);
 }
 
-test "runProgram map insert replaces and appends, len counts (M0.8 E3-C tranche 3)" {
+test "runProgram map insert replaces and appends, len counts" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9947,7 +9947,7 @@ test "runProgram map insert replaces and appends, len counts (M0.8 E3-C tranche 
     try std.testing.expectEqual(@as(i64, 3065), total);
 }
 
-test "runProgram Set.new/Set.from + insert dedup, contains, len (M0.8 E3-C tranche 3bis)" {
+test "runProgram Set.new/Set.from + insert dedup, contains, len" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -9998,7 +9998,7 @@ test "runProgram Set.new/Set.from + insert dedup, contains, len (M0.8 E3-C tranc
     try std.testing.expectEqual(@as(i64, 4010), total);
 }
 
-test "runProgram closure captures an outer local by value (M0.8 closures)" {
+test "runProgram closure captures an outer local by value (closures)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10043,7 +10043,7 @@ test "runProgram closure captures an outer local by value (M0.8 closures)" {
     try std.testing.expectEqual(@as(i64, 15), out);
 }
 
-test "runProgram free-function call returns the computed value (M0.8 E2)" {
+test "runProgram free-function call returns the computed value" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10087,7 +10087,7 @@ test "runProgram free-function call returns the computed value (M0.8 E2)" {
     try std.testing.expectEqual(@as(i64, 42), out);
 }
 
-test "runProgram early return unwinds the fn body past later statements (M0.8 E2)" {
+test "runProgram early return unwinds the fn body past later statements" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10135,7 +10135,7 @@ test "runProgram early return unwinds the fn body past later statements (M0.8 E2
     try std.testing.expectEqual(@as(i64, 7), out);
 }
 
-test "runProgram struct method dispatch: associated fn + instance method (M0.8 E2 block 3)" {
+test "runProgram struct method dispatch: associated fn + instance method" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10184,7 +10184,7 @@ test "runProgram struct method dispatch: associated fn + instance method (M0.8 E
     try std.testing.expectEqual(@as(i64, 7), out);
 }
 
-test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)" {
+test "runProgram mut-self method mutates the receiver in place" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10238,7 +10238,7 @@ test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)
     try std.testing.expectEqual(@as(i64, 15), out);
 }
 
-test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
+test "runProgram try/catch catches a thrown value (error handling)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10290,7 +10290,7 @@ test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
     try std.testing.expectEqual(@as(i64, 4), out);
 }
 
-test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" {
+test "runProgram uncaught throw surfaces a runtime error (error handling)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10322,7 +10322,7 @@ test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" 
     try std.testing.expect(report.runtime_errors > 0);
 }
 
-test "runProgram emit enqueues an event into the dynamic event store (M0.8 E3)" {
+test "runProgram emit enqueues an event into the dynamic event store" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10369,7 +10369,7 @@ test "runProgram emit enqueues an event into the dynamic event store (M0.8 E3)" 
     try std.testing.expectEqual(@as(usize, 1), interp.events.count(dmg_id));
 }
 
-test "runProgram @on_event observer drains the event store and writes a resource (M0.8 E3)" {
+test "runProgram @on_event observer drains the event store and writes a resource" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10418,7 +10418,7 @@ test "runProgram @on_event observer drains the event store and writes a resource
     try std.testing.expectEqual(@as(i32, 30), total);
 }
 
-test "@on_event(T) fires exactly once per emit T in the tick (M1.0.2 E1)" {
+test "@on_event(T) fires exactly once per emit T in the tick" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10472,7 +10472,7 @@ test "@on_event(T) fires exactly once per emit T in the tick (M1.0.2 E1)" {
     try std.testing.expectEqual(@as(i32, 3), total);
 }
 
-test "@on_event discriminates event types (M1.0.2 E1)" {
+test "@on_event discriminates event types" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10529,7 +10529,7 @@ test "@on_event discriminates event types (M1.0.2 E1)" {
     try std.testing.expectEqual(@as(i32, 1), b);
 }
 
-test "event emitted earlier in the tick reaches a later-declared @on_event (M1.0.2 E1)" {
+test "event emitted earlier in the tick reaches a later-declared @on_event" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10571,7 +10571,7 @@ test "event emitted earlier in the tick reaches a later-declared @on_event (M1.0
     try std.testing.expectEqual(@as(i32, 7), seen);
 }
 
-test "event string payload survives to drain and not past tick boundary (M1.0.2 E1)" {
+test "event string payload survives to drain and not past tick boundary" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10683,7 +10683,7 @@ fn observerProgramDiagCount(gpa: std.mem.Allocator, source: []const u8) !usize {
     return diags.items.len;
 }
 
-test "observer annotation signature mismatch is rejected (M1.0.2 E2)" {
+test "observer annotation signature mismatch is rejected" {
     const gpa = std.testing.allocator;
     // `@on_removed(Poisoned)` without the required `old: Poisoned` param — the
     // shape must be `(entity: Entity, old: Poisoned)`. → E1208.
@@ -10707,7 +10707,7 @@ test "observer annotation signature mismatch is rejected (M1.0.2 E2)" {
     , .observer_signature_mismatch));
 }
 
-test "observer annotation requires a component type (M1.0.2 E2)" {
+test "observer annotation requires a component type" {
     const gpa = std.testing.allocator;
     // `Foo` is a declared struct, NOT a component → the lifecycle type T is
     // invalid. → E1209 (and no cascading E1208). Uses `@on_removed` (binding
@@ -10720,7 +10720,7 @@ test "observer annotation requires a component type (M1.0.2 E2)" {
     , .observer_component_invalid));
 }
 
-test "observer rule rejects when clause and conflicting lifecycle annotations (M1.0.2 E2)" {
+test "observer rule rejects when clause and conflicting lifecycle annotations" {
     const gpa = std.testing.allocator;
     // A `when` clause on an observer rule — the lifecycle component type is the
     // sole trigger; observers do not iterate entities. → E1215. (`@on_removed`
@@ -10739,7 +10739,7 @@ test "observer rule rejects when clause and conflicting lifecycle annotations (M
     , .observer_rule_conflict));
 }
 
-test "well-formed observer rules of all five kinds type-check clean (M1.0.2 E2)" {
+test "well-formed observer rules of all five kinds type-check clean" {
     const gpa = std.testing.allocator;
     // Positive control: each lifecycle kind with its exact required shape — no
     // observer diagnostic should fire (guards against over-rejection). `@on_added`
@@ -10761,7 +10761,7 @@ test "well-formed observer rules of all five kinds type-check clean (M1.0.2 E2)"
     try std.testing.expectEqual(@as(usize, 0), n);
 }
 
-test "@on_added(T) fires at flush with entity + value bound (M1.0.2 E3)" {
+test "@on_added(T) fires at flush with entity + value bound" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10816,7 +10816,7 @@ test "@on_added(T) fires at flush with entity + value bound (M1.0.2 E3)" {
     try std.testing.expectEqual(@as(i64, 42), seen);
 }
 
-test "@on_removed(T) binds the correct old value (M1.0.2 E3)" {
+test "@on_removed(T) binds the correct old value" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10869,7 +10869,7 @@ test "@on_removed(T) binds the correct old value (M1.0.2 E3)" {
     try std.testing.expectEqual(@as(i64, 13), seen); // the pre-removal dmg
 }
 
-test "@on_spawned and @on_despawned fire on spawn/despawn (M1.0.2 E3)" {
+test "@on_spawned and @on_despawned fire on spawn/despawn" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10914,7 +10914,7 @@ test "@on_spawned and @on_despawned fire on spawn/despawn (M1.0.2 E3)" {
     try std.testing.expectEqual(@as(usize, 1), interp.events.count(pr.ast.strings.find("Despawned").?));
 }
 
-test "observer body structural mutation is deferred — no recursion (M1.0.2 E3)" {
+test "observer body structural mutation is deferred — no recursion" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10968,7 +10968,7 @@ test "observer body structural mutation is deferred — no recursion (M1.0.2 E3)
     try std.testing.expectEqual(@as(usize, 0), world.observer_registry.deferred.?.commands.items.len);
 }
 
-test "observable behaviour: all five observer kinds + emit/@on_event, deterministic ordered log (M1.0.2 E3)" {
+test "observable behaviour: all five observer kinds + emit/@on_event, deterministic ordered log" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11067,7 +11067,7 @@ test "observable behaviour: all five observer kinds + emit/@on_event, determinis
     try std.testing.expectEqualSlices(i64, &[_]i64{6}, log.items);
 }
 
-test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
+test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11126,7 +11126,7 @@ test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a
     try std.testing.expectEqual(@as(u64, 1), word0 & 1);
 }
 
-test "runProgram `has T changed` gates a rule on per-tick change detection (M0.8 E3)" {
+test "runProgram `has T changed` gates a rule on per-tick change detection" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11245,7 +11245,7 @@ fn readChangedTick(world: *World, comp_id: ComponentId, entity: CoreEntityId) Ti
     return arch.changedTick(chunk, cidx, loc.slot);
 }
 
-test "runProgram changed fires per-slot intra-archetype (M1.0.1)" {
+test "runProgram changed fires per-slot intra-archetype" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11312,7 +11312,7 @@ test "runProgram changed fires per-slot intra-archetype (M1.0.1)" {
     try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, b));
 }
 
-test "runProgram changed combined with a field-filter (M1.0.1)" {
+test "runProgram changed combined with a field-filter" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11375,7 +11375,7 @@ test "runProgram changed combined with a field-filter (M1.0.1)" {
     try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, noopen));
 }
 
-test "runProgram changed_tick travels across archetype migration (M1.0.1)" {
+test "runProgram changed_tick travels across archetype migration" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11446,7 +11446,7 @@ test "runProgram changed_tick travels across archetype migration (M1.0.1)" {
     try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
 }
 
-test "runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1)" {
+test "runProgram changed on a freshly-spawned entity uses the spawn tick" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11502,7 +11502,7 @@ test "runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1
     try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
 }
 
-test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick (M1.0.11 E3)" {
+test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11555,7 +11555,7 @@ test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-test "time subsystem populates the three builtin resources (M1.0.13 E5)" {
+test "time subsystem populates the three builtin resources" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11605,7 +11605,7 @@ test "time subsystem populates the three builtin resources (M1.0.13 E5)" {
     try std.testing.expectEqual(@as(i64, 60), readResourceInt(&world, out_id));
 }
 
-test "time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/real (M1.0.13 E5)" {
+test "time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/real" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11661,7 +11661,7 @@ test "time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/r
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), readF64At(real, tr.real_total), 1e-12);
 }
 
-test "await wait scales with time_scale and freezes under paused (M1.0.13 E5)" {
+test "await wait scales with time_scale and freezes under paused" {
     const gpa = std.testing.allocator;
     // (a) At time_scale = 0.5, a 0.1s wait (6 fixed ticks) needs 12 real
     // ticks of game clock: suspended at tick 1 (game clock 0.5), deadline
@@ -11751,7 +11751,7 @@ test "await wait scales with time_scale and freezes under paused (M1.0.13 E5)" {
     }
 }
 
-test "await wait_unscaled fires under paused (M1.0.13 E5)" {
+test "await wait_unscaled fires under paused" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11796,7 +11796,7 @@ test "await wait_unscaled fires under paused (M1.0.13 E5)" {
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-test "after(d) fires once at the deadline from a non-async rule, then parks as a husk (M1.0.13 E6)" {
+test "after(d) fires once at the deadline from a non-async rule, then parks as a husk" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11839,7 +11839,7 @@ test "after(d) fires once at the deadline from a non-async rule, then parks as a
     try std.testing.expect(interp.timers.items[0].state == .fired);
 }
 
-test "every(d) fires each period, re-armed at a fixed period (M1.0.13 E6)" {
+test "every(d) fires each period, re-armed at a fixed period" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11876,7 +11876,7 @@ test "every(d) fires each period, re-armed at a fixed period (M1.0.13 E6)" {
     try std.testing.expect(interp.timers.items[0].state == .armed);
 }
 
-test "under paused, after freezes while after_unscaled still fires (M1.0.13 E6)" {
+test "under paused, after freezes while after_unscaled still fires" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11930,7 +11930,7 @@ test "under paused, after freezes while after_unscaled still fires (M1.0.13 E6)"
     }
 }
 
-test "time_scale stretches an after deadline (M1.0.13 E6)" {
+test "time_scale stretches an after deadline" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11962,7 +11962,7 @@ test "time_scale stretches an after deadline (M1.0.13 E6)" {
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
-test "a canceled timer never fires and cancel is idempotent (M1.0.13 E6)" {
+test "a canceled timer never fires and cancel is idempotent" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -11993,7 +11993,7 @@ test "a canceled timer never fires and cancel is idempotent (M1.0.13 E6)" {
     try std.testing.expect(interp.timers.items[0].state == .canceled);
 }
 
-test "the callback observes the scheduling-time scope snapshot (captured entity) (M1.0.13 E6)" {
+test "the callback observes the scheduling-time scope snapshot (captured entity)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12030,7 +12030,7 @@ test "the callback observes the scheduling-time scope snapshot (captured entity)
     try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
 }
 
-test "two timers due the same tick fire in registration order (M1.0.13 E6)" {
+test "two timers due the same tick fire in registration order" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12056,7 +12056,7 @@ test "two timers due the same tick fire in registration order (M1.0.13 E6)" {
     try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out_id));
 }
 
-test "a timer scheduled from an async rule fires and its emit reaches same-tick rules (M1.0.13 E6)" {
+test "a timer scheduled from an async rule fires and its emit reaches same-tick rules" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12097,7 +12097,7 @@ test "a timer scheduled from an async rule fires and its emit reaches same-tick 
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
-test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
+test "async rule resumes on await global_event(T)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12153,7 +12153,7 @@ test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
     try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
 }
 
-test "async rule suspends at a statement-head await inside an if body and resumes without re-running the prefix (M1.0.11 E1)" {
+test "async rule suspends at a statement-head await inside an if body and resumes without re-running the prefix" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12223,7 +12223,7 @@ test "async rule suspends at a statement-head await inside an if body and resume
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
 }
 
-test "async rule suspends at a statement-head await inside a loop body and resumes each iteration (M1.0.11 E1)" {
+test "async rule suspends at a statement-head await inside a loop body and resumes each iteration" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12279,7 +12279,7 @@ test "async rule suspends at a statement-head await inside a loop body and resum
     try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
 }
 
-test "async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved (M1.0.11 E1)" {
+test "async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12334,7 +12334,7 @@ test "async rule suspends at a statement-head await inside a for body and resume
     try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
 }
 
-test "async rule suspends inside a try body and a post-resume throw routes to the catch (M1.0.11 E1)" {
+test "async rule suspends inside a try body and a post-resume throw routes to the catch" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12388,7 +12388,7 @@ test "async rule suspends inside a try body and a post-resume throw routes to th
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-test "async fn called via await runs to completion across ticks and its return value flows into a let binding (M1.0.11 E2)" {
+test "async fn called via await runs to completion across ticks and its return value flows into a let binding" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12441,7 +12441,7 @@ test "async fn called via await runs to completion across ticks and its return v
     try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
 }
 
-test "async method called via await inlines with its own scope and locals survive the suspension (M1.0.11 E2)" {
+test "async method called via await inlines with its own scope and locals survive the suspension" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12499,7 +12499,7 @@ test "async method called via await inlines with its own scope and locals surviv
     try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
 }
 
-test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) (M1.0.11 E3)" {
+test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12546,7 +12546,7 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-test "future is the sole await target the wake-resolver rejects (M1.0.14 E4 — boundary pin flipped)" {
+test "future is the sole await target the wake-resolver rejects" {
     const gpa = std.testing.allocator;
     // An earlier pin asserted `entity_event` failed loud in the wake-resolver.
     // It is FLIPPED: `entity_event` and `global_event` are realized —
@@ -12594,7 +12594,7 @@ test "future is the sole await target the wake-resolver rejects (M1.0.14 E4 — 
     try std.testing.expectError(error.RuntimeFailure, interp.evalAwaitTarget(await_id));
 }
 
-test "entity-bound async rule: one root task per matched entity, independent resumes (M1.0.14 E3)" {
+test "entity-bound async rule: one root task per matched entity, independent resumes" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12636,7 +12636,7 @@ test "entity-bound async rule: one root task per matched entity, independent res
     try std.testing.expectEqual(@as(i64, 22), readResourceInt(&world, out));
 }
 
-test "entity-bound async rule: re-arms after a terminal state while the entity matches (M1.0.14 E3 ruling 1)" {
+test "entity-bound async rule: re-arms after a terminal state while the entity matches" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12675,7 +12675,7 @@ test "entity-bound async rule: re-arms after a terminal state while the entity m
     try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out));
 }
 
-test "entity-bound async rule: when gates the spawn, not the task life (M1.0.14 E3 ruling 2)" {
+test "entity-bound async rule: when gates the spawn, not the task life" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12721,7 +12721,7 @@ test "entity-bound async rule: when gates the spawn, not the task life (M1.0.14 
     try std.testing.expectEqual(@as(i64, 101), readResourceInt(&world, out));
 }
 
-test "entity-bound async rule: despawn mid-suspension → dead-handle fail-loud on resume (M1.0.14 E3 ruling 3)" {
+test "entity-bound async rule: despawn mid-suspension → dead-handle fail-loud on resume" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12760,7 +12760,7 @@ test "entity-bound async rule: despawn mid-suspension → dead-handle fail-loud 
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // tail never ran
 }
 
-test "entity-bound async rule: spawn follows selection order (M1.0.14 E3 ruling 4)" {
+test "entity-bound async rule: spawn follows selection order" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12800,7 +12800,7 @@ test "entity-bound async rule: spawn follows selection order (M1.0.14 E3 ruling 
     try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out));
 }
 
-test "async rule shape guard: parameterless byte-stable, dt param fail-loud (M1.0.14 E3)" {
+test "async rule shape guard: parameterless byte-stable, dt param fail-loud" {
     const gpa = std.testing.allocator;
 
     // Parameterless async rule: one root task, runs once, never re-arms (the
@@ -12868,7 +12868,7 @@ test "async rule shape guard: parameterless byte-stable, dt param fail-loud (M1.
     }
 }
 
-test "entity_event: wakes for the matching designated entity, not a different one (M1.0.14 E4)" {
+test "entity_event: wakes for the matching designated entity, not a different one" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -12915,7 +12915,7 @@ test "entity_event: wakes for the matching designated entity, not a different on
     try std.testing.expectEqual(@as(i64, 0), readI64Field(&world, woke, e2)); // a different entity never woke
 }
 
-test "global_event payload filter: int match/mismatch + string byte-equality (M1.0.14 E4)" {
+test "global_event payload filter: int match/mismatch + string byte-equality" {
     const gpa = std.testing.allocator;
 
     // A) int filter MATCH — producer emits Q{id:7}, awaiter filters {id:7} → wakes once.
@@ -13034,7 +13034,7 @@ test "global_event payload filter: int match/mismatch + string byte-equality (M1
     }
 }
 
-test "entity_event: @entity_target designates the matched field on a two-Entity event (M1.0.14 E4)" {
+test "entity_event: @entity_target designates the matched field on a two-Entity event" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13082,7 +13082,7 @@ test "entity_event: @entity_target designates the matched field on a two-Entity 
     try std.testing.expect(readI64Field(&world, woke, e_target) >= 1); // woke via the @entity_target field
 }
 
-test "entity_event: payload filter match/mismatch + `let x = await` binds unit (M1.0.14 E4)" {
+test "entity_event: payload filter match/mismatch + `let x = await` binds unit" {
     const gpa = std.testing.allocator;
     const prog =
         \\component NPC {{ v: int = 0 }}
@@ -13157,7 +13157,7 @@ test "entity_event: payload filter match/mismatch + `let x = await` binds unit (
     }
 }
 
-test "global_event filter is captured once at suspension, not re-evaluated at poll (M1.0.14 E4)" {
+test "global_event filter is captured once at suspension, not re-evaluated at poll" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13204,7 +13204,7 @@ test "global_event filter is captured once at suspension, not re-evaluated at po
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured 7 matched despite want→9
 }
 
-test "emit stabilizes a computed string so an @on_event observer reads it safely (M1.0.14 E4)" {
+test "emit stabilizes a computed string so an @on_event observer reads it safely" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13245,7 +13245,7 @@ test "emit stabilizes a computed string so an @on_event observer reads it safely
     try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out)); // "go!".len(), from the stable copy
 }
 
-test "a computed string filter survives to a cross-tick global_event poll (M1.0.14 E4)" {
+test "a computed string filter survives to a cross-tick global_event poll" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13287,7 +13287,7 @@ test "a computed string filter survives to a cross-tick global_event poll (M1.0.
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured "go!" matched cross-tick
 }
 
-test "a borrowed resource-string filter is captured once and survives reassignment (M1.0.14 E4)" {
+test "a borrowed resource-string filter is captured once and survives reassignment" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13338,7 +13338,7 @@ test "a borrowed resource-string filter is captured once and survives reassignme
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // matched the captured OLD "old"
 }
 
-test "two awaiters wake on a single global_event instance (M1.0.14 E5)" {
+test "two awaiters wake on a single global_event instance" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13385,7 +13385,7 @@ test "two awaiters wake on a single global_event instance (M1.0.14 E5)" {
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, b));
 }
 
-test "an @on_event observer and an awaiter both fire on the same event (M1.0.14 E5)" {
+test "an @on_event observer and an awaiter both fire on the same event" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13433,7 +13433,7 @@ test "an @on_event observer and an awaiter both fire on the same event (M1.0.14 
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, aw)); // awaiter woke on the same event
 }
 
-test "an event emitted at tick N does not wake a task that suspends at tick N+1 (M1.0.14 E5)" {
+test "an event emitted at tick N does not wake a task that suspends at tick N+1" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13478,7 +13478,7 @@ test "an event emitted at tick N does not wake a task that suspends at tick N+1 
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // the tick-1 Ping was cleared
 }
 
-test "a filtered global_event wakes only on the matching instance across ticks (M1.0.14 E5)" {
+test "a filtered global_event wakes only on the matching instance across ticks" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13520,7 +13520,7 @@ test "a filtered global_event wakes only on the matching instance across ticks (
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // woke once, on Q{id:7} only
 }
 
-test "9.2 mirror: entity awaiter resumes on its own event and its emit is observed (M1.0.14 E5)" {
+test "9.2 mirror: entity awaiter resumes on its own event and its emit is observed" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13577,7 +13577,7 @@ test "9.2 mirror: entity awaiter resumes on its own event and its emit is observ
     try std.testing.expect(readResourceInt(&world, sink) >= 1); // hero resumed on its DC → QuestStarted observed
 }
 
-test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
+test "task pool is pointer-stable and cancelTask parks a suspended task for good" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13640,7 +13640,7 @@ test "task pool is pointer-stable and cancelTask parks a suspended task for good
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
-test "race timeout pattern: winner return propagates, loser canceled (M1.0.12 E4)" {
+test "race timeout pattern: winner return propagates, loser canceled" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13702,7 +13702,7 @@ test "race timeout pattern: winner return propagates, loser canceled (M1.0.12 E4
     try std.testing.expectEqual(@as(i64, 99), readResourceInt(&world, out_id));
 }
 
-test "race emit interleaving is deterministic; canceled loser never emits (M1.0.12 E4)" {
+test "race emit interleaving is deterministic; canceled loser never emits" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13764,7 +13764,7 @@ test "race emit interleaving is deterministic; canceled loser never emits (M1.0.
     try std.testing.expectEqual(@as(i64, 124), readResourceInt(&world, out_id));
 }
 
-test "conditional admission + zero-admitted passthrough (M1.0.12 E4)" {
+test "conditional admission + zero-admitted passthrough" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13819,7 +13819,7 @@ test "conditional admission + zero-admitted passthrough (M1.0.12 E4)" {
     try std.testing.expectEqual(@as(i64, 105), readResourceInt(&world, out_id));
 }
 
-test "race tie-break: same-tick completions resolve in declaration order (M1.0.12 E4)" {
+test "race tie-break: same-tick completions resolve in declaration order" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13867,7 +13867,7 @@ test "race tie-break: same-tick completions resolve in declaration order (M1.0.1
     try std.testing.expectEqual(@as(i64, 10), readResourceInt(&world, out_id));
 }
 
-test "sync joins all branches; a failing branch does not block the join (M1.0.12 E4)" {
+test "sync joins all branches; a failing branch does not block the join" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13924,7 +13924,7 @@ test "sync joins all branches; a failing branch does not block the join (M1.0.12
     try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, a_id));
 }
 
-test "race with every branch failing completes; parent resumes after it (M1.0.12 E4)" {
+test "race with every branch failing completes; parent resumes after it" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -13970,7 +13970,7 @@ test "race with every branch failing completes; parent resumes after it (M1.0.12
     try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
 }
 
-test "branch scope is a snapshot copy: writes are invisible to the parent (M1.0.12 E4)" {
+test "branch scope is a snapshot copy: writes are invisible to the parent" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14014,7 +14014,7 @@ test "branch scope is a snapshot copy: writes are invisible to the parent (M1.0.
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
-test "branch is detached: parent continues same tick, task outlives it (M1.0.12 E5)" {
+test "branch is detached: parent continues same tick, task outlives it" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14063,7 +14063,7 @@ test "branch is detached: parent continues same tick, task outlives it (M1.0.12 
     try std.testing.expectEqual(@as(i64, 53), readResourceInt(&world, out_id));
 }
 
-test "spawn handle: cancel() prevents the task from ever running (M1.0.12 E5)" {
+test "spawn handle: cancel() prevents the task from ever running" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14104,7 +14104,7 @@ test "spawn handle: cancel() prevents the task from ever running (M1.0.12 E5)" {
     try std.testing.expectEqual(@as(i64, 5), readResourceInt(&world, out_id));
 }
 
-test "await h joins a running task and resumes after its completion (M1.0.12 E5)" {
+test "await h joins a running task and resumes after its completion" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14148,7 +14148,7 @@ test "await h joins a running task and resumes after its completion (M1.0.12 E5)
     try std.testing.expectEqual(@as(i64, 107), readResourceInt(&world, out_id));
 }
 
-test "await on an already-done handle resumes immediately, same drive (M1.0.12 E5)" {
+test "await on an already-done handle resumes immediately, same drive" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14197,7 +14197,7 @@ test "await on an already-done handle resumes immediately, same drive (M1.0.12 E
     try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
 }
 
-test "await on a canceled handle fails loud, no silent unit (M1.0.12 E5)" {
+test "await on a canceled handle fails loud, no silent unit" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14237,7 +14237,7 @@ test "await on a canceled handle fails loud, no silent unit (M1.0.12 E5)" {
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
 }
 
-test "a task canceled WHILE awaited fails the awaiter loud at resume (M1.0.12 E5)" {
+test "a task canceled WHILE awaited fails the awaiter loud at resume" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14286,7 +14286,7 @@ test "a task canceled WHILE awaited fails the awaiter loud at resume (M1.0.12 E5
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
 }
 
-test "canceling the parent does not cancel its detached children (M1.0.12 E5)" {
+test "canceling the parent does not cancel its detached children" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14338,7 +14338,7 @@ test "canceling the parent does not cancel its detached children (M1.0.12 E5)" {
     try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
 }
 
-test "construct matrix: race nested in a spawn body, joined via handle (M1.0.12 E5)" {
+test "construct matrix: race nested in a spawn body, joined via handle" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14393,7 +14393,7 @@ test "construct matrix: race nested in a spawn body, joined via handle (M1.0.12 
     try std.testing.expectEqual(@as(i64, 21), readResourceInt(&world, out_id));
 }
 
-test "return await regression: the return is never dropped at resume (M1.0.12 E5)" {
+test "return await regression: the return is never dropped at resume" {
     const gpa = std.testing.allocator;
 
     // Regression: a `return await <wake-target>`
@@ -14557,7 +14557,7 @@ test "return await regression: the return is never dropped at resume (M1.0.12 E5
     }
 }
 
-test "observable: sync parallel-preload over three awaits, documented emit sequence (M1.0.12 E5)" {
+test "observable: sync parallel-preload over three awaits, documented emit sequence" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14625,7 +14625,7 @@ test "observable: sync parallel-preload over three awaits, documented emit seque
     try std.testing.expectEqual(@as(i64, 91234), readResourceInt(&world, out_id));
 }
 
-test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
+test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k]" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14685,7 +14685,7 @@ test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche
     try std.testing.expectEqual(@as(i64, 342), out);
 }
 
-test "runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)" {
+test "runProgram force unwrap of none is a runtime failure" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14714,7 +14714,7 @@ test "runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)
     try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
 }
 
-test "runFor surfaces typed last_error with span on division by zero (D-S4-runtime-report)" {
+test "runFor surfaces typed last_error with span on division by zero" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14749,7 +14749,7 @@ test "runFor surfaces typed last_error with span on division by zero (D-S4-runti
     try std.testing.expectEqualStrings("1 / d", source[le.span.byte_start..le.span.byte_end]);
 }
 
-test "runFor surfaces UncaughtThrow with the thrown-value span (D-S4-runtime-report)" {
+test "runFor surfaces UncaughtThrow with the thrown-value span" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14788,7 +14788,7 @@ test "runFor surfaces UncaughtThrow with the thrown-value span (D-S4-runtime-rep
     try std.testing.expect(std.mem.indexOf(u8, span_text, "kaboom") != null);
 }
 
-test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
+test "async runtime failure surfaces typed last_error" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14854,7 +14854,7 @@ fn readCounterI64(world: *World, counter_id: ComponentId, eid: CoreEntityId) i64
     return v;
 }
 
-test "every entity-bound rule caches its matching-archetype set, rescanning only the tail (M1.0.0)" {
+test "every entity-bound rule caches its matching-archetype set, rescanning only the tail" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14906,7 +14906,7 @@ test "every entity-bound rule caches its matching-archetype set, rescanning only
     try std.testing.expectEqual(@as(i64, 3), readCounterI64(&world, counter_id, e_a));
 }
 
-test "the cached matching set replaces the per-tick walk at any archetype count (M1.0.0)" {
+test "the cached matching set replaces the per-tick walk at any archetype count" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14939,7 +14939,7 @@ test "the cached matching set replaces the per-tick walk at any archetype count 
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_b));
 }
 
-test "runProgram anonymous struct literal via let annotation and field value (M0.8 E3-C tranche 8)" {
+test "runProgram anonymous struct literal via let annotation and field value" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -14997,7 +14997,7 @@ test "runProgram anonymous struct literal via let annotation and field value (M0
 // loader's two-phase `on_spawned` pass ran the rule once per entity — emits
 // land in `events` and are NOT cleared, since the load drives no tick), and (c)
 // the resource `string` round-trips through the Tier-0 persistent heap.
-test "cooked Etch scene loads, on_spawned rules emit, resource string round-trips (M1.0.5 E3)" {
+test "cooked Etch scene loads, on_spawned rules emit, resource string round-trips" {
     const gpa = std.testing.allocator;
     const scene_cook = @import("scene_cook.zig");
 
@@ -15076,7 +15076,7 @@ test "cooked Etch scene loads, on_spawned rules emit, resource string round-trip
     try std.testing.expectEqualStrings("level_42", title[0..ss.len]);
 }
 
-test "execHookText mutates a component on the live world (M1.0.9 E2)" {
+test "execHookText mutates a component on the live world" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15101,7 +15101,7 @@ test "execHookText mutates a component on the live world (M1.0.9 E2)" {
     try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
 }
 
-test "execHookText restores self.ast and the program still steps (M1.0.9 E2)" {
+test "execHookText restores self.ast and the program still steps" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15131,7 +15131,7 @@ test "execHookText restores self.ast and the program still steps (M1.0.9 E2)" {
     try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4 (hook effect persisted)
 }
 
-test "execHookText emit enqueues into the dynamic event store (M1.0.9 E2)" {
+test "execHookText emit enqueues into the dynamic event store" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15208,7 +15208,7 @@ fn readI32(world: *World, entity: CoreEntityId, cid: ComponentId, field: []const
     return v;
 }
 
-test "spawn defers — entity materializes at flush with full payload (M1.0.10 E3)" {
+test "spawn defers — entity materializes at flush with full payload" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15239,7 +15239,7 @@ test "spawn defers — entity materializes at flush with full payload (M1.0.10 E
     try std.testing.expectEqual(@as(i32, 10), readI32(&world, spawned, health, "max").?);
 }
 
-test "despawn defers — entity removed at flush (M1.0.10 E3)" {
+test "despawn defers — entity removed at flush" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15264,7 +15264,7 @@ test "despawn defers — entity removed at flush (M1.0.10 E3)" {
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 }
 
-test "add defers — component present at flush (M1.0.10 E3)" {
+test "add defers — component present at flush" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15291,7 +15291,7 @@ test "add defers — component present at flush (M1.0.10 E3)" {
     try std.testing.expectEqual(@as(i32, 7), readI32(&world, e, shield, "amount").?);
 }
 
-test "remove defers — component gone at flush (M1.0.10 E3)" {
+test "remove defers — component gone at flush" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15318,7 +15318,7 @@ test "remove defers — component gone at flush (M1.0.10 E3)" {
     try std.testing.expect(world.componentBytes(e, marker) != null); // Marker kept
 }
 
-test "spawn fires on_spawned then on_add per component at flush (M1.0.10 E3)" {
+test "spawn fires on_spawned then on_add per component at flush" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15356,7 +15356,7 @@ test "spawn fires on_spawned then on_add per component at flush (M1.0.10 E3)" {
     try std.testing.expectEqual(ad_id, interp.events.list.items[1].type_name);
 }
 
-test "despawn fires on_remove per component then on_despawned (M1.0.10 E3)" {
+test "despawn fires on_remove per component then on_despawned" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15399,7 +15399,7 @@ test "despawn fires on_remove per component then on_despawned (M1.0.10 E3)" {
     try std.testing.expectEqual(@as(i64, 42), seen);
 }
 
-test "add-on-present fires on_replaced not on_added (M1.0.10 E3)" {
+test "add-on-present fires on_replaced not on_added" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15442,7 +15442,7 @@ test "add-on-present fires on_replaced not on_added (M1.0.10 E3)" {
     try std.testing.expectEqual(@as(i64, 9), n_seen);
 }
 
-test "B1 — multi-entity rule structural mutation defers without corrupting iteration (M1.0.10 E3)" {
+test "B1 — multi-entity rule structural mutation defers without corrupting iteration" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15481,7 +15481,7 @@ test "B1 — multi-entity rule structural mutation defers without corrupting ite
     try std.testing.expectEqual(@as(usize, 3), world.entityCount());
 }
 
-test "S4 structural-mutation boundary lifted — a body issuing all four ops runs (M1.0.10 E3)" {
+test "structural-mutation boundary lifted — a body issuing all four ops runs" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -15513,7 +15513,7 @@ test "S4 structural-mutation boundary lifted — a body issuing all four ops run
     try std.testing.expectEqual(@as(usize, 1), countEntitiesWith(&world, world.registry.idOf("Spawned").?));
 }
 
-test "runProgram a throw raised in an assignment's RHS unwinds to the catch (M1.1.15.2 G2)" {
+test "runProgram a throw raised in an assignment's RHS unwinds to the catch" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

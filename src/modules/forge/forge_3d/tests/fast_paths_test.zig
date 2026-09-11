@@ -864,7 +864,7 @@ test "anisotropic box face-face keeps four points (P2 class B)" {
     try testing.expectEqual(@as(u8, 4), ba.count);
 }
 
-test "off-center small feature on a large body keeps four points (P2 class B, E9)" {
+test "off-center small feature on a large body keeps four points (P2 class B)" {
     // Probe: the dedup eps must be relative to the candidates' local
     // EXTENT, never `max|pos|`. A small box (he = 0.05×1×0.05) resting on a large
     // ground face (he = 100000×1×100000) at x = 55000: its 4 bottom corners span

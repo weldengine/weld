@@ -1404,7 +1404,7 @@ fn buildLine(gpa: std.mem.Allocator, tree: *BvhF, boxes: *std.ArrayListUnmanaged
     }
 }
 
-test "queryRay at zero extent is bit-identical to M1.1.9" {
+test "queryRay is queryCast at a zero extent, bit for bit" {
     const gpa = std.testing.allocator;
 
     // THE REFACTOR'S PROOF. `queryRay` is now `queryCast` at a zero extent, and a

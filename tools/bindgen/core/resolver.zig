@@ -39,7 +39,7 @@ pub fn resolveImports(
     // Fleshed out by the first adapter that exercises an `ImportDecl`.
 }
 
-test "resolveImports is a no-op skeleton in M0.2" {
+test "resolveImports is a no-op skeleton" {
     const desc = api.ApiDescription{
         .name = "vulkan",
         .version = .{ .major = 1, .minor = 3, .patch = 0 },

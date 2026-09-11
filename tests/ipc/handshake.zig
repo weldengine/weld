@@ -177,7 +177,7 @@ test "version mismatch produces explicit rejection" {
     }
 }
 
-test "GPU_SHARED_FB capability defaults to 0 in S6" {
+test "GPU_SHARED_FB capability defaults to 0" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;

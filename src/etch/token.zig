@@ -385,7 +385,7 @@ test "const/private/test graduate to s3 keywords" {
     try std.testing.expect(isKeywordToken(.kw_test));
 }
 
-test "spawn graduates to s3 keyword (M1.0.10)" {
+test "spawn graduates to s3 keyword" {
     // `spawn` is IN `s3_keywords`, mapped
     // to `kw_spawn`, so the structural `spawn(C{…})` expr lexes to a real
     // keyword so the parser can dispatch it. (The async `spawn { }` task form
@@ -411,7 +411,7 @@ test "spawn graduates to s3 keyword (M1.0.10)" {
     try std.testing.expect(isKeywordToken(.kw_spawn));
 }
 
-test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
+test "race/sync graduate to s3 keywords" {
     // `race` / `sync` are IN `s3_keywords`,
     // mapped to `kw_race` / `kw_sync` — the concurrency-algebra statements
     // (§4.2) become parseable. `override` remains the last reserved top-level
@@ -442,7 +442,7 @@ test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
     try std.testing.expect(isKeywordToken(.kw_sync));
 }
 
-test "every/after_unscaled graduate to s3 keywords (M1.0.13 E1)" {
+test "every/after_unscaled graduate to s3 keywords" {
     // `every` / `after_unscaled` are IN
     // `s3_keywords`, mapped to `kw_every` / `kw_after_unscaled` — the §4.3
     // timer statements become parseable (`after` has been a real keyword

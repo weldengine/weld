@@ -726,7 +726,7 @@ fn healthMax(world: *World, entity: EntityId) i32 {
     return std.mem.readInt(i32, hb[4..8], .little);
 }
 
-test "scene with active extension executes on_attach at load — Health.max adjusted (M1.0.9 headline)" {
+test "scene with active extension executes on_attach at load — Health.max adjusted" {
     const gpa = std.testing.allocator;
 
     const combat_bytes = try cookCombatModule(gpa);
@@ -776,7 +776,7 @@ test "scene with active extension executes on_attach at load — Health.max adju
     try std.testing.expect(world.hasEntityExtension(npc, "CombatModule"));
 }
 
-test "entity.activate_extension executes on_attach (M1.0.9)" {
+test "entity.activate_extension executes on_attach" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
     defer gpa.free(combat_bytes);
@@ -812,7 +812,7 @@ test "entity.activate_extension executes on_attach (M1.0.9)" {
     try std.testing.expect(world.hasEntityExtension(eid, "CombatModule"));
 }
 
-test "has_extension / active_extensions (Etch methods) reflect activation (M1.0.9)" {
+test "has_extension / active_extensions (Etch methods) reflect activation" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
     defer gpa.free(combat_bytes);
@@ -851,7 +851,7 @@ test "has_extension / active_extensions (Etch methods) reflect activation (M1.0.
     try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, pb[4..8], .little)); // active_extensions().len() == 1
 }
 
-test "entity.deactivate_extension executes on_detach and removes components (M1.0.9)" {
+test "entity.deactivate_extension executes on_detach and removes components" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
     defer gpa.free(combat_bytes);
@@ -891,7 +891,7 @@ test "entity.deactivate_extension executes on_detach and removes components (M1.
     try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
 }
 
-test "multi-entity rule activate_extension defers without corrupting iteration (M1.0.9 B1)" {
+test "multi-entity rule activate_extension defers without corrupting iteration" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
     defer gpa.free(combat_bytes);
@@ -934,7 +934,7 @@ test "multi-entity rule activate_extension defers without corrupting iteration (
     }
 }
 
-test "on_attach-issued structural command is drained before on_spawned (M1.0.9)" {
+test "on_attach-issued structural command is drained before on_spawned" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
     defer gpa.free(combat_bytes);
@@ -1004,7 +1004,7 @@ const DrainSpy = struct {
 
 // ─── M1.B / G6 — an extension whose components are ALL sparse ───────────────
 
-test "G6: an ALL-SPARSE extension activates without touching the archetype" {
+test "an ALL-SPARSE extension activates without touching the archetype" {
     const gpa = std.testing.allocator;
 
     var base = try scene_cook.cookPrefab(gpa, base_character, null, null);

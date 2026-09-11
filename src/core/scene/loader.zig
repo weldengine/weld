@@ -1123,7 +1123,7 @@ test "loadFromBytes rejects an out-of-range parent ordinal with MalformedScene" 
     try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
 }
 
-test "resource strings outlive LoadResult.deinit (M1.1.1-HF1 D1)" {
+test "resource strings outlive LoadResult.deinit" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1148,7 +1148,7 @@ test "resource strings outlive LoadResult.deinit (M1.1.1-HF1 D1)" {
     decrefResourceStrings(&world, gpa, settings, buf);
 }
 
-test "loading over an existing resource string releases the previous block (M1.1.1-HF1 D1)" {
+test "loading over an existing resource string releases the previous block" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1176,7 +1176,7 @@ test "loading over an existing resource string releases the previous block (M1.1
     decrefResourceStrings(&world, gpa, settings, buf); // release "second"
 }
 
-test "a failed load leaves the world unchanged (M1.1.1-HF1 D2)" {
+test "a failed load leaves the world unchanged" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1212,7 +1212,7 @@ test "a failed load leaves the world unchanged (M1.1.1-HF1 D2)" {
     decrefResourceStrings(&world, gpa, settings, buf); // release "old"
 }
 
-test "rollback restores across duplicate resource entries (M1.1.1-HF1 D2)" {
+test "rollback restores across duplicate resource entries" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1281,7 +1281,7 @@ fn buildTwoBlockScene(gpa: std.mem.Allocator, reg: *const Registry, cid_a: Compo
     return try writer.write(gpa, model, reg);
 }
 
-test "instantiate under post-spawn OOM leaves no orphan (M1.1.1-HF2 C2)" {
+test "instantiate under post-spawn OOM leaves no orphan" {
     const gpa = testing.allocator;
 
     // A 2-block scene (two spawns) built once with the real allocator.
@@ -1328,7 +1328,7 @@ test "instantiate under post-spawn OOM leaves no orphan (M1.1.1-HF2 C2)" {
     try testing.expect(saw_success);
 }
 
-test "rejected load restores the resource dirty bit (M1.1.1-HF2 C6)" {
+test "rejected load restores the resource dirty bit" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1392,7 +1392,7 @@ fn buildTwoEntityOneBlockScene(gpa: std.mem.Allocator, reg: *const Registry, cid
     return try writer.write(gpa, model, reg);
 }
 
-test "instantiate rejects an out-of-range entity uuid ordinal (M1.1.1-HF2 C2b)" {
+test "instantiate rejects an out-of-range entity uuid ordinal" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -1410,7 +1410,7 @@ test "instantiate rejects an out-of-range entity uuid ordinal (M1.1.1-HF2 C2b)" 
     try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
 }
 
-test "instantiate rejects a duplicate entity uuid ordinal (M1.1.1-HF2 C2b)" {
+test "instantiate rejects a duplicate entity uuid ordinal" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

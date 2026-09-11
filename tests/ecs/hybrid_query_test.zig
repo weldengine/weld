@@ -317,7 +317,7 @@ comptime {
     }
 }
 
-test "G7: the ECS protocol stays at 1, over an ENUMERATED surface" {
+test "the ECS protocol stays at 1, over an ENUMERATED surface" {
     // The version, first — necessary and nowhere near sufficient: a test
     // asserting only this would pass while a frozen entry was deleted
     // underneath it. The two comptime loops above are what make it sufficient,
@@ -447,7 +447,7 @@ fn sumRange(r: hybrid.DenseRange, total: *usize, n_ranges: *usize, min_len: *usi
     max_len.* = @max(max_len.*, r.len());
 }
 
-test "G8: the dense split covers the population exactly once, evenly" {
+test "the dense split covers the population exactly once, evenly" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -487,7 +487,7 @@ test "G8: the dense split covers the population exactly once, evenly" {
     for (seen) |s| try testing.expect(s); // no index missed
 }
 
-test "G8: a target above the population yields one range per entity, never an empty one" {
+test "a target above the population yields one range per entity, never an empty one" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -508,7 +508,7 @@ test "G8: a target above the population yields one range per entity, never an em
     try testing.expectEqual(@as(usize, 0), qb.rangeCount(&world, 4));
 }
 
-test "G8: the dispatch sites are ENUMERATED and the bound holds at each" {
+test "the dispatch sites are ENUMERATED and the bound holds at each" {
     // The brief asks that the bound be "checked over the whole set of dispatch
     // call sites, and the check reports how many it inspected". The MECHANISM is
     // `refuseCommandBufferInArgs`, a comptime refusal inside the dispatch entry
@@ -683,7 +683,7 @@ fn markRange(r: hybrid.DenseRange, probe: *DispatchProbe) void {
     if (slot < probe.tids.len) probe.tids[slot] = std.Thread.getCurrentId();
 }
 
-test "G10/B1: a dense range reaches a worker, and the same body agrees with the same-thread entry" {
+test "a dense range reaches a worker, and the same body agrees with the same-thread entry" {
     const gpa = testing.allocator;
     const io = std.testing.io;
 
@@ -755,7 +755,7 @@ test "G10/B1: a dense range reaches a worker, and the same body agrees with the 
     for (hits_disp) |h| try testing.expectEqual(@as(u8, 1), h);
 }
 
-test "G10/B1: an empty driver stages no job, and a target above the population stages one per entity" {
+test "an empty driver stages no job, and a target above the population stages one per entity" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

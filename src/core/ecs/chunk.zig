@@ -321,11 +321,11 @@ test "chunk alignment is at least 16 bytes" {
     try std.testing.expect(@alignOf(Chunk) >= ChunkAlignment);
 }
 
-test "computeLayout ACCEPTS an empty component list (M1.B/G2)" {
-    // The reversal made observable. This test asserted the refusal until
-    // It is the same call with the opposite verdict, so a
-    // re-introduced guard fails here rather than surfacing three layers up as
-    // a spawn that cannot happen.
+test "computeLayout ACCEPTS an empty component list" {
+    // **AN EMPTY COMPONENT LIST IS LEGAL, and this is the same call that once
+    // refused it.** An entity ALWAYS has an archetype, so the archetype of zero
+    // components has to exist. Do NOT re-introduce the refusal: it fails HERE
+    // rather than surfacing three layers up as a spawn that cannot happen.
     const gpa = std.testing.allocator;
     const layout = try computeLayout(gpa, &.{}, &.{});
     defer {
@@ -340,7 +340,7 @@ test "computeLayout ACCEPTS an empty component list (M1.B/G2)" {
     try std.testing.expectEqual(@as(usize, 0), layout.added_tick_offsets.len);
 }
 
-test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars" {
+test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries sidecars" {
     // The layout reserves added_tick + changed_tick columns
     // + a dirty bitset, so the capacity drops below the sidecar-free reference
     // (185) but stays comfortably above 140. The capacity check is a

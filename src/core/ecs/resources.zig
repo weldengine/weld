@@ -167,7 +167,7 @@ test "removing a resource clears its dirty bit" {
     try std.testing.expect(!store.isDirty(3));
 }
 
-test "resource buffers are chunk-aligned (M0.8 Option A)" {
+test "resource buffers are chunk-aligned (Option A)" {
     const gpa = std.testing.allocator;
     var store = ResourceStore.init();
     defer store.deinit(gpa);
@@ -190,7 +190,7 @@ test "addResource rejects duplicate id" {
     try std.testing.expectError(error.DuplicateResource, store.addResource(gpa, 0, &bytes));
 }
 
-test "setDirty restores an explicit dirty state (M1.1.1-HF2 C6)" {
+test "setDirty restores an explicit dirty state" {
     const gpa = std.testing.allocator;
     var store = ResourceStore.init();
     defer store.deinit(gpa);

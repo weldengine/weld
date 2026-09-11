@@ -562,7 +562,7 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
 // rule selecting an entity by a sparse component and writing its row — is
 // pinned in `tests/etch/storage_mode_test.zig`.
 
-fn g5TestWorld(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
+fn registerProbe(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
     const zero = [_]u8{0} ** 8;
     return world.registry.registerComponentRaw(gpa, .{
         .name = "Probe",
@@ -574,12 +574,12 @@ fn g5TestWorld(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.Storag
     });
 }
 
-test "G5: componentRefOf resolves a SPARSE component, and the field round-trips" {
+test "componentRefOf resolves a SPARSE component, and the field round-trips" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const cid = try registerProbe(gpa, &world, .sparse);
     const eid = try world.spawnDynamic(gpa, &.{cid});
 
     // A naive resolution returns `BridgeError.UnknownComponent` here: it
@@ -599,7 +599,7 @@ test "G5: componentRefOf resolves a SPARSE component, and the field round-trips"
     try std.testing.expectApproxEqAbs(@as(f64, 7.5), v, 1e-12);
 }
 
-test "G5: the TABLE arm is unchanged — the same round-trip, same assertions" {
+test "the TABLE arm is unchanged — the same round-trip, same assertions" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -607,7 +607,7 @@ test "G5: the TABLE arm is unchanged — the same round-trip, same assertions" {
     // The counter-factual is the MODE and nothing else: same size, same field,
     // same calls. Without it, "the sparse arm works" would not establish that
     // the table arm still does.
-    const cid = try g5TestWorld(gpa, &world, .table);
+    const cid = try registerProbe(gpa, &world, .table);
     const eid = try world.spawnDynamic(gpa, &.{cid});
 
     const ref = try Bridge.componentRefOf(&world, @bitCast(eid), cid, true);
@@ -620,12 +620,12 @@ test "G5: the TABLE arm is unchanged — the same round-trip, same assertions" {
     try std.testing.expectApproxEqAbs(@as(f64, 7.5), v, 1e-12);
 }
 
-test "G5: markComponentChanged stamps a SPARSE component" {
+test "markComponentChanged stamps a SPARSE component" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const cid = try registerProbe(gpa, &world, .sparse);
     const eid = try world.spawnDynamic(gpa, &.{cid});
     const at_spawn = world.sparse_stores.getConst(cid).?.changedTick(eid).?;
 
@@ -642,14 +642,14 @@ test "G5: markComponentChanged stamps a SPARSE component" {
     try std.testing.expectEqual(world.current_tick, after);
 }
 
-test "G5: componentRefOf still refuses a component the entity does NOT carry" {
+test "componentRefOf still refuses a component the entity does NOT carry" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
     // The refusal must survive the widening: a guard has two ways of being
     // wrong, and making the sparse arm resolve must not make every id resolve.
-    const cid = try g5TestWorld(gpa, &world, .sparse);
+    const cid = try registerProbe(gpa, &world, .sparse);
     const eid = try world.spawnDynamic(gpa, &.{});
     try std.testing.expectError(
         BridgeError.UnknownComponent,

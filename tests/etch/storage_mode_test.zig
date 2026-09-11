@@ -473,7 +473,7 @@ const AddSpy = struct {
     }
 };
 
-test "G8: the planner elects SPARSE, and the effect applies exactly once per matching entity" {
+test "the planner elects SPARSE, and the effect applies exactly once per matching entity" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -575,7 +575,7 @@ const src_requires_strip =
     \\}
 ;
 
-test "G9: the skip counter resets per tick even with NO `changed` filter" {
+test "the skip counter resets per tick even with NO `changed` filter" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

@@ -587,7 +587,7 @@ fn perpendicularTo(comptime T: type, axis: math.Vec(3, T)) math.Vec(3, T) {
 
 const testing = std.testing;
 
-test "fastSeed dispatch routing (E3 handles sphere and box pairs)" {
+test "fastSeed dispatch routing covers every fast pair" {
     const T = f32;
     const V = math.Vec(3, T);
     const Q = math.Quat(T);

@@ -7277,7 +7277,7 @@ test "parse test block" {
     try std.testing.expectEqual(ast_mod.AnnotationKind.tag, annot.kind);
 }
 
-test "parse measure expression (M1.0.15)" {
+test "parse measure expression" {
     const gpa = std.testing.allocator;
     // `measure { block }` parses as a primary expression (§17 erratum); the
     // parser produces one `measure_exprs` slab entry, no diagnostics.
@@ -7363,7 +7363,7 @@ test "parser captures annotation kind and args" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
 }
 
-test "D-S3-trivia: doc comments and leading comments attach to top-level items" {
+test "doc comments and leading comments attach to top-level items" {
     const gpa = std.testing.allocator;
     const src =
         "// leading plain comment\n" ++
@@ -7395,7 +7395,7 @@ test "D-S3-trivia: doc comments and leading comments attach to top-level items" 
     try std.testing.expectEqual(@as(usize, 0), result.ast.leadingCommentsOf(bravo_id).len);
 }
 
-test "D-S3-annot-field-access: annotation arg accepts a field access expression" {
+test "annotation arg accepts a field access expression" {
     const gpa = std.testing.allocator;
     // `@requires(self.health)` — annotation positional arg that is a field
     // access. Pre-fix, the annotation-arg path built the ident then called
@@ -7419,7 +7419,7 @@ test "D-S3-annot-field-access: annotation arg accepts a field access expression"
     try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
 }
 
-test "parser builds array literals, fill, and index/slice access (M0.8 collections)" {
+test "parser builds array literals, fill, and index/slice access (collections)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7449,7 +7449,7 @@ test "parser builds array literals, fill, and index/slice access (M0.8 collectio
     try std.testing.expectEqual(@as(usize, 1), fill_count); // exactly the `[0; 4]` literal
 }
 
-test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
+test "parser builds map type, map literal, and Set<T> type (collections)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7478,7 +7478,7 @@ test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
     try std.testing.expect(saw_set_type);
 }
 
-test "parser builds closures and calls (M0.8 closures)" {
+test "parser builds closures and calls (closures)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7503,7 +7503,7 @@ test "parser builds closures and calls (M0.8 closures)" {
     try std.testing.expectEqual(@as(usize, 1), calls); // f(10)
 }
 
-test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)" {
+test "parser builds top-level fn declarations, free calls, and return" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\fn double(x: int) -> int {
@@ -7548,7 +7548,7 @@ test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)"
     try std.testing.expectEqual(@as(usize, 1), returns); // the `return x * 2`
 }
 
-test "parser builds method-call postfix into the reserved method_call kind (M0.8 E2)" {
+test "parser builds method-call postfix into the reserved method_call kind" {
     const gpa = std.testing.allocator;
     // `recv.method(args)` → method_call; `recv.field` (no parens) → field_access.
     // Parser-only: the 4-kind dispatch is a later slice.
@@ -7580,7 +7580,7 @@ test "parser builds method-call postfix into the reserved method_call kind (M0.8
     try std.testing.expectEqual(@as(usize, 2), calculate_args); // (target, 5)
 }
 
-test "structural spawn parses component-literal varargs (M1.0.10)" {
+test "structural spawn parses component-literal varargs" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7610,7 +7610,7 @@ test "structural spawn parses component-literal varargs (M1.0.10)" {
     try std.testing.expectEqual(ast_mod.ExprKind.struct_lit, result.ast.exprKind(arg1));
 }
 
-test "structural spawn parses a prefab name (M1.0.10)" {
+test "structural spawn parses a prefab name" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7636,7 +7636,7 @@ test "structural spawn parses a prefab name (M1.0.10)" {
     try std.testing.expectEqual(@as(u32, 0), ss.args_len);
 }
 
-test "spawn { } in a sub-expression position is a parse error (M1.0.12 E2)" {
+test "spawn { } in a sub-expression position is a parse error" {
     const gpa = std.testing.allocator;
     // `spawn_stmt` is a STATEMENT (§4.2): statement head and the
     // `let h = spawn { }` binding form are its only sites. A `spawn { }`
@@ -7678,7 +7678,7 @@ fn firstRuleBodyKinds(result: *const ParseResult, buf: []ast_mod.StmtKind) []ast
     return buf[0..n];
 }
 
-test "race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)" {
+test "race/sync parse: branches, conditional branches, empty body" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7721,7 +7721,7 @@ test "race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)" 
     try std.testing.expectEqual(@as(u32, 0), result.ast.sync_stmts.items[1].branches_len);
 }
 
-test "race branch starting with an if-statement is unconditional (M1.0.12 E2)" {
+test "race branch starting with an if-statement is unconditional" {
     const gpa = std.testing.allocator;
     // `if cond { … }` at branch head is the branch STATEMENT (an if-statement),
     // not a conditional-branch guard — the token after the expression (`{` vs
@@ -7757,7 +7757,7 @@ test "race branch starting with an if-statement is unconditional (M1.0.12 E2)" {
     try std.testing.expect(ife.let_binding != 0);
 }
 
-test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
+test "branch/spawn statements parse incl. binding + empty bodies" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7798,7 +7798,7 @@ test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 0), spawns);
 }
 
-test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
+test "spawn ( stays structural next to spawn { task form" {
     const gpa = std.testing.allocator;
     // Token-based disambiguation (§3.2 note): `spawn (` → structural expr,
     // `spawn {` → async task statement.
@@ -7822,7 +7822,7 @@ test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
 }
 
-test "nested concurrency constructs parse (M1.0.12 E2)" {
+test "nested concurrency constructs parse" {
     const gpa = std.testing.allocator;
     // A `race` inside a `sync` branch block, a `spawn` inside a `branch` body,
     // and a `branch` inside a race branch — the shared branch slab stays
@@ -7862,7 +7862,7 @@ test "nested concurrency constructs parse (M1.0.12 E2)" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
 }
 
-test "async branch statement coexists with quest/dialogue branches (M1.0.12 E2)" {
+test "async branch statement coexists with quest/dialogue branches" {
     const gpa = std.testing.allocator;
     // `kw_branch` serves three disjoint parse contexts: the quest branch
     // (inside `parseQuestBranch`), the dialogue branch (inside
@@ -7906,7 +7906,7 @@ test "async branch statement coexists with quest/dialogue branches (M1.0.12 E2)"
     try std.testing.expectEqual(@as(u32, 1), result.ast.branch_stmts.items[0].body_len);
 }
 
-test "spawn binding form rejects mut and type annotation (M1.0.12 E2)" {
+test "spawn binding form rejects mut and type annotation" {
     const gpa = std.testing.allocator;
     // §4.2: `spawn_stmt = [ "let" IDENT "=" ] "spawn" block` — no `mut`, no
     // type annotation on the binding.
@@ -7928,7 +7928,7 @@ test "spawn binding form rejects mut and type annotation (M1.0.12 E2)" {
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
 }
 
-test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
+test "parser builds loops, labels, break value, and continue (loop/break)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7967,7 +7967,7 @@ test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" 
     try std.testing.expectEqual(@as(usize, 1), labeled);
 }
 
-test "parser builds throw and try/catch (M0.8 error handling)" {
+test "parser builds throw and try/catch (error handling)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -7996,7 +7996,7 @@ test "parser builds throw and try/catch (M0.8 error handling)" {
     try std.testing.expectEqualStrings("err", result.ast.strings.slice(result.ast.try_catch_stmts.items[0].catch_name));
 }
 
-test "parser builds block expressions with a trailing value (M0.8 control flow)" {
+test "parser builds block expressions with a trailing value (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8026,7 +8026,7 @@ test "parser builds block expressions with a trailing value (M0.8 control flow)"
     try std.testing.expectEqual(@as(usize, 1), with_value);
 }
 
-test "parser builds if/else with an else-if chain (M0.8 control flow)" {
+test "parser builds if/else with an else-if chain (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8054,7 +8054,7 @@ test "parser builds if/else with an else-if chain (M0.8 control flow)" {
     try std.testing.expectEqual(@as(usize, 2), with_else);
 }
 
-test "parser builds a while statement (M0.8 control flow)" {
+test "parser builds a while statement (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8076,7 +8076,7 @@ test "parser builds a while statement (M0.8 control flow)" {
     try std.testing.expectEqual(@as(usize, 1), whiles);
 }
 
-test "parser accepts block bodies in closures and match arms (M0.8 control flow)" {
+test "parser accepts block bodies in closures and match arms (control flow)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -8107,7 +8107,7 @@ test "parser accepts block bodies in closures and match arms (M0.8 control flow)
     try std.testing.expectEqual(@as(usize, 2), blocks);
 }
 
-test "parser builds struct + inherent impl + struct literal + method calls (M0.8 E2 block 3)" {
+test "parser builds struct + inherent impl + struct literal + method calls" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\struct V2 { x: int = 0, y: int = 0 }
@@ -8147,7 +8147,7 @@ test "parser builds struct + inherent impl + struct literal + method calls (M0.8
     try std.testing.expectEqual(@as(usize, 2), method_calls);
 }
 
-test "parser recovers and a valid struct/impl after a broken construct survives (M0.8 E2 block 3 lockstep)" {
+test "parser recovers and a valid struct/impl after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // A broken leading annotation forces the top-level resync; the `struct` and
     // `impl` that follow must still land in the AST (the lockstep stop-set now
@@ -8163,7 +8163,7 @@ test "parser recovers and a valid struct/impl after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.impl_decls.items.len);
 }
 
-test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 block 3)" {
+test "parser suppresses struct literals in if/while/for/match heads" {
     const gpa = std.testing.allocator;
     // `while Cond { … }` must parse `Cond` as a path (a value) and `{ … }` as
     // the loop body, NOT as a `Cond { … }` struct literal. With a struct
@@ -8187,7 +8187,7 @@ test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 blo
     try std.testing.expectEqual(@as(usize, 0), struct_lits);
 }
 
-test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0.8 E2)" {
+test "parser accepts a trait impl and a generic struct" {
     const gpa = std.testing.allocator;
     // `impl Trait for T` — the first name is the trait, the
     // post-`for` name the target type (trait existence is a resolver concern).
@@ -8223,7 +8223,7 @@ test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0
     }
 }
 
-test "parser builds trait decl with abstract + default members + survives lockstep (M0.8 E2 block 3 tranche C)" {
+test "parser builds trait decl with abstract + default members + survives lockstep" {
     const gpa = std.testing.allocator;
     {
         var result = try parse(gpa,
@@ -8257,7 +8257,7 @@ test "parser builds trait decl with abstract + default members + survives lockst
     }
 }
 
-test "parser builds optional type + none/some + if let / while let (M0.8 E2 block 5)" {
+test "parser builds optional type + none/some + if let / while let" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has Acc {
@@ -8297,7 +8297,7 @@ test "parser builds optional type + none/some + if let / while let (M0.8 E2 bloc
     try std.testing.expect(result.ast.while_stmts.items[0].let_binding != 0);
 }
 
-test "parser builds generic params + bounds + where + generic type (M0.8 E2 block 4)" {
+test "parser builds generic params + bounds + where + generic type" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\trait Comparable { fn cmp(self, other: int) -> int }
@@ -8329,7 +8329,7 @@ test "parser builds generic params + bounds + where + generic type (M0.8 E2 bloc
     try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
 }
 
-test "parser builds a qualified type path in type position (M1.0.16)" {
+test "parser builds a qualified type path in type position" {
     const gpa = std.testing.allocator;
     // `m.Health` as a type-alias target parses to the reserved `.path`
     // TypeNode carrying { alias = "m", member = "Health" }.
@@ -8350,7 +8350,7 @@ test "parser builds a qualified type path in type position (M1.0.16)" {
     try std.testing.expectEqualStrings("Health", result.ast.strings.slice(path.member));
 }
 
-test "parser leaves a qualified path in expression position a parse error (M1.0.16 type-position boundary)" {
+test "parser leaves a qualified path in expression position a parse error (type-position boundary)" {
     const gpa = std.testing.allocator;
     // The qualified-access grammar addition is type-position only: a qualified access
     // in expression position (`let x = m.Health`) still fails to parse — a
@@ -8363,7 +8363,7 @@ test "parser leaves a qualified path in expression position a parse error (M1.0.
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891, M0.8 E2)" {
+test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891)" {
     const gpa = std.testing.allocator;
     // `impl<T> Range<T>` — a generic-type inherent target, now grammatical
     // (`etch-grammar.md §891`: `impl_decl` target = impl_trait_for_type |
@@ -8407,7 +8407,7 @@ test "parser accepts inherent impl generic + bare targets, rejects generic trait
     }
 }
 
-test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)" {
+test "parser builds enum decl + enum-variant match patterns" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\enum Difficulty { easy, normal, hard }
@@ -8445,7 +8445,7 @@ test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tra
     try std.testing.expectEqual(@as(usize, 1), shorthand);
 }
 
-test "parser recovers and a valid enum after a broken construct survives (M0.8 E2 block 3 tranche B lockstep)" {
+test "parser recovers and a valid enum after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_enum`: a broken leading construct
     // resyncs at the `enum` that follows, which lands in the AST.
@@ -8458,7 +8458,7 @@ test "parser recovers and a valid enum after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.enum_decls.items.len);
 }
 
-test "parser parses data-carrying + generic enum variants (M0.8 E2 block 3 tranche B / block 4)" {
+test "parser parses data-carrying + generic enum variants" {
     const gpa = std.testing.allocator;
     // Struct-like + tuple-like variant shapes parse (construction / patterns are
     // deferred; the grammar is accepted). Variant names are `IDENT` per
@@ -8524,7 +8524,7 @@ test "parser does not leak comment spans on OOM during init" {
     }
 }
 
-test "parser builds event declaration + emit statement (M0.8 E3)" {
+test "parser builds event declaration + emit statement" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Damage { amount: int, crit: bool }
@@ -8547,7 +8547,7 @@ test "parser builds event declaration + emit statement (M0.8 E3)" {
     try std.testing.expectEqual(@as(u32, 2), em.fields_len);
 }
 
-test "parser builds an @on_event observer rule with the implicit `event` binding (M0.8 E3)" {
+test "parser builds an @on_event observer rule with the implicit `event` binding" {
     const gpa = std.testing.allocator;
     // `event` is a keyword (the declaration); in expression position inside an
     // observer body it parses as the implicit `event` binding (self-style) — so
@@ -8577,7 +8577,7 @@ test "parser builds an @on_event observer rule with the implicit `event` binding
     try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(ev_type));
 }
 
-test "parser builds `entity has T changed` change-detection filter (M0.8 E3)" {
+test "parser builds `entity has T changed` change-detection filter" {
     const gpa = std.testing.allocator;
     // `changed` is a reserved keyword; `has T changed` mirrors `resource T
     // changed` (`etch-grammar.md` §6, patched) and produces a `has_changed`
@@ -8601,7 +8601,7 @@ test "parser builds `entity has T changed` change-detection filter (M0.8 E3)" {
     try std.testing.expect(found);
 }
 
-test "parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)" {
+test "parser recovers and a valid event after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_event`: a broken leading construct
     // resyncs at the `event` that follows, which lands in the AST.
@@ -8614,7 +8614,7 @@ test "parser recovers and a valid event after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.event_decls.items.len);
 }
 
-test "parser builds a hierarchical tags declaration (M0.8 E3)" {
+test "parser builds a hierarchical tags declaration" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags {
@@ -8660,7 +8660,7 @@ test "parser builds a hierarchical tags declaration (M0.8 E3)" {
     try std.testing.expectEqual(@as(u32, 7), td.leaf_len);
 }
 
-test "parser recovers and a valid tags after a broken construct survives (M0.8 E3 lockstep)" {
+test "parser recovers and a valid tags after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_tags`: a broken leading construct
     // resyncs at the `tags` that follows, which lands in the AST.
@@ -8673,7 +8673,7 @@ test "parser recovers and a valid tags after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.tags_decls.items.len);
 }
 
-test "parser builds tag-filter when conditions (M0.8 E3)" {
+test "parser builds tag-filter when conditions" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags { character { status { alive, stunned } } }
@@ -8701,7 +8701,7 @@ test "parser builds tag-filter when conditions (M0.8 E3)" {
     try std.testing.expectEqualStrings("stunned", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start + 2]));
 }
 
-test "parser builds tag mutation statements (M0.8 E3)" {
+test "parser builds tag mutation statements" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\tags { character { status { alive, stunned } } }
@@ -8732,7 +8732,7 @@ test "parser builds tag mutation statements (M0.8 E3)" {
     try std.testing.expectEqual(ast_mod.StmtKind.tag_mutation_stmt, result.ast.stmtKind(first_stmt));
 }
 
-test "parser: async rule parses with await wait + global_event targets (M0.8 E3 sub-slice B)" {
+test "parser: async rule parses with await wait + global_event targets" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Done { }
@@ -8768,7 +8768,7 @@ test "parser: async rule parses with await wait + global_event targets (M0.8 E3 
     try std.testing.expectEqual(@as(u32, 0), aw1.filter_len); // bare form: no payload filter
 }
 
-test "parser: await entity_event(entity, T) parses bare and with payload filter (M1.0.14 E1)" {
+test "parser: await entity_event(entity, T) parses bare and with payload filter" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Hit { }
@@ -8815,7 +8815,7 @@ test "parser: await entity_event(entity, T) parses bare and with payload filter 
     try std.testing.expectEqual(ast_mod.ExprKind.int_lit, filtered.ast.exprKind(ffield.value));
 }
 
-test "parser: await global_event(T) parses bare and with payload filter + trailing comma (M1.0.14 E1)" {
+test "parser: await global_event(T) parses bare and with payload filter + trailing comma" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Quest { }
@@ -8851,7 +8851,7 @@ test "parser: await global_event(T) parses bare and with payload filter + traili
     try std.testing.expectEqualStrings("tier", result.ast.strings.slice(f1.name));
 }
 
-test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
+test "parser builds a data table declaration with entries + spread" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data ItemDatabase: Item {
@@ -8894,7 +8894,7 @@ test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
     try std.testing.expectEqualStrings("value", result.ast.strings.slice(override_field.name));
 }
 
-test "parser keeps data entry field runs contiguous around nested struct literals (M0.8 E4)" {
+test "parser keeps data entry field runs contiguous around nested struct literals" {
     const gpa = std.testing.allocator;
     // The `pos` value is a struct literal whose own fields land in
     // `struct_lit_fields` DURING the entry parse; the entry's run must stay
@@ -8918,7 +8918,7 @@ test "parser keeps data entry field runs contiguous around nested struct literal
     try std.testing.expectEqualStrings("hp", result.ast.strings.slice(f1.name));
 }
 
-test "parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)" {
+test "parser accepts a PascalCase data entry id, recorded for E1768" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data Foo: Bar {
@@ -8932,7 +8932,7 @@ test "parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)" {
     try std.testing.expect(entry.id_pascal);
 }
 
-test "parser rejects a data table without its entry type (M0.8 E4)" {
+test "parser rejects a data table without its entry type" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\data ItemDatabase {
@@ -8944,7 +8944,7 @@ test "parser rejects a data table without its entry type (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), result.ast.data_decls.items.len);
 }
 
-test "parser recovers and a valid data after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid data after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_data`: a broken leading construct
     // resyncs at the `data` that follows, which lands in the AST.
@@ -8957,7 +8957,7 @@ test "parser recovers and a valid data after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.data_decls.items.len);
 }
 
-test "parser builds a routine with segments + interrupts (M0.8 E4)" {
+test "parser builds a routine with segments + interrupts" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\routine BlacksmithDaily {
@@ -9015,7 +9015,7 @@ test "parser builds a routine with segments + interrupts (M0.8 E4)" {
     try std.testing.expect(int1.is_pause);
 }
 
-test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
+test "parser rejects routine clause-order and shape violations" {
     const gpa = std.testing.allocator;
     // `actions` before `trigger` — the §8.2 clause order is fixed.
     var bad_order = try parse(gpa,
@@ -9057,7 +9057,7 @@ test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
     try std.testing.expect(bad_time.diagnostics.len > 0);
 }
 
-test "timer statements parse: unbound forms, expression arg (M1.0.13 E3)" {
+test "timer statements parse: unbound forms, expression arg" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has Health {
@@ -9092,7 +9092,7 @@ test "timer statements parse: unbound forms, expression arg (M1.0.13 E3)" {
     try std.testing.expectEqual(ast_mod.ExprKind.ident, result.ast.exprKind(timers[3].arg));
 }
 
-test "bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)" {
+test "bound timer parses as a TimerStmt, not a let_stmt" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Boom { }
@@ -9117,7 +9117,7 @@ test "bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)" {
     try std.testing.expectEqual(@as(usize, 0), result.ast.let_stmts.items.len);
 }
 
-test "timer statement routes inside a value block (M1.0.13 E3)" {
+test "timer statement routes inside a value block" {
     const gpa = std.testing.allocator;
     // `startsKeywordStmt` must route the timer keywords to `parseStmt` in a
     // value-block body so the trailing value stays detectable.
@@ -9138,7 +9138,7 @@ test "timer statement routes inside a value block (M1.0.13 E3)" {
     try std.testing.expectEqual(ast_mod.TimerKind.every, result.ast.timer_stmts.items[0].kind);
 }
 
-test "timer binding form rejects mut and type annotation (M1.0.13 E3)" {
+test "timer binding form rejects mut and type annotation" {
     const gpa = std.testing.allocator;
     // §4.3: `timer_stmt = [ "let" IDENT "=" ] timer_kind "(" expression ")"
     // block` — no `mut`, no type annotation on the binding.
@@ -9160,7 +9160,7 @@ test "timer binding form rejects mut and type annotation (M1.0.13 E3)" {
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
 }
 
-test "quantize still fail-louds at the statement head (M1.0.13 E3)" {
+test "quantize still fail-louds at the statement head" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r() {
@@ -9176,7 +9176,7 @@ test "quantize still fail-louds at the statement head (M1.0.13 E3)" {
     try std.testing.expect(std.mem.indexOf(u8, msg, "Phase 2") == null);
 }
 
-test "parser recovers and a valid routine after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid routine after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     // The lockstep stop-set now lists `kw_routine`: a broken leading
     // construct resyncs at the `routine` that follows, which lands in the AST.
@@ -9195,7 +9195,7 @@ test "parser recovers and a valid routine after a broken construct survives (M0.
     try std.testing.expectEqual(@as(usize, 1), result.ast.routine_decls.items.len);
 }
 
-test "parser builds the §6 when-surface extension forms (M0.8 E4 item 4)" {
+test "parser builds the §6 when-surface extension forms" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\component Counter { value: int = 0 }
@@ -9240,7 +9240,7 @@ test "parser builds the §6 when-surface extension forms (M0.8 E4 item 4)" {
     try std.testing.expectEqual(ast_mod.WhenNodeKind.resource_filter, result.ast.when_nodes.items[n3.lhs].kind);
 }
 
-test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
+test "parser keeps the body brace out of the §6 general filter" {
     const gpa = std.testing.allocator;
     // `has Counter` directly followed by the rule body: the matching-brace
     // scan sees the body's `}` followed by EOF → NOT a filter.
@@ -9260,7 +9260,7 @@ test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
     try std.testing.expectEqual(@as(u32, 2), rule.body_len);
 }
 
-test "parser builds named call arguments + soft keyword label (M0.8 E4 item 16)" {
+test "parser builds named call arguments + soft keyword label" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\fn use_smart_object(name: string, type_: int) { }
@@ -9286,7 +9286,7 @@ test "parser builds named call arguments + soft keyword label (M0.8 E4 item 16)"
     try std.testing.expect(found_named);
 }
 
-test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
+test "parser rejects a positional argument after a named one (§3.3)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has C {
@@ -9297,7 +9297,7 @@ test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser builds a behavior tree with composites, when, and leaf forms (M0.8 E4)" {
+test "parser builds a behavior tree with composites, when, and leaf forms" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\behavior CombatBehavior {
@@ -9339,7 +9339,7 @@ test "parser builds a behavior tree with composites, when, and leaf forms (M0.8 
     try std.testing.expect(!cond.payload_is_stmt);
 }
 
-test "parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)" {
+test "parser accepts a leaf behavior root (E1500 is validation's call)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\behavior JustAct {
@@ -9352,7 +9352,7 @@ test "parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)
     try std.testing.expectEqual(ast_mod.BTNodeKind.action, result.ast.bt_nodes.items[decl.root].kind);
 }
 
-test "parser recovers and a valid behavior after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid behavior after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9363,7 +9363,7 @@ test "parser recovers and a valid behavior after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.behavior_decls.items.len);
 }
 
-test "parser builds a quest with properties, stages, objectives, handlers, branches (M0.8 E4)" {
+test "parser builds a quest with properties, stages, objectives, handlers, branches" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\quest EscortMerchant {
@@ -9440,7 +9440,7 @@ test "parser builds a quest with properties, stages, objectives, handlers, branc
     try std.testing.expect(!block_h.payload_is_stmt);
 }
 
-test "parser recovers and a valid quest after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid quest after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9451,7 +9451,7 @@ test "parser recovers and a valid quest after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.quest_decls.items.len);
 }
 
-test "parser builds a dialogue with speakers, choices, branches, emit-when, gotos (M0.8 E4)" {
+test "parser builds a dialogue with speakers, choices, branches, emit-when, gotos" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\dialogue MerchantGreeting {
@@ -9510,7 +9510,7 @@ test "parser builds a dialogue with speakers, choices, branches, emit-when, goto
     try std.testing.expect(result.ast.dialogue_gotos.items[result.ast.dialogue_elems.items[br.elems_start + 2].index].is_end);
 }
 
-test "parser recovers and a valid dialogue after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid dialogue after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9521,7 +9521,7 @@ test "parser recovers and a valid dialogue after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.dialogue_decls.items.len);
 }
 
-test "parser builds an ability with properties and embedded rule (M0.8 E4)" {
+test "parser builds an ability with properties and embedded rule" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\ability Fireball {
@@ -9558,7 +9558,7 @@ test "parser builds an ability with properties and embedded rule (M0.8 E4)" {
     try std.testing.expectEqual(@as(usize, 0), rule_items);
 }
 
-test "parser recovers and a valid ability after a broken construct survives (M0.8 E4 lockstep)" {
+test "parser recovers and a valid ability after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9569,7 +9569,7 @@ test "parser recovers and a valid ability after a broken construct survives (M0.
     try std.testing.expectEqual(@as(usize, 1), result.ast.ability_decls.items.len);
 }
 
-test "parser builds a theme with string name and key:expr entries (M0.8 E5)" {
+test "parser builds a theme with string name and key:expr entries" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\theme "dark" {
@@ -9584,7 +9584,7 @@ test "parser builds a theme with string name and key:expr entries (M0.8 E5)" {
     try std.testing.expectEqual(@as(u32, 3), result.ast.theme_decls.items[0].entries_len);
 }
 
-test "parser recovers and a valid theme after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid theme after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9595,7 +9595,7 @@ test "parser recovers and a valid theme after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.theme_decls.items.len);
 }
 
-test "parser builds a motion with states, wildcard transitions, and recursive animators (M0.8 E5)" {
+test "parser builds a motion with states, wildcard transitions, and recursive animators" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\motion MenuPanel {
@@ -9623,7 +9623,7 @@ test "parser builds a motion with states, wildcard transitions, and recursive an
     try std.testing.expectEqual(@as(usize, 5), result.ast.motion_animators.items.len);
 }
 
-test "parser recovers and a valid motion after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid motion after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9634,7 +9634,7 @@ test "parser recovers and a valid motion after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.motion_decls.items.len);
 }
 
-test "parser builds an input_mapping with properties, actions, binds, and a combo (M0.8 E5)" {
+test "parser builds an input_mapping with properties, actions, binds, and a combo" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\input_mapping "Gameplay" {
@@ -9664,7 +9664,7 @@ test "parser builds an input_mapping with properties, actions, binds, and a comb
     try std.testing.expectEqual(@as(usize, 3), result.ast.input_binds.items.len);
 }
 
-test "parser recovers and a valid input_mapping after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid input_mapping after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9675,7 +9675,7 @@ test "parser recovers and a valid input_mapping after a broken construct survive
     try std.testing.expectEqual(@as(usize, 1), result.ast.input_mapping_decls.items.len);
 }
 
-test "parser builds a widget with params, when clause, recursive ui_tree, and control flow (M0.8 E5)" {
+test "parser builds a widget with params, when clause, recursive ui_tree, and control flow" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\widget HealthBar(entity: Entity)
@@ -9709,7 +9709,7 @@ test "parser builds a widget with params, when clause, recursive ui_tree, and co
     try std.testing.expectEqual(@as(usize, 1), result.ast.ui_fors.items.len);
 }
 
-test "parser recovers and a valid widget after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid widget after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9720,7 +9720,7 @@ test "parser recovers and a valid widget after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.widget_decls.items.len);
 }
 
-test "parser builds a locale with string key=value entries (M0.8 E5)" {
+test "parser builds a locale with string key=value entries" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\locale fr {
@@ -9735,7 +9735,7 @@ test "parser builds a locale with string key=value entries (M0.8 E5)" {
     try std.testing.expectEqual(@as(u32, 3), result.ast.locale_decls.items[0].entries_len);
 }
 
-test "parser recovers and a valid locale after a broken construct survives (M0.8 E5 lockstep)" {
+test "parser recovers and a valid locale after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9746,7 +9746,7 @@ test "parser recovers and a valid locale after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.locale_decls.items.len);
 }
 
-test "parser builds an effect with params, emitters, and an event handler (M0.8 E6)" {
+test "parser builds an effect with params, emitters, and an event handler" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\effect Explosion {
@@ -9777,7 +9777,7 @@ test "parser builds an effect with params, emitters, and an event handler (M0.8 
     try std.testing.expectEqual(@as(u32, 1), decl.handlers_len);
 }
 
-test "parser recovers and a valid effect after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid effect after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9788,7 +9788,7 @@ test "parser recovers and a valid effect after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.effect_decls.items.len);
 }
 
-test "parser builds an audio_graph with params, statements, and the output sink (M0.8 E6)" {
+test "parser builds an audio_graph with params, statements, and the output sink" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_graph LaserBlast {
@@ -9809,7 +9809,7 @@ test "parser builds an audio_graph with params, statements, and the output sink 
     try std.testing.expect(!decl.output.isNone());
 }
 
-test "parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)" {
+test "parser rejects an audio_graph missing the mandatory output sink" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_graph Silent {
@@ -9820,7 +9820,7 @@ test "parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)"
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser recovers and a valid audio_graph after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid audio_graph after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9831,7 +9831,7 @@ test "parser recovers and a valid audio_graph after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_graph_decls.items.len);
 }
 
-test "parser builds an audio_score with tempo, sections, and stems (M0.8 E6)" {
+test "parser builds an audio_score with tempo, sections, and stems" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\audio_score "exploration" {
@@ -9870,7 +9870,7 @@ test "parser builds an audio_score with tempo, sections, and stems (M0.8 E6)" {
     try std.testing.expect(tension.has_on_finish);
 }
 
-test "parser recovers and a valid audio_score after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid audio_score after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9881,7 +9881,7 @@ test "parser recovers and a valid audio_score after a broken construct survives 
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_score_decls.items.len);
 }
 
-test "parser builds a sequence with properties, on_start/finish, tracks, and keyframes (M0.8 E6)" {
+test "parser builds a sequence with properties, on_start/finish, tracks, and keyframes" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\sequence IntroCinematic {
@@ -9913,7 +9913,7 @@ test "parser builds a sequence with properties, on_start/finish, tracks, and key
     try std.testing.expectEqual(@as(u32, 2), cam.keyframes_len);
 }
 
-test "parser recovers and a valid sequence after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid sequence after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9924,7 +9924,7 @@ test "parser recovers and a valid sequence after a broken construct survives (M0
     try std.testing.expectEqual(@as(usize, 1), result.ast.sequence_decls.items.len);
 }
 
-test "parser builds an anim_graph with params, state bodies, transitions, and a layer (M0.8 E6)" {
+test "parser builds an anim_graph with params, state bodies, transitions, and a layer" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\anim_graph HumanoidLocomotion {
@@ -9976,7 +9976,7 @@ test "parser builds an anim_graph with params, state bodies, transitions, and a 
     try std.testing.expect(attack.has_on_finish);
 }
 
-test "parser recovers and a valid anim_graph after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid anim_graph after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -9987,7 +9987,7 @@ test "parser recovers and a valid anim_graph after a broken construct survives (
     try std.testing.expectEqual(@as(usize, 1), result.ast.anim_graph_decls.items.len);
 }
 
-test "parser builds a shader with params, optional vertex, and mandatory fragment (M0.8 E6)" {
+test "parser builds a shader with params, optional vertex, and mandatory fragment" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\shader StandardPBR {
@@ -10017,7 +10017,7 @@ test "parser builds a shader with params, optional vertex, and mandatory fragmen
     try std.testing.expect(decl.fragment.body_len > 0);
 }
 
-test "parser: a fragment-only shader is valid (vertex optional, M0.8 E6)" {
+test "parser: a fragment-only shader is valid (vertex optional)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\shader Unlit {
@@ -10032,7 +10032,7 @@ test "parser: a fragment-only shader is valid (vertex optional, M0.8 E6)" {
     try std.testing.expect(!result.ast.shader_decls.items[0].has_vertex);
 }
 
-test "parser recovers and a valid shader after a broken construct survives (M0.8 E6 lockstep)" {
+test "parser recovers and a valid shader after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10045,7 +10045,7 @@ test "parser recovers and a valid shader after a broken construct survives (M0.8
 
 // ── Level C — scene / prefab parser tests ────────────────────────────────
 
-test "parser parses a scene with version, metadata, resources, entity, instance (M0.8 E7)" {
+test "parser parses a scene with version, metadata, resources, entity, instance" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\scene "Village" {
@@ -10084,7 +10084,7 @@ test "parser parses a scene with version, metadata, resources, entity, instance 
     try std.testing.expectEqual(@as(usize, 1), result.ast.field_overrides.items.len);
 }
 
-test "parser parses prefab autonomous, of-variant, and extends with requires + hooks (M0.8 E7)" {
+test "parser parses prefab autonomous, of-variant, and extends with requires + hooks" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\prefab "WallTorch" {
@@ -10125,7 +10125,7 @@ test "parser parses prefab autonomous, of-variant, and extends with requires + h
     try std.testing.expect(extension.has_on_detach);
 }
 
-test "parser recovers and a valid scene after a broken construct survives (M0.8 E7 lockstep)" {
+test "parser recovers and a valid scene after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10136,7 +10136,7 @@ test "parser recovers and a valid scene after a broken construct survives (M0.8 
     try std.testing.expectEqual(@as(usize, 1), result.ast.scene_decls.items.len);
 }
 
-test "parser recovers and a valid prefab after a broken construct survives (M0.8 E7 lockstep)" {
+test "parser recovers and a valid prefab after a broken construct survives (lockstep)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@@@bad
@@ -10147,7 +10147,7 @@ test "parser recovers and a valid prefab after a broken construct survives (M0.8
     try std.testing.expectEqual(@as(usize, 1), result.ast.prefab_decls.items.len);
 }
 
-test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
+test "parseStmtBlock parses a bare statement run" {
     const gpa = std.testing.allocator;
     // Exactly the shape `descriptor.renderStmtRunAlloc` emits for an extension
     // hook body: statements joined by "; ", no enclosing braces. The emit body
@@ -10164,7 +10164,7 @@ test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
     try std.testing.expectEqual(ast_mod.StmtKind.emit_stmt, result.ast.stmtKind(s1));
 }
 
-test "parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)" {
+test "parseStmtBlock on empty body yields a zero-statement block" {
     const gpa = std.testing.allocator;
     var result = try parseStmtBlock(gpa, "");
     defer result.deinit(gpa);

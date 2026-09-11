@@ -131,7 +131,7 @@ test "cook rejects a reference to an absent entity" {
 
 // ─── M1.B / G6 — a cross-ref borne by a SPARSE component ────────────────────
 
-test "G6: a cross-ref resolves into a SPARSE component's row" {
+test "a cross-ref resolves into a SPARSE component's row" {
     const gpa = std.testing.allocator;
     // The SAME cooked bytes as the sibling test — the cook never sees a storage
     // mode, so only the runtime registry differs.
@@ -197,7 +197,7 @@ const src_sparse =
     \\}
 ;
 
-test "G6: @storage(.sparse) changes NOTHING in the cooked bytes" {
+test "@storage(.sparse) changes NOTHING in the cooked bytes" {
     const gpa = std.testing.allocator;
 
     var plain = try scene_cook.cook(gpa, src_plain, null);
@@ -224,7 +224,7 @@ test "G6: @storage(.sparse) changes NOTHING in the cooked bytes" {
     try std.testing.expectEqualSlices(u8, b_plain, b_sparse);
 }
 
-test "G6: the Etch-cooked scene loads under EITHER host registration" {
+test "the Etch-cooked scene loads under EITHER host registration" {
     const gpa = std.testing.allocator;
     var cooked = try scene_cook.cook(gpa, src_sparse, null);
     defer cooked.deinit(gpa);

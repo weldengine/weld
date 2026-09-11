@@ -132,7 +132,7 @@ test "fallback to manual archetype walk when when clause contains 'not'" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query") == null);
 }
 
-test "lowers event declaration, bus registration, and emit (M0.8 E3)" {
+test "lowers event declaration, bus registration, and emit" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
@@ -167,7 +167,7 @@ test "type mapping int=>i64 float=>f64 bool=>bool" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "b: bool = true,") != null);
 }
 
-test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zig (M0.8 E3)" {
+test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zig" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
@@ -203,7 +203,7 @@ test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zi
     try std.testing.expect(std.mem.indexOf(u8, out.items, "event.x") != null);
 }
 
-test "lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)" {
+test "lowers `has T changed` to tick-based change-detection codegen" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
@@ -243,7 +243,7 @@ test "lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "__last_run_react = world.current_tick;") != null);
 }
 
-test "lowers receiver-less get/get_mut resource access over the aligned store (M0.8 E3-C tranche 7)" {
+test "lowers receiver-less get/get_mut resource access over the aligned store" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
@@ -289,7 +289,7 @@ test "lowers receiver-less get/get_mut resource access over the aligned store (M
     try std.testing.expect(std.mem.indexOf(u8, out.items, "getMutResource(Score_id).?.ptr))).base") == null);
 }
 
-test "emits the Error/ErrorCode prelude only when the program uses error handling (M0.8 E3-C tranche 2)" {
+test "emits the Error/ErrorCode prelude only when the program uses error handling" {
     const gpa = std.testing.allocator;
 
     // An error-free program keeps byte-identical output: no prelude, and the
@@ -329,7 +329,7 @@ test "emits the Error/ErrorCode prelude only when the program uses error handlin
     try std.testing.expect(std.mem.indexOf(u8, errful.items, "if (__thrown_0) |err| {") != null);
 }
 
-test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned call positions (M0.8 E3-C tranche 2)" {
+test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned call positions" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -389,7 +389,7 @@ test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned 
     );
 }
 
-test "lowers dynamic-array and map locals to frame-arena lists, gating the map-insert helper (M0.8 E3-C tranche 3)" {
+test "lowers dynamic-array and map locals to frame-arena lists, gating the map-insert helper" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -439,7 +439,7 @@ test "lowers dynamic-array and map locals to frame-arena lists, gating the map-i
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapInsert") == null);
 }
 
-test "lowers Set locals to frame-arena element lists, gating the set helpers (M0.8 E3-C tranche 3bis)" {
+test "lowers Set locals to frame-arena element lists, gating the set helpers" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -484,7 +484,7 @@ test "lowers Set locals to frame-arena element lists, gating the set helpers (M0
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchSet") == null);
 }
 
-test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper (M0.8 E3-C tranche 4)" {
+test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -531,7 +531,7 @@ test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get help
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapGet") == null);
 }
 
-test "lowers the enum shorthand in field-value position to the qualified variant (M0.8 E3-C tranche 4)" {
+test "lowers the enum shorthand in field-value position to the qualified variant" {
     const gpa = std.testing.allocator;
     // The part1 §10.2 canonical form: a bare `.variant` field value emits
     // qualified from the field's declared enum type.
@@ -554,7 +554,7 @@ test "lowers the enum shorthand in field-value position to the qualified variant
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Spec{ .hp = 5, .faction = Faction.blue }") != null);
 }
 
-test "collection allocations require the frame arena: fn-body push fails loud (M0.8 E3-C tranche 3)" {
+test "collection allocations require the frame arena: fn-body push fails loud" {
     const gpa = std.testing.allocator;
     // A fn body has no arena (§6.3 outparam model deferred) — a collection
     // allocation inside one fails loud, same policy as string concat.
@@ -588,7 +588,7 @@ test "collection allocations require the frame arena: fn-body push fails loud (M
     );
 }
 
-test "lowers mut-self methods to pointer receivers, mutation visible at the call site (M0.8 E3-C tranche 5)" {
+test "lowers mut-self methods to pointer receivers, mutation visible at the call site" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -625,7 +625,7 @@ test "lowers mut-self methods to pointer receivers, mutation visible at the call
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "lowers anonymous struct literals to qualified Zig literals from the expected type (M0.8 E3-C tranche 8)" {
+test "lowers anonymous struct literals to qualified Zig literals from the expected type" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -660,7 +660,7 @@ test "lowers anonymous struct literals to qualified Zig literals from the expect
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "lowers capturing closures to struct-with-fields, snapshot at creation (M0.8 E3-C tranche 6)" {
+test "lowers capturing closures to struct-with-fields, snapshot at creation" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -696,7 +696,7 @@ test "lowers capturing closures to struct-with-fields, snapshot at creation (M0.
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "closure captures are bounded to POD scalars: string capture fails loud (M0.8 E3-C tranche 6)" {
+test "closure captures are bounded to POD scalars: string capture fails loud" {
     const gpa = std.testing.allocator;
     // A string-typed capture is a §8.2 ref-capture — outside the
     // codegen subset (interpreter reference, fail loud).
@@ -727,7 +727,7 @@ test "closure captures are bounded to POD scalars: string capture fails loud (M0
     );
 }
 
-test "lowers block-body closures: statements in the call fn, return is the fn boundary (M0.8 E3-C tranche 6)" {
+test "lowers block-body closures: statements in the call fn, return is the fn boundary" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -765,7 +765,7 @@ test "lowers block-body closures: statements in the call fn, return is the fn bo
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "lowers throwing closures with their own __err out-param, let call site re-raises (M0.8 E3-C tranche 6)" {
+test "lowers throwing closures with their own __err out-param, let call site re-raises" {
     const gpa = std.testing.allocator;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -809,7 +809,7 @@ test "lowers throwing closures with their own __err out-param, let call site re-
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "throwing closure call outside a let initializer fails loud (M0.8 E3-C tranche 6)" {
+test "throwing closure call outside a let initializer fails loud" {
     const gpa = std.testing.allocator;
     // Expression position needs the statement-level __terr sequencing —
     // unsanctioned, fail loud (interpreter reference), mirroring the

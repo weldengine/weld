@@ -310,7 +310,7 @@ fn cookPosVelScene2(gpa: std.mem.Allocator, world: *World, vel_mode: ecs.Storage
     return try writer.write(gpa, model, &world.registry);
 }
 
-test "G6: a cooked scene loads a SPARSE component into its own store" {
+test "a cooked scene loads a SPARSE component into its own store" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -347,7 +347,7 @@ test "G6: a cooked scene loads a SPARSE component into its own store" {
     try std.testing.expectEqual(@as(usize, n_entities), world.sparse_stores.getConst(vel_id).?.len());
 }
 
-test "G6: the SAME cooked bytes give the same values under either mode" {
+test "the SAME cooked bytes give the same values under either mode" {
     // The counter-factual is the REGISTRY and nothing else: same cook function,
     // same column bytes, same UUIDs — only `Vel`'s declared mode differs. This
     // is what establishes that the on-disk identity does not carry the mode,
@@ -391,7 +391,7 @@ test "G6: the SAME cooked bytes give the same values under either mode" {
     try std.testing.expectEqual(@as(usize, 1), as_.component_ids.len);
 }
 
-test "G6: two blocks whose TABLE subset coincides land in one archetype" {
+test "two blocks whose TABLE subset coincides land in one archetype" {
     // The property the corpus names: an Archetype Block is a SERIALIZATION
     // group keyed by the full on-disk signature, so two entities differing only
     // by a sparse component cook into DIFFERENT blocks — and instantiate into

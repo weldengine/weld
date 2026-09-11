@@ -473,7 +473,7 @@ test "lexer skips line and block comments, records spans in comment_spans" {
     try std.testing.expectEqualStrings("// header", src[lex.comment_spans.items[0].byte_start..lex.comment_spans.items[0].byte_end]);
 }
 
-test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomment)" {
+test "lexer routes triple-slash doc comments to doc_comment_spans" {
     const gpa = std.testing.allocator;
     const src = "/// doc\nlet x = 1";
     var lex = Lexer.init(src);
@@ -490,7 +490,7 @@ test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomme
     try std.testing.expectEqualStrings("/// doc", src[d.byte_start..d.byte_end]);
 }
 
-test "lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)" {
+test "lexer distinguishes //, ///, //// comment kinds" {
     const gpa = std.testing.allocator;
     // `//` plain, `///` doc, `////` plain (4+ slashes is not a doc comment).
     var lex = Lexer.init("// plain\n/// doc\n//// also plain\nlet x = 1");
@@ -546,7 +546,7 @@ test "lexer promotes const/private/test" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
+test "lexer recognizes the import keyword (graduated from reserved)" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("import a.b");
     defer lex.deinit(gpa);
@@ -557,7 +557,7 @@ test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)" {
+test "lexer recognizes the scene + prefab keywords (graduated from reserved)" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("scene prefab");
     defer lex.deinit(gpa);
@@ -566,7 +566,7 @@ test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reser
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer recognizes the M0.8 E2 keywords and the `->` arrow" {
+test "lexer recognizes the async/fn/throws keywords and the `->` arrow" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("async fn f() -> int { return throws }");
     defer lex.deinit(gpa);
@@ -627,7 +627,7 @@ fn expectKind(lex: *Lexer, gpa: std.mem.Allocator, kind: TokenKind) !void {
     try std.testing.expectEqual(kind, t.kind);
 }
 
-test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
+test "lexer lexes DD:DD as a time literal, greedy-contiguous only" {
     const gpa = std.testing.allocator;
     var lex = Lexer.init("06:00 6:00 06:003 22:30");
     // `06:00` → one time literal.
@@ -645,7 +645,7 @@ test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
     try expectKind(&lex, gpa, .eof);
 }
 
-test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)" {
+test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only" {
     const gpa = std.testing.allocator;
     // `0.3s` → one DURATION_LIT; `3s` stays INT + IDENT (FLOAT-only per
     // §1.4); `0.3 s` (space) and `0.3sec` (ident continues) stay FLOAT +
@@ -661,7 +661,7 @@ test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 
     try expectKind(&lex, gpa, .ident);
 }
 
-test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)" {
+test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (§1.4)" {
     const gpa = std.testing.allocator;
     // `#2E6BBF` (6) and `#12345678` (8) are colors; `#FFF` (3) and `#1234567`
     // (7) are malformed → error_byte; `#FFFFFFz` is a 6-hex color then `z`.

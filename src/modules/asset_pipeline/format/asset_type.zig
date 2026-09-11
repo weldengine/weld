@@ -77,7 +77,7 @@ pub const AssetType = enum(u16) {
     }
 };
 
-test "asset_type u16 round-trips for the populated M0.6 subset" {
+test "asset_type u16 round-trips for the populated subset" {
     inline for (.{ AssetType.texture, AssetType.mesh, AssetType.audio }) |t| {
         try std.testing.expectEqual(t, AssetType.fromU16(t.toU16()).?);
     }

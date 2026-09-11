@@ -1,0 +1,490 @@
+# G10 — every renamed test name, enumerated.
+# Predicate: rule 1's, replicated from tools/weld_lint/rules/comment_identifiers.zig.
+# file	line	old name	new name	hand-written
+src/core/root.zig	252	runtime-query abstraction stays dropped (D-S4-runtime-query)	runtime-query abstraction stays dropped	
+src/core/ecs/chunk.zig	324	computeLayout ACCEPTS an empty component list (M1.B/G2)	computeLayout ACCEPTS an empty component list	
+src/core/ecs/chunk.zig	343	computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars	computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries sidecars	
+src/core/ecs/observers.zig	598	add on entity already having the component fires on_replaced with old and new (M1.0.2 E3)	add on entity already having the component fires on_replaced with old and new	
+src/core/ecs/observers.zig	625	on_removed receives the pre-removal value (M1.0.2 E3)	on_removed receives the pre-removal value	
+src/core/ecs/observers.zig	671	dispatchOnSpawned fires on_spawned once for an already-spawned entity (M1.0.5 E2)	dispatchOnSpawned fires on_spawned once for an already-spawned entity	
+src/core/ecs/resources.zig	170	resource buffers are chunk-aligned (M0.8 Option A)	resource buffers are chunk-aligned (Option A)	
+src/core/ecs/resources.zig	193	setDirty restores an explicit dirty state (M1.1.1-HF2 C6)	setDirty restores an explicit dirty state	
+src/core/ecs/world.zig	2492	registerOnDetach / dispatchOnDetach fires the on_detach seam (M1.0.9)	registerOnDetach / dispatchOnDetach fires the on_detach seam	
+src/core/ecs/world.zig	2525	per-entity extension side-table tracks add / has / remove (M1.0.9)	per-entity extension side-table tracks add / has / remove	
+src/core/ecs/world.zig	2565	despawn removes the entity's extension entry (M1.1.1-HF1 D7)	despawn removes the entity's extension entry	
+src/core/ecs/world.zig	2590	despawn is allocation-free after spawn (M1.1.1-HF2 C1)	despawn is allocation-free after spawn	
+src/core/ecs/world.zig	2615	spawn OOM on archetype storage leaves no orphan identity (M1.1.1-HF2 C1)	spawn OOM on archetype storage leaves no orphan identity	
+src/core/ecs/world.zig	2650	releaseResourcePayloads is idempotent and frees a string block once (M1.1.1-HF2 C4)	releaseResourcePayloads is idempotent and frees a string block once	
+src/core/scene/loader.zig	1126	resource strings outlive LoadResult.deinit (M1.1.1-HF1 D1)	resource strings outlive LoadResult.deinit	
+src/core/scene/loader.zig	1151	loading over an existing resource string releases the previous block (M1.1.1-HF1 D1)	loading over an existing resource string releases the previous block	
+src/core/scene/loader.zig	1179	a failed load leaves the world unchanged (M1.1.1-HF1 D2)	a failed load leaves the world unchanged	
+src/core/scene/loader.zig	1215	rollback restores across duplicate resource entries (M1.1.1-HF1 D2)	rollback restores across duplicate resource entries	
+src/core/scene/loader.zig	1284	instantiate under post-spawn OOM leaves no orphan (M1.1.1-HF2 C2)	instantiate under post-spawn OOM leaves no orphan	
+src/core/scene/loader.zig	1331	rejected load restores the resource dirty bit (M1.1.1-HF2 C6)	rejected load restores the resource dirty bit	
+src/core/scene/loader.zig	1395	instantiate rejects an out-of-range entity uuid ordinal (M1.1.1-HF2 C2b)	instantiate rejects an out-of-range entity uuid ordinal	
+src/core/scene/loader.zig	1413	instantiate rejects a duplicate entity uuid ordinal (M1.1.1-HF2 C2b)	instantiate rejects a duplicate entity uuid ordinal	
+src/etch/ast.zig	4051	AstArena timer statement round-trips through the timer_stmts slab (M1.0.13 E2)	AstArena timer statement round-trips through the timer_stmts slab	
+src/etch/descriptor.zig	2933	descriptor build + serialize: data table golden form (M0.8 E4)	descriptor build + serialize: data table golden form	
+src/etch/descriptor.zig	2984	descriptor renderer fails loud on an unsupported expression kind (M0.8 E4)	descriptor renderer fails loud on an unsupported expression kind	
+src/etch/descriptor.zig	2998	renderFieldTypeAlloc rejects a collection field type (M1.0.17 E5)	renderFieldTypeAlloc rejects a collection field type	
+src/etch/ecs_bridge.zig	577	G5: componentRefOf resolves a SPARSE component, and the field round-trips	componentRefOf resolves a SPARSE component, and the field round-trips	
+src/etch/ecs_bridge.zig	602	G5: the TABLE arm is unchanged — the same round-trip, same assertions	the TABLE arm is unchanged — the same round-trip, same assertions	
+src/etch/ecs_bridge.zig	623	G5: markComponentChanged stamps a SPARSE component	markComponentChanged stamps a SPARSE component	
+src/etch/ecs_bridge.zig	645	G5: componentRefOf still refuses a component the entity does NOT carry	componentRefOf still refuses a component the entity does NOT carry	
+src/etch/interp.zig	8080	runProgram resource get/get_mut without receiver reads and writes the resource (D-S3-resource-receiver)	runProgram resource get/get_mut without receiver reads and writes the resource	
+src/etch/interp.zig	8146	resource string field compiles and reads its default (M1.0.3 E2)	resource string field compiles and reads its default	
+src/etch/interp.zig	8193	resource string field with no default reads empty (M1.0.3 E2)	resource string field with no default reads empty	
+src/etch/interp.zig	8217	resource string field is mutable and the previous value is released (M1.0.3 E2)	resource string field is mutable and the previous value is released	
+src/etch/interp.zig	8266	world+interp teardown frees resource strings once (M1.1.1-HF2 C4)	world+interp teardown frees resource strings once	
+src/etch/interp.zig	8930	resource enum field compiles, reads its default, and is mutable (M1.0.3 E3)	resource enum field compiles, reads its default, and is mutable	
+src/etch/interp.zig	8971	resource enum field with no default reads the first variant (M1.0.3 E3)	resource enum field with no default reads the first variant	
+src/etch/interp.zig	8999	GameState end-state program mutates string + enum + int end-to-end (M1.0.3)	GameState end-state program mutates string + enum + int end-to-end	
+src/etch/interp.zig	9052	runProgram type-alias field resolves to the underlying primitive (M0.8 type alias)	runProgram type-alias field resolves to the underlying primitive (type alias)	
+src/etch/interp.zig	9100	runProgram for-in over a range accumulates (M0.8 ranges + for-in)	runProgram for-in over a range accumulates (ranges + for-in)	
+src/etch/interp.zig	9145	runProgram block expression yields its trailing value (M0.8 control flow)	runProgram block expression yields its trailing value (control flow)	
+src/etch/interp.zig	9191	runProgram while loop with a conditional break (M0.8 control flow)	runProgram while loop with a conditional break (control flow)	
+src/etch/interp.zig	9242	runProgram closure with a block body (M0.8 control flow)	runProgram closure with a block body (control flow)	
+src/etch/interp.zig	9293	runProgram return inside a closure exits the closure only (M0.8 closures)	runProgram return inside a closure exits the closure only (closures)	
+src/etch/interp.zig	9347	runProgram match dispatches on literal and binding arms (M0.8 match)	runProgram match dispatches on literal and binding arms (match)	
+src/etch/interp.zig	9420	runProgram enum value + match selects the right arm (M0.8 E2 block 3 tranche B)	runProgram enum value + match selects the right arm	
+src/etch/interp.zig	9458	runProgram trait method on Entity mutates via get_mut (M0.8 E2 block 3 tranche C)	runProgram trait method on Entity mutates via get_mut	
+src/etch/interp.zig	9498	runProgram generic fn + generic struct run type-erased (M0.8 E2 block 4)	runProgram generic fn + generic struct run type-erased	
+src/etch/interp.zig	9538	runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891, M0.8 E2)	runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891)	
+src/etch/interp.zig	9588	runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)	runProgram while let unwraps an optional each iteration	
+src/etch/interp.zig	9630	user fn named test_world is not shadowed by the builtin outside a test (M1.0.15 review fix)	user fn named test_world is not shadowed by the builtin outside a test	
+src/etch/interp.zig	9655	runProgram assert passes on true, reports a runtime error on false (M0.8 assert)	runProgram assert passes on true, reports a runtime error on false (assert)	
+src/etch/interp.zig	9713	runProgram numeric cast int-to-float (M0.8 cast foundation)	runProgram numeric cast int-to-float (cast foundation)	
+src/etch/interp.zig	9762	runProgram for-in over a dynamic array iterates each element (M0.8 collections)	runProgram for-in over a dynamic array iterates each element (collections)	
+src/etch/interp.zig	9808	runProgram map literal + for-in sums values (M0.8 collections)	runProgram map literal + for-in sums values (collections)	
+src/etch/interp.zig	9855	runProgram dynamic array push and len (M0.8 E3-C tranche 3)	runProgram dynamic array push and len	
+src/etch/interp.zig	9901	runProgram map insert replaces and appends, len counts (M0.8 E3-C tranche 3)	runProgram map insert replaces and appends, len counts	
+src/etch/interp.zig	9950	runProgram Set.new/Set.from + insert dedup, contains, len (M0.8 E3-C tranche 3bis)	runProgram Set.new/Set.from + insert dedup, contains, len	
+src/etch/interp.zig	10001	runProgram closure captures an outer local by value (M0.8 closures)	runProgram closure captures an outer local by value (closures)	
+src/etch/interp.zig	10046	runProgram free-function call returns the computed value (M0.8 E2)	runProgram free-function call returns the computed value	
+src/etch/interp.zig	10090	runProgram early return unwinds the fn body past later statements (M0.8 E2)	runProgram early return unwinds the fn body past later statements	
+src/etch/interp.zig	10138	runProgram struct method dispatch: associated fn + instance method (M0.8 E2 block 3)	runProgram struct method dispatch: associated fn + instance method	
+src/etch/interp.zig	10187	runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)	runProgram mut-self method mutates the receiver in place	
+src/etch/interp.zig	10241	runProgram try/catch catches a thrown value (M0.8 error handling)	runProgram try/catch catches a thrown value (error handling)	
+src/etch/interp.zig	10293	runProgram uncaught throw surfaces a runtime error (M0.8 error handling)	runProgram uncaught throw surfaces a runtime error (error handling)	
+src/etch/interp.zig	10325	runProgram emit enqueues an event into the dynamic event store (M0.8 E3)	runProgram emit enqueues an event into the dynamic event store	
+src/etch/interp.zig	10372	runProgram @on_event observer drains the event store and writes a resource (M0.8 E3)	runProgram @on_event observer drains the event store and writes a resource	
+src/etch/interp.zig	10421	@on_event(T) fires exactly once per emit T in the tick (M1.0.2 E1)	@on_event(T) fires exactly once per emit T in the tick	
+src/etch/interp.zig	10475	@on_event discriminates event types (M1.0.2 E1)	@on_event discriminates event types	
+src/etch/interp.zig	10532	event emitted earlier in the tick reaches a later-declared @on_event (M1.0.2 E1)	event emitted earlier in the tick reaches a later-declared @on_event	
+src/etch/interp.zig	10574	event string payload survives to drain and not past tick boundary (M1.0.2 E1)	event string payload survives to drain and not past tick boundary	
+src/etch/interp.zig	10686	observer annotation signature mismatch is rejected (M1.0.2 E2)	observer annotation signature mismatch is rejected	
+src/etch/interp.zig	10710	observer annotation requires a component type (M1.0.2 E2)	observer annotation requires a component type	
+src/etch/interp.zig	10723	observer rule rejects when clause and conflicting lifecycle annotations (M1.0.2 E2)	observer rule rejects when clause and conflicting lifecycle annotations	
+src/etch/interp.zig	10742	well-formed observer rules of all five kinds type-check clean (M1.0.2 E2)	well-formed observer rules of all five kinds type-check clean	
+src/etch/interp.zig	10764	@on_added(T) fires at flush with entity + value bound (M1.0.2 E3)	@on_added(T) fires at flush with entity + value bound	
+src/etch/interp.zig	10819	@on_removed(T) binds the correct old value (M1.0.2 E3)	@on_removed(T) binds the correct old value	
+src/etch/interp.zig	10872	@on_spawned and @on_despawned fire on spawn/despawn (M1.0.2 E3)	@on_spawned and @on_despawned fire on spawn/despawn	
+src/etch/interp.zig	10917	observer body structural mutation is deferred — no recursion (M1.0.2 E3)	observer body structural mutation is deferred — no recursion	
+src/etch/interp.zig	10971	observable behaviour: all five observer kinds + emit/@on_event, deterministic ordered log (M1.0.2 E3)	observable behaviour: all five observer kinds + emit/@on_event, deterministic ordered log	
+src/etch/interp.zig	11070	runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)	runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter	
+src/etch/interp.zig	11129	runProgram `has T changed` gates a rule on per-tick change detection (M0.8 E3)	runProgram `has T changed` gates a rule on per-tick change detection	
+src/etch/interp.zig	11248	runProgram changed fires per-slot intra-archetype (M1.0.1)	runProgram changed fires per-slot intra-archetype	
+src/etch/interp.zig	11315	runProgram changed combined with a field-filter (M1.0.1)	runProgram changed combined with a field-filter	
+src/etch/interp.zig	11378	runProgram changed_tick travels across archetype migration (M1.0.1)	runProgram changed_tick travels across archetype migration	
+src/etch/interp.zig	11449	runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1)	runProgram changed on a freshly-spawned entity uses the spawn tick	
+src/etch/interp.zig	11505	async rule suspends at await wait(<d>s) and resumes at the equivalent tick (M1.0.11 E3)	async rule suspends at await wait(<d>s) and resumes at the equivalent tick	
+src/etch/interp.zig	11558	time subsystem populates the three builtin resources (M1.0.13 E5)	time subsystem populates the three builtin resources	
+src/etch/interp.zig	11608	time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/real (M1.0.13 E5)	time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/real	
+src/etch/interp.zig	11664	await wait scales with time_scale and freezes under paused (M1.0.13 E5)	await wait scales with time_scale and freezes under paused	
+src/etch/interp.zig	11754	await wait_unscaled fires under paused (M1.0.13 E5)	await wait_unscaled fires under paused	
+src/etch/interp.zig	11799	after(d) fires once at the deadline from a non-async rule, then parks as a husk (M1.0.13 E6)	after(d) fires once at the deadline from a non-async rule, then parks as a husk	
+src/etch/interp.zig	11842	every(d) fires each period, re-armed at a fixed period (M1.0.13 E6)	every(d) fires each period, re-armed at a fixed period	
+src/etch/interp.zig	11879	under paused, after freezes while after_unscaled still fires (M1.0.13 E6)	under paused, after freezes while after_unscaled still fires	
+src/etch/interp.zig	11933	time_scale stretches an after deadline (M1.0.13 E6)	time_scale stretches an after deadline	
+src/etch/interp.zig	11965	a canceled timer never fires and cancel is idempotent (M1.0.13 E6)	a canceled timer never fires and cancel is idempotent	
+src/etch/interp.zig	11996	the callback observes the scheduling-time scope snapshot (captured entity) (M1.0.13 E6)	the callback observes the scheduling-time scope snapshot (captured entity)	
+src/etch/interp.zig	12033	two timers due the same tick fire in registration order (M1.0.13 E6)	two timers due the same tick fire in registration order	
+src/etch/interp.zig	12059	a timer scheduled from an async rule fires and its emit reaches same-tick rules (M1.0.13 E6)	a timer scheduled from an async rule fires and its emit reaches same-tick rules	
+src/etch/interp.zig	12100	async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)	async rule resumes on await global_event(T)	
+src/etch/interp.zig	12156	async rule suspends at a statement-head await inside an if body and resumes without re-running the prefix (M1.0.11 E1)	async rule suspends at a statement-head await inside an if body and resumes without re-running the prefix	
+src/etch/interp.zig	12226	async rule suspends at a statement-head await inside a loop body and resumes each iteration (M1.0.11 E1)	async rule suspends at a statement-head await inside a loop body and resumes each iteration	
+src/etch/interp.zig	12282	async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved (M1.0.11 E1)	async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved	
+src/etch/interp.zig	12337	async rule suspends inside a try body and a post-resume throw routes to the catch (M1.0.11 E1)	async rule suspends inside a try body and a post-resume throw routes to the catch	
+src/etch/interp.zig	12391	async fn called via await runs to completion across ticks and its return value flows into a let binding (M1.0.11 E2)	async fn called via await runs to completion across ticks and its return value flows into a let binding	
+src/etch/interp.zig	12444	async method called via await inlines with its own scope and locals survive the suspension (M1.0.11 E2)	async method called via await inlines with its own scope and locals survive the suspension	
+src/etch/interp.zig	12502	await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) (M1.0.11 E3)	await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60)	
+src/etch/interp.zig	12549	future is the sole await target the wake-resolver rejects (M1.0.14 E4 — boundary pin flipped)	future is the sole await target the wake-resolver rejects	
+src/etch/interp.zig	12597	entity-bound async rule: one root task per matched entity, independent resumes (M1.0.14 E3)	entity-bound async rule: one root task per matched entity, independent resumes	
+src/etch/interp.zig	12639	entity-bound async rule: re-arms after a terminal state while the entity matches (M1.0.14 E3 ruling 1)	entity-bound async rule: re-arms after a terminal state while the entity matches	
+src/etch/interp.zig	12678	entity-bound async rule: when gates the spawn, not the task life (M1.0.14 E3 ruling 2)	entity-bound async rule: when gates the spawn, not the task life	
+src/etch/interp.zig	12724	entity-bound async rule: despawn mid-suspension → dead-handle fail-loud on resume (M1.0.14 E3 ruling 3)	entity-bound async rule: despawn mid-suspension → dead-handle fail-loud on resume	
+src/etch/interp.zig	12763	entity-bound async rule: spawn follows selection order (M1.0.14 E3 ruling 4)	entity-bound async rule: spawn follows selection order	
+src/etch/interp.zig	12803	async rule shape guard: parameterless byte-stable, dt param fail-loud (M1.0.14 E3)	async rule shape guard: parameterless byte-stable, dt param fail-loud	
+src/etch/interp.zig	12871	entity_event: wakes for the matching designated entity, not a different one (M1.0.14 E4)	entity_event: wakes for the matching designated entity, not a different one	
+src/etch/interp.zig	12918	global_event payload filter: int match/mismatch + string byte-equality (M1.0.14 E4)	global_event payload filter: int match/mismatch + string byte-equality	
+src/etch/interp.zig	13037	entity_event: @entity_target designates the matched field on a two-Entity event (M1.0.14 E4)	entity_event: @entity_target designates the matched field on a two-Entity event	
+src/etch/interp.zig	13085	entity_event: payload filter match/mismatch + `let x = await` binds unit (M1.0.14 E4)	entity_event: payload filter match/mismatch + `let x = await` binds unit	
+src/etch/interp.zig	13160	global_event filter is captured once at suspension, not re-evaluated at poll (M1.0.14 E4)	global_event filter is captured once at suspension, not re-evaluated at poll	
+src/etch/interp.zig	13207	emit stabilizes a computed string so an @on_event observer reads it safely (M1.0.14 E4)	emit stabilizes a computed string so an @on_event observer reads it safely	
+src/etch/interp.zig	13248	a computed string filter survives to a cross-tick global_event poll (M1.0.14 E4)	a computed string filter survives to a cross-tick global_event poll	
+src/etch/interp.zig	13290	a borrowed resource-string filter is captured once and survives reassignment (M1.0.14 E4)	a borrowed resource-string filter is captured once and survives reassignment	
+src/etch/interp.zig	13341	two awaiters wake on a single global_event instance (M1.0.14 E5)	two awaiters wake on a single global_event instance	
+src/etch/interp.zig	13388	an @on_event observer and an awaiter both fire on the same event (M1.0.14 E5)	an @on_event observer and an awaiter both fire on the same event	
+src/etch/interp.zig	13436	an event emitted at tick N does not wake a task that suspends at tick N+1 (M1.0.14 E5)	an event emitted at tick N does not wake a task that suspends at tick N+1	
+src/etch/interp.zig	13481	a filtered global_event wakes only on the matching instance across ticks (M1.0.14 E5)	a filtered global_event wakes only on the matching instance across ticks	
+src/etch/interp.zig	13523	9.2 mirror: entity awaiter resumes on its own event and its emit is observed (M1.0.14 E5)	9.2 mirror: entity awaiter resumes on its own event and its emit is observed	
+src/etch/interp.zig	13580	task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)	task pool is pointer-stable and cancelTask parks a suspended task for good	
+src/etch/interp.zig	13643	race timeout pattern: winner return propagates, loser canceled (M1.0.12 E4)	race timeout pattern: winner return propagates, loser canceled	
+src/etch/interp.zig	13705	race emit interleaving is deterministic; canceled loser never emits (M1.0.12 E4)	race emit interleaving is deterministic; canceled loser never emits	
+src/etch/interp.zig	13767	conditional admission + zero-admitted passthrough (M1.0.12 E4)	conditional admission + zero-admitted passthrough	
+src/etch/interp.zig	13822	race tie-break: same-tick completions resolve in declaration order (M1.0.12 E4)	race tie-break: same-tick completions resolve in declaration order	
+src/etch/interp.zig	13870	sync joins all branches; a failing branch does not block the join (M1.0.12 E4)	sync joins all branches; a failing branch does not block the join	
+src/etch/interp.zig	13927	race with every branch failing completes; parent resumes after it (M1.0.12 E4)	race with every branch failing completes; parent resumes after it	
+src/etch/interp.zig	13973	branch scope is a snapshot copy: writes are invisible to the parent (M1.0.12 E4)	branch scope is a snapshot copy: writes are invisible to the parent	
+src/etch/interp.zig	14017	branch is detached: parent continues same tick, task outlives it (M1.0.12 E5)	branch is detached: parent continues same tick, task outlives it	
+src/etch/interp.zig	14066	spawn handle: cancel() prevents the task from ever running (M1.0.12 E5)	spawn handle: cancel() prevents the task from ever running	
+src/etch/interp.zig	14107	await h joins a running task and resumes after its completion (M1.0.12 E5)	await h joins a running task and resumes after its completion	
+src/etch/interp.zig	14151	await on an already-done handle resumes immediately, same drive (M1.0.12 E5)	await on an already-done handle resumes immediately, same drive	
+src/etch/interp.zig	14200	await on a canceled handle fails loud, no silent unit (M1.0.12 E5)	await on a canceled handle fails loud, no silent unit	
+src/etch/interp.zig	14240	a task canceled WHILE awaited fails the awaiter loud at resume (M1.0.12 E5)	a task canceled WHILE awaited fails the awaiter loud at resume	
+src/etch/interp.zig	14289	canceling the parent does not cancel its detached children (M1.0.12 E5)	canceling the parent does not cancel its detached children	
+src/etch/interp.zig	14341	construct matrix: race nested in a spawn body, joined via handle (M1.0.12 E5)	construct matrix: race nested in a spawn body, joined via handle	
+src/etch/interp.zig	14396	return await regression: the return is never dropped at resume (M1.0.12 E5)	return await regression: the return is never dropped at resume	
+src/etch/interp.zig	14560	observable: sync parallel-preload over three awaits, documented emit sequence (M1.0.12 E5)	observable: sync parallel-preload over three awaits, documented emit sequence	
+src/etch/interp.zig	14628	runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)	runProgram Optional ops: ??, !, ?., patterns, pop, m[k]	
+src/etch/interp.zig	14688	runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)	runProgram force unwrap of none is a runtime failure	
+src/etch/interp.zig	14717	runFor surfaces typed last_error with span on division by zero (D-S4-runtime-report)	runFor surfaces typed last_error with span on division by zero	
+src/etch/interp.zig	14752	runFor surfaces UncaughtThrow with the thrown-value span (D-S4-runtime-report)	runFor surfaces UncaughtThrow with the thrown-value span	
+src/etch/interp.zig	14791	async runtime failure surfaces typed last_error (D-S4-runtime-report)	async runtime failure surfaces typed last_error	
+src/etch/interp.zig	14857	every entity-bound rule caches its matching-archetype set, rescanning only the tail (M1.0.0)	every entity-bound rule caches its matching-archetype set, rescanning only the tail	
+src/etch/interp.zig	14909	the cached matching set replaces the per-tick walk at any archetype count (M1.0.0)	the cached matching set replaces the per-tick walk at any archetype count	
+src/etch/interp.zig	14942	runProgram anonymous struct literal via let annotation and field value (M0.8 E3-C tranche 8)	runProgram anonymous struct literal via let annotation and field value	
+src/etch/interp.zig	15000	cooked Etch scene loads, on_spawned rules emit, resource string round-trips (M1.0.5 E3)	cooked Etch scene loads, on_spawned rules emit, resource string round-trips	
+src/etch/interp.zig	15079	execHookText mutates a component on the live world (M1.0.9 E2)	execHookText mutates a component on the live world	
+src/etch/interp.zig	15104	execHookText restores self.ast and the program still steps (M1.0.9 E2)	execHookText restores self.ast and the program still steps	
+src/etch/interp.zig	15134	execHookText emit enqueues into the dynamic event store (M1.0.9 E2)	execHookText emit enqueues into the dynamic event store	
+src/etch/interp.zig	15211	spawn defers — entity materializes at flush with full payload (M1.0.10 E3)	spawn defers — entity materializes at flush with full payload	
+src/etch/interp.zig	15242	despawn defers — entity removed at flush (M1.0.10 E3)	despawn defers — entity removed at flush	
+src/etch/interp.zig	15267	add defers — component present at flush (M1.0.10 E3)	add defers — component present at flush	
+src/etch/interp.zig	15294	remove defers — component gone at flush (M1.0.10 E3)	remove defers — component gone at flush	
+src/etch/interp.zig	15321	spawn fires on_spawned then on_add per component at flush (M1.0.10 E3)	spawn fires on_spawned then on_add per component at flush	
+src/etch/interp.zig	15359	despawn fires on_remove per component then on_despawned (M1.0.10 E3)	despawn fires on_remove per component then on_despawned	
+src/etch/interp.zig	15402	add-on-present fires on_replaced not on_added (M1.0.10 E3)	add-on-present fires on_replaced not on_added	
+src/etch/interp.zig	15445	B1 — multi-entity rule structural mutation defers without corrupting iteration (M1.0.10 E3)	B1 — multi-entity rule structural mutation defers without corrupting iteration	
+src/etch/interp.zig	15484	S4 structural-mutation boundary lifted — a body issuing all four ops runs (M1.0.10 E3)	structural-mutation boundary lifted — a body issuing all four ops runs	
+src/etch/interp.zig	15516	runProgram a throw raised in an assignment's RHS unwinds to the catch (M1.1.15.2 G2)	runProgram a throw raised in an assignment's RHS unwinds to the catch	
+src/etch/lexer.zig	476	lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomment)	lexer routes triple-slash doc comments to doc_comment_spans	
+src/etch/lexer.zig	493	lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)	lexer distinguishes //, ///, //// comment kinds	
+src/etch/lexer.zig	549	lexer recognizes the M1.0.7 import keyword (graduated from reserved)	lexer recognizes the import keyword (graduated from reserved)	
+src/etch/lexer.zig	560	lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)	lexer recognizes the scene + prefab keywords (graduated from reserved)	
+src/etch/lexer.zig	569	lexer recognizes the M0.8 E2 keywords and the `->` arrow	lexer recognizes the async/fn/throws keywords and the `->` arrow	yes
+src/etch/lexer.zig	630	lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)	lexer lexes DD:DD as a time literal, greedy-contiguous only	
+src/etch/lexer.zig	648	lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)	lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only	
+src/etch/lexer.zig	664	lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)	lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (§1.4)	
+src/etch/parser.zig	7280	parse measure expression (M1.0.15)	parse measure expression	
+src/etch/parser.zig	7366	D-S3-trivia: doc comments and leading comments attach to top-level items	doc comments and leading comments attach to top-level items	
+src/etch/parser.zig	7398	D-S3-annot-field-access: annotation arg accepts a field access expression	annotation arg accepts a field access expression	
+src/etch/parser.zig	7422	parser builds array literals, fill, and index/slice access (M0.8 collections)	parser builds array literals, fill, and index/slice access (collections)	
+src/etch/parser.zig	7452	parser builds map type, map literal, and Set<T> type (M0.8 collections)	parser builds map type, map literal, and Set<T> type (collections)	
+src/etch/parser.zig	7481	parser builds closures and calls (M0.8 closures)	parser builds closures and calls (closures)	
+src/etch/parser.zig	7506	parser builds top-level fn declarations, free calls, and return (M0.8 E2)	parser builds top-level fn declarations, free calls, and return	
+src/etch/parser.zig	7551	parser builds method-call postfix into the reserved method_call kind (M0.8 E2)	parser builds method-call postfix into the reserved method_call kind	
+src/etch/parser.zig	7583	structural spawn parses component-literal varargs (M1.0.10)	structural spawn parses component-literal varargs	
+src/etch/parser.zig	7613	structural spawn parses a prefab name (M1.0.10)	structural spawn parses a prefab name	
+src/etch/parser.zig	7639	spawn { } in a sub-expression position is a parse error (M1.0.12 E2)	spawn { } in a sub-expression position is a parse error	
+src/etch/parser.zig	7681	race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)	race/sync parse: branches, conditional branches, empty body	
+src/etch/parser.zig	7724	race branch starting with an if-statement is unconditional (M1.0.12 E2)	race branch starting with an if-statement is unconditional	
+src/etch/parser.zig	7760	branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)	branch/spawn statements parse incl. binding + empty bodies	
+src/etch/parser.zig	7801	spawn ( stays structural next to spawn { task form (M1.0.12 E2)	spawn ( stays structural next to spawn { task form	
+src/etch/parser.zig	7825	nested concurrency constructs parse (M1.0.12 E2)	nested concurrency constructs parse	
+src/etch/parser.zig	7865	async branch statement coexists with quest/dialogue branches (M1.0.12 E2)	async branch statement coexists with quest/dialogue branches	
+src/etch/parser.zig	7909	spawn binding form rejects mut and type annotation (M1.0.12 E2)	spawn binding form rejects mut and type annotation	
+src/etch/parser.zig	7931	parser builds loops, labels, break value, and continue (M0.8 loop/break)	parser builds loops, labels, break value, and continue (loop/break)	
+src/etch/parser.zig	7970	parser builds throw and try/catch (M0.8 error handling)	parser builds throw and try/catch (error handling)	
+src/etch/parser.zig	7999	parser builds block expressions with a trailing value (M0.8 control flow)	parser builds block expressions with a trailing value (control flow)	
+src/etch/parser.zig	8029	parser builds if/else with an else-if chain (M0.8 control flow)	parser builds if/else with an else-if chain (control flow)	
+src/etch/parser.zig	8057	parser builds a while statement (M0.8 control flow)	parser builds a while statement (control flow)	
+src/etch/parser.zig	8079	parser accepts block bodies in closures and match arms (M0.8 control flow)	parser accepts block bodies in closures and match arms (control flow)	
+src/etch/parser.zig	8110	parser builds struct + inherent impl + struct literal + method calls (M0.8 E2 block 3)	parser builds struct + inherent impl + struct literal + method calls	
+src/etch/parser.zig	8150	parser recovers and a valid struct/impl after a broken construct survives (M0.8 E2 block 3 lockstep)	parser recovers and a valid struct/impl after a broken construct survives (lockstep)	
+src/etch/parser.zig	8166	parser suppresses struct literals in if/while/for/match heads (M0.8 E2 block 3)	parser suppresses struct literals in if/while/for/match heads	
+src/etch/parser.zig	8190	parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0.8 E2)	parser accepts a trait impl and a generic struct	
+src/etch/parser.zig	8226	parser builds trait decl with abstract + default members + survives lockstep (M0.8 E2 block 3 tranche C)	parser builds trait decl with abstract + default members + survives lockstep	
+src/etch/parser.zig	8260	parser builds optional type + none/some + if let / while let (M0.8 E2 block 5)	parser builds optional type + none/some + if let / while let	
+src/etch/parser.zig	8300	parser builds generic params + bounds + where + generic type (M0.8 E2 block 4)	parser builds generic params + bounds + where + generic type	
+src/etch/parser.zig	8332	parser builds a qualified type path in type position (M1.0.16)	parser builds a qualified type path in type position	
+src/etch/parser.zig	8353	parser leaves a qualified path in expression position a parse error (M1.0.16 type-position boundary)	parser leaves a qualified path in expression position a parse error (type-position boundary)	
+src/etch/parser.zig	8366	parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891, M0.8 E2)	parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891)	
+src/etch/parser.zig	8410	parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)	parser builds enum decl + enum-variant match patterns	
+src/etch/parser.zig	8448	parser recovers and a valid enum after a broken construct survives (M0.8 E2 block 3 tranche B lockstep)	parser recovers and a valid enum after a broken construct survives (lockstep)	
+src/etch/parser.zig	8461	parser parses data-carrying + generic enum variants (M0.8 E2 block 3 tranche B / block 4)	parser parses data-carrying + generic enum variants	
+src/etch/parser.zig	8527	parser builds event declaration + emit statement (M0.8 E3)	parser builds event declaration + emit statement	
+src/etch/parser.zig	8550	parser builds an @on_event observer rule with the implicit `event` binding (M0.8 E3)	parser builds an @on_event observer rule with the implicit `event` binding	
+src/etch/parser.zig	8580	parser builds `entity has T changed` change-detection filter (M0.8 E3)	parser builds `entity has T changed` change-detection filter	
+src/etch/parser.zig	8604	parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)	parser recovers and a valid event after a broken construct survives (lockstep)	
+src/etch/parser.zig	8617	parser builds a hierarchical tags declaration (M0.8 E3)	parser builds a hierarchical tags declaration	
+src/etch/parser.zig	8663	parser recovers and a valid tags after a broken construct survives (M0.8 E3 lockstep)	parser recovers and a valid tags after a broken construct survives (lockstep)	
+src/etch/parser.zig	8676	parser builds tag-filter when conditions (M0.8 E3)	parser builds tag-filter when conditions	
+src/etch/parser.zig	8704	parser builds tag mutation statements (M0.8 E3)	parser builds tag mutation statements	
+src/etch/parser.zig	8735	parser: async rule parses with await wait + global_event targets (M0.8 E3 sub-slice B)	parser: async rule parses with await wait + global_event targets	
+src/etch/parser.zig	8771	parser: await entity_event(entity, T) parses bare and with payload filter (M1.0.14 E1)	parser: await entity_event(entity, T) parses bare and with payload filter	
+src/etch/parser.zig	8818	parser: await global_event(T) parses bare and with payload filter + trailing comma (M1.0.14 E1)	parser: await global_event(T) parses bare and with payload filter + trailing comma	
+src/etch/parser.zig	8854	parser builds a data table declaration with entries + spread (M0.8 E4)	parser builds a data table declaration with entries + spread	
+src/etch/parser.zig	8897	parser keeps data entry field runs contiguous around nested struct literals (M0.8 E4)	parser keeps data entry field runs contiguous around nested struct literals	
+src/etch/parser.zig	8921	parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)	parser accepts a PascalCase data entry id, recorded for E1768	
+src/etch/parser.zig	8935	parser rejects a data table without its entry type (M0.8 E4)	parser rejects a data table without its entry type	
+src/etch/parser.zig	8947	parser recovers and a valid data after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid data after a broken construct survives (lockstep)	
+src/etch/parser.zig	8960	parser builds a routine with segments + interrupts (M0.8 E4)	parser builds a routine with segments + interrupts	
+src/etch/parser.zig	9018	parser rejects routine clause-order and shape violations (M0.8 E4)	parser rejects routine clause-order and shape violations	
+src/etch/parser.zig	9060	timer statements parse: unbound forms, expression arg (M1.0.13 E3)	timer statements parse: unbound forms, expression arg	
+src/etch/parser.zig	9095	bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)	bound timer parses as a TimerStmt, not a let_stmt	
+src/etch/parser.zig	9120	timer statement routes inside a value block (M1.0.13 E3)	timer statement routes inside a value block	
+src/etch/parser.zig	9141	timer binding form rejects mut and type annotation (M1.0.13 E3)	timer binding form rejects mut and type annotation	
+src/etch/parser.zig	9163	quantize still fail-louds at the statement head (M1.0.13 E3)	quantize still fail-louds at the statement head	
+src/etch/parser.zig	9179	parser recovers and a valid routine after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid routine after a broken construct survives (lockstep)	
+src/etch/parser.zig	9198	parser builds the §6 when-surface extension forms (M0.8 E4 item 4)	parser builds the §6 when-surface extension forms	
+src/etch/parser.zig	9243	parser keeps the body brace out of the §6 general filter (M0.8 E4)	parser keeps the body brace out of the §6 general filter	
+src/etch/parser.zig	9263	parser builds named call arguments + soft keyword label (M0.8 E4 item 16)	parser builds named call arguments + soft keyword label	
+src/etch/parser.zig	9289	parser rejects a positional argument after a named one (M0.8 E4 §3.3)	parser rejects a positional argument after a named one (§3.3)	
+src/etch/parser.zig	9300	parser builds a behavior tree with composites, when, and leaf forms (M0.8 E4)	parser builds a behavior tree with composites, when, and leaf forms	
+src/etch/parser.zig	9342	parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)	parser accepts a leaf behavior root (E1500 is validation's call)	
+src/etch/parser.zig	9355	parser recovers and a valid behavior after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid behavior after a broken construct survives (lockstep)	
+src/etch/parser.zig	9366	parser builds a quest with properties, stages, objectives, handlers, branches (M0.8 E4)	parser builds a quest with properties, stages, objectives, handlers, branches	
+src/etch/parser.zig	9443	parser recovers and a valid quest after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid quest after a broken construct survives (lockstep)	
+src/etch/parser.zig	9454	parser builds a dialogue with speakers, choices, branches, emit-when, gotos (M0.8 E4)	parser builds a dialogue with speakers, choices, branches, emit-when, gotos	
+src/etch/parser.zig	9513	parser recovers and a valid dialogue after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid dialogue after a broken construct survives (lockstep)	
+src/etch/parser.zig	9524	parser builds an ability with properties and embedded rule (M0.8 E4)	parser builds an ability with properties and embedded rule	
+src/etch/parser.zig	9561	parser recovers and a valid ability after a broken construct survives (M0.8 E4 lockstep)	parser recovers and a valid ability after a broken construct survives (lockstep)	
+src/etch/parser.zig	9572	parser builds a theme with string name and key:expr entries (M0.8 E5)	parser builds a theme with string name and key:expr entries	
+src/etch/parser.zig	9587	parser recovers and a valid theme after a broken construct survives (M0.8 E5 lockstep)	parser recovers and a valid theme after a broken construct survives (lockstep)	
+src/etch/parser.zig	9598	parser builds a motion with states, wildcard transitions, and recursive animators (M0.8 E5)	parser builds a motion with states, wildcard transitions, and recursive animators	
+src/etch/parser.zig	9626	parser recovers and a valid motion after a broken construct survives (M0.8 E5 lockstep)	parser recovers and a valid motion after a broken construct survives (lockstep)	
+src/etch/parser.zig	9637	parser builds an input_mapping with properties, actions, binds, and a combo (M0.8 E5)	parser builds an input_mapping with properties, actions, binds, and a combo	
+src/etch/parser.zig	9667	parser recovers and a valid input_mapping after a broken construct survives (M0.8 E5 lockstep)	parser recovers and a valid input_mapping after a broken construct survives (lockstep)	
+src/etch/parser.zig	9678	parser builds a widget with params, when clause, recursive ui_tree, and control flow (M0.8 E5)	parser builds a widget with params, when clause, recursive ui_tree, and control flow	
+src/etch/parser.zig	9712	parser recovers and a valid widget after a broken construct survives (M0.8 E5 lockstep)	parser recovers and a valid widget after a broken construct survives (lockstep)	
+src/etch/parser.zig	9723	parser builds a locale with string key=value entries (M0.8 E5)	parser builds a locale with string key=value entries	
+src/etch/parser.zig	9738	parser recovers and a valid locale after a broken construct survives (M0.8 E5 lockstep)	parser recovers and a valid locale after a broken construct survives (lockstep)	
+src/etch/parser.zig	9749	parser builds an effect with params, emitters, and an event handler (M0.8 E6)	parser builds an effect with params, emitters, and an event handler	
+src/etch/parser.zig	9780	parser recovers and a valid effect after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid effect after a broken construct survives (lockstep)	
+src/etch/parser.zig	9791	parser builds an audio_graph with params, statements, and the output sink (M0.8 E6)	parser builds an audio_graph with params, statements, and the output sink	
+src/etch/parser.zig	9812	parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)	parser rejects an audio_graph missing the mandatory output sink	
+src/etch/parser.zig	9823	parser recovers and a valid audio_graph after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid audio_graph after a broken construct survives (lockstep)	
+src/etch/parser.zig	9834	parser builds an audio_score with tempo, sections, and stems (M0.8 E6)	parser builds an audio_score with tempo, sections, and stems	
+src/etch/parser.zig	9873	parser recovers and a valid audio_score after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid audio_score after a broken construct survives (lockstep)	
+src/etch/parser.zig	9884	parser builds a sequence with properties, on_start/finish, tracks, and keyframes (M0.8 E6)	parser builds a sequence with properties, on_start/finish, tracks, and keyframes	
+src/etch/parser.zig	9916	parser recovers and a valid sequence after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid sequence after a broken construct survives (lockstep)	
+src/etch/parser.zig	9927	parser builds an anim_graph with params, state bodies, transitions, and a layer (M0.8 E6)	parser builds an anim_graph with params, state bodies, transitions, and a layer	
+src/etch/parser.zig	9979	parser recovers and a valid anim_graph after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid anim_graph after a broken construct survives (lockstep)	
+src/etch/parser.zig	9990	parser builds a shader with params, optional vertex, and mandatory fragment (M0.8 E6)	parser builds a shader with params, optional vertex, and mandatory fragment	
+src/etch/parser.zig	10020	parser: a fragment-only shader is valid (vertex optional, M0.8 E6)	parser: a fragment-only shader is valid (vertex optional)	
+src/etch/parser.zig	10035	parser recovers and a valid shader after a broken construct survives (M0.8 E6 lockstep)	parser recovers and a valid shader after a broken construct survives (lockstep)	
+src/etch/parser.zig	10048	parser parses a scene with version, metadata, resources, entity, instance (M0.8 E7)	parser parses a scene with version, metadata, resources, entity, instance	
+src/etch/parser.zig	10087	parser parses prefab autonomous, of-variant, and extends with requires + hooks (M0.8 E7)	parser parses prefab autonomous, of-variant, and extends with requires + hooks	
+src/etch/parser.zig	10128	parser recovers and a valid scene after a broken construct survives (M0.8 E7 lockstep)	parser recovers and a valid scene after a broken construct survives (lockstep)	
+src/etch/parser.zig	10139	parser recovers and a valid prefab after a broken construct survives (M0.8 E7 lockstep)	parser recovers and a valid prefab after a broken construct survives (lockstep)	
+src/etch/parser.zig	10150	parseStmtBlock parses a bare statement run (M1.0.9 E1)	parseStmtBlock parses a bare statement run	
+src/etch/parser.zig	10167	parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)	parseStmtBlock on empty body yields a zero-statement block	
+src/etch/root.zig	549	public API builds + serializes a Level-B data descriptor (M0.8 E4)	public API builds + serializes a Level-B data descriptor	
+src/etch/scene_cook.zig	1449	cook builds the neutral model from a scene (E1)	cook builds the neutral model from a scene	
+src/etch/token.zig	388	spawn graduates to s3 keyword (M1.0.10)	spawn graduates to s3 keyword	
+src/etch/token.zig	414	race/sync graduate to s3 keywords (M1.0.12 E2)	race/sync graduate to s3 keywords	
+src/etch/token.zig	445	every/after_unscaled graduate to s3 keywords (M1.0.13 E1)	every/after_unscaled graduate to s3 keywords	
+src/etch/types.zig	8107	scene + prefab: a well-formed scene and prefab type-check clean (M0.8 E7)	scene + prefab: a well-formed scene and prefab type-check clean	
+src/etch/types.zig	8382	duplicate test names collide within the test namespace (E0101, M1.0.15)	duplicate test names collide within the test namespace	
+src/etch/types.zig	8396	test name does not collide with a component of the same name (M1.0.15)	test name does not collide with a component of the same name	
+src/etch/types.zig	8408	test annotation applicability + args (M1.0.15)	test annotation applicability + args	
+src/etch/types.zig	8440	await in a test body is E0901 (sync context, M1.0.15)	await in a test body is E0901 (sync context)	
+src/etch/types.zig	8452	measure outside a test body is E0910; inside checks clean (M1.0.15)	measure outside a test body is E0910; inside checks clean	
+src/etch/types.zig	8472	assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)	assert_eq rejects non-comparable aggregate operands	
+src/etch/types.zig	8494	assert_approx constrains its operands to float at type-check (M1.0.15 review fix)	assert_approx constrains its operands to float at type-check	
+src/etch/types.zig	8512	type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)	type-checker emits E0502 when an annotation is applied to the wrong target	
+src/etch/types.zig	8551	type-checker emits E0301/E0302 on get receiver/kind mismatch (D-S3-resource-receiver)	type-checker emits E0301/E0302 on get receiver/kind mismatch	
+src/etch/types.zig	8595	type-checker emits E1213 on receiver-less get of a resource absent from the when clause (D-S3-resource-receiver)	type-checker emits E1213 on receiver-less get of a resource absent from the when clause	
+src/etch/types.zig	8611	for-in requires an integer range iterable (M0.8 ranges + for-in)	for-in requires an integer range iterable (ranges + for-in)	
+src/etch/types.zig	8653	match exhaustiveness and arm typing (M0.8 match foundation)	match exhaustiveness and arm typing (match foundation)	
+src/etch/types.zig	8710	enum match exhaustiveness and variant resolution (M0.8 E2 block 3 tranche B)	enum match exhaustiveness and variant resolution	
+src/etch/types.zig	8764	trait dispatch, E0220 mut-self receiver, E0214 incomplete impl (M0.8 E2 block 3 tranche C)	trait dispatch, E0220 mut-self receiver, E0214 incomplete impl	
+src/etch/types.zig	8821	conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)	conditional trait impl proof E0215 (§7.3)	
+src/etch/types.zig	8855	optional if let / while let binding + non-optional rejection (M0.8 E2 block 5)	optional if let / while let binding + non-optional rejection	
+src/etch/types.zig	8894	generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)	generic fn inference + bounds	
+src/etch/types.zig	8976	assert requires a bool condition (M0.8 assert foundation)	assert requires a bool condition (assert foundation)	
+src/etch/types.zig	9004	if requires a bool condition and unifies its branch types (M0.8 control flow)	if requires a bool condition and unifies its branch types (control flow)	
+src/etch/types.zig	9046	while requires a bool condition (M0.8 control flow)	while requires a bool condition (control flow)	
+src/etch/types.zig	9077	type aliases resolve through to the underlying type (M0.8 type alias foundation)	type aliases resolve through to the underlying type (type alias foundation)	
+src/etch/types.zig	9110	type-checker accepts numeric casts and rejects non-numeric ones (M0.8 cast foundation)	type-checker accepts numeric casts and rejects non-numeric ones (cast foundation)	
+src/etch/types.zig	9256	type-checker accepts string .len() as int, rejects other string methods (M0.8 sub-slice C)	type-checker accepts string .len() as int, rejects other string methods	
+src/etch/types.zig	9297	array literal element typing, indexing, and slicing (M0.8 collections)	array literal element typing, indexing, and slicing (collections)	
+src/etch/types.zig	9362	map literal typing and map for-in bindings (M0.8 collections)	map literal typing and map for-in bindings (collections)	
+src/etch/types.zig	9392	closure call arity, return typing, and non-callable (M0.8 closures)	closure call arity, return typing, and non-callable (closures)	
+src/etch/types.zig	9435	closure body cannot mutate a capture, E0221 (M0.8 E3-C tranche 6)	closure body cannot mutate a capture, E0221	
+src/etch/types.zig	9493	free-function call arity, arg, and return typing (M0.8 E2)	free-function call arity, arg, and return typing	
+src/etch/types.zig	9544	struct inherent methods: dispatch, struct literal, and error cases (M0.8 E2 block 3)	struct inherent methods: dispatch, struct literal, and error cases	
+src/etch/types.zig	9632	type-checker validates event declaration + emit (M0.8 E3)	type-checker validates event declaration + emit	
+src/etch/types.zig	9672	type-checker validates entity_event / global_event await targets (M1.0.14 E2)	type-checker validates entity_event / global_event await targets	
+src/etch/types.zig	9808	type-checker validates @networked on event, rejects @config on event (M0.8 E3)	type-checker validates @networked on event, rejects @config on event	
+src/etch/types.zig	9828	type-checker validates @on_event observer: E1203 on non-event, accepts declared event + event-field access (M0.8 E3)	type-checker validates @on_event observer: E1203 on non-event, accepts declared event + event-field access	
+src/etch/types.zig	9868	type-checker validates tag-filter when conditions (M0.8 E3)	type-checker validates tag-filter when conditions	
+src/etch/types.zig	9889	type-checker accepts `has T changed` on a component, E1210 on a non-component (M0.8 E3)	type-checker accepts `has T changed` on a component, E1210 on a non-component	
+src/etch/types.zig	9931	entity structural methods type-check on an Entity receiver (M1.0.10 E2)	entity structural methods type-check on an Entity receiver	
+src/etch/types.zig	9949	structural spawn of component literals type-checks (M1.0.10 E2)	structural spawn of component literals type-checks	
+src/etch/types.zig	9963	binding a structural spawn result is rejected (M1.0.10 E2)	binding a structural spawn result is rejected	
+src/etch/types.zig	9978	prefab-name spawn is refused in Phase 1 (M1.0.10 E2)	prefab-name spawn is refused in Phase 1	
+src/etch/types.zig	9992	structural component-literal unknown field is rejected (M1.0.10 E2 completion)	structural component-literal unknown field is rejected	
+src/etch/types.zig	10016	structural component-literal mistyped field is rejected (M1.0.10 E2 completion)	structural component-literal mistyped field is rejected	
+src/etch/types.zig	10030	structural mutation of a non-component type is rejected (M1.0.10 E3 carry-over)	structural mutation of a non-component type is rejected	
+src/etch/types.zig	10055	type-checker validates tag mutations (M0.8 E3)	type-checker validates tag mutations	
+src/etch/types.zig	10095	type-checker accepts string + enum fields on struct + resource, keeps component rejection (M1.0.3)	type-checker accepts string + enum fields on struct + resource, keeps component rejection	
+src/etch/types.zig	10142	type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranche 2)	type-checker resolves the builtin Error struct end-to-end	
+src/etch/types.zig	10163	struct-literal field values resolve the enum shorthand in check mode (M0.8 E3-C tranche 4)	struct-literal field values resolve the enum shorthand in check mode	
+src/etch/types.zig	10203	type-checker rejects throwing a non-Error value (M0.8 E3-C tranche 2)	type-checker rejects throwing a non-Error value	
+src/etch/types.zig	10219	type-checker requires message and code on an Error literal (M0.8 E3-C tranche 2)	type-checker requires message and code on an Error literal	
+src/etch/types.zig	10236	type-checker rejects a user declaration colliding with the builtin Error (M0.8 E3-C tranche 2)	type-checker rejects a user declaration colliding with the builtin Error	
+src/etch/types.zig	10245	type-checker accepts the minimal collection method subset (M0.8 E3-C tranche 3)	type-checker accepts the minimal collection method subset	
+src/etch/types.zig	10265	type-checker rejects out-of-subset collection methods and immutable receivers (M0.8 E3-C tranches 3-4)	type-checker rejects out-of-subset collection methods and immutable receivers	
+src/etch/types.zig	10299	type-checker checks collection method argument types (M0.8 E3-C tranche 3)	type-checker checks collection method argument types	
+src/etch/types.zig	10322	type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)	type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k]	
+src/etch/types.zig	10349	type-checker rejects misused Optional ops (M0.8 E3-C tranche 4)	type-checker rejects misused Optional ops	
+src/etch/types.zig	10400	type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)	type-checker rejects float map keys at both gates	
+src/etch/types.zig	10433	type-checker resolves the Set builtin associated calls + method subset (M0.8 E3-C tranche 3bis)	type-checker resolves the Set builtin associated calls + method subset	
+src/etch/types.zig	10467	type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tranche 3bis)	type-checker rejects float set elements at both gates	
+src/etch/types.zig	10490	type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis)	type-checker rejects the out-of-subset Set surface	
+src/etch/types.zig	10530	anonymous struct literal resolves in check mode, rejected without an expected type (M0.8 E3-C tranche 8)	anonymous struct literal resolves in check mode, rejected without an expected type	
+src/etch/types.zig	10617	data table: a fully valid table with spread is clean (M0.8 E4)	data table: a fully valid table with spread is clean	
+src/etch/types.zig	10636	data table: E1760 empty entries + E0102 unknown entry type (M0.8 E4)	data table: E1760 empty entries + E0102 unknown entry type	
+src/etch/types.zig	10646	theme: E1640 empty + valid control (M0.8 E5)	theme: E1640 empty + valid control	
+src/etch/types.zig	10664	theme: E1641 duplicate entry key (M0.8 E5)	theme: E1641 duplicate entry key	
+src/etch/types.zig	10676	motion: valid control parses + checks clean (M0.8 E5)	motion: valid control parses + checks clean	
+src/etch/types.zig	10694	motion: E1661 duplicate state name (M0.8 E5)	motion: E1661 duplicate state name	
+src/etch/types.zig	10706	motion: E1664 transition references an undeclared state (M0.8 E5)	motion: E1664 transition references an undeclared state	
+src/etch/types.zig	10718	motion: E1666 unknown easing (M0.8 E5)	motion: E1666 unknown easing	
+src/etch/types.zig	10730	motion: E1665 negative-literal duration (M0.8 E5)	motion: E1665 negative-literal duration	
+src/etch/types.zig	10742	input_mapping: valid control parses + checks clean (M0.8 E5)	input_mapping: valid control parses + checks clean	
+src/etch/types.zig	10765	input_mapping: E1800 empty (only properties) (M0.8 E5)	input_mapping: E1800 empty (only properties)	
+src/etch/types.zig	10774	input_mapping: E1801 duplicate action name (M0.8 E5)	input_mapping: E1801 duplicate action name	
+src/etch/types.zig	10786	input_mapping: E1804 unknown modifier (M0.8 E5)	input_mapping: E1804 unknown modifier	
+src/etch/types.zig	10797	input_mapping: E1805 unknown trigger (M0.8 E5)	input_mapping: E1805 unknown trigger	
+src/etch/types.zig	10808	input_mapping: E1806 non-int priority (M0.8 E5)	input_mapping: E1806 non-int priority	
+src/etch/types.zig	10820	input_mapping: E1808 non-positive combo window (M0.8 E5)	input_mapping: E1808 non-positive combo window	
+src/etch/types.zig	10831	data table: E1762 entry type is not a struct (M0.8 E4)	data table: E1762 entry type is not a struct	
+src/etch/types.zig	10843	data table: E1761 duplicate entry id (M0.8 E4)	data table: E1761 duplicate entry id	
+src/etch/types.zig	10856	data table: E1763 unknown field + E1764 field value type (M0.8 E4)	data table: E1763 unknown field + E1764 field value type	
+src/etch/types.zig	10870	data table: E1764 enum-typed field rejects a numeric value (M0.8 E4)	data table: E1764 enum-typed field rejects a numeric value	
+src/etch/types.zig	10883	data table: E0105 unknown enum variant in entry value (M0.8 E4)	data table: E0105 unknown enum variant in entry value	
+src/etch/types.zig	10896	data table: E1765 required field missing, spread entry exempt (M0.8 E4)	data table: E1765 required field missing, spread entry exempt	
+src/etch/types.zig	10915	data table: E1766 spread reference forms (M0.8 E4)	data table: E1766 spread reference forms	
+src/etch/types.zig	10933	data table: E1762 cross-table spread with a different entry type (M0.8 E4)	data table: E1762 cross-table spread with a different entry type	
+src/etch/types.zig	10949	data table: E1767 spread cycle detected, acyclic chain clean (M0.8 E4)	data table: E1767 spread cycle detected, acyclic chain clean	
+src/etch/types.zig	10973	data table: E1768 id format (PascalCase and camelCase rejected) (M0.8 E4)	data table: E1768 id format (PascalCase and camelCase rejected)	
+src/etch/types.zig	10991	data table: E0101 collision with another top-level symbol (M0.8 E4)	data table: E0101 collision with another top-level symbol	
+src/etch/types.zig	11004	routine: a fully valid routine is clean (M0.8 E4)	routine: a fully valid routine is clean	
+src/etch/types.zig	11029	routine: E1520 empty + E1521 duplicate segment names (M0.8 E4)	routine: E1520 empty + E1521 duplicate segment names	
+src/etch/types.zig	11052	routine: E1522 trigger / E1523 until time out of range (M0.8 E4)	routine: E1522 trigger / E1523 until time out of range	
+src/etch/types.zig	11069	routine: E1524 unknown 'after' segment reference (M0.8 E4)	routine: E1524 unknown 'after' segment reference	
+src/etch/types.zig	11085	routine: E1525 on_event references no declared event (M0.8 E4)	routine: E1525 on_event references no declared event	
+src/etch/types.zig	11106	routine: E1526 interrupt target neither behavior nor pause_segment (M0.8 E4)	routine: E1526 interrupt target neither behavior nor pause_segment	
+src/etch/types.zig	11129	routine: E1527 action calling a non-void fn + E0102 unknown action (M0.8 E4)	routine: E1527 action calling a non-void fn + E0102 unknown action	
+src/etch/types.zig	11146	when-surface: non-bool general filter is E1211, fields-only scope (M0.8 E4)	when-surface: non-bool general filter is E1211, fields-only scope	
+src/etch/types.zig	11171	when-surface: non-bool bare condition is E0200 (M0.8 E4)	when-surface: non-bool bare condition is E0200	
+src/etch/types.zig	11185	when-surface: the differential-64 shapes check clean (M0.8 E4)	when-surface: the differential-64 shapes check clean	
+src/etch/types.zig	11212	named args: binding failures are E0203, valid bindings clean (M0.8 E4 item 16)	named args: binding failures are E0203, valid bindings clean	
+src/etch/types.zig	11248	named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)	named args: closure and builtin callees are refused, not bound, E0203	yes
+src/etch/types.zig	11269	behavior: canonical tree with ambient self/target checks clean (M0.8 E4)	behavior: canonical tree with ambient self/target checks clean	
+src/etch/types.zig	11310	behavior: E1500/E1501/E1503/E1504/E1505 structural codes (M0.8 E4)	behavior: E1500/E1501/E1503/E1504/E1505 structural codes	
+src/etch/types.zig	11347	behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)	behavior: E1502 unknown intrinsic targets + E1506 recursion	
+src/etch/types.zig	11387	quest: canonical quest with ambient player checks clean (M0.8 E4)	quest: canonical quest with ambient player checks clean	
+src/etch/types.zig	11422	quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548 (M0.8 E4)	quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548	
+src/etch/types.zig	11454	quest: E1543/E1545/E1550 reference codes + W1541 warning (M0.8 E4)	quest: E1543/E1545/E1550 reference codes + W1541 warning	
+src/etch/types.zig	11476	dialogue: canonical dialogue checks clean, structural codes fire (M0.8 E4)	dialogue: canonical dialogue checks clean, structural codes fire	
+src/etch/types.zig	11530	ability: canonical ability checks clean, structural codes fire (M0.8 E4)	ability: canonical ability checks clean, structural codes fire	
+src/etch/types.zig	11600	extension methods type-check on an Entity receiver (M1.0.9 B2)	extension methods type-check on an Entity receiver	
+src/etch/types.zig	11628	E0904 fires on a sub-expression await, not on the statement-head forms (M1.0.11 E3)	E0904 fires on a sub-expression await, not on the statement-head forms	
+src/etch/types.zig	11670	E0904 fires on a statement-head await inside a value-position block, not a statement-position one (M1.0.11 E3)	E0904 fires on a statement-head await inside a value-position block, not a statement-position one	
+src/etch/types.zig	11729	E0901 fires on an async call / await in a non-async context, not on a legal async→async await (M1.0.11 E4)	E0901 fires on an async call / await in a non-async context, not on a legal async→async await	
+src/etch/types.zig	11792	E0901 fires on the four concurrency constructs outside an async context (M1.0.12 E3)	E0901 fires on the four concurrency constructs outside an async context	
+src/etch/types.zig	11832	E0905 fires on every bare async call; await is the sole consumer (M1.0.12 E3)	E0905 fires on every bare async call; await is the sole consumer	
+src/etch/types.zig	11906	E0906 rejects return in sync/branch/spawn, accepts it in a race branch (M1.0.12 E3)	E0906 rejects return in sync/branch/spawn, accepts it in a race branch	
+src/etch/types.zig	11949	E0907 rejects break/continue crossing the task boundary, accepts in-branch loops (M1.0.12 E3)	E0907 rejects break/continue crossing the task boundary, accepts in-branch loops	
+src/etch/types.zig	12004	TaskHandle: binding typed, cancel/await accepted, misuse rejected (M1.0.12 E3)	TaskHandle: binding typed, cancel/await accepted, misuse rejected	
+src/etch/types.zig	12059	TaskHandle is rejected as a component/resource field type (M1.0.12 E3)	TaskHandle is rejected as a component/resource field type	
+src/etch/types.zig	12076	timer: binding typed TimerHandle, cancel accepted, expression arg, non-async rule (M1.0.13 E4)	timer: binding typed TimerHandle, cancel accepted, expression arg, non-async rule	
+src/etch/types.zig	12121	timer: await on a TimerHandle is rejected — a timer is not a task (M1.0.13 E4)	timer: await on a TimerHandle is rejected — a timer is not a task	
+src/etch/types.zig	12137	TimerHandle is rejected as a component/resource field type (M1.0.13 E4)	TimerHandle is rejected as a component/resource field type	
+src/etch/types.zig	12154	timer: non-Duration argument is rejected (M1.0.13 E4)	timer: non-Duration argument is rejected	
+src/etch/types.zig	12174	timer body is a synchronous context: await/async call inside is E0901 (M1.0.13 E4)	timer body is a synchronous context: await/async call inside is E0901	
+src/etch/types.zig	12222	builtin time resources resolve by name from the descriptor table (M1.0.13 E4)	builtin time resources resolve by name from the descriptor table	
+src/etch/types.zig	12261	conditional branch guards type-check as bool in the parent scope (M1.0.12 E3)	conditional branch guards type-check as bool in the parent scope	
+src/etch/zig_codegen/tests/lower_test.zig	135	lowers event declaration, bus registration, and emit (M0.8 E3)	lowers event declaration, bus registration, and emit	
+src/etch/zig_codegen/tests/lower_test.zig	170	lowers an @on_event observer to the bus drain (subscribe + poll), valid Zig (M0.8 E3)	lowers an @on_event observer to the bus drain (subscribe + poll), valid Zig	
+src/etch/zig_codegen/tests/lower_test.zig	206	lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)	lowers `has T changed` to tick-based change-detection codegen	
+src/etch/zig_codegen/tests/lower_test.zig	246	lowers receiver-less get/get_mut resource access over the aligned store (M0.8 E3-C tranche 7)	lowers receiver-less get/get_mut resource access over the aligned store	
+src/etch/zig_codegen/tests/lower_test.zig	292	emits the Error/ErrorCode prelude only when the program uses error handling (M0.8 E3-C tranche 2)	emits the Error/ErrorCode prelude only when the program uses error handling	
+src/etch/zig_codegen/tests/lower_test.zig	332	lowers a throws fn to the hidden __err out-param and rejects unsanctioned call positions (M0.8 E3-C tranche 2)	lowers a throws fn to the hidden __err out-param and rejects unsanctioned call positions	
+src/etch/zig_codegen/tests/lower_test.zig	392	lowers dynamic-array and map locals to frame-arena lists, gating the map-insert helper (M0.8 E3-C tranche 3)	lowers dynamic-array and map locals to frame-arena lists, gating the map-insert helper	
+src/etch/zig_codegen/tests/lower_test.zig	442	lowers Set locals to frame-arena element lists, gating the set helpers (M0.8 E3-C tranche 3bis)	lowers Set locals to frame-arena element lists, gating the set helpers	
+src/etch/zig_codegen/tests/lower_test.zig	487	lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper (M0.8 E3-C tranche 4)	lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper	
+src/etch/zig_codegen/tests/lower_test.zig	534	lowers the enum shorthand in field-value position to the qualified variant (M0.8 E3-C tranche 4)	lowers the enum shorthand in field-value position to the qualified variant	
+src/etch/zig_codegen/tests/lower_test.zig	557	collection allocations require the frame arena: fn-body push fails loud (M0.8 E3-C tranche 3)	collection allocations require the frame arena: fn-body push fails loud	
+src/etch/zig_codegen/tests/lower_test.zig	591	lowers mut-self methods to pointer receivers, mutation visible at the call site (M0.8 E3-C tranche 5)	lowers mut-self methods to pointer receivers, mutation visible at the call site	
+src/etch/zig_codegen/tests/lower_test.zig	628	lowers anonymous struct literals to qualified Zig literals from the expected type (M0.8 E3-C tranche 8)	lowers anonymous struct literals to qualified Zig literals from the expected type	
+src/etch/zig_codegen/tests/lower_test.zig	663	lowers capturing closures to struct-with-fields, snapshot at creation (M0.8 E3-C tranche 6)	lowers capturing closures to struct-with-fields, snapshot at creation	
+src/etch/zig_codegen/tests/lower_test.zig	699	closure captures are bounded to POD scalars: string capture fails loud (M0.8 E3-C tranche 6)	closure captures are bounded to POD scalars: string capture fails loud	
+src/etch/zig_codegen/tests/lower_test.zig	730	lowers block-body closures: statements in the call fn, return is the fn boundary (M0.8 E3-C tranche 6)	lowers block-body closures: statements in the call fn, return is the fn boundary	
+src/etch/zig_codegen/tests/lower_test.zig	768	lowers throwing closures with their own __err out-param, let call site re-raises (M0.8 E3-C tranche 6)	lowers throwing closures with their own __err out-param, let call site re-raises	
+src/etch/zig_codegen/tests/lower_test.zig	812	throwing closure call outside a let initializer fails loud (M0.8 E3-C tranche 6)	throwing closure call outside a let initializer fails loud	
+src/modules/asset_pipeline/loader/Loader.zig	381	finish under payload-reservation OOM allocates no handle and frees the buffer (M1.1.1-HF2 C3)	finish under payload-reservation OOM allocates no handle and frees the buffer	
+src/modules/asset_pipeline/format/asset_type.zig	80	asset_type u16 round-trips for the populated M0.6 subset	asset_type u16 round-trips for the populated subset	
+src/modules/forge/forge_3d/pipeline/narrowphase/fast_paths.zig	590	fastSeed dispatch routing (E3 handles sphere and box pairs)	fastSeed dispatch routing covers every fast pair	yes
+src/modules/forge/forge_3d/tests/broadphase_test.zig	1407	queryRay at zero extent is bit-identical to M1.1.9	queryRay is queryCast at a zero extent, bit for bit	yes
+src/modules/forge/forge_3d/tests/epa_robustness_test.zig	316	deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)	deep-boundary GJK stall classifies deep, not near-zero shallow	
+src/modules/forge/forge_3d/tests/epa_robustness_test.zig	388	separated radius-0 boxes stay separated (RD-4 band lower boundary)	separated radius-0 boxes stay separated (band lower boundary)	
+src/modules/forge/forge_3d/tests/fast_paths_test.zig	867	off-center small feature on a large body keeps four points (P2 class B, E9)	off-center small feature on a large body keeps four points (P2 class B)	
+tests/etch/cook_consolidate_test.zig	29	cookConsolidated renders namespaces, one header, and the programs table (D-S5-etchcook-inproc)	cookConsolidated renders namespaces, one header, and the programs table	
+tests/etch/cook_consolidate_test.zig	62	cookConsolidated propagates a failing input as a typed error (D-S5-etchcook-inproc)	cookConsolidated propagates a failing input as a typed error	
+tests/etch/import_resolve_test.zig	87	valid selective import emits no import diagnostic (E5 binding)	valid selective import emits no import diagnostic (binding)	
+tests/etch/import_resolve_test.zig	114	selective import resolves a cross-file const (M1.0.7 debt cleared, M1.0.8)	selective import resolves a cross-file const	
+tests/etch/import_resolve_test.zig	131	import of a private item errors (E0107, M1.0.8 activation)	import of a private item errors (E0107, activation)	
+tests/etch/import_resolve_test.zig	147	a public declaration alongside a private one stays importable (M1.0.8)	a public declaration alongside a private one stays importable	
+tests/etch/import_resolve_test.zig	167	a test block is not exported (E0104 on import, M1.0.8)	a test block is not exported (E0104 on import)	
+tests/etch/qualified_import_test.zig	150	private type inherent impl is not leaked (E2, §10.2 inheritance)	private type inherent impl is not leaked (§10.2 inheritance)	
+tests/etch/qualified_import_test.zig	175	public trait impl for private type is W0902 (E2)	public trait impl for private type is W0902	
+tests/etch/qualified_import_test.zig	195	public trait impl for public type is not W0902 (E2, over-report guard)	public trait impl for public type is not W0902 (over-report guard)	
+tests/etch/recovery_toplevel_test.zig	75	recovery resyncs at a top-level `type` alias after a broken construct (M0.8 lockstep)	recovery resyncs at a top-level `type` alias after a broken construct (lockstep)	
+tests/etch/recovery_toplevel_test.zig	106	recovery resyncs at a top-level `fn` after a broken construct (M0.8 E2 lockstep)	recovery resyncs at a top-level `fn` after a broken construct (lockstep)	
+tests/etch/recovery_toplevel_test.zig	138	recovery resyncs at a top-level `async fn` after a broken construct (M0.8 E2 lockstep)	recovery resyncs at a top-level `async fn` after a broken construct (lockstep)	
+tests/etch/recovery_toplevel_test.zig	158	recovery keeps a rule exercising the E1 body constructs after a broken construct	recovery keeps a rule exercising the whole body-construct set after a broken construct	yes
+tests/etch/storage_mode_test.zig	476	G8: the planner elects SPARSE, and the effect applies exactly once per matching entity	the planner elects SPARSE, and the effect applies exactly once per matching entity	
+tests/etch/storage_mode_test.zig	578	G9: the skip counter resets per tick even with NO `changed` filter	the skip counter resets per tick even with NO `changed` filter	
+tests/etch/time_literal_test.zig	16	TIME_LITERAL in expression position: parses as time_lit + type-checks as Time (M0.8 E7)	TIME_LITERAL in expression position: parses as time_lit + type-checks as Time	
+tests/integration/vertical_slice_test.zig	89	vertical slice cross-file scene/prefab validation (E2-B)	vertical slice cross-file scene/prefab validation	
+tests/integration/vertical_slice_test.zig	111	vertical slice asset: PNG import → cook → .texture.bin (M0.6)	vertical slice asset: PNG import → cook → .texture.bin	
+tests/integration/vertical_slice_test.zig	133	vertical slice input: SPACE toggles pause, gating the sim (M0.3)	vertical slice input: SPACE toggles pause, gating the sim	
+tests/integration/vertical_slice_test.zig	162	vertical slice IPC: ModifyComponent over M0.7 applies to the live world (C0.8)	vertical slice IPC: ModifyComponent over the transport applies to the live world (C0.8)	yes
+tests/ecs/hybrid_query_test.zig	320	G7: the ECS protocol stays at 1, over an ENUMERATED surface	the ECS protocol stays at 1, over an ENUMERATED surface	
+tests/ecs/hybrid_query_test.zig	450	G8: the dense split covers the population exactly once, evenly	the dense split covers the population exactly once, evenly	
+tests/ecs/hybrid_query_test.zig	490	G8: a target above the population yields one range per entity, never an empty one	a target above the population yields one range per entity, never an empty one	
+tests/ecs/hybrid_query_test.zig	511	G8: the dispatch sites are ENUMERATED and the bound holds at each	the dispatch sites are ENUMERATED and the bound holds at each	
+tests/ecs/hybrid_query_test.zig	686	G10/B1: a dense range reaches a worker, and the same body agrees with the same-thread entry	a dense range reaches a worker, and the same body agrees with the same-thread entry	
+tests/ecs/hybrid_query_test.zig	758	G10/B1: an empty driver stages no job, and a target above the population stages one per entity	an empty driver stages no job, and a target above the population stages one per entity	
+tests/ecs/requires_test.zig	47	G9/1: a requires cycle is refused, and a DIAMOND is not	a requires cycle is refused, and a DIAMOND is not	
+tests/ecs/requires_test.zig	88	G9/1b: an unknown requisite is refused, not silently ignored	an unknown requisite is refused, not silently ignored	
+tests/ecs/requires_test.zig	98	G9/1c: a FORWARD reference resolves — names, not ids, is why	a FORWARD reference resolves — names, not ids, is why	
+tests/ecs/requires_test.zig	113	G9/2: adding a component adds its whole closure, in one migration	adding a component adds its whole closure, in one migration	
+tests/ecs/requires_test.zig	140	G9/2b: the closure is a FLOOR, not a reset — a present member keeps its value	the closure is a FLOOR, not a reset — a present member keeps its value	
+tests/ecs/requires_test.zig	157	G9/2c: a failed closure add leaves the entity EXACTLY as it was	a failed closure add leaves the entity EXACTLY as it was	
+tests/ecs/requires_test.zig	205	G9/2d: the closure applies identically to a SPARSE member	the closure applies identically to a SPARSE member	
+tests/ecs/requires_test.zig	230	G9/3: removing the REQUIRER removes nothing else	removing the REQUIRER removes nothing else	
+tests/ecs/requires_test.zig	250	G9/4: removing a still-required requisite is SKIPPED and SIGNALLED	removing a still-required requisite is SKIPPED and SIGNALLED	
+tests/ecs/requires_test.zig	281	G9/5: a GROUPED removal of the requisite with its dependents is allowed	a GROUPED removal of the requisite with its dependents is allowed	
+tests/ipc/handshake.zig	180	GPU_SHARED_FB capability defaults to 0 in S6	GPU_SHARED_FB capability defaults to 0	yes
+tests/physics/transform_sync_test.zig	847	no component write reaches the solver: the inward direction is M1.1.15.2's	no component write reaches the solver: the inward direction is not wired	yes
+tests/scene/crossref_test.zig	134	G6: a cross-ref resolves into a SPARSE component's row	a cross-ref resolves into a SPARSE component's row	
+tests/scene/crossref_test.zig	200	G6: @storage(.sparse) changes NOTHING in the cooked bytes	@storage(.sparse) changes NOTHING in the cooked bytes	
+tests/scene/crossref_test.zig	227	G6: the Etch-cooked scene loads under EITHER host registration	the Etch-cooked scene loads under EITHER host registration	
+tests/scene/extensions_test.zig	729	scene with active extension executes on_attach at load — Health.max adjusted (M1.0.9 headline)	scene with active extension executes on_attach at load — Health.max adjusted	
+tests/scene/extensions_test.zig	779	entity.activate_extension executes on_attach (M1.0.9)	entity.activate_extension executes on_attach	
+tests/scene/extensions_test.zig	815	has_extension / active_extensions (Etch methods) reflect activation (M1.0.9)	has_extension / active_extensions (Etch methods) reflect activation	
+tests/scene/extensions_test.zig	854	entity.deactivate_extension executes on_detach and removes components (M1.0.9)	entity.deactivate_extension executes on_detach and removes components	
+tests/scene/extensions_test.zig	894	multi-entity rule activate_extension defers without corrupting iteration (M1.0.9 B1)	multi-entity rule activate_extension defers without corrupting iteration	
+tests/scene/extensions_test.zig	937	on_attach-issued structural command is drained before on_spawned (M1.0.9)	on_attach-issued structural command is drained before on_spawned	
+tests/scene/extensions_test.zig	1007	G6: an ALL-SPARSE extension activates without touching the archetype	an ALL-SPARSE extension activates without touching the archetype	
+tests/scene/load_resources_test.zig	81	loader rejects a resource collection field (M1.0.17 E5 guard)	loader rejects a resource collection field (guard)	
+tests/scene/load_roundtrip_test.zig	313	G6: a cooked scene loads a SPARSE component into its own store	a cooked scene loads a SPARSE component into its own store	
+tests/scene/load_roundtrip_test.zig	350	G6: the SAME cooked bytes give the same values under either mode	the SAME cooked bytes give the same values under either mode	
+tests/scene/load_roundtrip_test.zig	394	G6: two blocks whose TABLE subset coincides land in one archetype	two blocks whose TABLE subset coincides land in one archetype	
+tools/bindgen/core/resolver.zig	42	resolveImports is a no-op skeleton in M0.2	resolveImports is a no-op skeleton	yes

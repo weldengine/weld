@@ -1446,7 +1446,7 @@ fn decodeColumn(reg: *const Registry, block: format.ArchetypeBlock, id: Componen
     return bridge_mod.readBytesAsValue(fd.kind, fb);
 }
 
-test "cook builds the neutral model from a scene (E1)" {
+test "cook builds the neutral model from a scene" {
     const gpa = std.testing.allocator;
     var cooked = try cook(gpa, e1_fixture, null);
     defer cooked.deinit(gpa);

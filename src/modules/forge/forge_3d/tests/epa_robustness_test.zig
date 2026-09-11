@@ -313,7 +313,7 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
 // Order-equivalence sweep with SAT classification
 // ---------------------------------------------------------------------------
 
-test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
+test "deep-boundary GJK stall classifies deep, not near-zero shallow" {
     if (red_gate_rd4) return error.SkipZigTest; // un-gated when the gjk.zig stall fix lands
     // The frozen pitch-X offset is a GJK deep/shallow-boundary stall: GJK converges
     // to a non-enclosing terminal ~2.66·floatEps·scale from the origin on a
@@ -385,7 +385,7 @@ test "collide is invariant under the quaternion double cover" {
     }
 }
 
-test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
+test "separated radius-0 boxes stay separated (band lower boundary)" {
     // Two unit boxes with a small but REAL core gap (~145·contact_margin at unit
     // scale) must classify separated — the deep band (`dist <= m`) must not
     // swallow a genuine separation just above it. collideOrderedGeneric → null.

@@ -147,7 +147,7 @@ test "non-alias receiver is unaffected (selective + local resolution, no regress
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_private_item));
 }
 
-test "private type inherent impl is not leaked (E2, §10.2 inheritance)" {
+test "private type inherent impl is not leaked (§10.2 inheritance)" {
     const gpa = std.testing.allocator;
     // `lib` declares a private component `X` and an inherent impl on it — the
     // impl is not a public surface (impls are never exported; the private type
@@ -172,7 +172,7 @@ test "private type inherent impl is not leaked (E2, §10.2 inheritance)" {
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
 }
 
-test "public trait impl for private type is W0902 (E2)" {
+test "public trait impl for private type is W0902" {
     const gpa = std.testing.allocator;
     // A public trait `T` implemented for a PRIVATE component `X` exposes the
     // private type through a public interface → exactly one W0902 (warning, not
@@ -192,7 +192,7 @@ test "public trait impl for private type is W0902 (E2)" {
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
 }
 
-test "public trait impl for public type is not W0902 (E2, over-report guard)" {
+test "public trait impl for public type is not W0902 (over-report guard)" {
     const gpa = std.testing.allocator;
     // Same trait, but a PUBLIC target type → no leak, no W0902. Guards the
     // detection against firing on every public trait impl.

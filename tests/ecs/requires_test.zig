@@ -44,7 +44,7 @@ fn word(v: u64) [8]u8 {
 
 // ─── Guard 1 — a cycle is an error, not a fixpoint ──────────────────────────
 
-test "G9/1: a requires cycle is refused, and a DIAMOND is not" {
+test "a requires cycle is refused, and a DIAMOND is not" {
     const gpa = testing.allocator;
     {
         var world = World.init();
@@ -85,7 +85,7 @@ test "G9/1: a requires cycle is refused, and a DIAMOND is not" {
     }
 }
 
-test "G9/1b: an unknown requisite is refused, not silently ignored" {
+test "an unknown requisite is refused, not silently ignored" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -95,7 +95,7 @@ test "G9/1b: an unknown requisite is refused, not silently ignored" {
     try testing.expectError(error.UnknownRequisite, world.registry.finalizeRequires(gpa));
 }
 
-test "G9/1c: a FORWARD reference resolves — names, not ids, is why" {
+test "a FORWARD reference resolves — names, not ids, is why" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -110,7 +110,7 @@ test "G9/1c: a FORWARD reference resolves — names, not ids, is why" {
 
 // ─── Guard 2 — the closure is added TRANSACTIONALLY ─────────────────────────
 
-test "G9/2: adding a component adds its whole closure, in one migration" {
+test "adding a component adds its whole closure, in one migration" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -137,7 +137,7 @@ test "G9/2: adding a component adds its whole closure, in one migration" {
     try testing.expectEqual(@as(usize, 3), arch.component_ids.len);
 }
 
-test "G9/2b: the closure is a FLOOR, not a reset — a present member keeps its value" {
+test "the closure is a FLOOR, not a reset — a present member keeps its value" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -154,7 +154,7 @@ test "G9/2b: the closure is a FLOOR, not a reset — a present member keeps its 
     try testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, world.componentBytes(e, mesh).?[0..8], .little));
 }
 
-test "G9/2c: a failed closure add leaves the entity EXACTLY as it was" {
+test "a failed closure add leaves the entity EXACTLY as it was" {
     const gpa = testing.allocator;
     const pass1 = blk: {
         var w = World.init();
@@ -202,7 +202,7 @@ test "G9/2c: a failed closure add leaves the entity EXACTLY as it was" {
     try testing.expect(induced > 0);
 }
 
-test "G9/2d: the closure applies identically to a SPARSE member" {
+test "the closure applies identically to a SPARSE member" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -227,7 +227,7 @@ test "G9/2d: the closure applies identically to a SPARSE member" {
 
 // ─── Guards 3, 4, 5 — removal ───────────────────────────────────────────────
 
-test "G9/3: removing the REQUIRER removes nothing else" {
+test "removing the REQUIRER removes nothing else" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -247,7 +247,7 @@ test "G9/3: removing the REQUIRER removes nothing else" {
     try testing.expectEqual(@as(u32, 0), world.requires_removals_skipped);
 }
 
-test "G9/4: removing a still-required requisite is SKIPPED and SIGNALLED" {
+test "removing a still-required requisite is SKIPPED and SIGNALLED" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -278,7 +278,7 @@ test "G9/4: removing a still-required requisite is SKIPPED and SIGNALLED" {
     try testing.expect(world.first_requires_skip == null);
 }
 
-test "G9/5: a GROUPED removal of the requisite with its dependents is allowed" {
+test "a GROUPED removal of the requisite with its dependents is allowed" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

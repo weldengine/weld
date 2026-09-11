@@ -378,7 +378,7 @@ test "a malformed .bin loads as error.MalformedAsset" {
     }
 }
 
-test "finish under payload-reservation OOM allocates no handle and frees the buffer (M1.1.1-HF2 C3)" {
+test "finish under payload-reservation OOM allocates no handle and frees the buffer" {
     const gpa = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});

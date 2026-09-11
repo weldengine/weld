@@ -249,7 +249,7 @@ comptime {
     _ = platform.input.linux_evdev;
 }
 
-test "runtime-query abstraction stays dropped (D-S4-runtime-query)" {
+test "runtime-query abstraction stays dropped" {
     // The `RuntimeQuery` / `World.query_dynamic` surface was
     // dropped — zero consumers materialised, the
     // interpreter hot path iterates archetypes through its own predicate

@@ -86,7 +86,7 @@ fn countCode(diags: []const etch.Diagnostic, code: DiagnosticCode) usize {
     return n;
 }
 
-test "vertical slice cross-file scene/prefab validation (E2-B)" {
+test "vertical slice cross-file scene/prefab validation" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
         .{ .name = "mob.prefab.etch", .source = sim.mob_prefab_etch },
@@ -108,7 +108,7 @@ test "vertical slice cross-file scene/prefab validation (E2-B)" {
     try std.testing.expectEqual(@as(usize, 2), diags.items.len);
 }
 
-test "vertical slice asset: PNG import → cook → .texture.bin (M0.6)" {
+test "vertical slice asset: PNG import → cook → .texture.bin" {
     const gpa = std.testing.allocator;
     const uuid = "0190b3f0-1c2d-7e4a-8b6c-5117ce0a1be0";
 
@@ -130,7 +130,7 @@ test "vertical slice asset: PNG import → cook → .texture.bin (M0.6)" {
     try std.testing.expectEqual(@as(usize, 8 * 8 * 4), payload.len);
 }
 
-test "vertical slice input: SPACE toggles pause, gating the sim (M0.3)" {
+test "vertical slice input: SPACE toggles pause, gating the sim" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -159,7 +159,7 @@ test "vertical slice input: SPACE toggles pause, gating the sim (M0.3)" {
     try std.testing.expectEqual(@as(i64, 1), readCounterTicks(&world, 0)); // advanced
 }
 
-test "vertical slice IPC: ModifyComponent over M0.7 applies to the live world (C0.8)" {
+test "vertical slice IPC: ModifyComponent over the transport applies to the live world (C0.8)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

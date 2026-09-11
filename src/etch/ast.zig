@@ -4048,7 +4048,7 @@ test "AstArena spans align with passed-in byte offsets" {
     try std.testing.expectEqual(@as(u32, 13), arena.exprSpan(id_b).byte_start);
 }
 
-test "AstArena timer statement round-trips through the timer_stmts slab (M1.0.13 E2)" {
+test "AstArena timer statement round-trips through the timer_stmts slab" {
     const gpa = std.testing.allocator;
     var arena = try AstArena.init(gpa);
     defer arena.deinit(gpa);

@@ -844,7 +844,7 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
     });
 }
 
-test "no component write reaches the solver: the inward direction is M1.1.15.2's" {
+test "no component write reaches the solver: the inward direction is not wired" {
     // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
     // shape as a second half — "the solver did not follow the ECS write" — and after the
     // re-scope each held for every body and discriminated nothing, which is a test counted and

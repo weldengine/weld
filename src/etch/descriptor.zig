@@ -2930,7 +2930,7 @@ fn renderQuoted(gpa: std.mem.Allocator, s: []const u8, out: *std.ArrayListUnmana
 
 const parser_mod = @import("parser.zig");
 
-test "descriptor build + serialize: data table golden form (M0.8 E4)" {
+test "descriptor build + serialize: data table golden form" {
     const gpa = std.testing.allocator;
     var pr = try parser_mod.parse(gpa,
         \\enum Rarity { common, uncommon }
@@ -2981,7 +2981,7 @@ test "descriptor build + serialize: data table golden form (M0.8 E4)" {
     , out.items);
 }
 
-test "descriptor renderer fails loud on an unsupported expression kind (M0.8 E4)" {
+test "descriptor renderer fails loud on an unsupported expression kind" {
     const gpa = std.testing.allocator;
     // A closure as a data value parses; the renderer must reject it rather
     // than emit a silently-wrong canonical form (Level-B fail-loud).
@@ -2995,7 +2995,7 @@ test "descriptor renderer fails loud on an unsupported expression kind (M0.8 E4)
     try std.testing.expectError(error.UnsupportedDescriptorExpr, build(gpa, &pr.ast));
 }
 
-test "renderFieldTypeAlloc rejects a collection field type (M1.0.17 E5)" {
+test "renderFieldTypeAlloc rejects a collection field type" {
     // Documents the recon result: a collection field type is not a descriptor
     // surface (collections cook via `interp.compileTypeDecl`, resource-only) — a
     // `.slice` type node is rejected by the cook's fail-loud `UnsupportedDescriptorExpr`

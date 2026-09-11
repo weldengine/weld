@@ -546,7 +546,7 @@ pub fn validateProject(
     }
 }
 
-test "public API builds + serializes a Level-B data descriptor (M0.8 E4)" {
+test "public API builds + serializes a Level-B data descriptor" {
     const gpa = std.testing.allocator;
     var result = try parseSource(gpa,
         \\struct Item { value: int }

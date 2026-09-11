@@ -2489,7 +2489,7 @@ fn setTagBit(bytes: []u8, bit: u32, set: bool) void {
     @memcpy(bytes[off .. off + 8], std.mem.asBytes(&word));
 }
 
-test "registerOnDetach / dispatchOnDetach fires the on_detach seam (M1.0.9)" {
+test "registerOnDetach / dispatchOnDetach fires the on_detach seam" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -2522,7 +2522,7 @@ test "registerOnDetach / dispatchOnDetach fires the on_detach seam (M1.0.9)" {
     try std.testing.expect(Spy.saw_text);
 }
 
-test "per-entity extension side-table tracks add / has / remove (M1.0.9)" {
+test "per-entity extension side-table tracks add / has / remove" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -2562,7 +2562,7 @@ test "per-entity extension side-table tracks add / has / remove (M1.0.9)" {
     try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e1).len);
 }
 
-test "despawn removes the entity's extension entry (M1.1.1-HF1 D7)" {
+test "despawn removes the entity's extension entry" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -2587,7 +2587,7 @@ test "despawn removes the entity's extension entry (M1.1.1-HF1 D7)" {
     try std.testing.expect(!world.isLive(e));
 }
 
-test "despawn is allocation-free after spawn (M1.1.1-HF2 C1)" {
+test "despawn is allocation-free after spawn" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -2612,7 +2612,7 @@ test "despawn is allocation-free after spawn (M1.1.1-HF2 C1)" {
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 }
 
-test "spawn OOM on archetype storage leaves no orphan identity (M1.1.1-HF2 C1)" {
+test "spawn OOM on archetype storage leaves no orphan identity" {
     const gpa = std.testing.allocator;
     const Marker = extern struct { v: u32 = 0 };
 
@@ -2647,7 +2647,7 @@ test "spawn OOM on archetype storage leaves no orphan identity (M1.1.1-HF2 C1)" 
     try std.testing.expectEqual(@as(usize, 0), w.entityCount());
 }
 
-test "releaseResourcePayloads is idempotent and frees a string block once (M1.1.1-HF2 C4)" {
+test "releaseResourcePayloads is idempotent and frees a string block once" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
