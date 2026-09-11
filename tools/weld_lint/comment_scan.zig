@@ -150,7 +150,6 @@ pub const pending = [_]Pending{
     .{ .prefix = "src/etch/services.zig" },
     .{ .prefix = "src/etch/tags.zig" },
     .{ .prefix = "src/etch/test_runner.zig" },
-    .{ .prefix = "build.zig" },
 };
 /// Whether `file` is inside a subtree the pass has not read yet.
 pub fn isPending(file: []const u8) bool {

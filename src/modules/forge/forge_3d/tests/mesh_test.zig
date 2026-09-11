@@ -1913,9 +1913,9 @@ test "the frozen query surface carries the back-face mode and a filled subshape 
 ///
 /// Face by face, with the cross product `(v₁−v₀) × (v₂−v₀)` checked on the first triangle
 /// of each: `−Z` gives `(0,2,0) × (2,2,0) = (0,0,−4)`; `+Z` gives `(2,0,0) × (2,2,0) =
-/// `(0,0,4)`; `−X` gives `(0,0,2) × (0,2,2) = (−4,0,0)`; `+X` gives `(0,2,0) × (0,2,2) =
-/// `(4,0,0)`; `−Y` gives `(2,0,0) × (2,0,2) = (0,−4,0)`; `+Y` gives `(0,0,2) × (2,0,2) =
-/// `(0,4,0)`.
+/// (0,0,4)`; `−X` gives `(0,0,2) × (0,2,2) = (−4,0,0)`; `+X` gives `(0,2,0) × (0,2,2) =
+/// (4,0,0)`; `−Y` gives `(2,0,0) × (2,0,2) = (0,−4,0)`; `+Y` gives `(0,0,2) × (2,0,2) =
+/// (0,4,0)`.
 const cube_vertices = [_]ApiVec3{
     av3(-1, -1, -1), av3(1, -1, -1), av3(1, 1, -1), av3(-1, 1, -1),
     av3(-1, -1, 1),  av3(1, -1, 1),  av3(1, 1, 1),  av3(-1, 1, 1),

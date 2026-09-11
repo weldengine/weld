@@ -13,6 +13,9 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // There is NO root binary: the engine is consumed as a lib + tools. The
+    // demonstration is the standalone `examples/triangle/` sub-project, which
+    // owns the windowing CLI and documents its own flags.
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -36,11 +39,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // Shared `weld_etch` module — S3 parser + type-checker + S4 tree-walking
+    // Shared `weld_etch` module — parser + type-checker + tree-walking
     // interpreter (foundation submodule per `engine-directory-structure.md`
     // §9.1). Etch is not a Tier 1 module; it is conceptually a foundation
     // submodule and ships as its own top-level public surface under
-    // `src/etch/root.zig`. The S4 interpreter pulls in `weld_core` to drive
+    // `src/etch/root.zig`. The interpreter pulls in `weld_core` to drive
     // the runtime registry / dynamic archetype / resource store.
     const etch_module = b.createModule(.{
         .root_source_file = b.path("src/etch/root.zig"),
@@ -49,8 +52,8 @@ pub fn build(b: *std.Build) void {
     });
     etch_module.addImport("weld_core", core_module);
 
-    // M0.3 — `weld_audio` module exposes the Tier 1 audio module entry
-    // (Dummy backend Phase 0, real backends Phase 1). Consumed by the
+    // `weld_audio` module exposes the Tier 1 audio module entry
+    // (the Dummy backend is what exists; no real backend does). Consumed by the
     // audio tests and, later, by the runtime once the audio strategy
     // selection wires in.
     const audio_module = b.createModule(.{
@@ -59,7 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // M0.4 — `weld_render` module exposes the Render Tier 1 module entry,
+    // `weld_render` module exposes the Render Tier 1 module entry,
     // starting with the GAL (GPU Abstraction Layer) public surface and
     // the `Null` + `Vulkan` backends. Consumed by `tests/render/*.zig`
     // and, eventually, by the runtime + `examples/triangle/` standalone
@@ -70,7 +73,7 @@ pub fn build(b: *std.Build) void {
     // `b.addModule` (instead of `b.createModule`) registers the module
     // in `b.modules` and makes it consumable by dependents via
     // `b.dependency("weld", ...).module("weld_render")` — a prerequisite of
-    // the `examples/triangle/` sub-project (brief §Scope).
+    // the `examples/triangle/` sub-project.
     const render_module = b.addModule("weld_render", .{
         .root_source_file = b.path("src/modules/render/root.zig"),
         .target = target,
@@ -78,15 +81,7 @@ pub fn build(b: *std.Build) void {
     });
     render_module.addImport("weld_core", core_module);
 
-    // M0.6 — `weld_asset_pipeline` module: the Tier 1 Asset Pipeline. E1
-    // ships the day-1-frozen on-disk surfaces (intermediate
-    // `<type>.asset.etch` schema + runtime `.<type>.bin` 40-byte header),
-    // the `AssetHandle`, and the slot registry (refcount + generation
-    // invalidation). Depends on `weld_core` (the E5 async loader consumes the
-    // Tier 0 job system); the `foundation` (SIMD) import wires in at E2 when
-    // the `adler32` / `paeth` kernels land. No `weld_etch` dependency
-    // (brief §Out-of-scope).
-    // M0.6 / E2 — `foundation` module: transversal sibling submodules
+    // `foundation` module: transversal sibling submodules
     // (math, simd). Ships `simd` (batched-SIMD kernels; `adler32` inaugural).
     // Imports nothing but std (engine-simd.md §4). Consumed by
     // `asset_pipeline` (zlib ADLER32 trailer check), the simd tests, and the
@@ -97,41 +92,45 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // M1.1.14 — Tier 0 gains a `foundation` dep. `foundation` imports nothing
+    // Tier 0 gains a `foundation` dep. `foundation` imports nothing
     // but std, so the graph stays acyclic (`ARCH-016`) and this is the shared
-    // bottom layer depending downward, not sideways. The one consumer is
-    // `platform/float_env.zig`, the platform layer's facade over
-    // `foundation/float_env.zig`: the float environment is INSTALLED by the
-    // platform layer and ASSERTED by `forge_3d`, and `forge_3d` may not import
-    // `weld_core` (a C1.1 exit metric), so the single owner of the register
-    // layout has to be reachable from `foundation`.
+    // bottom layer depending downward, not sideways. What makes the dep
+    // load-bearing rather than convenient: the float environment is ASSERTED by
+    // `forge_3d`, `forge_3d` may not import `weld_core` (a C1.1 exit metric), so
+    // the single owner of the register layout has to be reachable from
+    // `foundation` — and `core/jobs/scheduler.zig`, which creates threads, reads
+    // `foundation.math.float_env` from there.
     core_module.addImport("foundation", foundation_module);
-    // M1.1.14 — `ARCH-031` rule 5: the shader hot-reload watcher creates a thread,
-    // so it must INSTALL the float environment. It reaches the single definition in
-    // `foundation/math/float_env.zig` directly rather than through a re-export
-    // across a tier boundary, which session 1 of this milestone deleted for adding
-    // a name without adding a definition.
+    // `ARCH-031` rule 5: the shader hot-reload watcher creates a thread,
+    // so it must INSTALL the float environment. It reaches the single definition
+    // in `foundation/math/float_env.zig` directly, and NOT through a re-export
+    // across a tier boundary: a re-export adds a name without adding a
+    // definition, and the register layout has exactly one owner.
     render_module.addImport("foundation", foundation_module);
 
+    // `weld_asset_pipeline` module: the Tier 1 Asset Pipeline. The on-disk
+    // surfaces it ships are FROZEN — the intermediate `<type>.asset.etch` schema
+    // and the runtime `.<type>.bin` 40-byte header — alongside the `AssetHandle`
+    // and the slot registry (refcount + generation invalidation). `weld_core`
+    // serves the async loader, which consumes the Tier 0 job system;
+    // `foundation` serves the DEFLATE/zlib codec, which verifies the ADLER32
+    // trailer via `foundation.simd.adler32`.
     const asset_pipeline_module = b.createModule(.{
         .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     asset_pipeline_module.addImport("weld_core", core_module);
-    // M0.6 / E2 — `foundation` dep wires in now that simd exists (deferred
-    // from E1): the DEFLATE/zlib codec verifies the ADLER32 trailer via
-    // `foundation.simd.adler32`.
     asset_pipeline_module.addImport("foundation", foundation_module);
 
-    // M1.1.0 / E2 — `weld_forge` public API surface: Forge ECS component types
+    // `weld_forge` public API surface: Forge ECS component types
     // (`engine-physics-forge.md` §2) + physics descriptor/handle types
-    // (`engine-tier-interfaces.md` §1). Type definitions only — no ECS
-    // registration, no module instantiation. Imports `foundation` (math types)
-    // and `weld_core` (re-exports `core.ecs.components.Velocity` +
-    // `core.ecs.EntityId`). Rooted at `api/root.zig` until the module-instantiation
-    // `forge/root.zig` lands (a later milestone re-roots it, zero call sites).
-    // The `forge_3d` solver (E3) depends on this module.
+    // (`engine-tier-interfaces.md` §1). Imports `foundation` (math types) and
+    // `weld_core` (re-exports `core.ecs.components.Velocity` +
+    // `core.ecs.EntityId`). Rooted at `api/root.zig` and TYPES ONLY: the module
+    // that instantiates the physics module is a separate one, `forge_module`
+    // below, rooted at `forge/module.zig`. The `forge_3d` solver depends on this
+    // module.
     const forge_api_module = b.createModule(.{
         .root_source_file = b.path("src/modules/forge/api/root.zig"),
         .target = target,
@@ -140,14 +139,14 @@ pub fn build(b: *std.Build) void {
     forge_api_module.addImport("foundation", foundation_module);
     forge_api_module.addImport("weld_core", core_module);
 
-    // M1.1.0 / E3 — `physics_f64` build option (default false → `Real = f32`).
+    // `physics_f64` build option (default false → `Real = f32`).
     // `-Dphysics_f64=true` flips forge_3d to double precision (large worlds).
     // Exposed to forge_3d as the `build_options` module read by `config.zig`.
     const physics_f64 = b.option(bool, "physics_f64", "Build forge_3d in f64 (double) precision (default f32)") orelse false;
     const forge_build_options = b.addOptions();
     forge_build_options.addOption(bool, "physics_f64", physics_f64);
 
-    // M1.1.0 / E3 — `forge_3d` native 3D solver skeleton. Depends only on
+    // `forge_3d` native 3D solver skeleton. Depends only on
     // `foundation` (math) and `weld_forge` (the api surface; core entity types
     // reach it through api/), plus the `build_options` for the `Real` scalar.
     const forge_3d_module = b.createModule(.{
@@ -159,7 +158,7 @@ pub fn build(b: *std.Build) void {
     forge_3d_module.addImport("weld_forge", forge_api_module);
     forge_3d_module.addOptions("build_options", forge_build_options);
 
-    // M1.1.15 / gate D — `forge/sync.zig`, the ECS <-> solver seam. It is the ONE module
+    // `forge/sync.zig`, the ECS <-> solver seam. It is the ONE module
     // that sees both sides: `weld_core` for the World and the `Transform`, `weld_forge`
     // for the physics components, and `forge_3d` for `PhysicsWorld`. `forge_3d` itself
     // keeps its two-import discipline and never learns about the ECS.
@@ -173,7 +172,7 @@ pub fn build(b: *std.Build) void {
     forge_sync_module.addImport("forge_3d", forge_3d_module);
     forge_sync_module.addImport("foundation", foundation_module);
 
-    // M1.1.15.1 / gate C — `forge/module.zig`, the `Forge3DModule` adapter. Same import set
+    // `forge/module.zig`, the `Forge3DModule` adapter. Same import set
     // as `forge_sync`: `weld_core` for `ModuleContext`, `weld_forge` for the frozen
     // descriptor and query types, `forge_3d` for `PhysicsWorld` and the query family.
     // `forge_3d` keeps its two-import discipline and never learns about the ECS.
@@ -188,7 +187,7 @@ pub fn build(b: *std.Build) void {
     forge_module.addImport("foundation", foundation_module);
 
     // `src/interfaces/PhysicsModule.zig`, the Tier 1 physics interface and the first file
-    // of `src/interfaces/`. FROZEN at M1.1.15.2 G7: it carries
+    // of `src/interfaces/`. FROZEN: it carries
     // `WELD_PHYSICS_PROTOCOL_VERSION` and the comptime surface guard over the thirty-two
     // entries, plus the three body pose/velocity contracts moved out of
     // `forge/api/types.zig`. It needs `weld_forge` for the descriptor and query types and
@@ -201,7 +200,7 @@ pub fn build(b: *std.Build) void {
     interfaces_physics_module.addImport("weld_forge", forge_api_module);
     interfaces_physics_module.addImport("weld_core", core_module);
 
-    // M0.2 / E6 — plugin loader ABI module shared with the stub
+    // plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
     // just the declarations the stubs need: `WeldPluginDesc`,
@@ -213,7 +212,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // M0.2 / E6 — stub plugin libraries, dynamic linkage. Each
+    // stub plugin libraries, dynamic linkage. Each
     // produces `lib<name>.so` (Linux), `lib<name>.dylib` (macOS),
     // or `<name>.dll` (Windows). Installed under `zig-out/lib/`
     // (POSIX) or `zig-out/bin/` (Windows) so the load_unload_test
@@ -245,18 +244,12 @@ pub fn build(b: *std.Build) void {
     }
     const stub_plugins_step = b.step(
         "stub-plugins",
-        "Build the three M0.2 / E6 stub plugin libraries used by the plugin_loader tests",
+        "Build the three stub plugin libraries used by the plugin_loader tests",
     );
     for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
 
-    // M0.4 — `src/main.zig` removed (cf. brief §Removals). The Weld
-    // engine is consumed as a lib + tools, not as a root binary. The
-    // demonstration lives in `examples/triangle/`. All the CLI-parsing
-    // logic of the S2 spike binary (--smoke-test, --gpu-prefer, --capture-frame)
-    // is migrated into `examples/triangle/src/main.zig`.
-
     // Shaders embedding — shared by the editor + runtime binaries for
-    // the S6 viewport blit, and by `examples/triangle/` for the
+    // the viewport blit, and by `examples/triangle/` for the
     // triangle.vert/frag SPIR-V. The `.spv` live under `assets/shaders/`.
     // `b.addModule` (instead of `b.createModule`) so the standalone
     // sub-project consumes it via `b.dependency("weld", ...).module("shaders")`.
@@ -266,10 +259,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // M0.4 — `zig build run-example-triangle` invokes the standalone
+    // `zig build run-example-triangle` invokes the standalone
     // `examples/triangle/` sub-project via a `zig build run` subprocess.
-    // It is the living architectural test of external consumability
-    // (brief §Notes decision 12 + §Observable behavior).
+    // It is the living architectural test of external consumability.
     const ex_run = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "build",
@@ -283,8 +275,8 @@ pub fn build(b: *std.Build) void {
     const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
     ex_step.dependOn(&ex_run.step);
 
-    // M0.8 / E3-D — `zig build verify-synth-100` builds the standalone
-    // `bench/fixtures/synth_100/` sub-project (D-S5-synth100-proper): a
+    // `zig build verify-synth-100` builds the standalone
+    // `bench/fixtures/synth_100/` sub-project: a
     // real path-dep package that cooks the committed corpus through the
     // parent's `etch_cook` artifact and compiles it against
     // `weld.module("weld_core")`. A nested cold build — kept OUT of the
@@ -294,12 +286,9 @@ pub fn build(b: *std.Build) void {
         "build",
     });
     synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
-    const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the D-S5-synth100-proper proof)");
+    const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the standalone proof)");
     synth_verify_step.dependOn(&synth_verify.step);
 
-    // M0.4 — Shader compiler tool: `zig build shaders` regenerates the
-    // `.spv` from the `.glsl`. `zig build shaders-check` diffs vs
-    // the committed ones (brief §Files + §CI).
     const shader_compiler_module = b.createModule(.{
         .root_source_file = b.path("tools/shader_compiler/main.zig"),
         .target = target,
@@ -326,7 +315,7 @@ pub fn build(b: *std.Build) void {
     const shaders_check_step = b.step("shaders-check", "Verify .spv on disk matches a fresh glslc regen");
     shaders_check_step.dependOn(&shaders_check_run.step);
 
-    // M0.4 — `zig build vk-gen-check`: regenerates vk.zig and verifies that
+    // `zig build vk-gen-check`: regenerates vk.zig and verifies that
     // the diff vs the commit is empty. Delegated to the existing `bindgen-verify`
     // which covers all generated bindings.
     const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
@@ -346,26 +335,26 @@ pub fn build(b: *std.Build) void {
     const etch_tests = b.addTest(.{ .root_module = etch_module });
     test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
-    // M0.6 — inline tests inside src/modules/asset_pipeline/**. The module
+    // inline tests inside src/modules/asset_pipeline/**. The module
     // root re-exports format/ and registry/, so every sub-file is reachable
     // and its inline tests run (engine-zig-conventions.md §13).
     const asset_pipeline_tests = b.addTest(.{ .root_module = asset_pipeline_module });
     test_step.dependOn(&b.addRunArtifact(asset_pipeline_tests).step);
 
-    // M0.6 / E2 — inline tests inside src/foundation/** (traits + kernels).
+    // inline tests inside src/foundation/** (traits + kernels).
     // simd.zig re-exports traits/portable/dispatch/kernels, so they are all
     // reachable and analysed (engine-zig-conventions.md §13).
     const foundation_tests = b.addTest(.{ .root_module = foundation_module });
     test_step.dependOn(&b.addRunArtifact(foundation_tests).step);
 
-    // M1.1.0 / E2 — inline tests inside src/modules/forge/api/** (component
+    // inline tests inside src/modules/forge/api/** (component
     // size/align asserts, descriptor + component defaults, Velocity re-export
     // identity, BodyId pack/unpack). The api root re-exports components/ +
     // types/, so their inline tests are reachable (engine-zig-conventions.md §13).
     const forge_api_tests = b.addTest(.{ .root_module = forge_api_module });
     test_step.dependOn(&b.addRunArtifact(forge_api_tests).step);
 
-    // M1.1.0 / E3 — forge_3d solver unit tests (C1.1 verification path): the
+    // forge_3d solver unit tests (C1.1 verification path): the
     // inline tests in config/shape/body/body_manager + the acceptance suite
     // under forge_3d/tests/. root.zig pins them all. Added to
     // `zig build test`; `zig build test-forge-3d` runs just these.
@@ -374,7 +363,7 @@ pub fn build(b: *std.Build) void {
     const forge_module_tests = b.addTest(.{ .root_module = forge_module });
     test_step.dependOn(&b.addRunArtifact(forge_module_tests).step);
 
-    // M1.1.15 / gate E — the interface file's own tests: the attestation that no protocol
+    // the interface file's own tests: the attestation that no protocol
     // version is declared yet, and that the three signatures follow the world scalar.
     const interfaces_physics_tests = b.addTest(.{ .root_module = interfaces_physics_module });
     test_step.dependOn(&b.addRunArtifact(interfaces_physics_tests).step);
@@ -385,10 +374,10 @@ pub fn build(b: *std.Build) void {
     const forge_3d_test_step = b.step("test-forge-3d", "Run only the forge_3d solver tests");
     forge_3d_test_step.dependOn(&forge_3d_tests_run.step);
 
-    // M1.1.14 — `zig build forge-determinism`: the determinism instrument, run
+    // `zig build forge-determinism`: the determinism instrument, run
     // at ONE worker over the canonical scenario. The step is deliberately an
     // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a test:
-    // M1.1.21.1 replays it at N workers and M1.A on a rebuilt scheduler DAG, and a
+    // A later milestone replays it at N workers and another on a rebuilt scheduler DAG, and a
     // harness whose logic lived in its `main` would have to be re-entered through
     // a process to be replayed. Its self-reproducibility and its artifact
     // liveness are ALSO asserted inside `zig build test`, where the same library
@@ -412,11 +401,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_determinism_run.addArgs(args);
     const forge_determinism_step = b.step(
         "forge-determinism",
-        "Run the canonical determinism scenario at one worker (M1.1.14)",
+        "Run the canonical determinism scenario at one worker",
     );
     forge_determinism_step.dependOn(&forge_determinism_run.step);
 
-    // M1.1.14 — `zig build forge-asm-inventory`: the conformance test of
+    // `zig build forge-asm-inventory`: the conformance test of
     // `ARCH-031` rule 4, read in the EMITTED ASSEMBLY rather than in the source.
     // `forge_3d` is compiled to assembly for the three targets the engine ships
     // and every call site is inspected for a libm transcendental.
@@ -525,13 +514,11 @@ pub fn build(b: *std.Build) void {
     const asm_inventory_tests = b.addTest(.{ .root_module = asm_inventory_module });
     test_step.dependOn(&b.addRunArtifact(asm_inventory_tests).step);
 
-    // Out-of-tree tests. Each file is its own root_module and imports
-    // `weld_core` to reach the engine internals.
-    // Out-of-tree bindings tests need to reach files that live outside
-    // `weld_core`'s module tree. Each group is exposed via a thin facade
-    // module — Zig 0.16 forbids a single file from belonging to two module
-    // trees, so we can't expose siblings as separate modules when they
-    // `@import` each other.
+    // Out-of-tree tests: each file is its own root_module and imports
+    // `weld_core` to reach the engine internals. The exception is a group whose
+    // files `@import` each other — Zig 0.16 forbids a single file from belonging
+    // to two module trees, so such a group CANNOT be exposed as sibling modules
+    // and gets one thin facade module instead.
     const wl_protocols_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/platform/window/wayland_protocols/tests_facade.zig"),
         .target = target,
@@ -543,19 +530,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
-    // programs and their sidecar `expected.zig` files. The facade is the
-    // shared module the corpus_test driver and the bench harness both
-    // import (same pattern as the S3 corpus facade above).
     // Generic test driver module (independent of the corpus + runner) so it
-    // can be reused by S5's codegen-runner without modifying call sites.
+    // can be reused by the codegen-runner without modifying call sites.
     const etch_interp_driver_module = b.createModule(.{
         .root_source_file = b.path("tests/etch_interp/diff_runner.zig"),
         .target = target,
         .optimize = optimize,
     });
     etch_interp_driver_module.addImport("weld_core", core_module);
-    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
+    // Differential corpus — `tests/etch_interp/` houses 20 .etch
     // programs and their sidecar `expected.zig` files. The facade enumerates
     // them and is consumed by `corpus_test.zig` (the test driver) and by
     // the bench harness. Sidecars in `programs/` reach the diff_runner
@@ -577,7 +560,7 @@ pub fn build(b: *std.Build) void {
     etch_interp_runner_module.addImport("weld_core", core_module);
     etch_interp_runner_module.addImport("weld_etch", etch_module);
 
-    // M1.1.15.2 G3 — the toy service and the `.d.etch` emitter, defined HERE
+    // the toy service and the `.d.etch` emitter, defined HERE
     // rather than beside the bindgen steps below because the test-spec loop
     // needs them too, and one module definition serving both is what keeps the
     // tests exercising the very code the `bindgen-check` step runs.
@@ -596,7 +579,7 @@ pub fn build(b: *std.Build) void {
     });
     emit_detch_module.addImport("weld_etch", etch_module);
 
-    // M1.1.15.2 G6 — the physics service and the sensor-event types enter the
+    // the physics service and the sensor-event types enter the
     // manifest. They import the forge module, so their modules are built here
     // alongside the toy's.
     const forge_services_module = b.createModule(.{
@@ -610,14 +593,14 @@ pub fn build(b: *std.Build) void {
     forge_services_module.addImport("weld_core", core_module);
     forge_services_module.addImport("foundation", foundation_module);
     forge_services_module.addImport("forge_module", forge_module);
-    // M1.1.15.2 G11 — the MUTATION half of the service resolves an entity to the body the
+    // the MUTATION half of the service resolves an entity to the body the
     // seam drives and marks the seam's own journal, so it needs the seam. `forge_sync` is
     // the only module that sees both the ECS and `PhysicsWorld`, which is exactly what a
     // wrapper writing an ECS mirror needs.
     forge_services_module.addImport("forge_sync", forge_sync_module);
-    // M1.1.15.2 G7 — the bidirectional Etch slice. It is DRIVEN by a test rather
+    // the bidirectional Etch slice. It is DRIVEN by a test rather
     // than left as a directory to read: a mechanism nothing executes is the defect
-    // M1.1.15 named and this milestone has closed twice.
+    // an earlier milestone named and this one has closed twice.
     const arena_slice_module = b.createModule(.{
         .root_source_file = b.path("examples/arena/slice.zig"),
         .target = target,
@@ -646,60 +629,60 @@ pub fn build(b: *std.Build) void {
 
     const TestSpec = struct {
         path: []const u8,
-        // M0.4 — `spike` field removed, no entry needs it anymore.
+        // `spike` field removed, no entry needs it anymore.
         wl_protocols: bool = false,
         etch: bool = false,
         etch_interp: bool = false,
-        /// M0.2 / E6 — when set, the test step depends on
+        /// when set, the test step depends on
         /// `stub_install_steps[]` so the three stub libraries are
         /// built before the test runs.
         needs_stub_plugins: bool = false,
-        /// M0.3 — when set, imports the `weld_audio` module.
+        /// when set, imports the `weld_audio` module.
         audio: bool = false,
-        /// M0.4 — when set, imports the `weld_render` module (GAL public
+        /// when set, imports the `weld_render` module (GAL public
         /// surface + Null backend, Vulkan backend wires in later).
         render: bool = false,
-        /// M0.6 — when set, imports the `weld_asset_pipeline` module.
+        /// when set, imports the `weld_asset_pipeline` module.
         asset_pipeline: bool = false,
-        /// M1.1.15 — when set, imports the Forge synchronisation seam and the two
+        /// when set, imports the Forge synchronisation seam and the two
         /// modules it joins, so a test can drive a `PhysicsWorld` against a real ECS
         /// `World`.
         forge: bool = false,
-        /// M0.6 / E2 — when set, imports the `foundation` module (simd).
+        /// when set, imports the `foundation` module (simd).
         foundation: bool = false,
-        /// M1.0.4 — when set, imports `weld_etch` (the scene cook driver). A
+        /// when set, imports `weld_etch` (the scene cook driver). A
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
         scene: bool = false,
-        /// M1.1.15.2 G7 — when set, imports the bidirectional arena slice.
+        /// when set, imports the bidirectional arena slice.
         arena_slice: bool = false,
-        /// M1.1.15.2 G6 — when set, imports the physics service, the sensor-event
+        /// when set, imports the physics service, the sensor-event
         /// types and `weld_etch`, so a test can drive a rule through the service.
         physics_service: bool = false,
-        /// M1.1.15.2 G4 — when set, imports the toy service module (which also
+        /// when set, imports the toy service module (which also
         /// carries the toy EVENT and its emitted declaration).
         etch_events: bool = false,
-        /// M1.1.15.2 G3 — when set, imports the `.d.etch` emitter and the toy
+        /// when set, imports the `.d.etch` emitter and the toy
         /// service, so a test exercises the SAME functions `bindgen-check` runs.
         bindgen_detch: bool = false,
-        /// M0.4 stabilization — when set, create a dedicated `zig build
+        /// when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
         /// without re-running every other test in the repo (some of
         /// which have unrelated ReleaseSafe issues tracked as
-        /// out-of-scope M0.4 debt).
+        /// out-of-scope debt).
         dedicated_step: ?[]const u8 = null,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
         .{ .path = "tests/physics/transform_sync_test.zig", .forge = true },
-        // M1.1.15.1 / gate C — `Forge3DModule`: the allocator/fallibility shape of the
-        // frozen surface, and the `step` failure contract of RD-3.
+        // `Forge3DModule`: the allocator/fallibility shape of the
+        // frozen surface, and the `step` failure contract.
         .{ .path = "tests/physics/forge_module_test.zig", .forge = true },
-        // M1.1.15.2 G6 — the Tier 1 physics service called from a rule, and the two
+        // the Tier 1 physics service called from a rule, and the two
         // sensor deltas translated onto the Tier 0 bus.
         .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
-        // M1.1.15.2 G7 — the slice, run in both directions.
+        // the slice, run in both directions.
         .{ .path = "tests/physics/arena_slice_test.zig", .arena_slice = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
@@ -731,7 +714,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/core/events/saturation_test.zig" },
         .{ .path = "tests/core/events/lifetime_test.zig" },
         .{ .path = "tests/core/events/scheduler_integration_test.zig" },
-        // M1.1.15.1 / gate A — `core.ModuleContext`: the four-field pin and its negative
+        // `core.ModuleContext`: the four-field pin and its negative
         // twin (exactly one field reaches component registration and the event bus).
         .{ .path = "tests/core/module_context_test.zig" },
         .{ .path = "tests/bindgen/roundtrip_test.zig" },
@@ -741,181 +724,177 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
         .{ .path = "tests/window/wayland_open_close_test.zig" },
-        // M0.4 — tests/spike/ removed with the rest of the folder
-        // (cf. brief §Removals). The multi-GPU scoring is ported into
-        // gal/vulkan/device.zig, the CLI parse lives in
-        // examples/triangle/src/main.zig.
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
-        // M0.5 item 8 — Etch idents that collide with Zig keywords must
+        // Etch idents that collide with Zig keywords must
         // codegen to parseable (escaped) Zig. RED before the lower.zig fix.
         .{ .path = "tests/etch/keyword_ident_test.zig", .etch = true },
-        // M0.8 / E1 — top-level recovery sync-point (ParseResult.diagnostics
+        // top-level recovery sync-point (ParseResult.diagnostics
         // slice + resync at the next top-level keyword).
         .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
-        // M0.8 / E1 — EBNF harness: every ```etch example block parses clean.
+        // EBNF harness: every ```etch example block parses clean.
         .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
-        // M0.8 / E7 — AST stable interface freeze: ≥20 Level-1 entry points
+        // AST stable interface freeze: ≥20 Level-1 entry points
         // (§10.3.1). Compilation is the cross-phase invariant.
         .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
-        // M0.8 / E7 — interpreter hot-reload: edit rule body → AST swap →
+        // interpreter hot-reload: edit rule body → AST swap →
         // behaviour change on the same live world, measured < 500 ms.
         .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
-        // M0.8 / E7 — full-grammar 500+ line integration reference: parse
+        // full-grammar 500+ line integration reference: parse
         // < 50 ms + type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
-        // M1.B / G1 — `@storage` consumed end to end: the mode reaches the
+        // `@storage` consumed end to end: the mode reaches the
         // registry, the storage does not move yet, and the codegen refuses a
         // sparse program. `.etch = true` for `weld_etch`; `weld_core` is
         // unconditional in this loop.
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
-        // M0.8 / E7 — TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
+        // TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
-        // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
+        // the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
-        // M0.9 / E2-A — triple-quote `"""…"""` multiline string lexer token
+        // triple-quote `"""…"""` multiline string lexer token
         // + §1.4 common-indent strip at parse.
         .{ .path = "tests/etch/lexer_triple_quote_test.zig", .etch = true },
-        // M0.9 / E2-B — cross-file scene/prefab validation (E1782 cross-scene,
+        // cross-file scene/prefab validation (E1782 cross-scene,
         // E1786 cross-file prefab ref, E1791 cross-file prefab base).
         .{ .path = "tests/etch/crossfile_scene_prefab_test.zig", .etch = true },
-        // M1.0.7 / E3 — `import` directive parsing: the four grammar forms
+        // `import` directive parsing: the four grammar forms
         // (whole / selective / aliased / per-item alias), IDENT+TYPE_IDENT items
         // (D-D), and malformed-import recovery (resync, no UnsupportedConstructInS3).
         .{ .path = "tests/etch/import_parse_test.zig", .etch = true },
-        // M1.0.7 / E4-E6 — module graph + cycle (E0108), exports binding
+        // module graph + cycle (E0108), exports binding
         // (E0103/E0104), cross-file type resolution (no E0102).
         .{ .path = "tests/etch/import_resolve_test.zig", .etch = true },
-        // M1.0.16 / E1 — qualified `m.Type` resolution under validateProject:
+        // qualified `m.Type` resolution under validateProject:
         // type-alias-target parity with the selective form (`as m` + `m.Type`),
-        // use-site E0104/E0107, unresolved-alias E0102. E2 adds W0902.
+        // use-site E0104/E0107, unresolved-alias E0102, and W0902.
         .{ .path = "tests/etch/qualified_import_test.zig", .etch = true },
-        // M1.0.7 / E6 — the E1793 unblock: a `.prefab.etch` importing its
+        // the E1793 unblock: a `.prefab.etch` importing its
         // component types validates clean; an undeclared component still errors.
         .{ .path = "tests/etch/crossfile_prefab_import_test.zig", .etch = true },
-        // M1.0.0 — interpreter ↔ filtered ECS queries: has / not has / value
+        // interpreter ↔ filtered ECS queries: has / not has / value
         // field-filters (== and ordered) / and-or-not composition + the
         // dynamic-archetype (never-matches-then-matches) case + the per-rule
         // matched-count observable.
         .{ .path = "tests/etch/v1/query_filters_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
-        // M1.0.4 / E2 — scene cook → writer → accessor round-trip (entities,
+        // scene cook → writer → accessor round-trip (entities,
         // archetypes, UUIDs, names, parent links, content_version, resources,
         // mixed-alignment columns, byte-identical determinism).
-        // M1.1.15.2 G2 — the Tier 1 service path end to end: `.d.etch` declares,
+        // the Tier 1 service path end to end: `.d.etch` declares,
         // the checker resolves, the tree-walker dispatches into a Zig function.
         .{ .path = "tests/etch_services/service_call_test.zig", .scene = true },
-        // M1.1.15.2 G3 — the emitter and the `bindgen-check` comparison.
+        // the emitter and the `bindgen-check` comparison.
         .{ .path = "tests/etch_bindgen/detch_emitter_test.zig", .bindgen_detch = true },
-        // M1.1.15.2 G4 — the Tier 0 → Etch event bridge and its tick ordering.
+        // the Tier 0 → Etch event bridge and its tick ordering.
         .{ .path = "tests/etch_events/event_bridge_test.zig", .etch_events = true },
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
-        // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
+        // scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
-        // M1.0.6 / E2 — prefab cook → `.prefab.bin`: standalone + `of` variant
+        // prefab cook → `.prefab.bin`: standalone + `of` variant
         // (base inherited from its cooked `.prefab.bin`, field-merge/add overrides),
         // re-cook determinism, and the rejected forms (`extends`, hooks on `of`).
         .{ .path = "tests/scene/prefab_cook_test.zig", .scene = true, .dedicated_step = "test-prefab-cook" },
-        // M1.0.6 / E3 — `instance of` flattening at scene cook: override-free
+        // `instance of` flattening at scene cook: override-free
         // instance == hand-authored equivalent (same archetype + bytes), both
         // override forms, N instances cook→load→ECS, single-entity boundary.
         .{ .path = "tests/scene/prefab_flatten_test.zig", .scene = true, .dedicated_step = "test-prefab-flatten" },
-        // M1.0.6 / E4 — entity→entity cross-references: cook writes dead + a
+        // entity→entity cross-references: cook writes dead + a
         // side-table entry (by-name, two-phase), loader patches the slot to the
         // target handle; unset = dead; absent target = UnresolvedCrossRef at cook.
         .{ .path = "tests/scene/crossref_test.zig", .scene = true, .dedicated_step = "test-crossref" },
-        // M1.0.6 / E5 — `extensions:` clause parse + AST + descriptors. The
+        // `extensions:` clause parse + AST + descriptors. The
         // cook/binary + load portions land once the hooks-section shape unblocks.
         .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
-        // M1.0.6 / E3+E4+E6 — capstone: prefab instances + per-field override +
+        // capstone: prefab instances + per-field override +
         // cross-ref + active extension in one scene, cook → load → ECS.
         .{ .path = "tests/scene/prefab_integration_test.zig", .scene = true, .dedicated_step = "test-prefab-integration" },
-        // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
+        // runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`
         // flag → no `weld_etch`); builds the image in-memory via the writer.
         .{ .path = "tests/scene/load_roundtrip_test.zig" },
-        // M1.0.5 / E3 — resource `string` fields round-trip through the Tier-0
+        // resource `string` fields round-trip through the Tier-0
         // persistent heap (intern on load, owned by `LoadResult`). `weld_core` only.
         .{ .path = "tests/scene/load_resources_test.zig" },
-        // M0.3 — common platform layer tests.
+        // common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
         .{ .path = "tests/platform/time_test.zig" },
         .{ .path = "tests/platform/threading_test.zig" },
         .{ .path = "tests/platform/dynamic_lib_test.zig" },
-        // M0.3 — Win32 thread safety stress (Windows runner only).
+        // Win32 thread safety stress (Windows runner only).
         .{ .path = "tests/platform/win32_thread_safety_test.zig" },
-        // M0.3 — Wayland thread safety stress (Linux runner only).
+        // Wayland thread safety stress (Linux runner only).
         .{ .path = "tests/platform/wayland_thread_safety_test.zig" },
-        // M0.3 — Multi-monitor enumeration + current monitor + per-monitor DPI.
+        // Multi-monitor enumeration + current monitor + per-monitor DPI.
         .{ .path = "tests/platform/multi_monitor_test.zig" },
-        // M0.3 — WindowEvent union surface validation.
+        // WindowEvent union surface validation.
         .{ .path = "tests/platform/window_events_test.zig" },
-        // M0.3 — Input Tier 0 (event-driven path, runs on all OSes).
+        // Input Tier 0 (event-driven path, runs on all OSes).
         .{ .path = "tests/platform/input_raw_state_test.zig" },
         .{ .path = "tests/platform/input_gamepad_test.zig" },
-        // M0.3 — Audio Dummy stub test.
+        // Audio Dummy stub test.
         .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
-        // M0.4 — GAL Null backend smoke + interface check (CI headless).
+        // GAL Null backend smoke + interface check (CI headless).
         .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
-        // M0.4 — GAL Vulkan backend offline init test (skip if Vulkan absent).
+        // GAL Vulkan backend offline init test (skip if Vulkan absent).
         .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
-        // M0.4 — Render graph topological sort + cycle detection.
+        // Render graph topological sort + cycle detection.
         .{ .path = "tests/render/render_graph_topo.zig", .render = true },
-        // M0.4 — Render graph auto-tracking barriers (write-after-read,
+        // Render graph auto-tracking barriers (write-after-read,
         // explicit mode skip).
         .{ .path = "tests/render/render_graph_barriers.zig", .render = true },
-        // M0.4 — Instancing batcher (bucketing mesh+material, drawcalls
+        // Instancing batcher (bucketing mesh+material, drawcalls
         // ≤ 100 for 100k entities).
         .{ .path = "tests/render/instancing_batcher.zig", .render = true },
-        // M0.4 — Shader disk cache round-trip (hit/miss source change /
+        // Shader disk cache round-trip (hit/miss source change /
         // miss glslc version change).
         .{ .path = "tests/render/shader_cache.zig", .render = true },
-        // M0.4 § Scope Post-Review — smoke-test capture PSNR vs golden.
+        // smoke-test capture PSNR vs golden.
         // Skip if the platform has no Vulkan window backend or if the golden
         // has not yet been committed.
         // `dedicated_step` exposes `zig build test-render-capture` so
         // the CI runtime-smoke-test job can run only this test (the
         // generic `zig build test` pulls in the whole repo, including
         // unrelated tests with current ReleaseSafe issues — tracked as
-        // M0.7 housekeeping debt).
+        // housekeeping debt).
         .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
-        // M0.5 item 2 — GAL capture helper surface coverage (encodePpm +
+        // GAL capture helper surface coverage (encodePpm +
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
-        // M0.5 item 1 — direct PSNR gate reading the pre-produced
+        // direct PSNR gate reading the pre-produced
         // out/smoke_test.ppm with no rebuild and no triangle re-spawn.
         // std-only (no .render), so `zig build test-ppm-psnr` compiles in
         // seconds and replaces the rebuild-heavy `test-render-capture` in CI.
         .{ .path = "tests/render/ppm_psnr_compare.zig", .dedicated_step = "test-ppm-psnr" },
-        // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
+        // hot-reload filewatch latency < 200 ms.
         // Skip if glslc absent from PATH.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
-        // M0.4 — vk_gen whitelist closure (variant filtering + closure
+        // vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
         .{ .path = "tests/vk_gen/whitelist_closure.zig" },
-        // M0.4 — vk_gen *Raw variants emission (3 targets emitted, others
+        // vk_gen *Raw variants emission (3 targets emitted, others
         // not emitted).
         .{ .path = "tests/vk_gen/raw_variants.zig" },
-        // M0.6 / E1 — asset registry stale-handle (generation) acceptance.
+        // asset registry stale-handle (generation) acceptance.
         .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
-        // M0.6 / E5 — async loader + lifecycle (internal 5 s watchdog).
+        // async loader + lifecycle (internal 5 s watchdog).
         .{ .path = "tests/assets/loader_async.zig", .asset_pipeline = true },
-        // M0.6 / E2 — DEFLATE/zlib inflate known-vector acceptance.
+        // DEFLATE/zlib inflate known-vector acceptance.
         .{ .path = "tests/assets/deflate_vectors.zig", .asset_pipeline = true },
-        // M0.6 / E2 — adler32 kernel known vectors + cross-variant correctness.
+        // adler32 kernel known vectors + cross-variant correctness.
         .{ .path = "src/foundation/simd/tests/adler32_test.zig", .foundation = true },
         .{ .path = "src/foundation/simd/tests/correctness.zig", .foundation = true },
-        // M0.6 / E3 — paeth_filter_decode kernel portable == reference.
+        // paeth_filter_decode kernel portable == reference.
         .{ .path = "src/foundation/simd/tests/paeth_test.zig", .foundation = true },
-        // M0.6 / E4 — import → cook → load round-trips + cache differential.
+        // import → cook → load round-trips + cache differential.
         .{ .path = "tests/assets/png_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/gltf_static_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
-    // M1.0.1 — shared fail-fast watchdog for in-process concurrency tests
+    // shared fail-fast watchdog for in-process concurrency tests
     // (point-4 permanent guard; covers the scheduler.deinit-join site that
     // masked the windows-2025/ReleaseSafe hang). Imported by tests via
     // `@import("test_watchdog")`; only compiled into specs that use it.
@@ -1001,11 +980,11 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // M0.2.1 / E2 — `zig build test-stress` builds and runs ONLY the
-    // scheduler-livelock stress test. Kept out of `test_step` per
-    // brief § Notes ("No adding `test_stress` to `zig build
-    // test` by default; the 100× stress-signal loop is a local
-    // validation tool, not a routine CI test"). Local
+    // `zig build test-stress` builds and runs ONLY the
+    // scheduler-livelock stress test. It is deliberately OUT of `test_step` and
+    // must STAY out: the 100× stress-signal loop is a local validation tool, not
+    // a routine CI test. Adding it to `test_step` also reddens `dead-tests`,
+    // whose exclusion for that file points at this declaration. Local
     // diagnostic only — exit code 2 from the test process signals
     // SchedulerLivelock watchdog fired (5 s timeout).
     {
@@ -1015,7 +994,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         stress_mod.addImport("weld_core", core_module);
-        // E9b: the stress spec is created outside the `test_specs` loop, so it
+        // the stress spec is created outside the `test_specs` loop, so it
         // does not get `test_watchdog` automatically — wire it explicitly for
         // the global teardown watchdog it now arms.
         stress_mod.addImport("test_watchdog", watchdog_module);
@@ -1023,17 +1002,17 @@ pub fn build(b: *std.Build) void {
         const stress_test_run = b.addRunArtifact(stress_test);
         const stress_step = b.step(
             "test-stress",
-            "Run only the M0.2.1/E2 scheduler-livelock stress test",
+            "Run only the scheduler-livelock stress test",
         );
         stress_step.dependOn(&stress_test_run.step);
     }
 
-    // ----------------------------- S6 editor + runtime stub binaries -----
+    // ----------------------------- editor + runtime stub binaries -----
     //
-    // Two binaries at the canonical Phase 0+ locations per
+    // Two binaries at the canonical locations per
     // `engine-directory-structure.md` §9.1, not in `src/spike/`.
-    // S6 produces code that survives — these stubs grow into the
-    // real editor / runtime in Phase 0.
+    // The spike that produced them was meant to leave code that survives: these stubs grow into the
+    // real editor and runtime.
 
     const runtime_module = b.createModule(.{
         .root_source_file = b.path("src/runtime/main.zig"),
@@ -1042,7 +1021,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_module.addImport("weld_core", core_module);
-    // M1.1.14 — the main thread installs the engine float environment
+    // the main thread installs the engine float environment
     // (`ARCH-031` rule 5) from its single definition under `foundation/math/`.
     runtime_module.addImport("foundation", foundation_module);
     const runtime_exe = b.addExecutable(.{
@@ -1055,7 +1034,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| runtime_run.addArgs(args);
     const runtime_step = b.step(
         "run-runtime-stub",
-        "Run the S6 runtime stub directly (requires --socket=… --shm=… argv)",
+        "Run the runtime stub directly (requires --socket=… --shm=… argv)",
     );
     runtime_step.dependOn(&runtime_run.step);
 
@@ -1066,12 +1045,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     editor_module.addImport("weld_core", core_module);
-    // M1.1.14 — same as the runtime: the main thread is not born of a spawn.
+    // same as the runtime: the main thread is not born of a spawn.
     editor_module.addImport("foundation", foundation_module);
-    // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
-    // shared `shaders` facade — the same module the S2 spike uses.
+    // The viewport blit pipeline embeds pre-compiled SPIR-V via the
+    // shared `shaders` facade — the same module the windowing spike uses.
     editor_module.addImport("shaders", shaders_module);
-    // M0.9 / E6 — the viewport blit (vk_blit.zig) renders through the public
+    // the viewport blit (vk_blit.zig) renders through the public
     // GAL (gal.Device) instead of raw Vulkan.
     editor_module.addImport("weld_render", render_module);
     const editor_exe = b.addExecutable(.{
@@ -1084,20 +1063,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| editor_run.addArgs(args);
     const editor_step = b.step(
         "run-editor-stub",
-        "Run the S6 editor stub alone (will spawn the runtime stub)",
+        "Run the editor stub alone (will spawn the runtime stub)",
     );
     editor_step.dependOn(&editor_run.step);
 
-    // Full demo entry point — the editor spawns the runtime,
-    // handshake, message exchange, viewport mire visible for the
-    // brief's 60 s observable window, graceful shutdown. Honours
-    // the G6 manual-demo checklist.
+    // Full demo entry point — the editor spawns the runtime, handshake,
+    // message exchange, viewport mire visible for a 60 s window, graceful
+    // shutdown.
     //
-    // Pass any editor flag through `--`, e.g.
+    // Any editor flag passes through `--`, e.g.
     //   zig build run-ipc-demo -- --frames=3600
-    // for a one-minute observable session at 60 Hz. Defaults to
-    // `--frames=3600` (≈ 60 s) when the caller passes no `--` args
-    // so the canonical S6 demo matches the G6 verdict description.
+    // With no `--` args the step supplies `--frames=3600` itself, so the
+    // canonical demo is the 60 s one whether or not the caller says so.
     const ipc_demo_run = b.addRunArtifact(editor_exe);
     ipc_demo_run.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -1107,19 +1084,19 @@ pub fn build(b: *std.Build) void {
     }
     const ipc_demo_step = b.step(
         "run-ipc-demo",
-        "Run the S6 editor↔runtime demo (window + Vulkan blit, default 60 s; override with `-- --frames=N`)",
+        "Run the editor↔runtime demo (window + Vulkan blit, default 60 s; override with `-- --frames=N`)",
     );
     ipc_demo_step.dependOn(&ipc_demo_run.step);
 
-    // ------------------------------------------------ S6 IPC tests --------
+    // ------------------------------------------------ IPC tests --------
     //
-    // Each IPC test is its own exe so a deadlock in one case (the
-    // previous session's 46-minute test-runner hang taught us this
-    // the expensive way) cannot stall the rest of `zig build test`.
-    // The `test-ipc` step runs only the IPC tests for fast iteration
-    // during S6; the main `test` step also dependsOn each of them so
-    // CI keeps a single entry point.
-    const test_ipc_step = b.step("test-ipc", "Run the S6 IPC tests");
+    // Each IPC test is its own exe, and putting several back into one would be
+    // wrong: a deadlock in one case stalls its whole exe, and there is no
+    // bounded receive in Tier 0 IPC to cut it short, so a shared exe takes the
+    // rest of `zig build test` down with it. The `test-ipc` step runs only the
+    // IPC tests for fast iteration; the main `test` step also dependsOn each of
+    // them so CI keeps a single entry point.
+    const test_ipc_step = b.step("test-ipc", "Run the IPC tests");
     const ipc_test_paths = [_][]const u8{
         "tests/ipc/framing.zig",
         "tests/ipc/schema_hash.zig",
@@ -1162,12 +1139,12 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         // `tests/ipc/crash_recovery.zig` and `tests/ipc/catalogue.zig`
         // spawn `zig-out/bin/weld-runtime` to exercise the editor↔runtime
-        // contract end-to-end (G4 + G5; M0.7 / E2 catalogue handlers). The
+        // contract end-to-end (the catalogue handlers). The
         // path is relative to the project root which is the cwd when
         // `zig build test` dispatches the test binary; the runtime exe must
         // already be installed for `posix_spawnp` to find it. Bare
         // `b.addRunArtifact(t).step.dependOn(b.getInstallStep())` would gate
-        // the test on every install step (including the S5 etch_cook), so we
+        // the test on every install step (including `etch_cook`), so we
         // wire the dependency narrowly to the runtime install step alone.
         if (std.mem.eql(u8, p, "tests/ipc/crash_recovery.zig") or
             std.mem.eql(u8, p, "tests/ipc/catalogue.zig"))
@@ -1178,7 +1155,7 @@ pub fn build(b: *std.Build) void {
         test_ipc_step.dependOn(&run_t.step);
     }
 
-    // ----------------------------------------------- S6 IPC RTT bench -----
+    // ----------------------------------------------- IPC RTT bench -----
 
     const ipc_rtt_module = b.createModule(.{
         .root_source_file = b.path("bench/ipc_rtt.zig"),
@@ -1197,11 +1174,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| ipc_rtt_run.addArgs(args);
     const ipc_rtt_step = b.step(
         "bench-ipc-rtt",
-        "Run the S6 IPC RTT bench (N=10_000 Echo round-trips, writes bench/results/ipc_rtt.md)",
+        "Run the IPC RTT bench (N=10_000 Echo round-trips, writes bench/results/ipc_rtt.md)",
     );
     ipc_rtt_step.dependOn(&ipc_rtt_run.step);
 
-    // ----------------------------------------- S6 1 h fuzz harness --------
+    // ----------------------------------------- 1 h fuzz harness --------
 
     const fuzz_1h_module = b.createModule(.{
         .root_source_file = b.path("tests/ipc/fuzz_1h.zig"),
@@ -1229,10 +1206,8 @@ pub fn build(b: *std.Build) void {
 
     // ----------------------------------------------------- ECS bench step --
     //
-    // M0.1 / E1 renamed `bench/ecs_iteration.zig` → `bench/ecs_benchmark.zig`
-    // (file rename only — content stays the S1 non-regression case until
-    // E7 extends it with the C0.1 1 M × 4 archetypes × 10 systems case).
-
+    // `bench/ecs_benchmark.zig` carries the non-regression case and the
+    // C0.1 1 M × 4 archetypes × 10 systems case.
     const bench_module = b.createModule(.{
         .root_source_file = b.path("bench/ecs_benchmark.zig"),
         .target = target,
@@ -1250,11 +1225,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| bench_run.addArgs(args);
     const bench_step = b.step(
         "bench-ecs",
-        "Run the ECS benchmark (S1 non-regression case; pass `-- --smoke` for a CI sanity run)",
+        "Run the ECS benchmark (non-regression case; pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
 
-    // ------------------------- M1.B / G10 ECS hybrid-storage crossover bench --
+    // ------------------------------- ECS hybrid-storage crossover bench --
     //
     // Table vs SparseSet per-tick cost over (population fraction, churn rate),
     // swept one parameter at a time from a declared base over payload size,
@@ -1282,11 +1257,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| hybrid_bench_run.addArgs(args);
     const hybrid_bench_step = b.step(
         "bench-ecs-hybrid",
-        "Run the M1.B ECS hybrid-storage crossover bench (reported, not gated; writes bench/results/ecs_hybrid_crossover.md)",
+        "Run the ECS hybrid-storage crossover bench (reported, not gated; writes bench/results/ecs_hybrid_crossover.md)",
     );
     hybrid_bench_step.dependOn(&hybrid_bench_run.step);
 
-    // -------------------------- M1.B / P2-1 driver-election cost + flip rate --
+    // ----------------------------------- driver-election cost + flip rate --
     //
     // Two tracks: the cost of ONE `QueryPlan.elect` by with-set shape over a
     // swept archetype count, and the flip rate per tick under the crossover
@@ -1313,11 +1288,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| election_bench_run.addArgs(args);
     const election_bench_step = b.step(
         "bench-ecs-election",
-        "Run the M1.B driver-election bench (reported, not gated; writes bench/results/ecs_election.md)",
+        "Run the driver-election bench (reported, not gated; writes bench/results/ecs_election.md)",
     );
     election_bench_step.dependOn(&election_bench_run.step);
 
-    // ------------------------------ M1.1.4 forge narrowphase fast-path bench --
+    // ------------------------------ forge narrowphase fast-path bench --
     //
     // Per-pair dispatched `collideOrdered` vs the generic GJK/EPA oracle
     // `collideOrderedGeneric`, same pose set, contact + separated, checksum
@@ -1340,11 +1315,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_np_bench_run.addArgs(args);
     const forge_np_bench_step = b.step(
         "bench-forge-narrowphase",
-        "Run the M1.1.4 forge narrowphase fast-path bench (dispatched vs generic per pair, writes bench/results/forge_narrowphase.md)",
+        "Run the forge narrowphase fast-path bench (dispatched vs generic per pair, writes bench/results/forge_narrowphase.md)",
     );
     forge_np_bench_step.dependOn(&forge_np_bench_run.step);
 
-    // ------------------------------------- M1.1.9 forge raycast bench --------
+    // ------------------------------------- forge raycast bench --------
     //
     // Closest / any / all raycast throughput over a 10 000-body STATIC scene,
     // plus a short-bound variant. Writes `bench/results/forge_3d_raycast.md`.
@@ -1367,16 +1342,16 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_ray_bench_run.addArgs(args);
     const forge_ray_bench_step = b.step(
         "bench-forge-raycast",
-        "Run the M1.1.9 forge raycast throughput bench (closest/any/all over 10k static bodies, writes bench/results/forge_3d_raycast.md)",
+        "Run the forge raycast throughput bench (closest/any/all over 10k static bodies, writes bench/results/forge_3d_raycast.md)",
     );
     forge_ray_bench_step.dependOn(&forge_ray_bench_run.step);
 
     // --------------------------------- C1.1 physics integration bench --------
     //
     // The instrument `engine-phase-1-criteria.md` C1.1 names and which did not exist before
-    // M1.1.15.1: the FULL `step()` at 1 000 dynamic + 10 000 static bodies, 60 Hz. TWO GATED
+    // the FULL `step()` at 1 000 dynamic + 10 000 static bodies, 60 Hz. TWO GATED
     // targets — frame time and zero allocation in steady state — so this step FAILS rather
-    // than reports. The retention shape of `M1.D.13` is reported beside them, at two sizes.
+    // than reports. The retention shape is reported beside them, at two sizes.
     const forge_integration_module = b.createModule(.{
         .root_source_file = b.path("bench/physics_forge_3d_integration.zig"),
         .target = target,
@@ -1399,7 +1374,7 @@ pub fn build(b: *std.Build) void {
     );
     forge_integration_step.dependOn(&forge_integration_run.step);
 
-    // ---------------------------------- M1.1.10 forge shapecast bench --------
+    // ---------------------------------- forge shapecast bench --------
     //
     // Sphere / box / capsule casts and shape overlaps over the SAME 10 000-body
     // static scene as the raycast bench, plus a point-cast / raycast pair that
@@ -1424,16 +1399,17 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_cast_bench_run.addArgs(args);
     const forge_cast_bench_step = b.step(
         "bench-forge-shapecast",
-        "Run the M1.1.10 forge shapecast/overlap throughput bench (10k static bodies, writes bench/results/forge_3d_shapecast.md)",
+        "Run the forge shapecast/overlap throughput bench (10k static bodies, writes bench/results/forge_3d_shapecast.md)",
     );
     forge_cast_bench_step.dependOn(&forge_cast_bench_run.step);
 
-    // ---------------------------------- M1.1.11.1 forge mesh bench -----------
+    // ---------------------------------- forge mesh bench -----------
     //
     // Build time and traversal time against triangle count, at three sizes, PLUS the
     // `worldAabb` O(V) pass on the `aabbOverlapsBody` path measured against the per-body
-    // cache that would replace it — the decision promised at gate A and taken on figures.
-    // Writes `bench/results/forge_3d_mesh.md`. REPORTED, not gated.
+    // cache that would replace it. Writes `bench/results/forge_3d_mesh.md`. The first
+    // two rows are REPORTED, not gated — no envelope is pre-registered; the third is a
+    // DECISION taken on its own figures, and the bench header carries which is which.
     const forge_mesh_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/forge_3d_mesh.zig"),
         .target = target,
@@ -1452,11 +1428,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_mesh_bench_run.addArgs(args);
     const forge_mesh_bench_step = b.step(
         "bench-forge-mesh",
-        "Run the M1.1.11.1 forge mesh bench (build + traversal against triangle count, writes bench/results/forge_3d_mesh.md)",
+        "Run the forge mesh bench (build + traversal against triangle count, writes bench/results/forge_3d_mesh.md)",
     );
     forge_mesh_bench_step.dependOn(&forge_mesh_bench_run.step);
 
-    // -------------------------------- M1.1.12 forge character controller bench --
+    // -------------------------------- forge character controller bench --
     //
     // `moveCharacter` on a plane / stairs / a wall / a triangle mesh, plus
     // `resizeCharacter`, INTERLEAVED across reps. Writes
@@ -1480,11 +1456,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_char_bench_run.addArgs(args);
     const forge_char_bench_step = b.step(
         "bench-forge-character",
-        "Run the M1.1.12 forge character controller bench (five paths interleaved, writes bench/results/forge_3d_character.md)",
+        "Run the forge character controller bench (five paths interleaved, writes bench/results/forge_3d_character.md)",
     );
     forge_char_bench_step.dependOn(&forge_char_bench_run.step);
 
-    // M1.1.13 — sensor pass bench: the cost sleep does NOT economise, plus a floor row
+    // sensor pass bench: the cost sleep does NOT economise, plus a floor row
     // and a many-triggers row (reported, not gated).
     const forge_sensor_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/forge_3d_sensor.zig"),
@@ -1504,11 +1480,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| forge_sensor_bench_run.addArgs(args);
     const forge_sensor_bench_step = b.step(
         "bench-forge-sensor",
-        "Run the M1.1.13 forge sensor pass bench (three rows interleaved, writes bench/results/forge_3d_sensor.md)",
+        "Run the forge sensor pass bench (three rows interleaved, writes bench/results/forge_3d_sensor.md)",
     );
     forge_sensor_bench_step.dependOn(&forge_sensor_bench_run.step);
 
-    // -------------------------------------- M1.0.5 scene loader bench --------
+    // -------------------------------------- scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the
     // writer. Measurement only (median), not a gate — see the bench header.
@@ -1529,15 +1505,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| scene_load_bench_run.addArgs(args);
     const scene_load_bench_step = b.step(
         "bench-scene-load",
-        "Run the M1.0.5 scene loader bench (~10k entities, reports median)",
+        "Run the scene loader bench (~10k entities, reports median)",
     );
     scene_load_bench_step.dependOn(&scene_load_bench_run.step);
 
-    // ------------------------------------- M0.4 render instancing bench ------
+    // ------------------------------------- render instancing bench ------
     //
-    // CPU-side batcher harness for the brief Benchmarks targets
-    // (100k entities × 100 (mesh, material) distinct -> drawcall gate
-    // <= 100). GPU-side metrics live in the runtime-smoke-test CI step.
+    // CPU-side batcher harness: 100k entities × 100 distinct (mesh, material)
+    // pairs, drawcall gate <= 100. GPU-side metrics live in the
+    // runtime-smoke-test CI step.
     const render_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/render_instancing.zig"),
         .target = target,
@@ -1557,11 +1533,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| render_bench_run.addArgs(args);
     const render_bench_step = b.step(
         "bench-render-instancing",
-        "Run the M0.4 render instancing bench (writes bench/out/render_instancing_<os>.md)",
+        "Run the render instancing bench (writes bench/out/render_instancing_<os>.md)",
     );
     render_bench_step.dependOn(&render_bench_run.step);
 
-    // ------------------------------------------- M0.6 adler32 baseline bench --
+    // ------------------------------------------- adler32 baseline bench --
     //
     // Inaugural foundation/simd kernel throughput baseline. No parity target
     // (cold path — runs once at cook time). `zig build bench-adler32`.
@@ -1581,11 +1557,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| adler32_bench_run.addArgs(args);
     const adler32_bench_step = b.step(
         "bench-adler32",
-        "Run the M0.6 adler32 throughput baseline (pass `-- --smoke` for a CI sanity run)",
+        "Run the adler32 throughput baseline (pass `-- --smoke` for a CI sanity run)",
     );
     adler32_bench_step.dependOn(&adler32_bench_run.step);
 
-    // ------------------------------------------- M0.6 paeth baseline bench ----
+    // ------------------------------------------- paeth baseline bench ----
     //
     // Second foundation/simd kernel throughput baseline. No parity target.
     const paeth_bench_module = b.createModule(.{
@@ -1604,11 +1580,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| paeth_bench_run.addArgs(args);
     const paeth_bench_step = b.step(
         "bench-paeth",
-        "Run the M0.6 paeth_filter_decode throughput baseline (pass `-- --smoke` for a CI sanity run)",
+        "Run the paeth_filter_decode throughput baseline (pass `-- --smoke` for a CI sanity run)",
     );
     paeth_bench_step.dependOn(&paeth_bench_run.step);
 
-    // ------------------------------------- M0.6 asset cooking-cache bench -----
+    // ------------------------------------- asset cooking-cache bench -----
     //
     // Cold-cook-vs-warm-hit time differential. Host- and load-dependent, so
     // it lives here (archived, non-blocking, measured under the opposable
@@ -1631,15 +1607,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| asset_cache_bench_run.addArgs(args);
     const asset_cache_bench_step = b.step(
         "bench-asset-cache",
-        "Run the M0.6 cooking-cache cold-vs-hit differential (writes bench/out/asset_cache_<os>.md; pass `-- --smoke` for a CI sanity run)",
+        "Run the cooking-cache cold-vs-hit differential (writes bench/out/asset_cache_<os>.md; pass `-- --smoke` for a CI sanity run)",
     );
     asset_cache_bench_step.dependOn(&asset_cache_bench_run.step);
 
-    // ----------------------------------- M0.6 thin offline asset cook demo ----
+    // ----------------------------------- thin offline asset cook demo ----
     //
-    // `zig build cook-demo` cooks the three M0.6 fixtures end-to-end through
-    // the cache and logs hits (brief §Observable behavior). The user-facing
-    // `weld cook` CLI is Phase 1.
+    // `zig build cook-demo` cooks the three fixtures end-to-end through
+    // the cache and logs hits.
     const asset_cook_module = b.createModule(.{
         .root_source_file = b.path("tools/asset_cook/main.zig"),
         .target = target,
@@ -1655,11 +1630,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| asset_cook_run.addArgs(args);
     const asset_cook_step = b.step(
         "cook-demo",
-        "Cook the M0.6 fixtures end-to-end (import → cook → cache; logs hits)",
+        "Cook the three fixtures end-to-end (import → cook → cache; logs hits)",
     );
     asset_cook_step.dependOn(&asset_cook_run.step);
 
-    // M1.0.4 / E3 — `zig build scene-cook -- --output <out.scene.bin> <in.scene.etch>`
+    // `zig build scene-cook -- --output <out.scene.bin> <in.scene.etch>`
     // cooks one `.scene.etch` into the runtime `.scene.bin`, in-process via
     // `weld_etch.scene_cook` + `weld_core.scene.writer`. Mirrors the asset_cook
     // user-facing CLI step (built on the user target, args forwarded via `--`).
@@ -1683,10 +1658,10 @@ pub fn build(b: *std.Build) void {
     );
     scene_cook_step.dependOn(&scene_cook_run.step);
 
-    // -------------------------------------------- Fixture facade (S4 demo) --
+    // -------------------------------------------- Fixture facade (demo) --
 
     // `@embedFile` cannot escape the package root of the module that
-    // invokes it, so both the S4 bench and the S4 demo binary import this
+    // invokes it, so both the bench and the demo binary import this
     // tiny facade module that holds the fixture at its canonical path.
     const fixture_facade_module = b.createModule(.{
         .root_source_file = b.path("bench/fixture_facade.zig"),
@@ -1694,7 +1669,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // ------------------------------------------------- S4 demo binary ------
+    // ------------------------------------------------- demo binary ------
 
     const demo_module = b.createModule(.{
         .root_source_file = b.path("src/demo_etch_interp.zig"),
@@ -1715,11 +1690,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| demo_run.addArgs(args);
     const demo_step = b.step(
         "run-demo-etch-interp",
-        "Run the S4 demo (1000 entities × 5 rules × 60 ticks)",
+        "Run the interpreter demo (1000 entities × 5 rules × 60 ticks)",
     );
     demo_step.dependOn(&demo_run.step);
 
-    // -------------------------------------------- S4 Etch interpreter bench --
+    // -------------------------------------------- Etch interpreter bench --
 
     const interp_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/etch_interp.zig"),
@@ -1739,7 +1714,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| interp_bench_run.addArgs(args);
     const interp_bench_step = b.step(
         "bench-etch-interp",
-        "Run the S4 interpreter bench (pass `-- --smoke` for a CI sanity run)",
+        "Run the interpreter bench (pass `-- --smoke` for a CI sanity run)",
     );
     interp_bench_step.dependOn(&interp_bench_run.step);
 
@@ -1763,13 +1738,13 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| etch_bench_run.addArgs(args);
     const etch_bench_step = b.step(
         "bench-etch",
-        "Run the S3 Etch parse bench (pass `-- --smoke` for a CI sanity run)",
+        "Run the Etch parse bench (pass `-- --smoke` for a CI sanity run)",
     );
     etch_bench_step.dependOn(&etch_bench_run.step);
 
-    // --------------------------------------- S5 Etch → Zig codegen tool ---
+    // --------------------------------------- Etch → Zig codegen tool ---
     //
-    // `tools/etch_cook` is a standalone CLI that runs the S5 codegen on a
+    // `tools/etch_cook` is a standalone CLI that runs the codegen on a
     // list of `.etch` programs and emits a single consolidated `.zig`
     // file. The build invokes it once per corpus (the differential test
     // programs, the synthetic 100-file bench fixture) and exposes the
@@ -1792,7 +1767,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(etch_cook_exe);
 
-    // M1.0.15 — `etch_test` shim (thin CLI over `weld_etch.test_runner`) + the
+    // `etch_test` shim (thin CLI over `weld_etch.test_runner`) + the
     // `test-etch` acceptance step. The shim owns arg parsing + I/O; all logic is
     // in the library (same split as `etch_cook`).
     const etch_test_module = b.createModule(.{
@@ -1822,7 +1797,7 @@ pub fn build(b: *std.Build) void {
     const etch_driver_run = b.addRunArtifact(etch_driver_test);
     test_step.dependOn(&etch_driver_run.step);
 
-    const test_etch_step = b.step("test-etch", "Run the M1.0.15 Etch test-runner acceptance corpus (driver + shim over the green fixtures)");
+    const test_etch_step = b.step("test-etch", "Run the Etch test-runner acceptance corpus (driver + shim over the green fixtures)");
     test_etch_step.dependOn(&etch_driver_run.step);
     // Run the shim over the all-green fixtures in a SINGLE invocation (the shim
     // takes many files): prints the ✓ / skipped lines + per-file and total
@@ -1850,7 +1825,7 @@ pub fn build(b: *std.Build) void {
     const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
     for (codegen_corpus.programs) |p| {
         // `addPrefixedFileArg` content-tracks each `.etch` input in the Run
-        // step's cache manifest (M0.8 E3-D) — a raw `name=path` string arg
+        // step's cache manifest — a raw `name=path` string arg
         // is hashed by its bytes only, so a source edit would not
         // invalidate the cached cook output.
         cook_diff_run.addPrefixedFileArg(b.fmt("{s}=", .{p.name}), b.path(p.etch_path));
@@ -1890,11 +1865,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&codegen_diff_run.step);
     const codegen_diff_step = b.step(
         "test-codegen-diff",
-        "Run the S5 differential corpus through the Zig codegen runner",
+        "Run the differential corpus through the Zig codegen runner",
     );
     codegen_diff_step.dependOn(&codegen_diff_run.step);
 
-    // Level-B serialized-IR differential (M0.8 E4): interpreter-built
+    // Level-B serialized-IR differential: interpreter-built
     // descriptors vs cooked emit-structure, byte-identical canonical dumps.
     const levelb_ir_diff_module = b.createModule(.{
         .root_source_file = b.path("tests/etch_interp/levelb_ir_diff_test.zig"),
@@ -1923,7 +1898,7 @@ pub fn build(b: *std.Build) void {
     const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
     const codegen_parity_run = b.addRunArtifact(codegen_parity_test);
     test_step.dependOn(&codegen_parity_run.step);
-    // M0.8 E7 — `zig build test-ref500-codegen` runs the interp↔codegen parity
+    // `zig build test-ref500-codegen` runs the interp↔codegen parity
     // suite, which includes program 84 (the full-grammar TOTAL codegen
     // integration: cook whole-file + Sema-compile + Level-A byte-exact).
     const ref500_codegen_step = b.step(
@@ -1932,7 +1907,7 @@ pub fn build(b: *std.Build) void {
     );
     ref500_codegen_step.dependOn(&codegen_parity_run.step);
 
-    // ----------------------------------------- S5 etch_synth tool ------------
+    // ----------------------------------------- etch_synth tool ------------
 
     const etch_synth_module = b.createModule(.{
         .root_source_file = b.path("tools/etch_synth/main.zig"),
@@ -1952,7 +1927,7 @@ pub fn build(b: *std.Build) void {
     );
     etch_synth_step.dependOn(&etch_synth_run.step);
 
-    // -------------------------------- S5 demo binary (run-demo-etch-codegen) --
+    // -------------------------------- demo binary (run-demo-etch-codegen) --
 
     const cook_demo_run = b.addRunArtifact(etch_cook_exe);
     cook_demo_run.addArg("--output");
@@ -1984,17 +1959,17 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| demo_codegen_run.addArgs(args);
     const demo_codegen_step = b.step(
         "run-demo-etch-codegen",
-        "Run the S5 codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
+        "Run the codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
     );
     demo_codegen_step.dependOn(&demo_codegen_run.step);
 
-    // ----------------------- M0.9 / E3 vertical slice (run-vertical-slice) --
+    // ----------------------- vertical slice (run-vertical-slice) --
     // Headless slice: cook examples/vertical_slice/gameplay.etch (POD
-    // components + 5 rules) → cooked module; the host (main.zig) spawns 100
-    // entities (Option A host-spawn, brief Blockers #1) and ticks the rules at
-    // a fixed 60 Hz timestep. The *.scene.etch / *.prefab.etch are NOT cooked
+    // components + 5 rules) → cooked module; the HOST (main.zig) spawns the 100
+    // entities — the cooked module does not — and ticks the rules at a fixed
+    // 60 Hz timestep. The *.scene.etch / *.prefab.etch are NOT cooked
     // here — they are authored content cross-file validated by the integration
-    // test (E2-B), not loaded (Phase 1 Scene Serialization).
+    // test, not loaded — scene serialization is another milestone's.
     const cook_slice_run = b.addRunArtifact(etch_cook_exe);
     cook_slice_run.addArg("--output");
     const slice_codegen_path = cook_slice_run.addOutputFileArg("cooked_vertical_slice.zig");
@@ -2007,8 +1982,8 @@ pub fn build(b: *std.Build) void {
     });
     cooked_slice_module.addImport("weld_core", core_module);
 
-    // M0.9 / E4 — the slice gains a Vulkan forward renderer + an M0.6-cooked
-    // texture asset + M0.3 input. The host module (main.zig) file-imports
+    // the slice gains a Vulkan forward renderer + a cooked
+    // texture asset + input. The host module (main.zig) file-imports
     // sim.zig / render.zig / math.zig, so its named deps (core/render/assets/
     // cooked) cover all three files.
     const slice_module = b.createModule(.{
@@ -2026,8 +2001,8 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(slice_exe);
 
-    // E4 — cook the slice's single source asset (PNG → .texture.bin) through
-    // the real M0.6 pipeline, installed to a stable path the runtime Loader
+    // cook the slice's single source asset (PNG → .texture.bin) through
+    // the real pipeline, installed to a stable path the runtime Loader
     // reads (zig-out/vertical-slice-assets/slice_albedo.texture.bin).
     const cook_assets_module = b.createModule(.{
         .root_source_file = b.path("examples/vertical_slice/cook_assets.zig"),
@@ -2049,7 +2024,7 @@ pub fn build(b: *std.Build) void {
     );
     const cook_assets_step = b.step(
         "cook-vertical-slice-assets",
-        "Cook the M0.9 slice's source asset (PNG → .texture.bin) via M0.6",
+        "Cook the vertical slice's source asset (PNG → .texture.bin) through the asset pipeline",
     );
     cook_assets_step.dependOn(&install_slice_assets.step);
 
@@ -2059,12 +2034,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| slice_run.addArgs(args);
     const slice_run_step = b.step(
         "run-vertical-slice",
-        "Run the M0.9 vertical slice (windowed render; --smoke-test / --headless)",
+        "Run the vertical slice (windowed render; --smoke-test / --headless)",
     );
     slice_run_step.dependOn(&slice_run.step);
 
     // Integration test: imports the slice module (sim + render via re-export) +
-    // weld_etch (E2-B validateProject) + weld_asset_pipeline (in-memory asset
+    // weld_etch (`validateProject`) + weld_asset_pipeline (in-memory asset
     // cook+load verify). composeNull exercises the render path cross-platform.
     const slice_test_module = b.createModule(.{
         .root_source_file = b.path("tests/integration/vertical_slice_test.zig"),
@@ -2080,11 +2055,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&slice_test_run.step);
     const slice_test_step = b.step(
         "test-vertical-slice",
-        "Run the M0.9 vertical slice integration test",
+        "Run the vertical slice integration test",
     );
     slice_test_step.dependOn(&slice_test_run.step);
 
-    // ----------------------------- S5 compile-time bench (3 metrics) -------
+    // ----------------------------- compile-time bench (3 metrics) -------
 
     const compile_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/etch_compile.zig"),
@@ -2092,7 +2067,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     // The bench consumes the consolidated cook IN-PROCESS through the
-    // codegen library (M0.8 E3-D, D-S5-etchcook-inproc) — no etch_cook
+    // codegen library — no etch_cook
     // child process on the timed path.
     compile_bench_module.addImport("weld_etch", etch_module);
     const compile_bench_exe = b.addExecutable(.{
@@ -2104,14 +2079,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| compile_bench_run.addArgs(args);
     const compile_bench_step = b.step(
         "bench-etch-compile",
-        "Run the S5 compile-time bench (cook + cold + incremental, N=10; pass `-- --smoke` for CI)",
+        "Run the compile-time bench (cook + cold + incremental, N=10; pass `-- --smoke` for CI)",
     );
     compile_bench_step.dependOn(&compile_bench_run.step);
 
-    // -------------------------------------------- bindgen (M0.2 unified) --
+    // -------------------------------------------- bindgen (unified) --
     //
     // Unified bindgen system per `engine-c-bindings.md` §1. The two
-    // M0.2 adapters (`vk_xml`, `wayland_xml`) port the legacy S2
+    // adapters (`vk_xml`, `wayland_xml`) port the legacy
     // generators 1:1. Run explicitly via:
     //   - `zig build bindgen`                — regenerate every adapter
     //   - `zig build bindgen -- --target vulkan`  — only Vulkan
@@ -2131,11 +2106,10 @@ pub fn build(b: *std.Build) void {
     });
     const vk_gen_run = b.addRunArtifact(vk_gen_exe);
     vk_gen_run.has_side_effects = true;
-    // Generator output is unformatted; the brief's "bindgen-vk produces
-    // an empty diff" criterion only holds after `zig fmt` normalises
-    // identifier escapes (e.g. `@"undefined"` → `undefined`) and trims
-    // trailing blank lines. Pipe through fmt in the same step so the
-    // command is self-sufficient regardless of pre-commit hooks.
+    // Generator output is unformatted, so `bindgen-vk` produces an empty diff
+    // only after `zig fmt` normalises identifier escapes (e.g. `@"undefined"` →
+    // `undefined`) and trims trailing blank lines. Pipe through fmt in the same
+    // step so the command is self-sufficient regardless of pre-commit hooks.
     const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/core/platform/vk.zig" });
     vk_gen_fmt.step.dependOn(&vk_gen_run.step);
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
@@ -2177,7 +2151,7 @@ pub fn build(b: *std.Build) void {
     bindgen_step.dependOn(&vk_gen_fmt.step);
     bindgen_step.dependOn(&wayland_gen_fmt.step);
 
-    // ------------------------------- .d.etch service-spec emitter (M1.1.15.2 G3) --
+    // ------------------------------- .d.etch service-spec emitter --
     //
     // `engine-c-bindings.md` §8.4: the `bindgen.ServiceSpec` a Tier 1 module
     // declares is the SOURCE OF TRUTH, and the committed `.d.etch` is a derived
@@ -2227,7 +2201,7 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------- bindgen-verify gate --
     //
-    // M0.2 / E5 non-negotiable mechanical criterion: regenerate then
+    // The non-negotiable mechanical criterion: regenerate then
     // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
     // 0 if the regen matches the committed output bit-for-bit; non-zero
     // (visible diff) signals a divergence and blocks the merge.
@@ -2247,9 +2221,9 @@ pub fn build(b: *std.Build) void {
     );
     bindgen_verify_step.dependOn(&bindgen_verify_diff.step);
 
-    // -------------------------------------- weld_lint (M0.0 custom linter) --
+    // -------------------------------------- weld_lint (custom linter) --
     //
-    // In-tree Zig linter enforcing the four patterns from M0.0:
+    // In-tree Zig linter enforcing four patterns:
     //  - no `@cImport`
     //  - no `usingnamespace`
     //  - `///` doc comments on every root-level `pub` declaration
@@ -2284,7 +2258,7 @@ pub fn build(b: *std.Build) void {
     );
     lint_step.dependOn(&lint_run.step);
 
-    // M1.1.14 — the dead-test guard, ACTIVE. Every file holding a `test` block
+    // the dead-test guard, ACTIVE. Every file holding a `test` block
     // must belong to some test target's analysis closure or to a declared
     // exclusion. It builds nothing and runs nothing: it reads `build.zig` for its
     // roots and walks relative imports, so it costs a tree scan and rides on the
@@ -2302,7 +2276,7 @@ pub fn build(b: *std.Build) void {
     const dead_tests_run = b.addRunArtifact(weld_lint_exe);
     dead_tests_run.addArg("dead-tests");
 
-    // M1.1.14 review — `-Dexpect-collected=N` FORWARDED, and the reason it exists is
+    // `-Dexpect-collected=N` FORWARDED, and the reason it exists is
     // that the conservation it feeds was unreachable. The tool's suite-derived check
     // sat behind `--expect-collected=N` and NOTHING passed it: not this file, not the
     // CI. So the lint printed an expected-collected line and then printed `clean`,
@@ -2381,7 +2355,7 @@ pub fn build(b: *std.Build) void {
     );
     lint_commit_step.dependOn(&lint_commit_run.step);
 
-    // M0.0 — runner_test for the linter fixture corpus. The test spawns
+    // runner_test for the linter fixture corpus. The test spawns
     // the installed `weld_lint` binary, so wire the install step in as
     // an explicit dependency just like `tests/ipc/crash_recovery.zig`
     // wires the runtime binary.
@@ -2395,7 +2369,7 @@ pub fn build(b: *std.Build) void {
     lint_runner_run.step.dependOn(&b.addInstallArtifact(weld_lint_exe, .{}).step);
     test_step.dependOn(&lint_runner_run.step);
 
-    // M1.1.14 — the linter's OWN inline tests. The fixture corpus above proves
+    // the linter's OWN inline tests. The fixture corpus above proves
     // each rule is WIRED into `runLint`, by running the real binary; it cannot
     // prove a rule's logic, since the runner only reads an exit code and a
     // fixture can say no more than "something fired". The two layers are
@@ -2418,7 +2392,7 @@ pub fn build(b: *std.Build) void {
     const weld_lint_unit_test = b.addTest(.{ .root_module = weld_lint_test_module });
     test_step.dependOn(&b.addRunArtifact(weld_lint_unit_test).step);
 
-    // M1.1.14 — three modules held `test` blocks that NO test target collected,
+    // three modules held `test` blocks that NO test target collected,
     // so they had never run: `src/modules/render/` (49 blocks), `tools/bindgen/`
     // (8) and `src/modules/audio/` (1). Found by counting source `test` blocks
     // against the suite's own per-target totals, then confirming each by
@@ -2429,7 +2403,7 @@ pub fn build(b: *std.Build) void {
     // an anonymous literal in `buildPass`'s OWN STACK FRAME. Measured on
     // `depth_prepass`: `writes.ptr` is a stack address, `depth_attachment` reads
     // `false` immediately after the call, and a fresh call at the SAME address
-    // reads `true` — a use-after-return, live since M0.4 and invisible because
+    // reads `true` — a use-after-return, long-lived and invisible because
     // nothing ever compiled the tests that assert it. `forward.zig` fails
     // identically. The fix is an ownership decision in the render graph, not a
     // determinism change, so it is reported rather than taken here.
