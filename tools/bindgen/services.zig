@@ -1,5 +1,5 @@
 //! Explicit manifest of the Tier 1 modules exposing services to Etch
-//! (M1.1.15.2 G3, `engine-c-bindings.md` §8.4.2).
+//! (`engine-c-bindings.md` §8.4.2).
 //!
 //! Explicit and not auto-discovered, for the reason §8.4.2 gives: Zig cannot
 //! scan a source directory at comptime, and "explicit > magic" means a module
@@ -38,8 +38,8 @@ pub const entries = .{
         .source_path = "tests/etch_services/toy_service.zig",
         .output_dir = "tests/etch_services",
     },
-    // M1.1.15.2 G6 — the FIRST real Tier 1 module in the manifest, and the one
-    // whose entry expires the single-cell premise recorded in the milestone brief:
+    // The FIRST real Tier 1 module in the manifest, and the one whose entry
+    // expires the single-cell premise:
     // `-Dphysics_f64` switches `forge_3d` to double precision, so a service whose
     // emitted types followed `Real` would render differently per cell. This one's
     // do not — every float it declares is `f64` and renders `float` at both
@@ -71,7 +71,7 @@ pub fn specsOf(comptime entry: Entry) []const services.ServiceSpec {
 }
 
 /// Every `EventSpec` an entry's module declares, in declaration order
-/// (M1.1.15.2 G4). Same walk as `specsOf`, different type — an event a Tier 1
+/// Same walk as `specsOf`, different type — an event a Tier 1
 /// module publishes is guarded exactly as its services are.
 pub fn eventsOf(comptime entry: Entry) []const services.EventSpec {
     comptime {

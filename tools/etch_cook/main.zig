@@ -1,10 +1,10 @@
 //! `etch_cook` — thin CLI shim over the consolidated cook library
-//! (`weld_etch.codegen_zig.consolidate`, M0.8 E3-D, D-S5-etchcook-inproc).
+//! (`weld_etch.codegen_zig.consolidate`).
 //! The shim owns arg parsing and file I/O only; parse + type-check +
 //! codegen + namespace wrapping + the `programs` table all live in the
 //! library, which the bench harness consumes IN-PROCESS (no child process
 //! on the timed path). The CLI remains for the build-graph cooks
-//! (`b.addRunArtifact`): the 61-program differential corpus and the demo.
+//! (`b.addRunArtifact`): the differential corpus and the demo.
 //!
 //! CLI:
 //!     etch_cook --output <out.zig> <name1>=<path1.etch> [<name2>=<path2.etch> ...]
@@ -12,8 +12,8 @@
 //! Each input arg pairs a short alphanumeric **namespace name** (used as the
 //! Zig identifier of the nested struct) with the path to its source file.
 //! Output is written to `--output` (created / truncated), plus a
-//! `<output>.stats` sidecar (rules + distinct signatures — Gate 4
-//! reporting). The tool exits with code 0 on success and 1 on the first
+//! `<output>.stats` sidecar (rules + distinct signatures). The tool exits
+//! with code 0 on success and 1 on the first
 //! input that fails parse/type-check/codegen.
 
 const std = @import("std");
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
 
     try writeOutput(io, cwd, output.?, buffer.items);
 
-    // Stats sidecar — consumed for Gate 4 reporting. One line per metric,
+    // Stats sidecar. One line per metric,
     // key=value (whitespace-tolerant). The path mirrors the output with a
     // `.stats` suffix so consumers know where to look without an extra
     // CLI flag.

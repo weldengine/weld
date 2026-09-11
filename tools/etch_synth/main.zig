@@ -1,7 +1,8 @@
 //! `etch_synth` — deterministic synthetic Etch corpus generator. Produces
 //! N `.etch` files seeded for byte-identical reproducibility (same `--seed`
 //! across runs / platforms ⇒ same outputs). Each file has 5–10 components
-//! and 3–5 rules drawn from the S3 subset, exercising arithmetic, when
+//! and 3–5 rules drawn from the grammar subset the compile bench covers,
+//! exercising arithmetic, when
 //! clauses with single and multi-component filters, and a couple of
 //! resource gates so the cooked corpus stresses every codegen path the
 //! `bench-etch-compile` bench cares about.

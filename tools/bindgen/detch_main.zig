@@ -1,5 +1,5 @@
 //! CLI behind `zig build bindgen-detch` and `zig build bindgen-check`
-//! (M1.1.15.2 G3, `engine-c-bindings.md` §8.4.4).
+//! (`engine-c-bindings.md` §8.4.4).
 //!
 //! Two modes over the same rendering, which is the point: the check cannot
 //! disagree with the regeneration, because both call `emit_detch.emit` and

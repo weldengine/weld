@@ -152,14 +152,6 @@ pub const pending = [_]Pending{
     .{ .prefix = "src/etch/test_runner.zig" },
     .{ .prefix = "src/etch/descriptor_types.zig" },
     .{ .prefix = "src/interfaces" },
-    .{ .prefix = "tools/asm_inventory" },
-    .{ .prefix = "tools/asset_cook" },
-    .{ .prefix = "tools/bindgen" },
-    .{ .prefix = "tools/etch_cook" },
-    .{ .prefix = "tools/etch_synth" },
-    .{ .prefix = "tools/etch_test" },
-    .{ .prefix = "tools/scene_cook" },
-    .{ .prefix = "tools/shader_compiler" },
     .{ .prefix = "bench" },
 };
 /// Whether `file` is inside a subtree the pass has not read yet.

@@ -1,5 +1,5 @@
-//! `scene_cook` — thin CLI shim around the M1.0.4 scene cook and the M1.0.6
-//! prefab cook. Parses args + does file I/O; all real work is
+//! `scene_cook` — thin CLI shim around the scene cook and the prefab cook.
+//! Parses args + does file I/O; all real work is
 //! `weld_etch.scene_cook.{cook,cookPrefab}` + `weld_core.scene.writer.write`
 //! in-process. Mirrors `tools/etch_cook` / `tools/asset_cook`.
 //!

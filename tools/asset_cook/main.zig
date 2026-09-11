@@ -1,6 +1,6 @@
-//! Thin offline asset cook entry (M0.6 / E4 — brief §Observable behavior).
+//! Thin offline asset cook entry.
 //!
-//! Cooks the three M0.6 fixtures (PNG / glTF / WAV) end-to-end: import →
+//! Cooks the three fixtures (PNG / glTF / WAV) end-to-end: import →
 //! intermediate `<type>.asset.etch` + `.weld/blobs/<hash>.blob` → cook →
 //! `.weld/cooked/pc/<name>.<type>.bin`, driven through the local cooking
 //! cache. Re-running logs a cache hit and skips the cook.
@@ -10,8 +10,8 @@
 //! generate-once / preserve-forever identity policy (the pure importer
 //! receives the already-resolved uuid; the fs-aware resolution lives here).
 //!
-//! This is the thin offline surface; the user-facing `weld cook` CLI is
-//! Phase 1 (brief §Out-of-scope).
+//! This is the thin offline surface. There is no user-facing `weld cook` CLI,
+//! and nothing here is that CLI's entry point.
 //!
 //! Usage: `zig build cook-demo [-- <out_dir>]` (default `zig-out/cook-demo`).
 

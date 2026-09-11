@@ -1,25 +1,21 @@
-//! `ApiDescription` validator (M0.2 / E5 skeleton).
+//! `ApiDescription` validator — a SKELETON.
 //!
-//! Checks the internal consistency of a description before emission:
-//! resolved type refs, no unhandled cycles, consistent
-//! annotations (cf. `engine-c-bindings.md` §9.2). Run by
-//! `tools/bindgen/main.zig` after each adapter and before
-//! `emitter`.
+//! Meant to check the internal consistency of a description before emission:
+//! resolved type refs, no unhandled cycles, consistent annotations (cf.
+//! `engine-c-bindings.md` §9.2), between an adapter and `emitter`.
 //!
-//! M0.2 status: **skeleton**. The adapters `vk_xml` and
-//! `wayland_xml` short-circuit the `.api.zig` →
-//! `emitter` pipeline in M0.2 (E5 (i) technical decision), so the
-//! validator has no complete description to check in this
-//! milestone. The skeleton is in place for the Phase 1+ adapters
-//! that will consume `ApiDescription` as the canonical input.
+//! NOTHING CALLS IT. `tools/bindgen/main.zig` names it in a comment and invokes
+//! it nowhere, because the adapters `vk_xml` and `wayland_xml` short-circuit the
+//! `.api.zig` → `emitter` pipeline and leave no complete description to check.
+//! The skeleton is in place for the first adapter that consumes an
+//! `ApiDescription` as its canonical input.
 
 const std = @import("std");
 const api = @import("api_description.zig");
 
-/// Errors surfaced by `validate`. Bounded at the M0.2
-/// skeleton level; the real content will be fleshed out when a first
-/// Phase 1 adapter produces an `ApiDescription` exercising the
-/// rules.
+/// Errors surfaced by `validate`. Bounded at the skeleton level; the real
+/// content arrives with the first adapter that produces an `ApiDescription`
+/// exercising the rules.
 pub const ValidationError = error{
     UnresolvedTypeRef,
     UnsupportedCycle,
@@ -27,11 +23,10 @@ pub const ValidationError = error{
     NameCollision,
 };
 
-/// Checks the internal consistency of an `ApiDescription`. M0.2
-/// skeleton — always `Ok`. The real checks
-/// (ref resolution, cycle detection, ownership consistency)
-/// are introduced by the first Phase 1+ adapters that
-/// consume `ApiDescription`.
+/// Checks the internal consistency of an `ApiDescription`. Skeleton — always
+/// `Ok`. The real checks (ref resolution, cycle detection, ownership
+/// consistency) arrive with the first adapter that consumes an
+/// `ApiDescription`.
 pub fn validate(desc: api.ApiDescription) ValidationError!void {
     // Minimalist safeguard: an empty name is a signal that we
     // are not using the format. Prefer to raise explicitly rather

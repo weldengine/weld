@@ -1,4 +1,4 @@
-//! Common idiomatic Zig emitter (M0.2 / E5 skeleton).
+//! Common idiomatic Zig emitter — a SKELETON.
 //!
 //! Consumes an `ApiDescription` (already validated + resolved) and
 //! produces the Zig wrapper `<name>_binding.zig` in the
@@ -6,23 +6,20 @@
 //! strategies (`dlopen`, `dlopen_loader_pattern`, `framework`,
 //! `static_link`, cf. `engine-c-bindings.md` §4.6).
 //!
-//! M0.2 status: **structural skeleton**. The adapters
-//! `vk_xml` and `wayland_xml` carry their own 1:1 emission
-//! pipelines from `tools/vk_gen/` / `tools/wayland_gen/`
-//! and write the idiomatic Zig directly without going through
-//! this common emitter (E5 (i) technical decision of the brief —
-//! preservation of the non-negotiable "empty diff" criterion).
+//! NOTHING GOES THROUGH IT. The adapters `vk_xml` and `wayland_xml`
+//! carry their own emission pipelines and write the idiomatic Zig
+//! directly, so that their regeneration keeps producing an empty diff
+//! against the committed bindings.
 //!
-//! This emitter will be exercised by the first Phase 1+ keepers
-//! (Opus, Assimp, KTX/Basis, libdatachannel, ACL compressor,
-//! HarfBuzz, ONNX) which describe their surface in
-//! `bindings/manual/*.api.zig` and have no retroactive `empty diff`
-//! constraint.
+//! It is meant for the seven authorised keepers (Opus, Assimp,
+//! KTX/Basis, libdatachannel, ACL compressor, HarfBuzz, ONNX), which
+//! describe their surface in `bindings/manual/*.api.zig` and have no
+//! retroactive `empty diff` constraint.
 
 const std = @import("std");
 const api = @import("api_description.zig");
 
-/// Errors surfaced by `emit`. M0.2 skeleton.
+/// Errors surfaced by `emit`. Skeleton.
 pub const EmitError = error{
     UnsupportedStrategy,
     UnsupportedTypeKind,
@@ -30,11 +27,10 @@ pub const EmitError = error{
 };
 
 /// Emits the idiomatic Zig wrapper for `desc` into `out`.
-/// M0.2 skeleton: writes a commented placeholder stating that
-/// the real emission is short-circuited by the adapters
-/// `vk_xml` and `wayland_xml`; the first Phase 1+ adapters
-/// will replace this body with the full emission of the 4
-/// dlopen strategies.
+/// SKELETON: writes a commented placeholder stating that the real
+/// emission is short-circuited by the adapters `vk_xml` and
+/// `wayland_xml`. The first keeper replaces this body with the full
+/// emission of the four dlopen strategies.
 pub fn emit(
     desc: api.ApiDescription,
     out: *std.Io.Writer,
@@ -53,9 +49,10 @@ pub fn emit(
 
 test "emit writes a placeholder for a minimal description" {
     const gpa = std.testing.allocator;
-    // M1.1.14 — `ArrayList.writer` was removed in Zig 0.16; `Io.Writer.Allocating`
-    // is the in-tree idiom (`src/modules/asset_pipeline/format/intermediate.zig`).
-    // This test had never compiled since the 0.16 pin: nothing collected it.
+    // Do NOT reach for `ArrayList.writer`: it was removed in Zig 0.16, and
+    // `Io.Writer.Allocating` is the in-tree idiom
+    // (`src/modules/asset_pipeline/format/intermediate.zig`). A test using it
+    // does not compile, and an uncollected test says nothing about that.
     var aw = std.Io.Writer.Allocating.init(gpa);
     defer aw.deinit();
     const desc = api.ApiDescription{

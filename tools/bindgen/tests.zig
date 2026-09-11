@@ -1,9 +1,9 @@
 //! Test root for the bindgen tool's own unit tests.
 //!
 //! `main.zig` reaches its adapters through plain `const` imports, which a test
-//! build does not analyse, so rooting a test target there collects NOTHING —
-//! measured at M1.1.14: the target was added, the suite total moved by zero.
-//! Only a `comptime` block that REFERENCES each import collects their tests.
+//! build does not analyse, so rooting a test target there collects NOTHING: the
+//! target builds and the suite total does not move. Only a `comptime` block that
+//! REFERENCES each import collects their tests.
 //! Same trap as `tools/weld_lint/tests.zig` and `src/etch/root.zig`; see
 //! `engine-zig-conventions.md` §13.
 

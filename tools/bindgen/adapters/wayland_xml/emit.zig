@@ -1,4 +1,6 @@
-//! Emit Wayland protocol bindings as Zig source. Throwaway in S3.
+//! Emit Wayland protocol bindings as Zig source. LIVE: this is what
+//! `zig build bindgen-wayland` runs; `engine-c-bindings.md` §10.1 plans its
+//! replacement by the unified emitter, which has not happened.
 //!
 //! Output per `<protocol>`:
 //!   * Per-interface metadata (enums, opcode structs, `wl_X_listener`,
@@ -372,7 +374,7 @@ const Ctx = struct {
 
         // WlMessage arrays + WlInterface metadata.
         //
-        // Per-message types arrays (M0.3+ fix). Each message that has at
+        // Per-message types arrays. Each message that has at
         // least one object/new_id/array arg needs a `wl_interface*`-array
         // sibling so libwayland-client can route protocol type info — see
         // `writeMessageTypesArray` below for the layout rules. Messages

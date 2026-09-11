@@ -1,7 +1,5 @@
-//! Vulkan binding adapter for the unified bindgen pipeline (M0.2 /
-//! E5). Port 1:1 of the legacy `tools/vk_gen/` — same parser, same
-//! whitelist, same emitter. Lives under `tools/bindgen/adapters/`
-//! per `engine-c-bindings.md` §2.1.
+//! Vulkan binding adapter for the unified bindgen pipeline. Lives
+//! under `tools/bindgen/adapters/` per `engine-c-bindings.md` §2.1.
 //!
 //! Pipeline:
 //!     bindings/upstream/vulkan/vk.xml
@@ -20,10 +18,11 @@ const std = @import("std");
 const parser = @import("vk_xml/parser.zig");
 const emit = @import("vk_xml/emit.zig");
 
-/// Whitelist for the S2 spike. Stored as data (not magic) per the brief.
-/// Includes the four feature blocks per Vulkan version (BASE / GRAPHICS /
-/// COMPUTE / aggregate) for 1.0 → 1.3, plus the five extensions the spike
-/// uses to talk to the surface, swapchain, and validation layers.
+/// The emitted Vulkan surface, stored as DATA and not as generator logic so a
+/// reader can see the whole scope in one place. The four feature blocks per
+/// version (BASE / GRAPHICS / COMPUTE / aggregate) for 1.0 → 1.3, plus the five
+/// extensions the engine uses to talk to the surface, swapchain and validation
+/// layers.
 const whitelist = parser.Whitelist{
     .features = &.{
         "VK_BASE_VERSION_1_0",

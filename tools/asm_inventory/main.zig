@@ -8,14 +8,12 @@
 //! which emits the assembly of `forge_3d` for the three targets the engine
 //! ships and hands the paths here.
 //!
-//! **Why a Zig scanner and not `grep`.** The brief for M1.1.14 requires the
-//! pattern to be anchored on the instruction mnemonic at line start and warns
-//! against `\b`, a GNU extension that silently matches NOTHING on BSD grep —
-//! the failure mode being a check that reports clean because it never matched
-//! anything at all. Substituting a scanner removes the whole class rather than
-//! working around one instance of it: there is no regular expression here, no
-//! shell quoting, and identical behaviour on every host. The substitution is
-//! named, as the brief requires.
+//! **Why a Zig scanner and not `grep`.** The pattern must be anchored on the
+//! instruction mnemonic at line start, and `\b` cannot do it: it is a GNU
+//! extension that silently matches NOTHING on BSD grep, so the check reports
+//! clean because it never matched anything at all. A scanner removes the whole
+//! class rather than working around one instance of it: no regular expression,
+//! no shell quoting, identical behaviour on every host.
 //!
 //! **What this inventory does NOT establish, and it has to be said here because
 //! the next reader will assume otherwise.** `ARCH-031` rule 2 — no implicit
