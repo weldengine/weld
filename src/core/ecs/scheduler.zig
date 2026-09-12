@@ -670,8 +670,9 @@ pub const SystemScheduler = struct {
         errdefer _ = phase.systems.pop();
 
         // Allocate the per-system command buffer alongside the
-        // descriptor. The cmd buffer borrows `world` for type
-        // resolution and uses `gpa` as its backing allocator.
+        // descriptor. It borrows no world — a buffer that did would hand the
+        // system back the unrestricted handle its view withholds — and uses
+        // `gpa` as its backing allocator.
         try phase.command_buffers.append(gpa, CommandBuffer.init(gpa));
         errdefer {
             var popped_cb = phase.command_buffers.pop();

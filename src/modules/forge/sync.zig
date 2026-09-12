@@ -519,8 +519,10 @@ const Access = core.ecs.Access;
 
 /// The handle the registered systems reach the solver through, held as an ECS resource.
 ///
-/// **A `SystemFn` receives only a `SystemContext`**, which carries the `World` and no channel
-/// for a module's own state, so the pointer has to live somewhere the context can reach.
+/// **A `SystemFn` receives only a context**, which carries no channel for a module's own
+/// state — and since declared-access enforcement, not even an unrestricted world: the body
+/// gets a `View` over the set it declared. So the pointer has to live somewhere the context
+/// can reach, and a resource is what a view reaches by its declared type.
 /// `FrameContext.user` exists and was REFUSED: it is ONE `?*anyopaque` slot shared by the
 /// whole engine, so the first module to claim it wins and the second silently loses. A
 /// resource keyed on this type collides with nothing by construction.
