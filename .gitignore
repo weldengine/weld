@@ -37,3 +37,6 @@ desktop.ini
 # Claude Code (project-level settings whitelisted)
 .claude/*
 !.claude/settings.json
+
+# Objects a hand-run of the C witness leaves beside its source.
+*.o

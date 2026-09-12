@@ -163,6 +163,43 @@ pub const Command = union(CommandKind) {
     clear_tag: TagCommand,
 };
 
+/// Turn a command's declared TYPE into a `ComponentId` against `world`.
+///
+/// **This runs at the APPLY boundary, and that placement is the contract.**
+/// Resolution was moved off the record path when the buffer lost its world, so
+/// a command can sit in a buffer with `component_id` meaningless. Every
+/// function that applies one therefore resolves first — `CommandBuffer.applyOne`
+/// and the two in `observers.zig` — and the set of such functions is the
+/// derivation "every function that consumes a `Command` and mutates the world".
+///
+/// It is placed here rather than as a pre-pass over a buffer because a pre-pass
+/// covers the buffers someone remembered to pass it: the Etch tick-boundary
+/// drain reads `observer_registry.deferred` through neither `flush` nor
+/// `flushWithObservers`, and a per-buffer pass missed it silently — the
+/// resolution never ran and `spawnDynamicWithValues` received a slice of
+/// `undefined` ids.
+///
+/// Idempotent: a command already carrying its id has no resolver and is left
+/// alone, so applying one twice resolves once.
+pub fn resolveInPlace(cmd: *Command, world: *World, gpa: std.mem.Allocator) !void {
+    switch (cmd.*) {
+        .spawn => |*sp| {
+            for (sp.resolvers, sp.component_ids[0..sp.resolvers.len]) |r, *slot| {
+                slot.* = try r(world, gpa);
+            }
+        },
+        .add_component => |*a| {
+            if (a.resolve) |r| a.component_id = try r(world, gpa);
+        },
+        .remove_component => |*r| {
+            if (r.resolve) |f| r.component_id = try f(world, gpa);
+        },
+        // The tag commands carry a `tagset_id` their caller already holds:
+        // nothing to resolve, and nothing that needs a world.
+        .despawn, .set_tag, .clear_tag => {},
+    }
+}
+
 /// Per-system command buffer.
 pub const CommandBuffer = struct {
     /// THE TYPE DECLARES ITS OWN REFUSAL, and its value is the reason.
@@ -330,48 +367,18 @@ pub const CommandBuffer = struct {
     /// flush is used by tests that exercise the cmd-buffer logic in
     /// isolation.
     pub fn flush(self: *CommandBuffer, world: *World) !void {
-        try self.resolveComponentIds(world);
         for (self.commands.items) |cmd| {
             try self.applyOne(world, cmd);
         }
         self.reset();
     }
 
-    /// Turn every recorded command's type into a `ComponentId` against `world`.
-    ///
-    /// Runs ONCE per flush, before the first mutation, and must: an observer
-    /// firing mid-flush can record into another buffer, but the commands of
-    /// THIS one are all resolved before any of them applies — so a resolution
-    /// cannot observe a registry the flush itself has changed.
-    ///
-    /// Registering a type is itself a world mutation, which is why this is at
-    /// flush time and not at record time: a buffer with no world cannot
-    /// register, and a buffer that could would be a world handle.
-    pub fn resolveComponentIds(self: *CommandBuffer, world: *World) !void {
-        for (self.commands.items) |*cmd| {
-            switch (cmd.*) {
-                .spawn => |*sp| {
-                    for (sp.resolvers, sp.component_ids[0..sp.resolvers.len]) |r, *slot| {
-                        slot.* = try r(world, self.gpa);
-                    }
-                },
-                .add_component => |*a| {
-                    if (a.resolve) |r| a.component_id = try r(world, self.gpa);
-                },
-                .remove_component => |*r| {
-                    if (r.resolve) |f| r.component_id = try f(world, self.gpa);
-                },
-                // The tag commands carry a `tagset_id` their caller already
-                // holds: nothing to resolve, and nothing that needs a world.
-                .despawn, .set_tag, .clear_tag => {},
-            }
-        }
-    }
-
     /// Apply a single command. Exposed at module scope so the
     /// observer-aware flush in `observers.zig` can interleave
     /// dispatch between mutations.
-    pub fn applyOne(self: *CommandBuffer, world: *World, cmd: Command) !void {
+    pub fn applyOne(self: *CommandBuffer, world: *World, cmd_in: Command) !void {
+        var cmd = cmd_in;
+        try resolveInPlace(&cmd, world, self.gpa);
         switch (cmd) {
             .spawn => |s| {
                 _ = try world.spawnDynamicWithValues(

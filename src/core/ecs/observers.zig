@@ -353,14 +353,9 @@ pub fn flushWithObservers(
     // no observer dispatch on these, since they were observer-issued
     // and we do not want recursion).
     if (reg.deferred) |*deferred| {
-        try deferred.resolveComponentIds(world);
         for (deferred.commands.items) |c| try applyRawCommand(world, gpa, c);
         deferred.reset();
     }
-
-    // The system's own commands, resolved as a block before the first apply —
-    // see `CommandBuffer.resolveComponentIds` for why that order matters.
-    try cmd.resolveComponentIds(world);
 
     // Then — apply this system's cmds with observers dispatched
     // around each one. Observers may queue more cmds into
@@ -374,11 +369,13 @@ pub fn flushWithObservers(
 /// Apply a single command + dispatch observers around it. Used by
 /// `flushWithObservers`; exposed at module scope for the inline tests.
 pub fn applyWithObservers(
-    c: Command,
+    c_in: Command,
     reg: *ObserverRegistry,
     world: *World,
     gpa: std.mem.Allocator,
 ) !void {
+    var c = c_in;
+    try command_buffer_mod.resolveInPlace(&c, world, gpa);
     switch (c) {
         .spawn => |s| {
             // Shares the returning-eid primitive with the immediate
@@ -531,7 +528,9 @@ pub fn applyWithObservers(
 /// Raw apply without observer dispatch — used to drain the previous
 /// flush's deferred buffer (those cmds were already "observer-issued"
 /// and re-firing on them would create recursion).
-fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c: Command) !void {
+fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c_in: Command) !void {
+    var c = c_in;
+    try command_buffer_mod.resolveInPlace(&c, world, gpa);
     switch (c) {
         .spawn => |s| {
             _ = try world.spawnDynamicWithValues(gpa, s.component_ids, s.payloads);

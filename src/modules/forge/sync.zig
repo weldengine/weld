@@ -769,11 +769,12 @@ fn wouldConflict(
 /// `update` observes the poses of the tick that just ran instead of the previous one. The
 /// ECS → solver direction belongs to the service and registers nothing here.
 ///
-/// The declared accesses are exactly what the system does, which is what a future `ARCH-030`
-/// enforcement will check — `Transform`, `Velocity` and the `Sleeping` marker it migrates,
-/// plus the solver resource it mutates through the published pointer. Undeclared, two physics
-/// modules could sit in one phase with no edge between them and the enforcement would have
-/// nothing to catch them on.
+/// The declared accesses are exactly what the system does, and that is now CHECKED rather
+/// than claimed: the set parameterises the view the body receives, so an access it does not
+/// name does not compile. It names five — `Transform`, `Velocity` and the `Sleeping` marker
+/// it migrates, the `RigidBody` it reads through `authorityOf`, and the solver resource it
+/// mutates through the published pointer. Undeclared, two physics modules could sit in one
+/// phase with no edge between them and nothing would catch them.
 ///
 /// **PREFLIGHT AND NOT IDEMPOTENCE, because of which failure is real.** Calling this twice on
 /// one scheduler is the failure a caller can actually produce, and it is deterministic: the

@@ -170,6 +170,39 @@ test "a deferred spawn resolves every one of its component ids at flush" {
     try testing.expectEqual(@as(u8, 2), world.componentBytes(e, b.?).?[0]);
 }
 
+test "a command applied WITHOUT a flush resolves all the same" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const Drained = extern struct { v: u32 = 0 };
+
+    var cmd = CommandBuffer.init(gpa);
+    defer cmd.deinit();
+    try cmd.spawn(.{Drained{ .v = 5 }});
+
+    // **THE DEFECT THIS PINS.** Resolution was first written as a pre-pass over
+    // a BUFFER, which covers the buffers a caller remembered to hand it. The
+    // Etch tick-boundary drain reads `observer_registry.deferred` through
+    // neither `flush` nor `flushWithObservers`: it takes the commands BY VALUE
+    // and passes them straight to `applyWithObservers`. The pre-pass never ran
+    // there, and `spawnDynamicWithValues` received a slice of `undefined` ids —
+    // an out-of-range `ComponentId` into the registry, which is a panic under
+    // safety and an out-of-bounds read without it.
+    //
+    // So the resolution moved to the APPLY boundary, and this is the shape that
+    // reaches it: one command, taken out of its buffer, applied on its own.
+    const taken = cmd.commands.items[0];
+    try weld_core.ecs.observers.applyWithObservers(taken, &world.observer_registry, &world, gpa);
+
+    const cid = world.componentId(@typeName(Drained));
+    try testing.expect(cid != null);
+    try testing.expectEqual(@as(usize, 1), world.entityCount());
+    var it = world.entity_locations.keyIterator();
+    const e = it.next().?.*;
+    try testing.expectEqual(@as(u8, 5), world.componentBytes(e, cid.?).?[0]);
+}
+
 test "a command recorded with an id already in hand is left alone at flush" {
     const gpa = testing.allocator;
     var world = World.init();

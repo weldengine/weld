@@ -113,10 +113,18 @@ pub const WeldResourceLifecycle = enum(c_int) {
 /// Zig tier refuses an undeclared or wrongly-mutable access at compile time
 /// through the type of the view a system receives; C has no such view, and what
 /// it does have is `const`. So a component declared READ is reached through
-/// `const void* const*` and a component declared WRITE through `void* const*`:
-/// taking a mutable pointer to a read column discards a qualifier, and the
-/// plugin author's own compiler refuses it. Nothing here relies on the author's
-/// discipline.
+/// `const void* const*` and a component declared WRITE through `void* const*`.
+///
+/// **What that buys, stated at the strength C actually gives.** Taking a
+/// mutable pointer to a read column discards a qualifier, which C11 6.5.16.1
+/// makes a constraint violation — so a conforming compiler is REQUIRED to
+/// diagnose it. It is not required to refuse it: clang and gcc both warn by
+/// default and still emit the object. The refusal comes from `-Werror`, which
+/// `engine-c-api.md` §2 mandates for the published examples and which
+/// `zig build c-api-read-column-constness` applies to the witness. A plugin
+/// author building with their own default flags is TOLD, not stopped. That is
+/// weaker than the Zig side and it is the most C offers; the alternative — a
+/// single index space — does not even tell them.
 ///
 /// Each space is indexed in the DECLARATION ORDER of its own category at
 /// `query_create` — `reads[i]` is the i-th component declared read, not the

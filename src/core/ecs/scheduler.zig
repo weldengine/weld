@@ -873,9 +873,14 @@ pub const SystemScheduler = struct {
                 }
             }
             if (lvl.system_indices.items.len == 0) {
-                // Cycle in the DAG — should never happen since the
-                // conflict detection at registerSystem rejects the
-                // only construction path that creates one.
+                // A CYCLE, and it is reachable — do not turn this into
+                // `unreachable`. `registerSystem`'s pass 1 refuses two writers
+                // of the SAME id and nothing more; two systems that cross, one
+                // declaring `Reads(T), Writes(U)` and the other
+                // `Writes(T), Reads(U)`, each pass that check and together
+                // close a two-node cycle. Both registrations then report
+                // success and the failure surfaces HERE, at the first dispatch,
+                // under an error name that means something else.
                 lvl.deinit(gpa);
                 return error.WriteWriteConflict;
             }
