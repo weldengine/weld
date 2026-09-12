@@ -149,8 +149,37 @@ test "a view refuses to enter a dispatched body" {
     // opened it: `carriesMarked` finds nothing behind a `*anyopaque`.
     const spec = [_]Access{Access.writes(Transform)};
     const V = View(&spec);
-    try testing.expect(weld_core.ecs.command_buffer.carriesMarked(V));
-    try testing.expect(weld_core.ecs.command_buffer.carriesMarked(ecs.SystemContextOf(&spec)));
+    const carriesMarked = weld_core.ecs.command_buffer.carriesMarked;
+    try testing.expect(carriesMarked(V));
+    try testing.expect(carriesMarked(ecs.SystemContextOf(&spec)));
+
+    // **AND THE ERASED WORLD, which was NOT refused until the marker was put on
+    // it.** `ErasedFor` was created to close a promotion between views, and it
+    // was born without the guarantee its twin carried — the guarantee being
+    // implemented in another file, nothing at the point of creation recalled
+    // that a new carrier of a world owes it. Measured before the fix:
+    // `carriesMarked(*ErasedFor)` was FALSE while `carriesMarked(View)` was
+    // true, so a body refused a view and accepted the pointer a view rebuilds
+    // itself from — `fromErased` takes exactly that type, with no cast.
+    //
+    // The refusal itself is a `@compileError` and therefore lives in
+    // `access_counterproof/`, in two fixtures: bare and wrapped. What is
+    // asserted HERE is the property underneath it, and it is asserted here
+    // because the harness runs on one CI cell while the suite runs on all
+    // thirteen — deleting the marker must go red in both.
+    const E = ecs.view.ErasedFor(&spec);
+    try testing.expect(carriesMarked(*E));
+
+    // Through a FIELD as well, which is the form `carriesMarkedIn` covers and a
+    // reader might assume it does not: it enters every composite and follows
+    // pointers, so one declaration on the type closes both shapes.
+    try testing.expect(carriesMarked(struct { world: *E, stride: usize }));
+
+    // NON-VACUITY on both: a type carrying neither is accepted, so the four
+    // assertions above measure the marker and not a predicate that answers true
+    // for everything.
+    try testing.expect(!carriesMarked(struct { stride: usize }));
+    try testing.expect(!carriesMarked(*u32));
 }
 
 // ─── The erased world's identity ──────────────────────────────────────────

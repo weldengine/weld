@@ -56,6 +56,18 @@ const cases = [_]Case{
         .must_compile = false,
         .description = "rebuilds a wider view over a narrower one's pointer — must NOT compile",
     },
+    .{
+        .step = "case-erased-in-job",
+        .file = "case_erased_in_job.zig",
+        .must_compile = false,
+        .description = "hands a dispatched body the erased world, bare — must NOT compile",
+    },
+    .{
+        .step = "case-erased-wrapped-in-job",
+        .file = "case_erased_wrapped_in_job.zig",
+        .must_compile = false,
+        .description = "hands a dispatched body the erased world inside a struct — must NOT compile",
+    },
 };
 
 pub fn build(b: *std.Build) void {

@@ -169,6 +169,33 @@ fn require(comptime spec: []const Access, comptime T: type, comptime want: Use) 
 /// promotes a view to a set it was not built from.
 pub fn ErasedFor(comptime spec: []const Access) type {
     return opaque {
+        /// Read at comptime by `foundation.job_bound`. **This type is not a
+        /// view, and that is exactly why it needs the marker.** A `View` is
+        /// refused in a dispatched body's arguments because it reaches any
+        /// entity of the world by handle; a `*ErasedFor(spec)` is what a view
+        /// rebuilds itself from with NO cast — `fromErased` takes precisely
+        /// this type — so passing one into a worker hands over the same reach
+        /// under a different name.
+        ///
+        /// **It was born without this, and the shape of that omission is the
+        /// reason the text sits here rather than in a commit message.** This
+        /// type was created to close a promotion between views, and the
+        /// guarantee its twin carried lives in ANOTHER FILE
+        /// (`foundation/job_bound.zig`), so nothing at the point of creation
+        /// recalled that a new carrier of a world owes it. The rule, stated
+        /// where the next such type will be written: **any type through which a
+        /// `*World` can be recovered must declare this marker, whatever else it
+        /// is for.** `carriesMarkedIn` enters every composite and follows
+        /// pointers, so declaring it here covers the bare pointer and every
+        /// wrapper around one; both forms are exercised in
+        /// `tests/core/ecs/access_counterproof/`.
+        pub const weld_no_job_body: []const u8 =
+            "this is the erased world a view is rebuilt from — `View(spec).fromErased` " ++
+            "takes it directly, with no cast — so a worker holding one reaches any " ++
+            "entity of the world by handle, which is the reach a worker owning one " ++
+            "range must not have. Read on the system's own thread, or dispatch a body " ++
+            "that takes the chunk it was given.";
+
         /// The set this erased world may be read through. Reachable so a test
         /// can assert the type really carries its declaration rather than
         /// being one anonymous opaque among others.

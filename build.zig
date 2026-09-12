@@ -340,10 +340,30 @@ pub fn build(b: *std.Build) void {
             .step = "case-view-promotion",
             .marks = &.{"expected type '*ecs.view.ErasedFor"},
         },
+        .{
+            // The job bound, and the mark is the MARKER'S OWN TEXT rather than
+            // the refusal's frame — which is what says the reason travelled and
+            // not merely that something was refused.
+            .step = "case-erased-in-job",
+            .marks = &.{"the erased world a view is rebuilt from"},
+        },
+        .{
+            // The same bound reached through a FIELD. **The mark deliberately
+            // avoids the message's tail**, which today reads `no reason
+            // declared`: `reasonOf` walks only pointers and optionals where
+            // `carriesMarkedIn` enters everything, so a marker reached through a
+            // field refuses correctly and explains nothing. That asymmetry is a
+            // debt this milestone named and left to the bound's owner, and a
+            // fixture anchored on its message would go red the day it is
+            // repaired — asserting on a defect's symptom is how a repair gets
+            // read as a regression. The type name is what identifies this case.
+            .step = "case-erased-wrapped-in-job",
+            .marks = &.{"Carrier` reaches a dispatched body"},
+        },
     };
     const counterproof_step = b.step(
         "ecs-access-counterproof",
-        "Assert the four declared-access refusals fire, and that legitimate code still compiles",
+        "Assert the six declared-access refusals fire, and that legitimate code still compiles",
     );
     for (counterproof_cases) |case| {
         const run = if (case.step) |name|
