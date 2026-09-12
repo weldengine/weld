@@ -1253,6 +1253,36 @@ pub const World = struct {
         return arch.changedTick(chunk, col, loc.slot);
     }
 
+    /// The tick at which `T` on `entity` last changed, keyed by TYPE.
+    ///
+    /// The typed twin of `changedTickOf`, and it exists so a function generic
+    /// over its ECS accessor can spell one name whether it holds a `*World` or
+    /// a declared-access `View`. Without it, every such function carries a
+    /// comptime two-branch dispatch — two implementations of one question.
+    pub fn changedTick(self: *const World, comptime T: type, entity: EntityId) ?tick_mod.Tick {
+        const cid = self.componentId(@typeName(T)) orelse return null;
+        return self.changedTickOf(entity, cid);
+    }
+
+    /// The stored bytes of resource `R`, keyed by TYPE, or null when no
+    /// resource of that type is published.
+    ///
+    /// Same motive as `changedTick` above: one spelling for the two regimes.
+    /// Bytes and not a typed pointer, because the byte-keyed store is what the
+    /// resource path uses and the store's alignment is its own, not `R`'s.
+    pub fn resourceBytes(self: *const World, comptime R: type) ?[]const u8 {
+        const id = self.componentId(@typeName(R)) orelse return null;
+        return self.resources.getResource(id);
+    }
+
+    /// The world's current tick.
+    ///
+    /// The field is public and stays so; this reads it under the name a
+    /// restricted view can also answer to.
+    pub fn currentTick(self: *const World) tick_mod.Tick {
+        return self.current_tick;
+    }
+
     pub fn hasComponentDyn(self: *const World, entity: EntityId, cid: ComponentId) bool {
         if (!self.identity.isLive(entity)) return false;
         const loc = self.entity_locations.get(entity) orelse return false;

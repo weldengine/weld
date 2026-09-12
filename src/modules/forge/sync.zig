@@ -236,8 +236,13 @@ pub fn electPublishers(gpa: std.mem.Allocator, pw: *const PhysicsWorld) !Publish
 ///
 /// `with_velocity` is false for a STATIC body, which has no velocity columns a
 /// consumer would read.
+///
+/// `ecs` is either a `*World` or a declared-access `View`, and the shape it must
+/// answer to is `get(comptime T, EntityId)` and `getMut(comptime T, EntityId)`.
+/// Both regimes are real and neither is a fallback: inside a dispatched system
+/// the accessor is a view, and every caller outside one holds the world.
 pub fn mirrorSolverState(
-    ecs: *World,
+    ecs: anytype,
     entity: EntityId,
     pw: *const PhysicsWorld,
     body: api.BodyId,
@@ -336,9 +341,49 @@ pub fn characterOf(pw: *const PhysicsWorld, entity: EntityId) ?api.CharacterId {
 /// Shared by BOTH directions on purpose. `syncOut` publishes per
 /// `body_type × authority` and `syncIn` consumes per the same product; two
 /// readings of one field are two things that can disagree about the same body.
-pub fn authorityOf(ecs: *World, entity: EntityId) api.PhysicsAuthority {
+///
+/// `ecs` answers to `get(comptime T, EntityId)` — a `*World` or a view. The read
+/// is why `RigidBody` belongs in the registered system's declared set, and why
+/// the set was incomplete before that declaration became the view's type.
+pub fn authorityOf(ecs: anytype, entity: EntityId) api.PhysicsAuthority {
     const rb = ecs.get(RigidBody, entity) orelse return .solver;
     return rb.authority;
+}
+
+/// Whether `E` can mutate structure directly. False for every declared-access
+/// view: structural change is the one effect the access model has no category
+/// for, and it routes through the command buffer instead.
+fn mutatesStructure(comptime E: type) bool {
+    const Accessor = switch (@typeInfo(E)) {
+        .pointer => |ptr| ptr.child,
+        else => E,
+    };
+    return @hasDecl(Accessor, "addComponent");
+}
+
+/// Apply a `Sleeping` transition immediately, on the direct path only.
+///
+/// **The capability test is comptime and the failure is a typed error, and that
+/// split is forced rather than chosen.** `cmd` is a run-time optional, so Zig
+/// analyses the else-branch whatever the caller passed — a `@compileError` here
+/// would fire on the nominal system path, which always HAS a command buffer.
+/// What is decidable at compile time is whether the accessor can mutate at all;
+/// what is not is whether this particular call was given somewhere to record.
+/// So the branch a view cannot take is compiled away, and the combination that
+/// has no meaning — a view and no buffer — names itself at run time instead of
+/// silently skipping the transition.
+fn immediateStructural(
+    gpa: std.mem.Allocator,
+    ecs: anytype,
+    entity: EntityId,
+    comptime T: type,
+    comptime op: enum { add, remove },
+) !void {
+    if (comptime !mutatesStructure(@TypeOf(ecs))) return error.StructuralChangeNeedsCommandBuffer;
+    switch (op) {
+        .add => try ecs.addComponent(gpa, entity, T, .{}),
+        .remove => try ecs.removeComponent(gpa, entity, T),
+    }
 }
 
 /// Publish what the solver owns OUT to the ECS — after step 11 of the cycle.
@@ -350,9 +395,16 @@ pub fn authorityOf(ecs: *World, entity: EntityId) api.PhysicsAuthority {
 /// concurrently, and a migration under it is the defect `engine-ecs-internals.md` §6 defers
 /// structural changes to prevent. Nothing else in this function is structural.
 ///
+/// **The two regimes are separated by the TYPE of `ecs`.** A declared-access view
+/// cannot mutate structure at all, so passing one with `cmd = null` is
+/// `error.StructuralChangeNeedsCommandBuffer` rather than a transition that
+/// silently does not happen — see `immediateStructural` above for why that test
+/// cannot be a compile error. `ecs` answers to `get` / `getMut`, and to
+/// `addComponent` / `removeComponent` only on the direct path.
+///
 /// Three passes, and the order between them is the contract this file's header argues:
 /// untag the woken, publish everything untagged, tag the newly asleep.
-pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*CommandBuffer) !void {
+pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: anytype, cmd: ?*CommandBuffer) !void {
     const table = try electPublishers(gpa, pw);
     defer table.deinit(gpa);
 
@@ -363,7 +415,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         const entity = pw.bm.entity(entry.id) orelse continue;
         if (pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) == null) continue;
-        if (cmd) |c| try c.removeComponent(entity, Sleeping) else try ecs.removeComponent(gpa, entity, Sleeping);
+        if (cmd) |c| try c.removeComponent(entity, Sleeping) else try immediateStructural(gpa, ecs, entity, Sleeping, .remove);
     }
 
     // (2) PUBLISH everything not tagged. A body that fell asleep at step 11 of THIS tick
@@ -447,7 +499,7 @@ pub fn syncOut(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World, cmd: ?*Co
         const entity = pw.bm.entity(entry.id) orelse continue;
         if (!pw.bm.isSleeping(entry.id).?) continue;
         if (ecs.get(Sleeping, entity) != null) continue;
-        if (cmd) |c| try c.addComponent(entity, Sleeping, .{}) else try ecs.addComponent(gpa, entity, Sleeping, .{});
+        if (cmd) |c| try c.addComponent(entity, Sleeping, .{}) else try immediateStructural(gpa, ecs, entity, Sleeping, .add);
     }
 }
 
@@ -463,8 +515,7 @@ pub fn stepAndPublish(gpa: std.mem.Allocator, pw: *PhysicsWorld, ecs: *World) !v
 
 const SystemScheduler = core.ecs.SystemScheduler;
 const SystemContext = core.ecs.SystemContext;
-const Writes = core.ecs.Writes;
-const WritesResource = core.ecs.WritesResource;
+const Access = core.ecs.Access;
 
 /// The handle the registered systems reach the solver through, held as an ECS resource.
 ///
@@ -600,9 +651,8 @@ pub fn unpublishPhysicsWorld(ecs: *World, expected: *PhysicsWorld) void {
 /// nothing; a world where nothing was published has no such name, which is absence and not
 /// failure. `publishPhysicsWorld` is the only site that registers, and it takes the
 /// persistent allocator.
-fn resolve(ecs: *World) ?PhysicsWorldRef {
-    const id = ecs.componentId(@typeName(PhysicsWorldRef)) orelse return null;
-    const bytes = ecs.resources.getResource(id) orelse return null;
+fn resolve(ecs: anytype) ?PhysicsWorldRef {
+    const bytes = ecs.resourceBytes(PhysicsWorldRef) orelse return null;
     if (bytes.len != @sizeOf(PhysicsWorldRef)) return null;
     var ref: PhysicsWorldRef = undefined;
     // Copied out rather than pointer-cast: the resource store hands back a byte slice whose
@@ -638,8 +688,8 @@ pub fn publishedPhysicsWorld(ecs: *World) ?*PhysicsWorld {
     return ref.worldPtr();
 }
 
-fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
-    const ref = resolve(ctx.world) orelse return;
+fn stepAndPublishSystem(ctx: core.ecs.SystemContextOf(&step_spec)) anyerror!void {
+    const ref = resolve(ctx.view) orelse return;
     // THE NORMATIVE ORDER, inside the registered system and not in a caller's
     // discipline: gameplay rules and systems have already run in this phase's
     // predecessors, `syncIn` consumes what they wrote, `step` simulates, `syncOut`
@@ -647,35 +697,34 @@ fn stepAndPublishSystem(ctx: SystemContext) anyerror!void {
     // someone has to remember — the defect that registering the outward half at
     // all avoids.
     if (ref.journalPtr()) |j| {
-        _ = try in.syncIn(ref.allocator(), ref.worldPtr().?, ctx.world, j);
+        _ = try in.syncIn(ref.allocator(), ref.worldPtr().?, ctx.view, j);
     }
     try ref.worldPtr().?.step(ref.allocator());
-    try syncOut(ref.allocator(), ref.worldPtr().?, ctx.world, ctx.cmd);
+    try syncOut(ref.allocator(), ref.worldPtr().?, ctx.view, ctx.cmd);
 }
 
 const step_name = "forge_step_and_publish";
 
-/// The system's access set, as a FILE-SCOPE constant and not as a `&.{ ... }` temporary inside
-/// `registerSystems`.
+/// The system's declared access set — the ONE declaration this file writes.
 ///
-/// **This is a defect fixed, not a style choice, and it was measured.** A `&.{ ... }` literal
-/// in the struct passed to `registerSystem` is a temporary whose lifetime ends with the
-/// enclosing block. `SystemScheduler` stores the descriptor — slice included — so once
-/// `registerSystems` returns, every `type_name` in it points at dead stack: reading them
-/// printed an empty string and then took a FAULT. Nothing crashed earlier because the DAG
-/// edges are computed AT registration and no later path reads the accesses; the first thing
-/// that did was the test asserting they are declared. The tree's other call sites survive by
-/// accident — they register inside the same function that consumes the scheduler — so the API
-/// invites this, and the safe form is the one that does not depend on where the caller lives.
-/// It was two sets when the seam registered two systems; it is one now, and the reason to keep
-/// it at file scope is unchanged.
-const step_accesses = [_]core.ecs.AccessDescriptor{
-    Writes(Transform),
-    Writes(Velocity),
+/// It parameterises `stepAndPublishSystem`'s view AND produces the descriptors the DAG
+/// orders on, so the two cannot disagree. A file-scope constant is still the right form,
+/// for a reason that predates the enforcement: `SystemScheduler` stores the descriptor
+/// without duplicating its slice, so a `&.{ ... }` literal written inside the registering
+/// function left every `type_name` pointing at dead stack once that function returned —
+/// an empty string, then a fault. Derived descriptors are comptime constants and cannot
+/// dangle at all, which retires the hazard rather than avoiding it.
+const step_spec = [_]core.ecs.Access{
+    Access.writes(Transform),
+    Access.writes(Velocity),
     // The `Sleeping` transitions are STRUCTURAL — they migrate the entity between archetypes —
-    // so `Writes` is the closest the access model can express, not a description of the effect.
-    Writes(Sleeping),
-    WritesResource(PhysicsWorldRef),
+    // so `writes` is the closest the access model can express, not a description of the effect.
+    Access.writes(Sleeping),
+    // READ, and it was missing. `authorityOf` reads `RigidBody` from inside this
+    // system and the set said nothing about it, which is exactly the omission a
+    // declaration nobody checks produces. The system never writes it.
+    Access.reads(RigidBody),
+    Access.writesResource(PhysicsWorldRef),
 };
 
 fn isRegistered(sched: *const SystemScheduler, phase: core.ecs.Phase, wanted: []const u8) bool {
@@ -741,13 +790,14 @@ fn wouldConflict(
 /// of residue that no mechanism holds would be worse than saying nothing, because it excuses
 /// the next reader from checking.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
+    const desc = core.ecs.SystemDescriptor.of(
+        .fixed_update,
+        step_name,
+        &step_spec,
+        stepAndPublishSystem,
+    );
     if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
-    if (wouldConflict(sched, .fixed_update, &step_accesses)) return error.WriteWriteConflict;
+    if (wouldConflict(sched, .fixed_update, desc.accesses)) return error.WriteWriteConflict;
 
-    try sched.registerSystem(gpa, ecs, .{
-        .phase = .fixed_update,
-        .name = step_name,
-        .run = stepAndPublishSystem,
-        .accesses = &step_accesses,
-    });
+    try sched.registerSystem(gpa, ecs, desc);
 }

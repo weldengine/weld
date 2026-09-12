@@ -270,6 +270,10 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
         .phase = .post_update,
         .name = "cmd_despawn",
         .run = cmdDespawnSystem,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
 
     // ── Step 4: 10 ticks. On tick 5, set up pending despawns ──

@@ -2259,12 +2259,12 @@ test "a forbidden mutation is observable from the PRODUCTION path" {
     // It is also the more faithful shape: § *Autorité d'écriture* says the diagnostic
     // never claims "a rule wrote", precisely because a Zig system can have done it —
     // and this IS a Zig system, in `pre_update`, ahead of the physics phase.
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .pre_update,
-        .name = "test_forbidden_writer",
-        .run = forbiddenWriterSystem,
-        .accesses = &forbidden_writer_accesses,
-    });
+    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
+        .pre_update,
+        "test_forbidden_writer",
+        &forbidden_writer_spec,
+        forbiddenWriterSystem,
+    ));
 
     // A QUIET FRAME first, with the writer disarmed: it establishes the baseline the
     // diagnostic needs and reports nothing, so the number below is not the number this
@@ -2306,13 +2306,13 @@ var forbidden_writer_armed: bool = false;
 var forbidden_writer_target: EntityId = EntityId.dead;
 var forbidden_writer_x: WorldRealT = 0;
 
-fn forbiddenWriterSystem(ctx: core.ecs.SystemContext) anyerror!void {
+const forbidden_writer_spec = [_]core.ecs.Access{core.ecs.Access.writes(Transform)};
+
+fn forbiddenWriterSystem(ctx: core.ecs.SystemContextOf(&forbidden_writer_spec)) anyerror!void {
     if (!forbidden_writer_armed) return;
-    const t = ctx.world.getMut(Transform, forbidden_writer_target) orelse return;
+    const t = ctx.view.getMut(Transform, forbidden_writer_target) orelse return;
     t.pos[0] = forbidden_writer_x;
 }
-
-const forbidden_writer_accesses = [_]core.ecs.scheduler.AccessDescriptor{core.ecs.Writes(Transform)};
 
 test "addImpulse through the PUBLIC interface does not move a piloted body" {
     // **P1-b, the THIRD impulse path.** `BodyManager.addImpulse` applied the STORED
@@ -2510,12 +2510,12 @@ test "the FIRST forbidden mutation of a body's life is reported" {
     defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.attachSyncInJournal(&ecs, &journal);
     try sync.registerSystems(gpa, &sched, &ecs);
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .pre_update,
-        .name = "test_first_tick_writer",
-        .run = forbiddenWriterSystem,
-        .accesses = &forbidden_writer_accesses,
-    });
+    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
+        .pre_update,
+        "test_first_tick_writer",
+        &forbidden_writer_spec,
+        forbiddenWriterSystem,
+    ));
 
     // ARMED BEFORE THE FIRST FRAME. The journal has never seen this body: `syncIn`
     // creates its entry in the same pass that must report.
@@ -2712,14 +2712,14 @@ var g19_target: EntityId = EntityId.dead;
 /// The body is therefore created from the `on_spawned` observer, which is the path that
 /// RECEIVES the `EntityId` at the phase-boundary flush (`observers.flushWithObservers`,
 /// spawn arm). Both still land in the same tick, ahead of `fixed_update`.
-fn g19System(ctx: core.ecs.SystemContext) anyerror!void {
+fn g19System(ctx: core.ecs.SystemContextOf(&g19_spec)) anyerror!void {
     switch (g19_mode) {
         .idle => {},
         .spawn_only, .spawn_then_mutate => {
             try ctx.cmd.spawn(.{ Transform{ .pos = .{ 1, 2, 3 } }, Velocity{} });
         },
         .tier1_write => {
-            const t = ctx.world.getMut(Transform, g19_target) orelse return;
+            const t = ctx.view.getMut(Transform, g19_target) orelse return;
             t.pos[0] = 77;
         },
     }
@@ -2755,7 +2755,12 @@ fn g19OnSpawned(
     }
 }
 
-const g19_accesses = [_]core.ecs.scheduler.AccessDescriptor{core.ecs.Writes(Transform)};
+/// `Transform` only, and `Velocity` deliberately absent: the spawn arm below
+/// hands both types to the COMMAND BUFFER, which is not the view. Structural
+/// change has no access category — `engine-ecs-internals.md` §7 refuses to mint
+/// one — so the types a deferred spawn carries are not gated by this set, and
+/// adding `Velocity` here would declare an access the body never performs.
+const g19_spec = [_]core.ecs.Access{core.ecs.Access.writes(Transform)};
 
 test "a spawn is not a mutation, and a mutation after a spawn in the same tick is" {
     // **P1 of the fifth review.** The value comparison was short-circuited on a kinematic
@@ -2792,12 +2797,12 @@ test "a spawn is not a mutation, and a mutation after a spawn in the same tick i
     defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.attachSyncInJournal(&ecs, &journal);
     try sync.registerSystems(gpa, &sched, &ecs);
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .pre_update,
-        .name = "test_g19_writer",
-        .run = g19System,
-        .accesses = &g19_accesses,
-    });
+    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
+        .pre_update,
+        "test_g19_writer",
+        &g19_spec,
+        g19System,
+    ));
     // The observer is what receives the `EntityId` the flush creates — the production
     // path for "act on an entity a deferred spawn just made".
     try ecs.registerOnSpawned(gpa, null, g19OnSpawned);

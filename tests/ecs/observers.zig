@@ -114,6 +114,10 @@ test "on_add observer is called during flush after add_component" {
         .phase = .update,
         .name = "add_tag",
         .run = addTagSystem,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
@@ -192,6 +196,10 @@ test "on_despawned observer fires before chunk slot is reused" {
         .phase = .update,
         .name = "despawn",
         .run = despawnSystem,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
@@ -276,6 +284,10 @@ test "observer-issued structural mutations are queued for the next flush" {
         .phase = .update,
         .name = "spawn_one",
         .run = spawnOneSystem,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
 
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
@@ -303,6 +315,10 @@ test "observer-issued structural mutations are queued for the next flush" {
         .phase = .update,
         .name = "noop",
         .run = noopSystem,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
     try sys2.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &chain_state);
 

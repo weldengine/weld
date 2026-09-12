@@ -429,6 +429,12 @@ fn runS1(
         .phase = .update,
         .name = "bench_integrate",
         .run = integrateSystem,
+        // WRITES BOTH, and the declaration said nothing until the field lost its
+        // default. `integrateChunk` mutates the velocity column and the transform
+        // column from a worker-dispatched body, while this registration declared
+        // no access at all — so the scheduler placed it at level 0 with no edge to
+        // anything, which is the exact shape a declaration nobody checks produces.
+        .accesses = &.{ Writes(Transform), Writes(Velocity) },
     });
 
     if (smoke) {

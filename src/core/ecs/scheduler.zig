@@ -69,6 +69,7 @@ const registry_mod = @import("registry.zig");
 const command_buffer_mod = @import("command_buffer.zig");
 const hybrid_query_mod = @import("hybrid_query.zig");
 const observers_mod = @import("observers.zig");
+const view_mod = @import("view.zig");
 
 const World = world_mod.World;
 const Job = worker_mod.Job;
@@ -107,9 +108,12 @@ pub const Phase = enum(u8) {
 /// Kind tag distinguishing component reads/writes from resource
 /// reads/writes. Components and resources share the same DAG
 /// construction logic — the conflict matrix is identical,
-/// only the lookup namespace differs (and resources have no
-/// concrete API yet, so the placeholders just record the intent).
-pub const AccessKind = enum { reads, writes, reads_resource, writes_resource };
+/// only the lookup namespace differs.
+///
+/// Re-exported from `view.zig` rather than declared twice: the same four
+/// variants decide what the DAG orders and what the view lets a body reach,
+/// and two enumerations of one domain drift.
+pub const AccessKind = view_mod.AccessKind;
 
 /// Closure that ensures the access's component / resource type is
 /// registered with the world's `Registry` and returns its
@@ -199,14 +203,24 @@ pub const FrameContext = struct {
     user: ?*anyopaque,
 };
 
-/// Argument bundle passed to every `SystemFn`. Holds the borrowed
-/// `World`, the per-frame allocator, the io handle, the job
-/// scheduler for chunked dispatch, the `FrameContext` shared
-/// across systems, the `JobBuilder` the system stages its chunked
-/// work into, and the per-system `CommandBuffer` for deferred
-/// structural mutations.
+/// Argument bundle passed to every `SystemFn`. Holds the world with its type
+/// erased, the per-frame allocator, the io handle, the job scheduler for
+/// chunked dispatch, the `FrameContext` shared across systems, the
+/// `JobBuilder` the system stages its chunked work into, and the per-system
+/// `CommandBuffer` for deferred structural mutations.
+///
+/// **This is the ERASED context, and the erasure is the guarantee.** A system
+/// body written against a declared access set receives `SystemContextOf(spec)`
+/// instead, built by the trampoline `SystemDescriptor.of` generates. What
+/// remains here is what the scheduler stores behind one function pointer — and
+/// it hands out no `*World`, so a body that wants one has to name the type and
+/// cast, which is a decision someone can find rather than a field someone
+/// reaches by habit.
 pub const SystemContext = struct {
-    world: *World,
+    /// The world, type-erased. Recovering a `*World` from it is a deliberate
+    /// act; the generated trampoline's own recovery is the only one in the
+    /// tier, and it hands the result to a `View` that restricts it.
+    world_erased: *anyopaque,
     gpa: std.mem.Allocator,
     io: std.Io,
     jobs: *jobs_sched_mod.Scheduler,
@@ -226,15 +240,107 @@ pub const SystemContext = struct {
 /// level. Errors propagate through `dispatchFrame`.
 pub const SystemFn = *const fn (ctx: SystemContext) anyerror!void;
 
+/// The context a system body written against a declared access set receives.
+///
+/// Identical to `SystemContext` but for its first member: where the erased
+/// form carries an opaque pointer, this one carries the `View` the declaration
+/// parameterises. One instantiation per declared set — which is exactly why it
+/// cannot be what `SystemFn` points at, and why a trampoline exists.
+pub fn SystemContextOf(comptime spec: []const view_mod.Access) type {
+    return struct {
+        view: view_mod.View(spec),
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        jobs: *jobs_sched_mod.Scheduler,
+        frame: *FrameContext,
+        builder: *JobBuilder,
+        cmd: *CommandBuffer,
+    };
+}
+
+/// Turn a declared access set into the runtime descriptors the DAG reads.
+///
+/// The result is a comptime constant, so it has static lifetime — which also
+/// retires a hazard the inline `&.{ … }` form carries at every hand-written
+/// registration: `registerSystem` stores the caller's slice without duplicating
+/// it, and a temporary dangles the moment the registering function returns.
+fn descriptorsOf(comptime spec: []const view_mod.Access) []const AccessDescriptor {
+    // Held as a container-level `const` rather than built in a `comptime`
+    // block and returned by pointer: a container-level constant has static
+    // storage, which is the whole property this function exists to give the
+    // scheduler. A block-local would be a pointer into comptime memory that
+    // Zig refuses to hand to a run-time caller.
+    const Derived = struct {
+        const list = blk: {
+            var out: [spec.len]AccessDescriptor = undefined;
+            for (spec, 0..) |a, i| {
+                out[i] = switch (a.kind) {
+                    .reads => Reads(a.T),
+                    .writes => Writes(a.T),
+                    .reads_resource => ReadsResource(a.T),
+                    .writes_resource => WritesResource(a.T),
+                };
+            }
+            const frozen = out;
+            break :blk frozen;
+        };
+    };
+    return &Derived.list;
+}
+
 /// System descriptor with access declarations for DAG construction.
-/// `accesses` defaults to empty — a system with no declared
-/// accesses is treated as having no conflicts with any other
-/// system and lands on topological level 0.
+///
+/// `accesses` has NO default. Omitting it does not produce a system that
+/// conflicts with nobody and lands on level 0 — it fails to compile. An
+/// implicit empty set is the most dangerous value the field can hold, since it
+/// declares zero conflicts against everything else, and it is exactly what a
+/// forgotten field used to yield.
+///
+/// An EXPLICITLY empty set stays legal: a system that touches no component and
+/// no resource has an empty declaration, and saying so is a declaration.
 pub const SystemDescriptor = struct {
     phase: Phase,
     name: []const u8,
     run: SystemFn,
-    accesses: []const AccessDescriptor = &.{},
+    accesses: []const AccessDescriptor,
+
+    /// Describe a system from ONE declaration.
+    ///
+    /// `spec` parameterises the view the body receives AND produces the
+    /// descriptors the DAG orders on, so the two cannot disagree: there is no
+    /// second list to keep in step. The returned `run` is a trampoline
+    /// generated for this `spec` — it recovers the world from the erased
+    /// context, wraps it in `View(spec)`, and calls `body`.
+    ///
+    /// Write `spec` once as a named constant and reference it in both places;
+    /// two separate `&.{ … }` literals of identical content are two values,
+    /// and a generic type instantiated on each is two types.
+    pub fn of(
+        comptime phase: Phase,
+        comptime name: []const u8,
+        comptime spec: []const view_mod.Access,
+        comptime body: fn (SystemContextOf(spec)) anyerror!void,
+    ) SystemDescriptor {
+        const Generated = struct {
+            fn call(ctx: SystemContext) anyerror!void {
+                return body(.{
+                    .view = view_mod.View(spec).fromErased(ctx.world_erased),
+                    .gpa = ctx.gpa,
+                    .io = ctx.io,
+                    .jobs = ctx.jobs,
+                    .frame = ctx.frame,
+                    .builder = ctx.builder,
+                    .cmd = ctx.cmd,
+                });
+            }
+        };
+        return .{
+            .phase = phase,
+            .name = name,
+            .run = &Generated.call,
+            .accesses = descriptorsOf(spec),
+        };
+    }
 };
 
 // ─── JobBuilder ────────────────────────────────────────────────────────────
@@ -700,7 +806,7 @@ pub const SystemScheduler = struct {
             for (lvl.system_indices.items) |sys_idx| {
                 const sys = phase.systems.items[sys_idx];
                 const ctx = SystemContext{
-                    .world = world,
+                    .world_erased = @ptrCast(world),
                     .gpa = gpa,
                     .io = io,
                     .jobs = jobs,
@@ -807,7 +913,7 @@ test "SystemScheduler.init/deinit round-trip is leak-free" {
     try testing.expectEqual(@as(usize, 0), sched.systemCount());
 }
 
-test "registerSystem with no accesses lands on level 0" {
+test "registerSystem with an explicitly empty declaration lands on level 0" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -818,20 +924,104 @@ test "registerSystem with no accesses lands on level 0" {
         fn nop(_: SystemContext) anyerror!void {}
     };
 
+    // `.accesses` is spelled. It used to be omitted, and the field's default
+    // supplied the same empty set — which is the value that declares zero
+    // conflict with everything and therefore the one an omission must never
+    // produce. Written out, an empty set is a claim its author made.
     try sched.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "a",
         .run = T.nop,
+        .accesses = &.{},
     });
     try sched.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "b",
         .run = T.nop,
+        .accesses = &.{},
     });
 
     const levels = try sched.topologicalLevels(gpa, .update);
-    // Both systems have no accesses → no edges → both land on
-    // level 0.
+    // Two empty declarations share no id → no edges → one level.
     try testing.expectEqual(@as(usize, 1), levels.len);
     try testing.expectEqual(@as(usize, 2), levels[0].system_indices.items.len);
+}
+
+test "a described system's view and its DAG edges come from the same declaration" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var sched = SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    const writer_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Transform)};
+    const reader_spec = [_]view_mod.Access{view_mod.Access.reads(world_mod.Transform)};
+
+    const Bodies = struct {
+        fn write(ctx: SystemContextOf(&writer_spec)) anyerror!void {
+            _ = ctx;
+        }
+        fn read(ctx: SystemContextOf(&reader_spec)) anyerror!void {
+            _ = ctx;
+        }
+    };
+
+    try sched.registerSystem(gpa, &world, SystemDescriptor.of(
+        .update,
+        "writer",
+        &writer_spec,
+        Bodies.write,
+    ));
+    try sched.registerSystem(gpa, &world, SystemDescriptor.of(
+        .update,
+        "reader",
+        &reader_spec,
+        Bodies.read,
+    ));
+
+    // The edge exists BECAUSE the descriptors were derived from the same
+    // specs the two bodies are typed against. Nothing was declared twice, so
+    // nothing can disagree: the writer precedes the reader on the DAG.
+    const levels = try sched.topologicalLevels(gpa, .update);
+    try testing.expectEqual(@as(usize, 2), levels.len);
+    try testing.expectEqual(@as(usize, 1), levels[0].system_indices.items.len);
+    try testing.expectEqual(@as(u32, 0), levels[0].system_indices.items[0]);
+    try testing.expectEqual(@as(u32, 1), levels[1].system_indices.items[0]);
+
+    // And the derived descriptors say what the spec said.
+    const registered = sched.systemsInPhase(.update);
+    try testing.expectEqual(@as(usize, 1), registered[0].accesses.len);
+    try testing.expect(registered[0].accesses[0].kind == .writes);
+    try testing.expect(registered[1].accesses[0].kind == .reads);
+}
+
+test "a described system's accesses outlive the block that registered it" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var sched = SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    const spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Velocity)};
+    const Body = struct {
+        fn run(ctx: SystemContextOf(&spec)) anyerror!void {
+            _ = ctx;
+        }
+    };
+
+    // Registered from a nested block that RETURNS before the read below.
+    // `registerSystem` stores the caller's slice without duplicating it, so an
+    // inline `&.{ … }` temporary would leave `type_name` pointing at dead
+    // stack here; a derived set is a comptime constant and cannot.
+    {
+        try sched.registerSystem(gpa, &world, SystemDescriptor.of(
+            .post_update,
+            "outliver",
+            &spec,
+            Body.run,
+        ));
+    }
+
+    const registered = sched.systemsInPhase(.post_update);
+    try testing.expectEqualStrings(@typeName(world_mod.Velocity), registered[0].accesses[0].type_name);
 }

@@ -31,6 +31,8 @@ const Scheduler = jobs_sched_mod.Scheduler;
 const sys_sched_mod = weld_core.ecs.scheduler;
 const SystemScheduler = sys_sched_mod.SystemScheduler;
 const SystemContext = sys_sched_mod.SystemContext;
+const SystemDescriptor = sys_sched_mod.SystemDescriptor;
+const Access = weld_core.ecs.Access;
 
 const command_buffer_mod = weld_core.ecs.command_buffer;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
@@ -44,7 +46,14 @@ const DeferredSpawnState = struct {
     seen_count_in_body: usize = 0,
 };
 
-fn deferredSpawnSystem(ctx: SystemContext) anyerror!void {
+/// Empty, and the body is why: it records a spawn and counts entities. The
+/// spawn is structural, so it goes through the command buffer; a cardinality is
+/// neither a component nor a resource, so no declaration covers it. A system
+/// that touches no entity data still receives a view — one that can do nothing
+/// but count.
+const deferred_spawn_spec = [_]Access{};
+
+fn deferredSpawnSystem(ctx: sys_sched_mod.SystemContextOf(&deferred_spawn_spec)) anyerror!void {
     const state: *DeferredSpawnState = @ptrCast(@alignCast(ctx.frame.user.?));
     // Inside the body — record the spawn, capture the entity count
     // BEFORE the flush runs.
@@ -52,7 +61,7 @@ fn deferredSpawnSystem(ctx: SystemContext) anyerror!void {
         Transform{},
         Velocity{},
     });
-    state.seen_count_in_body = ctx.world.entityCount();
+    state.seen_count_in_body = ctx.view.entityCount();
 }
 
 test "deferred spawn is visible only after the phase flush" {
@@ -74,11 +83,12 @@ test "deferred spawn is visible only after the phase flush" {
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "deferred_spawn",
-        .run = deferredSpawnSystem,
-    });
+    try sys.registerSystem(gpa, &world, SystemDescriptor.of(
+        .update,
+        "deferred_spawn",
+        &deferred_spawn_spec,
+        deferredSpawnSystem,
+    ));
 
     var state = DeferredSpawnState{};
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
@@ -148,11 +158,19 @@ test "add_component and remove_component are applied in system submission order"
         .phase = .update,
         .name = "adds_tag1",
         .run = systemAddsTag1,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
     try sys.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "removes_tag2",
         .run = systemRemovesTag2,
+        // Structural only: every mutation goes through the command buffer, which
+        // the access model deliberately has no category for. An empty set is
+        // therefore the true declaration, and it is written rather than defaulted.
+        .accesses = &.{},
     });
 
     var state = OrderTestState{ .entity = entity };

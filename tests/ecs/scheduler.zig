@@ -99,11 +99,15 @@ test "phases dispatch sequentially with end-of-phase barrier" {
     // then one each in `update`, `post_update`, `pre_render`. Skip
     // `fixed_update` and `late_update` to verify empty phases are
     // skipped cleanly without breaking ordering.
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_a", .run = logPreUpdateA });
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_b", .run = logPreUpdateB });
-    try sys.registerSystem(gpa, &world, .{ .phase = .update, .name = "update_a", .run = logUpdateA });
-    try sys.registerSystem(gpa, &world, .{ .phase = .post_update, .name = "post", .run = logPostUpdate });
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_render, .name = "render", .run = logPreRender });
+    //
+    // Each declares an empty access set, and that is what these bodies do: they
+    // append their phase to a log and touch no entity data. The set is written
+    // because omitting it no longer yields one.
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_a", .run = logPreUpdateA, .accesses = &.{} });
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_b", .run = logPreUpdateB, .accesses = &.{} });
+    try sys.registerSystem(gpa, &world, .{ .phase = .update, .name = "update_a", .run = logUpdateA, .accesses = &.{} });
+    try sys.registerSystem(gpa, &world, .{ .phase = .post_update, .name = "post", .run = logPostUpdate, .accesses = &.{} });
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_render, .name = "render", .run = logPreRender, .accesses = &.{} });
 
     var log: PhaseLog = .{};
     defer log.deinit(gpa);
