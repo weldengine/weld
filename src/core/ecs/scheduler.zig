@@ -672,7 +672,7 @@ pub const SystemScheduler = struct {
         // Allocate the per-system command buffer alongside the
         // descriptor. The cmd buffer borrows `world` for type
         // resolution and uses `gpa` as its backing allocator.
-        try phase.command_buffers.append(gpa, CommandBuffer.init(gpa, world));
+        try phase.command_buffers.append(gpa, CommandBuffer.init(gpa));
         errdefer {
             var popped_cb = phase.command_buffers.pop();
             if (popped_cb) |*cb| cb.deinit();
@@ -834,7 +834,7 @@ pub const SystemScheduler = struct {
         // re-entrantly.
         for (phase.command_buffers.items) |*cb| {
             if (cb.commandCount() == 0 and !hasPendingDeferred(&world.observer_registry)) continue;
-            try observers_mod.flushWithObservers(cb, &world.observer_registry);
+            try observers_mod.flushWithObservers(cb, world, &world.observer_registry);
         }
     }
 

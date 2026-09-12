@@ -360,7 +360,7 @@ test "new archetype created during command buffer flush is visible to existing q
     // Stage a spawn that materialises a new (Transform, Velocity,
     // Marker) archetype via a deferred command. The world's entity
     // count stays unchanged until `cmd.flush()`.
-    var cmd = CommandBuffer.init(gpa, &world);
+    var cmd = CommandBuffer.init(gpa);
     defer cmd.deinit();
     try cmd.spawn(.{
         Transform{},
@@ -371,7 +371,7 @@ test "new archetype created during command buffer flush is visible to existing q
     const before = world.archetypeCount();
     try std.testing.expectEqual(@as(usize, 0), q.chunkCount());
 
-    try cmd.flush();
+    try cmd.flush(&world);
     try std.testing.expect(world.archetypeCount() > before);
 
     // Now the next iteration entry on `q` must see the new archetype

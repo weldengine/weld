@@ -822,6 +822,9 @@ pub fn build(b: *std.Build) void {
         // driven by `zig build ecs-access-counterproof` — a compile error
         // cannot be a test block.
         .{ .path = "tests/core/ecs/access_view_test.zig" },
+        // What the command buffer no longer holds, and when it resolves what it
+        // does — the two halves of the `world` field's removal.
+        .{ .path = "tests/core/ecs/command_buffer_test.zig" },
         .{ .path = "tests/ecs/change_detection.zig" },
         .{ .path = "tests/ecs/scheduler.zig" },
         .{ .path = "tests/ecs/scheduler_dag.zig" },

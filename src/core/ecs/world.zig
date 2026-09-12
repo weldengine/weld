@@ -309,7 +309,7 @@ pub const World = struct {
         ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
-        try self.observer_registry.registerOnSpawned(gpa, self, ctx, callback);
+        try self.observer_registry.registerOnSpawned(gpa, ctx, callback);
     }
 
     /// Register an `on_despawned` observer.
@@ -319,7 +319,7 @@ pub const World = struct {
         ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
-        try self.observer_registry.registerOnDespawned(gpa, self, ctx, callback);
+        try self.observer_registry.registerOnDespawned(gpa, ctx, callback);
     }
 
     /// Register an `on_add` observer for component `T`.
@@ -331,7 +331,7 @@ pub const World = struct {
         callback: observers_mod.ObserverFn,
     ) !void {
         const cid = try self.ensureRegistered(gpa, T);
-        try self.observer_registry.registerOnAdd(gpa, self, cid, ctx, callback);
+        try self.observer_registry.registerOnAdd(gpa, cid, ctx, callback);
     }
 
     /// Register an `on_remove` observer for component `T`.
@@ -343,7 +343,7 @@ pub const World = struct {
         callback: observers_mod.ObserverFn,
     ) !void {
         const cid = try self.ensureRegistered(gpa, T);
-        try self.observer_registry.registerOnRemove(gpa, self, cid, ctx, callback);
+        try self.observer_registry.registerOnRemove(gpa, cid, ctx, callback);
     }
 
     /// Register an `on_replaced` observer for component `T` (fires
@@ -356,7 +356,7 @@ pub const World = struct {
         callback: observers_mod.ObserverFn,
     ) !void {
         const cid = try self.ensureRegistered(gpa, T);
-        try self.observer_registry.registerOnReplaced(gpa, self, cid, ctx, callback);
+        try self.observer_registry.registerOnReplaced(gpa, cid, ctx, callback);
     }
 
     /// Fire `on_spawned` for one already-spawned entity. The scene

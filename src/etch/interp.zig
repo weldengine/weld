@@ -1883,11 +1883,11 @@ pub const Interpreter = struct {
             const ctx: *anyopaque = @ptrCast(&self.observer_ctxs[k]);
             k += 1;
             switch (kind) {
-                .on_added => try reg.registerOnAdd(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
-                .on_removed => try reg.registerOnRemove(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
-                .on_replaced => try reg.registerOnReplaced(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
-                .on_spawned => try reg.registerOnSpawned(self.gpa, world, ctx, &observerTrampoline),
-                .on_despawned => try reg.registerOnDespawned(self.gpa, world, ctx, &observerTrampoline),
+                .on_added => try reg.registerOnAdd(self.gpa, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_removed => try reg.registerOnRemove(self.gpa, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_replaced => try reg.registerOnReplaced(self.gpa, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_spawned => try reg.registerOnSpawned(self.gpa, ctx, &observerTrampoline),
+                .on_despawned => try reg.registerOnDespawned(self.gpa, ctx, &observerTrampoline),
             }
         }
     }
@@ -2038,7 +2038,7 @@ pub const Interpreter = struct {
         // loader drains it before `on_spawned`, so a hook-issued structural change
         // is applied at the same flush boundary an observer's would be.
         if (world.observer_registry.deferred == null) {
-            world.observer_registry.deferred = CommandBuffer.init(self.gpa, world);
+            world.observer_registry.deferred = CommandBuffer.init(self.gpa);
         }
         const prev_deferred = self.observer_deferred;
         self.observer_deferred = &world.observer_registry.deferred.?;
@@ -5161,7 +5161,7 @@ pub const Interpreter = struct {
     fn structuralDeferred(self: *Interpreter, world: *World) StmtError!*CommandBuffer {
         if (self.observer_deferred) |d| return d;
         if (world.observer_registry.deferred == null) {
-            world.observer_registry.deferred = CommandBuffer.init(self.gpa, world);
+            world.observer_registry.deferred = CommandBuffer.init(self.gpa);
         }
         return &world.observer_registry.deferred.?;
     }
@@ -10927,7 +10927,11 @@ test "@on_spawned and @on_despawned fire on spawn/despawn" {
 
     // Spawn (with Health) → on_spawned fires.
     var hv: i32 = 5;
-    const spawn_cmd: command_buffer_mod.Command = .{ .spawn = .{ .component_ids = &[_]ComponentId{health}, .payloads = &[_][]const u8{std.mem.asBytes(&hv)} } };
+    // `component_ids` is mutable because a recorder that holds a TYPE and no
+    // world writes it at flush; this one already holds the id, so it is read
+    // as-is and the storage only has to be writable.
+    var spawn_ids = [_]ComponentId{health};
+    const spawn_cmd: command_buffer_mod.Command = .{ .spawn = .{ .component_ids = &spawn_ids, .payloads = &[_][]const u8{std.mem.asBytes(&hv)} } };
     try observers_mod.applyWithObservers(spawn_cmd, &world.observer_registry, &world, gpa);
 
     // Despawn an existing entity → on_despawned fires (before destruction).
@@ -10978,17 +10982,17 @@ test "observer body structural mutation is deferred — no recursion" {
 
     // Flush 1: add Health → on_added fires → body queues a tag mutation into the
     // deferred buffer. The tag is NOT applied this flush (no re-entrancy).
-    var cmd = command_buffer_mod.CommandBuffer.init(gpa, &world);
+    var cmd = command_buffer_mod.CommandBuffer.init(gpa);
     defer cmd.deinit();
     var hv: i32 = 7;
     try cmd.commands.append(gpa, .{ .add_component = .{ .entity = e, .component_id = health, .bytes = std.mem.asBytes(&hv) } });
-    try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+    try observers_mod.flushWithObservers(&cmd, &world, &world.observer_registry);
 
     try std.testing.expect(world.componentBytes(e, tagset) == null); // tag NOT applied yet
     try std.testing.expectEqual(@as(usize, 1), world.observer_registry.deferred.?.commands.items.len);
 
     // Flush 2 (empty): drains the previous flush's deferred tag mutation.
-    try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+    try observers_mod.flushWithObservers(&cmd, &world, &world.observer_registry);
     try std.testing.expect(world.componentBytes(e, tagset) != null); // tag applied at next flush
     try std.testing.expectEqual(@as(usize, 0), world.observer_registry.deferred.?.commands.items.len);
 }
@@ -11057,8 +11061,9 @@ test "observable behaviour: all five observer kinds + emit/@on_event, determinis
     // spawn [Marker, Health(current=1)] → on_spawned (1), on_add[Health] (101).
     var mv: i32 = 0;
     var hv1: i64 = 1;
+    var lifecycle_ids = [_]ComponentId{ marker, health };
     try observers_mod.applyWithObservers(.{ .spawn = .{
-        .component_ids = &[_]ComponentId{ marker, health },
+        .component_ids = &lifecycle_ids,
         .payloads = &[_][]const u8{ std.mem.asBytes(&mv), std.mem.asBytes(&hv1) },
     } }, &world.observer_registry, &world, gpa);
     // The spawned entity is the only one holding Health — find it.
