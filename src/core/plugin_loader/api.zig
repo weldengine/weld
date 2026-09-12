@@ -107,14 +107,41 @@ pub const WeldResourceLifecycle = enum(c_int) {
 // =============================================================
 
 /// Contiguous slice of entities matching a query, surfaced to the
-/// `WeldQueryCallback`. SoA component arrays are addressable via
-/// `components[i][slot]` with `component_sizes[i]` driving the
-/// stride.
+/// `WeldQueryCallback`.
+///
+/// **TWO INDEX SPACES, and the split is what carries `ARCH-030` into C.** The
+/// Zig tier refuses an undeclared or wrongly-mutable access at compile time
+/// through the type of the view a system receives; C has no such view, and what
+/// it does have is `const`. So a component declared READ is reached through
+/// `const void* const*` and a component declared WRITE through `void* const*`:
+/// taking a mutable pointer to a read column discards a qualifier, and the
+/// plugin author's own compiler refuses it. Nothing here relies on the author's
+/// discipline.
+///
+/// Each space is indexed in the DECLARATION ORDER of its own category at
+/// `query_create` — `reads[i]` is the i-th component declared read, not the
+/// i-th of the query. A single space would make a read column addressable by a
+/// mutable pointer, which is the whole defect.
+///
+/// `struct_size` is the host's `sizeof` for this struct (`ARCH-018`): a plugin
+/// reads it before touching a member and treats anything beyond it as absent,
+/// which is what makes "a member appended at the end is a minor version" true
+/// rather than asserted.
 pub const WeldQueryChunk = extern struct {
-    entities: ?[*]const WeldEntity = null,
+    struct_size: u32 = @sizeOf(WeldQueryChunk),
     count: u32 = 0,
-    components: ?[*]?*anyopaque = null,
-    component_sizes: ?[*]const u32 = null,
+    entities: ?[*]const WeldEntity = null,
+
+    /// `reads[i]`: the i-th component declared READ, as `const void* const*`.
+    reads: ?[*]const ?*const anyopaque = null,
+    read_count: u32 = 0,
+    /// `writes[i]`: the i-th component declared WRITE, as `void* const*`.
+    writes: ?[*]const ?*anyopaque = null,
+    write_count: u32 = 0,
+
+    /// Element strides, parallel to their own index space.
+    read_sizes: ?[*]const u32 = null,
+    write_sizes: ?[*]const u32 = null,
 };
 
 /// Callback fired by `query_each` for every matching chunk.
@@ -233,10 +260,16 @@ pub const WeldEcsAPI = extern struct {
     component_get_mut: *const fn (world: WeldWorldHandle, entity: WeldEntity, comp: WeldComponentId) callconv(.c) ?*anyopaque = stub_component_get_mut,
 
     // --- Queries ---
+    /// Reads and writes are declared SEPARATELY, and that is what populates the
+    /// two index spaces of `WeldQueryChunk`. A single `include` list could not:
+    /// the chunk would have no way to know which columns are read-only, and the
+    /// two spaces would be shapes nothing fills.
     query_create: *const fn (
         world: WeldWorldHandle,
-        include: ?[*]const WeldComponentId,
-        include_count: u32,
+        reads: ?[*]const WeldComponentId,
+        read_count: u32,
+        writes: ?[*]const WeldComponentId,
+        write_count: u32,
         exclude: ?[*]const WeldComponentId,
         exclude_count: u32,
     ) callconv(.c) WeldQueryHandle = stub_query_create,
@@ -331,10 +364,20 @@ fn stub_component_get_mut(world: WeldWorldHandle, entity: WeldEntity, comp: Weld
     _ = comp;
     return null;
 }
-fn stub_query_create(world: WeldWorldHandle, include: ?[*]const WeldComponentId, include_count: u32, exclude: ?[*]const WeldComponentId, exclude_count: u32) callconv(.c) WeldQueryHandle {
+fn stub_query_create(
+    world: WeldWorldHandle,
+    reads: ?[*]const WeldComponentId,
+    read_count: u32,
+    writes: ?[*]const WeldComponentId,
+    write_count: u32,
+    exclude: ?[*]const WeldComponentId,
+    exclude_count: u32,
+) callconv(.c) WeldQueryHandle {
     _ = world;
-    _ = include;
-    _ = include_count;
+    _ = reads;
+    _ = read_count;
+    _ = writes;
+    _ = write_count;
     _ = exclude;
     _ = exclude_count;
     return null;

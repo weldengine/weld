@@ -71,7 +71,7 @@ test "stub_api WeldEcsAPI: components stubbed (WELD_ERR_NOT_IMPLEMENTED on Resul
 
 test "stub_api WeldEcsAPI: queries stubbed" {
     const a = pl.stub_api.ecs;
-    const q = a.query_create(world, null, 0, null, 0);
+    const q = a.query_create(world, null, 0, null, 0, null, 0);
     try std.testing.expect(q == null);
     a.query_destroy(q);
     a.query_each(q, &dummyQueryCallback, null);

@@ -543,6 +543,14 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build ecs-access-zero-cost -Dcpu=${{ env.ZIG_CPU }}
 
+      # The Tier 3 half of ARCH-030, and the first C the CI compiles. The
+      # witness must build as published and must NOT build with one line taking
+      # a mutable pointer to a read column. A property of the SURFACE, so one
+      # cell — and the diagnostic is matched on its text, not on an exit code.
+      - name: zig build c-api-read-column-constness
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build c-api-read-column-constness -Dcpu=${{ env.ZIG_CPU }}
+
       # M1.1.14 review — THE SUITE-DERIVED HALF OF THE CONSERVATION, on the cell.
       # `zig build lint` above already runs the unconditional check of the closure
       # against the DECLARED total. This confronts that declared number with the

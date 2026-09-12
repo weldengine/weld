@@ -628,6 +628,61 @@ pub fn build(b: *std.Build) void {
         });
         view_asm_run.addFileArg(zc_obj.getEmittedAsm());
     }
+    // `zig build c-api-read-column-constness` — the Tier 3 half of `ARCH-030`.
+    //
+    // C has no comptime view, and what it has instead is `const`. The witness
+    // compiles as published and must NOT compile with one line added that takes
+    // a mutable pointer to a column the query declared read-only. Both
+    // directions in ONE step, because a refusal nobody pairs with an acceptance
+    // is satisfied by a file that never compiles at all.
+    //
+    // Driven through `zig cc` rather than a `Compile` step: a C compilation
+    // expected to FAIL cannot be a step of the graph it would fail. The
+    // diagnostic is matched on its text, never on the exit code — a compiler
+    // that died for an unrelated reason exits identically.
+    const c_witness_dir = "tests/c_api/read_column_constness";
+    const c_witness_flags = [_][]const u8{ "-std=c11", "-Wall", "-Werror", "-pedantic" };
+    const constness_step = b.step(
+        "c-api-read-column-constness",
+        "Assert a Tier 3 read column is unreachable by a mutable pointer (engine-c-api.md 5.5)",
+    );
+    {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(b.allocator);
+        argv.appendSlice(b.allocator, &.{ b.graph.zig_exe, "cc" }) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &c_witness_flags) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &.{ "-c", b.pathJoin(&.{ c_witness_dir, "witness.c" }), "-o" }) catch @panic("OOM");
+        const ok = b.addSystemCommand(argv.items);
+        // The object goes to a build-owned path rather than to a device: the
+        // point is that the compiler accepted it, and a run that writes nowhere
+        // is one the build system may legitimately skip.
+        _ = ok.addOutputFileArg("witness.o");
+        ok.has_side_effects = true;
+        ok.expectExitCode(0);
+        constness_step.dependOn(&ok.step);
+    }
+    {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(b.allocator);
+        argv.appendSlice(b.allocator, &.{ b.graph.zig_exe, "cc" }) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &c_witness_flags) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &.{
+            "-DWELD_ASSIGN_THROUGH_READ_COLUMN",
+            "-c",
+            b.pathJoin(&.{ c_witness_dir, "witness.c" }),
+            "-o",
+        }) catch @panic("OOM");
+        const bad = b.addSystemCommand(argv.items);
+        _ = bad.addOutputFileArg("witness_counterproof.o");
+        // Always re-run: a `Run` cached on its argv alone replays a stale
+        // verdict, which is how the sibling counter-proof harness first
+        // reported green against a deliberately disabled guard.
+        bad.has_side_effects = true;
+        bad.expectExitCode(1);
+        bad.addCheck(.{ .expect_stderr_match = "discards qualifiers" });
+        constness_step.dependOn(&bad.step);
+    }
+
     const view_asm_step = b.step(
         "ecs-access-zero-cost",
         "Assert the declared-access view emits the same instructions as a direct World access",
@@ -825,6 +880,9 @@ pub fn build(b: *std.Build) void {
         // What the command buffer no longer holds, and when it resolves what it
         // does — the two halves of the `world` field's removal.
         .{ .path = "tests/core/ecs/command_buffer_test.zig" },
+        // The Zig half of the `WeldQueryChunk` drift pin; the C half is the
+        // `_Static_assert`s in `tests/c_api/read_column_constness/`.
+        .{ .path = "tests/c_api/chunk_layout_test.zig" },
         .{ .path = "tests/ecs/change_detection.zig" },
         .{ .path = "tests/ecs/scheduler.zig" },
         .{ .path = "tests/ecs/scheduler_dag.zig" },
