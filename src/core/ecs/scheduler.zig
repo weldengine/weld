@@ -40,6 +40,14 @@
 //! the registration error is the only outcome. A later milestone
 //! can add explicit ordering if a real-world case requires it.
 //!
+//! The matrix reads ONE component at a time, and a second refusal
+//! exists because the DAG does not. Two systems whose declarations
+//! cross — `Reads(T), Writes(U)` against `Writes(T), Reads(U)` —
+//! are legal in every cell of it and together force both edges,
+//! closing a cycle no per-component check can see.
+//! `registerSystem` walks the graph and refuses that with
+//! `error.DependencyCycle`, before the declaration is committed.
+//!
 //! Resource placeholders. `ReadsResource(R)` / `WritesResource(R)`
 //! share the DAG construction path with components — the resource
 //! API itself is out of scope, but the placeholders compile
@@ -560,16 +568,33 @@ const PhaseState = struct {
 
 // ─── Errors ────────────────────────────────────────────────────────────────
 
-/// Errors surfaced by `SystemScheduler.registerSystem`. Currently
-/// limited to `WriteWriteConflict` (two writes on the same id in
-/// the same phase) plus the usual `OutOfMemory`. Promoted to a
-/// public alias so callers do not have to spell the error set out.
+/// Errors surfaced by `SystemScheduler.registerSystem`, plus the usual
+/// `OutOfMemory`. Promoted to a public alias so callers do not have to spell
+/// the error set out.
+///
+/// The two refusals name two different facts and are deliberately NOT one code.
+/// A write-write conflict is a property of ONE component: two systems claim to
+/// write it. A dependency cycle is a property of a SET of components and of no
+/// single one of them — every declaration in the cycle is individually legal,
+/// and it is their composition that has no ordering. A caller told
+/// `WriteWriteConflict` for a cycle would look for the duplicated write that
+/// does not exist.
 pub const RegistrationError = error{
     /// Two systems declare `Writes(T)` on the same component (or resource) in the same
     /// phase, with no explicit ordering to break the tie. It is rejected at
     /// registration — Bevy's silent serialization is explicitly not the model used
     /// here.
     WriteWriteConflict,
+    /// The declaration closes a cycle in the phase's dataflow DAG: the new
+    /// system must run after one already registered and before another that
+    /// reaches it. Two systems suffice — one declaring `Reads(T), Writes(U)`
+    /// and the other `Writes(T), Reads(U)` — and neither declaration is a
+    /// write-write conflict on any id.
+    ///
+    /// There is no ordering to choose. The DAG semantic is forward dataflow,
+    /// so both edges are forced by the declarations themselves and no
+    /// `runs_before` exists to break the tie; the only outcome is refusal.
+    DependencyCycle,
     OutOfMemory,
 };
 
@@ -603,8 +628,26 @@ pub const SystemScheduler = struct {
     /// Register a system. Resolves the system's accesses against
     /// the world's registry, then computes incoming edges + checks
     /// for write-write conflicts against systems already registered
-    /// in the same phase. Returns `error.WriteWriteConflict` on a
-    /// conflict; the descriptor is NOT inserted in that case.
+    /// in the same phase, then checks that the new edges close no
+    /// cycle. Returns `error.WriteWriteConflict` or
+    /// `error.DependencyCycle` on a refusal; in either case NOTHING
+    /// OF THE SCHEDULER is touched — no descriptor, no edge, no
+    /// tracker entry, no command buffer — both checks running ahead
+    /// of the commit.
+    ///
+    /// **The WORLD is not covered by that, and the difference is
+    /// real rather than pedantic.** Resolving the accesses calls
+    /// `ensureComponentRegistered` for every type the declaration
+    /// names, so a refused registration leaves those types present
+    /// in the registry. It is benign because that call is idempotent
+    /// and monotone — a corrected declaration resolves to the same
+    /// ids — and it is stated because a reader who takes "nothing
+    /// was mutated" literally would be wrong about the registry.
+    ///
+    /// Neither guarantee covers `OutOfMemory`: the commit appends
+    /// edges and tracker entries the `errdefer`s do not all undo, so
+    /// a scheduler that has seen an allocation failure here is
+    /// unusable. The debt is recorded in `engine-ecs-internals.md`.
     ///
     /// Invalidates any cached topological levels for the affected
     /// phase — the next `dispatchFrame` recomputes them.
@@ -625,8 +668,11 @@ pub const SystemScheduler = struct {
         }
 
         // First pass — conflict detection. Two writes on the same
-        // id in the same phase = registration error. No state is
-        // mutated until we know the system is conflict-free.
+        // id in the same phase = registration error. No state OF THE
+        // SCHEDULER is mutated until we know the system is admissible;
+        // the resolution above has already registered the named types
+        // in the world's registry, idempotently, and that survives a
+        // refusal.
         for (desc.accesses, resolved) |access, cid| {
             if (access.kind == .writes or access.kind == .writes_resource) {
                 if (phase.tracker.writers.get(cid)) |writers| {
@@ -664,7 +710,66 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Third pass — commit. Append the new system, extend edges,
+        // Third pass — cycle detection, still ahead of the commit.
+        //
+        // Pass 1 refuses two writers of the SAME id and nothing more. Two
+        // systems that CROSS — one declaring `Reads(T), Writes(U)`, the other
+        // `Writes(T), Reads(U)` — pass it individually and together force both
+        // edges, closing a two-node cycle that no per-component check can see:
+        // the cycle is a property of the pair, and pass 1 only ever looks at
+        // one id at a time.
+        //
+        // Left to `computeLevels`, that failure surfaces at the FIRST DISPATCH
+        // instead of at the registration that caused it, under an error naming
+        // a duplicated write that does not exist, and with the offending
+        // descriptor already committed. So it is refused here, where the
+        // caller still holds the declaration that is wrong.
+        //
+        // The walk is a plain reachability over the EXISTING edges, and two
+        // properties make that enough. The graph before this registration is
+        // acyclic — this check is what keeps it so, from an empty graph
+        // onwards — hence any new cycle passes through `new_idx`, and such a
+        // cycle is exactly `new_idx → s → … → p → new_idx` for some successor
+        // `s` and some predecessor `p`. And a two-colour visited set suffices
+        // where `registry.zig`'s `@requires` closure needs three, because the
+        // question here is REACHABILITY and not cycle-finding: a diamond is
+        // simply a node reached twice, and revisiting it could not change the
+        // answer.
+        //
+        // The acyclicity it rests on holds for a scheduler whose registrations
+        // all returned. `registerSystem` is not transactional for itself —
+        // `engine-ecs-internals.md` carries that Tier 0 debt, and
+        // `forge/sync.zig`'s preflight states the consequence — so a scheduler
+        // that has seen an `OutOfMemory` here is unusable, and this invariant
+        // is not what rescues it.
+        if (incoming.items.len > 0 and outgoing.items.len > 0) {
+            const visited = try gpa.alloc(bool, phase.systems.items.len);
+            defer gpa.free(visited);
+            @memset(visited, false);
+
+            var stack = std.ArrayListUnmanaged(u32).empty;
+            defer stack.deinit(gpa);
+            for (outgoing.items) |succ| {
+                if (visited[succ]) continue;
+                visited[succ] = true;
+                try stack.append(gpa, succ);
+            }
+            while (stack.pop()) |node| {
+                // Tested on the node itself, which is what catches the
+                // two-node case where one system is both predecessor and
+                // successor of the new one.
+                for (incoming.items) |dep| {
+                    if (dep == node) return error.DependencyCycle;
+                }
+                for (phase.edges.items[node].items) |next| {
+                    if (visited[next]) continue;
+                    visited[next] = true;
+                    try stack.append(gpa, next);
+                }
+            }
+        }
+
+        // Fourth pass — commit. Append the new system, extend edges,
         // record accesses in the tracker, invalidate cached levels.
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
@@ -873,16 +978,24 @@ pub const SystemScheduler = struct {
                 }
             }
             if (lvl.system_indices.items.len == 0) {
-                // A CYCLE, and it is reachable — do not turn this into
-                // `unreachable`. `registerSystem`'s pass 1 refuses two writers
-                // of the SAME id and nothing more; two systems that cross, one
-                // declaring `Reads(T), Writes(U)` and the other
-                // `Writes(T), Reads(U)`, each pass that check and together
-                // close a two-node cycle. Both registrations then report
-                // success and the failure surfaces HERE, at the first dispatch,
-                // under an error name that means something else.
+                // A CYCLE. `registerSystem` refuses one before committing the
+                // declaration that would close it, so on a scheduler whose
+                // registrations all returned this is unreachable — and it is
+                // still not written `unreachable`, for two reasons that are
+                // not style.
+                //
+                // The invariant is held by a sibling function and not by this
+                // one: it rests on registration being the only builder of
+                // `edges`, which is true today and is the kind of fact a later
+                // milestone can take away without this line noticing.
+                //
+                // And it does not cover a scheduler left half-mutated by a
+                // registration that failed on `OutOfMemory`, which
+                // `forge/sync.zig`'s preflight documents as UNUSABLE. An
+                // `unreachable` there is undefined behaviour in ReleaseFast;
+                // an error is a diagnosis.
                 lvl.deinit(gpa);
-                return error.WriteWriteConflict;
+                return error.DependencyCycle;
             }
             // Mark these nodes as scheduled by setting their
             // in_degree to a sentinel high enough to never reappear.

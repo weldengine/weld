@@ -138,6 +138,7 @@ each system's `accesses` descriptor:
 
 - `Writes(X)` → `Reads(X)` edge (forward dataflow — writer runs before reader regardless of registration order).
 - Two `Writes(X)` in the same phase = `error.WriteWriteConflict` at registration. No silent serialisation.
+- Edges that close a cycle = `error.DependencyCycle` at registration. The rule above reads one component at a time, so two systems declaring `Reads(T), Writes(U)` and `Writes(T), Reads(U)` conflict on nothing and still force both edges; both are forced by forward dataflow and there is no `runs_before` to break the tie, so the only outcome is refusal. Neither refusal commits anything to the scheduler.
 
 Topological levels are computed via Kahn's algorithm (cached
 per phase, invalidated on `registerSystem`). Inside a level,

@@ -19,6 +19,14 @@
 //!   registration error` — register two systems with `Writes(X)`
 //!   in the same phase; the second `registerSystem` returns
 //!   `error.WriteWriteConflict`.
+//!
+//! Three later tests cover the SECOND refusal, which the acceptance
+//! criteria above do not name because the per-component conflict
+//! matrix cannot express it: two systems whose declarations cross
+//! close a cycle in the phase's DAG while conflicting on no single
+//! id. They pin the refusal, the transitive case that tells a real
+//! graph walk from a comparison of two sets, and the crossing
+//! declaration that is legal and must still register.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -262,4 +270,145 @@ test "unresolvable conflict between two writes raises a registration error" {
         .run = nopSystem,
         .accesses = &.{Reads(Velocity)},
     });
+}
+
+// ─── Test 4 — registration cycle ──────────────────────────────────────────
+
+test "crossing declarations that close a cycle are refused at registration" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var sys = SystemScheduler.init();
+    defer sys.deinit(gpa);
+
+    // TWO NODES. Neither declaration is a write-write conflict on any id —
+    // `TagA` is written once and `TagB` is written once — and together they
+    // force both edges: `a` reads what `b` writes, `b` reads what `a` writes.
+    // The DAG semantic is forward dataflow, so both are mandatory and there is
+    // no ordering to choose.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "cross_a",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagB) },
+    });
+    try std.testing.expectError(
+        error.DependencyCycle,
+        sys.registerSystem(gpa, &world, .{
+            .phase = .update,
+            .name = "cross_b",
+            .run = nopSystem,
+            .accesses = &.{ Writes(TagA), Reads(TagB) },
+        }),
+    );
+
+    // THE ERROR IS NOT `WriteWriteConflict`, and that is the point of the
+    // refusal rather than a detail of it. `expectError` above already fails on
+    // any other code, so what this adds is the other direction: a real
+    // duplicated write still reports the code that names it, so the two
+    // refusals are told apart and cannot silently collapse into one.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .post_update,
+        .name = "ww_first",
+        .run = nopSystem,
+        .accesses = &.{Writes(TagC)},
+    });
+    try std.testing.expectError(
+        error.WriteWriteConflict,
+        sys.registerSystem(gpa, &world, .{
+            .phase = .post_update,
+            .name = "ww_second",
+            .run = nopSystem,
+            .accesses = &.{Writes(TagC)},
+        }),
+    );
+
+    // NOTHING WAS COMMITTED by either refusal — the same contract the
+    // write-write refusal has always carried, now asserted rather than
+    // claimed. One system in `update`, one in `post_update`.
+    try std.testing.expectEqual(@as(usize, 1), sys.systemsInPhase(.update).len);
+    try std.testing.expectEqual(@as(usize, 1), sys.systemsInPhase(.post_update).len);
+
+    // And the phase that refused is still DISPATCHABLE: a committed cycle
+    // would surface here instead, which is the failure being moved.
+    const levels = try sys.topologicalLevels(gpa, .update);
+    try std.testing.expectEqual(@as(usize, 1), levels.len);
+}
+
+test "a cycle closed through a third system is refused too" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var sys = SystemScheduler.init();
+    defer sys.deinit(gpa);
+
+    // THE DISCRIMINATING CASE. A check comparing the new system's predecessors
+    // against its successors DIRECTLY passes the two-node test above and lets
+    // this one through: here the successor is `a` and the predecessor is `b`,
+    // and they are distinct. Only walking `a`'s own edges reaches `b`.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "chain_a",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagB) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "chain_b",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagB), Writes(TagC) },
+    });
+    try std.testing.expectError(
+        error.DependencyCycle,
+        sys.registerSystem(gpa, &world, .{
+            .phase = .update,
+            .name = "chain_c",
+            .run = nopSystem,
+            .accesses = &.{ Reads(TagC), Writes(TagA) },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), sys.systemsInPhase(.update).len);
+}
+
+test "a crossing declaration that closes no cycle is registered" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var sys = SystemScheduler.init();
+    defer sys.deinit(gpa);
+
+    // NON-VACUITY, and on the walk itself rather than on the refusal. The
+    // third system has a predecessor AND a successor, so the search really
+    // runs — a check that refused whenever both sets are non-empty would pass
+    // both tests above and fail here. It walks from `sink` and comes back
+    // empty because `sink` declares no write of its own.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "source",
+        .run = nopSystem,
+        .accesses = &.{Writes(TagA)},
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "sink",
+        .run = nopSystem,
+        .accesses = &.{Reads(TagB)},
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "middle",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagB) },
+    });
+
+    // Three systems, and the edges are the ones the declarations force:
+    // `source` → `middle` → `sink`, one system per level.
+    const levels = try sys.topologicalLevels(gpa, .update);
+    try std.testing.expectEqual(@as(usize, 3), levels.len);
+    for (levels) |lvl| {
+        try std.testing.expectEqual(@as(usize, 1), lvl.system_indices.items.len);
+    }
 }

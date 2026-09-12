@@ -31,12 +31,17 @@
 /// breaking change — a tracked migration, not a freeze failure (the
 /// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
 ///
-/// At 2 since declared-access enforcement (`ARCH-030`). Three of the shapes
-/// this version covers changed, and all three are breaking for a Tier-1
-/// caller: `SystemDescriptor.accesses` lost its empty default, `SystemContext`
-/// lost its `*World`, and `CommandBuffer` lost its `world` — so `flush` and
-/// `init` moved with it. The additions beside them (`view`, `View`, `Access`,
-/// `SystemContextOf`) would not on their own have moved this number.
+/// At 2 since declared-access enforcement (`ARCH-030`). FOUR of the shapes this
+/// version covers changed, and all four are breaking for a Tier-1 caller:
+/// `SystemDescriptor.accesses` lost its empty default, `SystemContext` lost its
+/// `*World`, `CommandBuffer` lost its `world` — so `flush` and `init` moved with
+/// it — and `RegistrationError` gained `DependencyCycle`, which breaks an
+/// exhaustive `switch` even though `registerSystem`'s inferred `!void` reads
+/// unchanged. That last one RIDES this bump rather than asking for a second:
+/// one version covers one milestone's breaking set, and a number incremented
+/// per change would stop meaning "the surface a caller compiled against".
+/// The additions beside them (`view`, `View`, `Access`, `SystemContextOf`)
+/// would not on their own have moved this number.
 pub const WELD_ECS_PROTOCOL_VERSION: u32 = 2;
 
 // ─── Sub-module re-exports — keeps `weld_core.ecs.<file>.<symbol>` reachable ──
