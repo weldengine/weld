@@ -324,16 +324,46 @@ test "crossing declarations that close a cycle are refused at registration" {
         }),
     );
 
-    // NOTHING WAS COMMITTED by either refusal — the same contract the
-    // write-write refusal has always carried, now asserted rather than
-    // claimed. One system in `update`, one in `post_update`.
-    try std.testing.expectEqual(@as(usize, 1), sys.systemsInPhase(.update).len);
-    try std.testing.expectEqual(@as(usize, 1), sys.systemsInPhase(.post_update).len);
+    // NOTHING WAS COMMITTED by either refusal, on ALL FOUR of the things
+    // `registerSystem` promises — descriptor, command buffer, edge, tracker
+    // entry. A count of descriptors alone is not that contract: an
+    // implementation that moved the tracker loop ahead of the cycle walk
+    // would leave `writers[TagA] = [1]` naming a system that does not exist,
+    // and every count in sight would still read 1.
+    try expectNothingCommitted(&sys, .update, 1);
+    try expectNothingCommitted(&sys, .post_update, 1);
+}
 
-    // And the phase that refused is still DISPATCHABLE: a committed cycle
-    // would surface here instead, which is the failure being moved.
-    const levels = try sys.topologicalLevels(gpa, .update);
-    try std.testing.expectEqual(@as(usize, 1), levels.len);
+/// Assert that `phase` holds exactly `expected` systems AND that nothing
+/// anywhere in it names an index beyond them.
+///
+/// The second half is the part a count cannot give. `registerSystem` rolls
+/// back its descriptor, its command buffer and its own adjacency list through
+/// `errdefer`, and refuses ahead of all three — so the residue a broken
+/// ordering would leave is in the structures the rollback does NOT walk: a
+/// predecessor's adjacency list, and the tracker's per-component reader and
+/// writer lists.
+fn expectNothingCommitted(
+    sys: *const SystemScheduler,
+    phase: sys_sched_mod.Phase,
+    expected: usize,
+) !void {
+    const p = &sys.phases[@intFromEnum(phase)];
+    try std.testing.expectEqual(expected, p.systems.items.len);
+    try std.testing.expectEqual(expected, p.command_buffers.items.len);
+    try std.testing.expectEqual(expected, p.edges.items.len);
+
+    for (p.edges.items) |adj| {
+        for (adj.items) |target| try std.testing.expect(target < expected);
+    }
+    var readers = p.tracker.readers.valueIterator();
+    while (readers.next()) |list| {
+        for (list.items) |idx| try std.testing.expect(idx < expected);
+    }
+    var writers = p.tracker.writers.valueIterator();
+    while (writers.next()) |list| {
+        for (list.items) |idx| try std.testing.expect(idx < expected);
+    }
 }
 
 test "a cycle closed through a third system is refused too" {
@@ -344,10 +374,17 @@ test "a cycle closed through a third system is refused too" {
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    // THE DISCRIMINATING CASE. A check comparing the new system's predecessors
-    // against its successors DIRECTLY passes the two-node test above and lets
-    // this one through: here the successor is `a` and the predecessor is `b`,
-    // and they are distinct. Only walking `a`'s own edges reaches `b`.
+    // ONE HOP, and that is exactly what it discriminates — no more. A check
+    // comparing the new system's predecessors against its successors DIRECTLY
+    // passes the two-node test above and lets this one through: here the
+    // successor is `a` and the predecessor is `b`, and they are distinct, so
+    // reaching `b` takes walking `a`'s edges.
+    //
+    // **It does NOT pin transitivity**, and an earlier form of this comment
+    // called it the discriminating case for the walk, which it is not: a
+    // bounded implementation that checks its seeds, expands ONE level and
+    // stops passes this test and the one above it. The four-node ring below
+    // is what refuses that form.
     try sys.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "chain_a",
@@ -369,7 +406,7 @@ test "a cycle closed through a third system is refused too" {
             .accesses = &.{ Reads(TagC), Writes(TagA) },
         }),
     );
-    try std.testing.expectEqual(@as(usize, 2), sys.systemsInPhase(.update).len);
+    try expectNothingCommitted(&sys, .update, 2);
 }
 
 test "a crossing declaration that closes no cycle is registered" {
@@ -411,4 +448,129 @@ test "a crossing declaration that closes no cycle is registered" {
     for (levels) |lvl| {
         try std.testing.expectEqual(@as(usize, 1), lvl.system_indices.items.len);
     }
+}
+
+test "a cycle two hops deep is refused, which a bounded walk would miss" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var sys = SystemScheduler.init();
+    defer sys.deinit(gpa);
+
+    // THE DISCRIMINATING CASE FOR THE WALK ITSELF, and the reason the two
+    // tests above are not: in both of them the predecessor sits ONE hop from
+    // a seed, so an implementation that checks its seeds, expands a single
+    // level and stops passes them. Here the ring is four deep — `ring_d`'s
+    // only successor is `ring_a` and its only predecessor is `ring_c`, two
+    // hops apart — so refusing it requires the transitive closure the stack
+    // computes and nothing less.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "ring_a",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagB) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "ring_b",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagB), Writes(TagC) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "ring_c",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagC), Writes(TagD) },
+    });
+
+    // The three registered so far form a CHAIN and no cycle — asserted, so
+    // the refusal below is attributable to the fourth declaration and not to
+    // a graph that was already closed.
+    const before = try sys.topologicalLevels(gpa, .update);
+    try std.testing.expectEqual(@as(usize, 3), before.len);
+
+    try std.testing.expectError(
+        error.DependencyCycle,
+        sys.registerSystem(gpa, &world, .{
+            .phase = .update,
+            .name = "ring_d",
+            .run = nopSystem,
+            .accesses = &.{ Reads(TagD), Writes(TagA) },
+        }),
+    );
+    try expectNothingCommitted(&sys, .update, 3);
+}
+
+test "a walk that reconverges on one node still terminates and admits" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var sys = SystemScheduler.init();
+    defer sys.deinit(gpa);
+
+    // A DIAMOND, so the walk reaches one node by TWO paths. Nothing else in
+    // this file does: every other case discovers each node once, which leaves
+    // `visited`'s second guard — the one on an expanded neighbour — never
+    // taken, and the reasoning at its site measured by nothing.
+    //
+    // What it establishes is TERMINATION AND THE ANSWER, not necessity: in a
+    // graph the registration keeps acyclic the walk halts either way, so
+    // deleting the guard would not change this verdict. That is what the
+    // source says too — the set bounds the work and cannot move the answer —
+    // and the honest test is one that runs the shape rather than one that
+    // claims the guard is load-bearing.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_root",
+        .run = nopSystem,
+        .accesses = &.{ Reads(Position), Writes(TagA) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_left",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagB) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_right",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagA), Writes(TagC) },
+    });
+    // TWO predecessors, where every other case in this file has exactly one.
+    // An implementation reading `incoming.items[0]` alone — skipping the
+    // membership loop — is indistinguishable from the shipped one everywhere
+    // else in the suite.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_join",
+        .run = nopSystem,
+        .accesses = &.{ Reads(TagB), Reads(TagC), Writes(TagD) },
+    });
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_aside",
+        .run = nopSystem,
+        .accesses = &.{Writes(Velocity)},
+    });
+
+    // The probe's walk seeds at `dia_root`, opens both branches, reaches
+    // `dia_join` through one of them and meets it again through the other.
+    // Its predecessor is `dia_aside`, which the diamond does not reach, so
+    // the answer is admission.
+    try sys.registerSystem(gpa, &world, .{
+        .phase = .update,
+        .name = "dia_probe",
+        .run = nopSystem,
+        .accesses = &.{ Reads(Velocity), Writes(Position) },
+    });
+
+    // Six systems, and the SHAPE is a diamond rather than a chain: five
+    // levels for six systems, the fourth holding the two branches. A chain
+    // would give six levels of one and would pass a bare count.
+    const levels = try sys.topologicalLevels(gpa, .update);
+    try std.testing.expectEqual(@as(usize, 5), levels.len);
+    try std.testing.expectEqual(@as(usize, 2), levels[3].system_indices.items.len);
 }

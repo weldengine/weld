@@ -568,9 +568,19 @@ const PhaseState = struct {
 
 // ─── Errors ────────────────────────────────────────────────────────────────
 
-/// Errors surfaced by `SystemScheduler.registerSystem`, plus the usual
-/// `OutOfMemory`. Promoted to a public alias so callers do not have to spell
-/// the error set out.
+/// The two refusals `SystemScheduler.registerSystem` decides, plus the usual
+/// `OutOfMemory`.
+///
+/// **It is NOT the error set that function returns, and a caller must not
+/// annotate against it.** `registerSystem` is declared `!void` with an
+/// inferred set, and it `try`s `AccessDescriptor.resolve`, which is
+/// `anyerror!ComponentId` — so the inferred set collapses to `anyerror`, and
+/// `fn wire(…) RegistrationError!void { try sched.registerSystem(…); }` does
+/// not compile. What this alias is good for is naming the refusals in a
+/// `switch` or an `expectError`, which is every use of it in the tree
+/// (measured). The gap is the resolver's `anyerror`, which predates this set
+/// and is not narrowed here: it is a public function-pointer type, so
+/// narrowing it is a frozen-surface change.
 ///
 /// The two refusals name two different facts and are deliberately NOT one code.
 /// A write-write conflict is a property of ONE component: two systems claim to
@@ -594,6 +604,12 @@ pub const RegistrationError = error{
     /// There is no ordering to choose. The DAG semantic is forward dataflow,
     /// so both edges are forced by the declarations themselves and no
     /// `runs_before` exists to break the tie; the only outcome is refusal.
+    ///
+    /// `computeLevels` returns it too, as a backstop on an invariant
+    /// registration maintains — so `dispatchFrame` and `topologicalLevels`
+    /// can surface it. A reader who meets it there should NOT look for a
+    /// declaration just made: it means the phase's DAG holds a cycle nothing
+    /// refused, which is a defect in the scheduler and not in the caller.
     DependencyCycle,
     OutOfMemory,
 };
@@ -644,10 +660,19 @@ pub const SystemScheduler = struct {
     /// ids — and it is stated because a reader who takes "nothing
     /// was mutated" literally would be wrong about the registry.
     ///
-    /// Neither guarantee covers `OutOfMemory`: the commit appends
-    /// edges and tracker entries the `errdefer`s do not all undo, so
-    /// a scheduler that has seen an allocation failure here is
-    /// unusable. The debt is recorded in `engine-ecs-internals.md`.
+    /// `OutOfMemory` splits, and the split is not pedantry. An
+    /// allocation that fails BEFORE the commit — resolving the
+    /// accesses, or the cycle walk's own scratch — returns with the
+    /// scheduler byte-unchanged, like the two refusals. An allocation
+    /// that fails INSIDE the commit leaves edges and tracker entries
+    /// the `errdefer`s do not all undo, naming an index the rollback
+    /// popped, and THAT scheduler is unusable: the next registration's
+    /// walk and the next `computeLevels` both index on it out of
+    /// bounds. A caller cannot tell the two apart from the error
+    /// alone, so the conservative reading is the right one — but the
+    /// sentence that said every allocation failure here leaves an
+    /// unusable scheduler was false for most of them. The debt is
+    /// recorded in `engine-ecs-internals.md`.
     ///
     /// Invalidates any cached topological levels for the affected
     /// phase — the next `dispatchFrame` recomputes them.
@@ -981,19 +1006,24 @@ pub const SystemScheduler = struct {
                 // A CYCLE. `registerSystem` refuses one before committing the
                 // declaration that would close it, so on a scheduler whose
                 // registrations all returned this is unreachable — and it is
-                // still not written `unreachable`, for two reasons that are
-                // not style.
+                // still not written `unreachable`, for ONE reason.
                 //
-                // The invariant is held by a sibling function and not by this
+                // The invariant is held by a SIBLING function and not by this
                 // one: it rests on registration being the only builder of
                 // `edges`, which is true today and is the kind of fact a later
-                // milestone can take away without this line noticing.
+                // milestone can take away without this line noticing. An
+                // `unreachable` proven somewhere else is a bet on a proof that
+                // can move; an error costs a branch that never runs.
                 //
-                // And it does not cover a scheduler left half-mutated by a
-                // registration that failed on `OutOfMemory`, which
-                // `forge/sync.zig`'s preflight documents as UNUSABLE. An
-                // `unreachable` there is undefined behaviour in ReleaseFast;
-                // an error is a diagnosis.
+                // **A second reason was written here and was FALSE.** It said
+                // the branch also covers a scheduler left half-mutated by a
+                // registration that failed on `OutOfMemory`. It does not: such
+                // a scheduler carries an edge naming an index the rollback
+                // popped, and the in-degree count twenty lines above faults on
+                // it — `in_degree[target] += 1` with `target == n` — before
+                // any level is built. The scenario cannot reach this line, so
+                // citing it justified the branch with something the code does
+                // not do. Nothing else about the branch changes.
                 lvl.deinit(gpa);
                 return error.DependencyCycle;
             }

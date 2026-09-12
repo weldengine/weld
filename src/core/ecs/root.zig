@@ -234,5 +234,6 @@ pub const AccessKind = scheduler.AccessKind;
 /// during intra-phase dispatch. Surfaced via `SystemContext.builder`.
 pub const JobBuilder = scheduler.JobBuilder;
 
-/// Error set returned by `SystemScheduler.registerSystem`.
+/// The two refusals `SystemScheduler.registerSystem` decides — NOT the set it
+/// returns, which is `anyerror`. See the declaration for why.
 pub const RegistrationError = scheduler.RegistrationError;

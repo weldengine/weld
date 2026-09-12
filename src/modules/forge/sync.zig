@@ -782,11 +782,28 @@ fn wouldConflict(
 /// nothing and reports `error.SystemAlreadyRegistered`. Idempotence would accept it in
 /// silence, hiding a double wiring rather than naming it.
 ///
-/// **The preflight covers the DETERMINISTIC failures — the name and the write conflicts — and
-/// covers OOM not at all.** `registerSystem` appends edges and several tracker entries before
+/// **The preflight covers TWO of the three deterministic failures — the name and the write
+/// conflicts — and covers OOM not at all.** The third is `error.DependencyCycle`, and it is
+/// not screened here for a reason rather than by omission: a cycle is a property of the
+/// phase's whole DAG, so predicting it means rebuilding the scheduler's edge construction
+/// inside this module, and a second implementation of that is how the two come to disagree.
+/// It surfaces from `sched.registerSystem` below instead, which refuses it AHEAD of its commit
+/// — so the scheduler is left untouched exactly as by a write conflict, and only the world's
+/// registry carries the types the resolution registered, which is the bound `registerSystem`'s
+/// own doc states.
+///
+/// **It is reachable and not theoretical.** `step_spec` declares writes on `Transform`,
+/// `Velocity` and `Sleeping` plus a read of `RigidBody`, all in `fixed_update`. Any later
+/// Tier 1 system in that phase which READS one of those three and WRITES `RigidBody` closes a
+/// two-node cycle — and `wouldConflict` cannot see it, because it compares write against write
+/// on `type_name` and nothing else. The ECS → solver direction this module deliberately does
+/// not register has exactly that shape.
+///
+/// `registerSystem` appends edges and several tracker entries before
 /// any allocation can fail, and its `errdefer`s do not undo all of them: after an allocation
-/// failure the scheduler must be treated as UNUSABLE, and a retry can report
-/// `WriteWriteConflict` against a `systemCount()` of zero. Moving to one system removed the
+/// failure INSIDE ITS COMMIT the scheduler must be treated as UNUSABLE, and a retry can report
+/// `WriteWriteConflict` against a `systemCount()` of zero. An allocation that fails before that
+/// commit — the access resolution, or the cycle walk's scratch — leaves it byte-unchanged. Moving to one system removed the
 /// residual BETWEEN two calls and nothing inside one. The real fix is that `registerSystem` be
 /// TRANSACTIONAL FOR ITSELF — a Tier 0 debt recorded in `engine-ecs-internals.md`, and a
 /// different one from the absence of a group removal recorded beside it. Promising an absence
