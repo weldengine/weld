@@ -224,6 +224,7 @@ pub fn build(b: *std.Build) void {
     const stub_specs = [_]StubSpec{
         .{ .name = "weld_stub_plugin_happy", .root = "tests/core/plugin_loader/stub_plugin/plugin.zig" },
         .{ .name = "weld_stub_plugin_future", .root = "tests/core/plugin_loader/stub_plugin/plugin_future_api.zig" },
+        .{ .name = "weld_stub_plugin_legacy", .root = "tests/core/plugin_loader/stub_plugin/plugin_legacy_api.zig" },
         .{ .name = "weld_stub_plugin_no_entry", .root = "tests/core/plugin_loader/stub_plugin/plugin_no_entry.zig" },
     };
     var stub_install_steps: [stub_specs.len]*std.Build.Step = undefined;
@@ -328,10 +329,18 @@ pub fn build(b: *std.Build) void {
             .step = "case-missing-accesses",
             .marks = &.{"missing struct field: accesses"},
         },
+        .{
+            // Also the compiler's, and for a stronger reason: the promotion is
+            // refused at the TYPE, before any access test can run. A refusal
+            // carrying the view's marker would mean the second view had been
+            // built and was objecting afterwards.
+            .step = "case-view-promotion",
+            .marks = &.{"expected type '*ecs.view.ErasedFor"},
+        },
     };
     const counterproof_step = b.step(
         "ecs-access-counterproof",
-        "Assert the three declared-access refusals fire, and that legitimate code still compiles",
+        "Assert the four declared-access refusals fire, and that legitimate code still compiles",
     );
     for (counterproof_cases) |case| {
         const run = if (case.step) |name|

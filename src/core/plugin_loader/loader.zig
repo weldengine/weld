@@ -88,6 +88,19 @@ pub const LoaderError = error{
     /// current runtime. The plugin requests a more recent API
     /// version than the one compiled into Weld.
     ApiVersionTooNew,
+    /// `desc.api_version_min < WELD_API_VERSION_MAJOR` of the current
+    /// runtime. The plugin was built against an API major this runtime has
+    /// broken, so it calls entries whose signatures moved and reads structs
+    /// whose layout moved.
+    ///
+    /// **Its absence was invisible while the major was 0**, nothing being
+    /// older than the first; the increment is what makes it reachable. A
+    /// major is by definition a binary break, so the admissible band is a
+    /// single value and not a floor — the field's name says `min`, which is
+    /// the shape a MINOR would need, and the two bounds together give the
+    /// equality a major requires while keeping the two refusals separately
+    /// diagnosable.
+    ApiVersionTooOld,
     /// Allocation failure while appending the handle.
     OutOfMemory,
 };
@@ -188,14 +201,23 @@ pub const Loader = struct {
         // valid for the lifetime of the load.
         const plugin_desc = entry_fn(@ptrCast(&api_mod.stub_api));
 
-        // Version check. We accept `desc.api_version_min <=
-        // current MAJOR`.
+        // Version check, BOTH directions. A major increment is a binary
+        // break, so the plugin's declared major must EQUAL the runtime's:
+        // above it the plugin wants entries that do not exist yet, below it
+        // the plugin calls entries whose signatures have moved.
         if (plugin_desc.api_version_min > desc.WELD_API_VERSION_MAJOR) {
             log.warn(
                 "plugin '{s}' requires API version {d}, runtime supports {d}",
                 .{ path, plugin_desc.api_version_min, desc.WELD_API_VERSION_MAJOR },
             );
             return error.ApiVersionTooNew;
+        }
+        if (plugin_desc.api_version_min < desc.WELD_API_VERSION_MAJOR) {
+            log.warn(
+                "plugin '{s}' was built against API version {d}, runtime is {d}",
+                .{ path, plugin_desc.api_version_min, desc.WELD_API_VERSION_MAJOR },
+            );
+            return error.ApiVersionTooOld;
         }
 
         // Log identity + capabilities (no enforcement). The

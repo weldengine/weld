@@ -149,6 +149,33 @@ fn require(comptime spec: []const Access, comptime T: type, comptime want: Use) 
     }
 }
 
+/// A world seen through ONE declared set, as a type distinct per set.
+///
+/// **This is what makes a view's transported pointer non-interchangeable, and
+/// without it the restriction had a free bypass that was not the one the file
+/// header describes.** As `*anyopaque` the field's type was the same for every
+/// spec, so `View(&write_spec).fromErased(ctx.view.world_erased)` promoted a
+/// read declaration to a write one with no cast, no builtin and no
+/// diagnostic — a plain call. Keyed on the spec, that same expression is a
+/// type error, and reaching across takes an explicit `@ptrCast` between two
+/// distinct opaque types: deliberate, greppable, and visible in review.
+///
+/// **Memoisation is on the slice's IDENTITY, not its value, and that was
+/// measured rather than assumed.** Naming one `const spec` yields one type
+/// wherever it is named, so a trampoline and the body it calls agree; two
+/// separately declared but identical sets yield two types, so a promotion
+/// between them is refused. Both directions are what this needs — the second
+/// is stricter than necessary and costs nothing, since no legitimate path
+/// promotes a view to a set it was not built from.
+pub fn ErasedFor(comptime spec: []const Access) type {
+    return opaque {
+        /// The set this erased world may be read through. Reachable so a test
+        /// can assert the type really carries its declaration rather than
+        /// being one anonymous opaque among others.
+        pub const declared: []const Access = spec;
+    };
+}
+
 /// The restricted handle a system receives in place of a `*World`.
 ///
 /// Instantiated once per declared set. Every accessor is a thin forward to the
@@ -171,13 +198,20 @@ pub fn View(comptime spec: []const Access) type {
         /// wants to assert the type carries its declaration.
         pub const declared: []const Access = spec;
 
-        /// The world, with its type erased. Not a `*World` field: see the file
-        /// header — Zig has no private field, so what is withheld is the type.
-        world_erased: *anyopaque,
+        /// The world, with its type erased THROUGH THIS SPEC. Not a `*World`
+        /// field: Zig has no private field, so what is withheld is the type.
+        /// Not `*anyopaque` either — that erased the spec along with the
+        /// world, and made every view's pointer interchangeable with every
+        /// other's.
+        world_erased: *ErasedFor(spec),
 
         /// Build a view over an erased world pointer. Called by the generated
         /// trampoline; `p` must point at a live `World`.
-        pub fn fromErased(p: *anyopaque) Self {
+        ///
+        /// The parameter is spec-typed, so this cannot be fed another view's
+        /// pointer: that is the whole of the promotion refusal, and it lives
+        /// in the signature rather than in a check.
+        pub fn fromErased(p: *ErasedFor(spec)) Self {
             return .{ .world_erased = p };
         }
 

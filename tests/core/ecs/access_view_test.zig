@@ -1,6 +1,6 @@
 //! Acceptance tests for the declared-access view (`ARCH-030`).
 //!
-//! **These are the POSITIVE half, and without them the three counter-proofs in
+//! **These are the POSITIVE half, and without them the four counter-proofs in
 //! `access_counterproof/` prove nothing.** A view that refused every access
 //! would satisfy all three refusals and fail nothing — so what has to be
 //! established first is that legitimate code reaches what it declared, reads
@@ -151,4 +151,72 @@ test "a view refuses to enter a dispatched body" {
     const V = View(&spec);
     try testing.expect(weld_core.ecs.command_buffer.carriesMarked(V));
     try testing.expect(weld_core.ecs.command_buffer.carriesMarked(ecs.SystemContextOf(&spec)));
+}
+
+// ─── The erased world's identity ──────────────────────────────────────────
+
+const erased_read_spec = [_]Access{Access.reads(Velocity)};
+const erased_write_spec = [_]Access{Access.writes(Velocity)};
+/// A second declaration of the SAME set as `erased_read_spec`, kept apart on
+/// purpose: it is what measures whether memoisation keys on value or identity.
+const erased_read_twin = [_]Access{Access.reads(Velocity)};
+
+test "a view's world pointer is typed by the set it was declared with" {
+    // **THE PROPERTY THE PROMOTION REFUSAL RESTS ON.** It was first measured in
+    // a throwaway program, which is exactly the place a load-bearing fact must
+    // not live: the design would go on resting on it while nothing in the tree
+    // could notice it changing. `case_view_promotion.zig` asserts the refusal;
+    // this asserts the mechanism underneath it.
+
+    // ONE declared set names ONE type, wherever it is named. This is what lets
+    // the generated trampoline and the body it calls agree on the view's type
+    // without either being told about the other.
+    try testing.expect(ecs.view.ErasedFor(&erased_read_spec) ==
+        ecs.view.ErasedFor(&erased_read_spec));
+
+    // TWO declared sets name TWO types. This is the refusal.
+    try testing.expect(ecs.view.ErasedFor(&erased_read_spec) !=
+        ecs.view.ErasedFor(&erased_write_spec));
+
+    // And the key is IDENTITY, not value: two separate declarations of the
+    // same set are two types. Asserted rather than tolerated, because it is
+    // the direction that could surprise — and it is the SAFE direction, since
+    // the only thing it refuses is a promotion between sets declared apart,
+    // which no legitimate path performs. Were Zig to key on value instead,
+    // this line is what would say so.
+    try testing.expect(ecs.view.ErasedFor(&erased_read_spec) !=
+        ecs.view.ErasedFor(&erased_read_twin));
+
+    // The type carries its declaration rather than being one anonymous opaque
+    // among others — without this the three assertions above would hold for
+    // any per-instantiation type and say nothing about access sets.
+    try testing.expectEqual(@as(usize, 1), ecs.view.ErasedFor(&erased_read_spec).declared.len);
+    try testing.expect(ecs.view.ErasedFor(&erased_read_spec).declared[0].kind == .reads);
+    try testing.expect(ecs.view.ErasedFor(&erased_write_spec).declared[0].kind == .writes);
+}
+
+test "a view built the way the trampoline builds one reaches what it declared" {
+    // THE POSITIVE DIRECTION of the promotion refusal, and it is not implied by
+    // the negative: a `fromErased` that accepted nothing at all would satisfy
+    // `case_view_promotion.zig` perfectly. What makes the refusal a bound
+    // rather than a wall is that the ONE conversion the design intends still
+    // goes through.
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const e = try world.spawn(gpa, Transform{}, Velocity{ .linear = .{ 1, 2, 3 } });
+
+    // The trampoline's own expression, verbatim: a `*World` narrowed to this
+    // system's erased type, then wrapped.
+    const v = View(&erased_write_spec).fromErased(@ptrCast(&world));
+    const got = v.getMut(Velocity, e).?;
+    try testing.expectEqual(@as(f32, 2), got.linear[1]);
+
+    // And the view is still ONE POINTER WIDE — typing the pointer must not
+    // have added a field. The zero-cost claim rests on this shape.
+    try testing.expectEqual(
+        @sizeOf(*anyopaque),
+        @sizeOf(View(&erased_write_spec)),
+    );
 }

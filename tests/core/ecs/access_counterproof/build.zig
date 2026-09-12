@@ -50,6 +50,12 @@ const cases = [_]Case{
         .must_compile = false,
         .description = "registers without a declared set — must NOT compile",
     },
+    .{
+        .step = "case-view-promotion",
+        .file = "case_view_promotion.zig",
+        .must_compile = false,
+        .description = "rebuilds a wider view over a narrower one's pointer — must NOT compile",
+    },
 };
 
 pub fn build(b: *std.Build) void {

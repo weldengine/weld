@@ -332,7 +332,13 @@ pub const SystemDescriptor = struct {
         const Generated = struct {
             fn call(ctx: SystemContext) anyerror!void {
                 return body(.{
-                    .view = view_mod.View(spec).fromErased(ctx.world_erased),
+                    // The ONE cast on this path, and it is generated rather
+                    // than written: `SystemContext` carries the world as
+                    // `*anyopaque` because it is the storage the dispatcher
+                    // fills before any spec is in view. Narrowing it to this
+                    // system's own erased type happens here, once per
+                    // registration, where the spec is known.
+                    .view = view_mod.View(spec).fromErased(@ptrCast(ctx.world_erased)),
                     .gpa = ctx.gpa,
                     .io = ctx.io,
                     .jobs = ctx.jobs,

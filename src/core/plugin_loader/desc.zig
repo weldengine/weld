@@ -25,11 +25,22 @@ const std = @import("std");
 /// Major version of the Weld plugin API. Incremented on every
 /// binary break (function removal / rename, signature change,
 /// struct layout change). Cf. `engine-c-api.md` §1.1.
-pub const WELD_API_VERSION_MAJOR: u32 = 0;
+///
+/// **At 1 since declared-access enforcement reached the C surface.** Two
+/// breaks, either of which alone requires the increment: `query_create` went
+/// from five parameters to seven, splitting one include list into a read set
+/// and a write set; and `WeldQueryChunk` changed layout, gaining
+/// `struct_size` and two index spaces. A plugin compiled against major 0
+/// calls the old entry with the old struct.
+///
+/// The rule is the same one that took `WELD_ECS_PROTOCOL_VERSION` to 2 for
+/// the Zig surface in the same change. It was applied on that axis and missed
+/// here — on the axis the loader actually enforces.
+pub const WELD_API_VERSION_MAJOR: u32 = 1;
 /// Minor version. Incremented on every binary-compatible
 /// addition (new function at the end of the table, new field
-/// at the end of a struct).
-pub const WELD_API_VERSION_MINOR: u32 = 1;
+/// at the end of a struct). Reset to 0 by a major increment.
+pub const WELD_API_VERSION_MINOR: u32 = 0;
 /// Patch version. Incremented for bug fixes without surface
 /// change.
 pub const WELD_API_VERSION_PATCH: u32 = 0;
