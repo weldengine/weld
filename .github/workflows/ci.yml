@@ -521,6 +521,20 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build lint -Dcpu=${{ env.ZIG_CPU }}
 
+      # The declared-access counter-proofs: three fixtures that must NOT compile
+      # and one that must. It answers a property of the SOURCE — whether a
+      # comptime membership test refuses — so one cell covers the matrix, the
+      # same arbitration as the three steps above.
+      #
+      # It is a dedicated step and not part of `zig build test` because a
+      # compilation failure cannot be a test: `@compileError` fires while the
+      # suite is being built. The harness matches the diagnostic TEXT and not the
+      # exit code, since a build that dies earlier exits identically; both halves
+      # were shown to redden by counter-factual before this line was written.
+      - name: zig build ecs-access-counterproof
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build ecs-access-counterproof -Dcpu=${{ env.ZIG_CPU }}
+
       # M1.1.14 review — THE SUITE-DERIVED HALF OF THE CONSERVATION, on the cell.
       # `zig build lint` above already runs the unconditional check of the closure
       # against the DECLARED total. This confronts that declared number with the

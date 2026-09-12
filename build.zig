@@ -289,6 +289,72 @@ pub fn build(b: *std.Build) void {
     const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the standalone proof)");
     synth_verify_step.dependOn(&synth_verify.step);
 
+    // `zig build ecs-access-counterproof` drives the declared-access corpus in
+    // `tests/core/ecs/access_counterproof/` — the first harness in this
+    // repository that asserts a COMPILATION FAILURE.
+    //
+    // **It matches the diagnostic text and never the exit code**, because a
+    // build that dies before the guard is reached exits exactly like one the
+    // guard stops. Each case therefore carries two checks: the expected exit,
+    // which says something failed, and a substring unique to that case, which
+    // says WHAT failed. The substrings are distinct across cases on purpose —
+    // matching only the shared refusal marker would let any one case stand in
+    // for any other.
+    //
+    // The control runs in the SAME step and must SUCCEED. Without it the three
+    // refusals prove nothing: a view that refused every access would satisfy
+    // all three.
+    const counterproof_dir = "tests/core/ecs/access_counterproof";
+    const CounterproofCase = struct {
+        step: ?[]const u8,
+        marks: []const []const u8,
+    };
+    const counterproof_cases = [_]CounterproofCase{
+        // The control: `zig build` with no step argument, which this
+        // sub-project wires to the one fixture that must compile.
+        .{ .step = null, .marks = &.{} },
+        .{
+            .step = "case-undeclared",
+            .marks = &.{"weld-access-refused: this system attempts a read of component"},
+        },
+        .{
+            .step = "case-mutable-on-read",
+            .marks = &.{"weld-access-refused: this system attempts a write to component"},
+        },
+        .{
+            // The compiler's own message, not the view's marker: this refusal is
+            // structural — a field that is no longer optional — so there is no
+            // access to test and nothing for the view to say.
+            .step = "case-missing-accesses",
+            .marks = &.{"missing struct field: accesses"},
+        },
+    };
+    const counterproof_step = b.step(
+        "ecs-access-counterproof",
+        "Assert the three declared-access refusals fire, and that legitimate code still compiles",
+    );
+    for (counterproof_cases) |case| {
+        const run = if (case.step) |name|
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build", name })
+        else
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        run.setCwd(b.path(counterproof_dir));
+        // ALWAYS RE-RUN, and this is not a precaution. A `Run` step with no file
+        // argument is cached on its argv alone, and `setCwd` does not make the
+        // directory's contents an input — so the first version of this harness
+        // replayed a cached success and reported GREEN against a deliberately
+        // disabled guard. The verdict of a harness that cannot observe the code
+        // it judges is worth nothing, and it looks exactly like a verdict that is.
+        run.has_side_effects = true;
+        if (case.step == null) {
+            run.expectExitCode(0);
+        } else {
+            run.expectExitCode(1);
+            for (case.marks) |mark| run.addCheck(.{ .expect_stderr_match = mark });
+        }
+        counterproof_step.dependOn(&run.step);
+    }
+
     const shader_compiler_module = b.createModule(.{
         .root_source_file = b.path("tools/shader_compiler/main.zig"),
         .target = target,
