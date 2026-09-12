@@ -691,16 +691,29 @@ pub const SystemScheduler = struct {
         comptime spec: []const view_mod.Access,
         comptime body: fn (SystemContextOf(spec)) anyerror!void,
     ) !void {
-        // **THE EMPTY SET IS NOT REFUSED HERE, AND THAT IS A QUESTION RAISED
-        // RATHER THAN A DECISION TAKEN.** The refusal was written, compiled and
-        // measured: twelve registrations in the tree declare nothing, and every
-        // one of them is honest about it — five drive PHASE ordering and write
-        // only a log, and the rest mutate through `ctx.cmd`, whose effects are
-        // deferred to a flush the DAG deliberately does not order. Giving them
-        // an access they do not perform would be the same lie in the other
-        // direction. What the generic entry above DOES close is the pairing:
-        // a body can no longer be handed a declaration that does not describe
-        // it, empty or otherwise.
+        // **AN EMPTY DECLARATION IS NOT REFUSED, AND THE REASON IS THE TYPE.**
+        //
+        // What `ARCH-030` forbids is the IMPLICIT empty set — the one an
+        // omission produces — and it requires that registering without a
+        // declaration FAIL rather than silently yield one. `spec` is a
+        // mandatory comptime parameter, so omitting it is a COMPILE error,
+        // which is stronger than the registration error the invariant asks
+        // for. A hand-written `&.{}` is a declaration its author made, not an
+        // omission that happened to them.
+        //
+        // And refusing it would add no safety, because the entry above already
+        // makes an empty declaration SELF-VERIFYING: the body receives
+        // `SystemContextOf(&.{})`, hence `View(&.{})`, whose `get` and `getMut`
+        // refuse at comptime for every `T` — pinned by `view.zig`'s « an empty
+        // declaration grants nothing ». A system that declares nothing cannot
+        // reach a column, so it has no edge to place, which is a property and
+        // not an oversight.
+        //
+        // Before the pairing was closed an empty set could lie: the declaration
+        // and the body were independent, so nothing stopped a body that wrote
+        // `A` from being registered with no declaration at all. After it, the
+        // set a body is typed against IS the set the DAG reads. That is what
+        // makes the refusal redundant rather than merely inconvenient.
         return self.registerDescriptor(gpa, world, SystemDescriptor.of(phase, name, spec, body));
     }
 
