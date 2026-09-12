@@ -81,6 +81,27 @@ test "a system reaches no world through its command buffer" {
     try testing.expect(!reachesType(ecs.command_buffer.ComponentResolveFn, *World, &.{}));
 }
 
+test "no system entry point reaches a world at all" {
+    // `ARCH-030`'s FIRST conformance test — "aucun point d'entrée de système ne
+    // reçoit `*World` ni aucun équivalent non restreint" — read mechanically on
+    // the type rather than by inspecting the fields one reader at a time.
+    //
+    // It belongs beside the command buffer's own assertion because the two are
+    // one claim: the view withholds the world, and a buffer holding one would
+    // hand it straight back. Removing the field is what makes THIS pass.
+    try testing.expect(!reachesType(ecs.SystemContext, *World, &.{}));
+
+    // And the typed form a declared system actually receives.
+    const spec = [_]ecs.Access{ecs.Access.writes(Transform)};
+    try testing.expect(!reachesType(ecs.SystemContextOf(&spec), *World, &.{}));
+
+    // NON-VACUITY on the subject itself, not on a toy: the context still
+    // carries its command buffer, its job scheduler and its frame context, so
+    // the walk really did traverse a live type graph and come back empty.
+    try testing.expect(@typeInfo(ecs.SystemContext).@"struct".fields.len >= 6);
+    try testing.expect(reachesType(ecs.SystemContext, *ecs.CommandBuffer, &.{}));
+}
+
 /// A component type no other test registers, so its absence from a world's
 /// registry is a fact about THIS test and not about the suite's ordering.
 const LateBound = extern struct { v: u32 = 0 };
