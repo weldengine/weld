@@ -323,11 +323,14 @@ pub fn build(b: *std.Build) void {
             .marks = &.{"weld-access-refused: this system attempts a write to component"},
         },
         .{
-            // The compiler's own message, not the view's marker: this refusal is
-            // structural — a field that is no longer optional — so there is no
-            // access to test and nothing for the view to say.
-            .step = "case-missing-accesses",
-            .marks = &.{"missing struct field: accesses"},
+            // The compiler's own message, not the view's marker: the pairing is
+            // refused at the SIGNATURE, so nothing here ever reaches an access
+            // test. Its predecessor omitted the `accesses` field and matched
+            // `missing struct field: accesses` — which measured that Zig
+            // refuses a literal missing a field without a default, a fact that
+            // owed nothing to this milestone and guarded nothing.
+            .step = "case-mismatched-pair",
+            .marks = &.{"expected type 'fn (ecs.scheduler.SystemContextOf"},
         },
         .{
             // Also the compiler's, and for a stronger reason: the promotion is

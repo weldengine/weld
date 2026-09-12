@@ -272,7 +272,7 @@ pub fn SystemContextOf(comptime spec: []const view_mod.Access) type {
 /// retires a hazard the inline `&.{ … }` form carries at every hand-written
 /// registration: `registerSystem` stores the caller's slice without duplicating
 /// it, and a temporary dangles the moment the registering function returns.
-fn descriptorsOf(comptime spec: []const view_mod.Access) []const AccessDescriptor {
+pub fn descriptorsOf(comptime spec: []const view_mod.Access) []const AccessDescriptor {
     // Held as a container-level `const` rather than built in a `comptime`
     // block and returned by pointer: a container-level constant has static
     // storage, which is the whole property this function exists to give the
@@ -323,7 +323,7 @@ pub const SystemDescriptor = struct {
     /// Write `spec` once as a named constant and reference it in both places;
     /// two separate `&.{ … }` literals of identical content are two values,
     /// and a generic type instantiated on each is two types.
-    pub fn of(
+    fn of(
         comptime phase: Phase,
         comptime name: []const u8,
         comptime spec: []const view_mod.Access,
@@ -683,6 +683,49 @@ pub const SystemScheduler = struct {
     /// Invalidates any cached topological levels for the affected
     /// phase — the next `dispatchFrame` recomputes them.
     pub fn registerSystem(
+        self: *SystemScheduler,
+        gpa: std.mem.Allocator,
+        world: *World,
+        comptime phase: Phase,
+        comptime name: []const u8,
+        comptime spec: []const view_mod.Access,
+        comptime body: fn (SystemContextOf(spec)) anyerror!void,
+    ) !void {
+        // **THE EMPTY SET IS NOT REFUSED HERE, AND THAT IS A QUESTION RAISED
+        // RATHER THAN A DECISION TAKEN.** The refusal was written, compiled and
+        // measured: twelve registrations in the tree declare nothing, and every
+        // one of them is honest about it — five drive PHASE ordering and write
+        // only a log, and the rest mutate through `ctx.cmd`, whose effects are
+        // deferred to a flush the DAG deliberately does not order. Giving them
+        // an access they do not perform would be the same lie in the other
+        // direction. What the generic entry above DOES close is the pairing:
+        // a body can no longer be handed a declaration that does not describe
+        // it, empty or otherwise.
+        return self.registerDescriptor(gpa, world, SystemDescriptor.of(phase, name, spec, body));
+    }
+
+    /// The registration proper, over a descriptor whose two halves are known
+    /// to come from one spec because `registerSystem` is the only caller and
+    /// it derived them together.
+    ///
+    /// **It is private, and that is the invariant rather than a detail.** A
+    /// `SystemDescriptor` is a plain struct with public fields, so a caller
+    /// handed one can rewrite `.accesses` and leave `.run` alone — a body that
+    /// writes `A` while the DAG is told it reads `Z`, which is `ARCH-030`'s
+    /// original defect rebuilt by field assignment. Zig has no private field
+    /// and no way to seal a pair, so what closes it is refusing to ACCEPT a
+    /// pair: the type stays public because the scheduler stores it and
+    /// `systemsInPhase` returns it, and nothing anywhere consumes one from
+    /// outside.
+    ///
+    /// **What that bounds is REGISTRATION, and the bound is stated rather than
+    /// rounded up.** `SystemScheduler.phases` is a public field, so a holder of
+    /// a `*SystemScheduler` can reach `phases[i].systems.items[j].accesses` and
+    /// rewrite it after the fact. That is post-hoc tampering with a DAG already
+    /// built, not a registration that lies — a different act, reachable, and
+    /// named here because claiming a closure wider than the one the code gives
+    /// is the exact class of defect this change exists to answer.
+    fn registerDescriptor(
         self: *SystemScheduler,
         gpa: std.mem.Allocator,
         world: *World,
@@ -1068,36 +1111,30 @@ test "SystemScheduler.init/deinit round-trip is leak-free" {
     try testing.expectEqual(@as(usize, 0), sched.systemCount());
 }
 
-test "registerSystem with an explicitly empty declaration lands on level 0" {
+test "two systems declaring disjoint sets land on the same level" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
     var sched = SystemScheduler.init();
     defer sched.deinit(gpa);
 
-    const T = struct {
-        fn nop(_: SystemContext) anyerror!void {}
+    // THIS TEST USED TO REGISTER TWO EMPTY DECLARATIONS, and the empty set is
+    // now refused at comptime — so the shape is gone and the PROPERTY it
+    // carried is not: two declarations sharing no component id produce no
+    // edge, hence one level holding both. Disjoint sets give that without
+    // asking the scheduler to order a system that touches nothing.
+    const a_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Transform)};
+    const b_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Velocity)};
+
+    const Bodies = struct {
+        fn a(_: SystemContextOf(&a_spec)) anyerror!void {}
+        fn b(_: SystemContextOf(&b_spec)) anyerror!void {}
     };
 
-    // `.accesses` is spelled. It used to be omitted, and the field's default
-    // supplied the same empty set — which is the value that declares zero
-    // conflict with everything and therefore the one an omission must never
-    // produce. Written out, an empty set is a claim its author made.
-    try sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "a",
-        .run = T.nop,
-        .accesses = &.{},
-    });
-    try sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "b",
-        .run = T.nop,
-        .accesses = &.{},
-    });
+    try sched.registerSystem(gpa, &world, .update, "a", &a_spec, Bodies.a);
+    try sched.registerSystem(gpa, &world, .update, "b", &b_spec, Bodies.b);
 
     const levels = try sched.topologicalLevels(gpa, .update);
-    // Two empty declarations share no id → no edges → one level.
     try testing.expectEqual(@as(usize, 1), levels.len);
     try testing.expectEqual(@as(usize, 2), levels[0].system_indices.items.len);
 }
@@ -1121,18 +1158,8 @@ test "a described system's view and its DAG edges come from the same declaration
         }
     };
 
-    try sched.registerSystem(gpa, &world, SystemDescriptor.of(
-        .update,
-        "writer",
-        &writer_spec,
-        Bodies.write,
-    ));
-    try sched.registerSystem(gpa, &world, SystemDescriptor.of(
-        .update,
-        "reader",
-        &reader_spec,
-        Bodies.read,
-    ));
+    try sched.registerSystem(gpa, &world, .update, "writer", &writer_spec, Bodies.write);
+    try sched.registerSystem(gpa, &world, .update, "reader", &reader_spec, Bodies.read);
 
     // The edge exists BECAUSE the descriptors were derived from the same
     // specs the two bodies are typed against. Nothing was declared twice, so
@@ -1169,12 +1196,7 @@ test "a described system's accesses outlive the block that registered it" {
     // inline `&.{ … }` temporary would leave `type_name` pointing at dead
     // stack here; a derived set is a comptime constant and cannot.
     {
-        try sched.registerSystem(gpa, &world, SystemDescriptor.of(
-            .post_update,
-            "outliver",
-            &spec,
-            Body.run,
-        ));
+        try sched.registerSystem(gpa, &world, .post_update, "outliver", &spec, Body.run);
     }
 
     const registered = sched.systemsInPhase(.post_update);

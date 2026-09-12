@@ -810,14 +810,22 @@ fn wouldConflict(
 /// of residue that no mechanism holds would be worse than saying nothing, because it excuses
 /// the next reader from checking.
 pub fn registerSystems(gpa: std.mem.Allocator, sched: *SystemScheduler, ecs: *World) !void {
-    const desc = core.ecs.SystemDescriptor.of(
+    if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
+    // The preflight reads the DERIVED accesses, never a descriptor: `of` is
+    // private now, and a pair of `run` and `accesses` supplied separately is
+    // what `registerSystem` refuses to accept at all. Deriving the accesses
+    // alone carries no pairing risk — there is no `run` beside them to
+    // disagree with.
+    if (wouldConflict(sched, .fixed_update, core.ecs.descriptorsOf(&step_spec))) {
+        return error.WriteWriteConflict;
+    }
+
+    try sched.registerSystem(
+        gpa,
+        ecs,
         .fixed_update,
         step_name,
         &step_spec,
         stepAndPublishSystem,
     );
-    if (isRegistered(sched, .fixed_update, step_name)) return error.SystemAlreadyRegistered;
-    if (wouldConflict(sched, .fixed_update, desc.accesses)) return error.WriteWriteConflict;
-
-    try sched.registerSystem(gpa, ecs, desc);
 }

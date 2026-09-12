@@ -32,6 +32,8 @@ const weld_core = @import("weld_core");
 const watchdog = @import("test_watchdog");
 
 const ecs = weld_core.ecs;
+const Access = weld_core.ecs.Access;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
 
 const Mass = extern struct { value: f32 = 1.0 };
 const Health = extern struct { current: f32 = 100.0, max: f32 = 100.0 };
@@ -41,6 +43,15 @@ const AI = extern struct { state: u32 = 0, target_index: u32 = 0 };
 const QIntegrate = ecs.Query(&.{ ecs.Transform, ecs.Velocity }, .{});
 const QDamage = ecs.Query(&.{Health}, .{});
 const QChangedHealth = ecs.Query(&.{Health}, .{ecs.Changed(Health)});
+
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_integrate: []const Access = &.{ Access.reads(ecs.Velocity), Access.writes(ecs.Transform) };
+const spec_damage: []const Access = &.{Access.writes(Health)};
+const spec_cmd_despawn: []const Access = &.{};
 
 const ScenarioState = struct {
     q_integrate: *QIntegrate,
@@ -66,7 +77,7 @@ fn integrateChunk(chunk: *ecs.Chunk, query: *QIntegrate, dt: f32) void {
     }
 }
 
-fn integrateSystem(ctx: ecs.SystemContext) anyerror!void {
+fn integrateSystem(ctx: SystemContextOf(spec_integrate)) anyerror!void {
     const s: *ScenarioState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_integrate, integrateChunk, .{ s.q_integrate, ctx.frame.dt });
 }
@@ -82,12 +93,12 @@ fn damageChunk(chunk: *ecs.Chunk, query: *QDamage, dt: f32) void {
     }
 }
 
-fn damageSystem(ctx: ecs.SystemContext) anyerror!void {
+fn damageSystem(ctx: SystemContextOf(spec_damage)) anyerror!void {
     const s: *ScenarioState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_damage, damageChunk, .{ s.q_damage, ctx.frame.dt });
 }
 
-fn cmdDespawnSystem(ctx: ecs.SystemContext) anyerror!void {
+fn cmdDespawnSystem(ctx: SystemContextOf(spec_cmd_despawn)) anyerror!void {
     const s: *ScenarioState = @ptrCast(@alignCast(ctx.frame.user.?));
     for (s.pending_despawns) |eid| {
         try ctx.cmd.despawn(eid);
@@ -254,27 +265,12 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
     var sys = ecs.SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .fixed_update,
-        .name = "integrate",
-        .run = integrateSystem,
-        .accesses = &.{ ecs.Reads(ecs.Velocity), ecs.Writes(ecs.Transform) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "damage",
-        .run = damageSystem,
-        .accesses = &.{ecs.Writes(Health)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .post_update,
-        .name = "cmd_despawn",
-        .run = cmdDespawnSystem,
-        // Structural only: every mutation goes through the command buffer, which
-        // the access model deliberately has no category for. An empty set is
-        // therefore the true declaration, and it is written rather than defaulted.
-        .accesses = &.{},
-    });
+    try sys.registerSystem(gpa, &world, .fixed_update, "integrate", spec_integrate, integrateSystem);
+    try sys.registerSystem(gpa, &world, .update, "damage", spec_damage, damageSystem);
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .post_update, "cmd_despawn", spec_cmd_despawn, cmdDespawnSystem);
 
     // ── Step 4: 10 ticks. On tick 5, set up pending despawns ──
     var to_despawn_at_tick_5: [50]ecs.EntityId = undefined;

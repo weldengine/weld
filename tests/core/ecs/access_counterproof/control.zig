@@ -8,6 +8,7 @@
 //! It exercises the three grants the model distinguishes: a declared read, a
 //! declared write, and a read reaching through a write declaration.
 
+const std = @import("std");
 const ecs = @import("weld_core").ecs;
 
 const spec = [_]ecs.Access{
@@ -23,10 +24,16 @@ fn body(ctx: ecs.SystemContextOf(&spec)) anyerror!void {
     _ = ctx.view.changedTick(ecs.Velocity, e);
 }
 
-const descriptor = ecs.SystemDescriptor.of(.update, "control", &spec, body);
+/// Registration is what forces the body to be analysed, and it is written as a
+/// function that is never called: `SystemDescriptor.of` is private now — the
+/// scheduler refuses to accept a `run` and an `accesses` supplied separately —
+/// so the only way in is the generic entry, which needs a live world this
+/// fixture has no reason to build. Without a reference Zig analyses neither the
+/// trampoline nor the body, and the file would compile by not looking.
+fn wire(sched: *ecs.SystemScheduler, gpa: std.mem.Allocator, world: *ecs.World) !void {
+    try sched.registerSystem(gpa, world, .update, "control", &spec, body);
+}
 
 comptime {
-    // Forces the trampoline — and through it `body` — to be analysed. Without a
-    // reference Zig analyses neither, and the file would compile by not looking.
-    _ = descriptor;
+    _ = &wire;
 }

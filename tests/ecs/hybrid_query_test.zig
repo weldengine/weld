@@ -285,6 +285,11 @@ const ecs_root_surface = [_][]const u8{
     "AccessDescriptor",          "AccessKind",        "JobBuilder",
     "RegistrationError",         "view",              "View",
     "Access",                    "SystemContextOf",
+    // Deriving the ACCESSES alone from a spec, for a preflight that wants to
+    // know what a declaration would conflict with before registering it. It is
+    // public where `SystemDescriptor.of` is not, and the asymmetry is the
+    // point: there is no `run` beside these for them to disagree with.
+      "descriptorsOf",
 };
 
 /// Whether `name` appears in the enumerated surface. A comptime function

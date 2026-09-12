@@ -35,6 +35,14 @@ const gravity_y: Real = -9.81;
 /// The same timestep as `fixed_dt`, in the `f32` the frame context carries.
 const fixed_dt_f32: f32 = 1.0 / 60.0;
 
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_transform_system_stand_in: []const core.ecs.Access = &.{core.ecs.Access.writes(Transform)};
+const spec_sleeping_writer_stand_in: []const core.ecs.Access = &.{core.ecs.Access.writes(Sleeping)};
+
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
 }
@@ -602,23 +610,16 @@ test "a competing writer of Transform in fixed_update is refused at registration
     try sync.registerSystems(gpa, &sched, &ecs);
 
     const Competitor = struct {
-        fn run(_: core.ecs.SystemContext) anyerror!void {}
+        fn run(_: core.ecs.SystemContextOf(spec_transform_system_stand_in)) anyerror!void {}
     };
-    try testing.expectError(error.WriteWriteConflict, sched.registerSystem(gpa, &ecs, .{
-        .phase = .fixed_update,
-        .name = "transform_system_stand_in",
-        .run = Competitor.run,
-        .accesses = &.{core.ecs.Writes(Transform)},
-    }));
+    try testing.expectError(
+        error.WriteWriteConflict,
+        sched.registerSystem(gpa, &ecs, .fixed_update, "transform_system_stand_in", spec_transform_system_stand_in, Competitor.run),
+    );
 
     // NON-VACUITY: the same registration in a phase forge does not write is accepted, so what
     // the assertion above measures is the conflict and not a registration that always fails.
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .late_update,
-        .name = "transform_system_stand_in_elsewhere",
-        .run = Competitor.run,
-        .accesses = &.{core.ecs.Writes(Transform)},
-    });
+    try sched.registerSystem(gpa, &ecs, .late_update, "transform_system_stand_in_elsewhere", spec_transform_system_stand_in, Competitor.run);
 }
 
 test "the registered system declares the solver resource it mutates through the pointer" {
@@ -825,23 +826,16 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
     try sync.registerSystems(gpa, &sched, &ecs);
 
     const Competitor = struct {
-        fn run(_: core.ecs.SystemContext) anyerror!void {}
+        fn run(_: core.ecs.SystemContextOf(spec_sleeping_writer_stand_in)) anyerror!void {}
     };
-    try testing.expectError(error.WriteWriteConflict, sched.registerSystem(gpa, &ecs, .{
-        .phase = .fixed_update,
-        .name = "sleeping_writer_stand_in",
-        .run = Competitor.run,
-        .accesses = &.{core.ecs.Writes(Sleeping)},
-    }));
+    try testing.expectError(
+        error.WriteWriteConflict,
+        sched.registerSystem(gpa, &ecs, .fixed_update, "sleeping_writer_stand_in", spec_sleeping_writer_stand_in, Competitor.run),
+    );
 
     // NON-VACUITY: the same writer in a phase forge does not write is accepted, so what the
     // assertion above measures is the conflict and not a registration that always fails.
-    try sched.registerSystem(gpa, &ecs, .{
-        .phase = .late_update,
-        .name = "sleeping_writer_elsewhere",
-        .run = Competitor.run,
-        .accesses = &.{core.ecs.Writes(Sleeping)},
-    });
+    try sched.registerSystem(gpa, &ecs, .late_update, "sleeping_writer_elsewhere", spec_sleeping_writer_stand_in, Competitor.run);
 }
 
 test "no component write reaches the solver: the inward direction is not wired" {
@@ -2259,12 +2253,7 @@ test "a forbidden mutation is observable from the PRODUCTION path" {
     // It is also the more faithful shape: § *Autorité d'écriture* says the diagnostic
     // never claims "a rule wrote", precisely because a Zig system can have done it —
     // and this IS a Zig system, in `pre_update`, ahead of the physics phase.
-    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
-        .pre_update,
-        "test_forbidden_writer",
-        &forbidden_writer_spec,
-        forbiddenWriterSystem,
-    ));
+    try sched.registerSystem(gpa, &ecs, .pre_update, "test_forbidden_writer", &forbidden_writer_spec, forbiddenWriterSystem);
 
     // A QUIET FRAME first, with the writer disarmed: it establishes the baseline the
     // diagnostic needs and reports nothing, so the number below is not the number this
@@ -2510,12 +2499,7 @@ test "the FIRST forbidden mutation of a body's life is reported" {
     defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.attachSyncInJournal(&ecs, &journal);
     try sync.registerSystems(gpa, &sched, &ecs);
-    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
-        .pre_update,
-        "test_first_tick_writer",
-        &forbidden_writer_spec,
-        forbiddenWriterSystem,
-    ));
+    try sched.registerSystem(gpa, &ecs, .pre_update, "test_first_tick_writer", &forbidden_writer_spec, forbiddenWriterSystem);
 
     // ARMED BEFORE THE FIRST FRAME. The journal has never seen this body: `syncIn`
     // creates its entry in the same pass that must report.
@@ -2797,12 +2781,7 @@ test "a spawn is not a mutation, and a mutation after a spawn in the same tick i
     defer sync.unpublishPhysicsWorld(&ecs, &pw);
     try sync.attachSyncInJournal(&ecs, &journal);
     try sync.registerSystems(gpa, &sched, &ecs);
-    try sched.registerSystem(gpa, &ecs, core.ecs.SystemDescriptor.of(
-        .pre_update,
-        "test_g19_writer",
-        &g19_spec,
-        g19System,
-    ));
+    try sched.registerSystem(gpa, &ecs, .pre_update, "test_g19_writer", &g19_spec, g19System);
     // The observer is what receives the `EntityId` the flush creates — the production
     // path for "act on an entity a deferred spawn just made".
     try ecs.registerOnSpawned(gpa, null, g19OnSpawned);

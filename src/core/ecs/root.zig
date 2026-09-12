@@ -237,3 +237,11 @@ pub const JobBuilder = scheduler.JobBuilder;
 /// The two refusals `SystemScheduler.registerSystem` decides — NOT the set it
 /// returns, which is `anyerror`. See the declaration for why.
 pub const RegistrationError = scheduler.RegistrationError;
+
+/// Turn a declared access set into the runtime descriptors the DAG reads.
+///
+/// Exposed for a PREFLIGHT — a caller that wants to know what a spec would
+/// conflict with before registering it. It derives the accesses ALONE, which
+/// is why it is safe to expose where `SystemDescriptor.of` is not: there is no
+/// `run` beside them for the result to disagree with.
+pub const descriptorsOf = scheduler.descriptorsOf;

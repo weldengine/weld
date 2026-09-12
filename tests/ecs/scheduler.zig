@@ -40,6 +40,8 @@ const sys_sched_mod = weld_core.ecs.scheduler;
 const Phase = sys_sched_mod.Phase;
 const SystemScheduler = sys_sched_mod.SystemScheduler;
 const SystemContext = sys_sched_mod.SystemContext;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
+const Access = weld_core.ecs.Access;
 
 // ─── Phase-ordering test infrastructure ───────────────────────────────────
 
@@ -55,23 +57,35 @@ const PhaseLog = struct {
     }
 };
 
-fn logPreUpdateA(ctx: SystemContext) anyerror!void {
+// ─── Declared access sets ─────────────────────────────────────────────────
+//
+// EMPTY, and deliberately: these five systems exercise the PHASE pipeline and
+// touch no component at all — each appends its name to a log reached through
+// `ctx.frame.user`. The DAG has nothing to order here, and the ordering under
+// test is the phase's.
+const spec_pre_a: []const Access = &.{};
+const spec_pre_b: []const Access = &.{};
+const spec_update_a: []const Access = &.{};
+const spec_post: []const Access = &.{};
+const spec_render: []const Access = &.{};
+
+fn logPreUpdateA(ctx: SystemContextOf(spec_pre_a)) anyerror!void {
     const log: *PhaseLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.entries.append(ctx.gpa, .{ .phase = .pre_update, .index_within_phase = 0 });
 }
-fn logPreUpdateB(ctx: SystemContext) anyerror!void {
+fn logPreUpdateB(ctx: SystemContextOf(spec_pre_b)) anyerror!void {
     const log: *PhaseLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.entries.append(ctx.gpa, .{ .phase = .pre_update, .index_within_phase = 1 });
 }
-fn logUpdateA(ctx: SystemContext) anyerror!void {
+fn logUpdateA(ctx: SystemContextOf(spec_update_a)) anyerror!void {
     const log: *PhaseLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.entries.append(ctx.gpa, .{ .phase = .update, .index_within_phase = 0 });
 }
-fn logPostUpdate(ctx: SystemContext) anyerror!void {
+fn logPostUpdate(ctx: SystemContextOf(spec_post)) anyerror!void {
     const log: *PhaseLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.entries.append(ctx.gpa, .{ .phase = .post_update, .index_within_phase = 0 });
 }
-fn logPreRender(ctx: SystemContext) anyerror!void {
+fn logPreRender(ctx: SystemContextOf(spec_render)) anyerror!void {
     const log: *PhaseLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.entries.append(ctx.gpa, .{ .phase = .pre_render, .index_within_phase = 0 });
 }
@@ -103,11 +117,11 @@ test "phases dispatch sequentially with end-of-phase barrier" {
     // Each declares an empty access set, and that is what these bodies do: they
     // append their phase to a log and touch no entity data. The set is written
     // because omitting it no longer yields one.
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_a", .run = logPreUpdateA, .accesses = &.{} });
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_b", .run = logPreUpdateB, .accesses = &.{} });
-    try sys.registerSystem(gpa, &world, .{ .phase = .update, .name = "update_a", .run = logUpdateA, .accesses = &.{} });
-    try sys.registerSystem(gpa, &world, .{ .phase = .post_update, .name = "post", .run = logPostUpdate, .accesses = &.{} });
-    try sys.registerSystem(gpa, &world, .{ .phase = .pre_render, .name = "render", .run = logPreRender, .accesses = &.{} });
+    try sys.registerSystem(gpa, &world, .pre_update, "pre_a", spec_pre_a, logPreUpdateA);
+    try sys.registerSystem(gpa, &world, .pre_update, "pre_b", spec_pre_b, logPreUpdateB);
+    try sys.registerSystem(gpa, &world, .update, "update_a", spec_update_a, logUpdateA);
+    try sys.registerSystem(gpa, &world, .post_update, "post", spec_post, logPostUpdate);
+    try sys.registerSystem(gpa, &world, .pre_render, "render", spec_render, logPreRender);
 
     var log: PhaseLog = .{};
     defer log.deinit(gpa);

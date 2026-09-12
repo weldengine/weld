@@ -38,6 +38,8 @@ const jobs_sched_mod = weld_core.jobs.scheduler;
 const Scheduler = jobs_sched_mod.Scheduler;
 
 const sys_sched_mod = weld_core.ecs.scheduler;
+const Access = weld_core.ecs.Access;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
 const SystemScheduler = sys_sched_mod.SystemScheduler;
 const SystemContext = sys_sched_mod.SystemContext;
 const Reads = sys_sched_mod.Reads;
@@ -53,6 +55,43 @@ const TagC = extern struct { v: u32 = 0 };
 const TagD = extern struct { v: u32 = 0 };
 
 // ─── Test 1 — DAG ordering ────────────────────────────────────────────────
+
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_reader: []const Access = &.{Access.reads(Position)};
+const spec_writer: []const Access = &.{Access.writes(Position)};
+const spec_heavy_a: []const Access = &.{Access.writes(TagA)};
+const spec_heavy_b: []const Access = &.{Access.writes(TagB)};
+const spec_heavy_c: []const Access = &.{Access.writes(TagC)};
+const spec_heavy_d: []const Access = &.{Access.writes(TagD)};
+const spec_writer_a: []const Access = &.{Access.writes(Position)};
+const spec_writer_post: []const Access = &.{Access.writes(Position)};
+const spec_reader_a: []const Access = &.{Access.reads(Velocity)};
+const spec_reader_b: []const Access = &.{Access.reads(Velocity)};
+const spec_cross_a: []const Access = &.{ Access.reads(TagA), Access.writes(TagB) };
+const spec_ww_first: []const Access = &.{Access.writes(TagC)};
+const spec_chain_a: []const Access = &.{ Access.reads(TagA), Access.writes(TagB) };
+const spec_chain_b: []const Access = &.{ Access.reads(TagB), Access.writes(TagC) };
+const spec_source: []const Access = &.{Access.writes(TagA)};
+const spec_sink: []const Access = &.{Access.reads(TagB)};
+const spec_middle: []const Access = &.{ Access.reads(TagA), Access.writes(TagB) };
+const spec_ring_a: []const Access = &.{ Access.reads(TagA), Access.writes(TagB) };
+const spec_ring_b: []const Access = &.{ Access.reads(TagB), Access.writes(TagC) };
+const spec_ring_c: []const Access = &.{ Access.reads(TagC), Access.writes(TagD) };
+const spec_dia_root: []const Access = &.{ Access.reads(Position), Access.writes(TagA) };
+const spec_dia_left: []const Access = &.{ Access.reads(TagA), Access.writes(TagB) };
+const spec_dia_right: []const Access = &.{ Access.reads(TagA), Access.writes(TagC) };
+const spec_dia_join: []const Access = &.{ Access.reads(TagB), Access.reads(TagC), Access.writes(TagD) };
+const spec_dia_aside: []const Access = &.{Access.writes(Velocity)};
+const spec_dia_probe: []const Access = &.{ Access.reads(Velocity), Access.writes(Position) };
+const spec_writer_b: []const Access = &.{Access.writes(Position)};
+const spec_cross_b: []const Access = &.{ Access.writes(TagA), Access.reads(TagB) };
+const spec_ww_second: []const Access = &.{Access.writes(TagC)};
+const spec_chain_c: []const Access = &.{ Access.reads(TagC), Access.writes(TagA) };
+const spec_ring_d: []const Access = &.{ Access.reads(TagD), Access.writes(TagA) };
 
 const OrderLog = struct {
     // No mutex needed — the writer (level 0) and reader (level 1) run
@@ -71,12 +110,12 @@ const OrderLog = struct {
     }
 };
 
-fn writerPositionSystem(ctx: SystemContext) anyerror!void {
+fn writerPositionSystem(ctx: SystemContextOf(spec_writer)) anyerror!void {
     const log: *OrderLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.record(ctx.gpa, "writer");
 }
 
-fn readerPositionSystem(ctx: SystemContext) anyerror!void {
+fn readerPositionSystem(ctx: SystemContextOf(spec_reader)) anyerror!void {
     const log: *OrderLog = @ptrCast(@alignCast(ctx.frame.user.?));
     try log.record(ctx.gpa, "reader");
 }
@@ -105,18 +144,8 @@ test "implicit DAG orders system that writes X before system that reads X" {
     // registration order; with the DAG it must reorder so the
     // writer runs first (the reader depends on the writer's
     // Writes(Position)).
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "reader",
-        .run = readerPositionSystem,
-        .accesses = &.{Reads(Position)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "writer",
-        .run = writerPositionSystem,
-        .accesses = &.{Writes(Position)},
-    });
+    try sys.registerSystem(gpa, &world, .update, "reader", spec_reader, readerPositionSystem);
+    try sys.registerSystem(gpa, &world, .update, "writer", spec_writer, writerPositionSystem);
 
     var log: OrderLog = .{};
     defer log.deinit(gpa);
@@ -138,11 +167,27 @@ test "implicit DAG orders system that writes X before system that reads X" {
 // The timing assertion was removed in the M0.1 hotfix; only the
 // platform-independent topological-level check remains.
 
-fn nopHeavySystem(_: SystemContext) anyerror!void {
-    // System body is never dispatched in this test — `registerSystem`
-    // sets up the DAG, `topologicalLevels` reads it, no
-    // `dispatchFrame` happens. The fn pointer is required by
-    // `SystemDescriptor.run` but its contents are inert here.
+/// A body that does nothing, typed against the set it is registered with.
+///
+/// It is GENERIC because a body's parameter type is now its declaration: one
+/// `nopSystem` served twenty registrations declaring twenty different sets,
+/// and there is no single type that could. The generic form gives each site
+/// its own, which is the property the change exists to create.
+fn Nop(comptime spec: []const Access) type {
+    return struct {
+        fn run(_: SystemContextOf(spec)) anyerror!void {}
+    };
+}
+
+/// The same, for the concurrency test whose bodies are never dispatched.
+///
+/// The DAG is built by `registerSystem` and read by `topologicalLevels`; no
+/// `dispatchFrame` runs, so the body's contents are inert here and only its
+/// TYPE matters — which is exactly what is being asserted.
+fn NopHeavy(comptime spec: []const Access) type {
+    return struct {
+        fn run(_: SystemContextOf(spec)) anyerror!void {}
+    };
 }
 
 test "systems with disjoint write sets run concurrently in the same phase" {
@@ -156,30 +201,10 @@ test "systems with disjoint write sets run concurrently in the same phase" {
     // Four systems, each writing a disjoint tag component. Their
     // read/write sets do not overlap, so the DAG must place them
     // all on the same topological level.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "heavy_a",
-        .run = nopHeavySystem,
-        .accesses = &.{Writes(TagA)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "heavy_b",
-        .run = nopHeavySystem,
-        .accesses = &.{Writes(TagB)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "heavy_c",
-        .run = nopHeavySystem,
-        .accesses = &.{Writes(TagC)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "heavy_d",
-        .run = nopHeavySystem,
-        .accesses = &.{Writes(TagD)},
-    });
+    try sys.registerSystem(gpa, &world, .update, "heavy_a", spec_heavy_a, NopHeavy(spec_heavy_a).run);
+    try sys.registerSystem(gpa, &world, .update, "heavy_b", spec_heavy_b, NopHeavy(spec_heavy_b).run);
+    try sys.registerSystem(gpa, &world, .update, "heavy_c", spec_heavy_c, NopHeavy(spec_heavy_c).run);
+    try sys.registerSystem(gpa, &world, .update, "heavy_d", spec_heavy_d, NopHeavy(spec_heavy_d).run);
 
     // ── Method (c) — structural assertion ────────────────────────
     // Pure DAG-level check : all four `Writes(TagA..D)` systems
@@ -215,8 +240,6 @@ test "systems with disjoint write sets run concurrently in the same phase" {
 
 // ─── Test 3 — registration conflict ───────────────────────────────────────
 
-fn nopSystem(_: SystemContext) anyerror!void {}
-
 test "unresolvable conflict between two writes raises a registration error" {
     const gpa = std.testing.allocator;
     var world = World.init();
@@ -225,12 +248,7 @@ test "unresolvable conflict between two writes raises a registration error" {
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "writer_a",
-        .run = nopSystem,
-        .accesses = &.{Writes(Position)},
-    });
+    try sys.registerSystem(gpa, &world, .update, "writer_a", spec_writer_a, Nop(spec_writer_a).run);
 
     // A second writer on the same component in the same phase
     // with no explicit ordering must be rejected at registration
@@ -238,38 +256,18 @@ test "unresolvable conflict between two writes raises a registration error" {
     // explicitly not the model).
     try std.testing.expectError(
         error.WriteWriteConflict,
-        sys.registerSystem(gpa, &world, .{
-            .phase = .update,
-            .name = "writer_b",
-            .run = nopSystem,
-            .accesses = &.{Writes(Position)},
-        }),
+        sys.registerSystem(gpa, &world, .update, "writer_b", spec_writer_b, Nop(spec_writer_b).run),
     );
 
     // A `Writes(X)` in a DIFFERENT phase is fine — phases are
     // independent dispatch units, so the conflict scope is
     // intra-phase.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .post_update,
-        .name = "writer_post",
-        .run = nopSystem,
-        .accesses = &.{Writes(Position)},
-    });
+    try sys.registerSystem(gpa, &world, .post_update, "writer_post", spec_writer_post, Nop(spec_writer_post).run);
 
     // And two `Reads(X)` on the same component in the same phase
     // are conflict-free — they can run in parallel.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "reader_a",
-        .run = nopSystem,
-        .accesses = &.{Reads(Velocity)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "reader_b",
-        .run = nopSystem,
-        .accesses = &.{Reads(Velocity)},
-    });
+    try sys.registerSystem(gpa, &world, .update, "reader_a", spec_reader_a, Nop(spec_reader_a).run);
+    try sys.registerSystem(gpa, &world, .update, "reader_b", spec_reader_b, Nop(spec_reader_b).run);
 }
 
 // ─── Test 4 — registration cycle ──────────────────────────────────────────
@@ -287,20 +285,10 @@ test "crossing declarations that close a cycle are refused at registration" {
     // force both edges: `a` reads what `b` writes, `b` reads what `a` writes.
     // The DAG semantic is forward dataflow, so both are mandatory and there is
     // no ordering to choose.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "cross_a",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagB) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "cross_a", spec_cross_a, Nop(spec_cross_a).run);
     try std.testing.expectError(
         error.DependencyCycle,
-        sys.registerSystem(gpa, &world, .{
-            .phase = .update,
-            .name = "cross_b",
-            .run = nopSystem,
-            .accesses = &.{ Writes(TagA), Reads(TagB) },
-        }),
+        sys.registerSystem(gpa, &world, .update, "cross_b", spec_cross_b, Nop(spec_cross_b).run),
     );
 
     // THE ERROR IS NOT `WriteWriteConflict`, and that is the point of the
@@ -308,20 +296,10 @@ test "crossing declarations that close a cycle are refused at registration" {
     // any other code, so what this adds is the other direction: a real
     // duplicated write still reports the code that names it, so the two
     // refusals are told apart and cannot silently collapse into one.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .post_update,
-        .name = "ww_first",
-        .run = nopSystem,
-        .accesses = &.{Writes(TagC)},
-    });
+    try sys.registerSystem(gpa, &world, .post_update, "ww_first", spec_ww_first, Nop(spec_ww_first).run);
     try std.testing.expectError(
         error.WriteWriteConflict,
-        sys.registerSystem(gpa, &world, .{
-            .phase = .post_update,
-            .name = "ww_second",
-            .run = nopSystem,
-            .accesses = &.{Writes(TagC)},
-        }),
+        sys.registerSystem(gpa, &world, .post_update, "ww_second", spec_ww_second, Nop(spec_ww_second).run),
     );
 
     // NOTHING WAS COMMITTED by either refusal, on ALL FOUR of the things
@@ -385,26 +363,11 @@ test "a cycle closed through a third system is refused too" {
     // bounded implementation that checks its seeds, expands ONE level and
     // stops passes this test and the one above it. The four-node ring below
     // is what refuses that form.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "chain_a",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagB) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "chain_b",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagB), Writes(TagC) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "chain_a", spec_chain_a, Nop(spec_chain_a).run);
+    try sys.registerSystem(gpa, &world, .update, "chain_b", spec_chain_b, Nop(spec_chain_b).run);
     try std.testing.expectError(
         error.DependencyCycle,
-        sys.registerSystem(gpa, &world, .{
-            .phase = .update,
-            .name = "chain_c",
-            .run = nopSystem,
-            .accesses = &.{ Reads(TagC), Writes(TagA) },
-        }),
+        sys.registerSystem(gpa, &world, .update, "chain_c", spec_chain_c, Nop(spec_chain_c).run),
     );
     try expectNothingCommitted(&sys, .update, 2);
 }
@@ -422,24 +385,9 @@ test "a crossing declaration that closes no cycle is registered" {
     // runs — a check that refused whenever both sets are non-empty would pass
     // both tests above and fail here. It walks from `sink` and comes back
     // empty because `sink` declares no write of its own.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "source",
-        .run = nopSystem,
-        .accesses = &.{Writes(TagA)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "sink",
-        .run = nopSystem,
-        .accesses = &.{Reads(TagB)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "middle",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagB) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "source", spec_source, Nop(spec_source).run);
+    try sys.registerSystem(gpa, &world, .update, "sink", spec_sink, Nop(spec_sink).run);
+    try sys.registerSystem(gpa, &world, .update, "middle", spec_middle, Nop(spec_middle).run);
 
     // Three systems, and the edges are the ones the declarations force:
     // `source` → `middle` → `sink`, one system per level.
@@ -465,24 +413,9 @@ test "a cycle two hops deep is refused, which a bounded walk would miss" {
     // only successor is `ring_a` and its only predecessor is `ring_c`, two
     // hops apart — so refusing it requires the transitive closure the stack
     // computes and nothing less.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "ring_a",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagB) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "ring_b",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagB), Writes(TagC) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "ring_c",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagC), Writes(TagD) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "ring_a", spec_ring_a, Nop(spec_ring_a).run);
+    try sys.registerSystem(gpa, &world, .update, "ring_b", spec_ring_b, Nop(spec_ring_b).run);
+    try sys.registerSystem(gpa, &world, .update, "ring_c", spec_ring_c, Nop(spec_ring_c).run);
 
     // The three registered so far form a CHAIN and no cycle — asserted, so
     // the refusal below is attributable to the fourth declaration and not to
@@ -492,12 +425,7 @@ test "a cycle two hops deep is refused, which a bounded walk would miss" {
 
     try std.testing.expectError(
         error.DependencyCycle,
-        sys.registerSystem(gpa, &world, .{
-            .phase = .update,
-            .name = "ring_d",
-            .run = nopSystem,
-            .accesses = &.{ Reads(TagD), Writes(TagA) },
-        }),
+        sys.registerSystem(gpa, &world, .update, "ring_d", spec_ring_d, Nop(spec_ring_d).run),
     );
     try expectNothingCommitted(&sys, .update, 3);
 }
@@ -521,51 +449,21 @@ test "a walk that reconverges on one node still terminates and admits" {
     // source says too — the set bounds the work and cannot move the answer —
     // and the honest test is one that runs the shape rather than one that
     // claims the guard is load-bearing.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_root",
-        .run = nopSystem,
-        .accesses = &.{ Reads(Position), Writes(TagA) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_left",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagB) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_right",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagA), Writes(TagC) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "dia_root", spec_dia_root, Nop(spec_dia_root).run);
+    try sys.registerSystem(gpa, &world, .update, "dia_left", spec_dia_left, Nop(spec_dia_left).run);
+    try sys.registerSystem(gpa, &world, .update, "dia_right", spec_dia_right, Nop(spec_dia_right).run);
     // TWO predecessors, where every other case in this file has exactly one.
     // An implementation reading `incoming.items[0]` alone — skipping the
     // membership loop — is indistinguishable from the shipped one everywhere
     // else in the suite.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_join",
-        .run = nopSystem,
-        .accesses = &.{ Reads(TagB), Reads(TagC), Writes(TagD) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_aside",
-        .run = nopSystem,
-        .accesses = &.{Writes(Velocity)},
-    });
+    try sys.registerSystem(gpa, &world, .update, "dia_join", spec_dia_join, Nop(spec_dia_join).run);
+    try sys.registerSystem(gpa, &world, .update, "dia_aside", spec_dia_aside, Nop(spec_dia_aside).run);
 
     // The probe's walk seeds at `dia_root`, opens both branches, reaches
     // `dia_join` through one of them and meets it again through the other.
     // Its predecessor is `dia_aside`, which the diamond does not reach, so
     // the answer is admission.
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "dia_probe",
-        .run = nopSystem,
-        .accesses = &.{ Reads(Velocity), Writes(Position) },
-    });
+    try sys.registerSystem(gpa, &world, .update, "dia_probe", spec_dia_probe, Nop(spec_dia_probe).run);
 
     // Six systems, and the SHAPE is a diamond rather than a chain: five
     // levels for six systems, the fourth holding the two branches. A chain

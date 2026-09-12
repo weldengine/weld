@@ -15,8 +15,13 @@
 //! automatic layout, which an exported function cannot take at all; giving one
 //! side a `*World` and the other a view would have measured the ABI and not the
 //! wrapper. With the same parameter on both, the only difference left is the
-//! path from that pointer to the component — `fromErased` then the membership
-//! test on one side, a bare cast on the other.
+//! path from that pointer to the component — a narrowing `@ptrCast`,
+//! `fromErased` and the membership test on one side, a bare cast on the other.
+//!
+//! The view side gained that `@ptrCast` when the erased world stopped being
+//! `*anyopaque` and became an opaque generated per declared set. It is the same
+//! cast the generated trampoline performs, it is a no-op at runtime, and the
+//! comparison below is what says so rather than this sentence.
 
 const ecs = @import("weld_core").ecs;
 
@@ -25,7 +30,7 @@ const spec = [_]ecs.Access{ecs.Access.writes(ecs.Transform)};
 /// Through the view. Its declared set grants the write, so the membership test
 /// passes and must leave nothing behind.
 export fn weld_zero_cost_via_view(p: *anyopaque, e: ecs.EntityId) ?*ecs.Transform {
-    return ecs.View(&spec).fromErased(p).getMut(ecs.Transform, e);
+    return ecs.View(&spec).fromErased(@ptrCast(p)).getMut(ecs.Transform, e);
 }
 
 /// Through the world, unrestricted. The reference listing.

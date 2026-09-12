@@ -18,6 +18,7 @@
 //! point. A refusal that needed `weld-access-refused` would mean the promotion
 //! had already succeeded and the view was arguing about it afterwards.
 
+const std = @import("std");
 const ecs = @import("weld_core").ecs;
 
 const read_spec = [_]ecs.Access{ecs.Access.reads(ecs.Velocity)};
@@ -36,8 +37,16 @@ fn body(ctx: ecs.SystemContextOf(&read_spec)) anyerror!void {
     _ = promoted.getMut(ecs.Velocity, e);
 }
 
-const descriptor = ecs.SystemDescriptor.of(.update, "view_promotion", &read_spec, body);
+/// Registration is what forces the body to be analysed, and it is written as a
+/// function that is never called: `SystemDescriptor.of` is private now — the
+/// scheduler refuses to accept a `run` and an `accesses` supplied separately —
+/// so the only way in is the generic entry, which needs a live world this
+/// fixture has no reason to build. Without a reference Zig analyses neither the
+/// trampoline nor the body, and the file would compile by not looking.
+fn wire(sched: *ecs.SystemScheduler, gpa: std.mem.Allocator, world: *ecs.World) !void {
+    try sched.registerSystem(gpa, world, .update, "view_promotion", &read_spec, body);
+}
 
 comptime {
-    _ = descriptor;
+    _ = &wire;
 }

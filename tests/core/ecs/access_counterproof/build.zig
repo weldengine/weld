@@ -45,10 +45,10 @@ const cases = [_]Case{
         .description = "writes a component declared read-only — must NOT compile",
     },
     .{
-        .step = "case-missing-accesses",
-        .file = "case_missing_accesses.zig",
+        .step = "case-mismatched-pair",
+        .file = "case_mismatched_pair.zig",
         .must_compile = false,
-        .description = "registers without a declared set — must NOT compile",
+        .description = "pairs a body with a declaration that does not describe it — must NOT compile",
     },
     .{
         .step = "case-view-promotion",
