@@ -580,6 +580,66 @@ pub fn build(b: *std.Build) void {
     const asm_inventory_tests = b.addTest(.{ .root_module = asm_inventory_module });
     test_step.dependOn(&b.addRunArtifact(asm_inventory_tests).step);
 
+    // `zig build ecs-access-zero-cost` — the declared-access view claims to cost
+    // nothing, and that claim is about EMITTED CODE. It is read in the listing,
+    // on the `forge-asm-inventory` shape above: emit the assembly of a witness
+    // pair, hand the path to a Zig scanner, compare.
+    //
+    // ReleaseSafe rather than Debug: the claim is about the code a game ships,
+    // and Debug emits a prologue and stack probes that say nothing about the
+    // view. Pinned here rather than taken from the cell's mode, for the same
+    // reason `forge-asm-inventory` pins its own.
+    const view_asm_module = b.createModule(.{
+        .root_source_file = b.path("tools/view_asm_equiv/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const view_asm_exe = b.addExecutable(.{
+        .name = "view_asm_equiv",
+        .root_module = view_asm_module,
+    });
+    const view_asm_run = b.addRunArtifact(view_asm_exe);
+    {
+        const zc_target = b.resolveTargetQuery(std.Target.Query.parse(.{
+            .arch_os_abi = "native",
+            .cpu_features = "baseline",
+        }) catch unreachable);
+        const zc_foundation = b.createModule(.{
+            .root_source_file = b.path("src/foundation/root.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+        });
+        const zc_core = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        });
+        zc_core.addImport("foundation", zc_foundation);
+        const zc_surface = b.createModule(.{
+            .root_source_file = b.path("tests/core/ecs/access_zero_cost_surface.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+        });
+        zc_surface.addImport("weld_core", zc_core);
+        const zc_obj = b.addObject(.{
+            .name = "ecs_access_zero_cost",
+            .root_module = zc_surface,
+        });
+        view_asm_run.addFileArg(zc_obj.getEmittedAsm());
+    }
+    const view_asm_step = b.step(
+        "ecs-access-zero-cost",
+        "Assert the declared-access view emits the same instructions as a direct World access",
+    );
+    view_asm_step.dependOn(&view_asm_run.step);
+
+    // The scanner's own tests ride in `zig build test`, for the reason written
+    // beside `asm_inventory`'s: a scanner that cannot discriminate reports a
+    // clean verdict for the wrong reason.
+    const view_asm_tests = b.addTest(.{ .root_module = view_asm_module });
+    test_step.dependOn(&b.addRunArtifact(view_asm_tests).step);
+
     // Out-of-tree tests: each file is its own root_module and imports
     // `weld_core` to reach the engine internals. The exception is a group whose
     // files `@import` each other — Zig 0.16 forbids a single file from belonging
@@ -757,6 +817,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/generational_indices.zig" },
         .{ .path = "tests/ecs/archetype_transitions.zig" },
         .{ .path = "tests/ecs/queries.zig" },
+        // The POSITIVE half of the declared-access enforcement. The refusals it
+        // makes non-vacuous live in `tests/core/ecs/access_counterproof/`,
+        // driven by `zig build ecs-access-counterproof` — a compile error
+        // cannot be a test block.
+        .{ .path = "tests/core/ecs/access_view_test.zig" },
         .{ .path = "tests/ecs/change_detection.zig" },
         .{ .path = "tests/ecs/scheduler.zig" },
         .{ .path = "tests/ecs/scheduler_dag.zig" },

@@ -535,6 +535,14 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build ecs-access-counterproof -Dcpu=${{ env.ZIG_CPU }}
 
+      # The zero-cost claim, read in the emitted assembly rather than asserted:
+      # the two witness functions must be one body, or the same instructions one
+      # by one. A property of the emitted CODE, so one cell — and it pins
+      # ReleaseSafe internally, since a Debug prologue says nothing about a view.
+      - name: zig build ecs-access-zero-cost
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build ecs-access-zero-cost -Dcpu=${{ env.ZIG_CPU }}
+
       # M1.1.14 review — THE SUITE-DERIVED HALF OF THE CONSERVATION, on the cell.
       # `zig build lint` above already runs the unconditional check of the closure
       # against the DECLARED total. This confronts that declared number with the
