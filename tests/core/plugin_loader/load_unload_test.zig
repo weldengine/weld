@@ -3,9 +3,11 @@
 //! Exercises `Loader.loadPlugin` + `unloadPlugin` against three
 //! stub libraries built by the main `build.zig`:
 //!   - `weld_stub_plugin_happy`     — `weld_plugin_entry` present,
-//!                                    `api_version_min = 0`
+//!                                    `api_version_min` = the current major
 //!   - `weld_stub_plugin_future`    — `weld_plugin_entry` present,
 //!                                    `api_version_min = 99`
+//!   - `weld_stub_plugin_legacy`    — `weld_plugin_entry` present,
+//!                                    `api_version_min = 0`, a superseded major
 //!   - `weld_stub_plugin_no_entry`  — symbol absent
 //!
 //! The test relies on `zig build` having installed each library
@@ -49,6 +51,7 @@ fn stubPath(comptime base: []const u8) []const u8 {
 const happy_path = stubPath("weld_stub_plugin_happy");
 const future_path = stubPath("weld_stub_plugin_future");
 const no_entry_path = stubPath("weld_stub_plugin_no_entry");
+const legacy_path = stubPath("weld_stub_plugin_legacy");
 
 test "Loader loads the stub plugin without error" {
     const gpa = std.testing.allocator;
@@ -73,7 +76,10 @@ test "Loader reads WeldPluginDesc correctly" {
 
     try std.testing.expectEqualStrings("stub", handle.desc.name.slice());
     try std.testing.expectEqualStrings("0.0.1", handle.desc.version.slice());
-    try std.testing.expectEqual(@as(u32, 0), handle.desc.api_version_min);
+    try std.testing.expectEqual(
+        weld_core.plugin_loader.WELD_API_VERSION_MAJOR,
+        handle.desc.api_version_min,
+    );
 }
 
 test "unloadPlugin clean, no leak" {
@@ -113,6 +119,45 @@ test "load of a plugin with api_version_min > current returns ApiVersionTooNew" 
         loader.loadPlugin(future_path),
     );
     try std.testing.expectEqual(@as(u32, 0), loader.count());
+}
+
+test "load of a plugin built against a superseded major returns ApiVersionTooOld" {
+    const gpa = std.testing.allocator;
+    var loader = Loader.init(gpa);
+    defer loader.deinit();
+
+    // THE OTHER DIRECTION, and it had no witness until the major moved. A
+    // major increment IS the binary break, so a plugin declaring an older one
+    // calls entries whose signatures have moved — here `query_create`, which
+    // went from five parameters to seven — and reads a `WeldQueryChunk` whose
+    // layout changed. Accepting it is worse than refusing it, because the
+    // failure lands inside the plugin's own call rather than at the load.
+    try std.testing.expectError(
+        error.ApiVersionTooOld,
+        loader.loadPlugin(legacy_path),
+    );
+    try std.testing.expectEqual(@as(u32, 0), loader.count());
+}
+
+test "the admissible band is exactly one major, and the happy stub sits in it" {
+    // NON-VACUITY for the pair above: both refusals fire on the same loader
+    // that accepts the happy stub, so the two tests measure the bound and not
+    // a loader that refuses everything. And the band's WIDTH is the claim —
+    // a major is a break, so it is one value, not a floor.
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        weld_core.plugin_loader.WELD_API_VERSION_MAJOR,
+    );
+
+    const gpa = std.testing.allocator;
+    var loader = Loader.init(gpa);
+    defer loader.deinit();
+    const handle = try loader.loadPlugin(happy_path);
+    try std.testing.expectEqual(
+        weld_core.plugin_loader.WELD_API_VERSION_MAJOR,
+        handle.desc.api_version_min,
+    );
+    try std.testing.expectEqual(@as(u32, 1), loader.count());
 }
 
 test "loadPlugin on an invalid path returns LibraryLoadFailed" {

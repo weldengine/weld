@@ -40,6 +40,14 @@
 //! the registration error is the only outcome. A later milestone
 //! can add explicit ordering if a real-world case requires it.
 //!
+//! The matrix reads ONE component at a time, and a second refusal
+//! exists because the DAG does not. Two systems whose declarations
+//! cross — `Reads(T), Writes(U)` against `Writes(T), Reads(U)` —
+//! are legal in every cell of it and together force both edges,
+//! closing a cycle no per-component check can see.
+//! `registerSystem` walks the graph and refuses that with
+//! `error.DependencyCycle`, before the declaration is committed.
+//!
 //! Resource placeholders. `ReadsResource(R)` / `WritesResource(R)`
 //! share the DAG construction path with components — the resource
 //! API itself is out of scope, but the placeholders compile
@@ -69,6 +77,7 @@ const registry_mod = @import("registry.zig");
 const command_buffer_mod = @import("command_buffer.zig");
 const hybrid_query_mod = @import("hybrid_query.zig");
 const observers_mod = @import("observers.zig");
+const view_mod = @import("view.zig");
 
 const World = world_mod.World;
 const Job = worker_mod.Job;
@@ -107,9 +116,12 @@ pub const Phase = enum(u8) {
 /// Kind tag distinguishing component reads/writes from resource
 /// reads/writes. Components and resources share the same DAG
 /// construction logic — the conflict matrix is identical,
-/// only the lookup namespace differs (and resources have no
-/// concrete API yet, so the placeholders just record the intent).
-pub const AccessKind = enum { reads, writes, reads_resource, writes_resource };
+/// only the lookup namespace differs.
+///
+/// Re-exported from `view.zig` rather than declared twice: the same four
+/// variants decide what the DAG orders and what the view lets a body reach,
+/// and two enumerations of one domain drift.
+pub const AccessKind = view_mod.AccessKind;
 
 /// Closure that ensures the access's component / resource type is
 /// registered with the world's `Registry` and returns its
@@ -199,14 +211,24 @@ pub const FrameContext = struct {
     user: ?*anyopaque,
 };
 
-/// Argument bundle passed to every `SystemFn`. Holds the borrowed
-/// `World`, the per-frame allocator, the io handle, the job
-/// scheduler for chunked dispatch, the `FrameContext` shared
-/// across systems, the `JobBuilder` the system stages its chunked
-/// work into, and the per-system `CommandBuffer` for deferred
-/// structural mutations.
+/// Argument bundle passed to every `SystemFn`. Holds the world with its type
+/// erased, the per-frame allocator, the io handle, the job scheduler for
+/// chunked dispatch, the `FrameContext` shared across systems, the
+/// `JobBuilder` the system stages its chunked work into, and the per-system
+/// `CommandBuffer` for deferred structural mutations.
+///
+/// **This is the ERASED context, and the erasure is the guarantee.** A system
+/// body written against a declared access set receives `SystemContextOf(spec)`
+/// instead, built by the trampoline `SystemDescriptor.of` generates. What
+/// remains here is what the scheduler stores behind one function pointer — and
+/// it hands out no `*World`, so a body that wants one has to name the type and
+/// cast, which is a decision someone can find rather than a field someone
+/// reaches by habit.
 pub const SystemContext = struct {
-    world: *World,
+    /// The world, type-erased. Recovering a `*World` from it is a deliberate
+    /// act; the generated trampoline's own recovery is the only one in the
+    /// tier, and it hands the result to a `View` that restricts it.
+    world_erased: *anyopaque,
     gpa: std.mem.Allocator,
     io: std.Io,
     jobs: *jobs_sched_mod.Scheduler,
@@ -226,15 +248,113 @@ pub const SystemContext = struct {
 /// level. Errors propagate through `dispatchFrame`.
 pub const SystemFn = *const fn (ctx: SystemContext) anyerror!void;
 
+/// The context a system body written against a declared access set receives.
+///
+/// Identical to `SystemContext` but for its first member: where the erased
+/// form carries an opaque pointer, this one carries the `View` the declaration
+/// parameterises. One instantiation per declared set — which is exactly why it
+/// cannot be what `SystemFn` points at, and why a trampoline exists.
+pub fn SystemContextOf(comptime spec: []const view_mod.Access) type {
+    return struct {
+        view: view_mod.View(spec),
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        jobs: *jobs_sched_mod.Scheduler,
+        frame: *FrameContext,
+        builder: *JobBuilder,
+        cmd: *CommandBuffer,
+    };
+}
+
+/// Turn a declared access set into the runtime descriptors the DAG reads.
+///
+/// The result is a comptime constant, so it has static lifetime — which also
+/// retires a hazard the inline `&.{ … }` form carries at every hand-written
+/// registration: `registerSystem` stores the caller's slice without duplicating
+/// it, and a temporary dangles the moment the registering function returns.
+pub fn descriptorsOf(comptime spec: []const view_mod.Access) []const AccessDescriptor {
+    // Held as a container-level `const` rather than built in a `comptime`
+    // block and returned by pointer: a container-level constant has static
+    // storage, which is the whole property this function exists to give the
+    // scheduler. A block-local would be a pointer into comptime memory that
+    // Zig refuses to hand to a run-time caller.
+    const Derived = struct {
+        const list = blk: {
+            var out: [spec.len]AccessDescriptor = undefined;
+            for (spec, 0..) |a, i| {
+                out[i] = switch (a.kind) {
+                    .reads => Reads(a.T),
+                    .writes => Writes(a.T),
+                    .reads_resource => ReadsResource(a.T),
+                    .writes_resource => WritesResource(a.T),
+                };
+            }
+            const frozen = out;
+            break :blk frozen;
+        };
+    };
+    return &Derived.list;
+}
+
 /// System descriptor with access declarations for DAG construction.
-/// `accesses` defaults to empty — a system with no declared
-/// accesses is treated as having no conflicts with any other
-/// system and lands on topological level 0.
+///
+/// `accesses` has NO default. Omitting it does not produce a system that
+/// conflicts with nobody and lands on level 0 — it fails to compile. An
+/// implicit empty set is the most dangerous value the field can hold, since it
+/// declares zero conflicts against everything else, and it is exactly what a
+/// forgotten field used to yield.
+///
+/// An EXPLICITLY empty set stays legal: a system that touches no component and
+/// no resource has an empty declaration, and saying so is a declaration.
 pub const SystemDescriptor = struct {
     phase: Phase,
     name: []const u8,
     run: SystemFn,
-    accesses: []const AccessDescriptor = &.{},
+    accesses: []const AccessDescriptor,
+
+    /// Describe a system from ONE declaration.
+    ///
+    /// `spec` parameterises the view the body receives AND produces the
+    /// descriptors the DAG orders on, so the two cannot disagree: there is no
+    /// second list to keep in step. The returned `run` is a trampoline
+    /// generated for this `spec` — it recovers the world from the erased
+    /// context, wraps it in `View(spec)`, and calls `body`.
+    ///
+    /// Write `spec` once as a named constant and reference it in both places;
+    /// two separate `&.{ … }` literals of identical content are two values,
+    /// and a generic type instantiated on each is two types.
+    fn of(
+        comptime phase: Phase,
+        comptime name: []const u8,
+        comptime spec: []const view_mod.Access,
+        comptime body: fn (SystemContextOf(spec)) anyerror!void,
+    ) SystemDescriptor {
+        const Generated = struct {
+            fn call(ctx: SystemContext) anyerror!void {
+                return body(.{
+                    // The ONE cast on this path, and it is generated rather
+                    // than written: `SystemContext` carries the world as
+                    // `*anyopaque` because it is the storage the dispatcher
+                    // fills before any spec is in view. Narrowing it to this
+                    // system's own erased type happens here, once per
+                    // registration, where the spec is known.
+                    .view = view_mod.View(spec).fromErased(@ptrCast(ctx.world_erased)),
+                    .gpa = ctx.gpa,
+                    .io = ctx.io,
+                    .jobs = ctx.jobs,
+                    .frame = ctx.frame,
+                    .builder = ctx.builder,
+                    .cmd = ctx.cmd,
+                });
+            }
+        };
+        return .{
+            .phase = phase,
+            .name = name,
+            .run = &Generated.call,
+            .accesses = descriptorsOf(spec),
+        };
+    }
 };
 
 // ─── JobBuilder ────────────────────────────────────────────────────────────
@@ -454,16 +574,49 @@ const PhaseState = struct {
 
 // ─── Errors ────────────────────────────────────────────────────────────────
 
-/// Errors surfaced by `SystemScheduler.registerSystem`. Currently
-/// limited to `WriteWriteConflict` (two writes on the same id in
-/// the same phase) plus the usual `OutOfMemory`. Promoted to a
-/// public alias so callers do not have to spell the error set out.
+/// The two refusals `SystemScheduler.registerSystem` decides, plus the usual
+/// `OutOfMemory`.
+///
+/// **It is NOT the error set that function returns, and a caller must not
+/// annotate against it.** `registerSystem` is declared `!void` with an
+/// inferred set, and it `try`s `AccessDescriptor.resolve`, which is
+/// `anyerror!ComponentId` — so the inferred set collapses to `anyerror`, and
+/// `fn wire(…) RegistrationError!void { try sched.registerSystem(…); }` does
+/// not compile. What this alias is good for is naming the refusals in a
+/// `switch` or an `expectError`, which is every use of it in the tree
+/// (measured). The gap is the resolver's `anyerror`, which predates this set
+/// and is not narrowed here: it is a public function-pointer type, so
+/// narrowing it is a frozen-surface change.
+///
+/// The two refusals name two different facts and are deliberately NOT one code.
+/// A write-write conflict is a property of ONE component: two systems claim to
+/// write it. A dependency cycle is a property of a SET of components and of no
+/// single one of them — every declaration in the cycle is individually legal,
+/// and it is their composition that has no ordering. A caller told
+/// `WriteWriteConflict` for a cycle would look for the duplicated write that
+/// does not exist.
 pub const RegistrationError = error{
     /// Two systems declare `Writes(T)` on the same component (or resource) in the same
     /// phase, with no explicit ordering to break the tie. It is rejected at
     /// registration — Bevy's silent serialization is explicitly not the model used
     /// here.
     WriteWriteConflict,
+    /// The declaration closes a cycle in the phase's dataflow DAG: the new
+    /// system must run after one already registered and before another that
+    /// reaches it. Two systems suffice — one declaring `Reads(T), Writes(U)`
+    /// and the other `Writes(T), Reads(U)` — and neither declaration is a
+    /// write-write conflict on any id.
+    ///
+    /// There is no ordering to choose. The DAG semantic is forward dataflow,
+    /// so both edges are forced by the declarations themselves and no
+    /// `runs_before` exists to break the tie; the only outcome is refusal.
+    ///
+    /// `computeLevels` returns it too, as a backstop on an invariant
+    /// registration maintains — so `dispatchFrame` and `topologicalLevels`
+    /// can surface it. A reader who meets it there should NOT look for a
+    /// declaration just made: it means the phase's DAG holds a cycle nothing
+    /// refused, which is a defect in the scheduler and not in the caller.
+    DependencyCycle,
     OutOfMemory,
 };
 
@@ -497,12 +650,95 @@ pub const SystemScheduler = struct {
     /// Register a system. Resolves the system's accesses against
     /// the world's registry, then computes incoming edges + checks
     /// for write-write conflicts against systems already registered
-    /// in the same phase. Returns `error.WriteWriteConflict` on a
-    /// conflict; the descriptor is NOT inserted in that case.
+    /// in the same phase, then checks that the new edges close no
+    /// cycle. Returns `error.WriteWriteConflict` or
+    /// `error.DependencyCycle` on a refusal; in either case NOTHING
+    /// OF THE SCHEDULER is touched — no descriptor, no edge, no
+    /// tracker entry, no command buffer — both checks running ahead
+    /// of the commit.
+    ///
+    /// **The WORLD is not covered by that, and the difference is
+    /// real rather than pedantic.** Resolving the accesses calls
+    /// `ensureComponentRegistered` for every type the declaration
+    /// names, so a refused registration leaves those types present
+    /// in the registry. It is benign because that call is idempotent
+    /// and monotone — a corrected declaration resolves to the same
+    /// ids — and it is stated because a reader who takes "nothing
+    /// was mutated" literally would be wrong about the registry.
+    ///
+    /// `OutOfMemory` splits, and the split is not pedantry. An
+    /// allocation that fails BEFORE the commit — resolving the
+    /// accesses, or the cycle walk's own scratch — returns with the
+    /// scheduler byte-unchanged, like the two refusals. An allocation
+    /// that fails INSIDE the commit leaves edges and tracker entries
+    /// the `errdefer`s do not all undo, naming an index the rollback
+    /// popped, and THAT scheduler is unusable: the next registration's
+    /// walk and the next `computeLevels` both index on it out of
+    /// bounds. A caller cannot tell the two apart from the error
+    /// alone, so the conservative reading is the right one — but the
+    /// sentence that said every allocation failure here leaves an
+    /// unusable scheduler was false for most of them. The debt is
+    /// recorded in `engine-ecs-internals.md`.
     ///
     /// Invalidates any cached topological levels for the affected
     /// phase — the next `dispatchFrame` recomputes them.
     pub fn registerSystem(
+        self: *SystemScheduler,
+        gpa: std.mem.Allocator,
+        world: *World,
+        comptime phase: Phase,
+        comptime name: []const u8,
+        comptime spec: []const view_mod.Access,
+        comptime body: fn (SystemContextOf(spec)) anyerror!void,
+    ) !void {
+        // **AN EMPTY DECLARATION IS NOT REFUSED, AND THE REASON IS THE TYPE.**
+        //
+        // What `ARCH-030` forbids is the IMPLICIT empty set — the one an
+        // omission produces — and it requires that registering without a
+        // declaration FAIL rather than silently yield one. `spec` is a
+        // mandatory comptime parameter, so omitting it is a COMPILE error,
+        // which is stronger than the registration error the invariant asks
+        // for. A hand-written `&.{}` is a declaration its author made, not an
+        // omission that happened to them.
+        //
+        // And refusing it would add no safety, because the entry above already
+        // makes an empty declaration SELF-VERIFYING: the body receives
+        // `SystemContextOf(&.{})`, hence `View(&.{})`, whose `get` and `getMut`
+        // refuse at comptime for every `T` — pinned by `view.zig`'s « an empty
+        // declaration grants nothing ». A system that declares nothing cannot
+        // reach a column, so it has no edge to place, which is a property and
+        // not an oversight.
+        //
+        // Before the pairing was closed an empty set could lie: the declaration
+        // and the body were independent, so nothing stopped a body that wrote
+        // `A` from being registered with no declaration at all. After it, the
+        // set a body is typed against IS the set the DAG reads. That is what
+        // makes the refusal redundant rather than merely inconvenient.
+        return self.registerDescriptor(gpa, world, SystemDescriptor.of(phase, name, spec, body));
+    }
+
+    /// The registration proper, over a descriptor whose two halves are known
+    /// to come from one spec because `registerSystem` is the only caller and
+    /// it derived them together.
+    ///
+    /// **It is private, and that is the invariant rather than a detail.** A
+    /// `SystemDescriptor` is a plain struct with public fields, so a caller
+    /// handed one can rewrite `.accesses` and leave `.run` alone — a body that
+    /// writes `A` while the DAG is told it reads `Z`, which is `ARCH-030`'s
+    /// original defect rebuilt by field assignment. Zig has no private field
+    /// and no way to seal a pair, so what closes it is refusing to ACCEPT a
+    /// pair: the type stays public because the scheduler stores it and
+    /// `systemsInPhase` returns it, and nothing anywhere consumes one from
+    /// outside.
+    ///
+    /// **What that bounds is REGISTRATION, and the bound is stated rather than
+    /// rounded up.** `SystemScheduler.phases` is a public field, so a holder of
+    /// a `*SystemScheduler` can reach `phases[i].systems.items[j].accesses` and
+    /// rewrite it after the fact. That is post-hoc tampering with a DAG already
+    /// built, not a registration that lies — a different act, reachable, and
+    /// named here because claiming a closure wider than the one the code gives
+    /// is the exact class of defect this change exists to answer.
+    fn registerDescriptor(
         self: *SystemScheduler,
         gpa: std.mem.Allocator,
         world: *World,
@@ -519,8 +755,11 @@ pub const SystemScheduler = struct {
         }
 
         // First pass — conflict detection. Two writes on the same
-        // id in the same phase = registration error. No state is
-        // mutated until we know the system is conflict-free.
+        // id in the same phase = registration error. No state OF THE
+        // SCHEDULER is mutated until we know the system is admissible;
+        // the resolution above has already registered the named types
+        // in the world's registry, idempotently, and that survives a
+        // refusal.
         for (desc.accesses, resolved) |access, cid| {
             if (access.kind == .writes or access.kind == .writes_resource) {
                 if (phase.tracker.writers.get(cid)) |writers| {
@@ -558,15 +797,75 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Third pass — commit. Append the new system, extend edges,
+        // Third pass — cycle detection, still ahead of the commit.
+        //
+        // Pass 1 refuses two writers of the SAME id and nothing more. Two
+        // systems that CROSS — one declaring `Reads(T), Writes(U)`, the other
+        // `Writes(T), Reads(U)` — pass it individually and together force both
+        // edges, closing a two-node cycle that no per-component check can see:
+        // the cycle is a property of the pair, and pass 1 only ever looks at
+        // one id at a time.
+        //
+        // Left to `computeLevels`, that failure surfaces at the FIRST DISPATCH
+        // instead of at the registration that caused it, under an error naming
+        // a duplicated write that does not exist, and with the offending
+        // descriptor already committed. So it is refused here, where the
+        // caller still holds the declaration that is wrong.
+        //
+        // The walk is a plain reachability over the EXISTING edges, and two
+        // properties make that enough. The graph before this registration is
+        // acyclic — this check is what keeps it so, from an empty graph
+        // onwards — hence any new cycle passes through `new_idx`, and such a
+        // cycle is exactly `new_idx → s → … → p → new_idx` for some successor
+        // `s` and some predecessor `p`. And a two-colour visited set suffices
+        // where `registry.zig`'s `@requires` closure needs three, because the
+        // question here is REACHABILITY and not cycle-finding: a diamond is
+        // simply a node reached twice, and revisiting it could not change the
+        // answer.
+        //
+        // The acyclicity it rests on holds for a scheduler whose registrations
+        // all returned. `registerSystem` is not transactional for itself —
+        // `engine-ecs-internals.md` carries that Tier 0 debt, and
+        // `forge/sync.zig`'s preflight states the consequence — so a scheduler
+        // that has seen an `OutOfMemory` here is unusable, and this invariant
+        // is not what rescues it.
+        if (incoming.items.len > 0 and outgoing.items.len > 0) {
+            const visited = try gpa.alloc(bool, phase.systems.items.len);
+            defer gpa.free(visited);
+            @memset(visited, false);
+
+            var stack = std.ArrayListUnmanaged(u32).empty;
+            defer stack.deinit(gpa);
+            for (outgoing.items) |succ| {
+                if (visited[succ]) continue;
+                visited[succ] = true;
+                try stack.append(gpa, succ);
+            }
+            while (stack.pop()) |node| {
+                // Tested on the node itself, which is what catches the
+                // two-node case where one system is both predecessor and
+                // successor of the new one.
+                for (incoming.items) |dep| {
+                    if (dep == node) return error.DependencyCycle;
+                }
+                for (phase.edges.items[node].items) |next| {
+                    if (visited[next]) continue;
+                    visited[next] = true;
+                    try stack.append(gpa, next);
+                }
+            }
+        }
+
+        // Fourth pass — commit. Append the new system, extend edges,
         // record accesses in the tracker, invalidate cached levels.
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
 
         // Allocate the per-system command buffer alongside the
-        // descriptor. The cmd buffer borrows `world` for type
-        // resolution and uses `gpa` as its backing allocator.
-        try phase.command_buffers.append(gpa, CommandBuffer.init(gpa, world));
+        // descriptor. It borrows no world — a buffer that did would hand the
+        // system back the unrestricted handle its view withholds — and uses
+        // `gpa` as its backing allocator.
+        try phase.command_buffers.append(gpa, CommandBuffer.init(gpa));
         errdefer {
             var popped_cb = phase.command_buffers.pop();
             if (popped_cb) |*cb| cb.deinit();
@@ -700,7 +999,7 @@ pub const SystemScheduler = struct {
             for (lvl.system_indices.items) |sys_idx| {
                 const sys = phase.systems.items[sys_idx];
                 const ctx = SystemContext{
-                    .world = world,
+                    .world_erased = @ptrCast(world),
                     .gpa = gpa,
                     .io = io,
                     .jobs = jobs,
@@ -728,7 +1027,7 @@ pub const SystemScheduler = struct {
         // re-entrantly.
         for (phase.command_buffers.items) |*cb| {
             if (cb.commandCount() == 0 and !hasPendingDeferred(&world.observer_registry)) continue;
-            try observers_mod.flushWithObservers(cb, &world.observer_registry);
+            try observers_mod.flushWithObservers(cb, world, &world.observer_registry);
         }
     }
 
@@ -766,11 +1065,29 @@ pub const SystemScheduler = struct {
                 }
             }
             if (lvl.system_indices.items.len == 0) {
-                // Cycle in the DAG — should never happen since the
-                // conflict detection at registerSystem rejects the
-                // only construction path that creates one.
+                // A CYCLE. `registerSystem` refuses one before committing the
+                // declaration that would close it, so on a scheduler whose
+                // registrations all returned this is unreachable — and it is
+                // still not written `unreachable`, for ONE reason.
+                //
+                // The invariant is held by a SIBLING function and not by this
+                // one: it rests on registration being the only builder of
+                // `edges`, which is true today and is the kind of fact a later
+                // milestone can take away without this line noticing. An
+                // `unreachable` proven somewhere else is a bet on a proof that
+                // can move; an error costs a branch that never runs.
+                //
+                // **A second reason was written here and was FALSE.** It said
+                // the branch also covers a scheduler left half-mutated by a
+                // registration that failed on `OutOfMemory`. It does not: such
+                // a scheduler carries an edge naming an index the rollback
+                // popped, and the in-degree count twenty lines above faults on
+                // it — `in_degree[target] += 1` with `target == n` — before
+                // any level is built. The scenario cannot reach this line, so
+                // citing it justified the branch with something the code does
+                // not do. Nothing else about the branch changes.
                 lvl.deinit(gpa);
-                return error.WriteWriteConflict;
+                return error.DependencyCycle;
             }
             // Mark these nodes as scheduled by setting their
             // in_degree to a sentinel high enough to never reappear.
@@ -807,31 +1124,94 @@ test "SystemScheduler.init/deinit round-trip is leak-free" {
     try testing.expectEqual(@as(usize, 0), sched.systemCount());
 }
 
-test "registerSystem with no accesses lands on level 0" {
+test "two systems declaring disjoint sets land on the same level" {
     const gpa = testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
     var sched = SystemScheduler.init();
     defer sched.deinit(gpa);
 
-    const T = struct {
-        fn nop(_: SystemContext) anyerror!void {}
+    // THIS TEST USED TO REGISTER TWO EMPTY DECLARATIONS, and the empty set is
+    // now refused at comptime — so the shape is gone and the PROPERTY it
+    // carried is not: two declarations sharing no component id produce no
+    // edge, hence one level holding both. Disjoint sets give that without
+    // asking the scheduler to order a system that touches nothing.
+    const a_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Transform)};
+    const b_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Velocity)};
+
+    const Bodies = struct {
+        fn a(_: SystemContextOf(&a_spec)) anyerror!void {}
+        fn b(_: SystemContextOf(&b_spec)) anyerror!void {}
     };
 
-    try sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "a",
-        .run = T.nop,
-    });
-    try sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "b",
-        .run = T.nop,
-    });
+    try sched.registerSystem(gpa, &world, .update, "a", &a_spec, Bodies.a);
+    try sched.registerSystem(gpa, &world, .update, "b", &b_spec, Bodies.b);
 
     const levels = try sched.topologicalLevels(gpa, .update);
-    // Both systems have no accesses → no edges → both land on
-    // level 0.
     try testing.expectEqual(@as(usize, 1), levels.len);
     try testing.expectEqual(@as(usize, 2), levels[0].system_indices.items.len);
+}
+
+test "a described system's view and its DAG edges come from the same declaration" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var sched = SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    const writer_spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Transform)};
+    const reader_spec = [_]view_mod.Access{view_mod.Access.reads(world_mod.Transform)};
+
+    const Bodies = struct {
+        fn write(ctx: SystemContextOf(&writer_spec)) anyerror!void {
+            _ = ctx;
+        }
+        fn read(ctx: SystemContextOf(&reader_spec)) anyerror!void {
+            _ = ctx;
+        }
+    };
+
+    try sched.registerSystem(gpa, &world, .update, "writer", &writer_spec, Bodies.write);
+    try sched.registerSystem(gpa, &world, .update, "reader", &reader_spec, Bodies.read);
+
+    // The edge exists BECAUSE the descriptors were derived from the same
+    // specs the two bodies are typed against. Nothing was declared twice, so
+    // nothing can disagree: the writer precedes the reader on the DAG.
+    const levels = try sched.topologicalLevels(gpa, .update);
+    try testing.expectEqual(@as(usize, 2), levels.len);
+    try testing.expectEqual(@as(usize, 1), levels[0].system_indices.items.len);
+    try testing.expectEqual(@as(u32, 0), levels[0].system_indices.items[0]);
+    try testing.expectEqual(@as(u32, 1), levels[1].system_indices.items[0]);
+
+    // And the derived descriptors say what the spec said.
+    const registered = sched.systemsInPhase(.update);
+    try testing.expectEqual(@as(usize, 1), registered[0].accesses.len);
+    try testing.expect(registered[0].accesses[0].kind == .writes);
+    try testing.expect(registered[1].accesses[0].kind == .reads);
+}
+
+test "a described system's accesses outlive the block that registered it" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var sched = SystemScheduler.init();
+    defer sched.deinit(gpa);
+
+    const spec = [_]view_mod.Access{view_mod.Access.writes(world_mod.Velocity)};
+    const Body = struct {
+        fn run(ctx: SystemContextOf(&spec)) anyerror!void {
+            _ = ctx;
+        }
+    };
+
+    // Registered from a nested block that RETURNS before the read below.
+    // `registerSystem` stores the caller's slice without duplicating it, so an
+    // inline `&.{ … }` temporary would leave `type_name` pointing at dead
+    // stack here; a derived set is a comptime constant and cannot.
+    {
+        try sched.registerSystem(gpa, &world, .post_update, "outliver", &spec, Body.run);
+    }
+
+    const registered = sched.systemsInPhase(.post_update);
+    try testing.expectEqualStrings(@typeName(world_mod.Velocity), registered[0].accesses[0].type_name);
 }

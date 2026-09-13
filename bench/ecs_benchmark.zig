@@ -122,7 +122,7 @@ const S1BenchState = struct {
     velocities_off: u16,
 };
 
-fn integrateSystem(ctx: SystemContext) anyerror!void {
+fn integrateSystem(ctx: SystemContextOf(&integrateSystem_spec)) anyerror!void {
     const state: *S1BenchState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(state.query, integrateChunk, .{
         state.transforms_off,
@@ -425,11 +425,7 @@ fn runS1(
     };
     var sys_sched = SystemScheduler.init();
     defer sys_sched.deinit(gpa);
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "bench_integrate",
-        .run = integrateSystem,
-    });
+    try sys_sched.registerSystem(gpa, &world, .update, "bench_integrate", &integrateSystem_spec, integrateSystem);
 
     if (smoke) {
         try sys_sched.dispatchFrame(&world, gpa, io, &sched, dt, &bench_state);
@@ -556,6 +552,30 @@ const QFrustum = weld_core.ecs.query.Query(&.{ Transform, C01Sprite }, .{});
 
 const Reads = weld_core.ecs.scheduler.Reads;
 const Writes = weld_core.ecs.scheduler.Writes;
+const Access = weld_core.ecs.Access;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
+
+// Declared access sets, one per registered body. `registerSystem` derives
+// BOTH the DAG's descriptors and the body's context type from the set named
+// here, so a body cannot be paired with a declaration that does not describe
+// it — which is what a separately-supplied `.run` and `.accesses` allowed.
+// WRITES BOTH, and this bench declared nothing at all until the field lost its
+// default: `integrateChunk` mutates the velocity column and the transform column
+// from a worker-dispatched body, while the registration named no access — so the
+// scheduler placed it at level 0 with no edge to anything, which is the shape a
+// declaration nobody checks produces. It is written HERE now rather than at the
+// call, because the set is what the body's own context type is built from.
+const integrateSystem_spec: [2]Access = .{ Access.writes(Transform), Access.writes(Velocity) };
+const c01AiDecideSystem_spec: [3]Access = .{ Access.reads(Transform), Access.reads(C01Health), Access.writes(C01AI) };
+const c01UpdateCameraSystem_spec = [_]Access{Access.reads(Transform)};
+const c01ApplyGravitySystem_spec: [2]Access = .{ Access.reads(C01Mass), Access.writes(Velocity) };
+const c01IntegrateMotionSystem_spec: [2]Access = .{ Access.reads(Velocity), Access.writes(Transform) };
+const c01DamageSystem_spec = [_]Access{Access.writes(C01Health)};
+const c01SpriteAnimSystem_spec = [_]Access{Access.writes(C01Sprite)};
+const c01ScoreSystem_spec = [_]Access{Access.reads(C01Health)};
+const c01CleanupDeadSystem_spec = [_]Access{Access.reads(C01Health)};
+const c01InterpSystem_spec: [2]Access = .{ Access.reads(Transform), Access.writes(C01Sprite) };
+const c01FrustumSystem_spec: [2]Access = .{ Access.reads(Transform), Access.reads(C01Sprite) };
 
 /// Cross-frame state for the C0.1 systems — one query per system,
 /// stashed once at bench setup and reused across every dispatch.
@@ -599,7 +619,7 @@ fn c01AiDecideChunk(chunk: *Chunk, query: *QAI, dt: f32) void {
     }
 }
 
-fn c01AiDecideSystem(ctx: SystemContext) anyerror!void {
+fn c01AiDecideSystem(ctx: SystemContextOf(&c01AiDecideSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_ai, c01AiDecideChunk, .{ s.q_ai, ctx.frame.dt });
 }
@@ -616,7 +636,7 @@ fn c01UpdateCameraChunk(chunk: *Chunk, query: *QCamera, _: f32) void {
     _ = C01_CAMERA_ACC.fetchAdd(local, .acq_rel);
 }
 
-fn c01UpdateCameraSystem(ctx: SystemContext) anyerror!void {
+fn c01UpdateCameraSystem(ctx: SystemContextOf(&c01UpdateCameraSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_camera, c01UpdateCameraChunk, .{ s.q_camera, ctx.frame.dt });
 }
@@ -633,7 +653,7 @@ fn c01ApplyGravityChunk(chunk: *Chunk, query: *QGravity, dt: f32) void {
     }
 }
 
-fn c01ApplyGravitySystem(ctx: SystemContext) anyerror!void {
+fn c01ApplyGravitySystem(ctx: SystemContextOf(&c01ApplyGravitySystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_gravity, c01ApplyGravityChunk, .{ s.q_gravity, ctx.frame.dt });
 }
@@ -652,7 +672,7 @@ fn c01IntegrateMotionChunk(chunk: *Chunk, query: *QIntegrate, dt: f32) void {
     }
 }
 
-fn c01IntegrateMotionSystem(ctx: SystemContext) anyerror!void {
+fn c01IntegrateMotionSystem(ctx: SystemContextOf(&c01IntegrateMotionSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_integrate, c01IntegrateMotionChunk, .{ s.q_integrate, ctx.frame.dt });
 }
@@ -669,7 +689,7 @@ fn c01DamageChunk(chunk: *Chunk, query: *QHealthW, dt: f32) void {
     }
 }
 
-fn c01DamageSystem(ctx: SystemContext) anyerror!void {
+fn c01DamageSystem(ctx: SystemContextOf(&c01DamageSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_damage, c01DamageChunk, .{ s.q_damage, ctx.frame.dt });
 }
@@ -686,7 +706,7 @@ fn c01ScoreChunk(chunk: *Chunk, query: *QHealthR1, _: f32) void {
     _ = C01_SCORE_ACC.fetchAdd(local, .acq_rel);
 }
 
-fn c01ScoreSystem(ctx: SystemContext) anyerror!void {
+fn c01ScoreSystem(ctx: SystemContextOf(&c01ScoreSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_score, c01ScoreChunk, .{ s.q_score, ctx.frame.dt });
 }
@@ -701,7 +721,7 @@ fn c01SpriteAnimChunk(chunk: *Chunk, query: *QSpriteW, _: f32) void {
     }
 }
 
-fn c01SpriteAnimSystem(ctx: SystemContext) anyerror!void {
+fn c01SpriteAnimSystem(ctx: SystemContextOf(&c01SpriteAnimSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_sprite, c01SpriteAnimChunk, .{ s.q_sprite, ctx.frame.dt });
 }
@@ -724,7 +744,7 @@ fn c01CleanupDeadChunk(chunk: *Chunk, query: *QHealthR2, _: f32) void {
     _ = C01_SCORE_ACC.fetchAdd(local, .acq_rel);
 }
 
-fn c01CleanupDeadSystem(ctx: SystemContext) anyerror!void {
+fn c01CleanupDeadSystem(ctx: SystemContextOf(&c01CleanupDeadSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_cleanup, c01CleanupDeadChunk, .{ s.q_cleanup, ctx.frame.dt });
 }
@@ -744,7 +764,7 @@ fn c01InterpChunk(chunk: *Chunk, query: *QInterp, _: f32) void {
     }
 }
 
-fn c01InterpSystem(ctx: SystemContext) anyerror!void {
+fn c01InterpSystem(ctx: SystemContextOf(&c01InterpSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_interp, c01InterpChunk, .{ s.q_interp, ctx.frame.dt });
 }
@@ -765,7 +785,7 @@ fn c01FrustumChunk(chunk: *Chunk, query: *QFrustum, _: f32) void {
     _ = C01_FRUSTUM_ACC.fetchAdd(visible, .acq_rel);
 }
 
-fn c01FrustumSystem(ctx: SystemContext) anyerror!void {
+fn c01FrustumSystem(ctx: SystemContextOf(&c01FrustumSystem_spec)) anyerror!void {
     const s: *C01State = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_frustum, c01FrustumChunk, .{ s.q_frustum, ctx.frame.dt });
 }
@@ -901,81 +921,31 @@ fn runC01(
     defer sys_sched.deinit(gpa);
 
     // pre_update — ai_decide + update_camera (parallel, no overlap).
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .pre_update,
-        .name = "ai_decide",
-        .run = c01AiDecideSystem,
-        .accesses = &.{ Reads(Transform), Reads(C01Health), Writes(C01AI) },
-    });
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .pre_update,
-        .name = "update_camera",
-        .run = c01UpdateCameraSystem,
-        .accesses = &.{Reads(Transform)},
-    });
+    try sys_sched.registerSystem(gpa, &world, .pre_update, "ai_decide", &c01AiDecideSystem_spec, c01AiDecideSystem);
+    try sys_sched.registerSystem(gpa, &world, .pre_update, "update_camera", &c01UpdateCameraSystem_spec, c01UpdateCameraSystem);
 
     // fixed_update — apply_gravity (W:Velocity) then integrate_motion
     // (R:Velocity, W:Transform). DAG W→R serialises them.
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .fixed_update,
-        .name = "apply_gravity",
-        .run = c01ApplyGravitySystem,
-        .accesses = &.{ Reads(C01Mass), Writes(Velocity) },
-    });
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .fixed_update,
-        .name = "integrate_motion",
-        .run = c01IntegrateMotionSystem,
-        .accesses = &.{ Reads(Velocity), Writes(Transform) },
-    });
+    try sys_sched.registerSystem(gpa, &world, .fixed_update, "apply_gravity", &c01ApplyGravitySystem_spec, c01ApplyGravitySystem);
+    try sys_sched.registerSystem(gpa, &world, .fixed_update, "integrate_motion", &c01IntegrateMotionSystem_spec, c01IntegrateMotionSystem);
 
     // update — damage_resolution (W:Health) → score_tracker (R:Health),
     // sprite_animator (W:Sprite) parallel on level 0 with damage.
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "damage_resolution",
-        .run = c01DamageSystem,
-        .accesses = &.{Writes(C01Health)},
-    });
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "sprite_animator",
-        .run = c01SpriteAnimSystem,
-        .accesses = &.{Writes(C01Sprite)},
-    });
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "score_tracker",
-        .run = c01ScoreSystem,
-        .accesses = &.{Reads(C01Health)},
-    });
+    try sys_sched.registerSystem(gpa, &world, .update, "damage_resolution", &c01DamageSystem_spec, c01DamageSystem);
+    try sys_sched.registerSystem(gpa, &world, .update, "sprite_animator", &c01SpriteAnimSystem_spec, c01SpriteAnimSystem);
+    try sys_sched.registerSystem(gpa, &world, .update, "score_tracker", &c01ScoreSystem_spec, c01ScoreSystem);
 
     // post_update — cleanup_dead (R:Health).
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .post_update,
-        .name = "cleanup_dead",
-        .run = c01CleanupDeadSystem,
-        .accesses = &.{Reads(C01Health)},
-    });
+    try sys_sched.registerSystem(gpa, &world, .post_update, "cleanup_dead", &c01CleanupDeadSystem_spec, c01CleanupDeadSystem);
 
     // late_update — interpolate_transform (R:Transform, W:Sprite).
     // Note: same component Sprite is written here AND in update
     // phase's sprite_animator. Phase boundary flushes everything so
     // no W/W conflict — the DAG is scoped per phase.
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .late_update,
-        .name = "interpolate_transform",
-        .run = c01InterpSystem,
-        .accesses = &.{ Reads(Transform), Writes(C01Sprite) },
-    });
+    try sys_sched.registerSystem(gpa, &world, .late_update, "interpolate_transform", &c01InterpSystem_spec, c01InterpSystem);
 
     // pre_render — frustum_cull (R:Transform, R:Sprite).
-    try sys_sched.registerSystem(gpa, &world, .{
-        .phase = .pre_render,
-        .name = "frustum_cull",
-        .run = c01FrustumSystem,
-        .accesses = &.{ Reads(Transform), Reads(C01Sprite) },
-    });
+    try sys_sched.registerSystem(gpa, &world, .pre_render, "frustum_cull", &c01FrustumSystem_spec, c01FrustumSystem);
 
     const dt: f32 = 1.0 / 60.0;
 

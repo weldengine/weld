@@ -251,11 +251,20 @@ test "the locator reaches a component of EITHER backend" {
 /// `WELD_ECS_PROTOCOL_VERSION == 1` would pass while a frozen entry was
 /// deleted underneath it.
 ///
-/// The two names M1.B added are `sparse_storage` (G2) and `hybrid_query` (G7),
-/// plus `StorageKind` (G1). Additive to the `World` API on the precedent
-/// written at `world.zig`'s `queryDynamic`: "The C0.5 freeze covers the
-/// Tier-0 ↔ Tier-1 module interfaces, not internal `World` methods, so this does
-/// not breach it."
+/// The two names the hybrid-storage milestone added are `sparse_storage` and
+/// `hybrid_query`, plus `StorageKind`. Additive to the `World` API on the
+/// precedent written at `world.zig`'s `queryDynamic`: "The C0.5 freeze covers
+/// the Tier-0 ↔ Tier-1 module interfaces, not internal `World` methods, so this
+/// does not breach it."
+///
+/// **Four names arrive with declared-access enforcement, and that addition is
+/// NOT additive — it is why the protocol version moves.** `view`, `View`,
+/// `Access` and `SystemContextOf` are the declaration surface `ARCH-030`
+/// requires. They come with two removals on the same frozen surface, which no
+/// precedent above covers: `SystemDescriptor.accesses` loses its empty default,
+/// and `SystemContext` loses its `*World`. Both are breaking for any Tier-1
+/// caller, so `WELD_ECS_PROTOCOL_VERSION` goes to 2 — the tracked migration
+/// `root.zig` prescribes for exactly this case, not a freeze failure.
 const ecs_root_surface = [_][]const u8{
     "WELD_ECS_PROTOCOL_VERSION", "entity",            "components",
     "tick",                      "change_detection",  "chunk",
@@ -274,7 +283,13 @@ const ecs_root_surface = [_][]const u8{
     "SystemContext",             "SystemFn",          "Reads",
     "Writes",                    "ReadsResource",     "WritesResource",
     "AccessDescriptor",          "AccessKind",        "JobBuilder",
-    "RegistrationError",
+    "RegistrationError",         "view",              "View",
+    "Access",                    "SystemContextOf",
+    // Deriving the ACCESSES alone from a spec, for a preflight that wants to
+    // know what a declaration would conflict with before registering it. It is
+    // public where `SystemDescriptor.of` is not, and the asymmetry is the
+    // point: there is no `run` beside these for them to disagree with.
+      "descriptorsOf",
 };
 
 /// Whether `name` appears in the enumerated surface. A comptime function
@@ -288,7 +303,7 @@ fn isEnumerated(comptime name: []const u8) bool {
 }
 
 comptime {
-    // The two loops below are quadratic in the surface size — 52 x 52 today —
+    // The two loops below are quadratic in the surface size — 56 x 56 today —
     // which exceeds the default comptime branch quota. Raised here rather than
     // by making the check cheaper: a linear form would need a sorted surface or
     // a comptime map, and neither is worth trading against a pin whose whole
@@ -317,13 +332,19 @@ comptime {
     }
 }
 
-test "the ECS protocol stays at 1, over an ENUMERATED surface" {
+test "the ECS protocol is at 2, over an ENUMERATED surface" {
     // The version, first — necessary and nowhere near sufficient: a test
     // asserting only this would pass while a frozen entry was deleted
     // underneath it. The two comptime loops above are what make it sufficient,
     // and this test reports the SIZE they walked so the control cannot narrow
     // in silence.
-    try testing.expectEqual(@as(u32, 1), ecs.WELD_ECS_PROTOCOL_VERSION);
+    //
+    // It reads 2 because two entries of the frozen surface were REMOVED, not
+    // because four were added: `SystemDescriptor.accesses` no longer defaults to
+    // empty and `SystemContext` no longer carries a `*World`. `root.zig` names
+    // both shapes as covered by this version and prescribes the bump for a
+    // breaking change.
+    try testing.expectEqual(@as(u32, 2), ecs.WELD_ECS_PROTOCOL_VERSION);
     const actual = std.meta.declarations(ecs);
     std.debug.print(
         "[ecs-surface] {d} public declarations inspected, {d} enumerated, protocol {d}\n",

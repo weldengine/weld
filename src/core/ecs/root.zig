@@ -30,7 +30,19 @@
 /// signatures, and the byte-keyed `resources` store). Bumped on any
 /// breaking change — a tracked migration, not a freeze failure (the
 /// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
-pub const WELD_ECS_PROTOCOL_VERSION: u32 = 1;
+///
+/// At 2 since declared-access enforcement (`ARCH-030`). FOUR of the shapes this
+/// version covers changed, and all four are breaking for a Tier-1 caller:
+/// `SystemDescriptor.accesses` lost its empty default, `SystemContext` lost its
+/// `*World`, `CommandBuffer` lost its `world` — so `flush` and `init` moved with
+/// it — and `RegistrationError` gained `DependencyCycle`, which breaks an
+/// exhaustive `switch` even though `registerSystem`'s inferred `!void` reads
+/// unchanged. That last one RIDES this bump rather than asking for a second:
+/// one version covers one milestone's breaking set, and a number incremented
+/// per change would stop meaning "the surface a caller compiled against".
+/// The additions beside them (`view`, `View`, `Access`, `SystemContextOf`)
+/// would not on their own have moved this number.
+pub const WELD_ECS_PROTOCOL_VERSION: u32 = 2;
 
 // ─── Sub-module re-exports — keeps `weld_core.ecs.<file>.<symbol>` reachable ──
 
@@ -62,9 +74,9 @@ pub const sparse_storage = @import("sparse_storage.zig");
 /// The mixed-query planner and its DISTINCT iteration type. Additive
 /// to the ECS surface on the precedent written at `world.zig`'s `queryDynamic`:
 /// the C0.5 freeze covers the Tier-0 ↔ Tier-1 module interfaces, not internal
-/// `World` methods. `WELD_ECS_PROTOCOL_VERSION` stays at 1, and
-/// `tests/ecs/hybrid_query_test.zig` proves it by ENUMERATING this surface and
-/// reporting its size rather than by declaring the version unchanged.
+/// `World` methods. `tests/ecs/hybrid_query_test.zig` guards the version by
+/// ENUMERATING this surface and reporting its size rather than by declaring the
+/// version unchanged.
 pub const hybrid_query = @import("hybrid_query.zig");
 /// Deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
@@ -80,6 +92,10 @@ pub const comptime_query = @import("comptime_query.zig");
 pub const command_buffer = @import("command_buffer.zig");
 /// Observer registry hooked into the per-phase cmd buffer flush.
 pub const observers = @import("observers.zig");
+/// Declared-access view: the restricted handle a system receives in place of
+/// a `*World`, and the comptime membership test that makes an undeclared
+/// access a compile error (`ARCH-030`).
+pub const view = @import("view.zig");
 
 // ─── Flat public API ──────────────────────────────────────────────────────
 
@@ -169,8 +185,24 @@ pub const Phase = scheduler.Phase;
 /// Per-frame state surfaced to every system.
 pub const FrameContext = scheduler.FrameContext;
 
-/// Per-call argument bundle passed to every `SystemFn` body.
+/// Per-call argument bundle passed to every `SystemFn` body. Carries the
+/// world ERASED — a system that wants entity data takes `SystemContextOf`.
 pub const SystemContext = scheduler.SystemContext;
+
+/// The context a system declared through `SystemDescriptor.of` receives:
+/// `SystemContext` with its erased world replaced by the `View` its
+/// declaration parameterises.
+pub const SystemContextOf = scheduler.SystemContextOf;
+
+/// One entry of a declared access set, carrying the component or resource
+/// TYPE. Written by every system author: `Access.reads(T)`,
+/// `Access.writes(T)`, `Access.readsResource(R)`, `Access.writesResource(R)`.
+pub const Access = view.Access;
+
+/// Restricted handle over a `World`, parameterised by a declared access set.
+/// An undeclared access, or a mutable access to a read-declared component,
+/// does not compile.
+pub const View = view.View;
 
 /// Type-erased system entry point.
 pub const SystemFn = scheduler.SystemFn;
@@ -202,5 +234,14 @@ pub const AccessKind = scheduler.AccessKind;
 /// during intra-phase dispatch. Surfaced via `SystemContext.builder`.
 pub const JobBuilder = scheduler.JobBuilder;
 
-/// Error set returned by `SystemScheduler.registerSystem`.
+/// The two refusals `SystemScheduler.registerSystem` decides — NOT the set it
+/// returns, which is `anyerror`. See the declaration for why.
 pub const RegistrationError = scheduler.RegistrationError;
+
+/// Turn a declared access set into the runtime descriptors the DAG reads.
+///
+/// Exposed for a PREFLIGHT — a caller that wants to know what a spec would
+/// conflict with before registering it. It derives the accesses ALONE, which
+/// is why it is safe to expose where `SystemDescriptor.of` is not: there is no
+/// `run` beside them for the result to disagree with.
+pub const descriptorsOf = scheduler.descriptorsOf;
