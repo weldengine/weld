@@ -163,15 +163,22 @@ pub const KinesisModule = struct {
 
     /// The rig behind a `RigId`, or null when the id names none.
     ///
-    /// **BY VALUE, not by pointer, and that is a lifetime decision rather than
-    /// a style one.** `rigs` grows by reallocation, so a `*const Rig` handed
-    /// out here is dangling the moment another rig is loaded — and holding one
-    /// across a load is exactly what the shipped scenario does. The record is
-    /// seven slices whose own pointers are stable across that move, so a copy
-    /// is complete and costs one struct copy.
-    pub fn rig(self: *Self, id: RigId) ?Rig {
+    /// **Answers a `RigView` and never a `Rig`, which is an OWNERSHIP decision
+    /// and not a style one.** The owning record carries mutable slices and a
+    /// `deinit`; handing out a copy of it made the caller a second holder of
+    /// the module's seven allocations, so `borrowed.parents[1] = 127` bypassed
+    /// every check the loader ran and `borrowed.deinit(gpa)` freed memory the
+    /// store still believed it owned — both silent, both compiling. The view
+    /// makes each a compile error.
+    ///
+    /// **BY VALUE, not by pointer, and that half stands unchanged.** `rigs`
+    /// grows by reallocation, so a pointer handed out here is dangling the
+    /// moment another rig is loaded — and holding one across a load is exactly
+    /// what the shipped scenario does. What the view copies is the record; the
+    /// slices it names do not move.
+    pub fn rig(self: *Self, id: RigId) ?skeleton_mod.RigView {
         if (id >= self.rigs.items.len) return null;
-        return self.rigs.items[id];
+        return self.rigs.items[id].view();
     }
 
     /// Instantiate `rig_id`, both poses seeded with its BIND pose.
@@ -269,7 +276,7 @@ pub const KinesisModule = struct {
     /// instead of moving the wrong one.
     pub fn resolveBone(self: *Self, id: SkeletonId, ref: anim.BoneRef) ?BoneIndex {
         const inst = self.instance(id) orelse return null;
-        return bone_ref_mod.resolveBone(self.rigs.items[inst.rig], ref);
+        return bone_ref_mod.resolveBone(self.rigs.items[inst.rig].view(), ref);
     }
 
     /// How many bones an instance holds; zero for a stale or unknown id.

@@ -23,8 +23,13 @@
 //! it would be a second path in the module's own surface, which is what the
 //! invariant forbids at the very place it is written down.
 //!
+//! **The entry takes a `RigView` and not a `Rig`**, which is not a detail of
+//! plumbing: resolution is a READ, so it has no business receiving the owning
+//! record with its mutable slices and its destructor. The one path to a bone is
+//! therefore also a path that cannot write one.
+//!
 //! **What this file does NOT give is that `resolveBone` is the only code that
-//! CAN map a role.** Zig has no private field, so a caller holding a `Rig` can
+//! CAN map a role.** Zig has no private field, so a caller holding a view can
 //! read its profile and search it by hand. What the type system does give is
 //! the uniformity `ARCH-033` actually imposes: the addressing type. The
 //! counter-proof corpus pins that, and the limit is stated here rather than
@@ -38,13 +43,16 @@ const skeleton_mod = @import("skeleton.zig");
 const BoneIndex = anim.BoneIndex;
 const BoneRef = anim.BoneRef;
 const BoneRole = anim.BoneRole;
+const RigView = skeleton_mod.RigView;
+/// The OWNING record, reached only by the test helper below, which builds one.
+/// No production declaration in this file names it — resolution reads a view.
 const Rig = skeleton_mod.Rig;
 
 /// Resolve a bone reference against a rig — the one resolution path.
 ///
 /// Answers null when the reference names nothing: a role the profile does not
 /// map, a role on a rig with no profile at all, or a name no bone carries.
-pub fn resolveBone(rig: Rig, ref: BoneRef) ?BoneIndex {
+pub fn resolveBone(rig: RigView, ref: BoneRef) ?BoneIndex {
     return switch (ref) {
         .name => |n| resolveName(rig, n),
         .role => |r| resolveRole(rig, r),
@@ -56,7 +64,7 @@ pub fn resolveBone(rig: Rig, ref: BoneRef) ?BoneIndex {
 /// Linear over the mappings, which is what makes it correct on a PARTIAL
 /// profile. The vocabulary is twenty-three roles and a profile is smaller
 /// still, so the walk is shorter than the indirection an index would need.
-fn resolveRole(rig: Rig, role: BoneRole) ?BoneIndex {
+fn resolveRole(rig: RigView, role: BoneRole) ?BoneIndex {
     const profile = rig.profile orelse return null;
     for (profile.mappings) |m| {
         if (m.role == role) return m.bone;
@@ -73,7 +81,7 @@ fn resolveRole(rig: Rig, role: BoneRole) ?BoneIndex {
 /// The first match wins, and the rig's names are unique — the loader refuses a
 /// rig that carries two bones of one name — so "first" and "only" are the same
 /// bone and this tie-break is never exercised.
-fn resolveName(rig: Rig, name: []const u8) ?BoneIndex {
+fn resolveName(rig: RigView, name: []const u8) ?BoneIndex {
     for (0..rig.boneCount()) |i| {
         const b: BoneIndex = @intCast(i);
         if (std.mem.eql(u8, rig.boneName(b), name)) return b;
@@ -133,9 +141,9 @@ test "a mapped role resolves to its bone index" {
 
     // The positive witness. Without it the absence test below is satisfied by a
     // resolver that answers null for everything.
-    try testing.expectEqual(@as(?BoneIndex, 0), resolveBone(rig, .{ .role = .root }));
-    try testing.expectEqual(@as(?BoneIndex, 6), resolveBone(rig, .{ .role = .head }));
-    try testing.expectEqual(@as(?BoneIndex, 17), resolveBone(rig, .{ .role = .foot_l }));
+    try testing.expectEqual(@as(?BoneIndex, 0), resolveBone(rig.view(), .{ .role = .root }));
+    try testing.expectEqual(@as(?BoneIndex, 6), resolveBone(rig.view(), .{ .role = .head }));
+    try testing.expectEqual(@as(?BoneIndex, 17), resolveBone(rig.view(), .{ .role = .foot_l }));
 }
 
 test "an unmapped role resolves to absence, not to a neighbouring bone" {
@@ -149,15 +157,15 @@ test "an unmapped role resolves to absence, not to a neighbouring bone" {
     var rig = try profiledRig(gpa, .calf_l);
     defer rig.deinit(gpa);
 
-    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig, .{ .role = .calf_l }));
+    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig.view(), .{ .role = .calf_l }));
 
     // And the roles on BOTH SIDES of the gap still resolve to their own bones.
     // Without this half the assertion above is satisfied by a resolver that
     // stopped working at the gap, which is a different defect with the same
     // symptom on one input.
-    try testing.expectEqual(@as(?BoneIndex, 15), resolveBone(rig, .{ .role = .thigh_l }));
-    try testing.expectEqual(@as(?BoneIndex, 17), resolveBone(rig, .{ .role = .foot_l }));
-    try testing.expectEqual(@as(?BoneIndex, 22), resolveBone(rig, .{ .role = .toe_r }));
+    try testing.expectEqual(@as(?BoneIndex, 15), resolveBone(rig.view(), .{ .role = .thigh_l }));
+    try testing.expectEqual(@as(?BoneIndex, 17), resolveBone(rig.view(), .{ .role = .foot_l }));
+    try testing.expectEqual(@as(?BoneIndex, 22), resolveBone(rig.view(), .{ .role = .toe_r }));
 }
 
 test "a skeleton with no profile resolves by literal name" {
@@ -170,11 +178,11 @@ test "a skeleton with no profile resolves by literal name" {
     rig.profile_mappings = &.{};
     defer rig.deinit(gpa);
 
-    try testing.expectEqual(@as(?BoneIndex, 6), resolveBone(rig, .{ .name = "head" }));
-    try testing.expectEqual(@as(?BoneIndex, 0), resolveBone(rig, .{ .name = "root" }));
+    try testing.expectEqual(@as(?BoneIndex, 6), resolveBone(rig.view(), .{ .name = "head" }));
+    try testing.expectEqual(@as(?BoneIndex, 0), resolveBone(rig.view(), .{ .name = "root" }));
     // Every role is absent now, and absent is not an error.
-    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig, .{ .role = .head }));
+    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig.view(), .{ .role = .head }));
     // A name no bone carries is absent too, not a near match.
-    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig, .{ .name = "hea" }));
-    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig, .{ .name = "HEAD" }));
+    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig.view(), .{ .name = "hea" }));
+    try testing.expectEqual(@as(?BoneIndex, null), resolveBone(rig.view(), .{ .name = "HEAD" }));
 }

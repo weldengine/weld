@@ -427,9 +427,21 @@ pub fn build(b: *std.Build) void {
     // The marks below are distinct per case — matching only the shared prefix would
     // let any one case stand in for any other, and two of the three share one.
     //
+    // The corpus carries a SECOND family: the rig a module entry hands out is a
+    // read-only view, so writing into the hierarchy it names and calling a
+    // destructor on it are both compile errors. Its two marks discriminate the same
+    // way — the `deinit` one names the type and the member, and the assignment one
+    // is generic in isolation, so it is paired with its own file name. The step and
+    // the directory keep the addressing name they were given rather than growing a
+    // rename for a second family: the path is prescribed by the milestone brief's
+    // frozen section, and a cosmetic divergence from it is still a divergence.
+    //
     // What it does NOT pin is that `resolveBone` is the only code that CAN map a
-    // role: Zig has no private field, so a caller holding a rig can search its
-    // profile by hand. The limit is named at `bone_ref.zig` rather than claimed away.
+    // role, nor that no code anywhere can name the OWNING record: Zig has no
+    // module-private declaration, so a caller reaching into the module's source can
+    // hold a `Rig` and search or free it by hand. What is checkable, and checked, is
+    // that the owning type never appears in an entry's return type. The limits are
+    // named at `bone_ref.zig` and `skeleton.zig` rather than claimed away.
     const bone_ref_cp_dir = "tests/kinesis/bone_ref_counterproof";
     const BoneRefCase = struct {
         step: ?[]const u8,
@@ -450,6 +462,17 @@ pub fn build(b: *std.Build) void {
         .{
             .step = "case-role-as-int",
             .marks = &.{"expected type 'AnimationModule.BoneRole', found 'comptime_int'"},
+        },
+        .{
+            .step = "case-view-write",
+            // Two marks, because the diagnostic alone is generic: any constant
+            // assigned anywhere produces it, so on its own it would be satisfied by
+            // a fixture that no longer touches a rig at all.
+            .marks = &.{ "case_view_write.zig", "error: cannot assign to constant" },
+        },
+        .{
+            .step = "case-view-deinit",
+            .marks = &.{"no field or member function named 'deinit' in 'skeleton.RigView'"},
         },
     };
     const bone_ref_cp_step = b.step(

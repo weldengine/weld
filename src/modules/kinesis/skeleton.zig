@@ -40,14 +40,28 @@ const Mat4 = anim.Mat4;
 const Vec3 = anim.Vec3;
 const Quat = anim.Quat;
 
-/// The immutable half of a skeleton — everything that comes from the asset and
-/// is the same for every entity posed against it.
+/// The OWNED half of a skeleton — everything that comes from the asset and is
+/// the same for every entity posed against it.
 ///
 /// Separate from the per-entity poses because it IS shared: a hundred
 /// characters on one rig carry one hierarchy and a hundred poses. Owning a copy
 /// per entity would not be wrong, only wasteful — but it would also make the
 /// sharing a refactor later rather than a store lookup, which is why the split
 /// is here rather than promised.
+///
+/// **THIS TYPE IS THE OWNER AND IT IS NOT WHAT A CALLER RECEIVES.** It carries
+/// mutable slices and a `deinit`, which is exactly right for the store that
+/// holds it and exactly wrong for anyone reading it: a handed-out copy is a
+/// second holder of the same seven allocations, so writing through it bypasses
+/// every check the loader ran and calling `deinit` on it frees memory the
+/// module still believes it owns — both of them silent. `view()` is what
+/// leaves; see `RigView`, whose `[]const` slices and absent destructor make
+/// each of those two a COMPILE error rather than a rule someone must remember.
+///
+/// Zig has no module-private declaration, so `pub` here is a reachability fact
+/// and not a permission — stated rather than claimed away, the same limit
+/// `bone_ref.zig` records for itself. What the split gives is that the OWNING
+/// type never leaves an entry's return type, which is checkable and is checked.
 pub const Rig = struct {
     /// Parent of each bone, `asset.no_parent` for the root. Strictly lower than
     /// the bone's own index everywhere else.
@@ -95,6 +109,24 @@ pub const Rig = struct {
         };
     }
 
+    /// A read-only view of this rig — what every consumer outside the store
+    /// gets, and the only shape that crosses a module entry.
+    ///
+    /// `profile_mappings` is deliberately NOT carried across: it is the backing
+    /// storage `deinit` frees and has no meaning to a reader, so its absence is
+    /// part of the separation rather than an omission. The profile itself
+    /// crosses whole — its `mappings` is already `[]const`.
+    pub fn view(self: Rig) RigView {
+        return .{
+            .parents = self.parents,
+            .name_spans = self.name_spans,
+            .name_bytes = self.name_bytes,
+            .bind_local = self.bind_local,
+            .inverse_bind = self.inverse_bind,
+            .profile = self.profile,
+        };
+    }
+
     /// Release everything the rig owns.
     pub fn deinit(self: *Rig, gpa: std.mem.Allocator) void {
         gpa.free(self.parents);
@@ -104,6 +136,49 @@ pub const Rig = struct {
         gpa.free(self.inverse_bind);
         gpa.free(self.profile_mappings);
         self.* = undefined;
+    }
+};
+
+/// A rig as a READER sees it: the same seven-field record minus its ownership.
+///
+/// **TWO TYPES AND NOT ONE, and the difference is the whole point.** Every
+/// slice is `[]const`, so `v.parents[1] = 127` does not compile — a write that
+/// would bypass the load-time validation that established the hierarchy's
+/// invariants in the first place. There is no `deinit`, so `v.deinit(gpa)` does
+/// not compile either — a free that would take the module's own memory with it
+/// and leave the store holding released slices. Neither is a convention: both
+/// are refused by the compiler, and the counter-proof corpus pins each with its
+/// own diagnostic beside a control that still compiles.
+///
+/// It is copied by value for the reason `Rig` cannot be handed out by pointer:
+/// the store grows by reallocation, so a `*const Rig` is dangling the moment
+/// another rig is loaded. The slices it carries are stable across that move —
+/// what moves is the record, not what it points at — so the copy is complete
+/// and costs one struct copy.
+pub const RigView = struct {
+    /// Parent of each bone, `asset.no_parent` for the root. Strictly lower than
+    /// the bone's own index everywhere else.
+    parents: []const BoneIndex,
+    /// Where each bone's name sits in `name_bytes`.
+    name_spans: []const asset_mod.SkeletonAsset.NameSpan,
+    /// Every bone name, concatenated.
+    name_bytes: []const u8,
+    /// The bind pose, each bone relative to its parent.
+    bind_local: []const BoneTransform,
+    /// The inverse of each bone's bind transform in model space.
+    inverse_bind: []const Mat4,
+    /// The role mapping, when the asset carried one.
+    profile: ?asset_mod.SkeletonProfile,
+
+    /// How many bones.
+    pub fn boneCount(self: RigView) u32 {
+        return @intCast(self.parents.len);
+    }
+
+    /// The name of bone `i`.
+    pub fn boneName(self: RigView, i: BoneIndex) []const u8 {
+        const span = self.name_spans[i];
+        return self.name_bytes[span.start..][0..span.len];
     }
 };
 

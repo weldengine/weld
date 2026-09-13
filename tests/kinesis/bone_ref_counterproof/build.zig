@@ -47,6 +47,18 @@ const cases = [_]Case{
         .must_compile = false,
         .description = "builds a role from a bare integer ordinal — must NOT compile",
     },
+    .{
+        .step = "case-view-write",
+        .file = "case_view_write.zig",
+        .must_compile = false,
+        .description = "writes into the hierarchy of a handed-out rig — must NOT compile",
+    },
+    .{
+        .step = "case-view-deinit",
+        .file = "case_view_deinit.zig",
+        .must_compile = false,
+        .description = "frees a handed-out rig — must NOT compile",
+    },
 };
 
 pub fn build(b: *std.Build) void {
