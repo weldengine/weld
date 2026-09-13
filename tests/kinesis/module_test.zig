@@ -14,6 +14,11 @@ const core = @import("weld_core");
 const anim = @import("weld_interfaces_animation");
 const kinesis = @import("weld_kinesis");
 
+const asset = kinesis.skeleton_asset;
+const BoneIndex = anim.BoneIndex;
+const BoneTransform = anim.BoneTransform;
+const Mat4 = anim.Mat4;
+
 const World = core.ecs.World;
 const ModuleContext = core.ModuleContext;
 const KinesisModule = kinesis.KinesisModule;
@@ -57,6 +62,42 @@ const Fixture = struct {
     }
 };
 
+/// Encode a flat rig of `n` bones — bone 0 the root, every other a child of
+/// bone 0 — so a test that needs an instance can get one without caring about
+/// the hierarchy.
+fn encodeFlatRig(gpa: std.mem.Allocator, n: u16) ![]u8 {
+    const parents = try gpa.alloc(BoneIndex, n);
+    defer gpa.free(parents);
+    const names = try gpa.alloc([]const u8, n);
+    defer gpa.free(names);
+    const bind = try gpa.alloc(BoneTransform, n);
+    defer gpa.free(bind);
+    const inv = try gpa.alloc(Mat4, n);
+    defer gpa.free(inv);
+    for (0..n) |i| {
+        parents[i] = if (i == 0) asset.no_parent else 0;
+        names[i] = "bone";
+        bind[i] = .{};
+        inv[i] = Mat4.identity;
+    }
+    return asset.encode(gpa, .{
+        .parents = parents,
+        .names = names,
+        .bind_local = bind,
+        .inverse_bind = inv,
+    });
+}
+
+fn loadFlatRig(module: *KinesisModule, gpa: std.mem.Allocator, n: u16) !kinesis.RigId {
+    const bytes = try encodeFlatRig(gpa, n);
+    defer gpa.free(bytes);
+    return module.loadRig(bytes);
+}
+
+fn instantiateFlat(module: *KinesisModule, gpa: std.mem.Allocator, n: u16) !anim.SkeletonId {
+    return module.instantiate(try loadFlatRig(module, gpa, n));
+}
+
 test "init registers the Skeleton component through the world" {
     const gpa = testing.allocator;
     const fx = try Fixture.init(gpa);
@@ -98,8 +139,8 @@ test "an instance carries its own bone count" {
 
     // TWO instances of DIFFERENT sizes: one instance cannot tell a per-instance
     // count from a constant, nor from the count of whichever was created last.
-    const a = try module.createSkeletonInstance(3);
-    const b = try module.createSkeletonInstance(7);
+    const a = try instantiateFlat(&module, gpa, 3);
+    const b = try instantiateFlat(&module, gpa, 7);
     try testing.expectEqual(@as(u32, 3), module.getBoneCount(a));
     try testing.expectEqual(@as(u32, 7), module.getBoneCount(b));
 
@@ -114,7 +155,7 @@ test "a destroyed instance stays dead and its slot is never reused" {
     var module = try KinesisModule.init(&fx.ctx);
     defer module.deinit();
 
-    const a = try module.createSkeletonInstance(4);
+    const a = try instantiateFlat(&module, gpa, 4);
     module.destroySkeleton(a);
 
     // Dead, and answering as such.
@@ -124,13 +165,48 @@ test "a destroyed instance stays dead and its slot is never reused" {
     // And the next instance does NOT land on the freed slot. If it did, the
     // stale handle `a` would start addressing somebody else's skeleton — which
     // reads as a working handle and is the whole reason slots are not recycled.
-    const b = try module.createSkeletonInstance(9);
+    const b = try instantiateFlat(&module, gpa, 9);
     try testing.expect(b != a);
     try testing.expectEqual(@as(u32, 0), module.getBoneCount(a));
     try testing.expectEqual(@as(u32, 9), module.getBoneCount(b));
 
     // Idempotent: a second destroy is a no-op, not a double free.
     module.destroySkeleton(a);
+}
+
+test "instantiating an unknown rig is refused" {
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+    var module = try KinesisModule.init(&fx.ctx);
+    defer module.deinit();
+
+    // Rig zero does not exist until one is loaded, so the refusal is about the
+    // id naming nothing and not about the id being out of some fixed range.
+    try testing.expectError(error.UnknownRig, module.instantiate(0));
+    _ = try loadFlatRig(&module, gpa, 2);
+    _ = try module.instantiate(0);
+    try testing.expectError(error.UnknownRig, module.instantiate(1));
+}
+
+test "one rig backs many instances" {
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+    var module = try KinesisModule.init(&fx.ctx);
+    defer module.deinit();
+
+    // The whole reason the rig and the instance are separate stores: a hundred
+    // characters on one skeleton carry one hierarchy and a hundred poses. Two
+    // instances of ONE rig must have distinct poses, or a pose written for one
+    // entity moves every other.
+    const r = try loadFlatRig(&module, gpa, 3);
+    const a = try module.instantiate(r);
+    const b = try module.instantiate(r);
+    try testing.expect(a != b);
+    try testing.expect(module.localPose(a).?.bones != module.localPose(b).?.bones);
+    try testing.expectEqual(@as(u32, 3), module.getBoneCount(a));
+    try testing.expectEqual(@as(u32, 3), module.getBoneCount(b));
 }
 
 test "an out-of-range id answers as absent rather than trapping" {
@@ -170,7 +246,7 @@ test "the interface wrapper delegates, it does not merely validate" {
     // implementation, and exposes none of it — and a test asserting only that
     // the field exists cannot see that. So every entry is called THROUGH the
     // wrapper and its answer asserted.
-    const id = try wrapped.impl.createSkeletonInstance(5);
+    const id = try instantiateFlat(&wrapped.impl, gpa, 5);
     try testing.expectEqual(@as(u32, 5), wrapped.getBoneCount(id));
     try testing.expectError(error.NotImplemented, wrapped.createSkeleton(@enumFromInt(1)));
     wrapped.destroySkeleton(id);

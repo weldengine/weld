@@ -29,6 +29,7 @@ const anim = @import("weld_interfaces_animation");
 const pose_mod = @import("pose.zig");
 const components_mod = @import("components.zig");
 const asset_mod = @import("asset.zig");
+const skeleton_mod = @import("skeleton.zig");
 
 /// The ECS components this module registers.
 pub const components = components_mod;
@@ -42,6 +43,8 @@ pub const components = components_mod;
 pub const poses = pose_mod;
 /// The skeleton asset: byte format, reader, and refusals.
 pub const skeleton_asset = asset_mod;
+/// The runtime hierarchy and its forward kinematics.
+pub const skeleton = skeleton_mod;
 
 /// An entity posed against a skeleton.
 pub const Skeleton = components_mod.Skeleton;
@@ -53,6 +56,18 @@ pub const BoneTransform = anim.BoneTransform;
 pub const SkeletonId = anim.SkeletonId;
 /// Index of a bone within its skeleton.
 pub const BoneIndex = anim.BoneIndex;
+/// The immutable half of a skeleton, shared by every entity posed against it.
+pub const Rig = skeleton_mod.Rig;
+
+/// A loaded rig.
+///
+/// Distinct from `SkeletonId`, which names a per-entity INSTANCE. One rig backs
+/// many instances: a hundred characters on one skeleton carry one hierarchy and
+/// a hundred poses.
+pub const RigId = u32;
+
+/// No rig.
+pub const no_rig: RigId = std.math.maxInt(RigId);
 
 /// One live skeleton instance: the poses, and how many bones they hold.
 ///
@@ -63,6 +78,8 @@ pub const BoneIndex = anim.BoneIndex;
 /// composed by the consumers, so that a socket read and a skin matrix build do
 /// not each have to undo it.
 const Instance = struct {
+    /// The rig this instance is posed against.
+    rig: RigId,
     bone_count: u32,
     local: anim.PoseBuffer,
     model: anim.PoseBuffer,
@@ -79,6 +96,15 @@ pub const KinesisModule = struct {
     /// The allocator received once, at `init`. THE reason this type sits in
     /// front of the stores.
     gpa: std.mem.Allocator,
+    /// Loaded rigs, indexed by `RigId`. Monotone for the same reason the
+    /// instances are.
+    ///
+    /// There is no `destroyRig`. Rigs are released at `deinit` and nowhere
+    /// else, because the only thing that would free one is unloading its asset
+    /// and no asset lifetime reaches this module yet. Adding the entry later
+    /// touches no call site — what would NOT be additive is handing out rig ids
+    /// that can dangle, which is why the slot is kept rather than recycled.
+    rigs: std.ArrayListUnmanaged(Rig) = .empty,
     /// Live skeleton instances, indexed by `SkeletonId`.
     ///
     /// Monotone and never compacted: an id is a position, so recycling a slot
@@ -108,15 +134,45 @@ pub const KinesisModule = struct {
             inst.live = false;
         }
         self.instances.deinit(self.gpa);
+        for (self.rigs.items) |*loaded| loaded.deinit(self.gpa);
+        self.rigs.deinit(self.gpa);
         self.* = undefined;
     }
 
-    /// Create an instance of `bone_count` bones, both poses at the identity.
+    /// Read a skeleton asset and keep it as a rig.
     ///
-    /// This is the entry the asset path builds on: parsing a skeleton produces
-    /// a bone count and a hierarchy, and the hierarchy joins the record here
-    /// rather than in a second store keyed by the same id.
-    pub fn createSkeletonInstance(self: *Self, bone_count: u32) anyerror!SkeletonId {
+    /// Takes BYTES and not an `AssetHandle`: resolving a handle is the asset
+    /// pipeline's, reached through the module registry, and no such route is
+    /// wired. This is the entry `createSkeleton` will call once one is.
+    pub fn loadRig(self: *Self, bytes: []const u8) anyerror!RigId {
+        try self.rigs.ensureUnusedCapacity(self.gpa, 1);
+        var parsed = try asset_mod.parse(self.gpa, bytes);
+        errdefer parsed.deinit(self.gpa);
+        const id: RigId = @intCast(self.rigs.items.len);
+        // `fromAsset` ADOPTS the parse's allocations rather than copying them,
+        // so the `errdefer` above must not survive this line: two owners of one
+        // set of slices is a double free.
+        self.rigs.appendAssumeCapacity(Rig.fromAsset(parsed));
+        return id;
+    }
+
+    /// The rig behind a `RigId`, or null when the id names none.
+    pub fn rig(self: *Self, id: RigId) ?*const Rig {
+        if (id >= self.rigs.items.len) return null;
+        return &self.rigs.items[id];
+    }
+
+    /// Instantiate `rig_id`, both poses seeded with its BIND pose.
+    ///
+    /// Seeded and not left at the identity: an entity whose clip has not been
+    /// sampled yet must stand in its bind pose, which is a pose an artist
+    /// authored. A skeleton at the identity is a heap of bones at the origin,
+    /// and it looks exactly like a sampling bug.
+    pub fn instantiate(self: *Self, rig_id: RigId) anyerror!SkeletonId {
+        if (rig_id >= self.rigs.items.len) return error.UnknownRig;
+        const r = &self.rigs.items[rig_id];
+        const bone_count = r.boneCount();
+
         // Reserve BEFORE allocating the poses: on a failed append the two
         // buffers would already be live with nothing holding them, and the
         // `errdefer` that frees them is one edit away from being forgotten.
@@ -126,14 +182,30 @@ pub const KinesisModule = struct {
         errdefer pose_mod.free(self.gpa, local);
         const model = try pose_mod.alloc(self.gpa, bone_count);
 
+        @memcpy(local.slice(), r.bind_local);
+        skeleton_mod.forwardKinematics(r.parents, local, model);
+
         const id: SkeletonId = @intCast(self.instances.items.len);
         self.instances.appendAssumeCapacity(.{
+            .rig = rig_id,
             .bone_count = bone_count,
             .local = local,
             .model = model,
             .live = true,
         });
         return id;
+    }
+
+    /// Recompute an instance's model-space pose from its local one.
+    ///
+    /// Answers false when the id names nothing, so a caller that lost track of
+    /// an instance learns it here rather than by reading a pose that silently
+    /// never moved.
+    pub fn updateModelPose(self: *Self, id: SkeletonId) bool {
+        const inst = self.instanceMut(id) orelse return false;
+        const r = &self.rigs.items[inst.rig];
+        skeleton_mod.forwardKinematics(r.parents, inst.local, inst.model);
+        return true;
     }
 
     /// Instantiate a skeleton from its asset.
@@ -202,4 +274,5 @@ comptime {
     _ = pose_mod;
     _ = components_mod;
     _ = asset_mod;
+    _ = skeleton_mod;
 }

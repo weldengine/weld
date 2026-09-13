@@ -1541,6 +1541,35 @@ pub fn build(b: *std.Build) void {
     );
     hybrid_bench_step.dependOn(&hybrid_bench_run.step);
 
+    // ------------------------------------------- skeleton forward kinematics --
+    //
+    // Load a three-level skeleton and PRINT what forward kinematics makes of it.
+    // The acceptance suite pins the same chain against a hand-computed pose, which
+    // answers whether it is right; this answers what it looks like, which is the
+    // question someone has when the numbers are wrong. It is also the one place the
+    // load-to-pose path runs as a program rather than as a test.
+    const kinesis_demo_module = b.createModule(.{
+        .root_source_file = b.path("examples/kinesis_skeleton/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kinesis_demo_module.addImport("weld_core", core_module);
+    kinesis_demo_module.addImport("foundation", foundation_module);
+    kinesis_demo_module.addImport("weld_kinesis", kinesis_module);
+    kinesis_demo_module.addImport("weld_interfaces_animation", interfaces_animation_module);
+    const kinesis_demo_exe = b.addExecutable(.{
+        .name = "kinesis-skeleton-demo",
+        .root_module = kinesis_demo_module,
+    });
+    b.installArtifact(kinesis_demo_exe);
+    const kinesis_demo_run = b.addRunArtifact(kinesis_demo_exe);
+    kinesis_demo_run.step.dependOn(b.getInstallStep());
+    const kinesis_demo_step = b.step(
+        "kinesis-skeleton-demo",
+        "Load a three-level skeleton and print its local and model-space poses",
+    );
+    kinesis_demo_step.dependOn(&kinesis_demo_run.step);
+
     // ------------------------------------------- pose buffer layout ruling --
     //
     // AoS against SoA on the two operations that pull in opposite directions —
