@@ -3,7 +3,7 @@
 //! Built as a dynamic library (`.so` / `.dll` / `.dylib`) that
 //! exports a single C symbol `weld_plugin_entry`. The stub returns
 //! a static `WeldPluginDesc` with `name = "stub"`,
-//! `version = "0.0.1"`, `api_version_min = 0`, no callbacks, no
+//! `version = "0.0.1"`, `api_version_min = 1`, no callbacks, no
 //! capabilities. Used by `tests/core/plugin_loader/load_unload_test.zig`
 //! to exercise the loader's happy path.
 //!
@@ -27,7 +27,7 @@ const stub_desc: WeldPluginDesc = .{
     .name = .{ .ptr = stub_name_bytes.ptr, .len = stub_name_bytes.len },
     .display_name = .{ .ptr = stub_display_name_bytes.ptr, .len = stub_display_name_bytes.len },
     .version = .{ .ptr = stub_version_bytes.ptr, .len = stub_version_bytes.len },
-    .api_version_min = 0,
+    .api_version_min = 1,
     .caps = .{},
     .callbacks = .{},
 };

@@ -187,19 +187,18 @@ pub const ObserverRegistry = struct {
 
     /// Ensure `self.deferred` is initialised. Called lazily by the
     /// observer registration helpers — keeps `init()` allocator-free.
-    fn ensureDeferred(self: *ObserverRegistry, gpa: std.mem.Allocator, world: *World) void {
-        if (self.deferred == null) self.deferred = CommandBuffer.init(gpa, world);
+    fn ensureDeferred(self: *ObserverRegistry, gpa: std.mem.Allocator) void {
+        if (self.deferred == null) self.deferred = CommandBuffer.init(gpa);
     }
 
     /// Register an `on_spawned` observer (`ctx` threaded back).
     pub fn registerOnSpawned(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        self.ensureDeferred(gpa, world);
+        self.ensureDeferred(gpa);
         try self.on_spawned.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
@@ -207,11 +206,10 @@ pub const ObserverRegistry = struct {
     pub fn registerOnDespawned(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        self.ensureDeferred(gpa, world);
+        self.ensureDeferred(gpa);
         try self.on_despawned.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
@@ -219,48 +217,44 @@ pub const ObserverRegistry = struct {
     pub fn registerOnAdd(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         cid: ComponentId,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        try self.registerInMap(gpa, world, &self.on_add, cid, ctx, callback);
+        try self.registerInMap(gpa, &self.on_add, cid, ctx, callback);
     }
 
     /// Register an `on_remove` observer for `cid`.
     pub fn registerOnRemove(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         cid: ComponentId,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        try self.registerInMap(gpa, world, &self.on_remove, cid, ctx, callback);
+        try self.registerInMap(gpa, &self.on_remove, cid, ctx, callback);
     }
 
     /// Register an `on_replaced` observer for `cid`.
     pub fn registerOnReplaced(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         cid: ComponentId,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        try self.registerInMap(gpa, world, &self.on_replaced, cid, ctx, callback);
+        try self.registerInMap(gpa, &self.on_replaced, cid, ctx, callback);
     }
 
     fn registerInMap(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
-        world: *World,
         map: *std.AutoHashMapUnmanaged(ComponentId, Listeners),
         cid: ComponentId,
         ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        self.ensureDeferred(gpa, world);
+        self.ensureDeferred(gpa);
         const entry = try map.getOrPut(gpa, cid);
         if (!entry.found_existing) entry.value_ptr.* = .empty;
         try entry.value_ptr.append(gpa, .{ .ctx = ctx, .callback = callback });
@@ -280,7 +274,7 @@ pub const ObserverRegistry = struct {
         world: *World,
         eid: EntityId,
     ) !void {
-        self.ensureDeferred(gpa, world);
+        self.ensureDeferred(gpa);
         try self.fireList(self.on_spawned, world, eid, null, null, null);
     }
 
@@ -299,7 +293,7 @@ pub const ObserverRegistry = struct {
         component_ids: []const ComponentId,
         payloads: []const []const u8,
     ) !EntityId {
-        self.ensureDeferred(gpa, world);
+        self.ensureDeferred(gpa);
         const eid = try world.spawnDynamicWithValues(gpa, component_ids, payloads);
         try self.fireList(self.on_spawned, world, eid, null, null, null);
         // The ENTITY's real union, not the caller's slice: the `@requires`
@@ -345,14 +339,14 @@ pub const ObserverRegistry = struct {
 ///
 pub fn flushWithObservers(
     cmd: *CommandBuffer,
+    world: *World,
     registry: ?*ObserverRegistry,
 ) !void {
     if (registry == null) {
-        try cmd.flush();
+        try cmd.flush(world);
         return;
     }
     const reg = registry.?;
-    const world = cmd.world;
     const gpa = cmd.gpa;
 
     // First — drain the previous flush's queued observer cmds (raw,
@@ -375,11 +369,13 @@ pub fn flushWithObservers(
 /// Apply a single command + dispatch observers around it. Used by
 /// `flushWithObservers`; exposed at module scope for the inline tests.
 pub fn applyWithObservers(
-    c: Command,
+    c_in: Command,
     reg: *ObserverRegistry,
     world: *World,
     gpa: std.mem.Allocator,
 ) !void {
+    var c = c_in;
+    try command_buffer_mod.resolveInPlace(&c, world, gpa);
     switch (c) {
         .spawn => |s| {
             // Shares the returning-eid primitive with the immediate
@@ -532,7 +528,9 @@ pub fn applyWithObservers(
 /// Raw apply without observer dispatch — used to drain the previous
 /// flush's deferred buffer (those cmds were already "observer-issued"
 /// and re-firing on them would create recursion).
-fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c: Command) !void {
+fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c_in: Command) !void {
+    var c = c_in;
+    try command_buffer_mod.resolveInPlace(&c, world, gpa);
     switch (c) {
         .spawn => |s| {
             _ = try world.spawnDynamicWithValues(gpa, s.component_ids, s.payloads);
@@ -616,7 +614,7 @@ test "add on entity already having the component fires on_replaced with old and 
     const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&v7)});
 
     E3Capture.reset();
-    try world.observer_registry.registerOnReplaced(gpa, &world, cid, null, &e3CaptureObserver);
+    try world.observer_registry.registerOnReplaced(gpa, cid, null, &e3CaptureObserver);
 
     // `add_component` on an entity that ALREADY has the component = replace.
     var v42: i32 = 42;
@@ -649,7 +647,7 @@ test "on_removed receives the pre-removal value" {
     const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{ keep, drop }, &[_][]const u8{ std.mem.asBytes(&kv), std.mem.asBytes(&dv) });
 
     E3Capture.reset();
-    try world.observer_registry.registerOnRemove(gpa, &world, drop, null, &e3CaptureObserver);
+    try world.observer_registry.registerOnRemove(gpa, drop, null, &e3CaptureObserver);
 
     const c: Command = .{ .remove_component = .{ .entity = e, .component_id = drop } };
     try applyWithObservers(c, &world.observer_registry, &world, gpa);

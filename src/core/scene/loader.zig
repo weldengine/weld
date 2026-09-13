@@ -339,9 +339,9 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     // drain; this explicit one keeps the ordering contract local to the load
     // sequence (it does not depend on a downstream function's internal drain).
     {
-        var hook_drain = command_buffer_mod.CommandBuffer.init(gpa, world);
+        var hook_drain = command_buffer_mod.CommandBuffer.init(gpa);
         defer hook_drain.deinit();
-        try observers_mod.flushWithObservers(&hook_drain, &world.observer_registry);
+        try observers_mod.flushWithObservers(&hook_drain, world, &world.observer_registry);
     }
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
 
@@ -792,15 +792,15 @@ fn loadResources(
 /// `applyRawCommand`). A pre-existing deferred queue is drained first; an
 /// `on_spawned` rule may queue structural commands, drained after the pass.
 fn dispatchSpawnLifecycle(world: *World, gpa: std.mem.Allocator, spawned: []const EntityId) !void {
-    var drain = command_buffer_mod.CommandBuffer.init(gpa, world);
+    var drain = command_buffer_mod.CommandBuffer.init(gpa);
     defer drain.deinit();
 
     // Drain any commands left queued from prior observer activity.
-    try observers_mod.flushWithObservers(&drain, &world.observer_registry);
+    try observers_mod.flushWithObservers(&drain, world, &world.observer_registry);
     // Every entity already exists — now fire its spawn hook.
     for (spawned) |eid| try world.dispatchOnSpawned(gpa, eid);
     // Apply whatever the `on_spawned` rules queued.
-    try observers_mod.flushWithObservers(&drain, &world.observer_registry);
+    try observers_mod.flushWithObservers(&drain, world, &world.observer_registry);
 }
 
 /// Read a little-endian `u32` at file offset `off` (the accessor's `readU32` is

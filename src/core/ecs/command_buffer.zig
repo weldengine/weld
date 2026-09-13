@@ -34,10 +34,14 @@
 //! a later refinement.
 //!
 //! Allocation: each `CommandBuffer` owns an arena. Payload bytes and
-//! per-spawn id/payload slices are duplicated into the arena so the
+//! per-spawn resolver/id/payload slices are duplicated into the arena so the
 //! caller's stack values can go out of scope between recording and
 //! flushing. The arena is reset with `retain_capacity` between
 //! frames so steady-state allocation is zero after the first flush.
+//!
+//! The buffer holds NO world. A recorded command carries the type it needs as a
+//! resolver and the world arrives at `flush` — see `CommandBuffer.init` for why
+//! that is a contract and not a refactor.
 
 const std = @import("std");
 const world_mod = @import("world.zig");
@@ -72,12 +76,40 @@ const ComponentId = registry_mod.ComponentId;
 /// Tag enum for the `Command` union.
 pub const CommandKind = enum { spawn, despawn, add_component, remove_component, set_tag, clear_tag };
 
+/// Closure that registers a component type with a world's `Registry` if needed
+/// and returns its `ComponentId`.
+///
+/// **This is what replaces the world the buffer used to hold.** Recording a
+/// deferred `add` needs the type; resolving the type needs the world; and a
+/// buffer that holds a world hands a system back the unrestricted handle its
+/// view exists to withhold — through a neighbouring field, with no cast and no
+/// diagnostic. So the type travels as a closure and the world arrives at
+/// `flush`. Same shape as `scheduler.AccessDescriptor.resolve`, for the same
+/// reason: a `comptime T` that must survive into a runtime value.
+pub const ComponentResolveFn = *const fn (world: *World, gpa: std.mem.Allocator) anyerror!ComponentId;
+
+/// Build the resolver for `T`.
+fn resolverFor(comptime T: type) ComponentResolveFn {
+    const Wrapper = struct {
+        fn resolve(world: *World, gpa: std.mem.Allocator) anyerror!ComponentId {
+            return try world.ensureComponentRegistered(gpa, T);
+        }
+    };
+    return &Wrapper.resolve;
+}
+
 /// Deferred spawn: arrays of component ids + payload bytes. Both
 /// arrays live in the buffer's arena. `payloads[i]` is paired with
 /// `component_ids[i]` (same ordering, before any sort the world does
 /// internally).
 pub const SpawnCommand = struct {
-    component_ids: []const ComponentId,
+    /// EMPTY when the recorder already held the ids — see the note on
+    /// `AddComponentCommand.resolve` for the two recorders this serves.
+    /// Otherwise parallel to `component_ids` and the same length.
+    resolvers: []const ComponentResolveFn = &.{},
+    /// The ids the spawn applies with. Already meaningful when `resolvers` is
+    /// empty; otherwise written at flush, in the buffer's own arena.
+    component_ids: []ComponentId,
     payloads: []const []const u8,
 };
 
@@ -89,6 +121,14 @@ pub const DespawnCommand = struct {
 /// Deferred component add — bytes live in the buffer's arena.
 pub const AddComponentCommand = struct {
     entity: EntityId,
+    /// Non-null when the recorder held a TYPE and no world — the typed
+    /// `addComponent(T)` path, whose id can only be resolved at flush. Null
+    /// when the recorder already held the id, which is the Etch interpreter,
+    /// the observer flush, and every caller that resolved before recording.
+    ///
+    /// Two recorders, both real. `component_id` has no default precisely so a
+    /// literal that says neither does not compile.
+    resolve: ?ComponentResolveFn = null,
     component_id: ComponentId,
     bytes: []const u8,
 };
@@ -96,6 +136,8 @@ pub const AddComponentCommand = struct {
 /// Deferred component remove — only needs the component id.
 pub const RemoveComponentCommand = struct {
     entity: EntityId,
+    /// Same two recorders as `AddComponentCommand.resolve`.
+    resolve: ?ComponentResolveFn = null,
     component_id: ComponentId,
 };
 
@@ -121,6 +163,43 @@ pub const Command = union(CommandKind) {
     clear_tag: TagCommand,
 };
 
+/// Turn a command's declared TYPE into a `ComponentId` against `world`.
+///
+/// **This runs at the APPLY boundary, and that placement is the contract.**
+/// Resolution was moved off the record path when the buffer lost its world, so
+/// a command can sit in a buffer with `component_id` meaningless. Every
+/// function that applies one therefore resolves first — `CommandBuffer.applyOne`
+/// and the two in `observers.zig` — and the set of such functions is the
+/// derivation "every function that consumes a `Command` and mutates the world".
+///
+/// It is placed here rather than as a pre-pass over a buffer because a pre-pass
+/// covers the buffers someone remembered to pass it: the Etch tick-boundary
+/// drain reads `observer_registry.deferred` through neither `flush` nor
+/// `flushWithObservers`, and a per-buffer pass missed it silently — the
+/// resolution never ran and `spawnDynamicWithValues` received a slice of
+/// `undefined` ids.
+///
+/// Idempotent: a command already carrying its id has no resolver and is left
+/// alone, so applying one twice resolves once.
+pub fn resolveInPlace(cmd: *Command, world: *World, gpa: std.mem.Allocator) !void {
+    switch (cmd.*) {
+        .spawn => |*sp| {
+            for (sp.resolvers, sp.component_ids[0..sp.resolvers.len]) |r, *slot| {
+                slot.* = try r(world, gpa);
+            }
+        },
+        .add_component => |*a| {
+            if (a.resolve) |r| a.component_id = try r(world, gpa);
+        },
+        .remove_component => |*r| {
+            if (r.resolve) |f| r.component_id = try f(world, gpa);
+        },
+        // The tag commands carry a `tagset_id` their caller already holds:
+        // nothing to resolve, and nothing that needs a world.
+        .despawn, .set_tag, .clear_tag => {},
+    }
+}
+
 /// Per-system command buffer.
 pub const CommandBuffer = struct {
     /// THE TYPE DECLARES ITS OWN REFUSAL, and its value is the reason.
@@ -141,20 +220,22 @@ pub const CommandBuffer = struct {
     arena: std.heap.ArenaAllocator,
     /// Recorded commands, in submission order inside this system.
     commands: std.ArrayListUnmanaged(Command) = .empty,
-    /// Borrowed pointer to the world. Used for type resolution
-    /// (`ensureComponentRegistered`) at record time and for the
-    /// actual mutations at flush time.
-    world: *World,
     /// Backing allocator for the `commands` ArrayList. The arena is
     /// initialised from this allocator too.
     gpa: std.mem.Allocator,
 
-    /// Construct a fresh command buffer. `world` is borrowed and
-    /// must outlive the buffer.
-    pub fn init(gpa: std.mem.Allocator, world: *World) CommandBuffer {
+    /// Construct a fresh command buffer.
+    ///
+    /// **It holds no world, and that absence is the contract.** Zig has no
+    /// private field, so a buffer carrying a `*World` would hand every system
+    /// the unrestricted handle its declared-access view exists to withhold —
+    /// `ctx.cmd.world.getMut(Anything, e)`, no cast, no diagnostic. The world
+    /// arrives at `flush`, and the type each command needs travels with the
+    /// command as a resolver. Encapsulation here is the REMOVAL of the datum,
+    /// never an envelope around it.
+    pub fn init(gpa: std.mem.Allocator) CommandBuffer {
         return .{
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .world = world,
             .gpa = gpa,
         };
     }
@@ -189,12 +270,13 @@ pub const CommandBuffer = struct {
         if (n == 0) @compileError("CommandBuffer.spawn requires at least one component");
 
         const arena_alloc = self.arena.allocator();
+        const resolvers = try arena_alloc.alloc(ComponentResolveFn, n);
         const ids = try arena_alloc.alloc(ComponentId, n);
         const payloads = try arena_alloc.alloc([]const u8, n);
 
         inline for (info.fields, 0..) |field, i| {
             const T = field.type;
-            ids[i] = try self.world.ensureComponentRegistered(self.gpa, T);
+            resolvers[i] = resolverFor(T);
             // Materialise the field as a local so `std.mem.asBytes`
             // has a stable address, then dupe into the arena.
             const v: T = @field(values, field.name);
@@ -202,6 +284,7 @@ pub const CommandBuffer = struct {
         }
 
         try self.commands.append(self.gpa, .{ .spawn = .{
+            .resolvers = resolvers,
             .component_ids = ids,
             .payloads = payloads,
         } });
@@ -225,14 +308,19 @@ pub const CommandBuffer = struct {
         comptime T: type,
         value: T,
     ) !void {
-        const cid = try self.world.ensureComponentRegistered(self.gpa, T);
         const arena_alloc = self.arena.allocator();
         const bytes = try arena_alloc.dupe(u8, std.mem.asBytes(&value));
-        try self.commands.append(self.gpa, .{ .add_component = .{
-            .entity = entity,
-            .component_id = cid,
-            .bytes = bytes,
-        } });
+        try self.commands.append(self.gpa, .{
+            .add_component = .{
+                .entity = entity,
+                .resolve = resolverFor(T),
+                // Meaningless until `resolveComponentIds` runs; the field carries no
+                // default so that a recorder holding NEITHER a type nor an id
+                // cannot be written at all.
+                .component_id = undefined,
+                .bytes = bytes,
+            },
+        });
     }
 
     /// Record a deferred component remove. The component must
@@ -244,10 +332,10 @@ pub const CommandBuffer = struct {
         entity: EntityId,
         comptime T: type,
     ) !void {
-        const cid = try self.world.ensureComponentRegistered(self.gpa, T);
         try self.commands.append(self.gpa, .{ .remove_component = .{
             .entity = entity,
-            .component_id = cid,
+            .resolve = resolverFor(T),
+            .component_id = undefined,
         } });
     }
 
@@ -278,9 +366,9 @@ pub const CommandBuffer = struct {
     /// via `flushWithObservers` (see `observers.zig`) — this raw
     /// flush is used by tests that exercise the cmd-buffer logic in
     /// isolation.
-    pub fn flush(self: *CommandBuffer) !void {
+    pub fn flush(self: *CommandBuffer, world: *World) !void {
         for (self.commands.items) |cmd| {
-            try self.applyOne(cmd);
+            try self.applyOne(world, cmd);
         }
         self.reset();
     }
@@ -288,20 +376,22 @@ pub const CommandBuffer = struct {
     /// Apply a single command. Exposed at module scope so the
     /// observer-aware flush in `observers.zig` can interleave
     /// dispatch between mutations.
-    pub fn applyOne(self: *CommandBuffer, cmd: Command) !void {
+    pub fn applyOne(self: *CommandBuffer, world: *World, cmd_in: Command) !void {
+        var cmd = cmd_in;
+        try resolveInPlace(&cmd, world, self.gpa);
         switch (cmd) {
             .spawn => |s| {
-                _ = try self.world.spawnDynamicWithValues(
+                _ = try world.spawnDynamicWithValues(
                     self.gpa,
                     s.component_ids,
                     s.payloads,
                 );
             },
             .despawn => |d| {
-                try self.world.despawn(self.gpa, d.entity);
+                try world.despawn(self.gpa, d.entity);
             },
             .add_component => |a| {
-                try self.world.addComponentDynamic(
+                try world.addComponentDynamic(
                     self.gpa,
                     a.entity,
                     a.component_id,
@@ -309,17 +399,17 @@ pub const CommandBuffer = struct {
                 );
             },
             .remove_component => |r| {
-                try self.world.removeComponentDynamic(
+                try world.removeComponentDynamic(
                     self.gpa,
                     r.entity,
                     r.component_id,
                 );
             },
             .set_tag => |t| {
-                try self.world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, true);
+                try world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, true);
             },
             .clear_tag => |t| {
-                try self.world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, false);
+                try world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, false);
             },
         }
     }
@@ -334,7 +424,7 @@ test "CommandBuffer init/deinit round-trip is leak-free" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    var cmd = CommandBuffer.init(gpa, &world);
+    var cmd = CommandBuffer.init(gpa);
     defer cmd.deinit();
     try testing.expectEqual(@as(usize, 0), cmd.commandCount());
 }
@@ -344,7 +434,7 @@ test "CommandBuffer.spawn records but does not mutate world" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    var cmd = CommandBuffer.init(gpa, &world);
+    var cmd = CommandBuffer.init(gpa);
     defer cmd.deinit();
 
     try cmd.spawn(.{
@@ -360,14 +450,14 @@ test "CommandBuffer.flush applies spawn → world entity count incremented" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    var cmd = CommandBuffer.init(gpa, &world);
+    var cmd = CommandBuffer.init(gpa);
     defer cmd.deinit();
 
     try cmd.spawn(.{
         world_mod.Transform{},
         world_mod.Velocity{},
     });
-    try cmd.flush();
+    try cmd.flush(&world);
 
     try testing.expectEqual(@as(usize, 1), world.entityCount());
     try testing.expectEqual(@as(usize, 0), cmd.commandCount());
@@ -389,7 +479,7 @@ test "CommandBuffer set_tag adds TagSet and sets the bit; clear_tag clears it" {
     });
     const eid = try world.spawn(gpa, world_mod.Transform{}, world_mod.Velocity{});
 
-    var cmd = CommandBuffer.init(gpa, &world);
+    var cmd = CommandBuffer.init(gpa);
     defer cmd.deinit();
 
     // Recorded, not yet applied — the entity still lacks TagSet.
@@ -401,12 +491,12 @@ test "CommandBuffer set_tag adds TagSet and sets the bit; clear_tag clears it" {
     }
 
     // Flush adds TagSet (archetype transition) with bit 3 set.
-    try cmd.flush();
+    try cmd.flush(&world);
     try testing.expectEqual(@as(u64, 1) << 3, readTagWord(&world, tagset_id, eid));
 
     // clear_tag flips the bit back in place (no further transition).
     try cmd.clearTag(eid, tagset_id, 3);
-    try cmd.flush();
+    try cmd.flush(&world);
     try testing.expectEqual(@as(u64, 0), readTagWord(&world, tagset_id, eid));
 }
 

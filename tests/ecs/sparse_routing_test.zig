@@ -941,7 +941,7 @@ test "on_remove at despawn fires over the UNION, ascending by component id" {
     var log: FireLog = .{};
     defer log.ids.deinit(gpa);
     for ([_]ComponentId{ t0, s1, t2, s3 }) |cid| {
-        try world.observer_registry.registerOnRemove(gpa, &world, cid, &log, &FireLog.note);
+        try world.observer_registry.registerOnRemove(gpa, cid, &log, &FireLog.note);
     }
 
     // The caller's slice order is DELIBERATELY not ascending: the firing order
@@ -971,8 +971,8 @@ test "add-on-present on a SPARSE component fires the replacement, not the add" {
     var reps: FireLog = .{};
     defer adds.ids.deinit(gpa);
     defer reps.ids.deinit(gpa);
-    try world.observer_registry.registerOnAdd(gpa, &world, s, &adds, &FireLog.note);
-    try world.observer_registry.registerOnReplaced(gpa, &world, s, &reps, &FireLog.note);
+    try world.observer_registry.registerOnAdd(gpa, s, &adds, &FireLog.note);
+    try world.observer_registry.registerOnReplaced(gpa, s, &reps, &FireLog.note);
 
     // Through `spawnWithObservers` and NOT `spawnDynamicWithValues`: the direct
     // entry fires no observer at all, which a first version of this test got
@@ -1063,30 +1063,33 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
         defer world.deinit(gpa);
         const s = try reg(&world, gpa, "S", .sparse);
         const tag = try reg(&world, gpa, "TagSet", .sparse);
-        var cmd = CommandBuffer.init(gpa, &world);
+        var cmd = CommandBuffer.init(gpa);
         defer cmd.deinit();
 
         // spawn
         var e: EntityId = undefined;
-        try cmd.applyOne(.{ .spawn = .{ .component_ids = &.{s}, .payloads = &.{&word(1)} } });
+        // Writable storage: the field is filled at flush when the recorder held
+        // a type rather than an id. This one holds the id.
+        var spawn_ids = [_]ComponentId{s};
+        try cmd.applyOne(&world, .{ .spawn = .{ .component_ids = &spawn_ids, .payloads = &.{&word(1)} } });
         e = blk: {
             var it = world.entity_locations.keyIterator();
             break :blk it.next().?.*;
         };
         if (readWord(world.componentBytes(e, s).?) == 1) covered[0] += 1;
         // remove_component
-        try cmd.applyOne(.{ .remove_component = .{ .entity = e, .component_id = s } });
+        try cmd.applyOne(&world, .{ .remove_component = .{ .entity = e, .component_id = s } });
         if (!world.hasComponentDyn(e, s)) covered[0] += 1;
         // add_component (absent — the raw paths refuse add-on-present by design)
-        try cmd.applyOne(.{ .add_component = .{ .entity = e, .component_id = s, .bytes = &word(5) } });
+        try cmd.applyOne(&world, .{ .add_component = .{ .entity = e, .component_id = s, .bytes = &word(5) } });
         if (readWord(world.componentBytes(e, s).?) == 5) covered[0] += 1;
         // set_tag / clear_tag on a SPARSE TagSet
-        try cmd.applyOne(.{ .set_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
+        try cmd.applyOne(&world, .{ .set_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
         if (readWord(world.componentBytes(e, tag).?) == @as(u64, 1) << 2) covered[0] += 1;
-        try cmd.applyOne(.{ .clear_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
+        try cmd.applyOne(&world, .{ .clear_tag = .{ .entity = e, .tagset_id = tag, .bit_index = 2 } });
         if (readWord(world.componentBytes(e, tag).?) == 0) covered[0] += 1;
         // despawn
-        try cmd.applyOne(.{ .despawn = .{ .entity = e } });
+        try cmd.applyOne(&world, .{ .despawn = .{ .entity = e } });
         if (world.sparse_stores.getConst(s).?.len() == 0 and !world.isLive(e)) covered[0] += 1;
     }
 
@@ -1125,8 +1128,9 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
         // will act on, plus a trigger whose `on_add` does the queueing.
         const subject = try world.spawnDynamicWithValues(gpa, &.{s}, &.{&word(1)});
 
+        var queued_ids = [_]ComponentId{s};
         var q: Queuer = .{ .cmd = switch (k) {
-            0 => .{ .spawn = .{ .component_ids = &.{s}, .payloads = &.{&word(7)} } },
+            0 => .{ .spawn = .{ .component_ids = &queued_ids, .payloads = &.{&word(7)} } },
             1 => .{ .despawn = .{ .entity = subject } },
             2 => .{ .add_component = .{ .entity = subject, .component_id = tag, .bytes = &word(0) } },
             3 => .{ .remove_component = .{ .entity = subject, .component_id = s } },
@@ -1134,9 +1138,9 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
             5 => .{ .clear_tag = .{ .entity = subject, .tagset_id = tag, .bit_index = 2 } },
             else => unreachable,
         } };
-        try world.observer_registry.registerOnAdd(gpa, &world, trigger, &q, &Queuer.note);
+        try world.observer_registry.registerOnAdd(gpa, trigger, &q, &Queuer.note);
 
-        var cmd = CommandBuffer.init(gpa, &world);
+        var cmd = CommandBuffer.init(gpa);
         defer cmd.deinit();
         // Flush 1: the trigger's add fires the observer, which QUEUES.
         // Appended raw rather than through `cmd.addComponent`, whose signature
@@ -1149,11 +1153,11 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
             .component_id = trigger,
             .bytes = &trigger_bytes,
         } });
-        try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+        try observers_mod.flushWithObservers(&cmd, &world, &world.observer_registry);
         try testing.expectEqual(@as(usize, 1), q.fired);
         cmd.reset();
         // Flush 2: the queued command drains through `applyRawCommand`.
-        try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+        try observers_mod.flushWithObservers(&cmd, &world, &world.observer_registry);
 
         const ok = switch (k) {
             0 => world.sparse_stores.getConst(s).?.len() == 2, // subject + the spawned one

@@ -37,3 +37,12 @@ desktop.ini
 # Claude Code (project-level settings whitelisted)
 .claude/*
 !.claude/settings.json
+
+# Objects a hand-run of the C witness leaves beside its source.
+*.o
+
+# Scratch left by a scripted migration pass. A stray `.mig`/`.specs` reached a
+# commit once, the same way a zero-byte `witness.o` did: a tool wrote beside its
+# source and the add swept it up.
+*.mig
+*.specs

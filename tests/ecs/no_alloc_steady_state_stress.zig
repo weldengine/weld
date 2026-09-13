@@ -55,6 +55,7 @@ const dump = @import("livelock_dump.zig");
 const watchdog = @import("test_watchdog");
 
 const ecs = weld_core.ecs;
+const SystemContextOf = ecs.SystemContextOf;
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
 
 const Mass = extern struct { value: f32 = 1.0 };
@@ -65,6 +66,16 @@ const QIntegrate = ecs.Query(&.{ ecs.Transform, ecs.Velocity }, .{});
 const QDamage = ecs.Query(&.{Health}, .{});
 const QChangedHealth = ecs.Query(&.{Health}, .{ecs.Changed(Health)});
 const QCleanup = ecs.Query(&.{Health}, .{});
+
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_integrate: []const ecs.Access = &.{ ecs.Access.reads(ecs.Velocity), ecs.Access.writes(ecs.Transform) };
+const spec_damage: []const ecs.Access = &.{ecs.Access.writes(Health)};
+const spec_changed_reader: []const ecs.Access = &.{ecs.Access.reads(Health)};
+const spec_cleanup: []const ecs.Access = &.{ecs.Access.reads(Health)};
 
 const SteadyState = struct {
     q_integrate: *QIntegrate,
@@ -85,7 +96,7 @@ fn integrateChunk(chunk: *ecs.Chunk, query: *QIntegrate, dt: f32) void {
     }
 }
 
-fn integrateSystem(ctx: ecs.SystemContext) anyerror!void {
+fn integrateSystem(ctx: SystemContextOf(spec_integrate)) anyerror!void {
     const s: *SteadyState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_integrate, integrateChunk, .{ s.q_integrate, ctx.frame.dt });
 }
@@ -100,7 +111,7 @@ fn damageChunk(chunk: *ecs.Chunk, query: *QDamage, dt: f32) void {
     }
 }
 
-fn damageSystem(ctx: ecs.SystemContext) anyerror!void {
+fn damageSystem(ctx: SystemContextOf(spec_damage)) anyerror!void {
     const s: *SteadyState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_damage, damageChunk, .{ s.q_damage, ctx.frame.dt });
 }
@@ -119,7 +130,7 @@ fn changedReaderChunk(chunk: *ecs.Chunk, query: *QChangedHealth, _: f32) void {
     CHANGED_FLAG_TOUCHED +%= local;
 }
 
-fn changedReaderSystem(ctx: ecs.SystemContext) anyerror!void {
+fn changedReaderSystem(ctx: SystemContextOf(spec_changed_reader)) anyerror!void {
     const s: *SteadyState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_changed, changedReaderChunk, .{ s.q_changed, ctx.frame.dt });
 }
@@ -136,7 +147,7 @@ fn cleanupChunk(chunk: *ecs.Chunk, query: *QCleanup, _: f32) void {
     }
 }
 
-fn cleanupSystem(ctx: ecs.SystemContext) anyerror!void {
+fn cleanupSystem(ctx: SystemContextOf(spec_cleanup)) anyerror!void {
     const s: *SteadyState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(s.q_cleanup, cleanupChunk, .{ s.q_cleanup, ctx.frame.dt });
 }
@@ -480,30 +491,10 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     var sys = ecs.SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .fixed_update,
-        .name = "integrate",
-        .run = integrateSystem,
-        .accesses = &.{ ecs.Reads(ecs.Velocity), ecs.Writes(ecs.Transform) },
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "damage",
-        .run = damageSystem,
-        .accesses = &.{ecs.Writes(Health)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "changed_reader",
-        .run = changedReaderSystem,
-        .accesses = &.{ecs.Reads(Health)},
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .post_update,
-        .name = "cleanup",
-        .run = cleanupSystem,
-        .accesses = &.{ecs.Reads(Health)},
-    });
+    try sys.registerSystem(gpa, &world, .fixed_update, "integrate", spec_integrate, integrateSystem);
+    try sys.registerSystem(gpa, &world, .update, "damage", spec_damage, damageSystem);
+    try sys.registerSystem(gpa, &world, .update, "changed_reader", spec_changed_reader, changedReaderSystem);
+    try sys.registerSystem(gpa, &world, .post_update, "cleanup", spec_cleanup, cleanupSystem);
 
     // Warm-up window — same 10 dispatchFrame as the non-stress test
     // so the alloc-free contract carries over.

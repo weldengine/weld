@@ -1,0 +1,21 @@
+.{
+    .name = .weld_access_counterproof,
+    .version = "0.0.0",
+    .fingerprint = 0x39ef734258ced8ce, // suggested by Zig at creation, immutable
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .weld = .{
+            // Local path — the monolithic repo (cf. ARCH-017), four levels up
+            // from tests/core/ecs/access_counterproof/.
+            .path = "../../../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "control.zig",
+        "case_undeclared.zig",
+        "case_mutable_on_read.zig",
+        "case_missing_accesses.zig",
+    },
+}

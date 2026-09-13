@@ -2,7 +2,7 @@
 //!
 //! Exports `weld_plugin_entry` exactly like the happy-path stub
 //! but with `api_version_min = 99`, well above the runtime's
-//! current `WELD_API_VERSION_MAJOR = 0`. Used by
+//! current `WELD_API_VERSION_MAJOR`. Used by
 //! `tests/core/plugin_loader/load_unload_test.zig` to assert
 //! `Loader.loadPlugin` returns `error.ApiVersionTooNew`.
 

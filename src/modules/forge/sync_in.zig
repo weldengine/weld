@@ -265,16 +265,19 @@ pub const SyncInResult = struct {
 /// advances the baseline every tick, so `changedTick > now - 1` and `changedTick == now`
 /// are the same predicate everywhere except on the first pass, which is the case that
 /// was wrong.
-fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
-    // Routed through `World.changedTickOf`, which carries the
+fn changedAt(ecs: anytype, comptime T: type, entity: EntityId, tick: Tick) bool {
+    // Routed through the accessor's `changedTick`, which carries the
     // storage decision so this site carries none. Reaching the archetype directly
     // would answer for the TABLE half only —
     // unreachable today, since `registerComponent(T)` never sets a mode and
     // every `T` here is a Zig-registered physics component, but that is a
     // PREMISE about another module's registration path and this removes the
     // need for it rather than documenting it.
-    const cid = ecs.componentId(@typeName(T)) orelse return false;
-    const changed = ecs.changedTickOf(entity, cid) orelse return false;
+    //
+    // Keyed by TYPE, so a declared-access view gates it on the same set that
+    // gates the read of the value: observing that `T` changed is a read of `T`,
+    // and a system that cannot read `T` must not be able to time it either.
+    const changed = ecs.changedTick(T, entity) orelse return false;
     return changed == tick;
 }
 
@@ -283,22 +286,25 @@ fn changedAt(ecs: *World, comptime T: type, entity: EntityId, tick: Tick) bool {
 /// Reads the SIGNAL `Changed<T>` is built on (`world.getMut` → `markChanged`)
 /// and deliberately not the value — the two predicates answer different
 /// questions and the second one runs later, on the value.
-fn changedSince(ecs: *World, comptime T: type, entity: EntityId, since: ?Tick) bool {
+fn changedSince(ecs: anytype, comptime T: type, entity: EntityId, since: ?Tick) bool {
     const baseline = since orelse return true; // never consumed: no baseline to filter by
     // Same routing as `changedAt`, same reason.
-    const cid = ecs.componentId(@typeName(T)) orelse return false;
-    const changed = ecs.changedTickOf(entity, cid) orelse return false;
+    const changed = ecs.changedTick(T, entity) orelse return false;
     return changed > baseline;
 }
 
 /// Consume gameplay's writes into the solver. Runs BEFORE `step`.
 ///
 /// `cmd` is absent on purpose: nothing here is structural. The pass writes body
-/// poses and velocities and touches no archetype.
+/// poses and velocities and touches no archetype — which is also why this
+/// direction needs no command buffer to run under a restricted view.
+///
+/// `ecs` is either a `*World` or a declared-access `View`, and the shape it must
+/// answer to is `get`, `getMut`, `changedTick` and `currentTick`.
 pub fn syncIn(
     gpa: std.mem.Allocator,
     pw: *PhysicsWorld,
-    ecs: *World,
+    ecs: anytype,
     journal: *Journal,
 ) !SyncInResult {
     // THE SAME ELECTION AS `syncOut`, and it must be: if the two directions
@@ -310,7 +316,7 @@ pub fn syncIn(
     defer table.deinit(gpa);
 
     var result: SyncInResult = .{};
-    const now = ecs.current_tick;
+    const now = ecs.currentTick();
 
     for (pw.bodies.items, 0..) |entry, reg| {
         const body = entry.id;

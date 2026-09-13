@@ -224,6 +224,7 @@ pub fn build(b: *std.Build) void {
     const stub_specs = [_]StubSpec{
         .{ .name = "weld_stub_plugin_happy", .root = "tests/core/plugin_loader/stub_plugin/plugin.zig" },
         .{ .name = "weld_stub_plugin_future", .root = "tests/core/plugin_loader/stub_plugin/plugin_future_api.zig" },
+        .{ .name = "weld_stub_plugin_legacy", .root = "tests/core/plugin_loader/stub_plugin/plugin_legacy_api.zig" },
         .{ .name = "weld_stub_plugin_no_entry", .root = "tests/core/plugin_loader/stub_plugin/plugin_no_entry.zig" },
     };
     var stub_install_steps: [stub_specs.len]*std.Build.Step = undefined;
@@ -288,6 +289,103 @@ pub fn build(b: *std.Build) void {
     synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
     const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the standalone proof)");
     synth_verify_step.dependOn(&synth_verify.step);
+
+    // `zig build ecs-access-counterproof` drives the declared-access corpus in
+    // `tests/core/ecs/access_counterproof/` — the first harness in this
+    // repository that asserts a COMPILATION FAILURE.
+    //
+    // **It matches the diagnostic text and never the exit code**, because a
+    // build that dies before the guard is reached exits exactly like one the
+    // guard stops. Each case therefore carries two checks: the expected exit,
+    // which says something failed, and a substring unique to that case, which
+    // says WHAT failed. The substrings are distinct across cases on purpose —
+    // matching only the shared refusal marker would let any one case stand in
+    // for any other.
+    //
+    // The control runs in the SAME step and must SUCCEED. Without it the three
+    // refusals prove nothing: a view that refused every access would satisfy
+    // all three.
+    const counterproof_dir = "tests/core/ecs/access_counterproof";
+    const CounterproofCase = struct {
+        step: ?[]const u8,
+        marks: []const []const u8,
+    };
+    const counterproof_cases = [_]CounterproofCase{
+        // The control: `zig build` with no step argument, which this
+        // sub-project wires to the one fixture that must compile.
+        .{ .step = null, .marks = &.{} },
+        .{
+            .step = "case-undeclared",
+            .marks = &.{"weld-access-refused: this system attempts a read of component"},
+        },
+        .{
+            .step = "case-mutable-on-read",
+            .marks = &.{"weld-access-refused: this system attempts a write to component"},
+        },
+        .{
+            // The compiler's own message, not the view's marker: the pairing is
+            // refused at the SIGNATURE, so nothing here ever reaches an access
+            // test. Its predecessor omitted the `accesses` field and matched
+            // `missing struct field: accesses` — which measured that Zig
+            // refuses a literal missing a field without a default, a fact that
+            // owed nothing to this milestone and guarded nothing.
+            .step = "case-mismatched-pair",
+            .marks = &.{"expected type 'fn (ecs.scheduler.SystemContextOf"},
+        },
+        .{
+            // Also the compiler's, and for a stronger reason: the promotion is
+            // refused at the TYPE, before any access test can run. A refusal
+            // carrying the view's marker would mean the second view had been
+            // built and was objecting afterwards.
+            .step = "case-view-promotion",
+            .marks = &.{"expected type '*ecs.view.ErasedFor"},
+        },
+        .{
+            // The job bound, and the mark is the MARKER'S OWN TEXT rather than
+            // the refusal's frame — which is what says the reason travelled and
+            // not merely that something was refused.
+            .step = "case-erased-in-job",
+            .marks = &.{"the erased world a view is rebuilt from"},
+        },
+        .{
+            // The same bound reached through a FIELD. **The mark deliberately
+            // avoids the message's tail**, which today reads `no reason
+            // declared`: `reasonOf` walks only pointers and optionals where
+            // `carriesMarkedIn` enters everything, so a marker reached through a
+            // field refuses correctly and explains nothing. That asymmetry is a
+            // debt this milestone named and left to the bound's owner, and a
+            // fixture anchored on its message would go red the day it is
+            // repaired — asserting on a defect's symptom is how a repair gets
+            // read as a regression. The type name is what identifies this case.
+            .step = "case-erased-wrapped-in-job",
+            .marks = &.{"Carrier` reaches a dispatched body"},
+        },
+    };
+    const counterproof_step = b.step(
+        "ecs-access-counterproof",
+        "Assert the six declared-access refusals fire, and that legitimate code still compiles",
+    );
+    for (counterproof_cases) |case| {
+        const run = if (case.step) |name|
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build", name })
+        else
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        run.setCwd(b.path(counterproof_dir));
+        // ALWAYS RE-RUN, and this is not a precaution. A `Run` step with no file
+        // argument is cached on its argv alone, and `setCwd` does not make the
+        // directory's contents an input — so the first version of this harness
+        // replayed a cached success and reported GREEN against a deliberately
+        // disabled guard. The verdict of a harness that cannot observe the code
+        // it judges is worth nothing, and it looks exactly like a verdict that is.
+        run.has_side_effects = true;
+        if (case.step == null) {
+            run.expectExitCode(0);
+        } else {
+            run.expectExitCode(1);
+            for (case.marks) |mark| run.addCheck(.{ .expect_stderr_match = mark });
+        }
+        counterproof_step.dependOn(&run.step);
+    }
 
     const shader_compiler_module = b.createModule(.{
         .root_source_file = b.path("tools/shader_compiler/main.zig"),
@@ -514,6 +612,121 @@ pub fn build(b: *std.Build) void {
     const asm_inventory_tests = b.addTest(.{ .root_module = asm_inventory_module });
     test_step.dependOn(&b.addRunArtifact(asm_inventory_tests).step);
 
+    // `zig build ecs-access-zero-cost` — the declared-access view claims to cost
+    // nothing, and that claim is about EMITTED CODE. It is read in the listing,
+    // on the `forge-asm-inventory` shape above: emit the assembly of a witness
+    // pair, hand the path to a Zig scanner, compare.
+    //
+    // ReleaseSafe rather than Debug: the claim is about the code a game ships,
+    // and Debug emits a prologue and stack probes that say nothing about the
+    // view. Pinned here rather than taken from the cell's mode, for the same
+    // reason `forge-asm-inventory` pins its own.
+    const view_asm_module = b.createModule(.{
+        .root_source_file = b.path("tools/view_asm_equiv/main.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    const view_asm_exe = b.addExecutable(.{
+        .name = "view_asm_equiv",
+        .root_module = view_asm_module,
+    });
+    const view_asm_run = b.addRunArtifact(view_asm_exe);
+    {
+        const zc_target = b.resolveTargetQuery(std.Target.Query.parse(.{
+            .arch_os_abi = "native",
+            .cpu_features = "baseline",
+        }) catch unreachable);
+        const zc_foundation = b.createModule(.{
+            .root_source_file = b.path("src/foundation/root.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+        });
+        const zc_core = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        });
+        zc_core.addImport("foundation", zc_foundation);
+        const zc_surface = b.createModule(.{
+            .root_source_file = b.path("tests/core/ecs/access_zero_cost_surface.zig"),
+            .target = zc_target,
+            .optimize = .ReleaseSafe,
+        });
+        zc_surface.addImport("weld_core", zc_core);
+        const zc_obj = b.addObject(.{
+            .name = "ecs_access_zero_cost",
+            .root_module = zc_surface,
+        });
+        view_asm_run.addFileArg(zc_obj.getEmittedAsm());
+    }
+    // `zig build c-api-read-column-constness` — the Tier 3 half of `ARCH-030`.
+    //
+    // C has no comptime view, and what it has instead is `const`. The witness
+    // compiles as published and must NOT compile with one line added that takes
+    // a mutable pointer to a column the query declared read-only. Both
+    // directions in ONE step, because a refusal nobody pairs with an acceptance
+    // is satisfied by a file that never compiles at all.
+    //
+    // Driven through `zig cc` rather than a `Compile` step: a C compilation
+    // expected to FAIL cannot be a step of the graph it would fail. The
+    // diagnostic is matched on its text, never on the exit code — a compiler
+    // that died for an unrelated reason exits identically.
+    const c_witness_dir = "tests/c_api/read_column_constness";
+    const c_witness_flags = [_][]const u8{ "-std=c11", "-Wall", "-Werror", "-pedantic" };
+    const constness_step = b.step(
+        "c-api-read-column-constness",
+        "Assert a Tier 3 read column is unreachable by a mutable pointer (engine-c-api.md 5.5)",
+    );
+    {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(b.allocator);
+        argv.appendSlice(b.allocator, &.{ b.graph.zig_exe, "cc" }) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &c_witness_flags) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &.{ "-c", b.pathJoin(&.{ c_witness_dir, "witness.c" }), "-o" }) catch @panic("OOM");
+        const ok = b.addSystemCommand(argv.items);
+        // The object goes to a build-owned path rather than to a device: the
+        // point is that the compiler accepted it, and a run that writes nowhere
+        // is one the build system may legitimately skip.
+        _ = ok.addOutputFileArg("witness.o");
+        ok.has_side_effects = true;
+        ok.expectExitCode(0);
+        constness_step.dependOn(&ok.step);
+    }
+    {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(b.allocator);
+        argv.appendSlice(b.allocator, &.{ b.graph.zig_exe, "cc" }) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &c_witness_flags) catch @panic("OOM");
+        argv.appendSlice(b.allocator, &.{
+            "-DWELD_ASSIGN_THROUGH_READ_COLUMN",
+            "-c",
+            b.pathJoin(&.{ c_witness_dir, "witness.c" }),
+            "-o",
+        }) catch @panic("OOM");
+        const bad = b.addSystemCommand(argv.items);
+        _ = bad.addOutputFileArg("witness_counterproof.o");
+        // Always re-run: a `Run` cached on its argv alone replays a stale
+        // verdict, which is how the sibling counter-proof harness first
+        // reported green against a deliberately disabled guard.
+        bad.has_side_effects = true;
+        bad.expectExitCode(1);
+        bad.addCheck(.{ .expect_stderr_match = "discards qualifiers" });
+        constness_step.dependOn(&bad.step);
+    }
+
+    const view_asm_step = b.step(
+        "ecs-access-zero-cost",
+        "Assert the declared-access view emits the same instructions as a direct World access",
+    );
+    view_asm_step.dependOn(&view_asm_run.step);
+
+    // The scanner's own tests ride in `zig build test`, for the reason written
+    // beside `asm_inventory`'s: a scanner that cannot discriminate reports a
+    // clean verdict for the wrong reason.
+    const view_asm_tests = b.addTest(.{ .root_module = view_asm_module });
+    test_step.dependOn(&b.addRunArtifact(view_asm_tests).step);
+
     // Out-of-tree tests: each file is its own root_module and imports
     // `weld_core` to reach the engine internals. The exception is a group whose
     // files `@import` each other — Zig 0.16 forbids a single file from belonging
@@ -691,6 +904,17 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/generational_indices.zig" },
         .{ .path = "tests/ecs/archetype_transitions.zig" },
         .{ .path = "tests/ecs/queries.zig" },
+        // The POSITIVE half of the declared-access enforcement. The refusals it
+        // makes non-vacuous live in `tests/core/ecs/access_counterproof/`,
+        // driven by `zig build ecs-access-counterproof` — a compile error
+        // cannot be a test block.
+        .{ .path = "tests/core/ecs/access_view_test.zig" },
+        // What the command buffer no longer holds, and when it resolves what it
+        // does — the two halves of the `world` field's removal.
+        .{ .path = "tests/core/ecs/command_buffer_test.zig" },
+        // The Zig half of the `WeldQueryChunk` drift pin; the C half is the
+        // `_Static_assert`s in `tests/c_api/read_column_constness/`.
+        .{ .path = "tests/c_api/chunk_layout_test.zig" },
         .{ .path = "tests/ecs/change_detection.zig" },
         .{ .path = "tests/ecs/scheduler.zig" },
         .{ .path = "tests/ecs/scheduler_dag.zig" },

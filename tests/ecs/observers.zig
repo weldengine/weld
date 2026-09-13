@@ -23,6 +23,8 @@ const weld_core = @import("weld_core");
 const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
+const Access = weld_core.ecs.Access;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
 const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
 const EntityId = weld_core.ecs.world.EntityId;
@@ -47,6 +49,16 @@ const Tag = extern struct { v: u32 = 0 };
 const Marker = extern struct { id: u32 = 0 };
 
 // ─── Test 1 — on_add fires after add_component ────────────────────────────
+
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_add_tag: []const Access = &.{};
+const spec_despawn: []const Access = &.{};
+const spec_spawn_one: []const Access = &.{};
+const spec_noop: []const Access = &.{};
 
 const AddObserverState = struct {
     fire_count: u32 = 0,
@@ -75,7 +87,7 @@ fn onAddTagObserver(
     s.last_cid = component_id.?;
 }
 
-fn addTagSystem(ctx: SystemContext) anyerror!void {
+fn addTagSystem(ctx: SystemContextOf(spec_add_tag)) anyerror!void {
     const s: *AddObserverState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.cmd.addComponent(s.target_entity, Tag, .{ .v = 7 });
 }
@@ -110,11 +122,10 @@ test "on_add observer is called during flush after add_component" {
     defer ADD_STATE = null;
 
     try world.registerOnAdd(gpa, Tag, null, &onAddTagObserver);
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "add_tag",
-        .run = addTagSystem,
-    });
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .update, "add_tag", spec_add_tag, addTagSystem);
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
 
@@ -154,7 +165,7 @@ fn onDespawnedObserver(
     }
 }
 
-fn despawnSystem(ctx: SystemContext) anyerror!void {
+fn despawnSystem(ctx: SystemContextOf(spec_despawn)) anyerror!void {
     const s: *DespawnObserverState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.cmd.despawn(s.target_entity);
 }
@@ -188,11 +199,10 @@ test "on_despawned observer fires before chunk slot is reused" {
     defer DESPAWN_STATE = null;
 
     try world.registerOnDespawned(gpa, null, &onDespawnedObserver);
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "despawn",
-        .run = despawnSystem,
-    });
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .update, "despawn", spec_despawn, despawnSystem);
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
 
@@ -241,12 +251,12 @@ fn onSpawnedChain(
     }
 }
 
-fn spawnOneSystem(ctx: SystemContext) anyerror!void {
+fn spawnOneSystem(ctx: SystemContextOf(spec_spawn_one)) anyerror!void {
     _ = ctx.frame; // state shared via globals
     try ctx.cmd.spawn(.{ Transform{}, Velocity{} });
 }
 
-fn noopSystem(_: SystemContext) anyerror!void {}
+fn noopSystem(_: SystemContextOf(spec_noop)) anyerror!void {}
 
 test "observer-issued structural mutations are queued for the next flush" {
     const gpa = std.testing.allocator;
@@ -272,11 +282,10 @@ test "observer-issued structural mutations are queued for the next flush" {
     defer CHAIN_STATE = null;
 
     try world.registerOnSpawned(gpa, null, &onSpawnedChain);
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "spawn_one",
-        .run = spawnOneSystem,
-    });
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .update, "spawn_one", spec_spawn_one, spawnOneSystem);
 
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 
@@ -299,11 +308,10 @@ test "observer-issued structural mutations are queued for the next flush" {
     // and on_spawned was NOT called for it.
     var sys2 = SystemScheduler.init();
     defer sys2.deinit(gpa);
-    try sys2.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "noop",
-        .run = noopSystem,
-    });
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys2.registerSystem(gpa, &world, .update, "noop", spec_noop, noopSystem);
     try sys2.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &chain_state);
 
     // The deferred spawn from the previous flush has applied —

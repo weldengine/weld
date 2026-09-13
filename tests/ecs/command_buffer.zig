@@ -21,6 +21,7 @@ const weld_core = @import("weld_core");
 const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
+const SystemContextOf = weld_core.ecs.SystemContextOf;
 const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
 const EntityId = weld_core.ecs.world.EntityId;
@@ -31,11 +32,21 @@ const Scheduler = jobs_sched_mod.Scheduler;
 const sys_sched_mod = weld_core.ecs.scheduler;
 const SystemScheduler = sys_sched_mod.SystemScheduler;
 const SystemContext = sys_sched_mod.SystemContext;
+const SystemDescriptor = sys_sched_mod.SystemDescriptor;
+const Access = weld_core.ecs.Access;
 
 const command_buffer_mod = weld_core.ecs.command_buffer;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
 
 // ─── Test 1 — deferred spawn ─────────────────────────────────────────────
+
+// ─── Declared access sets ──────────────────────────────────────────────────
+//
+// One per registered system, named after it. `registerSystem` derives BOTH
+// the DAG's descriptors and the body's context type from the set named here,
+// so a body cannot be paired with a declaration that does not describe it.
+const spec_adds_tag1: []const Access = &.{};
+const spec_removes_tag2: []const Access = &.{};
 
 const DeferredSpawnState = struct {
     /// Snapshot of `world.entityCount()` taken inside the system
@@ -44,7 +55,14 @@ const DeferredSpawnState = struct {
     seen_count_in_body: usize = 0,
 };
 
-fn deferredSpawnSystem(ctx: SystemContext) anyerror!void {
+/// Empty, and the body is why: it records a spawn and counts entities. The
+/// spawn is structural, so it goes through the command buffer; a cardinality is
+/// neither a component nor a resource, so no declaration covers it. A system
+/// that touches no entity data still receives a view — one that can do nothing
+/// but count.
+const deferred_spawn_spec = [_]Access{};
+
+fn deferredSpawnSystem(ctx: sys_sched_mod.SystemContextOf(&deferred_spawn_spec)) anyerror!void {
     const state: *DeferredSpawnState = @ptrCast(@alignCast(ctx.frame.user.?));
     // Inside the body — record the spawn, capture the entity count
     // BEFORE the flush runs.
@@ -52,7 +70,7 @@ fn deferredSpawnSystem(ctx: SystemContext) anyerror!void {
         Transform{},
         Velocity{},
     });
-    state.seen_count_in_body = ctx.world.entityCount();
+    state.seen_count_in_body = ctx.view.entityCount();
 }
 
 test "deferred spawn is visible only after the phase flush" {
@@ -74,11 +92,7 @@ test "deferred spawn is visible only after the phase flush" {
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "deferred_spawn",
-        .run = deferredSpawnSystem,
-    });
+    try sys.registerSystem(gpa, &world, .update, "deferred_spawn", &deferred_spawn_spec, deferredSpawnSystem);
 
     var state = DeferredSpawnState{};
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
@@ -109,12 +123,12 @@ const OrderTestState = struct {
     entity: EntityId,
 };
 
-fn systemAddsTag1(ctx: SystemContext) anyerror!void {
+fn systemAddsTag1(ctx: SystemContextOf(spec_adds_tag1)) anyerror!void {
     const state: *OrderTestState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.cmd.addComponent(state.entity, Tag1, .{ .v = 10 });
 }
 
-fn systemRemovesTag2(ctx: SystemContext) anyerror!void {
+fn systemRemovesTag2(ctx: SystemContextOf(spec_removes_tag2)) anyerror!void {
     const state: *OrderTestState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.cmd.removeComponent(state.entity, Tag2);
 }
@@ -144,16 +158,14 @@ test "add_component and remove_component are applied in system submission order"
     try world.addComponent(gpa, entity, Tag2, .{ .v = 99 });
 
     // Register A first, then B — submission order is (A, B).
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "adds_tag1",
-        .run = systemAddsTag1,
-    });
-    try sys.registerSystem(gpa, &world, .{
-        .phase = .update,
-        .name = "removes_tag2",
-        .run = systemRemovesTag2,
-    });
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .update, "adds_tag1", spec_adds_tag1, systemAddsTag1);
+    // Structural only: every mutation goes through the command buffer, which
+    // the access model deliberately has no category for. An empty set is
+    // therefore the true declaration, and it is written rather than defaulted.
+    try sys.registerSystem(gpa, &world, .update, "removes_tag2", spec_removes_tag2, systemRemovesTag2);
 
     var state = OrderTestState{ .entity = entity };
 

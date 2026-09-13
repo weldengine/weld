@@ -6589,7 +6589,7 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
         // flushed (applied) after every rule has run, before the boundary —
         // never mid-archetype-walk. It owns and frees its arena each tick, so
         // a plain gpa is leak-free here.
-        try w.line("var cmd = CommandBuffer.init(gpa, world);");
+        try w.line("var cmd = CommandBuffer.init(gpa);");
         try w.line("defer cmd.deinit();");
     }
     if (any_arena) {
@@ -6641,7 +6641,7 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
         }
     }
 
-    if (any_tag_mutation) try w.line("cmd.flush() catch {};");
+    if (any_tag_mutation) try w.line("cmd.flush(world) catch {};");
     try w.line("world.tickBoundary();");
     w.indentBy(-1);
     try w.line("}");

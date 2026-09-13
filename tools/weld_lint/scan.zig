@@ -25,9 +25,14 @@ const ignored_dir_names = [_][]const u8{
 /// corpus — the `lint` step must never visit it; the runner_test
 /// drives it explicitly with the expected non-zero exit code.
 /// `tests/lint/commit` is plain text, not `.zig` source.
+/// `tests/core/ecs/access_counterproof` holds fixtures that must NOT
+/// compile, plus the sub-project build that drives them. Three of its
+/// four files are refused by the compiler on purpose, so a rule that
+/// reported a defect there would name one nobody may fix.
 const ignored_path_substrings = [_][]const u8{
     "tests/lint/bad",
     "tests/lint/commit",
+    "tests/core/ecs/access_counterproof",
 };
 
 /// Append every `.zig` file reachable from `path` to `out`. `path` may

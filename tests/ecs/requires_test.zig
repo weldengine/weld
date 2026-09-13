@@ -395,7 +395,7 @@ test "P1-1: on_add fires for a component the CLOSURE added, not only the caller'
         }
     };
     Seen.n = 0;
-    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+    try world.observer_registry.registerOnAdd(gpa, c.transform, null, Seen.cb);
 
     const v = word(1);
     _ = try world.observer_registry.spawnWithObservers(gpa, &world, &[_]ComponentId{c.mesh}, &[_][]const u8{&v});
@@ -456,7 +456,7 @@ test "P1-3: a refused removal fires no on_remove, and is counted exactly once" {
         }
     };
     Spy.fired = 0;
-    try world.observer_registry.registerOnRemove(gpa, &world, c.transform, null, Spy.cb);
+    try world.observer_registry.registerOnRemove(gpa, c.transform, null, Spy.cb);
 
     const e = try world.spawnDynamic(gpa, &[_]ComponentId{c.mesh}); // closure adds Transform
     try testing.expect(world.hasComponentDyn(e, c.transform));
@@ -487,7 +487,7 @@ test "P1-3: a stale deferred despawn fires no on_despawned" {
         }
     };
     Spy.fired = 0;
-    try world.observer_registry.registerOnDespawned(gpa, &world, null, Spy.cb);
+    try world.observer_registry.registerOnDespawned(gpa, null, Spy.cb);
 
     const e = try world.spawnDynamic(gpa, &.{});
     try world.despawn(gpa, e); // the handle goes stale BEFORE the flush
@@ -520,7 +520,7 @@ test "P1-B: on_add fires for a closure member on the deferred ADD path" {
         }
     };
     Seen.n = 0;
-    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+    try world.observer_registry.registerOnAdd(gpa, c.transform, null, Seen.cb);
 
     // The SPAWN direction already carried this property
     // (`spawnWithObservers`, the test above); the ADD arm fired for the
@@ -549,7 +549,7 @@ test "P1-B: a requisite ALREADY present is not re-notified" {
         }
     };
     Seen.n = 0;
-    try world.observer_registry.registerOnAdd(gpa, &world, c.transform, null, Seen.cb);
+    try world.observer_registry.registerOnAdd(gpa, c.transform, null, Seen.cb);
 
     // `Transform` is present BEFORE the command, so the add contributes it to
     // nothing. Firing over the closure unconditionally would announce a state
@@ -631,7 +631,7 @@ test "P4: an add with no closure and no listener allocates nothing of its own" {
         }
     };
     Seen.n = 0;
-    try world.observer_registry.registerOnAdd(gpa, &world, mark, null, Seen.cb);
+    try world.observer_registry.registerOnAdd(gpa, mark, null, Seen.cb);
     for (all[0..10]) |e| try world.removeComponentDynamic(gpa, e, mark);
 
     const l0 = counting.snapshot();

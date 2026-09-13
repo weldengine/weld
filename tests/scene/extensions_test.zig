@@ -970,7 +970,7 @@ test "on_attach-issued structural command is drained before on_spawned" {
     // Tier-0 stand-in exercises the same drain channel + ordering. See the brief's
     // Recorded deviations.)
     world.registerOnAttach(null, &DrainSpy.attachCb);
-    try world.observer_registry.registerOnSpawned(gpa, &world, null, &DrainSpy.onSpawnedCb);
+    try world.observer_registry.registerOnSpawned(gpa, null, &DrainSpy.onSpawnedCb);
 
     var ext_res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
     var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, ext_res.ext());
@@ -993,7 +993,7 @@ const DrainSpy = struct {
     var marker_bytes = [_]u8{ 1, 0, 0, 0 };
     fn attachCb(_: ?*anyopaque, world: *World, entity: EntityId, _: []const u8, _: ?[]const u8) anyerror!void {
         if (world.observer_registry.deferred == null) {
-            world.observer_registry.deferred = CommandBuffer.init(std.testing.allocator, world);
+            world.observer_registry.deferred = CommandBuffer.init(std.testing.allocator);
         }
         try world.observer_registry.deferred.?.commands.append(std.testing.allocator, .{ .add_component = .{ .entity = entity, .component_id = marker_id, .bytes = marker_bytes[0..] } });
     }

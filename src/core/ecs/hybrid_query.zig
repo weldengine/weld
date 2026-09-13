@@ -33,7 +33,7 @@
 //! which one it holds. It is additive to the `World` API on the precedent
 //! already written at `world.zig`'s `queryDynamic`: "The C0.5 freeze covers the
 //! Tier-0 ↔ Tier-1 module interfaces, not internal `World` methods, so this does
-//! not breach it." `WELD_ECS_PROTOCOL_VERSION` stays at 1 and the milestone
+//! not breach it." The mixed-query planner moved no version, and the milestone
 //! PROVES it rather than asserting it (see `hybrid_query_test.zig`).
 //!
 //! The module-scope tail-rescan helper `query.rescanNewArchetypes` is reused

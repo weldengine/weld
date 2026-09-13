@@ -496,7 +496,7 @@ test "the planner elects SPARSE, and the effect applies exactly once per matchin
     const bystander = try world.spawnDynamic(gpa, &.{});
 
     AddSpy.reset();
-    try world.observer_registry.registerOnAdd(gpa, &world, scorched, null, &AddSpy.cb);
+    try world.observer_registry.registerOnAdd(gpa, scorched, null, &AddSpy.cb);
 
     try std.testing.expectEqual(@as(usize, 1), interp.rule_descs.len);
     try std.testing.expectEqual(@as(usize, 1), interp.rule_descs[0].selection.len);
