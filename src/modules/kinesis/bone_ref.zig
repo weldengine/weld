@@ -18,6 +18,11 @@
 //! one — a tentacle or a mech has no role, and `ARCH-033` imposes the
 //! uniformity of the addressing TYPE, never the obligation of a role.
 //!
+//! **`resolveBone` is the only PUBLIC entry here**, and the two halves below are
+//! private for that reason rather than by habit: a public `resolveRole` beside
+//! it would be a second path in the module's own surface, which is what the
+//! invariant forbids at the very place it is written down.
+//!
 //! **What this file does NOT give is that `resolveBone` is the only code that
 //! CAN map a role.** Zig has no private field, so a caller holding a `Rig` can
 //! read its profile and search it by hand. What the type system does give is
@@ -51,7 +56,7 @@ pub fn resolveBone(rig: Rig, ref: BoneRef) ?BoneIndex {
 /// Linear over the mappings, which is what makes it correct on a PARTIAL
 /// profile. The vocabulary is twenty-three roles and a profile is smaller
 /// still, so the walk is shorter than the indirection an index would need.
-pub fn resolveRole(rig: Rig, role: BoneRole) ?BoneIndex {
+fn resolveRole(rig: Rig, role: BoneRole) ?BoneIndex {
     const profile = rig.profile orelse return null;
     for (profile.mappings) |m| {
         if (m.role == role) return m.bone;

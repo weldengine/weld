@@ -141,17 +141,6 @@ pub fn forwardKinematics(parents: []const BoneIndex, local: PoseBuffer, model: P
     }
 }
 
-/// The model-space transform each bone holds in the bind pose.
-///
-/// Derived by running the pass over the bind pose, which is what makes the
-/// stored inverse-bind matrices checkable: their product with these is the
-/// identity for any asset whose bind pose and rest pose coincide.
-pub fn bindModelPose(rig: Rig, out: PoseBuffer) void {
-    std.debug.assert(out.bone_count == rig.boneCount());
-    @memcpy(out.slice(), rig.bind_local);
-    forwardKinematics(rig.parents, out, out);
-}
-
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
