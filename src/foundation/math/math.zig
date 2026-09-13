@@ -12,6 +12,7 @@
 const vec = @import("vec.zig");
 const quat = @import("quat.zig");
 const mat3 = @import("mat3.zig");
+const mat4 = @import("mat4.zig");
 const aabb = @import("aabb.zig");
 const trig = @import("trig.zig");
 const reduce_mod = @import("reduce.zig");
@@ -65,6 +66,12 @@ pub const Mat3 = mat3.Mat3;
 /// f32 3×3 matrix.
 pub const Mat3f = mat3.Mat3f;
 
+/// Generic 4×4 matrix constructor `Mat4(T)`.
+pub const Mat4 = mat4.Mat4;
+/// f32 4×4 matrix — the type the RTTI reflection surface and the plugin C ABI
+/// both name, hence `extern struct` and a layout that is not free.
+pub const Mat4f = mat4.Mat4f;
+
 /// Generic axis-aligned bounding box constructor `Aabb(T)`.
 pub const Aabb = aabb.Aabb;
 /// f32 axis-aligned bounding box.
@@ -97,6 +104,7 @@ comptime {
     _ = vec;
     _ = quat;
     _ = mat3;
+    _ = mat4;
     _ = aabb;
     _ = trig;
     _ = float_env;

@@ -15,6 +15,7 @@
 //! See `ARCH-007`.
 
 const std = @import("std");
+const math = @import("foundation").math;
 
 /// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// Stable identity for a registered type, derived deterministically
@@ -172,7 +173,17 @@ pub const Mat3 = extern struct { m: [9]f32 = .{ 1, 0, 0, 0, 1, 0, 0, 0, 1 } };
 /// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// 4×4 column-major float matrix. Matches `WeldMat4` in
 /// `engine-c-api.md` §2.2.
-pub const Mat4 = extern struct { m: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+///
+/// **DECLARED IN `foundation/math`, and this is the alias.** A mathematical
+/// type with operations belongs one tier down, where Forge and Kinesis can
+/// reach it; the reflection module only needs to NAME it. The alias keeps type
+/// IDENTITY, which is load-bearing twice over: `comptime_builder.classifyField`
+/// matches on `T == Mat4` and not on shape, so a structurally identical but
+/// distinct declaration would reclassify every reflected field as
+/// `.nested_struct`; and the layout the plugin ABI mirrors is the one
+/// `foundation` now owns. Re-declaring it here instead would be two types
+/// where the C twin allows one.
+pub const Mat4 = math.Mat4f;
 /// FROZEN — see `engine-phase-0-criteria.md` C0.5.
 /// RGBA float color in linear space. Matches `WeldColor` in
 /// `engine-c-api.md` §2.2.

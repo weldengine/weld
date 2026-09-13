@@ -897,6 +897,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
         // the slice, run in both directions.
         .{ .path = "tests/physics/arena_slice_test.zig", .arena_slice = true },
+        // `Mat4` across the tier boundary: the layout it committed to before it
+        // moved down into `foundation/math`, and the plugin C twin that layout
+        // mirrors. Needs BOTH sides in one unit, which is what puts it here
+        // rather than beside the type.
+        .{ .path = "tests/foundation/math/mat4_test.zig", .foundation = true },
         .{ .path = "tests/ecs/world_test.zig" },
         .{ .path = "tests/ecs/chunk_test.zig" },
         .{ .path = "tests/ecs/query_test.zig" },
@@ -1484,6 +1489,36 @@ pub fn build(b: *std.Build) void {
         "Run the ECS hybrid-storage crossover bench (reported, not gated; writes bench/results/ecs_hybrid_crossover.md)",
     );
     hybrid_bench_step.dependOn(&hybrid_bench_run.step);
+
+    // ------------------------------------------- pose buffer layout ruling --
+    //
+    // AoS against SoA on the two operations that pull in opposite directions —
+    // a bone-independent blend and a parent-serialised forward kinematics. It
+    // DECIDES A DESIGN rather than guarding one: the pose type freezes with the
+    // animation interface and is snapshotted by rollback, so the layout is
+    // cheap to choose now and a save-format migration to change later. Three
+    // layouts are measured, interleaved inside one process. Writes
+    // `bench/results/pose_layout.md`.
+    const pose_layout_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/pose_layout_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pose_layout_bench_module.addImport("weld_core", core_module);
+    pose_layout_bench_module.addImport("foundation", foundation_module);
+    const pose_layout_bench_exe = b.addExecutable(.{
+        .name = "pose-layout-bench",
+        .root_module = pose_layout_bench_module,
+    });
+    b.installArtifact(pose_layout_bench_exe);
+    const pose_layout_bench_run = b.addRunArtifact(pose_layout_bench_exe);
+    pose_layout_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| pose_layout_bench_run.addArgs(args);
+    const pose_layout_bench_step = b.step(
+        "pose-layout-bench",
+        "Run the pose-buffer layout bench (AoS vs SoA; decides the layout, writes bench/results/pose_layout.md)",
+    );
+    pose_layout_bench_step.dependOn(&pose_layout_bench_run.step);
 
     // ----------------------------------- driver-election cost + flip rate --
     //
