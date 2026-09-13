@@ -23,6 +23,14 @@
 //! arrays) can deliver it. Measuring the corpus form alone would have given SoA
 //! its worst case and called the result a verdict.
 //!
+//! **Four layouts, because three left a confound open.** The AoS candidate the
+//! corpus names is "one `Transform` per bone", and `Transform` is an
+//! `extern struct` of `[3]f32` / `[4]f32` — so the AoS row differs from the SoA
+//! rows in element REPRESENTATION as well as in memory order, and a reader
+//! could charge the whole gap to the conversion rather than to the layout.
+//! `AoS-vec` is the same interleaving with `@Vector`-backed elements: identical
+//! 48 bytes, identical alignment, no conversion. It isolates the layout.
+//!
 //! **Interleaved, never best-of-three.** The layouts are measured round by
 //! round in the same process, so a thermal or scheduling drift moves all three
 //! together instead of favouring whichever ran first. A best-of-three across
@@ -181,6 +189,60 @@ const Aos = struct {
         var acc: f64 = 0;
         for (self.t) |e| {
             acc += @as(f64, e.pos[0]) + @as(f64, e.rot[3]) + @as(f64, e.scale[1]);
+        }
+        return acc;
+    }
+};
+
+// --- Layout 1b: AoS with vector elements — the confound control -----------
+
+/// One bone, interleaved, with `@Vector`-backed members instead of `Transform`'s
+/// `[N]f32`. Same 48 bytes and same 16-byte alignment as `Transform`, so the
+/// ONLY difference from `Aos` is that no `fromArray` / `toArray` sits between
+/// the store and the arithmetic.
+const VecPose = struct { pos: Vec3, rot: Quatf, scale: Vec3 };
+
+const AosV = struct {
+    t: []VecPose,
+
+    fn alloc(gpa: std.mem.Allocator, n: usize) !AosV {
+        return .{ .t = try gpa.alloc(VecPose, n) };
+    }
+    fn free(self: AosV, gpa: std.mem.Allocator) void {
+        gpa.free(self.t);
+    }
+    fn fill(self: AosV, salt: u64) void {
+        for (self.t, 0..) |*e, i| {
+            const p = poseAt(i, salt);
+            e.* = .{ .pos = p.pos, .rot = p.rot, .scale = p.scale };
+        }
+    }
+
+    fn blend(a: AosV, b: AosV, out: AosV, t: f32) void {
+        for (a.t, b.t, out.t) |x, y, *o| {
+            o.pos = x.pos.add(y.pos.sub(x.pos).scale(t));
+            o.scale = x.scale.add(y.scale.sub(x.scale).scale(t));
+            o.rot = nlerp(x.rot, y.rot, t);
+        }
+    }
+
+    fn fk(local: AosV, world: AosV, parents: []const u16) void {
+        world.t[0] = local.t[0];
+        for (1..local.t.len) |i| {
+            const p = world.t[parents[i]];
+            const l = local.t[i];
+            world.t[i] = .{
+                .pos = p.pos.add(p.rot.rotateVec3(l.pos.mul(p.scale))),
+                .rot = p.rot.mul(l.rot),
+                .scale = p.scale.mul(l.scale),
+            };
+        }
+    }
+
+    fn checksum(self: AosV) f64 {
+        var acc: f64 = 0;
+        for (self.t) |e| {
+            acc += @as(f64, e.pos.data[0]) + @as(f64, e.rot.w) + @as(f64, e.scale.data[1]);
         }
         return acc;
     }
@@ -353,6 +415,7 @@ const SoaCh = struct {
 const Row = struct {
     bones: usize,
     aos_ns: f64,
+    aosv_ns: f64,
     soa3_ns: f64,
     soach_ns: f64,
     checksum: f64,
@@ -378,6 +441,15 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     a_aos.fill(1);
     b_aos.fill(2);
 
+    const a_av = try AosV.alloc(gpa, n);
+    defer a_av.free(gpa);
+    const b_av = try AosV.alloc(gpa, n);
+    defer b_av.free(gpa);
+    const o_av = try AosV.alloc(gpa, n);
+    defer o_av.free(gpa);
+    a_av.fill(1);
+    b_av.fill(2);
+
     const a_s3 = try Soa3.alloc(gpa, n);
     defer a_s3.free(gpa);
     const b_s3 = try Soa3.alloc(gpa, n);
@@ -397,6 +469,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     b_sc.fill(2);
 
     var aos_rounds: [rounds]f64 = undefined;
+    var aosv_rounds: [rounds]f64 = undefined;
     var s3_rounds: [rounds]f64 = undefined;
     var sc_rounds: [rounds]f64 = undefined;
     var checksum: f64 = 0;
@@ -407,11 +480,13 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
         switch (op) {
             .blend => {
                 Aos.blend(a_aos, b_aos, o_aos, 0.5);
+                AosV.blend(a_av, b_av, o_av, 0.5);
                 Soa3.blend(a_s3, b_s3, o_s3, 0.5);
                 SoaCh.blend(a_sc, b_sc, o_sc, 0.5);
             },
             .fk => {
                 Aos.fk(a_aos, o_aos, parents);
+                AosV.fk(a_av, o_av, parents);
                 Soa3.fk(a_s3, o_s3, parents);
                 SoaCh.fk(a_sc, o_sc, parents);
             },
@@ -431,6 +506,17 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
         }
         aos_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
         checksum += o_aos.checksum();
+
+        t0 = nowNs();
+        for (0..iters_per_round) |k| {
+            const alpha = @as(f32, @floatFromInt(k % 64)) / 64.0;
+            switch (op) {
+                .blend => AosV.blend(a_av, b_av, o_av, alpha),
+                .fk => AosV.fk(a_av, o_av, parents),
+            }
+        }
+        aosv_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
+        checksum += o_av.checksum();
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
@@ -458,6 +544,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     return .{
         .bones = n,
         .aos_ns = median(&aos_rounds),
+        .aosv_ns = median(&aosv_rounds),
         .soa3_ns = median(&s3_rounds),
         .soach_ns = median(&sc_rounds),
         .checksum = checksum,
@@ -466,25 +553,28 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
 
 fn emitConsole(title: []const u8, rows: []const Row) void {
     std.debug.print("\n  {s}\n", .{title});
-    std.debug.print("  {s:<7} {s:>11} {s:>13} {s:>17} {s:>13} {s:>13}\n", .{
-        "bones", "AoS (ns)", "SoA-3 (ns)", "SoA-chan (ns)", "SoA-3 / AoS", "SoA-ch / AoS",
+    std.debug.print("  {s:<7} {s:>10} {s:>11} {s:>11} {s:>13} {s:>12} {s:>12} {s:>12}\n", .{
+        "bones",         "AoS (ns)",      "AoS-vec (ns)", "SoA-3 (ns)",
+        "SoA-chan (ns)", "AoS-vec / AoS", "SoA-3 / AoS",  "SoA-ch / AoS",
     });
     for (rows) |r| {
-        std.debug.print("  {d:<7} {d:>11.1} {d:>13.1} {d:>17.1} {d:>12.3}x {d:>12.3}x\n", .{
-            r.bones,    r.aos_ns,             r.soa3_ns,
-            r.soach_ns, r.soa3_ns / r.aos_ns, r.soach_ns / r.aos_ns,
+        std.debug.print("  {d:<7} {d:>10.1} {d:>11.1} {d:>11.1} {d:>13.1} {d:>11.3}x {d:>11.3}x {d:>11.3}x\n", .{
+            r.bones,              r.aos_ns,              r.aosv_ns,
+            r.soa3_ns,            r.soach_ns,            r.aosv_ns / r.aos_ns,
+            r.soa3_ns / r.aos_ns, r.soach_ns / r.aos_ns,
         });
     }
 }
 
 fn emitMarkdown(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), title: []const u8, rows: []const Row) !void {
     try buf.print(gpa, "\n### {s}\n\n", .{title});
-    try buf.print(gpa, "| bones | AoS (ns) | SoA-3 (ns) | SoA-channel (ns) | SoA-3 / AoS | SoA-ch / AoS |\n", .{});
-    try buf.print(gpa, "|---|---|---|---|---|---|\n", .{});
+    try buf.print(gpa, "| bones | AoS (ns) | AoS-vec (ns) | SoA-3 (ns) | SoA-channel (ns) | AoS-vec / AoS | SoA-3 / AoS | SoA-ch / AoS |\n", .{});
+    try buf.print(gpa, "|---|---|---|---|---|---|---|---|\n", .{});
     for (rows) |r| {
-        try buf.print(gpa, "| {d} | {d:.1} | {d:.1} | {d:.1} | {d:.3}x | {d:.3}x |\n", .{
-            r.bones,    r.aos_ns,             r.soa3_ns,
-            r.soach_ns, r.soa3_ns / r.aos_ns, r.soach_ns / r.aos_ns,
+        try buf.print(gpa, "| {d} | {d:.1} | {d:.1} | {d:.1} | {d:.1} | {d:.3}x | {d:.3}x | {d:.3}x |\n", .{
+            r.bones,              r.aos_ns,              r.aosv_ns,
+            r.soa3_ns,            r.soach_ns,            r.aosv_ns / r.aos_ns,
+            r.soa3_ns / r.aos_ns, r.soach_ns / r.aos_ns,
         });
     }
 }
@@ -520,8 +610,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\npose buffer layout bench ({s}, {d} interleaved rounds x {d} iterations)\n", .{
         @tagName(builtin.mode), rounds, iters_per_round,
     });
-    std.debug.print("  per-bone footprint: AoS {d} B, SoA-3 {d} B, SoA-channel 40 B\n", .{
-        @sizeOf(Transform), soa3_bytes,
+    std.debug.print("  per-bone footprint: AoS {d} B, AoS-vec {d} B, SoA-3 {d} B, SoA-channel 40 B\n", .{
+        @sizeOf(Transform), @sizeOf(VecPose), soa3_bytes,
     });
     emitConsole("Blend (no dependency between bones)", &blend_rows);
     emitConsole("Forward kinematics (serialised parent -> child)", &fk_rows);
@@ -535,11 +625,11 @@ pub fn main(init: std.process.Init) !void {
         \\## Pose buffer layout -- AoS against SoA
         \\
         \\Mode: {s}. {d} interleaved rounds of {d} iterations, median per round.
-        \\Per-bone footprint: AoS {d} B, SoA-3 {d} B, SoA-channel 40 B.
+        \\Per-bone footprint: AoS {d} B, AoS-vec {d} B, SoA-3 {d} B, SoA-channel 40 B.
         \\
         \\Decides a design; no target to clear.
         \\
-    , .{ @tagName(builtin.mode), rounds, iters_per_round, @sizeOf(Transform), soa3_bytes });
+    , .{ @tagName(builtin.mode), rounds, iters_per_round, @sizeOf(Transform), @sizeOf(VecPose), soa3_bytes });
     try emitMarkdown(gpa, &buf, "Blend (no dependency between bones)", &blend_rows);
     try emitMarkdown(gpa, &buf, "Forward kinematics (serialised parent -> child)", &fk_rows);
     try buf.print(gpa, "\nAnti-DCE checksums: blend {d:.6}, fk {d:.6}\n", .{
