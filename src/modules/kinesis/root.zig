@@ -28,11 +28,20 @@ const anim = @import("weld_interfaces_animation");
 
 const pose_mod = @import("pose.zig");
 const components_mod = @import("components.zig");
+const asset_mod = @import("asset.zig");
 
 /// The ECS components this module registers.
 pub const components = components_mod;
 /// Pose allocation and lifetime.
-pub const pose = pose_mod;
+///
+/// Named in the plural, and `skeleton_asset` spelled out, because the singular
+/// forms collide with the parameter names the interface's own entries carry —
+/// `sampleClip(clip, time, pose)` and `createSkeleton(asset)`. A namespace that
+/// shadows a parameter is a compile error at the call site that adds the
+/// parameter, which is a rename this file would rather not owe later.
+pub const poses = pose_mod;
+/// The skeleton asset: byte format, reader, and refusals.
+pub const skeleton_asset = asset_mod;
 
 /// An entity posed against a skeleton.
 pub const Skeleton = components_mod.Skeleton;
@@ -192,4 +201,5 @@ comptime {
     // (`engine-zig-conventions.md` §13).
     _ = pose_mod;
     _ = components_mod;
+    _ = asset_mod;
 }

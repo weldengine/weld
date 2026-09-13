@@ -940,6 +940,9 @@ pub fn build(b: *std.Build) void {
         // the Kinesis module's opening: what `init` touches, the instance
         // store's guarantees, and that the interface wrapper delegates.
         .{ .path = "tests/kinesis/module_test.zig", .kinesis = true },
+        // the skeleton asset: what loads, and the four malformed
+        // hierarchies that are refused rather than repaired.
+        .{ .path = "tests/kinesis/skeleton_test.zig", .kinesis = true },
         // `Mat4` across the tier boundary: the layout it committed to before it
         // moved down into `foundation/math`, and the plugin C twin that layout
         // mirrors. Needs BOTH sides in one unit, which is what puts it here
