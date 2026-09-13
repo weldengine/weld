@@ -16,6 +16,8 @@ const anim = @import("weld_interfaces_animation");
 pub const BoneTransform = anim.BoneTransform;
 /// The pose of a skeleton at an instant.
 pub const PoseBuffer = anim.PoseBuffer;
+/// The model-space pose of a skeleton — one matrix per bone.
+pub const ModelPose = anim.ModelPose;
 
 /// Allocate a pose of `bone_count` bones, every bone at the identity.
 ///
@@ -35,6 +37,22 @@ pub fn alloc(gpa: std.mem.Allocator, bone_count: u32) !PoseBuffer {
 /// place for that length to be wrong.
 pub fn free(gpa: std.mem.Allocator, pose: PoseBuffer) void {
     gpa.free(pose.bones[0..pose.bone_count]);
+}
+
+/// Allocate a model-space pose of `bone_count` bones, every bone at the identity.
+///
+/// Identity for the same reason the local pose is: an uninitialised matrix is
+/// not a transform, and a consumer that reads one before the pass has run gets
+/// finite, plausible, wrong world positions rather than a crash.
+pub fn allocModel(gpa: std.mem.Allocator, bone_count: u32) !ModelPose {
+    const matrices = try gpa.alloc(anim.Mat4, bone_count);
+    for (matrices) |*m| m.* = anim.Mat4.identity;
+    return .{ .bone_count = bone_count, .matrices = matrices.ptr };
+}
+
+/// Release a model-space pose allocated by `allocModel`.
+pub fn freeModel(gpa: std.mem.Allocator, pose: ModelPose) void {
+    gpa.free(pose.matrices[0..pose.bone_count]);
 }
 
 /// Copy `src` over `dst`, bone for bone.
@@ -65,6 +83,16 @@ test "an allocated pose is the identity everywhere" {
         try testing.expectEqual(@as(f32, 0), b.rotation.x);
         try testing.expect(b.position.approxEql(anim.Vec3.zero, 0));
         try testing.expect(b.scale.approxEql(anim.Vec3.one, 0));
+    }
+}
+
+test "an allocated model pose is the identity everywhere" {
+    const gpa = testing.allocator;
+    const m = try allocModel(gpa, 4);
+    defer freeModel(gpa, m);
+    try testing.expectEqual(@as(usize, 4), m.constSlice().len);
+    for (m.constSlice()) |e| {
+        try testing.expect(e.approxEql(anim.Mat4.identity, 0));
     }
 }
 

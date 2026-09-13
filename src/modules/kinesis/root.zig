@@ -56,6 +56,8 @@ pub const sync = sync_mod;
 pub const Skeleton = components_mod.Skeleton;
 /// The pose of a skeleton at an instant.
 pub const PoseBuffer = anim.PoseBuffer;
+/// The model-space pose of a skeleton — one matrix per bone.
+pub const ModelPose = anim.ModelPose;
 /// One bone's transform inside a packed pose.
 pub const BoneTransform = anim.BoneTransform;
 /// A skeleton instance handle.
@@ -85,7 +87,7 @@ const Instance = struct {
     rig: RigId,
     bone_count: u32,
     local: anim.PoseBuffer,
-    model: anim.PoseBuffer,
+    model: anim.ModelPose,
     /// False once the slot has been destroyed; the slot itself is never
     /// reused, so a stale `SkeletonId` reads as dead rather than as somebody
     /// else's skeleton.
@@ -133,7 +135,7 @@ pub const KinesisModule = struct {
         for (self.instances.items) |*inst| {
             if (!inst.live) continue;
             pose_mod.free(self.gpa, inst.local);
-            pose_mod.free(self.gpa, inst.model);
+            pose_mod.freeModel(self.gpa, inst.model);
             inst.live = false;
         }
         self.instances.deinit(self.gpa);
@@ -190,7 +192,7 @@ pub const KinesisModule = struct {
 
         const local = try pose_mod.alloc(self.gpa, bone_count);
         errdefer pose_mod.free(self.gpa, local);
-        const model = try pose_mod.alloc(self.gpa, bone_count);
+        const model = try pose_mod.allocModel(self.gpa, bone_count);
 
         @memcpy(local.slice(), r.bind_local);
         skeleton_mod.forwardKinematics(r.parents, local, model);
@@ -255,7 +257,7 @@ pub const KinesisModule = struct {
     pub fn destroySkeleton(self: *Self, id: SkeletonId) void {
         const inst = self.instanceMut(id) orelse return;
         pose_mod.free(self.gpa, inst.local);
-        pose_mod.free(self.gpa, inst.model);
+        pose_mod.freeModel(self.gpa, inst.model);
         inst.live = false;
     }
 
@@ -287,10 +289,10 @@ pub const KinesisModule = struct {
         return inst.local;
     }
 
-    /// The MODEL-space pose of an instance — each bone relative to the
-    /// skeleton root, NOT to the world. The entity's `Transform` is composed by
-    /// the consumer.
-    pub fn modelPose(self: *Self, id: SkeletonId) ?anim.PoseBuffer {
+    /// The MODEL-space pose of an instance — one matrix per bone, each relative
+    /// to the skeleton root and NOT to the world. The entity's `Transform` is
+    /// composed by the consumer.
+    pub fn modelPose(self: *Self, id: SkeletonId) ?anim.ModelPose {
         const inst = self.instance(id) orelse return null;
         return inst.model;
     }

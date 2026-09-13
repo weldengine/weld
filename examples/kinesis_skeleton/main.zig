@@ -94,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
         const b: BoneIndex = @intCast(i);
         const p = rig.parents[i];
         const lp = local.constSlice()[i].position;
-        const mp = model.constSlice()[i].position;
+        const mp = model.constSlice()[i].translation();
         var parent_text: [8]u8 = undefined;
         const parent_str = if (p == asset.no_parent)
             "-"

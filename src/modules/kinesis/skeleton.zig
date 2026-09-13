@@ -10,12 +10,22 @@
 //! both of them wrong in a way that looks right on an entity sitting at the
 //! origin.
 //!
+//! **THE PASS PRODUCES MATRICES, AND THAT IS A CORRECTNESS DECISION.** It used
+//! to compose translation-rotation-scale into translation-rotation-scale, which
+//! accumulates the scales componentwise — right only when no rotation between
+//! two bones reorients the scale axes. Under a rotated child the accumulated
+//! scale has no frame, and the position derived from it is wrong BY THE SCALE
+//! FACTOR: measured, a root scaled `(3, 1, 1)` with a quarter-turned child put
+//! its grandchild at `(0, 3, 0)` where the matrix product puts it at
+//! `(0, 1, 0)`. A comment on that composition documented an approximation about
+//! SHEAR — which is genuinely inexpressible in TRS — and a documented
+//! approximation on one quantity does not cover an error on another. The
+//! position is exact in every case, shear included.
+//!
 //! **The pass is ONE ascending loop, and the asset invariant is what buys
 //! that.** A parent's index is strictly lower than its children's — refused at
 //! load otherwise — so by the time bone `i` is reached its parent is already
-//! final. No sort, no recursion, no visited set, and no second pass: running the
-//! loop twice is a fixed point, which is the mechanical form of the claim and
-//! what the acceptance suite asserts.
+//! final. No sort, no recursion, no visited set.
 
 const std = @import("std");
 
@@ -25,6 +35,7 @@ const asset_mod = @import("asset.zig");
 const BoneIndex = anim.BoneIndex;
 const BoneTransform = anim.BoneTransform;
 const PoseBuffer = anim.PoseBuffer;
+const ModelPose = anim.ModelPose;
 const Mat4 = anim.Mat4;
 const Vec3 = anim.Vec3;
 const Quat = anim.Quat;
@@ -96,33 +107,26 @@ pub const Rig = struct {
     }
 };
 
-/// Compose a parent's transform with a child's local one.
+/// The matrix of one bone's local transform.
 ///
-/// **This is the TRS composition, and it is an APPROXIMATION whenever a
-/// non-uniform scale meets a rotation that does not permute its axes.** The
-/// exact product of two transforms carrying non-uniform scale contains shear,
-/// and shear is not expressible as translation-rotation-scale — so an exact
-/// pipeline would have to carry matrices, which a pose cannot: a matrix does
-/// not blend, and blending is the operation the pose type exists for. Every
-/// skeletal animation system makes this trade; what is unusual is writing it
-/// down. The acceptance suite pins the choice with a case where the two forms
-/// visibly differ, so switching to matrices is a decision someone takes rather
-/// than a diff that slips through.
-pub fn compose(parent: BoneTransform, local: BoneTransform) BoneTransform {
-    return .{
-        .position = parent.position.add(parent.rotation.rotateVec3(local.position.mul(parent.scale))),
-        .rotation = parent.rotation.mul(local.rotation),
-        .scale = parent.scale.mul(local.scale),
-    };
+/// The single place a `BoneTransform` becomes a `Mat4`; everything downstream of
+/// the pass is matrices, so there is no second conversion to keep in step.
+pub fn localMatrix(b: BoneTransform) Mat4 {
+    return Mat4.fromTrs(b.position, b.rotation, b.scale);
 }
 
-/// Fill `model` with each bone relative to the skeleton ROOT, from `local`.
+/// Fill `model` with each bone's transform relative to the skeleton ROOT, from
+/// the local pose `local`.
 ///
-/// One ascending pass. The caller's three arrays must agree on length, and the
-/// hierarchy must satisfy the asset invariant — both are the loader's
-/// guarantees and both are asserted rather than re-derived here, because
-/// re-deriving them per frame is what the load-time refusal exists to avoid.
-pub fn forwardKinematics(parents: []const BoneIndex, local: PoseBuffer, model: PoseBuffer) void {
+/// One ascending pass, composing MATRICES: `model[i] = model[parent] · local[i]`.
+/// Matrix composition carries shear, which is what makes the result exact for
+/// every hierarchy rather than for the ones whose rotations happen to permute
+/// their parents' scale axes.
+///
+/// The caller's three arrays must agree on length and the hierarchy must satisfy
+/// the asset invariant — both are the loader's guarantees, asserted here rather
+/// than re-derived per frame.
+pub fn forwardKinematics(parents: []const BoneIndex, local: PoseBuffer, model: ModelPose) void {
     std.debug.assert(local.bone_count == model.bone_count);
     std.debug.assert(parents.len == local.bone_count);
 
@@ -130,14 +134,14 @@ pub fn forwardKinematics(parents: []const BoneIndex, local: PoseBuffer, model: P
     const dst = model.slice();
     if (dst.len == 0) return;
 
-    // The root takes its local transform unchanged: model space IS the root's
-    // space, so composing anything onto it would place the skeleton somewhere
-    // the entity transform is then asked to place it a second time.
-    dst[0] = src[0];
+    // The root takes its own local matrix: model space IS the root's space, so
+    // composing anything onto it would place the skeleton somewhere the entity
+    // transform is then asked to place it a second time.
+    dst[0] = localMatrix(src[0]);
     for (1..dst.len) |i| {
         const p = parents[i];
         std.debug.assert(p < i);
-        dst[i] = compose(dst[p], src[i]);
+        dst[i] = dst[p].mul(localMatrix(src[i]));
     }
 }
 
@@ -149,124 +153,37 @@ fn v3(x: f32, y: f32, z: f32) Vec3 {
     return Vec3.fromArray(.{ x, y, z });
 }
 
-test "compose places a child through its parent's rotation and scale" {
-    // Parent: two metres up, a quarter turn about +Z, scale (2, 3, 1).
-    // Child: one metre along its own +Y.
-    //
-    // The parent's scale acts on the child's offset FIRST, in the parent's own
-    // frame: (0,1,0) becomes (0,3,0), and the quarter turn about +Z sends +Y to
-    // -X, so the child lands three metres along -X of the parent.
-    const parent = BoneTransform{
-        .position = v3(0, 2, 0),
-        .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 2.0),
-        .scale = v3(2, 3, 1),
-    };
-    const child = BoneTransform{ .position = v3(0, 1, 0) };
-    const out = compose(parent, child);
-
-    try testing.expect(out.position.approxEql(v3(-3, 2, 0), 1e-5));
-    try testing.expect(out.scale.approxEql(v3(2, 3, 1), 1e-6));
-    try testing.expect(out.rotation.approxEql(parent.rotation, 1e-6));
-}
-
-test "composition applies the parent's rotation to the child's, in that order" {
-    // **Found by counter-factual: reversing the two operands changed nothing
-    // that any test observed.** A chain whose bones rotate about ONE axis, or
-    // whose children carry the identity, cannot see the order — quaternion
-    // multiplication commutes for parallel axes and trivially for the identity,
-    // and the acceptance chain has both properties. This fixture has neither.
-    const p = BoneTransform{ .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 2.0) };
-    const c = BoneTransform{ .rotation = Quat.fromAxisAngle(Vec3.unit_x, std.math.pi / 2.0) };
-    const got = compose(p, c);
-
-    // The oracle is SEQUENTIAL APPLICATION and not the same product written
-    // twice: rotating a vector by the child and then by the parent is what
-    // "the child's rotation expressed in the parent's frame" means, and it owes
-    // nothing to how `compose` spells it.
-    const v = v3(1, 2, 3);
-    try testing.expect(got.rotation.rotateVec3(v).approxEql(p.rotation.rotateVec3(c.rotation.rotateVec3(v)), 1e-5));
-
-    // The discrimination guard, without which the assertion above would also
-    // hold for the reversed order: the two orders must really differ on this
-    // fixture.
-    const reversed = c.rotation.mul(p.rotation);
-    try testing.expect(!reversed.rotateVec3(v).approxEql(got.rotation.rotateVec3(v), 1e-3));
-}
-
-test "the TRS composition is not the matrix product under sheared scale" {
-    // The contract this file states, pinned. A non-uniform parent scale under a
-    // rotation that does NOT permute its axes produces shear, and the TRS form
-    // cannot carry shear — so the two answers differ. The assertion is on the
-    // DIFFERENCE: what breaks if this test is removed is that a later change to
-    // matrix composition reads as a refactor instead of as the decision it is.
-    const parent = BoneTransform{
-        .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 4.0),
-        .scale = v3(3, 1, 1),
-    };
-    const child = BoneTransform{
-        .position = v3(1, 0, 0),
-        .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 4.0),
-    };
-
-    const trs = compose(parent, child);
-    const exact = Mat4.fromTrs(parent.position, parent.rotation, parent.scale)
-        .mul(Mat4.fromTrs(child.position, child.rotation, child.scale));
-
-    // Positions still agree — the offset passes through the same operations
-    // either way — which is what makes this test about the BASIS and not about
-    // arithmetic noise.
-    try testing.expect(trs.position.approxEql(exact.translation(), 1e-5));
-
-    // The basis does not. Column 1 of the exact product is the sheared image of
-    // +Y; the TRS form gives a rotated, axis-scaled one.
-    const trs_mat = Mat4.fromTrs(trs.position, trs.rotation, trs.scale);
-    try testing.expect(!trs_mat.axis(1).approxEql(exact.axis(1), 1e-3));
-}
-
-/// The model transform of bone `i`, resolved by walking UP to the root.
+/// The model matrix of bone `i`, resolved by walking UP to the root.
 ///
-/// An oracle that owes the pass nothing: it is defined by the hierarchy alone
-/// and evaluates in whatever order recursion reaches, so it cannot agree with a
-/// pass that composes the wrong things or visits in the wrong order. The
-/// ascending loop's OWN idempotence proves nothing — it is a pure function of
-/// its inputs when the two buffers are distinct, so running it twice is
-/// bit-identical whatever its body does, including a body that copies.
+/// An oracle that owes the pass nothing: it is defined by the hierarchy alone and
+/// evaluates in whatever order recursion reaches, so it cannot agree with a pass
+/// that composes the wrong things or visits in the wrong order. The ascending
+/// loop's OWN idempotence proves nothing — it is a pure function of its inputs, so
+/// running it twice is bit-identical whatever its body does, including a body that
+/// copies.
 fn modelByWalkingUp(
     parents: []const BoneIndex,
     local: []const BoneTransform,
     i: usize,
-) BoneTransform {
-    if (parents[i] == asset_mod.no_parent) return local[i];
-    return compose(modelByWalkingUp(parents, local, parents[i]), local[i]);
-}
-
-fn expectSameTransform(want: BoneTransform, got: BoneTransform) !void {
-    // All TEN scalars. Comparing a subset is how a rotation-order defect hides:
-    // `rotation.x/y/z` are exactly the components a wrong composition moves
-    // while `w` and the position can stay plausible.
-    try testing.expect(got.position.approxEql(want.position, 1e-5));
-    try testing.expect(got.scale.approxEql(want.scale, 1e-5));
-    try testing.expect(got.rotation.approxEql(want.rotation, 1e-5));
+) Mat4 {
+    const own = localMatrix(local[i]);
+    if (parents[i] == asset_mod.no_parent) return own;
+    return modelByWalkingUp(parents, local, parents[i]).mul(own);
 }
 
 test "forward kinematics agrees with resolving each bone up to the root" {
-    // **This replaces a test that could not fail.** Its predecessor ran the
-    // pass twice and asserted bit equality, on the stated ground that a wrong
-    // visiting order would move something on the second run. It would not: the
-    // pass is a pure function of `(parents, local)`, so idempotence holds for
-    // any body at all — a body reduced to `dst[i] = src[i]` passed it.
     const gpa = testing.allocator;
     const pose = @import("pose.zig");
 
     const parents = [_]BoneIndex{ asset_mod.no_parent, 0, 1, 1, 3, 0 };
     const local = try pose.alloc(gpa, parents.len);
     defer pose.free(gpa, local);
-    const model = try pose.alloc(gpa, parents.len);
-    defer pose.free(gpa, model);
+    const model = try pose.allocModel(gpa, parents.len);
+    defer pose.freeModel(gpa, model);
 
-    // Rotations about DIFFERENT axes down the chain, and non-uniform scales:
-    // a chain turning about one axis cannot see a composition order, and a
-    // uniform scale cannot see which side the scale is applied on.
+    // Rotations about DIFFERENT axes down the chain, and non-uniform scales: a
+    // chain turning about one axis cannot see a composition order, and a uniform
+    // scale cannot see which side the scale is applied on.
     const axes = [_]Vec3{ Vec3.unit_x, Vec3.unit_y, Vec3.unit_z, v3(1, 1, 0), v3(0, 1, 1), v3(1, 0, 1) };
     for (local.slice(), 0..) |*b, i| {
         const f: f32 = @floatFromInt(i + 1);
@@ -280,16 +197,78 @@ test "forward kinematics agrees with resolving each bone up to the root" {
     forwardKinematics(&parents, local, model);
     for (model.constSlice(), 0..) |got, i| {
         errdefer std.debug.print("bone {d} diverged from the walk-up oracle\n", .{i});
-        try expectSameTransform(modelByWalkingUp(&parents, local.constSlice(), i), got);
+        try testing.expect(got.approxEql(modelByWalkingUp(&parents, local.constSlice(), i), 1e-4));
     }
 
     // Non-vacuity: the oracle must not agree with everything. A pass reduced to
-    // a copy — the mutant that defeated the predecessor — differs from it on at
-    // least one bone of this fixture.
+    // converting each local transform on its own — the mutant a weaker test lets
+    // through — differs from it on at least one bone of this fixture.
     var disagrees = false;
-    for (local.constSlice(), 0..) |copied, i| {
-        const walked = modelByWalkingUp(&parents, local.constSlice(), i);
-        if (!walked.position.approxEql(copied.position, 1e-5)) disagrees = true;
+    for (local.constSlice(), 0..) |b, i| {
+        if (!localMatrix(b).approxEql(modelByWalkingUp(&parents, local.constSlice(), i), 1e-4)) {
+            disagrees = true;
+        }
     }
     try testing.expect(disagrees);
+}
+
+test "an accumulated scale does not survive a rotated child" {
+    // **THE DEFECT THAT SENT THIS PASS TO MATRICES, pinned.** The root is scaled
+    // on +X alone and the child is turned a quarter turn about +Z, so the
+    // grandchild's own +X offset arrives along the root's +Y — an axis the root's
+    // scale does NOT stretch. A translation-rotation-scale composition multiplies
+    // the scales componentwise and has no way to know that, so it stretched the
+    // offset by three; the matrix product does not.
+    const gpa = testing.allocator;
+    const pose = @import("pose.zig");
+
+    const parents = [_]BoneIndex{ asset_mod.no_parent, 0, 1 };
+    const local = try pose.alloc(gpa, 3);
+    defer pose.free(gpa, local);
+    const model = try pose.allocModel(gpa, 3);
+    defer pose.freeModel(gpa, model);
+
+    local.slice()[0] = .{ .scale = v3(3, 1, 1) };
+    local.slice()[1] = .{ .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 2.0) };
+    local.slice()[2] = .{ .position = v3(1, 0, 0) };
+
+    forwardKinematics(&parents, local, model);
+    const got = model.constSlice()[2].translation();
+    try testing.expect(got.approxEql(v3(0, 1, 0), 1e-5));
+
+    // The discrimination guard: the wrong answer and the right one differ by the
+    // whole scale factor, so a fixture where they coincided would pin nothing.
+    try testing.expect(!got.approxEql(v3(0, 3, 0), 1e-2));
+}
+
+test "composition applies the parent's transform to the child's, in that order" {
+    // Order, on two rotations about non-parallel axes — quaternion and matrix
+    // products both commute for parallel axes and trivially for the identity,
+    // so a chain with either property cannot see an inversion.
+    const gpa = testing.allocator;
+    const pose = @import("pose.zig");
+
+    const parents = [_]BoneIndex{ asset_mod.no_parent, 0 };
+    const local = try pose.alloc(gpa, 2);
+    defer pose.free(gpa, local);
+    const model = try pose.allocModel(gpa, 2);
+    defer pose.freeModel(gpa, model);
+
+    local.slice()[0] = .{ .rotation = Quat.fromAxisAngle(Vec3.unit_z, std.math.pi / 2.0) };
+    local.slice()[1] = .{
+        .position = v3(1, 2, 3),
+        .rotation = Quat.fromAxisAngle(Vec3.unit_x, std.math.pi / 2.0),
+    };
+    forwardKinematics(&parents, local, model);
+
+    // The oracle is SEQUENTIAL APPLICATION: the child's offset expressed in the
+    // parent's frame is the parent rotating what the child produced, and it owes
+    // nothing to how the pass spells its product.
+    const parent_rot = local.constSlice()[0].rotation;
+    const want = parent_rot.rotateVec3(local.constSlice()[1].position);
+    try testing.expect(model.constSlice()[1].translation().approxEql(want, 1e-5));
+
+    // Discrimination guard: the reversed order really differs on this fixture.
+    const reversed = localMatrix(local.constSlice()[1]).mul(localMatrix(local.constSlice()[0]));
+    try testing.expect(!reversed.translation().approxEql(want, 1e-3));
 }

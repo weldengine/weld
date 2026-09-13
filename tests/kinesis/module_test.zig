@@ -371,7 +371,7 @@ test "the registered system drives the pass through a dispatched frame" {
     module.localPose(id).?.slice()[1].position = anim.Vec3.fromArray(.{ 0, 5, 0 });
     try testing.expectApproxEqAbs(
         @as(f32, 0),
-        module.modelPose(id).?.constSlice()[1].position.data[1],
+        module.modelPose(id).?.constSlice()[1].translation().data[1],
         1e-6,
     );
 
@@ -379,7 +379,7 @@ test "the registered system drives the pass through a dispatched frame" {
 
     try testing.expectApproxEqAbs(
         @as(f32, 5),
-        module.modelPose(id).?.constSlice()[1].position.data[1],
+        module.modelPose(id).?.constSlice()[1].translation().data[1],
         1e-6,
     );
 }

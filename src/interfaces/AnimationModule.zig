@@ -132,6 +132,44 @@ pub const PoseBuffer = struct {
     }
 };
 
+/// The MODEL-space pose of a skeleton — one matrix per bone, each bone relative
+/// to the skeleton root.
+///
+/// **MATRICES AND NOT TRS, AND THE REASON IS CORRECTNESS RATHER THAN
+/// CONVENIENCE.** Composing two transforms as translation-rotation-scale
+/// accumulates the scales componentwise, which is only right when no rotation
+/// between them reorients the scale axes. Under a rotated child the accumulated
+/// scale becomes a quantity with no frame, and the position derived from it is
+/// wrong by the scale factor — measured, a root scaled `(3, 1, 1)` with a
+/// quarter-turned child puts its grandchild at `(0, 3, 0)` where the matrix
+/// product puts it at `(0, 1, 0)`. That is a bone metres out of place, not a
+/// rounding difference, and no approximation note covers it: the earlier one
+/// was written about SHEAR, which really is inexpressible in TRS, while the
+/// position is exact and expressible in every case.
+///
+/// **The local pose stays `PoseBuffer` and that is not a compromise.** TRS is
+/// what BLENDS, and blending is the only reason the pose type exists. Model
+/// space is never blended — it is CONSUMED, by the skin-matrix build and by a
+/// socket read — so the chain runs `local TRS → forward kinematics → model Mat4
+/// → × inverse bind → skin Mat4` with no conversion in the middle. The same
+/// split the established engines draw for the same reason.
+pub const ModelPose = struct {
+    /// How many bones `matrices` addresses.
+    bone_count: u32 = 0,
+    /// The matrices, or undefined when `bone_count` is zero.
+    matrices: [*]Mat4 = undefined,
+
+    /// The matrices as a slice.
+    pub fn slice(self: ModelPose) []Mat4 {
+        return self.matrices[0..self.bone_count];
+    }
+
+    /// The matrices as a read-only slice.
+    pub fn constSlice(self: ModelPose) []const Mat4 {
+        return self.matrices[0..self.bone_count];
+    }
+};
+
 /// The canonical role vocabulary a `SkeletonProfile` maps onto bone indices.
 ///
 /// **APPEND-ONLY: an ordinal is never reassigned, and a retired role keeps

@@ -8,12 +8,30 @@
 //! asserted a layout for it and none had measured one. What is measured here is
 //! the number the ruling rests on.
 //!
+//! **Forward kinematics writes MATRICES, because that is what the pass does.**
+//! Composing translation-rotation-scale into translation-rotation-scale
+//! accumulates the scales componentwise and puts a bone out of place under a
+//! rotated child, so the engine's pass produces `Mat4` and the four arms here
+//! do the same: each reads its own layout and writes the same matrix output.
+//! What is compared is therefore the cost of READING each layout, which is the
+//! question the layout ruling is about.
+//!
 //! **The two operations are chosen because they disagree.** A pose BLEND is
 //! bone-by-bone with no dependency between bones, so the columns are
 //! independent and the SoA forms can stream them. FORWARD KINEMATICS is
 //! serialised by the parent → child dependency and reads a whole transform per
-//! bone, which is what AoS gives in one cache line. A ruling taken on blend
-//! alone is a ruling taken on half the evidence.
+//! bone, which is what AoS gives in one cache line.
+//!
+//! **THE KINEMATICS ARM NO LONGER DISCRIMINATES, and reporting it anyway is
+//! deliberate.** When the pass composed translation-rotation-scale it separated
+//! the layouts by 5 to 7 %; now that it composes matrices, each bone costs a
+//! `fromTrs` and a 4×4 product, and that arithmetic dominates the cost of
+//! reading any of the four. Measured over three runs the ratios straddle 1.0
+//! — 0.87 to 1.15 — and the sign flips between bone counts inside a single run,
+//! so NO verdict is registered there. The blend, over the same three runs, holds
+//! 0.898 to 0.909 for the interleaved-vector form against every other. **The
+//! ruling therefore rests on the blend, and this arm is what says the other half
+//! of the evidence has become silent rather than agreeing.**
 //!
 //! **Three layouts, not two, and the third is why.** The corpus defines SoA as
 //! "three arrays, one per component", and at `Vec3`/`Quat` element width that
@@ -49,6 +67,7 @@ const math = foundation.math;
 const Vec3 = math.Vec3;
 const Quatf = math.Quatf;
 const Transform = core.ecs.components.Transform;
+const Mat4 = math.Mat4f;
 
 const bone_counts = [_]usize{ 32, 64, 128 };
 const rounds = 9;
@@ -168,20 +187,14 @@ const Aos = struct {
         }
     }
 
-    /// Same composition as `Soa3.fk`, operation for operation.
-    fn fk(local: Aos, world: Aos, parents: []const u16) void {
-        world.t[0] = local.t[0];
+    /// Same composition as every other arm, operation for operation.
+    fn fk(local: Aos, out: []Mat4, parents: []const u16) void {
+        const t = local.t[0];
+        out[0] = Mat4.fromTrs(Vec3.fromArray(t.pos), Quatf.fromArray(t.rot), Vec3.fromArray(t.scale));
         for (1..local.t.len) |i| {
-            const p = world.t[parents[i]];
             const l = local.t[i];
-            const pr = Quatf.fromArray(p.rot);
-            const ps = Vec3.fromArray(p.scale);
-            const rotated = pr.rotateVec3(Vec3.fromArray(l.pos).mul(ps));
-            world.t[i] = .{
-                .pos = Vec3.fromArray(p.pos).add(rotated).toArray(),
-                .rot = pr.mul(Quatf.fromArray(l.rot)).toArray(),
-                .scale = ps.mul(Vec3.fromArray(l.scale)).toArray(),
-            };
+            const own = Mat4.fromTrs(Vec3.fromArray(l.pos), Quatf.fromArray(l.rot), Vec3.fromArray(l.scale));
+            out[i] = out[parents[i]].mul(own);
         }
     }
 
@@ -226,16 +239,12 @@ const AosV = struct {
         }
     }
 
-    fn fk(local: AosV, world: AosV, parents: []const u16) void {
-        world.t[0] = local.t[0];
+    fn fk(local: AosV, out: []Mat4, parents: []const u16) void {
+        const t = local.t[0];
+        out[0] = Mat4.fromTrs(t.pos, t.rot, t.scale);
         for (1..local.t.len) |i| {
-            const p = world.t[parents[i]];
             const l = local.t[i];
-            world.t[i] = .{
-                .pos = p.pos.add(p.rot.rotateVec3(l.pos.mul(p.scale))),
-                .rot = p.rot.mul(l.rot),
-                .scale = p.scale.mul(l.scale),
-            };
+            out[i] = out[parents[i]].mul(Mat4.fromTrs(l.pos, l.rot, l.scale));
         }
     }
 
@@ -282,18 +291,11 @@ const Soa3 = struct {
         for (a.rot, b.rot, out.rot) |x, y, *o| o.* = nlerp(x, y, t);
     }
 
-    fn fk(local: Soa3, world: Soa3, parents: []const u16) void {
-        world.pos[0] = local.pos[0];
-        world.rot[0] = local.rot[0];
-        world.scale[0] = local.scale[0];
+    fn fk(local: Soa3, out: []Mat4, parents: []const u16) void {
+        out[0] = Mat4.fromTrs(local.pos[0], local.rot[0], local.scale[0]);
         for (1..local.pos.len) |i| {
-            const pi = parents[i];
-            const ps = world.scale[pi];
-            const pr = world.rot[pi];
-            const rotated = pr.rotateVec3(local.pos[i].mul(ps));
-            world.pos[i] = world.pos[pi].add(rotated);
-            world.rot[i] = pr.mul(local.rot[i]);
-            world.scale[i] = ps.mul(local.scale[i]);
+            const own = Mat4.fromTrs(local.pos[i], local.rot[i], local.scale[i]);
+            out[i] = out[parents[i]].mul(own);
         }
     }
 
@@ -374,30 +376,19 @@ const SoaCh = struct {
         }
     }
 
-    fn fk(local: SoaCh, world: SoaCh, parents: []const u16) void {
-        inline for (@typeInfo(SoaCh).@"struct".fields) |f| {
-            @field(world, f.name)[0] = @field(local, f.name)[0];
-        }
+    fn fk(local: SoaCh, out: []Mat4, parents: []const u16) void {
+        out[0] = Mat4.fromTrs(
+            Vec3.fromArray(.{ local.px[0], local.py[0], local.pz[0] }),
+            .{ .x = local.rx[0], .y = local.ry[0], .z = local.rz[0], .w = local.rw[0] },
+            Vec3.fromArray(.{ local.sx[0], local.sy[0], local.sz[0] }),
+        );
         for (1..local.px.len) |i| {
-            const pi = parents[i];
-            const pr = Quatf{ .x = world.rx[pi], .y = world.ry[pi], .z = world.rz[pi], .w = world.rw[pi] };
-            const scaled = Vec3.fromArray(.{
-                world.sx[pi] * local.px[i],
-                world.sy[pi] * local.py[i],
-                world.sz[pi] * local.pz[i],
-            });
-            const rotated = pr.rotateVec3(scaled);
-            world.px[i] = world.px[pi] + rotated.data[0];
-            world.py[i] = world.py[pi] + rotated.data[1];
-            world.pz[i] = world.pz[pi] + rotated.data[2];
-            const q = pr.mul(.{ .x = local.rx[i], .y = local.ry[i], .z = local.rz[i], .w = local.rw[i] });
-            world.rx[i] = q.x;
-            world.ry[i] = q.y;
-            world.rz[i] = q.z;
-            world.rw[i] = q.w;
-            world.sx[i] = world.sx[pi] * local.sx[i];
-            world.sy[i] = world.sy[pi] * local.sy[i];
-            world.sz[i] = world.sz[pi] * local.sz[i];
+            const own = Mat4.fromTrs(
+                Vec3.fromArray(.{ local.px[i], local.py[i], local.pz[i] }),
+                .{ .x = local.rx[i], .y = local.ry[i], .z = local.rz[i], .w = local.rw[i] },
+                Vec3.fromArray(.{ local.sx[i], local.sy[i], local.sz[i] }),
+            );
+            out[i] = out[parents[i]].mul(own);
         }
     }
 
@@ -434,6 +425,16 @@ const Row = struct {
 fn median(xs: []f64) f64 {
     std.mem.sort(f64, xs, {}, std.sort.asc(f64));
     return xs[xs.len / 2];
+}
+
+/// Checksum over a matrix output, shaped like the four layout checksums so the
+/// cross-layout agreement reads the same way for both operations.
+fn matrixChecksum(out: []const Mat4) f64 {
+    var acc: f64 = 0;
+    for (out) |m| {
+        acc += @as(f64, m.m[0]) + @as(f64, m.m[5]) + @as(f64, m.m[12]) + @as(f64, m.m[13]);
+    }
+    return acc;
 }
 
 const Op = enum { blend, fk };
@@ -485,6 +486,16 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     a_sc.fill(1);
     b_sc.fill(2);
 
+    // One matrix output per layout: the four are timed and checksummed apart,
+    // so they cannot share a buffer.
+    const mat_out = try gpa.alloc(Mat4, n * 4);
+    defer gpa.free(mat_out);
+    const m_aos = mat_out[0 * n ..][0..n];
+    const m_av = mat_out[1 * n ..][0..n];
+    const m_s3 = mat_out[2 * n ..][0..n];
+    const m_sc = mat_out[3 * n ..][0..n];
+    for (mat_out) |*m| m.* = Mat4.identity;
+
     var aos_rounds: [rounds]f64 = undefined;
     var aosv_rounds: [rounds]f64 = undefined;
     var s3_rounds: [rounds]f64 = undefined;
@@ -502,10 +513,10 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
                 SoaCh.blend(a_sc, b_sc, o_sc, 0.5);
             },
             .fk => {
-                Aos.fk(a_aos, o_aos, parents);
-                AosV.fk(a_av, o_av, parents);
-                Soa3.fk(a_s3, o_s3, parents);
-                SoaCh.fk(a_sc, o_sc, parents);
+                Aos.fk(a_aos, m_aos, parents);
+                AosV.fk(a_av, m_av, parents);
+                Soa3.fk(a_s3, m_s3, parents);
+                SoaCh.fk(a_sc, m_sc, parents);
             },
         }
     }
@@ -517,44 +528,56 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
         for (0..iters_per_round) |k| {
             switch (op) {
                 .blend => Aos.blend(a_aos, b_aos, o_aos, alphaAt(k)),
-                .fk => Aos.fk(a_aos, o_aos, parents),
+                .fk => Aos.fk(a_aos, m_aos, parents),
             }
         }
         aos_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksums[0] += o_aos.checksum();
+        checksums[0] += switch (op) {
+            .blend => o_aos.checksum(),
+            .fk => matrixChecksum(m_aos),
+        };
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
             const alpha = @as(f32, @floatFromInt(k % 64)) / 64.0;
             switch (op) {
                 .blend => AosV.blend(a_av, b_av, o_av, alpha),
-                .fk => AosV.fk(a_av, o_av, parents),
+                .fk => AosV.fk(a_av, m_av, parents),
             }
         }
         aosv_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksums[1] += o_av.checksum();
+        checksums[1] += switch (op) {
+            .blend => o_av.checksum(),
+            .fk => matrixChecksum(m_av),
+        };
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
             const alpha = @as(f32, @floatFromInt(k % 64)) / 64.0;
             switch (op) {
                 .blend => Soa3.blend(a_s3, b_s3, o_s3, alpha),
-                .fk => Soa3.fk(a_s3, o_s3, parents),
+                .fk => Soa3.fk(a_s3, m_s3, parents),
             }
         }
         s3_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksums[2] += o_s3.checksum();
+        checksums[2] += switch (op) {
+            .blend => o_s3.checksum(),
+            .fk => matrixChecksum(m_s3),
+        };
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
             const alpha = @as(f32, @floatFromInt(k % 64)) / 64.0;
             switch (op) {
                 .blend => SoaCh.blend(a_sc, b_sc, o_sc, alpha),
-                .fk => SoaCh.fk(a_sc, o_sc, parents),
+                .fk => SoaCh.fk(a_sc, m_sc, parents),
             }
         }
         sc_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksums[3] += o_sc.checksum();
+        checksums[3] += switch (op) {
+            .blend => o_sc.checksum(),
+            .fk => matrixChecksum(m_sc),
+        };
     }
 
     return .{
@@ -676,7 +699,10 @@ pub fn main(init: std.process.Init) !void {
         \\Mode: {s}. {d} interleaved rounds of {d} iterations, median per round.
         \\Per-bone footprint: AoS {d} B, AoS-vec {d} B, SoA-3 {d} B, SoA-channel 40 B.
         \\
-        \\Decides a design; no target to clear.
+        \\Decides a design; no target to clear. The kinematics arm composes MATRICES,
+        \\whose arithmetic dominates the cost of reading any layout: its ratios straddle
+        \\1.0 and its sign flips between bone counts, so no verdict is registered there.
+        \\The ruling rests on the blend.
         \\
     , .{ @tagName(builtin.mode), rounds, iters_per_round, @sizeOf(Transform), @sizeOf(VecPose), soa3_bytes });
     try emitMarkdown(gpa, &buf, "Blend (no dependency between bones)", &blend_rows);

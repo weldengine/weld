@@ -273,6 +273,19 @@ const chain_model = [3]BoneTransform{
     },
 };
 
+/// The same three, as the MATRICES the pass now produces.
+///
+/// Expressible as a translation-rotation-scale triple only because this chain's
+/// leaf carries the identity rotation — which is exactly the family where the
+/// two composition forms coincide, and exactly why this fixture could not have
+/// caught the defect that sent the pass to matrices. The case that does is in
+/// `skeleton.zig`, beside the pass.
+fn chainModelMatrices() [3]Mat4 {
+    var out: [3]Mat4 = undefined;
+    for (&out, chain_model) |*m, t| m.* = Mat4.fromTrs(t.position, t.rotation, t.scale);
+    return out;
+}
+
 const Fixture = struct {
     world: core.ecs.World,
     scheduler: core.ecs.SystemScheduler,
@@ -334,11 +347,12 @@ test "world transforms of a three-level chain are correct" {
     const id = try module.instantiate(rig);
 
     const model = module.modelPose(id).?;
-    for (model.constSlice(), chain_model, 0..) |got, want, i| {
+    // ALL SIXTEEN elements of each bone, not a position: the matrix is what the
+    // skin build and the socket read consume, and a position alone leaves the
+    // basis — where the scale and the rotation live — unchecked.
+    for (model.constSlice(), chainModelMatrices(), 0..) |got, want, i| {
         errdefer std.debug.print("bone {d} diverged\n", .{i});
-        try testing.expect(got.position.approxEql(want.position, 1e-5));
-        try testing.expect(got.scale.approxEql(want.scale, 1e-5));
-        try testing.expect(got.rotation.approxEql(want.rotation, 1e-5));
+        try testing.expect(got.approxEql(want, 1e-4));
     }
 
     // And the LOCAL pose is untouched by the pass — the two spaces are two
@@ -398,8 +412,9 @@ test "inverse bind pose composed with the bind pose yields identity" {
     const epsilon: f32 = 1e-4;
     for (module.modelPose(id).?.constSlice(), r.inverse_bind, 0..) |m, inv, i| {
         errdefer std.debug.print("bone {d} does not round-trip\n", .{i});
-        const skin = Mat4.fromTrs(m.position, m.rotation, m.scale).mul(inv);
-        try testing.expect(skin.approxEql(Mat4.identity, epsilon));
+        // No conversion: the pass already produced the matrix the skin build
+        // multiplies, which is the whole point of model space being matrices.
+        try testing.expect(m.mul(inv).approxEql(Mat4.identity, epsilon));
     }
 }
 
@@ -419,7 +434,7 @@ test "a fresh instance stands in its bind pose, not at the origin" {
     // origin is what tells the two apart.
     const head = module.localPose(id).?.constSlice()[2];
     try testing.expect(head.position.approxEql(v3(0, 1, 0), 1e-6));
-    try testing.expect(!module.modelPose(id).?.constSlice()[2].position.approxEql(Vec3.zero, 1e-3));
+    try testing.expect(!module.modelPose(id).?.constSlice()[2].translation().approxEql(Vec3.zero, 1e-3));
 }
 
 test "a profile kind or provenance outside its enum is refused" {
