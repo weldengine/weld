@@ -200,6 +200,35 @@ pub fn build(b: *std.Build) void {
     interfaces_physics_module.addImport("weld_forge", forge_api_module);
     interfaces_physics_module.addImport("weld_core", core_module);
 
+    // `src/interfaces/AnimationModule.zig`, the Tier 1 animation interface. NOT
+    // FROZEN: it carries no `WELD_ANIMATION_PROTOCOL_VERSION` and no comptime surface
+    // guard, and its own test attests that absence. It declares the types its signatures
+    // name — the pose buffer, the bone addressing, the IK request — which is where the
+    // owner document puts them, so the module implements against this file rather than
+    // the reverse. `weld_core` for `ModuleContext` and the Tier 0 `Transform`,
+    // `foundation` for the math types.
+    const interfaces_animation_module = b.createModule(.{
+        .root_source_file = b.path("src/interfaces/AnimationModule.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    interfaces_animation_module.addImport("weld_core", core_module);
+    interfaces_animation_module.addImport("foundation", foundation_module);
+
+    // `weld_kinesis`: the Tier 1 animation module. It owns the skeleton
+    // instances and their poses OUTSIDE the ECS — a pose is variable-length and a
+    // component is POD — and the `Skeleton` component carries a handle into that
+    // storage. `weld_core` for `ModuleContext` and the ECS, `foundation` for the math,
+    // and the interface file for the types its own entries are typed against.
+    const kinesis_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/kinesis/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kinesis_module.addImport("weld_core", core_module);
+    kinesis_module.addImport("foundation", foundation_module);
+    kinesis_module.addImport("weld_interfaces_animation", interfaces_animation_module);
+
     // plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -460,6 +489,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(forge_sync_tests).step);
     const forge_module_tests = b.addTest(.{ .root_module = forge_module });
     test_step.dependOn(&b.addRunArtifact(forge_module_tests).step);
+
+    // inline tests inside src/modules/kinesis/** and the animation
+    // interface's own: the not-frozen attestation, the append-only role ordinals, and
+    // the pose buffer's allocation and lifetime.
+    const kinesis_tests = b.addTest(.{ .root_module = kinesis_module });
+    test_step.dependOn(&b.addRunArtifact(kinesis_tests).step);
+    const interfaces_animation_tests = b.addTest(.{ .root_module = interfaces_animation_module });
+    test_step.dependOn(&b.addRunArtifact(interfaces_animation_tests).step);
 
     // the interface file's own tests: the attestation that no protocol
     // version is declared yet, and that the three signatures follow the world scalar.
@@ -863,6 +900,9 @@ pub fn build(b: *std.Build) void {
         forge: bool = false,
         /// when set, imports the `foundation` module (simd).
         foundation: bool = false,
+        /// when set, imports the Kinesis module and the animation interface it
+        /// is typed against.
+        kinesis: bool = false,
         /// when set, imports `weld_etch` (the scene cook driver). A
         /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
         /// the `corpus_facade` baggage `.etch` carries.
@@ -897,6 +937,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/physics/physics_service_test.zig", .forge = true, .physics_service = true },
         // the slice, run in both directions.
         .{ .path = "tests/physics/arena_slice_test.zig", .arena_slice = true },
+        // the Kinesis module's opening: what `init` touches, the instance
+        // store's guarantees, and that the interface wrapper delegates.
+        .{ .path = "tests/kinesis/module_test.zig", .kinesis = true },
         // `Mat4` across the tier boundary: the layout it committed to before it
         // moved down into `foundation/math`, and the plugin C twin that layout
         // mirrors. Needs BOTH sides in one unit, which is what puts it here
@@ -1172,6 +1215,11 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
         }
         if (spec.foundation) {
+            t_mod.addImport("foundation", foundation_module);
+        }
+        if (spec.kinesis) {
+            t_mod.addImport("weld_kinesis", kinesis_module);
+            t_mod.addImport("weld_interfaces_animation", interfaces_animation_module);
             t_mod.addImport("foundation", foundation_module);
         }
         if (spec.scene) {
