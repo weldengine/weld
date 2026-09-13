@@ -1,0 +1,21 @@
+.{
+    .name = .weld_bone_ref_counterproof,
+    .version = "0.0.0",
+    .fingerprint = 0x5d2b42d3f6ca5137, // suggested by Zig at creation, immutable
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .weld = .{
+            // Local path — the monolithic repo (cf. ARCH-017), three levels up
+            // from tests/kinesis/bone_ref_counterproof/.
+            .path = "../../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "control.zig",
+        "case_literal_name.zig",
+        "case_raw_index.zig",
+        "case_role_as_int.zig",
+    },
+}

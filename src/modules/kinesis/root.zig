@@ -30,6 +30,7 @@ const pose_mod = @import("pose.zig");
 const components_mod = @import("components.zig");
 const asset_mod = @import("asset.zig");
 const skeleton_mod = @import("skeleton.zig");
+const bone_ref_mod = @import("bone_ref.zig");
 
 /// The ECS components this module registers.
 pub const components = components_mod;
@@ -45,6 +46,8 @@ pub const poses = pose_mod;
 pub const skeleton_asset = asset_mod;
 /// The runtime hierarchy and its forward kinematics.
 pub const skeleton = skeleton_mod;
+/// Bone addressing — the one path from a `BoneRef` to an index.
+pub const bone_ref = bone_ref_mod;
 
 /// An entity posed against a skeleton.
 pub const Skeleton = components_mod.Skeleton;
@@ -229,6 +232,17 @@ pub const KinesisModule = struct {
         inst.live = false;
     }
 
+    /// Resolve a bone reference against an instance's rig — the ONE resolution
+    /// path.
+    ///
+    /// A role the profile does not map resolves to ABSENCE, never to a
+    /// neighbouring bone: a solver that cannot find its chain deactivates
+    /// instead of moving the wrong one.
+    pub fn resolveBone(self: *Self, id: SkeletonId, ref: anim.BoneRef) ?BoneIndex {
+        const inst = self.instance(id) orelse return null;
+        return bone_ref_mod.resolveBone(self.rigs.items[inst.rig], ref);
+    }
+
     /// How many bones an instance holds; zero for a stale or unknown id.
     ///
     /// Zero is not ambiguous here and that is why it is admissible where it was
@@ -275,4 +289,5 @@ comptime {
     _ = components_mod;
     _ = asset_mod;
     _ = skeleton_mod;
+    _ = bone_ref_mod;
 }

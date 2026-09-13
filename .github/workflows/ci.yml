@@ -535,6 +535,20 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build ecs-access-counterproof -Dcpu=${{ env.ZIG_CPU }}
 
+      # The bone-addressing counter-proofs: three fixtures that must NOT compile
+      # and one that must. Same arbitration as the step above — it answers a
+      # property of the SOURCE, whether the addressing type is imposed at the
+      # resolution entry, so one cell covers the matrix.
+      #
+      # Its marks are distinct per case on purpose: two of the three refusals
+      # share a prefix, and matching only that would let either stand in for the
+      # other. Both halves were shown to redden by counter-factual before this
+      # line was written — a fixture made to compile, and a mark made not to
+      # match.
+      - name: zig build bone-ref-counterproof
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build bone-ref-counterproof -Dcpu=${{ env.ZIG_CPU }}
+
       # The zero-cost claim, read in the emitted assembly rather than asserted:
       # the two witness functions must be one body, or the same instructions one
       # by one. A property of the emitted CODE, so one cell — and it pins

@@ -33,6 +33,7 @@ const ignored_path_substrings = [_][]const u8{
     "tests/lint/bad",
     "tests/lint/commit",
     "tests/core/ecs/access_counterproof",
+    "tests/kinesis/bone_ref_counterproof",
 };
 
 /// Append every `.zig` file reachable from `path` to `out`. `path` may

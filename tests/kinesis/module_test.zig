@@ -69,14 +69,19 @@ fn encodeFlatRig(gpa: std.mem.Allocator, n: u16) ![]u8 {
     const parents = try gpa.alloc(BoneIndex, n);
     defer gpa.free(parents);
     const names = try gpa.alloc([]const u8, n);
-    defer gpa.free(names);
+    defer {
+        for (names) |nm| gpa.free(nm);
+        gpa.free(names);
+    }
     const bind = try gpa.alloc(BoneTransform, n);
     defer gpa.free(bind);
     const inv = try gpa.alloc(Mat4, n);
     defer gpa.free(inv);
     for (0..n) |i| {
         parents[i] = if (i == 0) asset.no_parent else 0;
-        names[i] = "bone";
+        // Distinct: the loader refuses two bones of one name, because a name
+        // that addresses two bones addresses neither.
+        names[i] = try std.fmt.allocPrint(gpa, "bone{d}", .{i});
         bind[i] = .{};
         inv[i] = Mat4.identity;
     }

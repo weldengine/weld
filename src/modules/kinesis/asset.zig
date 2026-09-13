@@ -84,6 +84,8 @@ pub const ParseError = error{
     ProfileBoneOutOfRange,
     /// The profile names a role this build's vocabulary does not carry.
     UnknownRole,
+    /// Two bones carry the same name, so a name would resolve ambiguously.
+    DuplicateBoneName,
 };
 
 /// Where a profile's mapping came from.
@@ -266,6 +268,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !SkeletonAsset {
     if (c.at != bytes.len) return error.MalformedSkeleton;
 
     try validateHierarchy(parents);
+    try validateNamesUnique(gpa, name_spans, name_buf.items);
     if (profile) |p| try validateProfile(p, bone_count);
 
     const owned_names = try name_buf.toOwnedSlice(gpa);
@@ -331,6 +334,49 @@ pub fn validateHierarchy(parents: []const BoneIndex) ParseError!void {
     // leave a refusal nobody can test.
     std.debug.assert(roots >= 1);
     if (roots > 1) return error.MultipleRoots;
+}
+
+/// Refuse two bones of one name.
+///
+/// **Without this, `BoneRef.name` is ambiguous by construction** and the
+/// resolver would have to pick — which is acting on possibly the wrong bone,
+/// exactly what the addressing contract forbids. It is the same fault as a role
+/// mapped twice, and it gets the same treatment: refused where it is written,
+/// not arbitrated where it is read. An importer that meets a source with
+/// duplicate joint names disambiguates them; the cooked asset never carries the
+/// ambiguity forward.
+///
+/// Sorted rather than hashed: `max_bones` is 4096, so the quadratic form is
+/// sixteen million comparisons on a legal asset, and no hash container appears
+/// anywhere on a path whose output must be reproducible.
+fn validateNamesUnique(
+    gpa: std.mem.Allocator,
+    spans: []const SkeletonAsset.NameSpan,
+    bytes: []const u8,
+) !void {
+    if (spans.len < 2) return;
+    const order = try gpa.alloc(u32, spans.len);
+    defer gpa.free(order);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+
+    const Ctx = struct {
+        spans: []const SkeletonAsset.NameSpan,
+        bytes: []const u8,
+        fn name(self: @This(), i: u32) []const u8 {
+            const s = self.spans[i];
+            return self.bytes[s.start..][0..s.len];
+        }
+        fn lessThan(self: @This(), a: u32, b: u32) bool {
+            return std.mem.order(u8, self.name(a), self.name(b)) == .lt;
+        }
+    };
+    const ctx = Ctx{ .spans = spans, .bytes = bytes };
+    std.mem.sort(u32, order, ctx, Ctx.lessThan);
+    for (1..order.len) |i| {
+        if (std.mem.eql(u8, ctx.name(order[i - 1]), ctx.name(order[i]))) {
+            return error.DuplicateBoneName;
+        }
+    }
 }
 
 fn validateProfile(p: SkeletonProfile, bone_count: usize) ParseError!void {

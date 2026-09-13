@@ -255,6 +255,7 @@ pub fn AnimationModule(comptime Impl: type) type {
         assertFn(Impl, "createSkeleton", fn (*Impl, AssetHandle) anyerror!SkeletonId);
         assertFn(Impl, "destroySkeleton", fn (*Impl, SkeletonId) void);
         assertFn(Impl, "getBoneCount", fn (*Impl, SkeletonId) u32);
+        assertFn(Impl, "resolveBone", fn (*Impl, SkeletonId, BoneRef) ?BoneIndex);
     }
 
     return struct {
@@ -282,6 +283,12 @@ pub fn AnimationModule(comptime Impl: type) type {
         /// How many bones a skeleton instance holds.
         pub fn getBoneCount(self: *Self, id: SkeletonId) u32 {
             return self.impl.getBoneCount(id);
+        }
+        /// Resolve a bone reference — the ONE resolution path (`ARCH-033`). A
+        /// role the profile does not map resolves to absence, never to a
+        /// neighbouring bone.
+        pub fn resolveBone(self: *Self, id: SkeletonId, ref: BoneRef) ?BoneIndex {
+            return self.impl.resolveBone(id, ref);
         }
     };
 }

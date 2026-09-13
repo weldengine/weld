@@ -207,7 +207,10 @@ pub fn build(b: *std.Build) void {
     // owner document puts them, so the module implements against this file rather than
     // the reverse. `weld_core` for `ModuleContext` and the Tier 0 `Transform`,
     // `foundation` for the math types.
-    const interfaces_animation_module = b.createModule(.{
+    // `b.addModule` and not `b.createModule`: the bone-addressing counter-proof
+    // sub-project reaches both of these through `b.dependency("weld", …).module(…)`,
+    // which only sees modules registered by name.
+    const interfaces_animation_module = b.addModule("weld_interfaces_animation", .{
         .root_source_file = b.path("src/interfaces/AnimationModule.zig"),
         .target = target,
         .optimize = optimize,
@@ -220,7 +223,7 @@ pub fn build(b: *std.Build) void {
     // component is POD — and the `Skeleton` component carries a handle into that
     // storage. `weld_core` for `ModuleContext` and the ECS, `foundation` for the math,
     // and the interface file for the types its own entries are typed against.
-    const kinesis_module = b.createModule(.{
+    const kinesis_module = b.addModule("weld_kinesis", .{
         .root_source_file = b.path("src/modules/kinesis/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -414,6 +417,63 @@ pub fn build(b: *std.Build) void {
             for (case.marks) |mark| run.addCheck(.{ .expect_stderr_match = mark });
         }
         counterproof_step.dependOn(&run.step);
+    }
+
+    // ------------------------------------------- bone addressing counter-proof --
+    //
+    // `ARCH-033` imposes the UNIFORMITY OF THE ADDRESSING TYPE, and this is where
+    // that becomes mechanical: a bare string, a bare index and a bare ordinal must
+    // not compile in a bone-reference position, while both legitimate variants must.
+    // The marks below are distinct per case — matching only the shared prefix would
+    // let any one case stand in for any other, and two of the three share one.
+    //
+    // What it does NOT pin is that `resolveBone` is the only code that CAN map a
+    // role: Zig has no private field, so a caller holding a rig can search its
+    // profile by hand. The limit is named at `bone_ref.zig` rather than claimed away.
+    const bone_ref_cp_dir = "tests/kinesis/bone_ref_counterproof";
+    const BoneRefCase = struct {
+        step: ?[]const u8,
+        marks: []const []const u8,
+    };
+    const bone_ref_cases = [_]BoneRefCase{
+        // The control: `zig build` with no step argument, which the sub-project
+        // wires to the one fixture that must compile.
+        .{ .step = null, .marks = &.{} },
+        .{
+            .step = "case-literal-name",
+            .marks = &.{"expected type 'AnimationModule.BoneRef', found '*const [6:0]u8'"},
+        },
+        .{
+            .step = "case-raw-index",
+            .marks = &.{"expected type 'AnimationModule.BoneRef', found 'u16'"},
+        },
+        .{
+            .step = "case-role-as-int",
+            .marks = &.{"expected type 'AnimationModule.BoneRole', found 'comptime_int'"},
+        },
+    };
+    const bone_ref_cp_step = b.step(
+        "bone-ref-counterproof",
+        "Assert the three bone-addressing refusals fire, and that legitimate code still compiles",
+    );
+    for (bone_ref_cases) |case| {
+        const run = if (case.step) |name|
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build", name })
+        else
+            b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        run.setCwd(b.path(bone_ref_cp_dir));
+        // ALWAYS RE-RUN. A `Run` step with no file argument is cached on its argv
+        // alone, and `setCwd` does not make the directory's contents an input — so a
+        // harness without this replays a cached success and reports green against a
+        // guard that is no longer there.
+        run.has_side_effects = true;
+        if (case.step == null) {
+            run.expectExitCode(0);
+        } else {
+            run.expectExitCode(1);
+            for (case.marks) |mark| run.addCheck(.{ .expect_stderr_match = mark });
+        }
+        bone_ref_cp_step.dependOn(&run.step);
     }
 
     const shader_compiler_module = b.createModule(.{
@@ -943,6 +1003,9 @@ pub fn build(b: *std.Build) void {
         // the skeleton asset: what loads, and the four malformed
         // hierarchies that are refused rather than repaired.
         .{ .path = "tests/kinesis/skeleton_test.zig", .kinesis = true },
+        // bone addressing end to end — from a byte buffer through the module
+        // and the interface wrapper to an index or to absence.
+        .{ .path = "tests/kinesis/bone_ref_test.zig", .kinesis = true },
         // `Mat4` across the tier boundary: the layout it committed to before it
         // moved down into `foundation/math`, and the plugin C twin that layout
         // mirrors. Needs BOTH sides in one unit, which is what puts it here
