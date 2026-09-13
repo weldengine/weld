@@ -558,3 +558,94 @@ test "a corrupt float payload is refused rather than carried into every descenda
     defer parsed.deinit(gpa);
     try testing.expectEqual(@as(u32, 3), parsed.boneCount());
 }
+
+test "a rotation accepted at the edge of tolerance does not stretch a deep chain" {
+    // **THE ATTACK, and the first version of it measured nothing.** It used a
+    // 0.1 rad rotation, where a norm error at the band's edge compounds to
+    // 0.06 % over 128 bones — so it passed against the unnormalised code and
+    // proved the opposite of what it claimed. The exposure is governed by the
+    // rotation ANGLE, not by the tolerance alone: at 1.2 rad the same error
+    // compounds to 8.5 % about +Y and 5.7 % about (1,1,1), which is a limb
+    // visibly the wrong length. Measured, then written.
+    const gpa = testing.allocator;
+    const depth = 128;
+    const parents = try gpa.alloc(BoneIndex, depth);
+    defer gpa.free(parents);
+    const names = try gpa.alloc([]const u8, depth);
+    defer {
+        for (names) |nm| gpa.free(nm);
+        gpa.free(names);
+    }
+    const bind = try gpa.alloc(BoneTransform, depth);
+    defer gpa.free(bind);
+    const inv = try gpa.alloc(Mat4, depth);
+    defer gpa.free(inv);
+
+    // Every bone just inside the band — the norm an exporter that quantises its
+    // quaternions legitimately produces, and which this loader accepts.
+    const k = @sqrt(1.0 + asset.unit_rotation_tolerance);
+    const q = Quat.fromAxisAngle(Vec3.unit_y, 1.2);
+    const off_unit = Quat{ .x = q.x * k, .y = q.y * k, .z = q.z * k, .w = q.w * k };
+    for (0..depth) |i| {
+        parents[i] = if (i == 0) asset.no_parent else @intCast(i - 1);
+        names[i] = try std.fmt.allocPrint(gpa, "b{d}", .{i});
+        bind[i] = .{ .rotation = off_unit };
+        inv[i] = Mat4.identity;
+    }
+    const bytes = try asset.encode(gpa, .{
+        .parents = parents,
+        .names = names,
+        .bind_local = bind,
+        .inverse_bind = inv,
+    });
+    defer gpa.free(bytes);
+
+    var parsed = try asset.parse(gpa, bytes);
+    defer parsed.deinit(gpa);
+
+    // The stored rotation is unit AS STORED, which is the direct property and
+    // the one that does not depend on a chain length.
+    for (parsed.bind_local, 0..) |b, i| {
+        errdefer std.debug.print("bone {d} is not unit after load\n", .{i});
+        const r = b.rotation;
+        const len_sq = ((r.x * r.x + r.y * r.y) + r.z * r.z) + r.w * r.w;
+        try testing.expectApproxEqAbs(@as(f32, 1), len_sq, 1e-6);
+    }
+
+    // And the consequence, at the end of 128 compositions.
+    const local = try kinesis.poses.alloc(gpa, depth);
+    defer kinesis.poses.free(gpa, local);
+    const model = try kinesis.poses.allocModel(gpa, depth);
+    defer kinesis.poses.freeModel(gpa, model);
+    @memcpy(local.slice(), parsed.bind_local);
+    kinesis.skeleton.forwardKinematics(parsed.parents, local, model);
+    const tip = model.constSlice()[depth - 1];
+    for ([_]Vec3{ Vec3.unit_x, Vec3.unit_y, Vec3.unit_z }) |d| {
+        try testing.expectApproxEqAbs(@as(f32, 1), tip.mulDirection(d).length(), 1e-3);
+    }
+
+    // NON-VACUITY: the same chain built from the UNNORMALISED quaternion really
+    // does stretch, so the assertions above are about the normalisation and not
+    // about a fixture that could never have drifted.
+    for (local.slice()) |*b| b.rotation = off_unit;
+    kinesis.skeleton.forwardKinematics(parsed.parents, local, model);
+    const drifted = model.constSlice()[depth - 1].mulDirection(Vec3.unit_x).length();
+    try testing.expect(drifted > 1.05);
+}
+
+test "an absurd rotation is still refused, and the refusal runs before the normalisation" {
+    // The order is load-bearing: a zero quaternion normalised is a NaN, so the
+    // band is not something the normalisation makes redundant.
+    const gpa = testing.allocator;
+    var bind = chainBind();
+    bind[1].rotation = .{ .x = 0, .y = 0, .z = 0, .w = 0 };
+    const inv = [_]Mat4{ Mat4.identity, Mat4.identity, Mat4.identity };
+    const bytes = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &bind,
+        .inverse_bind = &inv,
+    });
+    defer gpa.free(bytes);
+    try testing.expectError(error.NonUnitRotation, asset.parse(gpa, bytes));
+}

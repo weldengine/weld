@@ -98,6 +98,17 @@ pub const ParseError = error{
 /// because it exists to catch a CORRUPT quaternion and not to police an
 /// importer's rounding: what it must reject is the zero quaternion and the
 /// arbitrary one, which miss by 1 and by 99.
+///
+/// **ACCEPTING IS NOT ENOUGH, AND THE TOLERANCE IS NOT THE GUARANTEE.** A
+/// quaternion inside this band is a legitimate export and still not a rotation:
+/// the matrix built from it stretches, and the stretch COMPOUNDS down the
+/// hierarchy. Measured at the band's edge over 128 bones — 8.5 % on a 1.2 rad
+/// rotation about +Y, 5.7 % about (1,1,1) — while the same error at 0.1 rad
+/// gives 0.06 %. So the exposure is governed by the ROTATION ANGLE and not by
+/// the tolerance alone, which is why tightening the band would not have closed
+/// it and why `normalizeRotations` runs after this check rather than instead of
+/// it. Refuse the absurd, then normalise what remains: a zero quaternion
+/// normalised is a NaN, so the order is load-bearing.
 pub const unit_rotation_tolerance: f32 = 1.0e-3;
 
 /// Where a profile's mapping came from.
@@ -287,6 +298,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !SkeletonAsset {
     try validateHierarchy(parents);
     try validateNamesUnique(gpa, name_spans, name_buf.items);
     try validatePayload(bind_local, inverse_bind);
+    normalizeRotations(bind_local);
 
     var profile_mappings: []RoleMapping = &.{};
     errdefer gpa.free(profile_mappings);
@@ -453,6 +465,20 @@ fn validatePayload(bind_local: []const BoneTransform, inverse_bind: []const Mat4
             if (!std.math.isFinite(e)) return error.NonFiniteTransform;
         }
     }
+}
+
+/// Make every stored rotation exactly unit, after `validatePayload` has refused
+/// the ones that are not rotations at all.
+///
+/// **Runs on what was ACCEPTED, never as a substitute for the refusal.** The
+/// band exists to reject a zero or an arbitrary quaternion; normalising a zero
+/// produces a NaN, so this must not be reachable before that check. What it
+/// buys is that every consumer downstream — the kinematics, the skin build, a
+/// socket read — gets the unit quaternion each of them already assumes, instead
+/// of a legitimate export's rounding compounding into centimetres at the end of
+/// a chain.
+fn normalizeRotations(bind_local: []BoneTransform) void {
+    for (bind_local) |*b| b.rotation = b.rotation.normalize();
 }
 
 fn validateProfile(p: SkeletonProfile, bone_count: usize) ParseError!void {
