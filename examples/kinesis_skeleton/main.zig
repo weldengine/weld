@@ -12,6 +12,7 @@
 const std = @import("std");
 
 const anim = @import("weld_interfaces_animation");
+const foundation = @import("foundation");
 const core = @import("weld_core");
 const kinesis = @import("weld_kinesis");
 
@@ -52,6 +53,10 @@ fn buildChain(gpa: std.mem.Allocator) ![]u8 {
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
+    // `ARCH-031` rule 5: installation belongs to the ACT of entering a process.
+    // This one composes transforms and prints them, so its output is a float
+    // result read by a human against a hand-computed one.
+    foundation.math.float_env.install();
 
     var world = core.ecs.World.init();
     defer world.deinit(gpa);

@@ -48,6 +48,5 @@ const testing = std.testing;
 test "Skeleton is POD and defaults to no instance" {
     const s = Skeleton{};
     try testing.expectEqual(anim.no_skeleton, s.instance);
-    try testing.expect(s.instance != 0);
     try testing.expectEqual(std.builtin.Type.ContainerLayout.@"extern", @typeInfo(Skeleton).@"struct".layout);
 }

@@ -49,10 +49,18 @@ test "Mat4 keeps its committed layout and its C twin" {
     // site, so no compilation anywhere would have noticed them diverging.
     try testing.expect(structurallyIdentical(rtti.Mat4, desc.WeldMat4));
 
-    // The witness that the comparison can fail: `WeldMat3` is the same family,
-    // the same file, the same column-major convention, and a different width.
-    // Without it, `structurallyIdentical` returning true proves nothing about
-    // whether it is capable of returning false.
+    // Witnesses that the comparison can fail. `WeldMat3` differs in WIDTH, so
+    // it is refused at the size check and the field loop never runs — which
+    // means it witnesses only the half the size assertion already covered. The
+    // two below are 64 bytes and 4-aligned like the real thing and differ only
+    // INSIDE, which is the half this function exists for and the half a
+    // reshuffle would exploit.
+    const RenamedField = extern struct { n: [16]f32 = @splat(0) };
+    const RetypedField = extern struct { m: [16]u32 = @splat(0) };
+    try testing.expectEqual(@sizeOf(rtti.Mat4), @sizeOf(RenamedField));
+    try testing.expectEqual(@sizeOf(rtti.Mat4), @sizeOf(RetypedField));
+    try testing.expect(!structurallyIdentical(rtti.Mat4, RenamedField));
+    try testing.expect(!structurallyIdentical(rtti.Mat4, RetypedField));
     try testing.expect(!structurallyIdentical(rtti.Mat4, desc.WeldMat3));
 }
 
@@ -63,17 +71,26 @@ test "the reflection alias is the foundation type itself, not a copy" {
     // through to `.nested_struct` and the schema would change shape in silence.
     try testing.expectEqual(rtti.Mat4, math.Mat4f);
 
-    const Probe = extern struct {
-        via_foundation: math.Mat4f = .{},
-        via_rtti: rtti.Mat4 = .{},
-    };
+    // ONE field, not two. The line above has just established that the two
+    // names denote one type, so declaring a field under each would declare the
+    // same type twice and the second could not classify differently from the
+    // first — it would read as covering both spellings and cover one. What this
+    // pins is the consequence of the move: a field declared against the
+    // FOUNDATION name still reaches `.mat4` and not `.nested_struct`.
+    const Probe = extern struct { via_foundation: math.Mat4f = .{} };
     const built = comptime rtti.buildTypeInfo(Probe, .component);
-    try testing.expectEqual(@as(usize, 2), built.fields.len);
+    try testing.expectEqual(@as(usize, 1), built.fields.len);
     try testing.expectEqual(rtti.FieldKind.mat4, built.fields[0].kind);
-    try testing.expectEqual(rtti.FieldKind.mat4, built.fields[1].kind);
+
+    // The control that makes the line above mean something: a structurally
+    // identical but DISTINCT type falls through to `.nested_struct`, which is
+    // exactly what a re-declaration instead of an alias would have produced.
+    const Impostor = extern struct { looks_like: extern struct { m: [16]f32 = @splat(0) } = .{} };
+    const impostor_info = comptime rtti.buildTypeInfo(Impostor, .component);
+    try testing.expectEqual(rtti.FieldKind.nested_struct, impostor_info.fields[0].kind);
 }
 
-test "the default value is the identity in column-major order" {
+test "the default value is the identity" {
     // The identity is symmetric, so it cannot discriminate row- from
     // column-major on its own. What it CAN pin is that the default is the
     // identity at all: a default of zeroes collapses every transform to the

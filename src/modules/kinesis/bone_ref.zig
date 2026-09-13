@@ -73,7 +73,7 @@ fn resolveRole(rig: Rig, role: BoneRole) ?BoneIndex {
 /// The first match wins, and the rig's names are unique — the loader refuses a
 /// rig that carries two bones of one name — so "first" and "only" are the same
 /// bone and this tie-break is never exercised.
-pub fn resolveName(rig: Rig, name: []const u8) ?BoneIndex {
+fn resolveName(rig: Rig, name: []const u8) ?BoneIndex {
     for (0..rig.boneCount()) |i| {
         const b: BoneIndex = @intCast(i);
         if (std.mem.eql(u8, rig.boneName(b), name)) return b;

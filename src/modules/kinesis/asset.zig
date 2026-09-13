@@ -86,7 +86,19 @@ pub const ParseError = error{
     UnknownRole,
     /// Two bones carry the same name, so a name would resolve ambiguously.
     DuplicateBoneName,
+    /// A transform or an inverse-bind matrix carries a NaN or an infinity.
+    NonFiniteTransform,
+    /// A bind rotation is not a unit quaternion.
+    NonUnitRotation,
 };
+
+/// How far a stored rotation may sit from unit length before it is refused.
+///
+/// Generous by an order of magnitude over what an `f32` round trip costs,
+/// because it exists to catch a CORRUPT quaternion and not to police an
+/// importer's rounding: what it must reject is the zero quaternion and the
+/// arbitrary one, which miss by 1 and by 99.
+pub const unit_rotation_tolerance: f32 = 1.0e-3;
 
 /// Where a profile's mapping came from.
 pub const Provenance = enum(u8) {
@@ -171,6 +183,9 @@ pub const SkeletonAsset = struct {
 
 // --- reading -----------------------------------------------------------------
 
+/// A profile entry as the bytes carry it, before either field is judged.
+const RawMapping = struct { role: u16, bone: BoneIndex };
+
 const Cursor = struct {
     bytes: []const u8,
     at: usize = 0,
@@ -197,10 +212,12 @@ const Cursor = struct {
 /// Read a skeleton asset, refusing anything the runtime would have to assume
 /// away.
 ///
-/// The order of the checks is deliberate: SHAPE before CONTENT. Every byte is
-/// read and bounded first, then the hierarchy is judged — so a truncated file
-/// is never diagnosed as a bad hierarchy, which would send a reader looking at
-/// the wrong thing.
+/// The order of the checks is deliberate: SHAPE before CONTENT, with no
+/// exception. Every byte is read and accounted for — including the refusal of
+/// trailing bytes — before ANY content verdict is reached, so a truncated or
+/// over-long file is never diagnosed as a bad hierarchy or a bad role, which
+/// would send a reader looking at the wrong thing. The profile is read raw for
+/// exactly this reason: turning an ordinal into an enum is already a verdict.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !SkeletonAsset {
     var c = Cursor{ .bytes = bytes };
 
@@ -239,37 +256,58 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !SkeletonAsset {
         for (&m.m) |*e| e.* = try c.f32At();
     }
 
-    var profile_mappings: []RoleMapping = &.{};
-    var profile: ?SkeletonProfile = null;
+    // The profile is READ RAW here and JUDGED below, after the buffer's shape is
+    // settled. Converting an ordinal to an enum is already a judgement — a
+    // `@enumFromInt` past the variants is illegal behaviour and not a refusal —
+    // so doing it inline would put a content verdict ahead of the trailing-byte
+    // check, and a file that is both too long and carries an unknown role would
+    // come back naming the role. Shape first means shape first.
+    var raw_kind: u8 = 0;
+    var raw_prov: u8 = 0;
+    var raw_mappings: []RawMapping = &.{};
+    errdefer gpa.free(raw_mappings);
     if (has_profile) {
-        const kind_raw = try c.u8At();
-        const prov_raw = try c.u8At();
+        raw_kind = try c.u8At();
+        raw_prov = try c.u8At();
         const count = try c.u16At();
-        if (kind_raw > @intFromEnum(ProfileKind.custom)) return error.MalformedSkeleton;
-        if (prov_raw > @intFromEnum(Provenance.authored)) return error.MalformedSkeleton;
-        profile_mappings = try gpa.alloc(RoleMapping, count);
-        errdefer gpa.free(profile_mappings);
-        for (profile_mappings) |*m| {
-            const role_raw = try c.u16At();
-            if (role_raw >= @typeInfo(BoneRole).@"enum".fields.len) return error.UnknownRole;
-            m.* = .{ .role = @enumFromInt(role_raw), .bone = try c.u16At() };
+        raw_mappings = try gpa.alloc(RawMapping, count);
+        for (raw_mappings) |*m| {
+            m.role = try c.u16At();
+            m.bone = try c.u16At();
         }
-        profile = .{
-            .kind = @enumFromInt(kind_raw),
-            .provenance = @enumFromInt(prov_raw),
-            .mappings = profile_mappings,
-        };
     }
-    errdefer gpa.free(profile_mappings);
 
     // Trailing bytes are a refusal and not slack. A file longer than its own
     // declared contents is a file this reader did not understand, and reading
     // it anyway is how a version skew becomes a silent partial load.
     if (c.at != bytes.len) return error.MalformedSkeleton;
 
+    // --- every byte is now accounted for; from here the CONTENT is judged ---
+
     try validateHierarchy(parents);
     try validateNamesUnique(gpa, name_spans, name_buf.items);
-    if (profile) |p| try validateProfile(p, bone_count);
+    try validatePayload(bind_local, inverse_bind);
+
+    var profile_mappings: []RoleMapping = &.{};
+    errdefer gpa.free(profile_mappings);
+    var profile: ?SkeletonProfile = null;
+    if (has_profile) {
+        if (raw_kind > @intFromEnum(ProfileKind.custom)) return error.MalformedSkeleton;
+        if (raw_prov > @intFromEnum(Provenance.authored)) return error.MalformedSkeleton;
+        profile_mappings = try gpa.alloc(RoleMapping, raw_mappings.len);
+        for (profile_mappings, raw_mappings) |*m, raw| {
+            if (raw.role >= @typeInfo(BoneRole).@"enum".fields.len) return error.UnknownRole;
+            m.* = .{ .role = @enumFromInt(raw.role), .bone = raw.bone };
+        }
+        profile = .{
+            .kind = @enumFromInt(raw_kind),
+            .provenance = @enumFromInt(raw_prov),
+            .mappings = profile_mappings,
+        };
+        try validateProfile(profile.?, bone_count);
+    }
+    gpa.free(raw_mappings);
+    raw_mappings = &.{};
 
     const owned_names = try name_buf.toOwnedSlice(gpa);
     return .{
@@ -375,6 +413,44 @@ fn validateNamesUnique(
     for (1..order.len) |i| {
         if (std.mem.eql(u8, ctx.name(order[i - 1]), ctx.name(order[i]))) {
             return error.DuplicateBoneName;
+        }
+    }
+}
+
+/// Refuse a transform the runtime would otherwise carry into every descendant.
+///
+/// **The module defends this invariant where it allocates and left it undefended
+/// at the door.** `pose.alloc` fills a fresh buffer with the identity precisely
+/// because an uninitialised rotation is not unit and "produces finite, plausible,
+/// wrong world transforms rather than a crash" — and untrusted bytes can carry
+/// exactly that. One corrupt bone is not one wrong bone: a zero quaternion at the
+/// root multiplies through `compose` and zeroes the orientation of the entire
+/// subtree, and a single NaN position spreads to every descendant.
+///
+/// Runs in the CONTENT section, after the buffer's shape is settled, for the same
+/// reason the profile is judged there: a file that is both truncated and corrupt
+/// must be diagnosed on its shape.
+fn validatePayload(bind_local: []const BoneTransform, inverse_bind: []const Mat4) ParseError!void {
+    for (bind_local) |b| {
+        for (b.position.toArray()) |e| {
+            if (!std.math.isFinite(e)) return error.NonFiniteTransform;
+        }
+        for (b.scale.toArray()) |e| {
+            if (!std.math.isFinite(e)) return error.NonFiniteTransform;
+        }
+        const r = b.rotation;
+        for ([_]f32{ r.x, r.y, r.z, r.w }) |e| {
+            if (!std.math.isFinite(e)) return error.NonFiniteTransform;
+        }
+        // Written in the POSITIVE form: a NaN has already been refused above,
+        // but the negated comparison would accept one and the two guards are one
+        // edit apart from being reordered.
+        const len_sq = ((r.x * r.x + r.y * r.y) + r.z * r.z) + r.w * r.w;
+        if (!(@abs(len_sq - 1.0) <= unit_rotation_tolerance)) return error.NonUnitRotation;
+    }
+    for (inverse_bind) |m| {
+        for (m.m) |e| {
+            if (!std.math.isFinite(e)) return error.NonFiniteTransform;
         }
     }
 }
@@ -513,7 +589,13 @@ test "a description round-trips through encode and parse" {
 
 test "a truncated buffer is refused as malformed, never as a bad hierarchy" {
     const gpa = testing.allocator;
-    const parents = [_]BoneIndex{ no_parent, 0 };
+    // **THE HIERARCHY IS DELIBERATELY INVALID.** With a well-formed one the
+    // claim is untestable: no ordering of the checks could yield a hierarchy
+    // error on any truncation, so the test would pass whatever order the code
+    // used. Bone 1 names bone 2, which does not exist — so if the hierarchy
+    // were judged before the bytes were bounded, a truncation would come back
+    // `ParentIndexOutOfRange` instead of `MalformedSkeleton`.
+    const parents = [_]BoneIndex{ no_parent, 2 };
     const names = [_][]const u8{ "a", "b" };
     const bind = [_]BoneTransform{ .{}, .{} };
     const inv = [_]Mat4{ Mat4.identity, Mat4.identity };
@@ -532,6 +614,11 @@ test "a truncated buffer is refused as malformed, never as a bad hierarchy" {
     while (cut < bytes.len) : (cut += 7) {
         try testing.expectError(error.MalformedSkeleton, parse(gpa, bytes[0..cut]));
     }
+
+    // The control that makes the sweep mean something: the SAME bytes, whole,
+    // do reach the hierarchy verdict. Without it every line above is satisfied
+    // by a reader that answers `MalformedSkeleton` to everything.
+    try testing.expectError(error.ParentIndexOutOfRange, parse(gpa, bytes));
 }
 
 test "trailing bytes are refused" {

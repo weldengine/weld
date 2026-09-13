@@ -223,39 +223,73 @@ test "the TRS composition is not the matrix product under sheared scale" {
     try testing.expect(!trs_mat.axis(1).approxEql(exact.axis(1), 1e-3));
 }
 
-test "forward kinematics reaches its fixed point in one pass" {
-    // The mechanical form of "a single linear pass". If the ordering were wrong
-    // — a parent evaluated after its child — a second pass would move something,
-    // because the child would finally see a final parent. Bit equality after a
-    // second run is what says the first one was enough.
+/// The model transform of bone `i`, resolved by walking UP to the root.
+///
+/// An oracle that owes the pass nothing: it is defined by the hierarchy alone
+/// and evaluates in whatever order recursion reaches, so it cannot agree with a
+/// pass that composes the wrong things or visits in the wrong order. The
+/// ascending loop's OWN idempotence proves nothing — it is a pure function of
+/// its inputs when the two buffers are distinct, so running it twice is
+/// bit-identical whatever its body does, including a body that copies.
+fn modelByWalkingUp(
+    parents: []const BoneIndex,
+    local: []const BoneTransform,
+    i: usize,
+) BoneTransform {
+    if (parents[i] == asset_mod.no_parent) return local[i];
+    return compose(modelByWalkingUp(parents, local, parents[i]), local[i]);
+}
+
+fn expectSameTransform(want: BoneTransform, got: BoneTransform) !void {
+    // All TEN scalars. Comparing a subset is how a rotation-order defect hides:
+    // `rotation.x/y/z` are exactly the components a wrong composition moves
+    // while `w` and the position can stay plausible.
+    try testing.expect(got.position.approxEql(want.position, 1e-5));
+    try testing.expect(got.scale.approxEql(want.scale, 1e-5));
+    try testing.expect(got.rotation.approxEql(want.rotation, 1e-5));
+}
+
+test "forward kinematics agrees with resolving each bone up to the root" {
+    // **This replaces a test that could not fail.** Its predecessor ran the
+    // pass twice and asserted bit equality, on the stated ground that a wrong
+    // visiting order would move something on the second run. It would not: the
+    // pass is a pure function of `(parents, local)`, so idempotence holds for
+    // any body at all — a body reduced to `dst[i] = src[i]` passed it.
     const gpa = testing.allocator;
     const pose = @import("pose.zig");
 
-    const parents = [_]BoneIndex{ asset_mod.no_parent, 0, 1, 1, 3 };
+    const parents = [_]BoneIndex{ asset_mod.no_parent, 0, 1, 1, 3, 0 };
     const local = try pose.alloc(gpa, parents.len);
     defer pose.free(gpa, local);
     const model = try pose.alloc(gpa, parents.len);
     defer pose.free(gpa, model);
 
+    // Rotations about DIFFERENT axes down the chain, and non-uniform scales:
+    // a chain turning about one axis cannot see a composition order, and a
+    // uniform scale cannot see which side the scale is applied on.
+    const axes = [_]Vec3{ Vec3.unit_x, Vec3.unit_y, Vec3.unit_z, v3(1, 1, 0), v3(0, 1, 1), v3(1, 0, 1) };
     for (local.slice(), 0..) |*b, i| {
         const f: f32 = @floatFromInt(i + 1);
         b.* = .{
             .position = v3(f * 0.25, f, -f * 0.5),
-            .rotation = Quat.fromAxisAngle(v3(0.3, 1, 0.2).normalize(), f * 0.4),
-            .scale = v3(1.0 + f * 0.1, 1.0, 1.0 + f * 0.05),
+            .rotation = Quat.fromAxisAngle(axes[i].normalize(), f * 0.4),
+            .scale = v3(1.0 + f * 0.1, 1.0 - f * 0.05, 1.0 + f * 0.07),
         };
     }
 
     forwardKinematics(&parents, local, model);
-    var first: [5]BoneTransform = undefined;
-    @memcpy(&first, model.constSlice());
-
-    forwardKinematics(&parents, local, model);
-    for (model.constSlice(), first) |after, before| {
-        try testing.expectEqual(before.position.data[0], after.position.data[0]);
-        try testing.expectEqual(before.position.data[1], after.position.data[1]);
-        try testing.expectEqual(before.position.data[2], after.position.data[2]);
-        try testing.expectEqual(before.rotation.w, after.rotation.w);
-        try testing.expectEqual(before.scale.data[0], after.scale.data[0]);
+    for (model.constSlice(), 0..) |got, i| {
+        errdefer std.debug.print("bone {d} diverged from the walk-up oracle\n", .{i});
+        try expectSameTransform(modelByWalkingUp(&parents, local.constSlice(), i), got);
     }
+
+    // Non-vacuity: the oracle must not agree with everything. A pass reduced to
+    // a copy — the mutant that defeated the predecessor — differs from it on at
+    // least one bone of this fixture.
+    var disagrees = false;
+    for (local.constSlice(), 0..) |copied, i| {
+        const walked = modelByWalkingUp(&parents, local.constSlice(), i);
+        if (!walked.position.approxEql(copied.position, 1e-5)) disagrees = true;
+    }
+    try testing.expect(disagrees);
 }

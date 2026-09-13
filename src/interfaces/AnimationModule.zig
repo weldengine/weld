@@ -28,12 +28,16 @@
 //! never returns a plausible zero, because a caller cannot tell a zero that
 //! means "no rotation" from a zero that means "nobody wrote this yet".
 //!
-//! **The assert block covers what an implementation OWES TODAY, and it grows
-//! with the implementation rather than standing complete in advance.** An
-//! entry asserted before anything can satisfy it forces a body that returns a
-//! plausible answer — which is worse than its absence, because the absence is
-//! visible and the plausible answer is not. The block is complete at the
-//! freeze and not before; §4 of the owner document lists what it will hold.
+//! **THE ERROR CHANNEL ON THE UNIMPLEMENTED ENTRIES IS THE STUB'S, NOT THE
+//! FREEZE'S.** `engine-tier-interfaces.md` §4 shows several of them infallible
+//! — `sampleClip` returns `void`, `getClipDuration` an `f32`, `solveIK` a
+//! `bool` — and an infallible stub has nothing to answer but a plausible value:
+//! an unchanged pose, a zero duration, a false. So each carries a channel here
+//! purely so its body can REFUSE, which is exactly what the file being unfrozen
+//! makes free. **The freeze decides fallibility entry by entry, on one question
+//! — can this path allocate? — and it is not bound by the shape below.** An
+//! earlier revision left these entries out altogether on the ground that a stub
+//! must lie; that ground assumed a freeze that has not happened.
 
 const std = @import("std");
 const core = @import("weld_core");
@@ -75,9 +79,11 @@ pub const BoneIndex = u16;
 /// **The members are `@Vector`-backed and that is the measured half of the
 /// layout ruling, not a detail.** The same interleaving over the Tier 0
 /// `Transform`, whose members are `[3]f32` / `[4]f32` because it is an
-/// `extern struct` POD, measures about 10 % slower on BOTH a pose blend and a
-/// forward-kinematics pass — the conversion between a three-element array and
-/// a vector sits on every bone of every frame. The entity-facing surface keeps
+/// `extern struct` POD, measures about 10 % slower on a pose BLEND and 6 to 7 %
+/// slower on a forward-kinematics pass — the conversion between a three-element
+/// array and a vector sits on every bone of every frame, and the blend touches
+/// more of them per unit of work. The two figures are stated apart because one
+/// number covering both overstated the second by half again. The entity-facing surface keeps
 /// the Tier 0 `Transform`; the packed pose does not.
 ///
 /// It is NOT named `BonePose` and NOT named `SoaTransform`: both are retired
@@ -256,6 +262,22 @@ pub fn AnimationModule(comptime Impl: type) type {
         assertFn(Impl, "destroySkeleton", fn (*Impl, SkeletonId) void);
         assertFn(Impl, "getBoneCount", fn (*Impl, SkeletonId) u32);
         assertFn(Impl, "resolveBone", fn (*Impl, SkeletonId, BoneRef) ?BoneIndex);
+
+        // --- Per-frame ---
+        assertFn(Impl, "update", fn (*Impl) void);
+
+        // --- Clips --- (declared, not implemented)
+        assertFn(Impl, "sampleClip", fn (*Impl, AssetHandle, f32, *PoseBuffer) anyerror!void);
+        assertFn(Impl, "getClipDuration", fn (*Impl, AssetHandle) anyerror!f32);
+
+        // --- Blending --- (declared, not implemented)
+        assertFn(Impl, "blendPoses", fn (*Impl, *const PoseBuffer, *const PoseBuffer, f32, *PoseBuffer) anyerror!void);
+        assertFn(Impl, "additivePose", fn (*Impl, *const PoseBuffer, *const PoseBuffer, f32, *PoseBuffer) anyerror!void);
+
+        // --- Output, IK, sockets --- (declared, not implemented)
+        assertFn(Impl, "getSkinMatrices", fn (*Impl, EntityId) anyerror![]const Mat4);
+        assertFn(Impl, "solveIK", fn (*Impl, EntityId, IKRequest) anyerror!bool);
+        assertFn(Impl, "getSocketTransform", fn (*Impl, EntityId, BoneRef) anyerror!?Transform);
     }
 
     return struct {
@@ -289,6 +311,42 @@ pub fn AnimationModule(comptime Impl: type) type {
         /// neighbouring bone.
         pub fn resolveBone(self: *Self, id: SkeletonId, ref: BoneRef) ?BoneIndex {
             return self.impl.resolveBone(id, ref);
+        }
+
+        /// The module's per-frame pass.
+        pub fn update(self: *Self) void {
+            self.impl.update();
+        }
+
+        /// Sample `clip` at `time` into `pose`.
+        pub fn sampleClip(self: *Self, clip: AssetHandle, time: f32, pose: *PoseBuffer) anyerror!void {
+            return self.impl.sampleClip(clip, time, pose);
+        }
+        /// How long `clip` runs, in seconds.
+        pub fn getClipDuration(self: *Self, clip: AssetHandle) anyerror!f32 {
+            return self.impl.getClipDuration(clip);
+        }
+
+        /// Interpolate `a` towards `b` by `alpha` into `out`.
+        pub fn blendPoses(self: *Self, a: *const PoseBuffer, b: *const PoseBuffer, alpha: f32, out: *PoseBuffer) anyerror!void {
+            return self.impl.blendPoses(a, b, alpha, out);
+        }
+        /// Add `additive` onto `base` by `alpha` into `out`.
+        pub fn additivePose(self: *Self, base: *const PoseBuffer, additive: *const PoseBuffer, alpha: f32, out: *PoseBuffer) anyerror!void {
+            return self.impl.additivePose(base, additive, alpha, out);
+        }
+
+        /// The bone matrices the GPU skins with.
+        pub fn getSkinMatrices(self: *Self, entity: EntityId) anyerror![]const Mat4 {
+            return self.impl.getSkinMatrices(entity);
+        }
+        /// Run one inverse-kinematics request; answers whether it converged.
+        pub fn solveIK(self: *Self, entity: EntityId, request: IKRequest) anyerror!bool {
+            return self.impl.solveIK(entity, request);
+        }
+        /// The world transform of a socket, or absence when it resolves to none.
+        pub fn getSocketTransform(self: *Self, entity: EntityId, socket: BoneRef) anyerror!?Transform {
+            return self.impl.getSocketTransform(entity, socket);
         }
     };
 }
@@ -326,7 +384,12 @@ test "the absent skeleton is not a live id" {
     try testing.expectEqual(std.math.maxInt(SkeletonId), no_skeleton);
 }
 
-test "an empty pose buffer yields an empty slice" {
+test "an empty pose buffer yields an empty slice rather than reading undefined" {
+    // `bones` defaults to `undefined`, so the ONLY thing that keeps
+    // `constSlice` from forming a slice over it is the count. What breaks if
+    // this test is removed: a default `bone_count` other than zero makes every
+    // unset buffer a slice over an undefined pointer.
     const empty = PoseBuffer{};
     try testing.expectEqual(@as(usize, 0), empty.constSlice().len);
+    try testing.expectEqual(@as(usize, 0), empty.slice().len);
 }

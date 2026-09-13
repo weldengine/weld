@@ -418,7 +418,17 @@ const Row = struct {
     aosv_ns: f64,
     soa3_ns: f64,
     soach_ns: f64,
-    checksum: f64,
+    /// One checksum PER LAYOUT, kept apart on purpose.
+    ///
+    /// **Summing them into one scalar computes the agreement and then destroys
+    /// it**, which is what an earlier form did: four identically-shaped
+    /// `checksum()` functions were written, added together, and the total
+    /// reported for one bone count — so a layout whose body had diverged would
+    /// have produced a different total against no baseline, and would still
+    /// have been timed and still have decided the ruling. Kept apart, they
+    /// answer the question the four functions were plainly written for: do the
+    /// four layouts compute the SAME pose?
+    checksums: [4]f64,
 };
 
 fn median(xs: []f64) f64 {
@@ -427,6 +437,13 @@ fn median(xs: []f64) f64 {
 }
 
 const Op = enum { blend, fk };
+
+/// The blend factor of iteration `k`. Named so the `.fk` arm does not compute
+/// one it never uses — which it did, and which reads as a loop that varies when
+/// it does not.
+fn alphaAt(k: usize) f32 {
+    return @as(f32, @floatFromInt(k % 64)) / 64.0;
+}
 
 fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     const parents = try buildParents(gpa, n);
@@ -472,7 +489,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
     var aosv_rounds: [rounds]f64 = undefined;
     var s3_rounds: [rounds]f64 = undefined;
     var sc_rounds: [rounds]f64 = undefined;
-    var checksum: f64 = 0;
+    var checksums = [_]f64{ 0, 0, 0, 0 };
 
     // One untimed warm round so the first timed round is not the one that
     // faults every page in.
@@ -498,14 +515,13 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
         // drift moves them together.
         var t0 = nowNs();
         for (0..iters_per_round) |k| {
-            const alpha = @as(f32, @floatFromInt(k % 64)) / 64.0;
             switch (op) {
-                .blend => Aos.blend(a_aos, b_aos, o_aos, alpha),
+                .blend => Aos.blend(a_aos, b_aos, o_aos, alphaAt(k)),
                 .fk => Aos.fk(a_aos, o_aos, parents),
             }
         }
         aos_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksum += o_aos.checksum();
+        checksums[0] += o_aos.checksum();
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
@@ -516,7 +532,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
             }
         }
         aosv_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksum += o_av.checksum();
+        checksums[1] += o_av.checksum();
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
@@ -527,7 +543,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
             }
         }
         s3_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksum += o_s3.checksum();
+        checksums[2] += o_s3.checksum();
 
         t0 = nowNs();
         for (0..iters_per_round) |k| {
@@ -538,7 +554,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
             }
         }
         sc_rounds[r] = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, iters_per_round);
-        checksum += o_sc.checksum();
+        checksums[3] += o_sc.checksum();
     }
 
     return .{
@@ -547,7 +563,7 @@ fn measure(gpa: std.mem.Allocator, n: usize, op: Op) !Row {
         .aosv_ns = median(&aosv_rounds),
         .soa3_ns = median(&s3_rounds),
         .soach_ns = median(&sc_rounds),
-        .checksum = checksum,
+        .checksums = checksums,
     };
 }
 
@@ -581,6 +597,13 @@ fn emitMarkdown(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), title:
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
+    // `ARCH-031` rule 5: installation belongs to the ACT of entering a process,
+    // and the rule admits no exception for a program that compares nothing today.
+    // It matters most here of all: the numbers this binary prints are what
+    // decided the pose layout, and a float measurement taken under an unowned
+    // rounding mode measures a configuration that exists on no machine.
+    foundation.math.float_env.install();
+
     // `safety` is FORCED true: its default is `std.debug.runtime_safety`, which
     // is false in ReleaseFast, so the default would report "no leaks"
     // unconditionally. Every allocation here is setup or report writing,
@@ -615,9 +638,35 @@ pub fn main(init: std.process.Init) !void {
     });
     emitConsole("Blend (no dependency between bones)", &blend_rows);
     emitConsole("Forward kinematics (serialised parent -> child)", &fk_rows);
-    std.debug.print("\n  (decides a design, not gated; checksums blend {d:.6} fk {d:.6})\n", .{
-        blend_rows[0].checksum, fk_rows[0].checksum,
-    });
+    // **THE AGREEMENT IS ASSERTED, not printed and left to a reader.** Four
+    // layouts that compute different poses can be timed against each other all
+    // day and the comparison means nothing; this is the check that says the
+    // ruling is about memory and not about four different functions. It is
+    // reported per bone count, because a divergence that only appears at one
+    // size is exactly the kind a single row hides.
+    //
+    // What the checksum does NOT do is prevent dead-code elimination of the
+    // inner loop: it is read once per round, so it forces the LAST iteration.
+    // Nothing is hoisted today — tripling the iteration count leaves ns/iter
+    // flat — and that is the measurement this claim rests on, not the checksum.
+    var disagreements: usize = 0;
+    for ([_][]const Row{ &blend_rows, &fk_rows }, [_][]const u8{ "blend", "fk" }) |rows, label| {
+        for (rows) |r| {
+            for (r.checksums[1..], 1..) |c, i| {
+                if (c == r.checksums[0]) continue;
+                disagreements += 1;
+                std.debug.print(
+                    "  LAYOUTS DISAGREE: {s} n={d}, layout {d} checksum {d:.9} against {d:.9}\n",
+                    .{ label, r.bones, i, c, r.checksums[0] },
+                );
+            }
+        }
+    }
+    if (disagreements == 0) {
+        std.debug.print("\n  all four layouts agree at every bone count (blend {d:.9}, fk {d:.9})\n", .{
+            blend_rows[0].checksums[0], fk_rows[0].checksums[0],
+        });
+    }
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
@@ -632,8 +681,10 @@ pub fn main(init: std.process.Init) !void {
     , .{ @tagName(builtin.mode), rounds, iters_per_round, @sizeOf(Transform), @sizeOf(VecPose), soa3_bytes });
     try emitMarkdown(gpa, &buf, "Blend (no dependency between bones)", &blend_rows);
     try emitMarkdown(gpa, &buf, "Forward kinematics (serialised parent -> child)", &fk_rows);
-    try buf.print(gpa, "\nAnti-DCE checksums: blend {d:.6}, fk {d:.6}\n", .{
-        blend_rows[0].checksum, fk_rows[0].checksum,
+    try buf.print(gpa, "\nLayout agreement: {s} (blend {d:.9}, fk {d:.9} at 32 bones)\n", .{
+        if (disagreements == 0) "all four compute the same pose" else "LAYOUTS DISAGREE",
+        blend_rows[0].checksums[0],
+        fk_rows[0].checksums[0],
     });
 
     const path: [:0]const u8 = "bench/results/pose_layout.md";

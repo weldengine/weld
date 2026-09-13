@@ -134,6 +134,30 @@ test "a foreign or mis-versioned buffer is refused before its contents are judge
     try expectWellFormedLoads(gpa);
 }
 
+test "a bone count of zero or past the ceiling is refused through parse" {
+    const gpa = testing.allocator;
+    const bytes = try encodeChain(gpa, &chain_parents);
+    defer gpa.free(bytes);
+
+    // **Reached through `parse` and not only through the exported judge.** The
+    // ceiling is what stops a corrupt count from driving an enormous
+    // allocation before the bytes run out, and a test that only calls
+    // `validateHierarchy(&.{})` never exercises the reader's own check — the
+    // allocation bound would then have no test at all. The count is the `u16`
+    // at offset 6, right after the magic and the version.
+    const zero = try gpa.dupe(u8, bytes);
+    defer gpa.free(zero);
+    std.mem.writeInt(u16, zero[6..8], 0, .little);
+    try testing.expectError(error.BadBoneCount, asset.parse(gpa, zero));
+
+    const huge = try gpa.dupe(u8, bytes);
+    defer gpa.free(huge);
+    std.mem.writeInt(u16, huge[6..8], @intCast(asset.max_bones + 1), .little);
+    try testing.expectError(error.BadBoneCount, asset.parse(gpa, huge));
+
+    try expectWellFormedLoads(gpa);
+}
+
 // --- the optional profile ----------------------------------------------------
 
 fn encodeWithProfile(
@@ -335,26 +359,23 @@ test "forward kinematics is a single linear pass" {
     defer gpa.free(bytes);
     const id = try module.instantiate(try module.loadRig(bytes));
 
-    // The invariant the single pass rests on, read off the loaded rig: a parent
-    // precedes its child. This is what the loader refuses to admit otherwise,
-    // and what makes the ascending loop sufficient.
+    // **What a single ascending pass rests on, and the only half a test can
+    // carry.** The invariant is read off the LOADED rig: a parent precedes its
+    // child, which is what the loader refuses to admit otherwise and what makes
+    // the ascending loop sufficient. The pass's output is checked against a
+    // hand-computed model pose in the test above, which is the correctness half;
+    // running the pass twice and comparing would check NOTHING, the pass being a
+    // pure function of its inputs whatever its body does.
     const r = module.rig(0).?;
     for (r.parents, 0..) |p, i| {
-        if (i == 0) continue;
+        if (i == 0) {
+            try testing.expectEqual(asset.no_parent, p);
+            continue;
+        }
+        try testing.expect(p != asset.no_parent);
         try testing.expect(p < i);
     }
-
-    // And the mechanical half: one pass reaches the fixed point. If a parent
-    // were evaluated after its child, a second pass would move something.
-    var first: [3]anim.BoneTransform = undefined;
-    @memcpy(&first, module.modelPose(id).?.constSlice());
-    try testing.expect(module.updateModelPose(id));
-    for (module.modelPose(id).?.constSlice(), first) |after, before| {
-        try testing.expectEqual(before.position.data[0], after.position.data[0]);
-        try testing.expectEqual(before.position.data[1], after.position.data[1]);
-        try testing.expectEqual(before.rotation.w, after.rotation.w);
-        try testing.expectEqual(before.scale.data[1], after.scale.data[1]);
-    }
+    try testing.expectEqual(@as(usize, 3), module.modelPose(id).?.constSlice().len);
 }
 
 test "inverse bind pose composed with the bind pose yields identity" {
@@ -399,4 +420,126 @@ test "a fresh instance stands in its bind pose, not at the origin" {
     const head = module.localPose(id).?.constSlice()[2];
     try testing.expect(head.position.approxEql(v3(0, 1, 0), 1e-6));
     try testing.expect(!module.modelPose(id).?.constSlice()[2].position.approxEql(Vec3.zero, 1e-3));
+}
+
+test "a profile kind or provenance outside its enum is refused" {
+    const gpa = testing.allocator;
+    const bytes = try encodeWithProfile(gpa, &.{.{ .role = .root, .bone = 0 }});
+    defer gpa.free(bytes);
+
+    // **These two guard an `@enumFromInt`, which is why they are refusals and
+    // not asserts.** Without them a tampered byte reaches `@enumFromInt` on a
+    // three-variant enum: safety-checked illegal behaviour where safety is on,
+    // and undefined where it is not. The profile block is the tail — kind,
+    // provenance, a `u16` count, then one four-byte entry — so the two bytes
+    // sit eight and seven back from the end.
+    const bad_kind = try gpa.dupe(u8, bytes);
+    defer gpa.free(bad_kind);
+    bad_kind[bad_kind.len - 8] = 9;
+    try testing.expectError(error.MalformedSkeleton, asset.parse(gpa, bad_kind));
+
+    const bad_prov = try gpa.dupe(u8, bytes);
+    defer gpa.free(bad_prov);
+    bad_prov[bad_prov.len - 7] = 9;
+    try testing.expectError(error.MalformedSkeleton, asset.parse(gpa, bad_prov));
+
+    // The untampered buffer loads, so the two refusals are about the bytes
+    // changed and not about the shape of the fixture.
+    var parsed = try asset.parse(gpa, bytes);
+    defer parsed.deinit(gpa);
+    try testing.expectEqual(asset.ProfileKind.humanoid, parsed.profile.?.kind);
+}
+
+test "a file that is both too long and carries an unknown role is refused on its shape" {
+    const gpa = testing.allocator;
+    const bytes = try encodeWithProfile(gpa, &.{.{ .role = .root, .bone = 0 }});
+    defer gpa.free(bytes);
+
+    // BOTH faults at once. Shape-before-content is only observable on a buffer
+    // that carries a shape fault AND a content fault: with one of the two, any
+    // ordering gives the same answer. The verdict must name the shape.
+    const both = try gpa.alloc(u8, bytes.len + 1);
+    defer gpa.free(both);
+    @memcpy(both[0..bytes.len], bytes);
+    both[bytes.len] = 0;
+    std.mem.writeInt(u16, both[bytes.len - 4 ..][0..2], 9999, .little);
+    try testing.expectError(error.MalformedSkeleton, asset.parse(gpa, both));
+
+    // And with the trailing byte removed, the SAME content fault surfaces —
+    // which is what says the refusal above was about the shape and not about
+    // the reader having stopped caring.
+    const content_only = try gpa.dupe(u8, both[0..bytes.len]);
+    defer gpa.free(content_only);
+    try testing.expectError(error.UnknownRole, asset.parse(gpa, content_only));
+}
+
+test "a corrupt float payload is refused rather than carried into every descendant" {
+    const gpa = testing.allocator;
+
+    // A zero quaternion is not a rotation, and it is not one bone's problem:
+    // `compose` multiplies it through, so a zero at the root zeroes the
+    // orientation of the whole subtree and every child comes out unrotated
+    // whatever its own local rotation says.
+    var bind = chainBind();
+    bind[0].rotation = .{ .x = 0, .y = 0, .z = 0, .w = 0 };
+    const inv = [_]Mat4{ Mat4.identity, Mat4.identity, Mat4.identity };
+    const zero_quat = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &bind,
+        .inverse_bind = &inv,
+    });
+    defer gpa.free(zero_quat);
+    try testing.expectError(error.NonUnitRotation, asset.parse(gpa, zero_quat));
+
+    // An arbitrary one misses by 99 rather than by 1, and is refused the same way.
+    bind[0].rotation = .{ .x = 5, .y = 5, .z = 5, .w = 5 };
+    const wild = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &bind,
+        .inverse_bind = &inv,
+    });
+    defer gpa.free(wild);
+    try testing.expectError(error.NonUnitRotation, asset.parse(gpa, wild));
+
+    // A NaN position spreads to every descendant through the same composition.
+    bind = chainBind();
+    bind[1].position = v3(std.math.nan(f32), 0, 0);
+    const nan_pos = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &bind,
+        .inverse_bind = &inv,
+    });
+    defer gpa.free(nan_pos);
+    try testing.expectError(error.NonFiniteTransform, asset.parse(gpa, nan_pos));
+
+    // And an infinity in an inverse-bind matrix, which a skin matrix multiplies
+    // into every vertex the bone touches.
+    var bad_inv = inv;
+    bad_inv[2].m[5] = std.math.inf(f32);
+    const inf_inv = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &chainBind(),
+        .inverse_bind = &bad_inv,
+    });
+    defer gpa.free(inf_inv);
+    try testing.expectError(error.NonFiniteTransform, asset.parse(gpa, inf_inv));
+
+    // The tolerance is generous on purpose — it catches corruption, not an
+    // importer's rounding — so a quaternion off by a few ULP still loads.
+    bind = chainBind();
+    bind[0].rotation = .{ .x = 0, .y = 0, .z = 0, .w = 1.0 + asset.unit_rotation_tolerance / 4.0 };
+    const nearly = try asset.encode(gpa, .{
+        .parents = &chain_parents,
+        .names = &chain_names,
+        .bind_local = &bind,
+        .inverse_bind = &inv,
+    });
+    defer gpa.free(nearly);
+    var parsed = try asset.parse(gpa, nearly);
+    defer parsed.deinit(gpa);
+    try testing.expectEqual(@as(u32, 3), parsed.boneCount());
 }

@@ -31,6 +31,7 @@ const components_mod = @import("components.zig");
 const asset_mod = @import("asset.zig");
 const skeleton_mod = @import("skeleton.zig");
 const bone_ref_mod = @import("bone_ref.zig");
+const sync_mod = @import("sync.zig");
 
 /// The ECS components this module registers.
 pub const components = components_mod;
@@ -48,6 +49,8 @@ pub const skeleton_asset = asset_mod;
 pub const skeleton = skeleton_mod;
 /// Bone addressing — the one path from a `BoneRef` to an index.
 pub const bone_ref = bone_ref_mod;
+/// The ECS seam: publishing the module and registering its per-frame pass.
+pub const sync = sync_mod;
 
 /// An entity posed against a skeleton.
 pub const Skeleton = components_mod.Skeleton;
@@ -68,9 +71,6 @@ pub const Rig = skeleton_mod.Rig;
 /// many instances: a hundred characters on one skeleton carry one hierarchy and
 /// a hundred poses.
 pub const RigId = u32;
-
-/// No rig.
-pub const no_rig: RigId = std.math.maxInt(RigId);
 
 /// One live skeleton instance: the poses, and how many bones they hold.
 ///
@@ -160,9 +160,16 @@ pub const KinesisModule = struct {
     }
 
     /// The rig behind a `RigId`, or null when the id names none.
-    pub fn rig(self: *Self, id: RigId) ?*const Rig {
+    ///
+    /// **BY VALUE, not by pointer, and that is a lifetime decision rather than
+    /// a style one.** `rigs` grows by reallocation, so a `*const Rig` handed
+    /// out here is dangling the moment another rig is loaded — and holding one
+    /// across a load is exactly what the shipped scenario does. The record is
+    /// seven slices whose own pointers are stable across that move, so a copy
+    /// is complete and costs one struct copy.
+    pub fn rig(self: *Self, id: RigId) ?Rig {
         if (id >= self.rigs.items.len) return null;
-        return &self.rigs.items[id];
+        return self.rigs.items[id];
     }
 
     /// Instantiate `rig_id`, both poses seeded with its BIND pose.
@@ -197,6 +204,26 @@ pub const KinesisModule = struct {
             .live = true,
         });
         return id;
+    }
+
+    /// The module's per-frame pass: recompute every live instance's
+    /// model-space pose from its local one.
+    ///
+    /// **This is what the registered system drives**, and it is why the pass is
+    /// a mechanism rather than an entry point. It walks the module's OWN
+    /// instance store and not the entities that carry a `Skeleton`: reaching
+    /// those needs a query, and the declared-access view exposes none until its
+    /// first consumer — so the pass poses every instance that exists, which is
+    /// every instance somebody asked for.
+    ///
+    /// Allocation-free, hence `void`: the poses were sized when the instance
+    /// was created and the pass only writes into them.
+    pub fn update(self: *Self) void {
+        for (self.instances.items) |*inst| {
+            if (!inst.live) continue;
+            const r = &self.rigs.items[inst.rig];
+            skeleton_mod.forwardKinematics(r.parents, inst.local, inst.model);
+        }
     }
 
     /// Recompute an instance's model-space pose from its local one.
@@ -268,6 +295,67 @@ pub const KinesisModule = struct {
         return inst.model;
     }
 
+    // --- Declared, not implemented -------------------------------------------
+    //
+    // Each REFUSES rather than answering a plausible value. The error channel
+    // exists for that refusal and for nothing else: the owner document shows
+    // several of these infallible, and the interface file carries why the
+    // freeze — not this shape — decides that entry by entry.
+
+    /// Sample `clip` at `time` into `pose`.
+    pub fn sampleClip(self: *Self, clip: anim.AssetHandle, time: f32, pose: *anim.PoseBuffer) anyerror!void {
+        _ = .{ self, clip, time, pose };
+        return error.NotImplemented;
+    }
+
+    /// How long `clip` runs, in seconds.
+    pub fn getClipDuration(self: *Self, clip: anim.AssetHandle) anyerror!f32 {
+        _ = .{ self, clip };
+        return error.NotImplemented;
+    }
+
+    /// Interpolate `a` towards `b` by `alpha` into `out`.
+    pub fn blendPoses(
+        self: *Self,
+        a: *const anim.PoseBuffer,
+        b: *const anim.PoseBuffer,
+        alpha: f32,
+        out: *anim.PoseBuffer,
+    ) anyerror!void {
+        _ = .{ self, a, b, alpha, out };
+        return error.NotImplemented;
+    }
+
+    /// Add `additive` onto `base` by `alpha` into `out`.
+    pub fn additivePose(
+        self: *Self,
+        base: *const anim.PoseBuffer,
+        additive: *const anim.PoseBuffer,
+        alpha: f32,
+        out: *anim.PoseBuffer,
+    ) anyerror!void {
+        _ = .{ self, base, additive, alpha, out };
+        return error.NotImplemented;
+    }
+
+    /// The bone matrices the GPU skins with.
+    pub fn getSkinMatrices(self: *Self, entity: anim.EntityId) anyerror![]const anim.Mat4 {
+        _ = .{ self, entity };
+        return error.NotImplemented;
+    }
+
+    /// Run one inverse-kinematics request; answers whether it converged.
+    pub fn solveIK(self: *Self, entity: anim.EntityId, request: anim.IKRequest) anyerror!bool {
+        _ = .{ self, entity, request };
+        return error.NotImplemented;
+    }
+
+    /// The world transform of a socket.
+    pub fn getSocketTransform(self: *Self, entity: anim.EntityId, socket: anim.BoneRef) anyerror!?anim.Transform {
+        _ = .{ self, entity, socket };
+        return error.NotImplemented;
+    }
+
     fn instance(self: *Self, id: SkeletonId) ?*const Instance {
         if (id >= self.instances.items.len) return null;
         const inst = &self.instances.items[id];
@@ -290,4 +378,5 @@ comptime {
     _ = asset_mod;
     _ = skeleton_mod;
     _ = bone_ref_mod;
+    _ = sync_mod;
 }

@@ -212,9 +212,16 @@ pub fn Mat4(comptime T: type) type {
         }
 
         /// Elementwise approximate equality within `tolerance`.
+        ///
+        /// **Written in the POSITIVE form, and the negation is not equivalent.**
+        /// `@abs(x - y) > tolerance` is FALSE for a NaN difference, so the
+        /// negated form accepts a matrix that is entirely NaN — and every
+        /// assertion shaped `inverse.mul(m).approxEql(identity, eps)` then
+        /// passes on a total failure of the inverse. The siblings in this
+        /// submodule all use the positive form for the same reason.
         pub fn approxEql(self: Self, other: Self, tolerance: T) bool {
             for (self.m, other.m) |x, y| {
-                if (@abs(x - y) > tolerance) return false;
+                if (!(@abs(x - y) <= tolerance)) return false;
             }
             return true;
         }
@@ -255,6 +262,78 @@ test "identity is neutral for mul and for mulPoint" {
     try testing.expect(Mat4f.identity.mul(m).approxEql(m, 1e-6));
 }
 
+test "TRS composition matches the reference product" {
+    // **ALL SIXTEEN ELEMENTS, twice, against two oracles — and the first
+    // attempt at this test could not see two of the four columns.** The
+    // image-of-three-points test below probes columns 0, 1 and 3 and touches
+    // column 2 with nothing: verified by mutation, scaling `fromTrs`'s third
+    // column left the whole suite green while the same mutation on column 0
+    // reddened it. The replacement then used a quarter turn about +X, where the
+    // diagonal terms of columns 1 and 2 are EXACTLY ZERO — so scaling them
+    // changed nothing either, and the new test was blind to the same two
+    // columns for a different reason. A fixture that cannot express an error
+    // cannot detect it, and a rotation is a very effective way to hide one.
+
+    // ORACLE ONE — hand-computable, and no element of the basis is zero. A half
+    // turn about +X sends +Y to −Y and +Z to −Z, so with scale (2, 3, 4) the
+    // basis columns are (2,0,0), (0,−3,0), (0,0,−4) and the fourth is the
+    // translation. Every diagonal term is non-zero, which is what the quarter
+    // turn cost.
+    const half = Mat4f.fromTrs(
+        Vec3.fromArray(.{ 1, 2, 3 }),
+        Quatf.fromAxisAngle(Vec3.unit_x, std.math.pi),
+        Vec3.fromArray(.{ 2, 3, 4 }),
+    );
+    const reference = [16]f32{
+        2, 0,  0,  0,
+        0, -3, 0,  0,
+        0, 0,  -4, 0,
+        1, 2,  3,  1,
+    };
+    for (half.m, reference, 0..) |got, want, i| {
+        errdefer std.debug.print("element {d} (row {d}, column {d}) diverged\n", .{ i, i % 4, i / 4 });
+        try testing.expectApproxEqAbs(want, got, 1e-6);
+    }
+
+    // ORACLE TWO — a GENERIC rotation, where every one of the nine basis terms
+    // is non-zero, checked against the geometric definition of what a TRS
+    // matrix IS: column `c` is the image, under the rotation, of the `c`-th
+    // basis axis scaled by `s[c]`. The reference comes from `Quat.rotateVec3`,
+    // a different function tested on its own against `Mat3.fromQuat` — so an
+    // error in `fromTrs` cannot cancel itself here the way it does inside an
+    // inverse round trip, which derives its second operand from the first.
+    const t = Vec3.fromArray(.{ -5, 7, 0.25 });
+    // Axis and angle chosen so the SMALLEST scaled basis term is 0.66, not by
+    // taste: a rotation whose matrix carries a near-zero term is a rotation on
+    // which scaling that term is unobservable, and the guard at the foot of
+    // this test refuses such a fixture rather than letting it pass quietly.
+    const q = Quatf.fromAxisAngle(Vec3.fromArray(.{ 1, 1, 1 }).normalize(), 1.1);
+    const scale = Vec3.fromArray(.{ 2, 3, 4 });
+    const m = Mat4f.fromTrs(t, q, scale);
+
+    const axes = [3]Vec3{ Vec3.unit_x, Vec3.unit_y, Vec3.unit_z };
+    // `@Vector` lanes are not indexable at run time; the scale is read once
+    // into an array so the loop can take its components by a run-time index.
+    const scale_parts = scale.toArray();
+    var smallest: f32 = std.math.floatMax(f32);
+    for (axes, scale_parts, 0..) |axis, s_c, c| {
+        const want = q.rotateVec3(axis.scale(s_c)).toArray();
+        for (want, 0..) |component, r| {
+            errdefer std.debug.print("basis element (row {d}, column {d}) diverged\n", .{ r, c });
+            try testing.expectApproxEqAbs(component, m.at(r, c), 1e-5);
+            smallest = @min(smallest, @abs(component));
+        }
+        try testing.expectApproxEqAbs(@as(f32, 0), m.at(3, c), 1e-6);
+    }
+    try testing.expect(m.translation().approxEql(t, 1e-6));
+    try testing.expectApproxEqAbs(@as(f32, 1), m.at(3, 3), 1e-6);
+
+    // The discrimination guard this test owes itself: no basis element is near
+    // zero, so scaling ANY of the nine is observable. Without it the fixture
+    // could quietly drift back into the shape that hid two columns twice.
+    try testing.expect(smallest > 0.1);
+}
+
 test "fromTrs applies scale before rotation and translation last" {
     // Non-uniform scale on purpose: under uniform scale `R·S == S·R`, so a
     // uniform fixture passes whichever order the code applies.
@@ -272,14 +351,27 @@ test "fromTrs applies scale before rotation and translation last" {
     try testing.expect(m.translation().approxEql(t, 1e-5));
 }
 
-test "mulDirection ignores the translation column" {
+test "mulDirection applies the basis and ignores the translation column" {
+    // **The basis half, and it needs a NON-IDENTITY basis to exist.** An
+    // earlier form built the matrix with an identity rotation and a unit
+    // scale, so the 3×3 block was the identity and transposing the index
+    // arithmetic left the whole suite green: the test pinned only what its
+    // title said, the excluded fourth column.
     const m = Mat4f.fromTrs(
         Vec3.fromArray(.{ 100, 200, 300 }),
-        Quatf.identity,
-        Vec3.one,
+        Quatf.fromAxisAngle(Vec3.unit_z, std.math.pi / 2.0),
+        Vec3.fromArray(.{ 2, 5, 1 }),
     );
-    try testing.expect(m.mulDirection(Vec3.unit_x).approxEql(Vec3.unit_x, 1e-6));
-    try testing.expect(m.mulPoint(Vec3.unit_x).approxEql(Vec3.fromArray(.{ 101, 200, 300 }), 1e-5));
+
+    // +X scaled by 2 then turned onto +Y — and the translation does not apply.
+    try testing.expect(m.mulDirection(Vec3.unit_x).approxEql(Vec3.fromArray(.{ 0, 2, 0 }), 1e-5));
+    // +Y scaled by 5 then turned onto −X.
+    try testing.expect(m.mulDirection(Vec3.unit_y).approxEql(Vec3.fromArray(.{ -5, 0, 0 }), 1e-5));
+    // The same vector as a POINT carries the translation on top.
+    try testing.expect(m.mulPoint(Vec3.unit_x).approxEql(Vec3.fromArray(.{ 100, 202, 300 }), 1e-5));
+    // And the two differ by exactly the translation column, for any vector.
+    const v = Vec3.fromArray(.{ 3, -4, 7 });
+    try testing.expect(m.mulPoint(v).sub(m.mulDirection(v)).approxEql(m.translation(), 1e-4));
 }
 
 test "affineInverse round-trips a non-uniformly scaled TRS matrix" {

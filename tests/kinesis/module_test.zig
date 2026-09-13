@@ -30,10 +30,12 @@ const testing = std.testing;
 /// cheap.
 ///
 /// `job_scheduler` is the exception: starting a worker pool for a test that
-/// submits no job buys nothing, so it points at a zeroed placeholder. That is
-/// not a shortcut but an ASSERTION — this module's `init` provably never reads
-/// it, and a placeholder is what makes "never reads it" observable instead of
-/// merely claimed.
+/// submits no job buys nothing, so it points at an UNMAPPED address — the
+/// alignment of the type and nothing else. It is not a zeroed object and it is
+/// not readable: anything that dereferenced it would fault rather than read a
+/// plausible zero. What it buys is bounded — a field merely copied into the
+/// context is invisible either way — so it witnesses a DEREFERENCE that does
+/// not happen, not an absence of interest in the field.
 const Fixture = struct {
     world: World,
     scheduler: core.ecs.SystemScheduler,
@@ -224,6 +226,24 @@ test "an out-of-range id answers as absent rather than trapping" {
     try testing.expectEqual(@as(u32, 0), module.getBoneCount(anim.no_skeleton));
     try testing.expect(module.localPose(1234) == null);
     module.destroySkeleton(anim.no_skeleton);
+
+    // **THE BOUNDARY, and it is the only id the check can get wrong.** Every
+    // other test probes an id far outside the range or one `instantiate`
+    // returned, so `>` in place of `>=` passes them all — and then
+    // `getBoneCount(len)` indexes one past the end: a panic in Debug and a read
+    // out of bounds in ReleaseFast. The id ONE PAST the last live instance is
+    // what discriminates, and it only exists once an instance does.
+    const live = try instantiateFlat(&module, gpa, 2);
+    const one_past: anim.SkeletonId = live + 1;
+    try testing.expectEqual(@as(u32, 0), module.getBoneCount(one_past));
+    try testing.expect(module.localPose(one_past) == null);
+    try testing.expect(module.modelPose(one_past) == null);
+    try testing.expect(!module.updateModelPose(one_past));
+    try testing.expect(module.resolveBone(one_past, .{ .name = "bone0" }) == null);
+    module.destroySkeleton(one_past);
+    // …and the last LIVE one still answers, so the bound was not merely made
+    // stricter.
+    try testing.expectEqual(@as(u32, 2), module.getBoneCount(live));
 }
 
 test "createSkeleton refuses rather than answering a plausible id" {
@@ -249,11 +269,186 @@ test "the interface wrapper delegates, it does not merely validate" {
 
     // A `struct { impl: Impl }` carrying nothing else compiles, validates the
     // implementation, and exposes none of it — and a test asserting only that
-    // the field exists cannot see that. So every entry is called THROUGH the
-    // wrapper and its answer asserted.
+    // the field exists cannot see that. So each entry below is called THROUGH
+    // the wrapper and its answer asserted. `resolveBone` is the wrapper's sixth
+    // entry and is exercised the same way in `bone_ref_test.zig`, beside the
+    // fixtures that give it a profile; saying "every entry" HERE would be false
+    // of this file, and a sentence like that is what stops a reader checking.
     const id = try instantiateFlat(&wrapped.impl, gpa, 5);
     try testing.expectEqual(@as(u32, 5), wrapped.getBoneCount(id));
     try testing.expectError(error.NotImplemented, wrapped.createSkeleton(@enumFromInt(1)));
     wrapped.destroySkeleton(id);
     try testing.expectEqual(@as(u32, 0), wrapped.getBoneCount(id));
+}
+
+// --- the ECS seam ------------------------------------------------------------
+
+test "the module publishes, withdraws, and refuses to replace a live publication" {
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+    var module = try KinesisModule.init(&fx.ctx);
+    defer module.deinit();
+
+    try testing.expect(kinesis.sync.publishedModule(&fx.world) == null);
+    try kinesis.sync.publishModule(gpa, &fx.world, &module);
+    // The IDENTITY and not a boolean: a boolean cannot tell "still published"
+    // from "erased and something else answers".
+    try testing.expectEqual(&module, kinesis.sync.publishedModule(&fx.world).?);
+
+    // A second publication is refused rather than silently replacing the first,
+    // which would make a live module disappear with nobody having withdrawn it.
+    var other = try KinesisModule.init(&fx.ctx);
+    defer other.deinit();
+    try testing.expectError(
+        error.ModuleAlreadyPublished,
+        kinesis.sync.publishModule(gpa, &fx.world, &other),
+    );
+    try testing.expectEqual(&module, kinesis.sync.publishedModule(&fx.world).?);
+
+    // A withdrawal that names someone ELSE is a no-op — otherwise a late
+    // teardown erases a module published after it, and every frame afterwards
+    // is a silent nothing.
+    kinesis.sync.withdrawModule(&fx.world, &other);
+    try testing.expectEqual(&module, kinesis.sync.publishedModule(&fx.world).?);
+
+    kinesis.sync.withdrawModule(&fx.world, &module);
+    try testing.expect(kinesis.sync.publishedModule(&fx.world) == null);
+}
+
+test "the registered system drives the pass through a dispatched frame" {
+    // **DISPATCHED, not called.** A first version of this test called
+    // `module.update()` by hand and asserted the pose moved — which it does,
+    // and which says nothing about the system: emptying the system's body left
+    // the whole suite green. What has to run is `dispatchFrame`, so the claim
+    // in the title is the thing being measured.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var scheduler = core.ecs.SystemScheduler.init();
+    defer scheduler.deinit(gpa);
+
+    var ctx = ModuleContext{
+        .world = &world,
+        .persistent_allocator = gpa,
+        .system_scheduler = &scheduler,
+        .job_scheduler = &jobs,
+    };
+    var module = try KinesisModule.init(&ctx);
+    defer module.deinit();
+    try kinesis.sync.publishModule(gpa, &world, &module);
+    defer kinesis.sync.withdrawModule(&world, &module);
+    try kinesis.sync.registerSystems(gpa, &scheduler, &world);
+
+    // ONE system, in `fixed_update`: the pass is inside the compared-output
+    // perimeter, and a driver in `update` would pose differently on two
+    // machines that agree on everything else.
+    try testing.expectEqual(@as(usize, 1), scheduler.systemsInPhase(.fixed_update).len);
+    var elsewhere: usize = 0;
+    for ([_]core.ecs.Phase{ .pre_update, .update, .post_update, .late_update, .pre_render }) |p| {
+        elsewhere += scheduler.systemsInPhase(p).len;
+    }
+    try testing.expectEqual(@as(usize, 0), elsewhere);
+
+    // Registering twice is refused rather than adding a twin: two drivers of
+    // one store run the pass twice a tick, and the second is invisible.
+    try testing.expectError(
+        error.SystemAlreadyRegistered,
+        kinesis.sync.registerSystems(gpa, &scheduler, &world),
+    );
+
+    // Displace the child's LOCAL transform behind the pass's back, and assert
+    // the model pose has NOT followed. Without this half the assertion after
+    // the frame is satisfied by a pose that was already right.
+    const id = try instantiateFlat(&module, gpa, 2);
+    module.localPose(id).?.slice()[1].position = anim.Vec3.fromArray(.{ 0, 5, 0 });
+    try testing.expectApproxEqAbs(
+        @as(f32, 0),
+        module.modelPose(id).?.constSlice()[1].position.data[1],
+        1e-6,
+    );
+
+    try scheduler.dispatchFrame(&world, gpa, io, &jobs, 1.0 / 60.0, null);
+
+    try testing.expectApproxEqAbs(
+        @as(f32, 5),
+        module.modelPose(id).?.constSlice()[1].position.data[1],
+        1e-6,
+    );
+}
+
+test "a frame dispatched with no module published is a no-op, not a fault" {
+    // The system resolves its resource and returns when it names nothing. What
+    // breaks if this is removed: a withdrawal followed by a frame dereferences
+    // a dead address, and the fault surfaces far from the withdrawal.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    var jobs = try core.jobs.scheduler.Scheduler.init(gpa, io);
+    try jobs.start();
+    defer jobs.deinit(gpa);
+    var scheduler = core.ecs.SystemScheduler.init();
+    defer scheduler.deinit(gpa);
+
+    var ctx = ModuleContext{
+        .world = &world,
+        .persistent_allocator = gpa,
+        .system_scheduler = &scheduler,
+        .job_scheduler = &jobs,
+    };
+    var module = try KinesisModule.init(&ctx);
+    defer module.deinit();
+    try kinesis.sync.publishModule(gpa, &world, &module);
+    try kinesis.sync.registerSystems(gpa, &scheduler, &world);
+
+    kinesis.sync.withdrawModule(&world, &module);
+    try scheduler.dispatchFrame(&world, gpa, io, &jobs, 1.0 / 60.0, null);
+}
+
+test "the declared entries that are not implemented refuse" {
+    const gpa = testing.allocator;
+    const fx = try Fixture.init(gpa);
+    defer fx.deinit(gpa);
+
+    const Wrapped = anim.AnimationModule(KinesisModule);
+    var wrapped = try Wrapped.init(&fx.ctx);
+    defer wrapped.deinit();
+
+    // Called THROUGH the wrapper, because that is the surface a consumer sees,
+    // and asserted one by one: a refusal is the only answer that cannot be
+    // mistaken for a result. An unchanged pose, a zero duration, an empty
+    // palette and a false are all plausible.
+    var pose = try kinesis.poses.alloc(gpa, 2);
+    defer kinesis.poses.free(gpa, pose);
+    const clip: anim.AssetHandle = @enumFromInt(1);
+    const entity = core.ecs.EntityId.dead;
+
+    try testing.expectError(error.NotImplemented, wrapped.sampleClip(clip, 0.0, &pose));
+    try testing.expectError(error.NotImplemented, wrapped.getClipDuration(clip));
+    try testing.expectError(error.NotImplemented, wrapped.blendPoses(&pose, &pose, 0.5, &pose));
+    try testing.expectError(error.NotImplemented, wrapped.additivePose(&pose, &pose, 0.5, &pose));
+    try testing.expectError(error.NotImplemented, wrapped.getSkinMatrices(entity));
+    try testing.expectError(error.NotImplemented, wrapped.solveIK(entity, .{
+        .ik_type = .two_bone,
+        .chain_root = 0,
+        .chain_tip = 1,
+        .target_position = anim.Vec3.zero,
+    }));
+    try testing.expectError(error.NotImplemented, wrapped.getSocketTransform(entity, .{ .role = .hand_r }));
+
+    // The control: `update` is on the same surface and is REAL, so the seven
+    // refusals above are about those entries and not about a wrapper that
+    // refuses everything.
+    wrapped.update();
 }
