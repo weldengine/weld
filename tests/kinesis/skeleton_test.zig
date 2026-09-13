@@ -560,13 +560,26 @@ test "a corrupt float payload is refused rather than carried into every descenda
 }
 
 test "a rotation accepted at the edge of tolerance does not stretch a deep chain" {
-    // **THE ATTACK, and the first version of it measured nothing.** It used a
-    // 0.1 rad rotation, where a norm error at the band's edge compounds to
-    // 0.06 % over 128 bones — so it passed against the unnormalised code and
-    // proved the opposite of what it claimed. The exposure is governed by the
-    // rotation ANGLE, not by the tolerance alone: at 1.2 rad the same error
-    // compounds to 8.5 % about +Y and 5.7 % about (1,1,1), which is a limb
-    // visibly the wrong length. Measured, then written.
+    // **THE ATTACK, and two earlier versions of it were defective.** The first
+    // used a 0.1 rad rotation, where a norm error at the band's edge compounds
+    // to 0.06 % over 128 bones — it passed against the unnormalised code and
+    // proved the opposite of what it claimed. The drift is the PRODUCT
+    // `n · δ · (1 − cos θ)`: all three factors govern, and the angle is the one
+    // that fixture had set to nearly nothing.
+    //
+    // The second used `k = @sqrt(1 + tolerance)`, which NAMES A LENGTH THE BAND
+    // REFUSES: `1 + tolerance` is not representable in f32 and rounds up to
+    // 8389 ULP, one past the 8388 the predicate admits. It loaded only because
+    // the five roundings between `@sqrt` and the summed `len_sq` happened to
+    // land one ULP low at this particular angle — measured, the identical
+    // construction is REFUSED at 15.2 % of angles in (0, 3], and the verdict is
+    // not even monotone: 1.80 rad is refused between an accepted 1.50 and an
+    // accepted 2.00. A fixture whose admissibility is a one-in-six lottery on
+    // the last ULP is not a fixture.
+    //
+    // So the band edge is approached FROM BELOW, with headroom stated as a
+    // multiple of the ULP noise and not as a bare fraction, and admissibility is
+    // asserted through the loader's own predicate before the loader is asked.
     const gpa = testing.allocator;
     const depth = 128;
     const parents = try gpa.alloc(BoneIndex, depth);
@@ -583,9 +596,33 @@ test "a rotation accepted at the edge of tolerance does not stretch a deep chain
 
     // Every bone just inside the band — the norm an exporter that quantises its
     // quaternions legitimately produces, and which this loader accepts.
-    const k = @sqrt(1.0 + asset.unit_rotation_tolerance);
-    const q = Quat.fromAxisAngle(Vec3.unit_y, 1.2);
+    //
+    // 0.9 is not a fraction chosen for taste. The band is `tolerance / 2⁻²³` =
+    // 8389 ULP of one, the construction's own spread across angles is 2 ULP, and
+    // the margin that has to cover that spread is ABSOLUTE — so the rule is
+    // `factor <= 1 − N·2⁻²³/tolerance` for a measured spread of N. At this
+    // tolerance that admits anything up to 0.999; 0.9 leaves 839 ULP, some 400 ×
+    // the noise. Written as a rule because the number stops working if the
+    // tolerance is ever tightened: at `1.0e-6` the whole band is 8 ULP wide and
+    // 0.9 of it no longer clears the spread.
+    const k = @sqrt(1.0 + 0.9 * asset.unit_rotation_tolerance);
+    // 3.0 rad and not 1.2: the stretch is monotone in the angle, so the worst
+    // case the door admits is at the top of the range, and an attack that
+    // settles for 84 % of it leaves the margin on the table. Not π, where the
+    // scalar part is 4.4e-8 and a reviewer may fairly call the quaternion
+    // degenerate; 3.0 is 97 % of the maximum with no such objection.
+    const q = Quat.fromAxisAngle(Vec3.unit_y, 3.0);
     const off_unit = Quat{ .x = q.x * k, .y = q.y * k, .z = q.z * k, .w = q.w * k };
+
+    // TWO-SIDED, and the lower half is what makes it a guard. "Inside the band"
+    // alone is satisfied by a perfectly unit quaternion, under which this whole
+    // test is vacuous — no drift to remove, `normalizeRotations` a no-op, and
+    // its own name false. Through the loader's own predicate, so there is no
+    // second copy of the band arithmetic to disagree by an ULP.
+    try testing.expect(asset.rotationIsUnitEnough(off_unit));
+    const built_len_sq = ((off_unit.x * off_unit.x + off_unit.y * off_unit.y) +
+        off_unit.z * off_unit.z) + off_unit.w * off_unit.w;
+    try testing.expect(built_len_sq - 1.0 >= 0.8 * asset.unit_rotation_tolerance);
     for (0..depth) |i| {
         parents[i] = if (i == 0) asset.no_parent else @intCast(i - 1);
         names[i] = try std.fmt.allocPrint(gpa, "b{d}", .{i});
@@ -626,11 +663,13 @@ test "a rotation accepted at the edge of tolerance does not stretch a deep chain
 
     // NON-VACUITY: the same chain built from the UNNORMALISED quaternion really
     // does stretch, so the assertions above are about the normalisation and not
-    // about a fixture that could never have drifted.
+    // about a fixture that could never have drifted. The floor tracks the
+    // fixture — it was 1.05 against a measured 1.085, and moving the angle to
+    // 3.0 without moving it would leave it slack by four times.
     for (local.slice()) |*b| b.rotation = off_unit;
     kinesis.skeleton.forwardKinematics(parsed.parents, local, model);
     const drifted = model.constSlice()[depth - 1].mulDirection(Vec3.unit_x).length();
-    try testing.expect(drifted > 1.05);
+    try testing.expect(drifted > 1.2);
 }
 
 test "an absurd rotation is still refused, and the refusal runs before the normalisation" {

@@ -94,22 +94,51 @@ pub const ParseError = error{
 
 /// How far a stored rotation may sit from unit length before it is refused.
 ///
-/// Generous by an order of magnitude over what an `f32` round trip costs,
-/// because it exists to catch a CORRUPT quaternion and not to police an
-/// importer's rounding: what it must reject is the zero quaternion and the
-/// arbitrary one, which miss by 1 and by 99.
+/// Three orders of magnitude above what building a quaternion costs — measured,
+/// `@sqrt`-and-store round trips land within `1.19e-7` of unit and
+/// `Quat.fromAxisAngle` within `3.58e-7`, against a band of `1.0e-3`, which is
+/// 8389 ULP of one. The band exists to catch a CORRUPT quaternion and not to
+/// police an importer's rounding: what it must reject is the zero quaternion
+/// and the arbitrary one, which miss by 1 and by 99.
 ///
 /// **ACCEPTING IS NOT ENOUGH, AND THE TOLERANCE IS NOT THE GUARANTEE.** A
-/// quaternion inside this band is a legitimate export and still not a rotation:
-/// the matrix built from it stretches, and the stretch COMPOUNDS down the
-/// hierarchy. Measured at the band's edge over 128 bones — 8.5 % on a 1.2 rad
-/// rotation about +Y, 5.7 % about (1,1,1) — while the same error at 0.1 rad
-/// gives 0.06 %. So the exposure is governed by the ROTATION ANGLE and not by
-/// the tolerance alone, which is why tightening the band would not have closed
-/// it and why `normalizeRotations` runs after this check rather than instead of
-/// it. Refuse the absurd, then normalise what remains: a zero quaternion
-/// normalised is a NaN, so the order is load-bearing.
+/// quaternion inside this band is a legitimate export and still not a rotation.
+/// `Mat4.fromTrs` writes an UNSCALED `1` on each diagonal term while every
+/// off-diagonal term carries the full `|q|²`, so for `q = k·u` with `u` unit it
+/// produces `k²·R(u) + (1 − k²)·I` — an affine MIX of the rotation and the
+/// identity, not a scaled rotation. A direction perpendicular to the axis is
+/// therefore stretched by `δ·(1 − cos θ)` per bone, with `δ = |q|² − 1`, and
+/// forward kinematics composes those matrices.
+///
+/// So the drift is the PRODUCT `n · δ · (1 − cos θ)` and all three factors
+/// govern it. Measured at the band's edge over 128 bones: 0.06 % at 0.1 rad,
+/// 8.5 % at 1.2 rad, 29 % at 3.0 rad — and exactly 0 at θ = 0, where `δ` is
+/// fully present and the mix degenerates to the identity.
+///
+/// **Tightening the band WOULD bound the drift**, linearly in `δ` — 100 ×
+/// tighter takes the 128-bone figure from 8.5 % to 0.08 %. What defeats a band
+/// is not its width but DEPTH: this format admits `max_bones` = 4096 and a
+/// legal chain of all of them, where the band's own edge stretches 13.6 × at
+/// 1.2 rad and 3583 × at π. A band sized against that case would sit three
+/// orders below where it sits, on an assumed depth and angle no scalar
+/// tolerance can carry. `normalizeRotations` carries none of those assumptions,
+/// which is why it runs after this check rather than instead of it: refuse the
+/// absurd, then normalise what remains — a zero quaternion normalised is a NaN,
+/// so the order is load-bearing.
 pub const unit_rotation_tolerance: f32 = 1.0e-3;
+
+/// Whether a rotation is close enough to unit for this loader to admit it.
+///
+/// **The ONE declarant of the band's arithmetic**, and the summation order is
+/// part of it: `((x² + y²) + z²) + w²` decides the last ULP, so a second copy
+/// written `x² + y² + z² + w²` can disagree with this one by one ULP and answer
+/// a different verdict on a quaternion at the edge. The tests that build a
+/// band-edge fixture call THIS, rather than re-deriving it — the repository has
+/// twice paid for two implementations of one exact arithmetic.
+pub fn rotationIsUnitEnough(r: Quat) bool {
+    const len_sq = ((r.x * r.x + r.y * r.y) + r.z * r.z) + r.w * r.w;
+    return @abs(len_sq - 1.0) <= unit_rotation_tolerance;
+}
 
 /// Where a profile's mapping came from.
 pub const Provenance = enum(u8) {
@@ -457,8 +486,7 @@ fn validatePayload(bind_local: []const BoneTransform, inverse_bind: []const Mat4
         // Written in the POSITIVE form: a NaN has already been refused above,
         // but the negated comparison would accept one and the two guards are one
         // edit apart from being reordered.
-        const len_sq = ((r.x * r.x + r.y * r.y) + r.z * r.z) + r.w * r.w;
-        if (!(@abs(len_sq - 1.0) <= unit_rotation_tolerance)) return error.NonUnitRotation;
+        if (!rotationIsUnitEnough(r)) return error.NonUnitRotation;
     }
     for (inverse_bind) |m| {
         for (m.m) |e| {

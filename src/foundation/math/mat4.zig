@@ -76,6 +76,23 @@ pub fn Mat4(comptime T: type) type {
         /// The matrix `T · R · S`, in that order: scale first, then rotate,
         /// then translate a point fed through `mulPoint`.
         ///
+        /// **`r` MUST BE UNIT, and a near-unit one is not nearly right.** The
+        /// rotation block is written in the unit-assumed form — an unscaled `1`
+        /// on each diagonal term, `|q|²` on every off-diagonal one — so for
+        /// `r = k · u` with `u` unit it yields `k²·R(u) + (1 − k²)·I`, an affine
+        /// MIX of the rotation with the identity rather than a scaled rotation.
+        /// A caller reading `k² · R(u)` out of it would be wrong: the mix is
+        /// ANISOTROPIC, stretching a direction perpendicular to the axis by
+        /// `(|q|² − 1)·(1 − cos θ)` and leaving the axis itself exact, so no
+        /// scale factor can describe it and the error grows with the ANGLE. It
+        /// compounds under composition, which is how it reaches centimetres at
+        /// the end of a bone chain. Normalise at the frontier that admits the
+        /// quaternion, not here — this entry has no channel to refuse one.
+        ///
+        /// Stated because `Mat3.fromQuat` and `Quat.rotateVec3` carry the same
+        /// unit-assumed form and BOTH declare it, and this one did not: a
+        /// property held by one entry and not by its twin.
+        ///
         /// `R · S` scales each COLUMN of the rotation by the matching scale
         /// component — scaling rows instead yields `S · R`, which differs
         /// under non-uniform scale and agrees under uniform scale, so a suite
