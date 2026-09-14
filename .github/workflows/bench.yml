@@ -81,6 +81,12 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
+          # ci.yml manages .zig-cache with its own restore and save steps below.
+          # Left at its default, this action restores and saves THE SAME directory
+          # under a key of its own that carries neither the optimize mode nor the
+          # precision — so cells that differ in both share one lineage and overlay
+          # it with this workflow's. Two layers of one directory, stored twice.
+          use-cache: false
 
       # Keyed on every axis that changes what is built: os, optimize mode, CPU
       # feature set, zig version, and the zon hash. A key missing an axis the

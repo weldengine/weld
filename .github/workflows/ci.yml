@@ -220,6 +220,12 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
+          # ci.yml manages .zig-cache with its own restore and save steps below.
+          # Left at its default, this action restores and saves THE SAME directory
+          # under a key of its own that carries neither the optimize mode nor the
+          # precision — so cells that differ in both share one lineage and overlay
+          # it with this workflow's. Two layers of one directory, stored twice.
+          use-cache: false
 
       # M0.9 / E1, reworked by the CI cache refresh chore — Zig build cache
       # keyed on (os, optimize mode, zig version, build.zig.zon hash), now as
@@ -238,8 +244,17 @@ jobs:
       # that dominate CI wall-time on the ReleaseSafe legs — hence the key
       # includes `matrix.mode`. Zig's cache is content-hashed and
       # self-invalidating: a restored cache never yields a stale build.
-      # setup-zig's own (global) cache is left at its default — this step
-      # adds the mode-keyed local cache it does not cover.
+      # This is the ONLY layer over `.zig-cache`, and it has to be: the setup
+      # action caches that same directory, not a global or toolchain one — its
+      # tarball is cached separately — under a key carrying the job name, the
+      # architecture and the Zig version, and carrying neither the optimize mode
+      # nor the precision. Left at its default it restores one lineage shared by
+      # every cell of a job, this step overlays a second on top, and both save at
+      # the end. The build then works on a mix of manifests and objects from
+      # cells that differ in mode and in precision, which is a miss and a rebuild
+      # rather than a wrong answer — and the same orphaned-manifest shape the
+      # save step below guards against. Hence `use-cache: false` at every call
+      # site whose job also manages this directory.
       # §7.3 whitelist note: actions/cache/restore@v5 and actions/cache/save@v5
       # are sub-actions of the already-whitelisted actions/cache@v5 (same
       # repo, same major, same portability notes).
@@ -602,8 +617,17 @@ jobs:
             echo "save=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # SAVED ONLY FROM A PUSH, never from a pull request. On a `pull_request`
+      # event `github.sha` is the MERGE commit, which changes whenever either
+      # side moves, so a lineage written there names a sha no later run can ever
+      # ask for: it is unreadable by construction, by anyone, and exists only to
+      # evict the lineage of `main` that the next run does need. Pull requests
+      # keep reading through the prefix ladder exactly as before — this removes
+      # writes, not reads. The other jobs' caches are keyed without a sha, so
+      # they overwrite rather than accumulate and are bounded at one entry each;
+      # this condition is for the per-sha key only.
       - name: Save Zig cache (final)
-        if: always() && steps.cache-size-final.outputs.save == 'true'
+        if: always() && github.event_name == 'push' && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
@@ -627,6 +651,12 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
+          # ci.yml manages .zig-cache with its own restore and save steps below.
+          # Left at its default, this action restores and saves THE SAME directory
+          # under a key of its own that carries neither the optimize mode nor the
+          # precision — so cells that differ in both share one lineage and overlay
+          # it with this workflow's. Two layers of one directory, stored twice.
+          use-cache: false
 
       # M0.9 / E1 — same Zig build cache as build-and-test. This job
       # `needs: build-and-test`, so the ubuntu-24.04/ReleaseSafe cell has
@@ -746,6 +776,12 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
+          # ci.yml manages .zig-cache with its own restore and save steps below.
+          # Left at its default, this action restores and saves THE SAME directory
+          # under a key of its own that carries neither the optimize mode nor the
+          # precision — so cells that differ in both share one lineage and overlay
+          # it with this workflow's. Two layers of one directory, stored twice.
+          use-cache: false
 
       - name: Restore Zig cache (Debug)
         uses: actions/cache@v5
@@ -949,6 +985,12 @@ jobs:
         if: steps.trailer.outputs.requested == 'true'
         with:
           version: ${{ env.ZIG_VERSION }}
+          # ci.yml manages .zig-cache with its own restore and save steps below.
+          # Left at its default, this action restores and saves THE SAME directory
+          # under a key of its own that carries neither the optimize mode nor the
+          # precision — so cells that differ in both share one lineage and overlay
+          # it with this workflow's. Two layers of one directory, stored twice.
+          use-cache: false
 
       - name: Generate one witness set per (precision, mode)
         if: steps.trailer.outputs.requested == 'true'
