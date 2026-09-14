@@ -586,6 +586,15 @@ jobs:
           bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
           bytes=$((bytes * 1024))
           echo "zig cache (final): $bytes bytes (cap $limit)"
+          # WHAT the archive is made of, and not only how big it is. The size
+          # alone cannot say whether the route out of the ceiling is to cache
+          # fewer cells or to cache less per cell, and nobody has read this
+          # decomposition: `o` holds the compilation outputs and cannot be
+          # dropped — a manifest without its object is the corruption guarded
+          # against below — but a subtree dominated by linked test binaries can
+          # be excluded from the saved path without losing a manifest.
+          echo "--- composition ---"
+          du -sk .zig-cache/* 2>/dev/null | sort -rn | head -10 || true
           if [ "$bytes" -gt "$limit" ]; then
             echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the final save."
             echo "save=false" >> "$GITHUB_OUTPUT"
