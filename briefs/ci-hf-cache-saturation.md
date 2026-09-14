@@ -130,3 +130,73 @@ The YAML parses, the matrix job keeps exactly three cache steps (restore,
 measure-final, save-final), and the CI is green on this branch. The effect of
 point 1 is read on the repository's cache usage after a full run, and the effect
 of point 2 is that no cell is cancelled with every step green.
+
+## Not this hotfix's subject — the scheduler park dump, recorded because nowhere else would keep it
+
+`CLAUDE.md`'s M1.1.1-HF3 row closes on: *"the windows-2025/ReleaseSafe hang (4
+consecutive pre-E9b occurrences) did not recur on the post-E9b merge run —
+unexplained, instrumented, **first recurrence self-names via the dump**."*
+
+**This is that first recurrence.** It landed on this branch's own CI, which is
+the only reason it is written here: a CI hotfix is not where a Tier 0 scheduler
+finding belongs, and a scratchpad does not survive the session. A repository file
+is the only durable place available, and this is the open PR.
+
+Provenance, so nothing about it has to be taken on trust:
+
+| | |
+|---|---|
+| run | 34795835386, **attempt 1** |
+| job | 103828662582 |
+| cell | `build-and-test (windows-2025, ReleaseSafe, true)` — f64 |
+| sha | `03e084b` (this branch: `ci.yml` + this brief, **zero source files**) |
+| when | 2026-09-14T01:47:02Z |
+| attempt 2, same sha | **did not reproduce** |
+
+VERBATIM, as the log carries it:
+
+```
+test
++- run test 2 pass, 1 crash (3 total)
+error: 'scheduler.test.workers deterministically park then wake on dispatch' exited with code 2 with stderr:
+       === M1.0.1 test watchdog: 'workers deterministically park then wake on dispatch' did not finish within 5s — deadlock/livelock (covers scheduler.deinit join) ===
+       === Job scheduler ===
+         pending_count : 0
+         generation    : 1
+         chunk_count   : 13
+         shutdown      : false
+         worker_count  : 4
+         worker[ 0] id= 0 chunks=       4 parks_entered=     0 parks=     0 steals_a=     724 steals_s=       0 work_ns=300
+         worker[ 1] id= 1 chunks=       3 parks_entered=     0 parks=     0 steals_a=     720 steals_s=       0 work_ns=0
+         worker[ 2] id= 2 chunks=       3 parks_entered=     0 parks=     0 steals_a=     719 steals_s=       0 work_ns=100
+         worker[ 3] id= 3 chunks=       3 parks_entered=     0 parks=     0 steals_a=     719 steals_s=       0 work_ns=300
+         totals: chunks=13 parks_entered=0 parks=0 steals_a=2882 steals_s=0 (invariant parks<=parks_entered: true)
+```
+
+### What it ESTABLISHES
+
+- **The work was entirely drained.** `pending_count = 0`, and the per-worker
+  `chunks` sum to the `chunk_count` of 13. So the 2882 attempted steals failing
+  for 0 successes is not an anomaly — with nothing left to steal, failing is the
+  correct outcome.
+- **No worker entered a park.** `parks_entered = 0` on all four, while every one
+  of them should have: the work was gone and there was nothing else to do.
+- **The test could not possibly have exited.** `tests/ecs/scheduler.zig:214`'s
+  phase (a) loops until `Σ parks_entered > Σ parks_completed`. At `0 > 0` that is
+  false forever, so the 5 s watchdog was the only exit. Its own comment
+  anticipates exactly this reading: *"a genuine regression — workers never
+  parking — hangs here and the watchdog dumps the scheduler state, rather than a
+  silent CI timeout."* The instrumentation did what it was built for.
+- **It is not this branch.** The diff against `5d79846` is `.github/workflows/`
+  and `briefs/` — no source file, so no compiled code changed.
+
+### What it does NOT establish, and is deliberately not guessed at here
+
+Why no worker parked. One occurrence, one cell, and this repository's own
+discipline is against conjecturing on a scheduler's internals from a single
+dump — M1.1.11.1 paid for that lesson twice.
+
+**The question the dump makes answerable BY READING CODE rather than by
+hypothesis: what does a worker do after an unsuccessful steal, and under what
+condition does it enter a park?** That is a Tier 0 question and belongs to
+whoever opens the entry. Recorded, not diagnosed.
