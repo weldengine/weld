@@ -1,12 +1,5 @@
 name: Bench
 
-# Benchmark jobs, split out of the CI (test) workflow at M0.9 / E1 — debt
-# tracked since M0.1 ("CI debt to investigate seriously in M0.2") and due at
-# the M0.8 close. ci.yml now carries only test-category jobs; this workflow
-# carries benchmarks. The full perf gates (S1 ≤ 62 µs etc.) are validated
-# locally on the reference machine under the thermal-aware protocol, NOT in
-# CI — this is the compile-and-run smoke that keeps the bench harness building
-# and executing on every PR.
 
 on:
   push:
@@ -52,26 +45,6 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
-    # Raised 10 -> 20 at M1.B/G11, on measurement rather than on symmetry.
-    #
-    # `bench-ecs-smoke (windows-2025)` was ALREADY at the edge: the last run to
-    # pass took 9m37 against the 10-minute budget — 23 seconds of headroom — and
-    # the very next run on the following commit was cancelled at 11m28. That
-    # marginality is a standing open item, first closed by experiment at
-    # M1.1.11.1 (cancelled at 9m28, passed on rerun at 7m34 on the SAME commit),
-    # with the code exonerated there too.
-    #
-    # M1.B then made it worse, and MEASURED so rather than assumed: this step
-    # runs `zig build bench-ecs`, whose run step depends on the install step, so
-    # it compiles EVERY installed artifact — verified by deleting
-    # `zig-out/bin/` and observing `ecs-hybrid-crossover-bench` reappear
-    # alongside `ecs-benchmark`. The new crossover bench is therefore compiled by
-    # this job, and the growth is legitimate work rather than a regression.
-    #
-    # 20 is not a masking: `build-and-test (windows-2025, ReleaseSafe)` compiles
-    # the whole forge suite on the same runner class in 42m, so a hang is still
-    # caught here well before it costs an hour. A job that fails on budget every
-    # run is worse than an absent job — it teaches everyone not to read it.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -81,11 +54,7 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
-          # ci.yml manages .zig-cache with its own restore and save steps below.
-          # Left at its default, this action restores and saves THE SAME directory
-          # under a key of its own that carries neither the optimize mode nor the
-          # precision — so cells that differ in both share one lineage and overlay
-          # it with this workflow's. Two layers of one directory, stored twice.
+          # use-cache: false — the action caches .zig-cache itself; this workflow owns it
           use-cache: false
 
       # Keyed on every axis that changes what is built: os, optimize mode, CPU
@@ -109,27 +78,12 @@ jobs:
           restore-keys: |
             zig-v2-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
-      # Compile-and-run sanity for the S1 ECS bench. The full bench gate
-      # (≤ 62 µs median ReleaseSafe on the M4 Pro reference) is checked
-      # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} -- --smoke
 
-      # M1.B: the crossover bench RUNS here and its measurement is archived,
-      # which the milestone's acceptance criteria require and which this
-      # workflow could not do before — it carried no `upload-artifact` step at
-      # all, and the crossover bench was compiled by the step above without
-      # ever being executed.
-      #
-      # The FULL sweep, not `--smoke`: measured at 15 s in ReleaseSafe on the
-      # M4 Pro reference (against 1 s for the smoke), so even several times
-      # slower on a runner it is negligible against the 20-minute budget — and
-      # a one-cell-per-configuration sample archived as "the measurement" would
-      # be a thinner artifact for no saving worth having. The bench has NO pass
-      # threshold, permanently: `engine-ecs-internals.md` §2 refuses to engrave
-      # a crossover threshold and names this bench as what produces one, so its
-      # output is the deliverable and a red here would mean the bench crashed,
-      # never that a number moved.
+      # No pass threshold here, permanently: engine-ecs-internals.md §2 refuses to
+      # engrave a crossover threshold and names this bench as what produces one, so
+      # its output is the deliverable and a red means the bench crashed.
       - name: zig build bench-ecs-hybrid (crossover sweep)
         run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
