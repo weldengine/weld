@@ -304,10 +304,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
-            zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
+            zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
@@ -617,21 +617,15 @@ jobs:
             echo "save=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # SAVED ONLY FROM A PUSH, never from a pull request. On a `pull_request`
-      # event `github.sha` is the MERGE commit, which changes whenever either
-      # side moves, so a lineage written there names a sha no later run can ever
-      # ask for: it is unreadable by construction, by anyone, and exists only to
-      # evict the lineage of `main` that the next run does need. Pull requests
-      # keep reading through the prefix ladder exactly as before — this removes
-      # writes, not reads. The other jobs' caches are keyed without a sha, so
-      # they overwrite rather than accumulate and are bounded at one entry each;
-      # this condition is for the per-sha key only.
       - name: Save Zig cache (final)
-        if: always() && github.event_name == 'push' && steps.cache-size-final.outputs.save == 'true'
+        if: always()
+          && (github.event_name == 'push'
+              || github.ref_name == 'phase-1/debt/phase-1-debt')
+          && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
@@ -666,9 +660,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -787,9 +781,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |

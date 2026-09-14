@@ -105,9 +105,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       # Compile-and-run sanity for the S1 ECS bench. The full bench gate
       # (≤ 62 µs median ReleaseSafe on the M4 Pro reference) is checked
