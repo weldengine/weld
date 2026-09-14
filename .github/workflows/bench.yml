@@ -37,6 +37,13 @@ env:
   # Single source of truth for the toolchain version — also keys the Zig
   # build cache below (cf. ci.yml).
   ZIG_VERSION: "0.16.0"
+  # The third pinning axis of `ARCH-031` rule 6, same constant and same motive
+  # as ci.yml's: no cell of this repository's CI compiles for its native CPU,
+  # so that a runner image moving to a new processor generation cannot change
+  # what is built without a line of code changing. A benchmark has the same
+  # exposure as a test cell and one more reason to care — an unpinned number is
+  # not comparable to the one the previous runner image produced.
+  ZIG_CPU: "baseline"
 
 jobs:
   bench-ecs-smoke:
@@ -75,25 +82,32 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # M0.9 / E1 — Zig build cache keyed on (os, optimize mode, zig version,
-      # build.zig.zon hash). The bench builds in ReleaseSafe and shares the
-      # exact key scheme with ci.yml's ReleaseSafe cells, so the warm cache
-      # is reused repo-wide (GitHub caches are repository-scoped, not
-      # workflow-scoped). The Zig cache is content-hashed and self-
-      # invalidating, so a restored cache never produces a stale build.
+      # Keyed on every axis that changes what is built: os, optimize mode, CPU
+      # feature set, zig version, and the zon hash. A key missing an axis the
+      # build varies lets one half of that axis restore the other's archive:
+      # Zig's manifests are cpu-aware, so the restore does not return a wrong
+      # object — it returns a MISS, rebuilds, and leaves BOTH variants in one
+      # `.zig-cache`, which is bloat rather than an error and therefore silent.
+      #
+      # This lineage is its OWN. It does not share with ci.yml, whose keys carry
+      # a precision axis and a per-commit component this workflow has no use
+      # for; a comment here claimed that sharing until the two shapes diverged,
+      # and a claim about another file is exactly what goes stale unread.
+      # The Zig cache is content-hashed and self-invalidating, so a restored
+      # cache never produces a stale build.
       - name: Restore Zig cache
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_VERSION }}-
+            zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       # Compile-and-run sanity for the S1 ECS bench. The full bench gate
       # (≤ 62 µs median ReleaseSafe on the M4 Pro reference) is checked
       # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
       - name: zig build bench-ecs -- --smoke
-        run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+        run: zig build bench-ecs -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} -- --smoke
 
       # M1.B: the crossover bench RUNS here and its measurement is archived,
       # which the milestone's acceptance criteria require and which this
@@ -111,10 +125,10 @@ jobs:
       # output is the deliverable and a red here would mean the bench crashed,
       # never that a number moved.
       - name: zig build bench-ecs-hybrid (crossover sweep)
-        run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe
+        run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
       - name: Archive the crossover measurement
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ecs-hybrid-crossover-${{ matrix.os }}
           path: bench/results/ecs_hybrid_crossover.md
