@@ -202,18 +202,27 @@ jobs:
     # different victims (the first died in the final save with every build and
     # test step green, the second lost `zig build test` to the ceiling), which
     # is what budget exhaustion looks like rather than a defect.
-    # The budget was NOT raised. This very comment block records the assumption
-    # breaking three times already — 10 -> 20 at M0.1, 20 -> 40 at M0.8 close,
-    # 40 -> 55 at the cache refresh chore — and a cache that does not fit under
-    # its own cap is not a cache, it is a tax. A cold Debug leg is ~11 min of
-    # work, ~45 % inside the 20-min budget on the slowest runner. ReleaseSafe
-    # keeps the cache: its near-cold recompile is what the 55-min budget exists
-    # for, and it is the leg the cache was added for in the first place.
-    # ReleaseFast joins ReleaseSafe on the 55-minute budget: both are optimising
-    # builds, and the 20 minutes were sized for Debug. Sizing the new cell to Debug's
-    # budget would make it fail on compile time rather than on the class it exists to
-    # detect, which is the worst kind of red.
-    timeout-minutes: ${{ (matrix.mode == 'ReleaseSafe' || matrix.mode == 'ReleaseFast') && 55 || 20 }}
+    # ReleaseFast joins ReleaseSafe on the optimising-build budget: both are
+    # optimising builds, and the shorter one was sized for Debug. Sizing the new
+    # cell to Debug's budget would make it fail on compile time rather than on the
+    # class it exists to detect, which is the worst kind of red.
+    #
+    # M1.D.27 — 55 -> 75 AND 20 -> 35, AND THE REASON IS NOT COMFORT. A budget's
+    # job is to separate SLOW from HUNG. At 55 against a cold cell measured at
+    # 52-57 minutes it separated nothing: it turned a known slowness into a random
+    # failure and made `M1.D.19` (a hung test runner, tests LOST) indistinguishable
+    # from `M1.D.27` (every step green, the wall arriving). Measured at M1.2.0's
+    # close, both f64 windows cells were cancelled with EVERY step green,
+    # `Complete job` included — 57 min against 55, and 21 min against 20 — while a
+    # re-run at the same sha returned 9.6 min and 5.6 min.
+    #
+    # The Debug budget was the tighter of the two in proportion, 21 measured
+    # against 20 allocated, and no debt entry had ever named it; the earlier note
+    # that "a cold Debug leg is ~11 min of work, ~45 % inside the 20-min budget"
+    # is superseded by that measurement and removed rather than left beside it.
+    # Both new figures are the measured cold case plus ~30 %, which is what leaves
+    # a hang visible as a hang.
+    timeout-minutes: ${{ (matrix.mode == 'ReleaseSafe' || matrix.mode == 'ReleaseFast') && 75 || 35 }}
     steps:
       - uses: actions/checkout@v6
 
@@ -243,9 +252,20 @@ jobs:
       # per-sha primary key never exact-hits on a fresh commit, so every run
       # re-saves from the most recent prior state; GitHub's 10 GB per-repo
       # LRU retires old entries (no manual cleanup machinery).
+      #
+      # M1.D.27 — THAT LRU IS NOT A SAFETY NET, IT IS THE FAILURE MODE, and the
+      # sentence above understated it. Because the key carries the sha, nothing is
+      # ever overwritten: the repository's cache grows monotonically with the
+      # number of commits pushed, one archive per cell per commit, and the four
+      # windows cells alone were measured at 8.44 GB of a 9.44 GB total against a
+      # 10 GB ceiling. Past it the eviction is silent and arbitrary, so an exact
+      # hit here is a lottery and a cell can rebuild cold on a commit that touched
+      # nothing it depends on. The `-build` second archive per cell is deleted for
+      # that reason; the remaining lever is not to save from a PR branch at all,
+      # which is measured separately rather than assumed here.
+      #
       # Three-level fallback: exact sha -> newest cache under this zon
-      # (prefix-matches both the post-build and post-test saves below,
-      # newest first) -> newest cache under this os/mode/zig. The local
+      # (newest first) -> newest cache under this os/mode/zig. The local
       # `.zig-cache` holds the mode-specific incremental compilation outputs
       # that dominate CI wall-time on the ReleaseSafe legs — hence the key
       # includes `matrix.mode`. Zig's cache is content-hashed and
@@ -323,90 +343,6 @@ jobs:
           zig build -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
           echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
-      # CI cache refresh chore — mid-job save right after `zig build`: a run
-      # killed during `zig build test` (timeout, crash, runner loss) still
-      # leaves a fresh build cache, bounding the damage of any test-step
-      # death to one build's worth of recompilation. The monolithic action's
-      # post-job save was skipped on timeout cancellation, which is what
-      # locked the fossil death loop. The `-build` suffix keeps this entry
-      # distinct from the full post-test save at the end of the job; the
-      # zon-level prefix fallback of the restore step matches both, newest
-      # first.
-      # M1.1.14 — THE SAVE IS ALL-OR-NOTHING. `actions/cache` purges contents when
-      # the archive exceeds its cap and saves what is left, which produces a
-      # `.zig-cache` whose manifests reference objects that are no longer there:
-      # the next restore hands `zig build` an entry it cannot stat, and the build
-      # fails with `file_hash FileNotFound` on something it believes it has.
-      # A cache that LIES costs more than no cache — this milestone spent six runs
-      # and two wrong hypotheses learning it.
-      #
-      # So the size is measured first and the save is SKIPPED, loudly, when it
-      # would be partial. A skipped save means the next run is cold: slower, and
-      # correct. Pinning `ZIG_CPU` in the key removed the cause that was inflating
-      # the archive here, but the cap will be met again for other reasons — the f64
-      # axis and the ARM cell both add targets — and the purge would corrupt just
-      # the same. The trigger was fixed; this fixes the mechanism.
-      # M1.1.14 — THE 2 GB CONSTANT HAD NO SOURCE ON THIS CACHE, and both ReleaseSafe
-      # cells have been permanently cold because of it. Measured, not argued:
-      #
-      #   * the line `Zig cache exceeded 2147483648 bytes (was …); purged contents
-      #     before save` is emitted by `Post Run weldengine/setup-zig@v0.1.0` — OUR
-      #     OWN action, in its post step, about the cache IT manages. It is not
-      #     `actions/cache`, and it is not this `.zig-cache`.
-      #   * `2147483648` occurs exactly TWICE in all of `.github/`: in the comment
-      #     quoting that message, and as the `limit=` below. It was transcribed
-      #     from one cache's cap onto a different cache.
-      #   * the volumes that action reports on the GLOBAL cache are far larger than
-      #     anything here — 14 700 387 106 bytes on ubuntu and 7 707 924 893 on
-      #     windows in bench run 31933791179 — so the two are not even the same
-      #     order of quantity.
-      #
-      # THIS RUN IS AN EXPERIMENT AND ITS LOG IS THE RESULT. The pre-check is
-      # raised to GitHub's documented repository-wide 10 GB so it stops pre-empting,
-      # and `actions/cache/save` is allowed to answer for itself. Two outcomes, both
-      # readable in the log and neither assumed here:
-      #
-      #   * it SAVES — then the cells stop being cold, and the next run yields the
-      #     warm `windows-2025 / ReleaseSafe` figure that decides the f64 matrix
-      #     axis. That number does not exist today.
-      #   * it REFUSES, with its own "over the … limit, not saving cache" — then
-      #     refusing is safe, the cells are cold for a reason that is finally the
-      #     platform's rather than ours, and the decision moves to what is cached.
-      #
-      # The outcome that would be a defect is a PURGE — a partial archive whose
-      # manifests outlive their objects, which the next restore turns into
-      # `file_hash FileNotFound`. Its signature is known and recorded: ReleaseSafe
-      # only, windows-2025 only, content varying at a CONSTANT commit. If it
-      # appears, this raise is reverted; a cache that lies costs more than no cache.
-      - name: Measure the Zig cache before saving
-        id: cache-size
-        shell: bash
-        run: |
-          set -euo pipefail
-          limit=10737418240
-          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
-          bytes=$((bytes * 1024))
-          echo "zig cache: $bytes bytes (cap $limit)"
-          # The decomposition, so the "reduce what is cached" route is instructed by
-          # a measurement rather than by a guess. Measured locally, `o` is ~99 % of
-          # the tree — and it cannot be dropped, since a manifest without its object
-          # is the corruption above.
-          du -sk .zig-cache/* 2>/dev/null | sort -rn | head -5 || true
-          if [ "$bytes" -gt "$limit" ]; then
-            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
-            echo "::warning::A partial save leaves manifests referencing purged objects, which"
-            echo "::warning::the next restore turns into 'file_hash FileNotFound'. Cold is correct."
-            echo "save=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "save=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Save Zig cache (post-build)
-        if: steps.cache-size.outputs.save == 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
 
       - name: zig build test
         shell: bash
@@ -668,22 +604,52 @@ jobs:
           path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}.txt
           retention-days: 30
 
-      # CI cache refresh chore — full post-test cache save. `if: always()`
-      # so a red test leg still saves whatever it compiled. This entry is
-      # newer than the post-build save of the same run, so the zon-level
-      # prefix fallback serves it first to the next run.
-      # M1.1.14 — THE ALL-OR-NOTHING GUARD WAS HALF-APPLIED, and this is where.
-      # `Save Zig cache (final)` carried `always() && matrix.mode == 'ReleaseSafe'`
-      # and never consulted `steps.cache-size.outputs.save`, so every run that
-      # printed `SKIPPING the save` saved anyway one step later — measured on run
-      # 31932309771, where the pre-check warned at 3 094 724 608 bytes, the
-      # post-build save was correctly skipped, and this one reported
-      # `Cache saved with key: …`. One of two save steps honoured the guard.
+      # CI cache refresh chore — the ONE cache save of this job. `if: always()`
+      # so a red test leg still saves whatever it compiled.
       #
-      # It gets its OWN measurement rather than reusing the earlier output, because
-      # `always()` is deliberate here — the cache is worth saving even when the
-      # tests failed — and the earlier step is skipped when the build fails, which
-      # would silently turn `always()` into `never` on exactly those runs.
+      # M1.D.27 — THE MID-JOB `-build` SAVE IS GONE, and deleting it is what this
+      # entry now rests on. It wrote a SECOND archive per cell per commit under a
+      # `…-${sha}-build` key, and since the key carries the sha nothing is ever
+      # overwritten: fifteen cells × two entries × every commit pushed, against
+      # GitHub's repository-wide 10 GB ceiling, with the four windows cells alone
+      # measured at 8.44 GB of a 9.44 GB total. Past the ceiling GitHub evicts LRU,
+      # so a rotating subset of cells restores a stale lineage and rebuilds COLD —
+      # which is the actual mechanism behind this file's "cold cache" history, and
+      # it fires whatever the commit touched. Measured at M1.2.0's close: the two
+      # f64 windows cells were cancelled at 57 min (budget 55) and 21 min (budget
+      # 20) with EVERY step green, `Complete job` included, and a re-run at the
+      # SAME sha returned 9.6 min and 5.6 min — the only difference being that the
+      # first attempt's save had run. In the same run `ReleaseSafe / f32` took
+      # 52.1 min TWICE, its own attempt-1 save having been evicted meanwhile: the
+      # cells evict each other INSIDE one run.
+      #
+      # What the deleted step covered, it covered by feeding the disease. Its
+      # unique window was a job killed between it and this one — i.e. the timeout
+      # — and the timeout is what saturation causes. Worse, this file already
+      # recorded it killing a cell directly: `Save Zig cache (post-build)` went
+      # 39s -> 5m23s -> 7m39s on windows-2025 / Debug while the useful work stayed
+      # flat, and the leg died at its ceiling twice.
+      #
+      # M1.1.14 — THE SAVE IS ALL-OR-NOTHING, and that doctrine now lives here
+      # because this is the only save left. `actions/cache` purges contents when
+      # the archive exceeds its cap and saves what is left, which produces a
+      # `.zig-cache` whose manifests reference objects that are no longer there:
+      # the next restore hands `zig build` an entry it cannot stat, and the build
+      # fails with `file_hash FileNotFound` on something it believes it has. A
+      # cache that LIES costs more than no cache — M1.1.14 spent six runs and two
+      # wrong hypotheses learning it. So the size is measured first and the save is
+      # SKIPPED, loudly, when it would be partial. A skipped save means the next
+      # run is cold: slower, and correct.
+      #
+      # The 10 GB limit below is GitHub's documented repository-wide figure and
+      # NOT a per-archive cap; the 2 GB constant that preceded it was transcribed
+      # from `weldengine/setup-zig`'s own cache, a different cache, and is recorded
+      # as such in the history of this file.
+      #
+      # The measurement keeps `if: always()` of its own: `always()` is deliberate
+      # on the save — the cache is worth keeping even when the tests failed — and a
+      # guard that did not itself run under `always()` would silently turn it into
+      # `never` on exactly those runs.
       - name: Measure the Zig cache before the final save
         if: always()
         id: cache-size-final
