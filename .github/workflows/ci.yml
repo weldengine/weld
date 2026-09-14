@@ -301,6 +301,7 @@ jobs:
       # so this is the number that decides that axis.
       - name: Restore Zig cache
         id: zig-cache
+        if: matrix.mode != 'Debug'
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
@@ -619,6 +620,7 @@ jobs:
 
       - name: Save Zig cache (final)
         if: always()
+          && matrix.mode != 'Debug'
           && (github.event_name == 'push'
               || github.head_ref == 'phase-1/debt/phase-1-debt')
           && steps.cache-size-final.outputs.save == 'true'
