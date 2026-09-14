@@ -36,13 +36,25 @@ env:
   ZIG_CPU: "baseline"
 
 jobs:
-  # M1.0.3-followup — doc-only fast path. `ci-gate` (en fin de fichier) devient
-  # l'unique check required de la branch protection, en remplacement des 4
-  # cellules build-and-test ; les jobs lourds sont conditionnés à la présence
-  # d'un changement non-doc. `code` est true SAUF si tous les fichiers changés
-  # matchent l'allowlist docs (**.md, briefs/**, docs/**, LICENSE, .gitignore).
-  # Step bash plutôt que dorny/paths-filter : pas de dépendance d'action hors
-  # whitelist (engine-development-workflow.md §7.3).
+  # Doc-only fast path. `ci-gate`, at the end of this file, is branch
+  # protection's single required check in place of the matrix cells, and the
+  # heavy jobs are conditioned on a non-doc change: `code` is true UNLESS every
+  # changed file matches the doc allow-list (`**.md`, `briefs/**`, `docs/**`,
+  # `LICENSE`, `.gitignore`).
+  #
+  # A bash step rather than `dorny/paths-filter`, and this is a constraint
+  # rather than a preference: no action dependency outside the allow-list of
+  # `engine-development-workflow.md` §7.3.
+  #
+  # THE FAST PATH DOES NOT FIRE ON A PULL REQUEST THAT ALREADY CARRIES CODE, and
+  # that bound is measured rather than suspected. A `pull_request` event is about
+  # the merge result, so the diff below runs from the PR's base — `main` — to its
+  # head; a documentation-only commit pushed onto a branch whose earlier commits
+  # touched code therefore still yields `code=true` and exercises every cell.
+  # Only a push whose whole diff against `main` is documentation takes the fast
+  # path. Narrowing this to the last commit is not a one-line change: the matrix
+  # is required per head sha, so skipping it would let a merge proceed on a sha
+  # whose verdict was inherited rather than produced.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -64,8 +76,8 @@ jobs:
             base="${{ github.event.before }}"
             head="${{ github.sha }}"
           fi
-          # Base inconnue / zéro-SHA (premier push, force-push, shallow) -> CI
-          # complet : on ne skippe jamais dans le doute.
+          # Unknown base, or the zero sha of a first push, a force-push or a
+          # shallow clone: run everything. Never skip on a doubt.
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             echo "base unknown -> code=true"
             echo "code=true" >> "$GITHUB_OUTPUT"
@@ -1062,11 +1074,15 @@ jobs:
           path: out/
           retention-days: 90
 
-  # M1.0.3-followup — l'UNIQUE check required. La branch protection ne requiert
-  # que ce job (Guy applique les réglages repo). Il agrège les jobs lourds :
-  # vert si tous success OU skipped (PR doc-only), rouge si l'un est failure /
-  # cancelled. Une PR doc-only merge en secondes ; une PR code reste gatée sur
-  # toute la matrice + les smokes.
+  # THE single required check. Branch protection requires this job and no other
+  # (Guy applies the repository settings), and it aggregates the heavy jobs:
+  # green when each is success OR skipped, red when any is failure or cancelled.
+  # A doc-only pull request therefore merges in seconds, while one carrying code
+  # stays gated on the whole matrix and both smokes.
+  #
+  # `skipped` counts as green because the fast path above is what produces it.
+  # That makes the allow-list load-bearing: a path added to it stops being
+  # verified, so it is widened only for files no build reads.
   ci-gate:
     needs: [changes, build-and-test, runtime-smoke-test, vertical-slice-smoke]
     if: always()
