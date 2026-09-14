@@ -620,7 +620,7 @@ jobs:
       - name: Save Zig cache (final)
         if: always()
           && (github.event_name == 'push'
-              || github.ref_name == 'phase-1/debt/phase-1-debt')
+              || github.head_ref == 'phase-1/debt/phase-1-debt')
           && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
