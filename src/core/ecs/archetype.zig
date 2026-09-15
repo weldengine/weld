@@ -19,13 +19,12 @@
 //!   They are cached locally so the hot paths (append, removeSwap,
 //!   componentSlot) do not need to bounce through the registry.
 //! - `removeSwap` performs an IN-CHUNK swap-and-pop; a chunk it empties is
-//!   freed by `releaseChunkIfEmpty`, which the owner calls because reclaiming
+//!   freed by `releaseChunkIfEmpty`, which the OWNER calls because reclaiming
 //!   a chunk can RENUMBER one other chunk and only the world holds the
-//!   locations that name it. `chunks` therefore tracks the live population
-//!   rather than the cumulative number of appends.
+//!   locations that name it.
 //! - A chunk index is valid only between two structural mutations of its
-//!   archetype. That was already true — `removeSwap` moves a row under any
-//!   live iterator — and reclamation widens it from one row to one index.
+//!   archetype: `removeSwap` moves a row under any live iterator, and a
+//!   reclamation moves a whole chunk's index.
 //! - The `TransitionCache` lifetime is tied to the owning archetype —
 //!   the cached `ArchetypeId` values are indices into the world's
 //!   archetype list, so they stay valid as long as the world does
@@ -164,11 +163,9 @@ pub const Archetype = struct {
     is_singleton: bool = false,
     /// Chunks freed by `releaseChunkIfEmpty` over this archetype's life.
     ///
-    /// STATS-ONLY, and it exists because the EFFECT of a reclamation is not a
-    /// witness of it: `chunks.items.len` falling proves a chunk went away, and
-    /// a length that never rose proves nothing at all, so a test asserting on
-    /// the length alone cannot tell a release from an allocation that never
-    /// happened. This counts the event.
+    /// STATS-ONLY. The EFFECT of a reclamation is not a witness of it: a length
+    /// that never rose proves nothing, so a test asserting on `chunks.items.len`
+    /// alone cannot tell a release from an allocation that never happened.
     chunks_released: u64 = 0,
 
     /// Initialise the archetype with the given sorted component list. An EMPTY
@@ -396,24 +393,21 @@ pub const Archetype = struct {
     /// Free the chunk at `chunk_idx` when it holds no entity; answer the index
     /// whose occupants were RENUMBERED by the free, or `null` when none were.
     ///
-    /// **Reclamation is the owner's call and not `removeSwap`'s**, for a reason
-    /// that is structural rather than stylistic: freeing a chunk that is not the
-    /// trailing one moves the trailing chunk into its index, and every entity in
-    /// THAT chunk then carries a stale `Location.chunk_idx`. The archetype does
-    /// not hold locations, so it cannot repair them; it reports the index and
-    /// the world repairs. Returning the index rather than doing nothing is what
-    /// makes the omission impossible to write — a caller that ignores the answer
-    /// leaves entities pointing at a chunk that moved.
+    /// **Reclamation is the owner's call and not `removeSwap`'s.** Freeing a
+    /// chunk that is not the trailing one moves the trailing chunk into its
+    /// index, and every entity in THAT chunk then carries a stale
+    /// `Location.chunk_idx`. The archetype holds no locations and cannot repair
+    /// them: a caller that ignores the answer leaves entities naming a chunk
+    /// that moved.
     ///
-    /// `null` covers both "not empty" and "the trailing chunk was freed", which
-    /// the caller treats alike because neither renumbers anything. The two are
-    /// distinguishable through `chunks_released`, which only the free bumps.
+    /// **`null` covers TWO cases** — "not empty" and "the trailing chunk was
+    /// freed" — alike to the caller, since neither renumbers anything, and
+    /// distinguishable through `chunks_released`, which only a free bumps.
     ///
     /// Why an empty chunk is worth the trouble: `allocateSlot` fills only the
     /// TRAILING chunk, so a chunk drained by churn is never refilled and the
-    /// count follows the cumulative number of appends instead of the live
-    /// population — until `dispatchBatch` refuses the archetype outright at its
-    /// chunk ceiling.
+    /// count follows the cumulative appends rather than the live population,
+    /// until `dispatchBatch` refuses the archetype at its chunk ceiling.
     pub fn releaseChunkIfEmpty(self: *Archetype, gpa: std.mem.Allocator, chunk_idx: u32) ?u32 {
         const chunk = self.chunks.items[chunk_idx];
         if (chunk.header().entity_count != 0) return null;

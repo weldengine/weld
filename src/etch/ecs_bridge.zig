@@ -67,10 +67,9 @@ pub const BridgeError = error{
     /// that produced it (`etch-reference-part1.md` §5.3 c).
     ///
     /// Distinct from `UnknownEntity` and `UnknownComponent`, which answer the
-    /// same two questions asked at CONSTRUCTION. Conflating them would lose the
-    /// only fact worth reporting here: the handle was valid when it was made and
-    /// the world moved under it, which is a lifetime defect in the Etch program
-    /// and not a typo in a component name.
+    /// same two questions asked at CONSTRUCTION: the handle was valid when it
+    /// was made and the world moved under it — a lifetime defect in the Etch
+    /// program, not a typo in a component name.
     StaleComponentRef,
 };
 
@@ -133,9 +132,9 @@ pub const Bridge = struct {
     /// Both questions are answered HERE so a `get` on a dead entity or on a
     /// component it does not carry fails at the `get`, where the programmer
     /// wrote it — and answered AGAIN at every dereference by `refBytes`, because
-    /// the handle can outlive the body that made it. The two checks are not
-    /// redundant: this one reports a program error, that one reports a lifetime
-    /// error, and they carry different kinds.
+    /// the handle can outlive the body that made it. The two are not redundant:
+    /// this one reports a program error, that one a lifetime error, and they
+    /// carry different kinds.
     pub fn componentRefOf(
         world: *World,
         entity: EntityId,
@@ -157,19 +156,14 @@ pub const Bridge = struct {
 
     /// The component's bytes for this handle, re-resolved from the ENTITY.
     ///
-    /// ONE path, not two. The previous form branched on a storage arm and the
-    /// table branch dereferenced `chunk_ptr + slot` WITHOUT comparing the
-    /// entity — so a handle surviving a `despawn` read whichever row
-    /// `Archetype.removeSwap` had moved into that slot, silently, with no
-    /// diagnostic and no runtime error. `World.componentBytes` asks the two
-    /// questions the old table branch never asked (is the entity live, does it
-    /// still carry the component) and answers for both backends, which is why
-    /// the bimodal decision disappears here rather than moving.
+    /// ONE path for both backends: `World.componentBytes` asks whether the
+    /// entity is live and whether it still carries the component, so a handle
+    /// that outlived either fails instead of answering another row's bytes.
     ///
-    /// The cost is one location lookup per access in place of a pointer cast.
-    /// It is the price of `etch-reference-part1.md` §5.3 a — a ref is a pair,
-    /// re-resolved at every access — and it is confined to the interpreter: the
-    /// codegen emits no `ComponentRef`, so the shipping path does not pay it.
+    /// The cost is one location lookup per access rather than a pointer
+    /// dereference. It is the price of `etch-reference-part1.md` §5.3 a — a ref
+    /// is a pair, re-resolved at every access — and it is confined to the
+    /// interpreter: the codegen emits no `ComponentRef`.
     fn refBytes(world: *World, ref: ComponentRef) BridgeError![]u8 {
         const core_id: CoreEntityId = @bitCast(ref.entity);
         return world.componentBytes(core_id, ref.component_id) orelse
@@ -219,11 +213,10 @@ pub const Bridge = struct {
         // `markChanged` takes a tick too, so the parameter survives on both
         // sides and the caller's contract does not move.
         //
-        // Both arms start from the ENTITY, like `refBytes` — a stamp written
-        // through a stale handle would mark whichever row now occupies the slot,
-        // which is the same defect as reading it and just as silent. Failure is
-        // a no-op here and not an error: the caller is a post-write stamp whose
-        // own write has already failed loudly if the handle was stale.
+        // Both arms start from the ENTITY, like `refBytes`: a stamp written
+        // through a stale handle would mark whichever row now occupies the slot.
+        // Failure is a no-op and not an error — the caller is a post-write stamp
+        // whose own write has already failed loudly on a stale handle.
         const core_id: CoreEntityId = @bitCast(ref.entity);
         if (world.storageOf(ref.component_id) == .sparse) {
             if (world.sparse_stores.get(ref.component_id)) |store| store.markChanged(core_id, tick);
@@ -563,19 +556,9 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
 
 // ─── The handle is a pair, and the same one in both modes ──────────────────
 //
-// `ComponentRef` was BIMODAL: `(chunk, slot)` for a table component and the
-// entity for a sparse one. It was collapsed onto the entity for both, because
-// the table arm dereferenced its slot without ever asking whose row now
-// occupied it. The round-trip pair below therefore no longer tests two
-// arms — it tests that one resolution serves two storage modes, which is the
-// `@storage`-has-no-semantic-effect property of `etch-reference-part1.md`
-// §5.3 a — and the lifetime pair after it tests what the old table arm got
-// wrong.
-//
-// These tests live here rather than in `tests/etch/` because the bridge is not
-// exported from the Etch root, and exporting it to reach a test would widen the
-// public surface for the test's convenience. The end-to-end counterpart — a
-// rule selecting an entity by a sparse component and writing its row — is
+// The round-trip pair tests that ONE resolution serves two storage modes —
+// `etch-reference-part1.md` §5.3 a. Here rather than in `tests/etch/` because
+// the bridge is not exported from the Etch root; the end-to-end counterpart is
 // pinned in `tests/etch/storage_mode_test.zig`.
 
 fn registerProbe(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
@@ -675,10 +658,8 @@ test "componentRefOf still refuses a component the entity does NOT carry" {
 
 // ─── A ref outliving its entity ───────────────────────────────────────────
 //
-// Both tests are written on `.table` and repeated on `.sparse`. The table mode
-// is where the defect lived; the sparse one is the twin that already behaved,
-// and running it in the same test is what makes the claim "one resolution, two
-// modes" rather than "the arm I touched works".
+// Both tests run on `.table` AND on `.sparse` in the same body, so what they
+// establish is "one resolution, two modes" rather than "one mode works".
 
 /// Spawn `n` probes carrying `cid` and give each a distinguishable value, so a
 /// read landing on the wrong row is visible rather than coincidentally right.
@@ -716,17 +697,13 @@ test "a ref to a despawned entity is refused, not resolved onto its successor" {
         const ref_a = try Bridge.componentRefOf(&world, @bitCast(e[0]), cid, true);
 
         // `World.despawn` calls `Archetype.removeSwap`, which moves the LAST row
-        // into the freed slot — so after this, the bytes at the address `ref_a`
-        // used to name belong to `e[1]`. That is the whole defect: the old table
-        // arm cast `chunk_ptr + slot` and read them.
+        // into the freed slot, so `e[1]`'s bytes now sit where `e[0]`'s were.
         try world.despawn(gpa, e[0]);
         try std.testing.expectApproxEqAbs(@as(f64, 22.0), probeValue(&world, cid, e[1]), 1e-12);
 
-        // The chunk-anchored form returned `22.0` here — the successor's value,
-        // with no diagnostic and no error — in the `.table` mode. Asserted as an ERROR
-        // and not as "not 22.0", because a refusal is the contract
-        // (`etch-reference-part1.md` §5.3 c) and any other value would satisfy a
-        // negative assertion just as well.
+        // Asserted as an ERROR and not as "not 22.0": a refusal is the contract
+        // (`etch-reference-part1.md` §5.3 c), and any other value would satisfy
+        // a negative assertion just as well.
         try std.testing.expectError(
             BridgeError.StaleComponentRef,
             Bridge.readComponentField(&world.registry, ref_a, &world, "v"),
@@ -756,11 +733,10 @@ test "a ref to a SURVIVOR whose row moved still writes that survivor" {
         const ref_b = try Bridge.componentRefOf(&world, @bitCast(e[1]), cid, true);
 
         // Despawning `e[0]` moves `e[1]` down into the freed slot, so the handle
-        // now names a row its entity no longer occupies. This is the sibling
-        // consequence of the test above and the reason the pair exists: there the
-        // ref pointed at someone else's live bytes, here it points at the dead
-        // copy of its own — a WRITE through it was silently LOST rather than
-        // wrong, which no read-side assertion would have caught.
+        // names a row its entity no longer occupies. The sibling consequence of
+        // the test above, and why the pair exists: there a stale handle reads
+        // someone else's bytes, here it would LOSE a write — which no read-side
+        // assertion catches.
         try world.despawn(gpa, e[0]);
 
         try Bridge.writeComponentField(&world.registry, ref_b, &world, "v", .{ .float_ = 99.0 });

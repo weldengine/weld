@@ -1216,11 +1216,10 @@ pub const World = struct {
     /// Free `loc`'s slot in `arch` and repair everything the removal moves — the
     /// swapped row's location, or the chunk index when the removal empties it.
     ///
-    /// ONE entry rather than eight: the swap-and-patch pair below was written
-    /// out at each site that removes a row, and reclamation adds a SECOND repair
-    /// at the same moment. A change landing in one site and not its siblings is
-    /// this module's dominant defect shape, and eight copies of a two-step
-    /// repair is how the ninth gets one step.
+    /// ONE entry for all eight removal sites: the repair is two steps — patch
+    /// the swapped row's location, or reclaim the chunk the removal emptied —
+    /// and a site that performs one and not the other leaves either a stale
+    /// location or an unreclaimable chunk.
     fn removeSlotAndReclaim(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1230,9 +1229,8 @@ pub const World = struct {
         if (arch.removeSwap(loc.chunk_idx, loc.slot)) |swapped_id| {
             self.entity_locations.getPtr(swapped_id).?.* = loc;
             // A swap moved a row INTO the freed slot, so the chunk holds at
-            // least that one entity and cannot be empty. The two outcomes are
-            // mutually exclusive by construction, which is why no second test
-            // follows.
+            // least that entity and cannot be empty: the two outcomes are
+            // mutually exclusive, which is why no second test follows.
             return;
         }
         self.reclaimChunk(gpa, arch, loc.chunk_idx);
@@ -2184,9 +2182,9 @@ pub const World = struct {
         const dst_r = prepared.dst_r orelse return;
         const swapped = prepared.dst_arch.removeSwap(dst_r.chunk_idx, dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
-        // An abort can leave behind the chunk `allocateSlot` had just created
-        // for this reservation — the one case where the reclaimed chunk is one
-        // this operation allocated rather than one churn drained.
+        // An abort can leave behind the chunk `allocateSlot` created for this
+        // reservation — the one case where the reclaimed chunk is one this
+        // operation allocated rather than one churn drained.
         self.reclaimChunk(gpa, prepared.dst_arch, dst_r.chunk_idx);
     }
 
@@ -2919,13 +2917,13 @@ test "grouped ops reject duplicate / absent components (R11c) without panicking"
 // ─── An emptied chunk is reclaimed ─────────────────────────────────────────
 //
 // `allocateSlot` fills only the TRAILING chunk, so a chunk drained by churn is
-// never refilled: without reclamation the chunk count follows the cumulative
-// number of appends rather than the live population, and `dispatchBatch`
-// eventually refuses the archetype at its chunk ceiling.
+// never refilled, and without reclamation the chunk count follows the cumulative
+// number of appends rather than the live population — until `dispatchBatch`
+// refuses the archetype at its chunk ceiling.
 //
 // Every assertion below is on `chunks_released` or on a survivor's bytes, never
 // on the absence of a crash: an implementation that reclaims nothing passes
-// every existing test in this file, which is why these are written on the EVENT.
+// every OTHER test in this file.
 
 /// A four-byte probe, so one chunk holds many entities and the capacity is the
 /// test's own parameter rather than a literal that a layout change would rot.
@@ -2958,7 +2956,7 @@ test "a chunk emptied by despawn is released, and the trailing case renumbers no
 
     // The negative twin, in the same world: chunk 0 still holds `cap` entities,
     // so removing one more reclaims nothing. Without it, "a chunk is released"
-    // would pass an implementation that releases on every despawn.
+    // is satisfied by an implementation that releases on every despawn.
     try world.despawn(gpa, ids.items[0]);
     try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
     try std.testing.expectEqual(@as(usize, 1), arch.chunks.items.len);
@@ -2998,8 +2996,8 @@ test "reclaiming a middle chunk renumbers the trailing one and repairs its locat
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
 
     // THE REPAIR, asserted on the survivor and not on the index alone: the
-    // trailing chunk took index 0, so `lone` moved without being touched, and a
-    // location left at 2 would name a chunk that no longer exists.
+    // trailing chunk takes index 0, so `lone` moves without being touched, and a
+    // location left at 2 names a chunk that no longer exists.
     try std.testing.expectEqual(@as(u32, 0), world.entity_locations.get(lone).?.chunk_idx);
     try std.testing.expectEqualSlices(u8, &marker, world.componentBytes(lone, cid).?);
 }
@@ -3015,13 +3013,11 @@ test "sustained churn keeps the chunk count on the live population" {
     const cap = arch.layout.capacity;
     try world.despawn(gpa, seed);
 
-    // THE DEBT ITSELF, in miniature, and the shape is load-bearing: the
-    // population must exceed ONE chunk. `removeSwap` compacts inside a chunk and
-    // `allocateSlot` appends only to the TRAILING one, so every chunk but the
-    // last can only LOSE entities — a population that fits in one chunk churns
-    // forever without ever creating a second, and measures nothing. A first
-    // version of this test did exactly that and passed with the reclamation
-    // disabled.
+    // THE SHAPE IS LOAD-BEARING: the population must exceed ONE chunk.
+    // `removeSwap` compacts inside a chunk and `allocateSlot` appends only to
+    // the TRAILING one, so every chunk but the last can only LOSE entities — a
+    // population that fits in one chunk churns forever without ever creating a
+    // second, and measures nothing.
     var live: std.ArrayListUnmanaged(EntityId) = .empty;
     defer live.deinit(gpa);
     while (live.items.len < 2 * cap) try live.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
@@ -3039,13 +3035,13 @@ test "sustained churn keeps the chunk count on the live population" {
     }
 
     try std.testing.expectEqual(@as(usize, 2 * cap), live.items.len);
-    // MEASURED on both sides rather than predicted, at `capacity = 813`: the
-    // population is an exact two chunks' worth and occupies exactly two, where
-    // the same churn with reclamation disabled reaches SIX and releases none —
-    // one chunk added per round, never reused. That ratio is the debt.
+    // MEASURED on both sides at `capacity = 813`: the population is an exact
+    // two chunks' worth and occupies exactly two, where the same churn with
+    // reclamation disabled reaches SIX and releases none — one chunk added per
+    // round, never reused.
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
-    // At least one per round. Not pinned to the measured 5: the exact count
-    // follows `capacity`, which a chunk-layout change moves, while the mechanism
-    // does not.
+    // At least one per round. Not pinned to the measured 5: that count follows
+    // `capacity`, which a chunk-layout change moves, while the mechanism does
+    // not.
     try std.testing.expect(arch.chunks_released >= 4);
 }

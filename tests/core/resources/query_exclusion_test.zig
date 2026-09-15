@@ -8,12 +8,10 @@
 //! `ComptimeQuery.next` consults it directly because its component walk is
 //! comptime specialised and cannot route through the shared matcher.
 //!
-//! **This header used to claim both paths were covered while all three tests
-//! below walked `comptime_query`** — and the path it named without exercising
-//! was the one that did not have the exclusion at all. The typed path's own
-//! cases were added for that reason, and the ORDER is what they carry: the
-//! defect was not that the typed query ignored the flag, but that it read it
-//! only on archetypes created AFTER the query was built.
+//! **The typed path's cases carry an ORDER**: a resource declared BEFORE the
+//! query and one declared AFTER reach different scans, and only the shared rule
+//! makes them answer alike. A file that exercised one path while naming two
+//! would leave the other's scan unguarded.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -113,17 +111,15 @@ test "user entity carrying a same-typed component coexists with the resource" {
     try std.testing.expectEqual(@as(u32, 1), matched);
 }
 
-// ─── The typed path, and the order that used to decide the answer ──────────
+// ─── The typed path, and the order the two scans divide ───────────────────
 
 test "a resource declared BEFORE a typed query is invisible to it" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The ORDER is the whole case. The exclusion lived in the tail rescan,
-    // which only ever sees archetypes created after the query was built — so a
-    // resource already present at construction entered the match list and the
-    // query returned it. Declaring it first is what reaches that path.
+    // The ORDER is the whole case: this reaches the query's INITIAL scan, the
+    // tail rescan seeing only archetypes created after construction.
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
 
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
@@ -137,10 +133,9 @@ test "a resource declared AFTER a typed query is invisible too" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The sibling order, which the tail rescan already handled. Kept as the
-    // NEGATIVE TWIN of the case above: without it, "the typed query excludes
-    // singletons" would not establish that the fix is about the order rather
-    // than about one of the two scans.
+    // The sibling order, reaching the tail rescan. The TWIN of the case above:
+    // without it, "the typed query excludes singletons" says nothing about which
+    // of the two scans applies the rule.
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
     defer q.deinit(gpa);
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
@@ -159,8 +154,8 @@ test "a typed query still returns USER entities of the resource's own type" {
     var user = GameClock{ .current_tick = 42 };
     _ = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{std.mem.asBytes(&user)});
 
-    // A guard has two ways of being wrong. Without this, an implementation that
-    // hides EVERY archetype carrying the type would pass the two cases above.
+    // A guard has two ways of being wrong: without this, an implementation
+    // hiding EVERY archetype carrying the type passes the two cases above.
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
     defer q.deinit(gpa);
 
@@ -183,7 +178,7 @@ test "a singleton entity is not counted in the population the planner elects on"
     try std.testing.expectEqual(@as(usize, 0), ecs.hybrid_query.population(&world, cid));
 
     // THE SECOND SITE, whose consequence is a biased PLAN rather than a leaked
-    // row: the resource entity carries the component, so it was counted in the
+    // row: the resource entity carries the component, so it would count in the
     // population `QueryPlan.elect` compares — a driver chosen on entities no
     // user query can visit.
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });

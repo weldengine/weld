@@ -24,36 +24,24 @@ pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 /// A handle onto one entity's component bytes.
 ///
 /// **A ref designates an `(entity, component)` PAIR, never a memory location**
-/// (`etch-reference-part1.md` §5.3 a). It is re-resolved at EVERY access, read
-/// and write alike, through `World.componentBytes` — the entry that already
-/// answers for both backends from an `EntityId`. So whatever happened to the
-/// storage in between — archetype migration, chunk compaction, a swap-remove
-/// moving another row into this slot — the ref still designates ITS entity's
-/// bytes or fails; it can never designate someone else's.
+/// (`etch-reference-part1.md` §5.3 a): it is re-resolved at EVERY access through
+/// `World.componentBytes`, so no migration, compaction or swap-remove can make
+/// it designate another entity's bytes. **`@storage` therefore has no semantic
+/// effect**, which is the property this shape holds.
 ///
-/// **`@storage` therefore has no semantic effect**, which is the property the
-/// shape exists to hold. The previous form carried `{ chunk_ptr, slot }` on the
-/// table arm and the entity alone on the sparse one, so a handle held across a
-/// structural mutation was safe in sparse and silently wrong in table — making a
-/// choice documented everywhere as pure performance change the lifetime
-/// semantics of a value visible from Etch.
+/// **Liveness and carriage are checked at each dereference**, not only at the
+/// `get`/`get_mut` that produced the handle (§5.3 c), in every build mode; a
+/// stale one answers `BridgeError.StaleComponentRef`.
 ///
-/// **The liveness and carriage check runs at each dereference, not only at the
-/// `get`/`get_mut` that produced the handle** (§5.3 c). A stale one fails loudly
-/// — `BridgeError.StaleComponentRef`, surfaced as a spanned runtime failure —
-/// and the check is present in every build mode, since a control absent from the
-/// mode the product ships in guards nothing.
+/// **A ref held beyond its rule body is therefore safe** (§5.3 corollary):
+/// `cloneLocalsInto` copies a `Value` VERBATIM into a timer's, `branch`'s,
+/// `spawn`'s or `race`/`sync` branch's scope snapshot and `AsyncTask.locals`
+/// retains it across a suspension, so the handle outlives the tick by
+/// construction and its safety cannot rest on the deferral of structural ops.
 ///
-/// **That is what makes a ref held beyond its rule body safe** (§5.3 corollary):
-/// a timer snapshot, a `branch`, a `spawn`, a `race`/`sync` branch, or a local
-/// living across an `await`. `cloneLocalsInto` copies a `Value` verbatim into
-/// those snapshots and `AsyncTask.locals` retains it across a suspension, so the
-/// handle outlives the tick by construction — the safety cannot rest on a
-/// temporal argument about deferred structural ops, and no longer does.
-///
-/// Rule-arena handles — a runtime-produced string, array, map or set — keep the
-/// opposite property and remain perishable: their store is reset at the body
-/// boundary, so the resolver refuses their capture with `E0223`.
+/// Rule-arena handles — a runtime-produced string, array, map or set — have the
+/// opposite lifetime: their store is reset at the body boundary, so the resolver
+/// refuses their capture with `E0223`.
 ///
 /// `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
@@ -293,13 +281,10 @@ pub const RuntimeErrorKind = enum {
     /// A component ref dereferenced after its entity died or lost the
     /// component — the typed-report home of `BridgeError.StaleComponentRef`.
     ///
-    /// It has its own kind rather than falling into `UnsupportedExpr` because
-    /// `etch-reference-part1.md` §5.3 c requires a CLEAR message: the expression
-    /// is perfectly supported, and what failed is the handle. Reachable from any
-    /// site that outlives a rule body — a timer, a `branch`, a `spawn`, a
-    /// `race`/`sync` branch, a local living across an `await` — which is exactly
-    /// where the ref is designed to fail loudly instead of reading the bytes of
-    /// whichever entity now occupies the slot.
+    /// Its own kind rather than `UnsupportedExpr`, because §5.3 c requires a
+    /// CLEAR message: the expression is supported and the handle is not.
+    /// Reachable from any site that outlives a rule body — a timer, a `branch`,
+    /// a `spawn`, a `race`/`sync` branch, a local living across an `await`.
     StaleComponentRef,
 };
 

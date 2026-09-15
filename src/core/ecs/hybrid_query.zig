@@ -127,11 +127,10 @@ pub fn population(world: *const World, cid: ComponentId) usize {
     }
     var total: usize = 0;
     for (world.archetypes.items) |arch| {
-        // THE SECOND SITE of the singleton-visibility class, and its
-        // consequence is different from a leaked result: a resource entity
-        // counted here inflates the population of its component type, which is
-        // the quantity `QueryPlan.elect` compares — so the bias lands on the
-        // PLAN, choosing a driver on a count no user query can ever visit.
+        // A resource entity counted here inflates the population of its
+        // component type, which is the quantity `QueryPlan.elect` compares — so
+        // the bias lands on the PLAN, electing a driver on a count no user query
+        // can visit. Distinct from a leaked row, and gated by the same rule.
         if (!query_mod.visibleToUserQueries(arch)) continue;
         if (arch.hasComponent(cid)) total += arch.entityCount();
     }

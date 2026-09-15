@@ -5722,24 +5722,18 @@ pub const TypeChecker = struct {
     /// Whether a value of this type CAN live in a store reset at the rule-body
     /// boundary (`etch-memory-model.md` §2), hence cannot outlive it.
     ///
-    /// **`CAN`, because the resolved type does not carry the ZONE, and that was
-    /// measured rather than assumed.** `let items = [1, 2, 3]` resolves to
-    /// `array_fixed` and is a rule-arena handle at runtime; `let xs =
-    /// get(Inv).items` resolves to `array_dyn` and is a persistent block the
-    /// resource owns, which is safe to capture. The two facts cross: a first
-    /// version of this predicate keyed on `array_dyn` alone, and it refused the
-    /// SAFE case while admitting the UNSAFE one — both at once, which is how the
-    /// inversion was found. The same holds for `string`, where a literal is an
-    /// AST-pool handle that outlives every body and a concatenation is not.
+    /// **`CAN`, because the resolved type does not carry the ZONE.**
+    /// `let items = [1, 2, 3]` resolves to `array_fixed` and is a rule-arena
+    /// handle; `let xs = get(Inv).items` resolves to `array_dyn` and is a
+    /// persistent block the resource owns, safe to capture. The two cross, so no
+    /// type-level predicate is exact — and the same holds for `string`, where a
+    /// literal is an AST-pool handle and a concatenation is not.
     ///
-    /// So the refusal is deliberately CONSERVATIVE: every type whose runtime
-    /// form can be rule-arena, accepting that it also refuses captures that
-    /// would have been safe — a literal string, a persistent resource
-    /// collection. The direction is chosen and not incidental: a false refusal
-    /// is a compile error the author reads and works around, a missed escape is
-    /// a use-after-free nobody sees, and this whole family exists because the
-    /// silent one is the unacceptable member. Measured cost of the widening on
-    /// the current suite: zero tests, zero corpus programs.
+    /// The refusal is therefore CONSERVATIVE: every type whose runtime form can
+    /// be rule-arena, accepting that it also refuses captures that are safe — a
+    /// literal string, a persistent resource collection. The direction is chosen
+    /// and not incidental: a false refusal is a compile error the author reads
+    /// and works around, a missed escape is a use-after-free nobody sees.
     ///
     /// An exact answer needs the provenance of the VALUE rather than the type of
     /// the binding, which this pass does not compute; `etch-memory-model.md` §11

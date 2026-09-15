@@ -720,8 +720,8 @@ pub const BodyManager = struct {
 
     /// Set the world-space orientation (mirror of `setPosition`). NORMALISED
     /// here — see `normalizedForStore` for why the caller cannot be asked to.
-    /// No-op on a stale/invalid handle, and on one that does not denote a
-    /// rotation. INTERNAL — see `setPosition`.
+    /// No-op on a stale handle, and on an argument denoting no rotation.
+    /// INTERNAL — see `setPosition`.
     ///
     /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
@@ -733,28 +733,23 @@ pub const BodyManager = struct {
     /// `q` as a UNIT quaternion, or `null` when it does not denote a rotation.
     ///
     /// **The column's invariant is established HERE because this is the last
-    /// point every writer passes through.** `addBody` normalises its descriptor;
-    /// this setter did not, and its doc asked the caller to — while its two
-    /// callers, `PhysicsWorld.setBodyTransform` and `moveKinematic`, do not, and
-    /// both are reachable from the frozen module surface AND from
-    /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot`: a bare
-    /// `[4]f32` carrying no invariant at all. A contract delegated to callers
-    /// that do not honour it is not a contract.
+    /// point every writer passes through**: `PhysicsWorld.setBodyTransform` and
+    /// `moveKinematic`, both reachable from the frozen module surface, and
+    /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot` — a bare
+    /// `[4]f32` carrying no invariant at all.
     ///
-    /// **And nothing downstream repaired it.** The single per-tick
-    /// renormalisation lives in `integration.zig` BELOW
+    /// **Nothing downstream repairs it.** The single per-tick renormalisation
+    /// lives in `integration.zig` BELOW
     /// `if (flags[i].gameplay_authority) continue;`, so a `.solver` body heals on
-    /// the next tick and a `.gameplay` body never does — drift accumulating for
-    /// as long as gameplay keeps writing.
+    /// the next tick and a `.gameplay` body is never visited.
     ///
-    /// The refusal is at TRUE ZERO and covers the three inputs that do not
-    /// denote a rotation: a zero quaternion, one carrying a NaN, and one
-    /// carrying an infinity — `normalize` is unguarded, so they would store NaN,
-    /// NaN, and an all-zero quaternion respectively, each of which breaks the
-    /// invariant rather than merely bending it. Refusing LEAVES the previous
-    /// unit value, which keeps `Body.rotation` unit unconditionally: the safe
-    /// direction, since a stored NaN propagates into every world AABB, query and
-    /// contact that reads the body, silently.
+    /// The refusal is at TRUE ZERO and covers the three inputs that denote no
+    /// rotation: a zero quaternion, one carrying a NaN, one carrying an infinity
+    /// — `normalize` is unguarded, so it answers NaN, NaN and an all-zero
+    /// quaternion respectively, each BREAKING the invariant rather than bending
+    /// it. Refusing LEAVES the previous unit value, which keeps `Body.rotation`
+    /// unit unconditionally: a stored NaN propagates silently into every world
+    /// AABB, query and contact that reads the body.
     fn normalizedForStore(q: Quatr) ?Quatr {
         const a = q.toArray();
         const norm_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
@@ -2705,9 +2700,10 @@ const testing = std.testing;
 
 /// The stored quaternion is unit, judged in `f128` from the stored components.
 ///
-/// Independent of the writer's arithmetic: `normalize` divides in `Real`, this
-/// squares and sums in a wider type and never divides — and comparing `|q|²` to
-/// 1 removes the `sqrt` that would otherwise be the one shared operation.
+/// INDEPENDENT of the writer's arithmetic by construction: `normalize` divides
+/// in `Real`, this squares and sums in a wider type and never divides — and
+/// comparing `|q|²` to 1 removes the `sqrt` that would be the one shared
+/// operation.
 fn expectUnit(q: Quatr) !void {
     const a = q.toArray();
     var acc: f128 = 0;
@@ -2736,13 +2732,10 @@ test "pose mutators write the pose and no-op on a stale handle" {
 
     const p = Vec3r.fromArray(.{ 1, 2, 3 });
     const q = Quatr.fromAxisAngle(Vec3r.unit_z, 0.5);
-    // The rotation is compared within a few eps and not BIT-EXACTLY, which is a
-    // deliberate loosening: `setRotation` normalises, and `fromAxisAngle`'s
-    // output is unit only to its own rounding, so the stored value differs from
-    // the argument by that correction. The tolerance was 0 here and it pinned
-    // verbatim storage — the property the normalisation exists to remove. What
-    // replaces it is STRICTLY STRONGER, because the unit check below is the
-    // invariant the exact comparison never asserted at all.
+    // Compared within a few eps and not BIT-EXACTLY: `setRotation` normalises,
+    // and `fromAxisAngle`'s output is unit only to its own rounding, so the
+    // stored value differs from the argument by that correction. The unit check
+    // below is what asserts the invariant.
     const rot_tol: Real = 8 * std.math.floatEps(Real);
     bm.setPosition(kept, p);
     bm.setRotation(kept, q);

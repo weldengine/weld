@@ -107,8 +107,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                     // (`ARCH-006`). This path cannot go through
                     // `archetypeMatches` — its component walk is comptime
                     // specialised — so it consults the RULE rather than
-                    // restating the flag, which is how the three paths came to
-                    // disagree.
+                    // restating the flag.
                     if (!query_mod.visibleToUserQueries(arch)) continue;
                     var all_present = true;
                     for (self.comp_ids) |cid| {
