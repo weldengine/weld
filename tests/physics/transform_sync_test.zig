@@ -2955,3 +2955,123 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
         try testing.expect(!pw.bm.isSleeping(piloted.body).?);
     }
 }
+
+// ─── `Body.rotation` is unit after every gameplay write ────────────────────
+//
+// Three entries into one invariant, each with its own test: `setBodyTransform`,
+// `moveKinematic`, and `sync_in.zig`'s per-tick seam, which forwards
+// `Transform.rot` — a bare `[4]f32` carrying no invariant. The integrator
+// renormalises BELOW `if (flags[i].gameplay_authority) continue;`, so nothing
+// downstream repairs a `.gameplay` body: the drift, once written, is permanent.
+
+/// `|q|² − 1` for the STORED rotation, computed in `f128`.
+///
+/// **Independent of the writer's arithmetic, which is the point.** The writer
+/// normalises by dividing in `Real`; this widens each stored component — a
+/// widening is exact — squares and sums in a type the writer never touches, and
+/// never divides or takes a root. So it cannot agree with the writer by sharing
+/// its rounding, and comparing `|q|²` to 1 rather than `|q|` removes the `sqrt`
+/// that would have been the one operation they had in common.
+fn normSqError(pw: *PhysicsWorld, body: api.BodyId) f128 {
+    const q = pw.bm.rotation(body).?.toArray();
+    var acc: f128 = 0;
+    inline for (q) |c| acc += @as(f128, c) * @as(f128, c);
+    return acc - 1;
+}
+
+/// The bound: the stored quaternion is unit to a few eps of the SOLVER scalar,
+/// which is as tight as a normalisation in that precision can be.
+const unit_tol: f128 = 8 * @as(f128, std.math.floatEps(Real));
+
+/// A quaternion that is emphatically NOT unit — norm 2, so an unnormalised
+/// store shows `|q|² − 1 = 3` and no tolerance could absorb it.
+const wide_rotation = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 2 };
+
+test "setBodyTransform stores a unit rotation from a non-unit one" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    pw.setBodyTransform(b.body, vr(0, 0, 0), wide_rotation);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "moveKinematic stores a unit rotation from a non-unit target" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // The SECOND write path, and it is not the first under another name: it
+    // derives both velocities from the move where `setBodyTransform` derives
+    // none, so it reaches `setRotation` through its own arithmetic.
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    pw.moveKinematic(b.body, vr(0, 0, 0), wide_rotation, fixed_dt);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "the per-tick sync seam stores a unit rotation from a raw Transform.rot" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // THE THIRD ENTRY, and the one no caller controls: `sync_in` forwards
+    // `Transform.rot` every tick for a `.gameplay` body, and that field is a
+    // `[4]f32` with no invariant — gameplay can write any four floats into it.
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try ecs.addComponent(gpa, b.entity, api.RigidBody, .{ .authority = .gameplay });
+
+    const t = ecs.getMut(Transform, b.entity).?;
+    t.rot = .{ 0, 0, 0, 2 };
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    // `frameWithSyncIn` and NOT `frame`: `stepAndPublish` is `step` + `syncOut`
+    // and calls `syncIn` nowhere — the inward seam lives in the registered
+    // system. A first version of this test used `frame`, so it drove no seam at
+    // all and stayed GREEN with the normalisation removed. It was the
+    // counter-factual's unexpected green branch that said so.
+    const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    // THE SEAM FIRED, asserted rather than assumed. Without this the test can
+    // go quiet again the next time a gate changes what drives a frame, and a
+    // quiet test reads exactly like a passing one.
+    try testing.expectEqual(@as(u32, 1), r.poses_applied);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "a rotation that denotes no rotation is refused, and the invariant holds" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    // THE NEGATIVE HALF, and it is not symmetry: `normalize` is unguarded, so a
+    // zero quaternion would store NaN and an infinite one would store all
+    // zeros — each breaking the invariant rather than bending it, and each
+    // propagating silently into every AABB, query and contact that reads the
+    // body. Refusing leaves the previous unit value, which is what keeps the
+    // invariant unconditional rather than merely usual.
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const zero = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 0 };
+    const inf = forge_3d.Quatr{ .x = std.math.inf(Real), .y = 0, .z = 0, .w = 0 };
+    const nan = forge_3d.Quatr{ .x = std.math.nan(Real), .y = 0, .z = 0, .w = 1 };
+
+    for ([_]forge_3d.Quatr{ zero, inf, nan }) |bad| {
+        pw.setBodyTransform(b.body, vr(0, 0, 0), bad);
+        try testing.expect(@abs(normSqError(&pw, b.body)) <= unit_tol);
+    }
+}
