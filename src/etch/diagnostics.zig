@@ -51,6 +51,7 @@ pub const DiagnosticCode = enum {
     immutable_receiver_for_mut_self, // E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // E0221 ClosureCannotMutateCapture
     collection_field_element_invalid, // E0222 CollectionFieldElementInvalid (resource collection field: unsupported element or nested collection)
+    rule_arena_value_escapes, // E0223 RuleArenaValueEscapes (a rule-arena handle captured by a construct that outlives the rule body)
 
     // ── ECS access errors (E0300-E0399) ──
     resource_expected_component_given, // E0301 ResourceExpectedComponentGiven
@@ -439,6 +440,7 @@ pub const DiagnosticCode = enum {
             .immutable_receiver_for_mut_self => "E0220",
             .closure_cannot_mutate_capture => "E0221",
             .collection_field_element_invalid => "E0222",
+            .rule_arena_value_escapes => "E0223",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .resource_field_unknown => "E0303",
@@ -647,6 +649,7 @@ pub const DiagnosticCode = enum {
             .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
             .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
             .collection_field_element_invalid => "CollectionFieldElementInvalid",
+            .rule_arena_value_escapes => "RuleArenaValueEscapes",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .resource_field_unknown => "ResourceFieldUnknown",

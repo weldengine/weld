@@ -22,6 +22,7 @@ const std = @import("std");
 const registry_mod = @import("registry.zig");
 const arch_dyn_mod = @import("archetype_dynamic.zig");
 const world_mod = @import("world.zig");
+const query_mod = @import("query.zig");
 
 const ComponentId = registry_mod.ComponentId;
 const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
@@ -102,9 +103,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                 // component.
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
-                    // Singleton resources are invisible to
-                    // user queries (cf. `ARCH-006`).
-                    if (arch.is_singleton) continue;
+                    if (!query_mod.visibleToUserQueries(arch)) continue;
                     var all_present = true;
                     for (self.comp_ids) |cid| {
                         if (!arch.hasComponent(cid)) {

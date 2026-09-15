@@ -203,6 +203,37 @@ pub const ComponentDesc = struct {
     requires: []const []const u8 = &.{},
 };
 
+/// The 64-bit schema identity of `desc` (`engine-ecs-internals.md` §13), over
+/// `(name, size, alignment, [(field name, kind, offset) in declaration order])`.
+///
+/// - **Derived at REGISTRATION, not at `comptime`.** A component declared in
+///   Etch has no Zig type when the engine is compiled.
+/// - **Size and alignment are IN the tuple**, not only the fields: a component
+///   with no named field — the builtin `TagSet`, an opaque block sized by the
+///   program's tag table — is discriminated by nothing else.
+/// - **Storage mode is OUT of it.** `table` or `sparse` is a property of this
+///   registry and not of the layout (`ARCH-005`), so changing it provokes
+///   neither refusal nor migration.
+///
+/// Sensitive to a field added in EXISTING padding, since offsets enter the hash.
+///
+/// **Not the Tier 0 RTTI digest, and never compared with it**: they run over
+/// different field descriptors, with different `kind` domains and offset widths.
+/// A reload confrontation is always between two values of the SAME computation.
+pub fn schemaDigestOf(desc: ComponentDesc) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(desc.name);
+    h.update(std.mem.asBytes(&desc.size));
+    h.update(std.mem.asBytes(&desc.alignment));
+    for (desc.fields) |f| {
+        h.update(f.name);
+        const k: u16 = @intFromEnum(f.kind);
+        h.update(std.mem.asBytes(&k));
+        h.update(std.mem.asBytes(&f.offset));
+    }
+    return h.final();
+}
+
 /// Surfaced by `Registry.registerComponent`, `registerComponentRaw`,
 /// and `registerAlias`; lookup paths never fail (return `?T`).
 pub const RegistryError = error{
@@ -221,6 +252,10 @@ const Entry = struct {
     /// settled at registration. Empty until finalisation, and empty forever for a
     /// component with no requisites.
     closure: []const ComponentId = &.{},
+    /// Schema identity, derived at registration (`engine-ecs-internals.md`
+    /// §13). Beside the descriptor for the same reason `closure` is: the
+    /// descriptor is what a CALLER supplies, this is what the registry DERIVES.
+    schema_digest: u64 = 0,
 };
 
 /// Runtime registry of component (and resource) type descriptions.
@@ -305,19 +340,30 @@ pub const Registry = struct {
             dup_req += 1;
         }
 
-        try self.entries.append(gpa, .{ .desc = .{
-            .name = name_owned,
-            .size = desc.size,
-            .alignment = desc.alignment,
-            .default_bytes = default_owned,
-            .fields = fields_owned,
-            .storage = desc.storage,
-            .requires = requires_owned,
-        } });
+        try self.entries.append(gpa, .{
+            .desc = .{
+                .name = name_owned,
+                .size = desc.size,
+                .alignment = desc.alignment,
+                .default_bytes = default_owned,
+                .fields = fields_owned,
+                .storage = desc.storage,
+                .requires = requires_owned,
+            },
+            .schema_digest = schemaDigestOf(desc),
+        });
         errdefer _ = self.entries.pop();
 
         try self.by_name.put(gpa, name_owned, id);
         return id;
+    }
+
+    /// The schema identity recorded for `id` at registration, or `null` when `id`
+    /// names no entry. A reload compares it with `schemaDigestOf` of the
+    /// CANDIDATE — two values of one computation, never against the RTTI digest.
+    pub fn schemaDigest(self: *const Registry, id: ComponentId) ?u64 {
+        if (id >= self.entries.items.len) return null;
+        return self.entries.items[id].schema_digest;
     }
 
     /// Register a component whose layout is known at Zig compile time. The

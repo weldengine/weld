@@ -186,32 +186,33 @@ test "workers deterministically park then wake on dispatch" {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
 
-    // Phase (a) — observe a worker parked RIGHT NOW.
-    //
-    // One dispatch of trivial work; idle workers then spin briefly and park on
-    // `work_available.waitUncancelable`, incrementing `parks_entered` under the
-    // park mutex before the wait. Poll until `Σ parks_entered > Σ parks_completed`:
-    // that strict inequality can only hold when a worker has entered a wait it
-    // has not yet woken from. The per-snapshot invariant
-    // `parks_completed <= parks_entered` (snapshot reads completed before entered)
-    // rules out a sampling artefact; and because this dispatch's wave has drained
-    // (no park↔wake churn), that entered-not-woken worker is a worker parked now.
-    // `std.Thread.yield` between polls; the 5 s watchdog armed above is
-    // the hard upper bound (a genuine regression — workers never parking — hangs
-    // here and the watchdog dumps the scheduler state, rather than a silent CI
-    // timeout).
+    // CONCURRENCY FACT: a snapshot reads `parks_completed` before
+    // `parks_entered`, so `entered > completed` can only hold when some worker
+    // has entered a wait it has not yet woken from.
     try sched.dispatch(&query, idleBody, .{});
+    const steals_at_dispatch = blk: {
+        const stats = try sched.snapshotStats(gpa);
+        defer gpa.free(stats);
+        var min: u64 = std.math.maxInt(u64);
+        for (stats) |s| min = @min(min, s.steals_attempted);
+        break :blk min;
+    };
     while (true) {
         std.Thread.yield() catch {};
         const stats = try sched.snapshotStats(gpa);
         defer gpa.free(stats);
         var entered: u64 = 0;
         var completed: u64 = 0;
+        var min_steals: u64 = std.math.maxInt(u64);
         for (stats) |s| {
             entered += s.parks_entered;
             completed += s.parks_completed;
+            min_steals = @min(min_steals, s.steals_attempted);
         }
         if (entered > completed) break; // at least one worker is parked now
+
+        const spent = min_steals - steals_at_dispatch;
+        if (spent > 2 * jobs_sched_mod.idle_spin_rounds) return error.WorkersDidNotParkAfterSpinBudget;
     }
 
     // Phase (b) — prove the wake side of the cycle.

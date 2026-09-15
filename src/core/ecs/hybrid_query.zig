@@ -127,6 +127,7 @@ pub fn population(world: *const World, cid: ComponentId) usize {
     }
     var total: usize = 0;
     for (world.archetypes.items) |arch| {
+        if (!query_mod.visibleToUserQueries(arch)) continue;
         if (arch.hasComponent(cid)) total += arch.entityCount();
     }
     return total;

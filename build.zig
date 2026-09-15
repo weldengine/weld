@@ -2429,6 +2429,11 @@ pub fn build(b: *std.Build) void {
     // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
     // 0 if the regen matches the committed output bit-for-bit; non-zero
     // (visible diff) signals a divergence and blocks the merge.
+    //
+    // KNOWN-GOOD CONTROL FIRST: `git diff --exit-code` answers 1 for a real diff
+    // and a different non-zero when git cannot run at all, so the control must
+    // establish that git answers before the diff's code is read as a verdict.
+    const bindgen_verify_control = b.addSystemCommand(&.{ "git", "--version" });
     const bindgen_verify_diff = b.addSystemCommand(&.{
         "git",
         "diff",
@@ -2437,6 +2442,7 @@ pub fn build(b: *std.Build) void {
         "bindings/generated/",
         "src/core/platform/",
     });
+    bindgen_verify_diff.step.dependOn(&bindgen_verify_control.step);
     bindgen_verify_diff.step.dependOn(&vk_gen_fmt.step);
     bindgen_verify_diff.step.dependOn(&wayland_gen_fmt.step);
     const bindgen_verify_step = b.step(

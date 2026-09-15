@@ -464,13 +464,19 @@ pub const Scheduler = struct {
 /// - Too high → idle workers burn CPU between actual frames; bad
 ///   for laptops and headless servers.
 ///
-/// 1024 rounds × ~200 ns/yield on macOS ≈ 200 µs spin window —
-/// large enough to absorb the inter-dispatch gap of a busy bench
-/// (≤10 µs measured between iterations) plus the wake-up jitter
-/// from OS scheduler reshuffles, and small enough that a truly idle
-/// scheduler settles to the parked state in well under a frame at
-/// 60 Hz.
-const idle_spin_rounds: u32 = 1024;
+/// Large enough to absorb the inter-dispatch gap of a busy bench (≤10 µs
+/// measured between iterations) plus the wake-up jitter from OS scheduler
+/// reshuffles.
+///
+/// **The window is WALL-CLOCK UNBOUNDED, and a reader must not size it from
+/// this number.** A round costs one `yield` plus a steal sweep, and a `yield`
+/// costs whatever the host gives it: measured single-threaded and unloaded on an
+/// M-series macOS dev box, 32 µs — so 1024 rounds ≈ 33 ms, not the microseconds
+/// a nanosecond-scale yield would suggest. Under contention it is far worse; a
+/// loaded CI runner has been observed at ≥ 6.9 ms per round, putting the same
+/// budget past five seconds. Anything that waits for a worker to park therefore
+/// waits on the HOST, not on this constant.
+pub const idle_spin_rounds: u32 = 1024;
 
 /// Dispatcher-side livelock watchdog budget. If a wave fails to
 /// drain within this wall-clock window, `publishWaveAndWait` is spinning

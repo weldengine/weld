@@ -1193,14 +1193,45 @@ pub const World = struct {
     /// entity's location atomically with the chunk-level swap. Purges the
     /// entity's active-extension set so its owned name copies
     /// are freed here rather than stranded until `World.deinit`.
+    /// Reclaim `arch`'s chunk at `chunk_idx` when it is empty, repairing the
+    /// locations the reclamation renumbers.
+    ///
+    /// The archetype frees the chunk and reports which index was renumbered; the
+    /// repair lives here because `entity_locations` does. A chunk that is not the
+    /// trailing one is replaced by the trailing one, so the entities that MOVED
+    /// are the ones now sitting at `renumbered` — not the ones that were freed,
+    /// which no longer exist.
+    fn reclaimChunk(self: *World, gpa: std.mem.Allocator, arch: *Archetype, chunk_idx: u32) void {
+        const renumbered = arch.releaseChunkIfEmpty(gpa, chunk_idx) orelse return;
+        const moved = arch.chunks.items[renumbered];
+        const ids = arch.entityIds(moved);
+        for (ids[0..moved.header().entity_count]) |e| {
+            self.entity_locations.getPtr(e).?.chunk_idx = renumbered;
+        }
+    }
+
+    /// Free `loc`'s slot in `arch` and repair what the removal moves. ONE entry
+    /// for all eight removal sites: the repair is two steps, and a site doing
+    /// one leaves either a stale location or an unreclaimable chunk.
+    fn removeSlotAndReclaim(
+        self: *World,
+        gpa: std.mem.Allocator,
+        arch: *Archetype,
+        loc: Location,
+    ) void {
+        if (arch.removeSwap(loc.chunk_idx, loc.slot)) |swapped_id| {
+            self.entity_locations.getPtr(swapped_id).?.* = loc;
+            return;
+        }
+        self.reclaimChunk(gpa, arch, loc.chunk_idx);
+    }
+
     pub fn despawn(self: *World, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
         try self.identity.validate(id);
         const location = self.entity_locations.get(id) orelse return error.StaleEntityHandle;
 
         const arch = self.archetypes.items[location.archetype_idx];
-        if (arch.removeSwap(location.chunk_idx, location.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = location;
-        }
+        self.removeSlotAndReclaim(gpa, arch, location);
         _ = self.entity_locations.remove(id);
         // Sweep every sparse store. Placed before `identity.release` for
         // reading order and NOT as a correctness condition — a first version of
@@ -1572,9 +1603,7 @@ pub const World = struct {
 
         // Swap-and-pop from the source archetype, then patch the
         // location maps.
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -1680,9 +1709,7 @@ pub const World = struct {
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
 
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -1773,9 +1800,7 @@ pub const World = struct {
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
 
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -1941,9 +1966,7 @@ pub const World = struct {
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
 
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -2122,9 +2145,7 @@ pub const World = struct {
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = prepared.entity;
 
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(prepared.entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -2138,9 +2159,9 @@ pub const World = struct {
     /// prepare and abort — hook structural changes are deferred and the
     /// path is single-threaded — so `removeSwap` on it is a pure pop (no swap,
     /// returns null). The entity was never recorded in `entity_locations` for the
-    /// dst slot, so no map fix-up is needed.
+    /// dst slot, so the POP needs no map fix-up — but reclaiming the chunk the
+    /// reservation may have created can renumber another, and that one does.
     pub fn abortRemoveComponentsDynamic(self: *World, gpa: std.mem.Allocator, prepared: PreparedRemove) void {
-        _ = self;
         defer gpa.free(prepared.cids_owned);
         // Nothing to undo on the sparse side: `commit` is what removes those
         // rows, so an aborted prepare never touched them.
@@ -2151,6 +2172,7 @@ pub const World = struct {
         const dst_r = prepared.dst_r orelse return;
         const swapped = prepared.dst_arch.removeSwap(dst_r.chunk_idx, dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
+        self.reclaimChunk(gpa, prepared.dst_arch, dst_r.chunk_idx);
     }
 
     /// Remove SEVERAL components in one migration (prepare → commit). The mirror of
@@ -2302,9 +2324,7 @@ pub const World = struct {
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
 
-        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
-            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
-        }
+        self.removeSlotAndReclaim(gpa, src_arch, src_loc);
         self.entity_locations.putAssumeCapacity(entity, .{
             .archetype_idx = dst_arch.archetype_id,
             .chunk_idx = dst_r.chunk_idx,
@@ -2879,4 +2899,108 @@ test "grouped ops reject duplicate / absent components (R11c) without panicking"
     try std.testing.expect(world.componentBytes(e, a) != null);
     try std.testing.expect(world.componentBytes(e, b) != null);
     try std.testing.expect(world.componentBytes(e, c) != null);
+}
+
+// ─── An emptied chunk is reclaimed ─────────────────────────────────────────
+//
+// `allocateSlot` fills only the TRAILING chunk, so a chunk drained by churn is
+// never refilled, and without reclamation the chunk count follows the cumulative
+// number of appends rather than the live population — until `dispatchBatch`
+// refuses the archetype at its chunk ceiling.
+//
+// Every assertion below is on `chunks_released` or on a survivor's bytes, never
+// on the absence of a crash: an implementation that reclaims nothing passes
+// every OTHER test in this file.
+
+/// A four-byte probe, so one chunk holds many entities and the capacity is the
+/// test's own parameter rather than a literal that a layout change would rot.
+fn reclaimProbe(name: []const u8) ComponentDesc {
+    return .{ .name = name, .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} };
+}
+
+test "a chunk emptied by despawn is released, and the trailing case renumbers nothing" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("RA"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < cap + 1) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+
+    try world.despawn(gpa, ids.items[cap]);
+    try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 1), arch.chunks.items.len);
+
+    try world.despawn(gpa, ids.items[0]);
+    try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 1), arch.chunks.items.len);
+}
+
+test "reclaiming a middle chunk renumbers the trailing one and repairs its locations" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("RB"));
+    const first = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 1, 0, 0, 0 }});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 2 * cap + 1) {
+        try ids.append(gpa, try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 1, 0, 0, 0 }}));
+    }
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    const lone = ids.items[2 * cap];
+    const marker = [_]u8{ 0xEF, 0xBE, 0xAD, 0xDE };
+    @memcpy(world.componentBytes(lone, cid).?, &marker);
+    try std.testing.expectEqual(@as(u32, 2), world.entity_locations.get(lone).?.chunk_idx);
+
+    for (ids.items[0..cap]) |e| try world.despawn(gpa, e);
+
+    try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    try std.testing.expectEqual(@as(u32, 0), world.entity_locations.get(lone).?.chunk_idx);
+    try std.testing.expectEqualSlices(u8, &marker, world.componentBytes(lone, cid).?);
+}
+
+test "sustained churn keeps the chunk count on the live population" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("RC"));
+    const seed = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(seed).?.archetype_idx];
+    const cap = arch.layout.capacity;
+    try world.despawn(gpa, seed);
+
+    var live: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer live.deinit(gpa);
+    while (live.items.len < 2 * cap) try live.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        var i: usize = 0;
+        while (i < cap) : (i += 1) try world.despawn(gpa, live.orderedRemove(0));
+        i = 0;
+        while (i < cap) : (i += 1) try live.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    }
+
+    try std.testing.expectEqual(@as(usize, 2 * cap), live.items.len);
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+    try std.testing.expect(arch.chunks_released >= 4);
 }

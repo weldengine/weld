@@ -2955,3 +2955,98 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
         try testing.expect(!pw.bm.isSleeping(piloted.body).?);
     }
 }
+
+// ─── `Body.rotation` is unit after every gameplay write ────────────────────
+//
+// Three entries into one invariant, each with its own test: `setBodyTransform`,
+// `moveKinematic`, and `sync_in.zig`'s per-tick seam, which forwards
+// `Transform.rot` — a bare `[4]f32` carrying no invariant. The integrator
+// renormalises BELOW `if (flags[i].gameplay_authority) continue;`, so nothing
+// downstream repairs a `.gameplay` body.
+
+/// `|q|² − 1` for the STORED rotation, in `f128`. INDEPENDENT of the writer's
+/// arithmetic by construction: widening is exact, this never divides or takes a
+/// root, and comparing `|q|²` removes the `sqrt` they would have shared.
+fn normSqError(pw: *PhysicsWorld, body: api.BodyId) f128 {
+    const q = pw.bm.rotation(body).?.toArray();
+    var acc: f128 = 0;
+    inline for (q) |c| acc += @as(f128, c) * @as(f128, c);
+    return acc - 1;
+}
+
+/// The bound: the stored quaternion is unit to a few eps of the SOLVER scalar,
+/// which is as tight as a normalisation in that precision can be.
+const unit_tol: f128 = 8 * @as(f128, std.math.floatEps(Real));
+
+/// A quaternion that is emphatically NOT unit — norm 2, so an unnormalised
+/// store shows `|q|² − 1 = 3` and no tolerance could absorb it.
+const wide_rotation = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 2 };
+
+test "setBodyTransform stores a unit rotation from a non-unit one" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    pw.setBodyTransform(b.body, vr(0, 0, 0), wide_rotation);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "moveKinematic stores a unit rotation from a non-unit target" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    pw.moveKinematic(b.body, vr(0, 0, 0), wide_rotation, fixed_dt);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "the per-tick sync seam stores a unit rotation from a raw Transform.rot" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    try ecs.addComponent(gpa, b.entity, api.RigidBody, .{ .authority = .gameplay });
+
+    const t = ecs.getMut(Transform, b.entity).?;
+    t.rot = .{ 0, 0, 0, 2 };
+
+    var journal: sync_in.Journal = .{};
+    defer journal.deinit(gpa);
+    const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
+
+    try testing.expectEqual(@as(u32, 1), r.poses_applied);
+
+    const err = normSqError(&pw, b.body);
+    try testing.expect(@abs(err) <= unit_tol);
+}
+
+test "a rotation that denotes no rotation is refused, and the invariant holds" {
+    const gpa = testing.allocator;
+    var ecs = World.init();
+    defer ecs.deinit(gpa);
+    var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
+    defer pw.deinit(gpa);
+
+    const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
+    const zero = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 0 };
+    const inf = forge_3d.Quatr{ .x = std.math.inf(Real), .y = 0, .z = 0, .w = 0 };
+    const nan = forge_3d.Quatr{ .x = std.math.nan(Real), .y = 0, .z = 0, .w = 1 };
+
+    for ([_]forge_3d.Quatr{ zero, inf, nan }) |bad| {
+        pw.setBodyTransform(b.body, vr(0, 0, 0), bad);
+        try testing.expect(@abs(normSqError(&pw, b.body)) <= unit_tol);
+    }
+}

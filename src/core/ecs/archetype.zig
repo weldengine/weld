@@ -18,9 +18,13 @@
 //!   `componentSize(component_ids[i])` / `componentAlignment(...)`.
 //!   They are cached locally so the hot paths (append, removeSwap,
 //!   componentSlot) do not need to bounce through the registry.
-//! - `chunks` grows monotonically on append; `removeSwap` performs an
-//!   in-chunk swap-and-pop and never frees the trailing empty chunk
-//!   (the empty-chunk reclamation policy is a later-milestone tweak).
+//! - `removeSwap` performs an IN-CHUNK swap-and-pop; a chunk it empties is
+//!   freed by `releaseChunkIfEmpty`, which the OWNER calls because reclaiming
+//!   a chunk can RENUMBER one other chunk and only the world holds the
+//!   locations that name it.
+//! - A chunk index is valid only between two structural mutations of its
+//!   archetype: `removeSwap` moves a row under any live iterator, and a
+//!   reclamation moves a whole chunk's index.
 //! - The `TransitionCache` lifetime is tied to the owning archetype —
 //!   the cached `ArchetypeId` values are indices into the world's
 //!   archetype list, so they stay valid as long as the world does
@@ -157,6 +161,10 @@ pub const Archetype = struct {
     /// than this flag's name suggests, and a reader must not take it for an
     /// invariant over every query.
     is_singleton: bool = false,
+    /// Chunks freed by `releaseChunkIfEmpty`. STATS-ONLY: a length that never
+    /// rose proves nothing, so asserting on `chunks.items.len` alone cannot tell
+    /// a release from an allocation that never happened.
+    chunks_released: u64 = 0,
 
     /// Initialise the archetype with the given sorted component list. An EMPTY
     /// list is accepted and yields the archetype of an entity whose whole set is
@@ -378,6 +386,40 @@ pub const Archetype = struct {
         ids[slot] = moved_id;
         hdr.entity_count = last;
         return moved_id;
+    }
+
+    /// Free the chunk at `chunk_idx` when it holds no entity; answer the index
+    /// whose occupants were RENUMBERED by the free, or `null` when none were.
+    ///
+    /// **Reclamation is the owner's call and not `removeSwap`'s.** Freeing a
+    /// chunk that is not the trailing one moves the trailing chunk into its
+    /// index, and every entity in THAT chunk then carries a stale
+    /// `Location.chunk_idx`. The archetype holds no locations and cannot repair
+    /// them: a caller that ignores the answer leaves entities naming a chunk
+    /// that moved.
+    ///
+    /// **`null` covers TWO cases** — "not empty" and "the trailing chunk was
+    /// freed" — alike to the caller, since neither renumbers anything, and
+    /// distinguishable through `chunks_released`, which only a free bumps.
+    ///
+    /// Why an empty chunk is worth the trouble: `allocateSlot` fills only the
+    /// TRAILING chunk, so a chunk drained by churn is never refilled and the
+    /// count follows the cumulative appends rather than the live population,
+    /// until `dispatchBatch` refuses the archetype at its chunk ceiling.
+    pub fn releaseChunkIfEmpty(self: *Archetype, gpa: std.mem.Allocator, chunk_idx: u32) ?u32 {
+        const chunk = self.chunks.items[chunk_idx];
+        if (chunk.header().entity_count != 0) return null;
+
+        const last_idx: u32 = @intCast(self.chunks.items.len - 1);
+        gpa.destroy(chunk);
+        self.chunks_released += 1;
+        if (chunk_idx == last_idx) {
+            _ = self.chunks.pop();
+            return null;
+        }
+        self.chunks.items[chunk_idx] = self.chunks.items[last_idx];
+        _ = self.chunks.pop();
+        return chunk_idx;
     }
 
     fn allocChunk(self: *Archetype, gpa: std.mem.Allocator) ArchetypeError!*Chunk {

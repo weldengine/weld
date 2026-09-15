@@ -718,15 +718,43 @@ pub const BodyManager = struct {
         self.poisonCachedBox(idx);
     }
 
-    /// Set the world-space orientation (mirror of `setPosition`; the caller owns
-    /// normalization). No-op on a stale/invalid handle. INTERNAL — see
-    /// `setPosition`.
+    /// Set the world-space orientation (mirror of `setPosition`). NORMALISED
+    /// here — see `normalizedForStore` for why the caller cannot be asked to.
+    /// No-op on a stale handle, and on an argument denoting no rotation.
+    /// INTERNAL — see `setPosition`.
     ///
     /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
         const idx = self.alloc.validate(id) orelse return;
-        self.bodies.items(.rotation)[idx] = new_rotation;
+        self.bodies.items(.rotation)[idx] = normalizedForStore(new_rotation) orelse return;
         self.poisonCachedBox(idx);
+    }
+
+    /// `q` as a UNIT quaternion, or `null` when it does not denote a rotation.
+    ///
+    /// **The column's invariant is established HERE because this is the last
+    /// point every writer passes through**: `PhysicsWorld.setBodyTransform` and
+    /// `moveKinematic`, both reachable from the frozen module surface, and
+    /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot` — a bare
+    /// `[4]f32` carrying no invariant at all.
+    ///
+    /// **Nothing downstream repairs it.** The single per-tick renormalisation
+    /// lives in `integration.zig` BELOW
+    /// `if (flags[i].gameplay_authority) continue;`, so a `.solver` body heals on
+    /// the next tick and a `.gameplay` body is never visited.
+    ///
+    /// The refusal is at TRUE ZERO and covers the three inputs that denote no
+    /// rotation: a zero quaternion, one carrying a NaN, one carrying an infinity
+    /// — `normalize` is unguarded, so it answers NaN, NaN and an all-zero
+    /// quaternion respectively, each BREAKING the invariant rather than bending
+    /// it. Refusing LEAVES the previous unit value, which keeps `Body.rotation`
+    /// unit unconditionally: a stored NaN propagates silently into every world
+    /// AABB, query and contact that reads the body.
+    fn normalizedForStore(q: Quatr) ?Quatr {
+        const a = q.toArray();
+        const norm_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
+        if (!(norm_sq > 0) or !std.math.isFinite(norm_sq)) return null;
+        return q.normalize();
     }
 
     /// Invalidate the cached world box of a NON-DYNAMIC body whose pose has just been
@@ -2670,6 +2698,16 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
 
 const testing = std.testing;
 
+/// The stored quaternion is unit, judged in `f128`. INDEPENDENT of the writer's
+/// arithmetic by construction: it squares and sums in a wider type and never
+/// divides, and comparing `|q|²` removes the `sqrt` they would have shared.
+fn expectUnit(q: Quatr) !void {
+    const a = q.toArray();
+    var acc: f128 = 0;
+    inline for (a) |c| acc += @as(f128, c) * @as(f128, c);
+    try testing.expect(@abs(acc - 1) <= 8 * @as(f128, std.math.floatEps(Real)));
+}
+
 test "pose mutators write the pose and no-op on a stale handle" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
@@ -2691,10 +2729,12 @@ test "pose mutators write the pose and no-op on a stale handle" {
 
     const p = Vec3r.fromArray(.{ 1, 2, 3 });
     const q = Quatr.fromAxisAngle(Vec3r.unit_z, 0.5);
+    const rot_tol: Real = 8 * std.math.floatEps(Real);
     bm.setPosition(kept, p);
     bm.setRotation(kept, q);
     try testing.expect(bm.position(kept).?.approxEql(p, 0));
-    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, rot_tol));
+    try expectUnit(bm.rotation(kept).?);
 
     // A stale handle (freed slot, bumped generation) writes nothing — neither into
     // its own freed slot nor anywhere else.
@@ -2704,5 +2744,6 @@ test "pose mutators write the pose and no-op on a stale handle" {
     try testing.expectEqual(@as(?Vec3r, null), bm.position(doomed));
     try testing.expectEqual(@as(?Quatr, null), bm.rotation(doomed));
     try testing.expect(bm.position(kept).?.approxEql(p, 0));
-    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, rot_tol));
+    try expectUnit(bm.rotation(kept).?);
 }

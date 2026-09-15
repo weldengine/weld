@@ -6872,6 +6872,7 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
 fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
+        error.StaleComponentRef => .StaleComponentRef,
         else => .UnsupportedExpr,
     };
 }
@@ -6888,6 +6889,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .TypeMismatch => "type mismatch",
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
+        .StaleComponentRef => "component ref outlived its entity",
     };
 }
 
@@ -7404,14 +7406,32 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    // Idempotent re-registration. A second Interpreter
-    // compiled on the SAME world — an AST swap, e.g. edit a rule body and
-    // re-compile — re-visits the unchanged component/resource decls. Reuse the
-    // existing id instead of erroring `DuplicateComponent`, so the live world
-    // state (entities, component bytes, resource values) survives the swap.
-    // The hot-reload contract is a rule-body edit with the declarations
-    // UNCHANGED; a layout-changing reload (archetype migration) is unimplemented.
     if (registry.idOf(name)) |existing_id| {
+        const candidate = weld_core.ecs.registry.schemaDigestOf(.{
+            .name = name,
+            .size = @intCast(size),
+            .alignment = @intCast(max_align),
+            .default_bytes = default_buf,
+            .fields = fields.items,
+            .storage = storage,
+            .requires = requires,
+        });
+        if ((registry.schemaDigest(existing_id) orelse candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+                .{
+                    name,
+                    registry.componentSize(existing_id),
+                    registry.componentAlignment(existing_id),
+                    registry.componentFields(existing_id).len,
+                    size,
+                    max_align,
+                    fields.items.len,
+                },
+            );
+            return error.SchemaChanged;
+        }
         switch (reg_kind) {
             .component => try bridge.mapComponent(gpa, name, existing_id),
             .resource => try bridge.mapResource(gpa, name, existing_id),

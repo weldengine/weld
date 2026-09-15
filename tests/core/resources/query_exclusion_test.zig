@@ -1,11 +1,4 @@
-//! M0.2 / E3 — Singleton entities must stay invisible to user
-//! queries.
-//!
-//! The exclusion is implemented via the `Archetype.is_singleton`
-//! flag (cf. brief § Notes — technical decision E3) and read by
-//! both `Query.maybeRescan` (typed S1 path) and
-//! `ComptimeQuery.next` (dynamic Etch path).
-
+//! Singleton entities stay invisible to user queries (`ARCH-006`).
 const std = @import("std");
 const weld_core = @import("weld_core");
 
@@ -102,4 +95,68 @@ test "user entity carrying a same-typed component coexists with the resource" {
         try std.testing.expectEqual(@as(u32, 7), row[0].setting);
     }
     try std.testing.expectEqual(@as(u32, 1), matched);
+}
+
+// ─── The typed path, and the order the two scans divide ───────────────────
+
+test "a resource declared BEFORE a typed query is invisible to it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
+
+    var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
+    defer q.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), q.matchCount());
+}
+
+test "a resource declared AFTER a typed query is invisible too" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
+    defer q.deinit(gpa);
+    try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
+
+    try std.testing.expectEqual(@as(usize, 0), q.matchCount());
+}
+
+test "a typed query still returns USER entities of the resource's own type" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
+    const cid = try world.ensureComponentRegistered(gpa, GameClock);
+    var user = GameClock{ .current_tick = 42 };
+    _ = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{std.mem.asBytes(&user)});
+
+    var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
+    defer q.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), q.matchCount());
+    var visited: u32 = 0;
+    for (q.matches.items) |m| {
+        for (m.archetype.chunks.items) |chunk| visited += chunk.entityCount();
+    }
+    try std.testing.expectEqual(@as(u32, 1), visited);
+}
+
+test "a singleton entity is not counted in the population the planner elects on" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.ensureComponentRegistered(gpa, GameClock);
+    try std.testing.expectEqual(@as(usize, 0), ecs.hybrid_query.population(&world, cid));
+
+    try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
+    try std.testing.expectEqual(@as(usize, 0), ecs.hybrid_query.population(&world, cid));
+
+    var user = GameClock{ .current_tick = 42 };
+    _ = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{std.mem.asBytes(&user)});
+    try std.testing.expectEqual(@as(usize, 1), ecs.hybrid_query.population(&world, cid));
 }

@@ -114,3 +114,106 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     );
     try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
 }
+
+/// Source A's `Counter`, one more field. Same name, different layout.
+const src_widened =
+    \\component Counter { value: int = 0, extra: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// Source A's `Counter` verbatim, with `@storage(.sparse)` added. §13's fourth
+/// property: the mode is a property of the runtime registry and not of the
+/// layout, so it changes no identity.
+const src_mode_changed =
+    \\@storage(.sparse)
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// Source A without the `Counter` declaration at all. §13 step 4: a type in the
+/// active image and absent from the new program does not fail the reload.
+const src_no_counter =
+    \\component Other { n: int = 0 }
+    \\rule noop(entity: Entity)
+    \\  when entity has Other
+    \\{
+    \\  entity.get_mut(Other).n += 1
+    \\}
+;
+
+/// Compile `src` on `world`, returning the error rather than the interpreter.
+fn reloadOn(gpa: std.mem.Allocator, world: *World, src: []const u8) !void {
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, world);
+    interp.deinit();
+}
+
+/// A live session on source A with one entity ticked to 3.
+fn liveSessionAt3(gpa: std.mem.Allocator, world: *World) !void {
+    var pr = try weld_etch.parseSource(gpa, src_a);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Counter").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(world, 3);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(world));
+}
+
+test "a reload that widens a component is refused and the live image survives" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+
+    const cid = world.registry.idOf("Counter").?;
+    const size_before = world.registry.componentSize(cid);
+
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_widened));
+
+    try std.testing.expectEqual(cid, world.registry.idOf("Counter").?);
+    try std.testing.expectEqual(size_before, world.registry.componentSize(cid));
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a reload that changes no layout still succeeds and keeps the live value" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+
+    try reloadOn(gpa, &world, src_b);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a reload that changes only the storage mode is not a layout change" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+
+    try reloadOn(gpa, &world, src_mode_changed);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a type absent from the new program does not fail the reload" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+
+    try reloadOn(gpa, &world, src_no_counter);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
