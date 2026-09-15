@@ -2429,6 +2429,17 @@ pub fn build(b: *std.Build) void {
     // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
     // 0 if the regen matches the committed output bit-for-bit; non-zero
     // (visible diff) signals a divergence and blocks the merge.
+    //
+    // KNOWN-GOOD CONTROL FIRST, and it is not decoration. `git diff
+    // --exit-code` answers 1 for "the files differ" and a DIFFERENT non-zero
+    // for "git could not run at all" — on macOS `/usr/bin/git` is the Xcode
+    // shim and an unaccepted licence makes every invocation exit 69,
+    // `git --version` included. Read as a diff, that is a divergence verdict
+    // nothing measured. Establishing that git answers BEFORE the diff runs
+    // separates the three outcomes at the only place they can be told apart:
+    // an unavailable tool fails here, naming itself on its own command line,
+    // and the diff step never produces a verdict.
+    const bindgen_verify_control = b.addSystemCommand(&.{ "git", "--version" });
     const bindgen_verify_diff = b.addSystemCommand(&.{
         "git",
         "diff",
@@ -2437,6 +2448,7 @@ pub fn build(b: *std.Build) void {
         "bindings/generated/",
         "src/core/platform/",
     });
+    bindgen_verify_diff.step.dependOn(&bindgen_verify_control.step);
     bindgen_verify_diff.step.dependOn(&vk_gen_fmt.step);
     bindgen_verify_diff.step.dependOn(&wayland_gen_fmt.step);
     const bindgen_verify_step = b.step(
