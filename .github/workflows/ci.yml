@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@v6
 
       # Action versions pinned to the engine-development-workflow.md §7.3
-      # whitelist (M0.9 / E1 decision): weldengine/setup-zig@v0.1.0 (exact
+      # whitelist: weldengine/setup-zig@v0.1.0 (exact
       # tag, not a floating @v0 — manual bumps), actions/cache@v5,
       # actions/upload-artifact@v6, actions/checkout@v6. All Node 24 /
       # runner ≥ 2.327.1.
@@ -87,8 +87,7 @@ jobs:
       # setup-zig action takes that syntax literally and resolves to
       # zig-...-0.16.x.tar.xz on the mirrors (404 everywhere). Pinned to
       # 0.16.0 exact until the action supports semver ranges or we switch
-      # to `version-file: build.zig.zon`. Tracked as an acted deviation in
-      # briefs/S0-bootstrap.md. The build.zig minor-version guard still
+      # to `version-file: build.zig.zon`. The build.zig minor-version guard still
       # enforces the 0.16.x invariant on the local toolchain.
       - uses: weldengine/setup-zig@v0.1.0
         with:
