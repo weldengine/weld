@@ -6872,6 +6872,11 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
 fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
+        // A ref whose entity died or dropped the component between the
+        // `get`/`get_mut` and this access. Named rather than folded into the
+        // `else`, because `etch-reference-part1.md` §5.3 c requires the failure
+        // to be legible: the expression is supported and the handle is stale.
+        error.StaleComponentRef => .StaleComponentRef,
         else => .UnsupportedExpr,
     };
 }
@@ -6888,6 +6893,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .TypeMismatch => "type mismatch",
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
+        .StaleComponentRef => "component ref outlived its entity",
     };
 }
 

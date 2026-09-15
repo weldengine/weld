@@ -21,53 +21,46 @@ pub const EntityId = u64;
 /// bridge to distinguish a missing handle from any valid entity.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
-/// A handle onto a component's bytes for one entity. NOT chunk-anchored: the
-/// `where` field below is bimodal, and a `.sparse` component designates no chunk
-/// and no slot. The interpreter resolves `entity.get(T)` / `entity.get_mut(T)`
-/// into one of these, which the bridge dereferences when the rule body reads or
-/// writes a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
+/// A handle onto one entity's component bytes.
+///
+/// **A ref designates an `(entity, component)` PAIR, never a memory location**
+/// (`etch-reference-part1.md` §5.3 a). It is re-resolved at EVERY access, read
+/// and write alike, through `World.componentBytes` — the entry that already
+/// answers for both backends from an `EntityId`. So whatever happened to the
+/// storage in between — archetype migration, chunk compaction, a swap-remove
+/// moving another row into this slot — the ref still designates ITS entity's
+/// bytes or fails; it can never designate someone else's.
+///
+/// **`@storage` therefore has no semantic effect**, which is the property the
+/// shape exists to hold. The previous form carried `{ chunk_ptr, slot }` on the
+/// table arm and the entity alone on the sparse one, so a handle held across a
+/// structural mutation was safe in sparse and silently wrong in table — making a
+/// choice documented everywhere as pure performance change the lifetime
+/// semantics of a value visible from Etch.
+///
+/// **The liveness and carriage check runs at each dereference, not only at the
+/// `get`/`get_mut` that produced the handle** (§5.3 c). A stale one fails loudly
+/// — `BridgeError.StaleComponentRef`, surfaced as a spanned runtime failure —
+/// and the check is present in every build mode, since a control absent from the
+/// mode the product ships in guards nothing.
+///
+/// **That is what makes a ref held beyond its rule body safe** (§5.3 corollary):
+/// a timer snapshot, a `branch`, a `spawn`, a `race`/`sync` branch, or a local
+/// living across an `await`. `cloneLocalsInto` copies a `Value` verbatim into
+/// those snapshots and `AsyncTask.locals` retains it across a suspension, so the
+/// handle outlives the tick by construction — the safety cannot rest on a
+/// temporal argument about deferred structural ops, and no longer does.
+///
+/// Rule-arena handles — a runtime-produced string, array, map or set — keep the
+/// opposite property and remain perishable: their store is reset at the body
+/// boundary, so the resolver refuses their capture with `E0223`.
+///
+/// `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
+    /// The Etch wire form; `@bitCast` to the core packed handle at use.
+    entity: EntityId,
     component_id: u32,
     mutable: bool,
-    /// WHERE the bytes live, and the field is bimodal.
-    ///
-    /// **The two arms are asymmetric ON PURPOSE.** Sparse keeps the ENTITY and
-    /// re-resolves per access, because a row POINTER would be invalidated by any
-    /// swap-remove in that store — and the lookup is an array index plus a
-    /// generation compare, cheaper than the hash a table ref already pays.
-    ///
-    /// **The table arm HAS that hazard.** A `chunk_ptr` + `slot` is invalidated
-    /// by a swap-remove in its chunk or by an archetype migration — that is, by
-    /// a component REMOVE, ADD or DESPAWN. So a handle held across a structural
-    /// mutation is safe in sparse and unsafe in table, which makes `@storage` —
-    /// presented everywhere as a choice with no semantic effect — change the
-    /// lifetime semantics of a value visible from Etch.
-    ///
-    /// **What makes that unreachable is TEMPORAL, not structural.** Nothing in
-    /// the language forbids the shape: `let r = entity.get_mut(H)` then
-    /// `entity.remove(M)` then `r.hp = 99` type-checks with zero diagnostics.
-    /// The three ops that MOVE a row are DEFERRED from a rule body since
-    /// a rule body, so no row moves while the body runs.
-    ///
-    /// **An immediate SPAWN is not a counter-example and must not be recorded as
-    /// one:** `Archetype.allocateSlot` appends, and an append relocates no
-    /// existing row, so a spawn leaves every handle valid.
-    ///
-    /// **And preserving that deferral does not preserve every capture — the
-    /// sibling case has one more guardian.** `hybrid_query.zig`'s sparse-driven
-    /// iterator holds a SLICE of its driver's dense array, which an APPEND
-    /// invalidates, and what keeps an immediate spawn out of a rule body there
-    /// is the type-checker refusing `test_world()` outside a test body. The rule
-    /// belongs to `etch-memory-model.md` and is stated on the OPERATIONS rather
-    /// than on a handle's lifetime, so the charge falls on whoever makes a
-    /// structural op immediate rather than on every future capture site.
-    where: Where,
-
-    pub const Where = union(enum) {
-        table: struct { chunk_ptr: *anyopaque, slot: u32 },
-        /// The `u64` wire form, bitcast to the core packed handle at use.
-        sparse: EntityId,
-    };
 };
 
 /// A handle to a resource's backing bytes in the world `ResourceStore`.
@@ -297,6 +290,17 @@ pub const RuntimeErrorKind = enum {
     /// covers the failing condition; the message (compared values, custom
     /// reason) travels alongside via the interpreter's `pending_message`.
     AssertFailed,
+    /// A component ref dereferenced after its entity died or lost the
+    /// component — the typed-report home of `BridgeError.StaleComponentRef`.
+    ///
+    /// It has its own kind rather than falling into `UnsupportedExpr` because
+    /// `etch-reference-part1.md` §5.3 c requires a CLEAR message: the expression
+    /// is perfectly supported, and what failed is the handle. Reachable from any
+    /// site that outlives a rule body — a timer, a `branch`, a `spawn`, a
+    /// `race`/`sync` branch, a local living across an `await` — which is exactly
+    /// where the ref is designed to fail loudly instead of reading the bytes of
+    /// whichever entity now occupies the slot.
+    StaleComponentRef,
 };
 
 // ─── Arithmetic helpers ──────────────────────────────────────────────────

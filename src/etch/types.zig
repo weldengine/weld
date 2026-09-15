@@ -551,6 +551,24 @@ pub const TypeChecker = struct {
     /// Start of the innermost branch's label window in `conc_labels`. Saved/restored at
     /// branch entry.
     conc_labels_base: usize = 0,
+    /// Names visible at the entry of the innermost SCOPE-SNAPSHOT body, in
+    /// `escape_names[escape_base..]`. A body that outlives the rule body — a
+    /// timer callback, a `branch`, a `spawn`, a `race`/`sync` branch — runs on
+    /// a COPY of the scope taken at construction, so a name it references and
+    /// did not declare is a capture. When that name's type is rule-arena, the
+    /// store backing it is reset at the body boundary and the copy outlives its
+    /// own bytes → E0223 (`etch-resolver-types.md` §8.2).
+    ///
+    /// A LIST and not a set, because the discipline here is a save/restore
+    /// window exactly like `conc_labels`: entry appends, exit truncates, and a
+    /// nested body's window is its own. `null` for `escape_site` means no such
+    /// body is open and the check is off entirely.
+    escape_names: std.ArrayListUnmanaged(StringId) = .empty,
+    /// Start of the innermost snapshot body's window in `escape_names`.
+    escape_base: usize = 0,
+    /// What the innermost snapshot body IS, for the diagnostic's wording. `null`
+    /// outside any.
+    escape_site: ?EscapeSite = null,
     /// The direct-call node consumed by the `await` currently being typed: the
     /// free-fn/method call sites skip E0905 for it. Set around the future-form arg
     /// synthesis; `NodeId.none` otherwise. The `await` is the SOLE call-grain consumer
@@ -603,6 +621,36 @@ pub const TypeChecker = struct {
     /// `root.validateProject` keeps alive for the duration of the checks. The four
     /// concurrency-branch contexts — see `conc_branch`.
     pub const ConcBranchKind = enum { race, sync, branch, spawn };
+
+    /// A construct whose body runs on a SNAPSHOT of the enclosing scope and
+    /// outlives the rule body that built it (`etch-resolver-types.md` §8.2).
+    ///
+    /// Five entries and not four: a timer is not a concurrency branch — it
+    /// carries no `{async}` effect and its body is a synchronous context — but
+    /// it snapshots the scope exactly like the other four, and the escape
+    /// question is about the SNAPSHOT and not about the effect. `async_frame`
+    /// names the fifth row of §8.2's table, which is not a construct but a
+    /// local living across an `await`; it has no site to check at today and is
+    /// declared so the switch below is exhaustive when it does.
+    pub const EscapeSite = enum {
+        timer,
+        race_branch,
+        sync_branch,
+        branch,
+        spawn,
+        async_frame,
+
+        pub fn label(self: EscapeSite) []const u8 {
+            return switch (self) {
+                .timer => "a timer body",
+                .race_branch => "a race branch",
+                .sync_branch => "a sync branch",
+                .branch => "a branch body",
+                .spawn => "a spawn body",
+                .async_frame => "an async frame",
+            };
+        }
+    };
 
     /// Visibility of an exported symbol. Since `private`
     /// graduated the exports builder sets `.private` from the decl's
@@ -682,6 +730,7 @@ pub const TypeChecker = struct {
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
+        self.escape_names.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
@@ -5615,7 +5664,9 @@ pub const TypeChecker = struct {
         self.conc_branch = null;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const esc = try self.openEscapeWindow(ctx, .timer);
         defer {
+            self.closeEscapeWindow(esc);
             self.current_is_async = saved_async;
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
@@ -5633,6 +5684,75 @@ pub const TypeChecker = struct {
     /// branch body stays an ORDINARY async context otherwise — E0905 applies
     /// recursively inside it (§9.2 revision 2: the constructs relocate the
     /// `await`, they do not replace it).
+    /// Open an escape window: record every name visible RIGHT NOW, so anything
+    /// the snapshot body references from this set is a capture rather than one
+    /// of its own locals.
+    ///
+    /// Recording the names at ENTRY is what makes the distinction cheap and
+    /// exact: `ctx.locals` only grows while a body is checked, so a name absent
+    /// from the window was declared inside the body and captures nothing. The
+    /// alternative — diffing the map at exit — would answer the same question
+    /// after the references have already been typed.
+    fn openEscapeWindow(self: *TypeChecker, ctx: *RuleCtx, site: EscapeSite) TypeError!EscapeSave {
+        const save: EscapeSave = .{ .base = self.escape_base, .site = self.escape_site };
+        self.escape_base = self.escape_names.items.len;
+        self.escape_site = site;
+        var it = ctx.locals.keyIterator();
+        while (it.next()) |k| try self.escape_names.append(self.gpa, k.*);
+        return save;
+    }
+
+    fn closeEscapeWindow(self: *TypeChecker, save: EscapeSave) void {
+        self.escape_names.shrinkRetainingCapacity(self.escape_base);
+        self.escape_base = save.base;
+        self.escape_site = save.site;
+    }
+
+    const EscapeSave = struct { base: usize, site: ?EscapeSite };
+
+    /// True when `name` was visible before the innermost snapshot body opened —
+    /// i.e. referencing it inside that body captures it.
+    fn isCaptured(self: *const TypeChecker, name: StringId) bool {
+        for (self.escape_names.items[self.escape_base..]) |n| {
+            if (n == name) return true;
+        }
+        return false;
+    }
+
+    /// Whether a value of this type CAN live in a store reset at the rule-body
+    /// boundary (`etch-memory-model.md` §2), hence cannot outlive it.
+    ///
+    /// **`CAN`, because the resolved type does not carry the ZONE, and that was
+    /// measured rather than assumed.** `let items = [1, 2, 3]` resolves to
+    /// `array_fixed` and is a rule-arena handle at runtime; `let xs =
+    /// get(Inv).items` resolves to `array_dyn` and is a persistent block the
+    /// resource owns, which is safe to capture. The two facts cross: a first
+    /// version of this predicate keyed on `array_dyn` alone, and it refused the
+    /// SAFE case while admitting the UNSAFE one — both at once, which is how the
+    /// inversion was found. The same holds for `string`, where a literal is an
+    /// AST-pool handle that outlives every body and a concatenation is not.
+    ///
+    /// So the refusal is deliberately CONSERVATIVE: every type whose runtime
+    /// form can be rule-arena, accepting that it also refuses captures that
+    /// would have been safe — a literal string, a persistent resource
+    /// collection. The direction is chosen and not incidental: a false refusal
+    /// is a compile error the author reads and works around, a missed escape is
+    /// a use-after-free nobody sees, and this whole family exists because the
+    /// silent one is the unacceptable member. Measured cost of the widening on
+    /// the current suite: zero tests, zero corpus programs.
+    ///
+    /// An exact answer needs the provenance of the VALUE rather than the type of
+    /// the binding, which this pass does not compute; `etch-memory-model.md` §11
+    /// owns that analysis. `escape_false_refusal` below pins the frontier, so
+    /// whoever delivers it has a test to flip rather than a comment to find.
+    fn isRuleArenaType(t: ResolvedType) bool {
+        return switch (t) {
+            .array_fixed, .array_dyn, .map_t, .set_t => true,
+            .builtin => |b| b == .string_,
+            else => false,
+        };
+    }
+
     fn checkConcBranchStmt(self: *TypeChecker, ctx: *RuleCtx, stmt: NodeId, kind: ConcBranchKind) TypeError!void {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
@@ -5640,7 +5760,14 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const esc = try self.openEscapeWindow(ctx, switch (kind) {
+            .race => .race_branch,
+            .sync => .sync_branch,
+            .branch => .branch,
+            .spawn => .spawn,
+        });
         defer {
+            self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.conc_labels_base = saved_base;
@@ -5657,7 +5784,14 @@ pub const TypeChecker = struct {
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
+        const esc = try self.openEscapeWindow(ctx, switch (kind) {
+            .race => .race_branch,
+            .sync => .sync_branch,
+            .branch => .branch,
+            .spawn => .spawn,
+        });
         defer {
+            self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.conc_labels_base = saved_base;
@@ -5786,7 +5920,26 @@ pub const TypeChecker = struct {
             .ident => {
                 const name_id: StringId = data;
                 if (ctx_opt) |ctx| {
-                    if (ctx.locals.get(name_id)) |local| return local.type_;
+                    if (ctx.locals.get(name_id)) |local| {
+                        // E0223 (`etch-resolver-types.md` §8.2). The criterion is
+                        // what the body USES, not what its scope holds: a handle
+                        // sitting unreferenced in the enclosing scope is never
+                        // copied into the snapshot, so it is not an escape — which
+                        // is why the check lives at the reference and not at the
+                        // construct.
+                        if (self.escape_site) |site| {
+                            if (isRuleArenaType(local.type_) and self.isCaptured(name_id)) {
+                                try self.emit(
+                                    .rule_arena_value_escapes,
+                                    .error_,
+                                    self.arena.exprSpan(id),
+                                    "'{s}' lives in the rule body's arena and cannot be captured by {s}, which outlives it",
+                                    .{ self.arena.strings.slice(name_id), site.label() },
+                                );
+                            }
+                        }
+                        return local.type_;
+                    }
                 }
                 try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
                 return ResolvedType.unknown;
@@ -12596,4 +12749,124 @@ test "an event declared in a .d.etch parses and registers, a component still doe
     // `imported_symbols`, which a `.d.etch` does not participate in (it is loaded
     // at compiler build, §20.5, never imported). That wiring is the service
     // registry's, and it is tested there.
+}
+
+// ─── A rule-arena handle captured by a construct that outlives the body ────
+
+test "a timer capturing a rule-arena array is E0223, and its negative twin is clean" {
+    const gpa = std.testing.allocator;
+
+    // The array lives in the per-body collection store, which is reset at the
+    // body boundary; the timer body runs on a snapshot taken now and fires
+    // later, so the copy would outlive the bytes it names.
+    var captured = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let items = [1, 2, 3]
+        \\  after(0.5s) {
+        \\    let n = items.len()
+        \\  }
+        \\}
+    );
+    defer captured.deinit(gpa);
+    try expectAnyCode(captured.diagnostics.items, .rule_arena_value_escapes);
+
+    // THE NEGATIVE TWIN, and it is what makes the check a capture rule rather
+    // than a ban on collections inside timers: the same array, declared INSIDE
+    // the body, is created when the body runs and dies with it.
+    var owned = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  after(0.5s) {
+        \\    let items = [1, 2, 3]
+        \\    let n = items.len()
+        \\  }
+        \\}
+    );
+    defer owned.deinit(gpa);
+    try expectNoCode(owned.diagnostics.items, .rule_arena_value_escapes);
+
+    // A POD capture is the second half of the bound. Without it, "the timer
+    // refuses captures" would pass an implementation that refuses ALL of them —
+    // a guard has two ways of being wrong and only one is usually tested.
+    var pod = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let count = 3
+        \\  after(0.5s) {
+        \\    let n = count + 1
+        \\  }
+        \\}
+    );
+    defer pod.deinit(gpa);
+    try expectNoCode(pod.diagnostics.items, .rule_arena_value_escapes);
+
+    // And a handle merely PRESENT in the scope, never referenced by the body,
+    // is not captured — §8.2's criterion is what the body USES. This is what
+    // the check being at the reference rather than at the construct buys.
+    var unreferenced = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let items = [1, 2, 3]
+        \\  let count = items.len()
+        \\  after(0.5s) {
+        \\    let n = count + 1
+        \\  }
+        \\}
+    );
+    defer unreferenced.deinit(gpa);
+    try expectNoCode(unreferenced.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "escape_false_refusal: the conservative rule also refuses two SAFE captures" {
+    const gpa = std.testing.allocator;
+
+    // A resource's collection field is a persistent block the resource owns; it
+    // outlives every rule body, so capturing it is safe and this refusal is a
+    // FALSE one. Pinned rather than hidden: the predicate cannot tell it from a
+    // rule-arena array because both resolve to a collection type, and the
+    // binding's type is all it sees.
+    var persistent = try parseAndCheck(gpa,
+        \\resource Inv { items: int[] = [] }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C and resource Inv
+        \\{
+        \\  let xs = get(Inv).items
+        \\  after(0.5s) {
+        \\    let n = xs.len()
+        \\  }
+        \\}
+    );
+    defer persistent.deinit(gpa);
+    try expectAnyCode(persistent.diagnostics.items, .rule_arena_value_escapes);
+
+    // A string LITERAL is a handle into the AST pool, which outlives the
+    // interpreter — also safe, also refused, and for the same reason: a
+    // concatenation produced at runtime has the same type and is not.
+    var literal = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let greeting = "hi"
+        \\  after(0.5s) {
+        \\    let n = greeting.len()
+        \\  }
+        \\}
+    );
+    defer literal.deinit(gpa);
+    try expectAnyCode(literal.diagnostics.items, .rule_arena_value_escapes);
+
+    // WHEN PROVENANCE LANDS, both assertions above become `expectNoCode` and
+    // this test is the one that says so. It is written as a pin on the CURRENT
+    // behaviour and not as an approval of it.
 }
