@@ -1,32 +1,11 @@
-//! M0.2 / E5 — bindgen roundtrip gate.
-//!
-//! Non-negotiable mechanical criterion of the E5 brief: regenerate
-//! the bindings and verify `git diff --quiet` returns 0 on
-//! `bindings/generated/` + `src/core/platform/`. Any bit-for-bit
-//! divergence fails the test (and therefore the merge in CI).
-//!
-//! Implementation: invoke `zig build bindgen-verify` in a
-//! subprocess. The `bindgen-verify` step regenerates then runs
-//! `git diff --quiet` (cf. `build.zig`).
-//!
-//! **A non-zero exit has THREE causes**: the regeneration diverged; the tree
-//! was not clean; or `git` could not run at all. The third is not hypothetical —
-//! on macOS `/usr/bin/git` is the Xcode shim, and an unaccepted licence makes
-//! EVERY invocation exit 69, `git --version` included, so the gate goes red
-//! while the bindings are byte-identical.
-//!
-//! The tool is therefore established to answer BEFORE its exit code is read as a
-//! verdict, and the third outcome fails under its own name and never as a
-//! drift.
-
+//! Bindgen round-trip gate: a regen must produce no diff against the committed
+//! output. A non-zero exit has three causes — a real diff, an unclean tree, or a
+//! `git` that cannot run — and the third must not be reported as the first.
 const std = @import("std");
 
-/// Does `git` answer at all?
-///
-/// The control is `git --version` and not a diff, because it shares every
-/// failure mode that is ABOUT THE TOOL — missing binary, unaccepted Xcode
-/// licence, broken PATH — and none that is about the tree. A control able to
-/// fail for the reason under test proves nothing.
+/// Does `git` answer at all? `git --version` and not a diff, because it shares
+/// every failure mode that is ABOUT THE TOOL and none about the tree — a control
+/// able to fail for the reason under test proves nothing.
 fn gitAnswers(gpa: std.mem.Allocator, io: std.Io) bool {
     const r = std.process.run(gpa, io, .{ .argv = &.{ "git", "--version" } }) catch return false;
     defer gpa.free(r.stdout);
@@ -41,8 +20,6 @@ test "regen Vulkan + Wayland produces no diff vs committed (bindgen-verify gate)
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
-    // THE CONTROL, ahead of everything: without it the branch below cannot tell
-    // a divergence from an unusable tool, and answers the first.
     if (!gitAnswers(gpa, io)) {
         std.debug.print(
             "roundtrip_test: `git --version` does not answer — the bindgen gate " ++
@@ -77,9 +54,6 @@ test "regen Vulkan + Wayland produces no diff vs committed (bindgen-verify gate)
     switch (result.term) {
         .exited => |code| {
             if (code != 0) {
-                // Re-check the tool AFTER the run: the build itself invokes
-                // `git`, so an environment degrading between the control and
-                // here would otherwise land on the drift arm.
                 if (!gitAnswers(gpa, io)) {
                     std.debug.print(
                         "roundtrip_test: `git` stopped answering during the run — " ++

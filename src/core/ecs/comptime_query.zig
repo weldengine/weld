@@ -103,11 +103,6 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                 // component.
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
-                    // Singleton resources are invisible to user queries
-                    // (`ARCH-006`). This path cannot go through
-                    // `archetypeMatches` — its component walk is comptime
-                    // specialised — so it consults the RULE rather than
-                    // restating the flag.
                     if (!query_mod.visibleToUserQueries(arch)) continue;
                     var all_present = true;
                     for (self.comp_ids) |cid| {

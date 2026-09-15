@@ -507,11 +507,9 @@ pub fn visibleToUserQueries(arch: *const Archetype) bool {
     return !arch.is_singleton;
 }
 
-/// Does `arch` match this id set, FOR A USER QUERY?
-///
-/// Visibility is folded in rather than left to the callers: BOTH scans of the
-/// typed path go through here, so neither can be written without it. A caller
-/// needing the signature question alone — none today — asks `hasComponent`.
+/// Does `arch` match this id set, FOR A USER QUERY? Visibility is folded in
+/// rather than left to callers: BOTH scans of the typed path go through here,
+/// so neither can be written without it.
 pub fn archetypeMatches(
     arch: *const Archetype,
     required_ids: []const ComponentId,
@@ -561,7 +559,6 @@ pub fn rescanNewArchetypes(
     // pointers are stable for the world's lifetime).
     const tail = all[last_seen.*..];
     for (tail) |arch| {
-        // Singleton visibility is INSIDE `archetypeMatches`.
         if (!archetypeMatches(arch, required_ids, with_ids, without_ids)) continue;
         onMatch(ctx, arch);
     }

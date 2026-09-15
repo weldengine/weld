@@ -100,13 +100,11 @@ pub const Body = struct {
     ///
     /// **The integrators are not a safety net for the other two**: their step
     /// sits below `if (flags[i].gameplay_authority) continue;`, so a `.solver`
-    /// body heals on the next tick and a `.gameplay` body is never visited. It once held by accident
-    /// for a dynamic body from its first tick and NEVER for a static or kinematic
-    /// one, which are never integrated: a static collider's frame was scaled by
-    /// `1 ± 3e-8`, which at 10 km — the regime `-Dphysics_f64` exists for — is
-    /// 0.34 mm on geometry that never moves. Every consumer that rotates a vector
-    /// by this field relies on it: inertia transport, lever arms, the sleep chord,
-    /// the ray transport of `raycastBody`.
+    /// body heals on the next tick and a `.gameplay` body is never visited.
+    ///
+    /// Every consumer that rotates a vector by this field relies on it: inertia
+    /// transport, lever arms, the sleep chord, the ray transport of
+    /// `raycastBody`.
     rotation: Quatr,
     /// World-space linear velocity.
     linear_velocity: Vec3r,

@@ -277,13 +277,9 @@ pub const RuntimeErrorKind = enum {
     /// covers the failing condition; the message (compared values, custom
     /// reason) travels alongside via the interpreter's `pending_message`.
     AssertFailed,
-    /// A component ref dereferenced after its entity died or lost the
-    /// component — the typed-report home of `BridgeError.StaleComponentRef`.
-    ///
+    /// A component ref dereferenced after its entity died or lost the component.
     /// Its own kind rather than `UnsupportedExpr`, because §5.3 c requires a
     /// CLEAR message: the expression is supported and the handle is not.
-    /// Reachable from any site that outlives a rule body — a timer, a `branch`,
-    /// a `spawn`, a `race`/`sync` branch, a local living across an `await`.
     StaleComponentRef,
 };
 

@@ -1206,20 +1206,13 @@ pub const World = struct {
         const moved = arch.chunks.items[renumbered];
         const ids = arch.entityIds(moved);
         for (ids[0..moved.header().entity_count]) |e| {
-            // `getPtr` and not `get`: every entity in a live chunk has a
-            // location entry, and a missing one would mean the two structures
-            // had already parted — louder here than at the next read.
             self.entity_locations.getPtr(e).?.chunk_idx = renumbered;
         }
     }
 
-    /// Free `loc`'s slot in `arch` and repair everything the removal moves — the
-    /// swapped row's location, or the chunk index when the removal empties it.
-    ///
-    /// ONE entry for all eight removal sites: the repair is two steps — patch
-    /// the swapped row's location, or reclaim the chunk the removal emptied —
-    /// and a site that performs one and not the other leaves either a stale
-    /// location or an unreclaimable chunk.
+    /// Free `loc`'s slot in `arch` and repair what the removal moves. ONE entry
+    /// for all eight removal sites: the repair is two steps, and a site doing
+    /// one leaves either a stale location or an unreclaimable chunk.
     fn removeSlotAndReclaim(
         self: *World,
         gpa: std.mem.Allocator,
@@ -1228,9 +1221,6 @@ pub const World = struct {
     ) void {
         if (arch.removeSwap(loc.chunk_idx, loc.slot)) |swapped_id| {
             self.entity_locations.getPtr(swapped_id).?.* = loc;
-            // A swap moved a row INTO the freed slot, so the chunk holds at
-            // least that entity and cannot be empty: the two outcomes are
-            // mutually exclusive, which is why no second test follows.
             return;
         }
         self.reclaimChunk(gpa, arch, loc.chunk_idx);
@@ -2182,9 +2172,6 @@ pub const World = struct {
         const dst_r = prepared.dst_r orelse return;
         const swapped = prepared.dst_arch.removeSwap(dst_r.chunk_idx, dst_r.slot);
         std.debug.assert(swapped == null); // the reserved slot must be the chunk's last
-        // An abort can leave behind the chunk `allocateSlot` created for this
-        // reservation — the one case where the reclaimed chunk is one this
-        // operation allocated rather than one churn drained.
         self.reclaimChunk(gpa, prepared.dst_arch, dst_r.chunk_idx);
     }
 
@@ -2941,7 +2928,6 @@ test "a chunk emptied by despawn is released, and the trailing case renumbers no
     const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
     const cap = arch.layout.capacity;
 
-    // One past a full chunk: chunk 0 full, chunk 1 holding exactly the overflow.
     var ids: std.ArrayListUnmanaged(EntityId) = .empty;
     defer ids.deinit(gpa);
     try ids.append(gpa, first);
@@ -2949,14 +2935,10 @@ test "a chunk emptied by despawn is released, and the trailing case renumbers no
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
     try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
 
-    // Emptying the TRAILING chunk frees it and moves nobody.
     try world.despawn(gpa, ids.items[cap]);
     try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
     try std.testing.expectEqual(@as(usize, 1), arch.chunks.items.len);
 
-    // The negative twin, in the same world: chunk 0 still holds `cap` entities,
-    // so removing one more reclaims nothing. Without it, "a chunk is released"
-    // is satisfied by an implementation that releases on every despawn.
     try world.despawn(gpa, ids.items[0]);
     try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
     try std.testing.expectEqual(@as(usize, 1), arch.chunks.items.len);
@@ -2980,24 +2962,16 @@ test "reclaiming a middle chunk renumbers the trailing one and repairs its locat
     }
     try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
 
-    // The lone occupant of the trailing chunk, marked so it is identifiable by
-    // its BYTES and not only by its handle — the repair must land on this
-    // entity, and a wrong one would otherwise read as success.
     const lone = ids.items[2 * cap];
     const marker = [_]u8{ 0xEF, 0xBE, 0xAD, 0xDE };
     @memcpy(world.componentBytes(lone, cid).?, &marker);
     try std.testing.expectEqual(@as(u32, 2), world.entity_locations.get(lone).?.chunk_idx);
 
-    // Drain chunk 0 entirely. Each despawn resolves its own location, so the
-    // in-chunk swaps `removeSwap` performs along the way are irrelevant here.
     for (ids.items[0..cap]) |e| try world.despawn(gpa, e);
 
     try std.testing.expectEqual(@as(u64, 1), arch.chunks_released);
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
 
-    // THE REPAIR, asserted on the survivor and not on the index alone: the
-    // trailing chunk takes index 0, so `lone` moves without being touched, and a
-    // location left at 2 names a chunk that no longer exists.
     try std.testing.expectEqual(@as(u32, 0), world.entity_locations.get(lone).?.chunk_idx);
     try std.testing.expectEqualSlices(u8, &marker, world.componentBytes(lone, cid).?);
 }
@@ -3013,19 +2987,11 @@ test "sustained churn keeps the chunk count on the live population" {
     const cap = arch.layout.capacity;
     try world.despawn(gpa, seed);
 
-    // THE SHAPE IS LOAD-BEARING: the population must exceed ONE chunk.
-    // `removeSwap` compacts inside a chunk and `allocateSlot` appends only to
-    // the TRAILING one, so every chunk but the last can only LOSE entities — a
-    // population that fits in one chunk churns forever without ever creating a
-    // second, and measures nothing.
     var live: std.ArrayListUnmanaged(EntityId) = .empty;
     defer live.deinit(gpa);
     while (live.items.len < 2 * cap) try live.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
 
-    // Four rounds, each retiring a chunk's worth of the OLDEST entities and
-    // replacing them. The replacements land in the trailing chunk, so each round
-    // drains one chunk at the front and creates one at the back.
     var round: usize = 0;
     while (round < 4) : (round += 1) {
         var i: usize = 0;
@@ -3035,13 +3001,6 @@ test "sustained churn keeps the chunk count on the live population" {
     }
 
     try std.testing.expectEqual(@as(usize, 2 * cap), live.items.len);
-    // MEASURED on both sides at `capacity = 813`: the population is an exact
-    // two chunks' worth and occupies exactly two, where the same churn with
-    // reclamation disabled reaches SIX and releases none — one chunk added per
-    // round, never reused.
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
-    // At least one per round. Not pinned to the measured 5: that count follows
-    // `capacity`, which a chunk-layout change moves, while the mechanism does
-    // not.
     try std.testing.expect(arch.chunks_released >= 4);
 }

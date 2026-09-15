@@ -62,14 +62,9 @@ pub const BridgeError = error{
     UnknownField,
     TypeMismatch,
     OutOfMemory,
-    /// A `ComponentRef` whose entity is dead or no longer carries the
-    /// component, detected at DEREFERENCE rather than at the `get`/`get_mut`
-    /// that produced it (`etch-reference-part1.md` §5.3 c).
-    ///
-    /// Distinct from `UnknownEntity` and `UnknownComponent`, which answer the
-    /// same two questions asked at CONSTRUCTION: the handle was valid when it
-    /// was made and the world moved under it — a lifetime defect in the Etch
-    /// program, not a typo in a component name.
+    /// A `ComponentRef` whose entity is dead or no longer carries the component,
+    /// detected at DEREFERENCE (§5.3 c). Distinct from `UnknownEntity` and
+    /// `UnknownComponent`, which ask the same two questions at CONSTRUCTION.
     StaleComponentRef,
 };
 
@@ -126,15 +121,9 @@ pub const Bridge = struct {
 
     // ─── Component access ────────────────────────────────────────────────
 
-    /// Resolve `entity.get(T)` (or `get_mut`) into a ref on the
-    /// `(entity, component)` pair.
-    ///
-    /// Both questions are answered HERE so a `get` on a dead entity or on a
-    /// component it does not carry fails at the `get`, where the programmer
-    /// wrote it — and answered AGAIN at every dereference by `refBytes`, because
-    /// the handle can outlive the body that made it. The two are not redundant:
-    /// this one reports a program error, that one a lifetime error, and they
-    /// carry different kinds.
+    /// Resolve `entity.get(T)` into a ref on the `(entity, component)` pair.
+    /// Liveness and carriage are answered here AND again at every dereference:
+    /// this reports a program error, `refBytes` a lifetime one.
     pub fn componentRefOf(
         world: *World,
         entity: EntityId,
@@ -143,9 +132,6 @@ pub const Bridge = struct {
     ) BridgeError!ComponentRef {
         const core_id: CoreEntityId = @bitCast(entity);
         if (world.dynamicLocation(core_id) == null) return BridgeError.UnknownEntity;
-        // The presence question is routed rather than asked of the archetype:
-        // `arch.componentIndex` on a sparse id answers null, indistinguishable
-        // from the entity really not carrying it.
         if (!world.hasComponentDyn(core_id, component_id)) return BridgeError.UnknownComponent;
         return .{
             .entity = entity,
@@ -212,11 +198,7 @@ pub const Bridge = struct {
         // shorter and would DROP the explicit `tick`. The sparse storage's own
         // `markChanged` takes a tick too, so the parameter survives on both
         // sides and the caller's contract does not move.
-        //
-        // Both arms start from the ENTITY, like `refBytes`: a stamp written
-        // through a stale handle would mark whichever row now occupies the slot.
-        // Failure is a no-op and not an error — the caller is a post-write stamp
-        // whose own write has already failed loudly on a stale handle.
+
         const core_id: CoreEntityId = @bitCast(ref.entity);
         if (world.storageOf(ref.component_id) == .sparse) {
             if (world.sparse_stores.get(ref.component_id)) |store| store.markChanged(core_id, tick);
@@ -692,18 +674,11 @@ test "a ref to a despawned entity is refused, not resolved onto its successor" {
         var e: [2]CoreEntityId = undefined;
         try spawnProbes(gpa, &world, cid, &.{ 11.0, 22.0 }, &e);
 
-        // Taken while the entity is alive — the handle is VALID here, which is
-        // what makes the later refusal a lifetime verdict and not a bad `get`.
         const ref_a = try Bridge.componentRefOf(&world, @bitCast(e[0]), cid, true);
 
-        // `World.despawn` calls `Archetype.removeSwap`, which moves the LAST row
-        // into the freed slot, so `e[1]`'s bytes now sit where `e[0]`'s were.
         try world.despawn(gpa, e[0]);
         try std.testing.expectApproxEqAbs(@as(f64, 22.0), probeValue(&world, cid, e[1]), 1e-12);
 
-        // Asserted as an ERROR and not as "not 22.0": a refusal is the contract
-        // (`etch-reference-part1.md` §5.3 c), and any other value would satisfy
-        // a negative assertion just as well.
         try std.testing.expectError(
             BridgeError.StaleComponentRef,
             Bridge.readComponentField(&world.registry, ref_a, &world, "v"),
@@ -713,8 +688,6 @@ test "a ref to a despawned entity is refused, not resolved onto its successor" {
             Bridge.writeComponentField(&world.registry, ref_a, &world, "v", .{ .float_ = 99.0 }),
         );
 
-        // The refused write changed nothing — a refusal that had already written
-        // would be worse than the corruption it replaces.
         try std.testing.expectApproxEqAbs(@as(f64, 22.0), probeValue(&world, cid, e[1]), 1e-12);
     }
 }
@@ -729,21 +702,12 @@ test "a ref to a SURVIVOR whose row moved still writes that survivor" {
         var e: [2]CoreEntityId = undefined;
         try spawnProbes(gpa, &world, cid, &.{ 11.0, 22.0 }, &e);
 
-        // Taken while `e[1]` occupies the SECOND slot.
         const ref_b = try Bridge.componentRefOf(&world, @bitCast(e[1]), cid, true);
 
-        // Despawning `e[0]` moves `e[1]` down into the freed slot, so the handle
-        // names a row its entity no longer occupies. The sibling consequence of
-        // the test above, and why the pair exists: there a stale handle reads
-        // someone else's bytes, here it would LOSE a write — which no read-side
-        // assertion catches.
         try world.despawn(gpa, e[0]);
 
         try Bridge.writeComponentField(&world.registry, ref_b, &world, "v", .{ .float_ = 99.0 });
 
-        // Read back through the World-level entry, which knows nothing of the
-        // handle — so this asserts where the bytes LANDED, not what the bridge
-        // believes it did.
         try std.testing.expectApproxEqAbs(@as(f64, 99.0), probeValue(&world, cid, e[1]), 1e-12);
 
         const read = try Bridge.readComponentField(&world.registry, ref_b, &world, "v");

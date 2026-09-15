@@ -349,10 +349,6 @@ pub const Registry = struct {
                 .fields = fields_owned,
                 .storage = desc.storage,
                 .requires = requires_owned,
-                // Derived from the CALLER's descriptor and not from the owned copy:
-                // the two agree field for field, and hashing the input is what makes
-                // a candidate's digest — computed before any registration — the same
-                // value as the one stored here.
             },
             .schema_digest = schemaDigestOf(desc),
         });
@@ -362,12 +358,9 @@ pub const Registry = struct {
         return id;
     }
 
-    /// The schema identity recorded for `id` at registration, or `null` when
-    /// `id` names no entry (`engine-ecs-internals.md` §13).
-    ///
-    /// The confrontation a hot reload performs reads this and compares it with
-    /// `schemaDigestOf` applied to the CANDIDATE descriptor — two values of one
-    /// computation, never a value of this one against the Tier 0 RTTI digest.
+    /// The schema identity recorded for `id` at registration, or `null` when `id`
+    /// names no entry. A reload compares it with `schemaDigestOf` of the
+    /// CANDIDATE — two values of one computation, never against the RTTI digest.
     pub fn schemaDigest(self: *const Registry, id: ComponentId) ?u64 {
         if (id >= self.entries.items.len) return null;
         return self.entries.items[id].schema_digest;

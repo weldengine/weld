@@ -2698,12 +2698,9 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
 
 const testing = std.testing;
 
-/// The stored quaternion is unit, judged in `f128` from the stored components.
-///
-/// INDEPENDENT of the writer's arithmetic by construction: `normalize` divides
-/// in `Real`, this squares and sums in a wider type and never divides — and
-/// comparing `|q|²` to 1 removes the `sqrt` that would be the one shared
-/// operation.
+/// The stored quaternion is unit, judged in `f128`. INDEPENDENT of the writer's
+/// arithmetic by construction: it squares and sums in a wider type and never
+/// divides, and comparing `|q|²` removes the `sqrt` they would have shared.
 fn expectUnit(q: Quatr) !void {
     const a = q.toArray();
     var acc: f128 = 0;
@@ -2732,10 +2729,6 @@ test "pose mutators write the pose and no-op on a stale handle" {
 
     const p = Vec3r.fromArray(.{ 1, 2, 3 });
     const q = Quatr.fromAxisAngle(Vec3r.unit_z, 0.5);
-    // Compared within a few eps and not BIT-EXACTLY: `setRotation` normalises,
-    // and `fromAxisAngle`'s output is unit only to its own rounding, so the
-    // stored value differs from the argument by that correction. The unit check
-    // below is what asserts the invariant.
     const rot_tol: Real = 8 * std.math.floatEps(Real);
     bm.setPosition(kept, p);
     bm.setRotation(kept, q);

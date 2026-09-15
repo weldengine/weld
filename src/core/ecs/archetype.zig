@@ -161,11 +161,9 @@ pub const Archetype = struct {
     /// than this flag's name suggests, and a reader must not take it for an
     /// invariant over every query.
     is_singleton: bool = false,
-    /// Chunks freed by `releaseChunkIfEmpty` over this archetype's life.
-    ///
-    /// STATS-ONLY. The EFFECT of a reclamation is not a witness of it: a length
-    /// that never rose proves nothing, so a test asserting on `chunks.items.len`
-    /// alone cannot tell a release from an allocation that never happened.
+    /// Chunks freed by `releaseChunkIfEmpty`. STATS-ONLY: a length that never
+    /// rose proves nothing, so asserting on `chunks.items.len` alone cannot tell
+    /// a release from an allocation that never happened.
     chunks_released: u64 = 0,
 
     /// Initialise the archetype with the given sorted component list. An EMPTY

@@ -115,16 +115,6 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
 }
 
-// ─── A layout change is refused, and the previous image is kept ────────────
-//
-// `ARCH-020` / `engine-ecs-internals.md` §13. Reusing an id because one of that
-// NAME exists re-reads live bytes at the new layout — the reinterpretation the
-// invariant excludes, and the value read is deterministic and plausible.
-//
-// **The branch that must stay green is the NOMINAL one**: a reload changing no
-// layout still succeeds and keeps the live values. Without it, "a layout change
-// is refused" is satisfied by a digest that refuses everything.
-
 /// Source A's `Counter`, one more field. Same name, different layout.
 const src_widened =
     \\component Counter { value: int = 0, extra: int = 0 }
@@ -193,9 +183,6 @@ test "a reload that widens a component is refused and the live image survives" {
 
     try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_widened));
 
-    // THE IMAGE IS INTACT AND READABLE, which is the witness — not the absence
-    // of a crash. The id is unchanged, the layout is unchanged, and the entity's
-    // value is still the 3 the previous session ticked it to.
     try std.testing.expectEqual(cid, world.registry.idOf("Counter").?);
     try std.testing.expectEqual(size_before, world.registry.componentSize(cid));
     try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
@@ -207,9 +194,6 @@ test "a reload that changes no layout still succeeds and keeps the live value" {
     defer world.deinit(gpa);
     try liveSessionAt3(gpa, &world);
 
-    // THE NAMED GREEN BRANCH. A digest that refused everything would satisfy the
-    // test above and fail here, so this is what says the digest DISCRIMINATES
-    // rather than that it refuses.
     try reloadOn(gpa, &world, src_b);
     try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
 }
@@ -220,8 +204,6 @@ test "a reload that changes only the storage mode is not a layout change" {
     defer world.deinit(gpa);
     try liveSessionAt3(gpa, &world);
 
-    // §13's fourth property, and it is a property of the TUPLE rather than of
-    // the comparison: the mode is nowhere in the digest, so it cannot move it.
     try reloadOn(gpa, &world, src_mode_changed);
     try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
 }
@@ -232,9 +214,6 @@ test "a type absent from the new program does not fail the reload" {
     defer world.deinit(gpa);
     try liveSessionAt3(gpa, &world);
 
-    // §13 step 4: the data stays, nobody reads it, and the actual removal
-    // happens at the next Play/Stop. A confrontation that iterated the REGISTRY
-    // instead of the new program's declarations would refuse here.
     try reloadOn(gpa, &world, src_no_counter);
     try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
 }

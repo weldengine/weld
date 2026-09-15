@@ -6872,8 +6872,6 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
 fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
-        // Named rather than folded into the `else`: §5.3 c requires the failure
-        // to be legible — the expression is supported and the handle is stale.
         error.StaleComponentRef => .StaleComponentRef,
         else => .UnsupportedExpr,
     };
@@ -7408,23 +7406,6 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    // Idempotent re-registration, CONFRONTED. A second Interpreter compiled on
-    // the SAME world — an AST swap, e.g. edit a rule body and re-compile —
-    // re-visits the component/resource decls, and reusing the existing id keeps
-    // the live world state (entities, component bytes, resource values) across
-    // the swap. That is the nominal path.
-    //
-    // **What it must not do is reuse the id when the LAYOUT changed.** That
-    // re-reads live bytes at a new layout: not a migration, not a refusal, but
-    // the reinterpretation `ARCH-020` excludes — and the value read is
-    // deterministic and plausible, which is worse than a crash. The schema
-    // digest is what tells the two apart, a registration of the same NAME being
-    // no evidence at all.
-    //
-    // Refusal covers the WHOLE reload and not the offending declaration
-    // (`engine-ecs-internals.md` §13): the error leaves Pass A, so no
-    // `Interpreter` is produced and the previous image stays active. A partially
-    // swapped program is a state nobody has specified.
     if (registry.idOf(name)) |existing_id| {
         const candidate = weld_core.ecs.registry.schemaDigestOf(.{
             .name = name,
@@ -7435,13 +7416,7 @@ pub fn compileTypeDecl(
             .storage = storage,
             .requires = requires,
         });
-        // `orelse candidate` and not `orelse return error…`: a live id with no
-        // recorded digest is not a layout change, it is an entry registered
-        // before this identity existed, and refusing there would refuse every
-        // reload rather than the ones that changed.
         if ((registry.schemaDigest(existing_id) orelse candidate) != candidate) {
-            // Names the type AND both layouts, which §13 requires: a digest
-            // pair says a change happened and nothing about what changed.
             std.log.warn(
                 "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
                     "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",

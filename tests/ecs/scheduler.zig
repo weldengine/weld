@@ -186,20 +186,9 @@ test "workers deterministically park then wake on dispatch" {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
 
-    // Phase (a) — observe a worker parked RIGHT NOW.
-    //
-    // One dispatch of trivial work; idle workers then spin briefly and park on
-    // `work_available.waitUncancelable`, incrementing `parks_entered` under the
-    // park mutex before the wait. Poll until `Σ parks_entered > Σ parks_completed`:
-    // that strict inequality can only hold when a worker has entered a wait it
-    // has not yet woken from. The per-snapshot invariant
-    // `parks_completed <= parks_entered` (snapshot reads completed before entered)
-    // rules out a sampling artefact; and because this dispatch's wave has drained
-    // (no park↔wake churn), that entered-not-woken worker is a worker parked now.
-    // `std.Thread.yield` between polls. The watchdog armed above stays the hard
-    // upper bound, but it is no longer the only exit: a worker that has idled
-    // through twice its spin budget without parking fails by NAME below, which
-    // is the case the watchdog could only report as "hung".
+    // CONCURRENCY FACT: a snapshot reads `parks_completed` before
+    // `parks_entered`, so `entered > completed` can only hold when some worker
+    // has entered a wait it has not yet woken from.
     try sched.dispatch(&query, idleBody, .{});
     const steals_at_dispatch = blk: {
         const stats = try sched.snapshotStats(gpa);
@@ -222,17 +211,6 @@ test "workers deterministically park then wake on dispatch" {
         }
         if (entered > completed) break; // at least one worker is parked now
 
-        // THE PRECONDITION FOR A PARK, checked before its absence is read as a
-        // failure. A worker parks only after `idle_spin_rounds` consecutive idle
-        // rounds, and one round costs a `yield` plus a steal sweep — a HOST cost,
-        // unbounded in wall-clock. So `parks_entered == 0` while a worker is
-        // still inside its spin budget says "not yet", not "never", and the two
-        // are what a wall-clock guard alone cannot tell apart.
-        //
-        // The steal counter advances once per idle round, so it measures exactly
-        // the budget being spent. Twice the budget is the margin: a worker that
-        // has idled through it and still not parked is the real defect, and it
-        // fails HERE, named, instead of hanging until the watchdog.
         const spent = min_steals - steals_at_dispatch;
         if (spent > 2 * jobs_sched_mod.idle_spin_rounds) return error.WorkersDidNotParkAfterSpinBudget;
     }

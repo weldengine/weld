@@ -36,11 +36,9 @@ const std = @import("std");
 /// why. A type declaring this name with any other type is a contract breach and
 /// fails loudly where the reason is read.
 ///
-/// **The reason travels exactly as far as the refusal, and that is a property
-/// to preserve.** `reasonOf` and `carriesMarkedIn` answer two halves of one
-/// question — does this type refuse, and why — so a form followed by one and not
-/// the other yields a refusal that explains nothing. Widening either walk means
-/// widening both.
+/// **The reason travels as far as the refusal**: `reasonOf` and
+/// `carriesMarkedIn` answer two halves of one question, so widening either walk
+/// means widening both.
 pub const marker_decl_name = "weld_no_job_body";
 
 /// Whether `T` itself carries the marker. False for every non-container type,
@@ -191,10 +189,6 @@ fn reasonOfIn(comptime T: type, comptime seen: []const type) []const u8 {
     }
     if (declaresMarker(T)) return @field(T, marker_decl_name);
     const next = seen ++ [_]type{T};
-    // The SEVEN forms `carriesMarkedIn` follows, and no others. The same list
-    // rather than a catch-all: a form this misses yields a blank diagnostic,
-    // which reads as "the type declared no reason" and not as "the walk
-    // stopped" — indistinguishable at the call site.
     return switch (@typeInfo(T)) {
         .pointer => |p| reasonOfIn(p.child, next),
         .optional => |o| reasonOfIn(o.child, next),
@@ -203,9 +197,6 @@ fn reasonOfIn(comptime T: type, comptime seen: []const type) []const u8 {
         .vector => |v| reasonOfIn(v.child, next),
         .@"struct" => |st| blk: {
             inline for (st.fields) |f| {
-                // Gated on the PREDICATE, not attempted and discarded: entering
-                // the first field regardless would return its `no_reason` and
-                // shadow a marked field behind it.
                 if (carriesMarked(f.type)) break :blk reasonOfIn(f.type, next);
             }
             break :blk no_reason;
@@ -234,8 +225,6 @@ const MarkedProbe = struct {
 };
 
 test "the reason survives every composite the refusal walks" {
-    // FORM BY FORM, and the list is the switch's own: a form the reason walk
-    // misses refuses correctly and explains nothing.
     const cases = .{
         MarkedProbe,
         *MarkedProbe,
@@ -246,22 +235,16 @@ test "the reason survives every composite the refusal walks" {
         anyerror!*MarkedProbe,
         struct { m: *MarkedProbe, stride: usize },
         union(enum) { a: usize, m: *MarkedProbe },
-        // Nested one more level, so the answer cannot come from a single hop.
         struct { inner: struct { m: MarkedProbe } },
         [2]?*MarkedProbe,
     };
     inline for (cases) |T| {
-        // The two halves asserted TOGETHER: a reason on a type that does not
-        // refuse is as wrong as a refusal with no reason.
         try std.testing.expect(carriesMarked(T));
         try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(T));
     }
 }
 
 test "a type that refuses nothing reports no reason, and the two agree" {
-    // THE NEGATIVE HALF. Without it, "the reason is found" is satisfied by a
-    // `reasonOf` returning the probe's string unconditionally — a guard has two
-    // ways of being wrong and only one is usually tested.
     const clean = .{
         u32,
         *u32,
@@ -277,18 +260,12 @@ test "a type that refuses nothing reports no reason, and the two agree" {
 }
 
 test "a marked field is not shadowed by a silent sibling declared before it" {
-    // The struct arm enters a field only when the PREDICATE says the marker is
-    // down it: entering the first field regardless answers `no_reason` here,
-    // the marked field sitting behind one that carries nothing.
     const Shadowed = struct { quiet: struct { n: usize }, m: *MarkedProbe };
     try std.testing.expect(carriesMarked(Shadowed));
     try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Shadowed));
 }
 
 test "the production shape is the one that used to be blank" {
-    // `SystemContext` carries `cmd: *CommandBuffer` as a FIELD. Reproduced
-    // structurally rather than imported: `foundation` sits below the ECS and
-    // cannot reach `SystemContext`, and the walk decides on the SHAPE.
     const Ctx = struct { cmd: *MarkedProbe, tick: u64, frame: ?*anyopaque };
     try std.testing.expect(carriesMarked(Ctx));
     try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Ctx));

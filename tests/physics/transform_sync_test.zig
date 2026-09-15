@@ -2964,14 +2964,9 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
 // renormalises BELOW `if (flags[i].gameplay_authority) continue;`, so nothing
 // downstream repairs a `.gameplay` body.
 
-/// `|q|² − 1` for the STORED rotation, computed in `f128`.
-///
-/// **Independent of the writer's arithmetic by construction.** The writer
-/// normalises by dividing in `Real`; this widens each stored component — a
-/// widening is exact — squares and sums in a type the writer never touches, and
-/// never divides or takes a root. So it cannot agree with the writer by sharing
-/// its rounding, and comparing `|q|²` to 1 rather than `|q|` removes the `sqrt`
-/// that would be their one common operation.
+/// `|q|² − 1` for the STORED rotation, in `f128`. INDEPENDENT of the writer's
+/// arithmetic by construction: widening is exact, this never divides or takes a
+/// root, and comparing `|q|²` removes the `sqrt` they would have shared.
 fn normSqError(pw: *PhysicsWorld, body: api.BodyId) f128 {
     const q = pw.bm.rotation(body).?.toArray();
     var acc: f128 = 0;
@@ -3008,9 +3003,6 @@ test "moveKinematic stores a unit rotation from a non-unit target" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // The SECOND write path and not the first under another name: it derives
-    // both velocities from the move where `setBodyTransform` derives none, so it
-    // reaches `setRotation` through its own arithmetic.
     const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
     pw.moveKinematic(b.body, vr(0, 0, 0), wide_rotation, fixed_dt);
 
@@ -3025,9 +3017,6 @@ test "the per-tick sync seam stores a unit rotation from a raw Transform.rot" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // THE THIRD ENTRY, and the one no caller controls: `sync_in` forwards
-    // `Transform.rot` every tick for a `.gameplay` body, and that field is a
-    // `[4]f32` with no invariant — gameplay writes any four floats into it.
     const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
     try ecs.addComponent(gpa, b.entity, api.RigidBody, .{ .authority = .gameplay });
 
@@ -3036,14 +3025,8 @@ test "the per-tick sync seam stores a unit rotation from a raw Transform.rot" {
 
     var journal: sync_in.Journal = .{};
     defer journal.deinit(gpa);
-    // `frameWithSyncIn` and NOT `frame`: `stepAndPublish` is `step` + `syncOut`
-    // and calls `syncIn` NOWHERE — the inward seam lives in the registered
-    // system, so a test driven by `frame` exercises none of it.
     const r = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
 
-    // THE SEAM FIRED, asserted rather than assumed: without this the test goes
-    // quiet the next time something changes what drives a frame, and a quiet
-    // test reads exactly like a passing one.
     try testing.expectEqual(@as(u32, 1), r.poses_applied);
 
     const err = normSqError(&pw, b.body);
@@ -3057,11 +3040,6 @@ test "a rotation that denotes no rotation is refused, and the invariant holds" {
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // THE NEGATIVE HALF, and not symmetry: `normalize` is unguarded, so a zero
-    // quaternion stores NaN and an infinite one stores all zeros — each BREAKING
-    // the invariant rather than bending it, and each propagating silently into
-    // every AABB, query and contact that reads the body. Refusing leaves the
-    // previous unit value, which is what makes the invariant unconditional.
     const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
     const zero = forge_3d.Quatr{ .x = 0, .y = 0, .z = 0, .w = 0 };
     const inf = forge_3d.Quatr{ .x = std.math.inf(Real), .y = 0, .z = 0, .w = 0 };

@@ -551,18 +551,9 @@ pub const TypeChecker = struct {
     /// Start of the innermost branch's label window in `conc_labels`. Saved/restored at
     /// branch entry.
     conc_labels_base: usize = 0,
-    /// Names visible at the entry of the innermost SCOPE-SNAPSHOT body, in
-    /// `escape_names[escape_base..]`. A body that outlives the rule body — a
-    /// timer callback, a `branch`, a `spawn`, a `race`/`sync` branch — runs on
-    /// a COPY of the scope taken at construction, so a name it references and
-    /// did not declare is a capture. When that name's type is rule-arena, the
-    /// store backing it is reset at the body boundary and the copy outlives its
-    /// own bytes → E0223 (`etch-resolver-types.md` §8.2).
-    ///
-    /// A LIST and not a set, because the discipline here is a save/restore
-    /// window exactly like `conc_labels`: entry appends, exit truncates, and a
-    /// nested body's window is its own. `null` for `escape_site` means no such
-    /// body is open and the check is off entirely.
+    /// Names visible at the entry of the innermost scope-snapshot body, in
+    /// `escape_names[escape_base..]`: a name referenced there and not declared
+    /// there is a capture (`etch-resolver-types.md` §8.2, E0223).
     escape_names: std.ArrayListUnmanaged(StringId) = .empty,
     /// Start of the innermost snapshot body's window in `escape_names`.
     escape_base: usize = 0,
@@ -623,15 +614,8 @@ pub const TypeChecker = struct {
     pub const ConcBranchKind = enum { race, sync, branch, spawn };
 
     /// A construct whose body runs on a SNAPSHOT of the enclosing scope and
-    /// outlives the rule body that built it (`etch-resolver-types.md` §8.2).
-    ///
-    /// Five entries and not four: a timer is not a concurrency branch — it
-    /// carries no `{async}` effect and its body is a synchronous context — but
-    /// it snapshots the scope exactly like the other four, and the escape
-    /// question is about the SNAPSHOT and not about the effect. `async_frame`
-    /// names the fifth row of §8.2's table, which is not a construct but a
-    /// local living across an `await`; it has no site to check at today and is
-    /// declared so the switch below is exhaustive when it does.
+    /// outlives the rule body that built it (`etch-resolver-types.md` §8.2). A
+    /// timer qualifies: the question is the snapshot, not the `{async}` effect.
     pub const EscapeSite = enum {
         timer,
         race_branch,
@@ -5734,11 +5718,6 @@ pub const TypeChecker = struct {
     /// literal string, a persistent resource collection. The direction is chosen
     /// and not incidental: a false refusal is a compile error the author reads
     /// and works around, a missed escape is a use-after-free nobody sees.
-    ///
-    /// An exact answer needs the provenance of the VALUE rather than the type of
-    /// the binding, which this pass does not compute; `etch-memory-model.md` §11
-    /// owns that analysis. `escape_false_refusal` below pins the frontier, so
-    /// whoever delivers it has a test to flip rather than a comment to find.
     fn isRuleArenaType(t: ResolvedType) bool {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
@@ -5915,12 +5894,6 @@ pub const TypeChecker = struct {
                 const name_id: StringId = data;
                 if (ctx_opt) |ctx| {
                     if (ctx.locals.get(name_id)) |local| {
-                        // E0223 (`etch-resolver-types.md` §8.2). The criterion is
-                        // what the body USES, not what its scope holds: a handle
-                        // sitting unreferenced in the enclosing scope is never
-                        // copied into the snapshot, so it is not an escape — which
-                        // is why the check lives at the reference and not at the
-                        // construct.
                         if (self.escape_site) |site| {
                             if (isRuleArenaType(local.type_) and self.isCaptured(name_id)) {
                                 try self.emit(
@@ -12750,9 +12723,6 @@ test "an event declared in a .d.etch parses and registers, a component still doe
 test "a timer capturing a rule-arena array is E0223, and its negative twin is clean" {
     const gpa = std.testing.allocator;
 
-    // The array lives in the per-body collection store, which is reset at the
-    // body boundary; the timer body runs on a snapshot taken now and fires
-    // later, so the copy would outlive the bytes it names.
     var captured = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -12767,9 +12737,6 @@ test "a timer capturing a rule-arena array is E0223, and its negative twin is cl
     defer captured.deinit(gpa);
     try expectAnyCode(captured.diagnostics.items, .rule_arena_value_escapes);
 
-    // THE NEGATIVE TWIN, and it is what makes the check a capture rule rather
-    // than a ban on collections inside timers: the same array, declared INSIDE
-    // the body, is created when the body runs and dies with it.
     var owned = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -12784,9 +12751,6 @@ test "a timer capturing a rule-arena array is E0223, and its negative twin is cl
     defer owned.deinit(gpa);
     try expectNoCode(owned.diagnostics.items, .rule_arena_value_escapes);
 
-    // A POD capture is the second half of the bound. Without it, "the timer
-    // refuses captures" would pass an implementation that refuses ALL of them —
-    // a guard has two ways of being wrong and only one is usually tested.
     var pod = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -12801,9 +12765,6 @@ test "a timer capturing a rule-arena array is E0223, and its negative twin is cl
     defer pod.deinit(gpa);
     try expectNoCode(pod.diagnostics.items, .rule_arena_value_escapes);
 
-    // And a handle merely PRESENT in the scope, never referenced by the body,
-    // is not captured — §8.2's criterion is what the body USES. This is what
-    // the check being at the reference rather than at the construct buys.
     var unreferenced = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -12823,11 +12784,6 @@ test "a timer capturing a rule-arena array is E0223, and its negative twin is cl
 test "escape_false_refusal: the conservative rule also refuses two SAFE captures" {
     const gpa = std.testing.allocator;
 
-    // A resource's collection field is a persistent block the resource owns; it
-    // outlives every rule body, so capturing it is safe and this refusal is a
-    // FALSE one. Pinned rather than hidden: the predicate cannot tell it from a
-    // rule-arena array because both resolve to a collection type, and the
-    // binding's type is all it sees.
     var persistent = try parseAndCheck(gpa,
         \\resource Inv { items: int[] = [] }
         \\component C { out: int = 0 }
@@ -12843,9 +12799,6 @@ test "escape_false_refusal: the conservative rule also refuses two SAFE captures
     defer persistent.deinit(gpa);
     try expectAnyCode(persistent.diagnostics.items, .rule_arena_value_escapes);
 
-    // A string LITERAL is a handle into the AST pool, which outlives the
-    // interpreter — also safe, also refused, and for the same reason: a
-    // concatenation produced at runtime has the same type and is not.
     var literal = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -12859,8 +12812,4 @@ test "escape_false_refusal: the conservative rule also refuses two SAFE captures
     );
     defer literal.deinit(gpa);
     try expectAnyCode(literal.diagnostics.items, .rule_arena_value_escapes);
-
-    // WHEN PROVENANCE LANDS, both assertions above become `expectNoCode` and
-    // this test is the one that says so. It is written as a pin on the CURRENT
-    // behaviour and not as an approval of it.
 }

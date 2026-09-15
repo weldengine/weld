@@ -1,18 +1,4 @@
-//! M0.2 / E3 — Singleton entities must stay invisible to user
-//! queries.
-//!
-//! The exclusion is implemented via the `Archetype.is_singleton` flag (cf.
-//! brief § Notes — technical decision E3), and the rule is stated ONCE in
-//! `query.visibleToUserQueries`: `archetypeMatches` folds it in, so both the
-//! typed `Query`'s initial scan and its tail rescan get it, and
-//! `ComptimeQuery.next` consults it directly because its component walk is
-//! comptime specialised and cannot route through the shared matcher.
-//!
-//! **The typed path's cases carry an ORDER**: a resource declared BEFORE the
-//! query and one declared AFTER reach different scans, and only the shared rule
-//! makes them answer alike. A file that exercised one path while naming two
-//! would leave the other's scan unguarded.
-
+//! Singleton entities stay invisible to user queries (`ARCH-006`).
 const std = @import("std");
 const weld_core = @import("weld_core");
 
@@ -118,8 +104,6 @@ test "a resource declared BEFORE a typed query is invisible to it" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The ORDER is the whole case: this reaches the query's INITIAL scan, the
-    // tail rescan seeing only archetypes created after construction.
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
 
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
@@ -133,14 +117,10 @@ test "a resource declared AFTER a typed query is invisible too" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The sibling order, reaching the tail rescan. The TWIN of the case above:
-    // without it, "the typed query excludes singletons" says nothing about which
-    // of the two scans applies the rule.
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
     defer q.deinit(gpa);
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
 
-    // The rescan runs lazily at the next walk, which `matchCount` drives.
     try std.testing.expectEqual(@as(usize, 0), q.matchCount());
 }
 
@@ -154,8 +134,6 @@ test "a typed query still returns USER entities of the resource's own type" {
     var user = GameClock{ .current_tick = 42 };
     _ = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{std.mem.asBytes(&user)});
 
-    // A guard has two ways of being wrong: without this, an implementation
-    // hiding EVERY archetype carrying the type passes the two cases above.
     var q = try world.queryFiltered(gpa, &.{GameClock}, .{});
     defer q.deinit(gpa);
 
@@ -172,19 +150,12 @@ test "a singleton entity is not counted in the population the planner elects on"
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Registered without any carrier, so the population starts at 0 and the
-    // later readings measure what was ADDED rather than an offset.
     const cid = try world.ensureComponentRegistered(gpa, GameClock);
     try std.testing.expectEqual(@as(usize, 0), ecs.hybrid_query.population(&world, cid));
 
-    // THE SECOND SITE, whose consequence is a biased PLAN rather than a leaked
-    // row: the resource entity carries the component, so it would count in the
-    // population `QueryPlan.elect` compares — a driver chosen on entities no
-    // user query can visit.
     try resources.setResource(&world, gpa, GameClock{ .current_tick = 7 });
     try std.testing.expectEqual(@as(usize, 0), ecs.hybrid_query.population(&world, cid));
 
-    // And a real carrier still counts, so the exclusion is not a zero.
     var user = GameClock{ .current_tick = 42 };
     _ = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{std.mem.asBytes(&user)});
     try std.testing.expectEqual(@as(usize, 1), ecs.hybrid_query.population(&world, cid));
