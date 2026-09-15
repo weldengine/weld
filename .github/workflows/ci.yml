@@ -26,7 +26,13 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.detect.outputs.code }}
+      week: ${{ steps.week.outputs.week }}
     steps:
+      - name: Compute the lineage window
+        id: week
+        shell: bash
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -104,10 +110,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
-            zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
@@ -244,7 +250,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # Linux-only: weston + lavapipe provide a fully software path. Windows CI sits
@@ -267,9 +273,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .zig-cache
-          key: zig-v2-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
           restore-keys: |
-            zig-v2-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
