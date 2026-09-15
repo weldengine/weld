@@ -201,7 +201,6 @@ jobs:
             echo "mode=${{ matrix.mode }}"
             echo "physics_f64=${{ matrix.precision }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
-            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
             echo "cache_enabled=true"
             echo "cache_bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 | awk '{print $1*1024}')"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
@@ -216,6 +215,7 @@ jobs:
 
       - name: Upload CI timing artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}-f64_${{ matrix.precision }}
