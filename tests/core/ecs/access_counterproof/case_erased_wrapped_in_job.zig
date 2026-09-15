@@ -6,12 +6,13 @@
 //! struct as well as a bare one — supposed to, until a fixture exercises it.
 //! Measured before the fix: this form returned false exactly like the bare one.
 //!
-//! **Its diagnostic is WEAKER than the bare form's, and that is recorded rather
-//! than repaired here.** `reasonOf` walks only `.pointer` and `.optional` where
-//! `carriesMarkedIn` enters everything, so a marker reached through a FIELD
-//! refuses correctly and explains nothing — `M1.D.24`, which this milestone
-//! named and left to the bound's owner. The refusal is what this fixture
-//! asserts; the missing reason is that debt's, not this one's.
+//! **Its diagnostic used to be WEAKER than the bare form's, and is no longer.**
+//! `reasonOf` walked only `.pointer` and `.optional` where `carriesMarkedIn`
+//! entered everything, so a marker reached through a FIELD refused correctly and
+//! explained nothing. The two walks are now the same walk. What this fixture
+//! still asserts is only the REFUSAL — the harness compares compilation and not
+//! message text — so the reason's own witness lives beside the walk, in
+//! `foundation/job_bound.zig`, where it can be read at runtime.
 
 const std = @import("std");
 const ecs = @import("weld_core").ecs;

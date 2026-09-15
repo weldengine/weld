@@ -111,8 +111,12 @@ pub fn grants(comptime spec: []const Access, comptime T: type, comptime want: Us
 /// Render `spec` as declared, for a refusal message.
 ///
 /// A refusal that names only what was refused leaves the reader to guess what
-/// was declared, which is the shape `job_bound.reasonOf` degenerated into: a
-/// structurally correct refusal that explains nothing.
+/// was declared — a structurally correct refusal that explains nothing. That is
+/// the shape `job_bound.reasonOf` had degenerated into, by following fewer forms
+/// than the predicate that decides the refusal; it no longer does, and the
+/// lesson is kept because the failure is cheap to repeat: the two halves of a
+/// diagnostic drift apart silently, since a missing reason and a declared
+/// absence of one read identically.
 fn renderSpec(comptime spec: []const Access) []const u8 {
     comptime {
         if (spec.len == 0) return "{ } (an explicitly empty declaration)";

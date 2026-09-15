@@ -36,13 +36,14 @@ const std = @import("std");
 /// why. A type declaring this name with any other type is a contract breach and
 /// fails loudly where the reason is read.
 ///
-/// **The reason does NOT travel as far as the refusal.** `reasonOf` below
-/// follows only pointers and optionals, while `carriesMarkedIn` enters every
-/// composite, so a marker reached through a struct, union, array or vector field
-/// refuses correctly and reports `"no reason declared"` — including
-/// `SystemContext`, whose `cmd: *CommandBuffer` field is the case the walk was
-/// widened for. Reading the two as symmetric is the mistake; widening one
-/// without the other is what produces it.
+/// **The reason travels exactly as far as the refusal**, and that is a property
+/// to preserve rather than a happy state: the two walks answer two halves of one
+/// question, and for a whole milestone they disagreed — `reasonOf` followed only
+/// pointers and optionals while `carriesMarkedIn` entered every composite, so a
+/// marker reached through a struct field refused correctly and reported
+/// `"no reason declared"`, `SystemContext` included. Widening one without the
+/// other is what produced it, and the shared form is what prevents it
+/// returning.
 pub const marker_decl_name = "weld_no_job_body";
 
 /// Whether `T` itself carries the marker. False for every non-container type,
@@ -173,11 +174,144 @@ pub fn refuseMarkedArgs(comptime ArgsType: type) void {
 }
 
 /// The reason a marked type gives for its own refusal, read off the marker.
-fn reasonOf(comptime T: type) []const u8 {
+///
+/// **Its walk is the SAME walk as `carriesMarkedIn`'s, and keeping the two in
+/// step is the whole contract.** They answer two halves of one question — does
+/// this type refuse, and why — so a form followed by one and not the other
+/// produces a refusal that explains nothing. That is what this used to be: it
+/// followed pointers and optionals while the predicate entered every composite,
+/// so a marker reached through a struct FIELD refused correctly and reported
+/// `"no reason declared"` — including `SystemContext`, whose
+/// `cmd: *CommandBuffer` is the exact shape the predicate's walk was widened
+/// for. The diagnostic was blank in the one case the guard exists to serve.
+///
+/// A branch is entered only when `carriesMarked` says the marker is down it, so
+/// the FIRST reason reached is returned and a sibling field's silence never
+/// shadows it. The two walks are therefore not merely similar in shape: this one
+/// is driven by the other's answer.
+///
+/// `pub` because a reason no one can read is not a reason. Its only other
+/// consumer raises a `@compileError`, which no test can assert at runtime, so
+/// without this the diagnostic's CONTENT would be unverifiable — and an
+/// unverifiable diagnostic is how this one came to be blank for a whole
+/// milestone without a test noticing.
+pub fn reasonOf(comptime T: type) []const u8 {
+    return reasonOfIn(T, &[_]type{});
+}
+
+fn reasonOfIn(comptime T: type, comptime seen: []const type) []const u8 {
+    @setEvalBranchQuota(100_000);
+    inline for (seen) |s| {
+        if (s == T) return no_reason;
+    }
     if (declaresMarker(T)) return @field(T, marker_decl_name);
+    const next = seen ++ [_]type{T};
+    // The SEVEN forms `carriesMarkedIn` follows, and no others. Written as the
+    // same list rather than as a catch-all: a form this misses is a blank
+    // diagnostic, which reads as "the type declared no reason" and not as "the
+    // walk stopped" — the two are indistinguishable at the call site, which is
+    // why they were allowed to diverge in the first place.
     return switch (@typeInfo(T)) {
-        .pointer => |p| reasonOf(p.child),
-        .optional => |o| reasonOf(o.child),
-        else => "no reason declared",
+        .pointer => |p| reasonOfIn(p.child, next),
+        .optional => |o| reasonOfIn(o.child, next),
+        .array => |a| reasonOfIn(a.child, next),
+        .error_union => |eu| reasonOfIn(eu.payload, next),
+        .vector => |v| reasonOfIn(v.child, next),
+        .@"struct" => |st| blk: {
+            inline for (st.fields) |f| {
+                // Gated on the PREDICATE, not attempted and discarded: entering
+                // the first field regardless would return its `no_reason` and
+                // shadow a marked field behind it.
+                if (carriesMarked(f.type)) break :blk reasonOfIn(f.type, next);
+            }
+            break :blk no_reason;
+        },
+        .@"union" => |un| blk: {
+            inline for (un.fields) |f| {
+                if (carriesMarked(f.type)) break :blk reasonOfIn(f.type, next);
+            }
+            break :blk no_reason;
+        },
+        else => no_reason,
     };
+}
+
+/// What `reasonOf` answers when no marker is reachable. Named rather than
+/// repeated, so a test can pin the negative against the same bytes the
+/// production path emits.
+pub const no_reason = "no reason declared";
+
+// ─── The reason travels as far as the refusal ──────────────────────────────
+
+/// A marked probe carrying a reason distinguishable from every other string
+/// here, so a test that reads it cannot be satisfied by an accident.
+const MarkedProbe = struct {
+    pub const weld_no_job_body: []const u8 = "the probe refuses, and says so";
+    x: u32 = 0,
+};
+
+test "the reason survives every composite the refusal walks" {
+    // FORM BY FORM, and the list is the switch's own. The predicate followed
+    // seven forms and the reason followed two, so five of these answered
+    // `no_reason` while refusing correctly — a refusal that explains nothing in
+    // the one case the guard exists to serve.
+    const cases = .{
+        MarkedProbe,
+        *MarkedProbe,
+        **MarkedProbe,
+        ?*MarkedProbe,
+        [3]MarkedProbe,
+        @Vector(4, *MarkedProbe),
+        anyerror!*MarkedProbe,
+        struct { m: *MarkedProbe, stride: usize },
+        union(enum) { a: usize, m: *MarkedProbe },
+        // Nested one more level, so the answer cannot come from a single hop.
+        struct { inner: struct { m: MarkedProbe } },
+        [2]?*MarkedProbe,
+    };
+    inline for (cases) |T| {
+        // The two halves asserted TOGETHER: a reason on a type that does not
+        // refuse would be as wrong as a refusal with no reason.
+        try std.testing.expect(carriesMarked(T));
+        try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(T));
+    }
+}
+
+test "a type that refuses nothing reports no reason, and the two agree" {
+    // THE NEGATIVE HALF. Without it, "the reason is found" would pass a
+    // `reasonOf` that returned the probe's string unconditionally — a guard has
+    // two ways of being wrong and only one is usually tested.
+    const clean = .{
+        u32,
+        *u32,
+        struct { stride: usize, name: []const u8 },
+        union(enum) { a: usize, b: bool },
+        [4]f32,
+        anyerror!void,
+    };
+    inline for (clean) |T| {
+        try std.testing.expect(!carriesMarked(T));
+        try std.testing.expectEqualStrings(no_reason, reasonOf(T));
+    }
+}
+
+test "a marked field is not shadowed by a silent sibling declared before it" {
+    // The struct arm enters a field only when the PREDICATE says the marker is
+    // down it. Entering the first field regardless would answer `no_reason`
+    // here — the marked field sits second, behind one that carries nothing, and
+    // that ordering is the whole case.
+    const Shadowed = struct { quiet: struct { n: usize }, m: *MarkedProbe };
+    try std.testing.expect(carriesMarked(Shadowed));
+    try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Shadowed));
+}
+
+test "the production shape is the one that used to be blank" {
+    // `SystemContext` carries `cmd: *CommandBuffer` as a FIELD, which is the
+    // shape the predicate's walk was widened for and the one whose diagnostic
+    // stayed empty. Reproduced structurally rather than imported: `foundation`
+    // sits below the ECS and cannot reach `SystemContext`, and a probe of the
+    // same SHAPE is what the walk actually decides on.
+    const Ctx = struct { cmd: *MarkedProbe, tick: u64, frame: ?*anyopaque };
+    try std.testing.expect(carriesMarked(Ctx));
+    try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Ctx));
 }
