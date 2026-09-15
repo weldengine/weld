@@ -495,12 +495,32 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
 /// component-id sets. Predicate evaluation happens at iteration time
 /// inside `slotPasses` — at archetype-matching time we only care about
 /// the structural shape.
+/// Is `arch` visible to a USER query?
+///
+/// A singleton-entity resource lives in an archetype of its own (`ARCH-006`)
+/// and must never surface in a query over its component type. **The rule is
+/// stated HERE and consulted, never restated**: it was written out at two of
+/// the three query paths and absent from the third — the initial scan a typed
+/// `Query` performs at construction — so whether a resource was returned
+/// depended on whether it had been declared BEFORE or AFTER the query was
+/// built. An exclusion whose answer depends on call order is not an exclusion.
+pub fn visibleToUserQueries(arch: *const Archetype) bool {
+    return !arch.is_singleton;
+}
+
+/// Does `arch` match this id set, FOR A USER QUERY?
+///
+/// Visibility is folded in rather than left to the callers, which is the whole
+/// point: two callers remembered it and one did not, and the one that did not
+/// is reached by every typed `Query` ever constructed. A caller that needs the
+/// signature question alone — none today — would ask `hasComponent` directly.
 pub fn archetypeMatches(
     arch: *const Archetype,
     required_ids: []const ComponentId,
     with_ids: []const ComponentId,
     without_ids: []const ComponentId,
 ) bool {
+    if (!visibleToUserQueries(arch)) return false;
     for (required_ids) |cid| {
         if (!arch.hasComponent(cid)) return false;
     }
@@ -543,9 +563,9 @@ pub fn rescanNewArchetypes(
     // pointers are stable for the world's lifetime).
     const tail = all[last_seen.*..];
     for (tail) |arch| {
-        // Singleton-entity resources are invisible to user
-        // queries. Skip before the cheaper signature match runs.
-        if (arch.is_singleton) continue;
+        // Singleton visibility is INSIDE `archetypeMatches` — it used to be
+        // restated here, and restating it is what let the initial scan be
+        // written without it.
         if (!archetypeMatches(arch, required_ids, with_ids, without_ids)) continue;
         onMatch(ctx, arch);
     }
