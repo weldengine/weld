@@ -33,11 +33,10 @@ pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 /// `get`/`get_mut` that produced the handle (§5.3 c), in every build mode; a
 /// stale one answers `BridgeError.StaleComponentRef`.
 ///
-/// **A ref held beyond its rule body is therefore safe** (§5.3 corollary):
-/// `cloneLocalsInto` copies a `Value` VERBATIM into a timer's, `branch`'s,
-/// `spawn`'s or `race`/`sync` branch's scope snapshot and `AsyncTask.locals`
-/// retains it across a suspension, so the handle outlives the tick by
-/// construction and its safety cannot rest on the deferral of structural ops.
+/// **A ref held beyond its rule body is therefore safe** (§5.3 corollary): a
+/// scope snapshot copies a `Value` VERBATIM and `AsyncTask.locals` retains it
+/// across a suspension, so the handle outlives the tick BY CONSTRUCTION and its
+/// safety cannot rest on the deferral of structural ops.
 ///
 /// Rule-arena handles — a runtime-produced string, array, map or set — have the
 /// opposite lifetime: their store is reset at the body boundary, so the resolver
