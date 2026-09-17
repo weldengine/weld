@@ -138,13 +138,11 @@ const DetachHook = struct { ctx: ?*anyopaque, func: ExtensionDetachFn };
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
 pub const World = struct {
-    // ── Shared identity ──
     /// Generational identity store driving every spawn / despawn. A
     /// single store guarantees that the `(index, generation)` halves of
     /// an `EntityId` stay unique world-wide.
     identity: EntityIdentityStore,
 
-    // ── Change detection ──
     /// Monotonic frame counter. Incremented by `beginFrame()` at the
     /// start of each tick; written into every spawn / migration's
     /// `added_tick` + `changed_tick` sidecars and into every
@@ -152,7 +150,6 @@ pub const World = struct {
     /// comparisons.
     current_tick: Tick,
 
-    // ── Component metadata + storage ──
     /// Runtime component / resource type registry. Assigns
     /// `ComponentId`s on first registration and caches size +
     /// alignment + default bytes + field descriptors.
@@ -298,8 +295,6 @@ pub const World = struct {
         }
         self.* = undefined;
     }
-
-    // ─── Observer registration ───────────────────────────────
 
     /// Register an `on_spawned` observer (`ctx` threaded back to the
     /// callback; native callers pass `null`).
@@ -515,8 +510,6 @@ pub const World = struct {
         }
     }
 
-    // ─── Component registration helpers ──────────────────────────────────
-
     /// Register a component whose layout is described at runtime.
     /// Returns the assigned `ComponentId`. Forwarded straight to the
     /// underlying `Registry` — see `registry.zig`.
@@ -563,8 +556,6 @@ pub const World = struct {
             .fields = &.{},
         });
     }
-
-    // ─── Archetype lookup ────────────────────────────────────────────────
 
     /// A component-id set every member of which is `.table`-stored, sorted
     /// into an archetype signature.
@@ -649,13 +640,6 @@ pub const World = struct {
         }
     }
 
-    /// Add `cid_new` together with its `@requires` closure, in one transaction.
-    ///
-    /// Members already carried are skipped — the closure is a floor and not a
-    /// reset, so an entity that already has `Transform` keeps ITS `Transform`
-    /// with its current values rather than having it overwritten by a default.
-    /// Missing members get their REGISTRY DEFAULTS, which is what
-    /// `etch-reference-part3.md` §6 specifies ("et l'ajoute avec ses defaults").
     /// Expand a caller-supplied component set with the transitive closure its
     /// members declare, into a NEW pair of lists. Returns whether anything was
     /// added.
@@ -702,6 +686,12 @@ pub const World = struct {
         return expanded;
     }
 
+    /// Add `cid_new` together with its `@requires` closure, in one transaction.
+    ///
+    /// Members already carried are skipped — the closure is a FLOOR and not a
+    /// reset, so an entity that already has `Transform` keeps ITS `Transform`
+    /// with its current values. Missing members get their REGISTRY DEFAULTS
+    /// (`etch-reference-part3.md` §6).
     fn addWithClosure(
         self: *World,
         gpa: std.mem.Allocator,
@@ -721,11 +711,8 @@ pub const World = struct {
             try ids.append(gpa, c);
             try vals.append(gpa, self.registry.componentDefaultBytes(c));
         }
-        // One entry point whatever the closure contributed: when every requisite
-        // is already present `ids` holds one id and the batched entry handles
-        // that correctly. A branch on `ids.items.len == 1` was written here and
-        // REMOVED — both arms called the same thing, so it was a branch that
-        // could not change behaviour carrying a comment that implied it could.
+        // One entry point whatever the closure contributed: with every requisite
+        // already present `ids` holds one id, which the batched entry handles.
         return self.addComponentsDynamic(gpa, entity, ids.items, vals.items);
     }
 
@@ -884,17 +871,11 @@ pub const World = struct {
                     for (order, 0..) |req, k| {
                         if (req == cid) break :blk ps[k];
                     }
-                    // Proven, not assumed. `ids` is `split.sparse`, whose every
-                    // member `splitByStorage` CHECKED against the registry, and
-                    // on the batched-add path the buffer it split is
-                    // `src.component_ids ++ cids` — so a member could come from
-                    // the archetype rather than from `order` only if a
-                    // component's mode changed after its archetype was built.
-                    // It cannot: `registerComponentRaw` refuses an existing
-                    // name with `DuplicateComponent`, and every one of the six
-                    // accesses to `entries.items[id].desc` in `registry.zig` is
-                    // a READ — there is no write path to an existing
-                    // descriptor anywhere in the tree. One grep re-checks that.
+                    // Proven, not assumed: every member of `ids` was checked
+                    // against the registry by `splitByStorage`, so one could come
+                    // from the archetype rather than from `order` only if a
+                    // component's storage mode changed after its archetype was
+                    // built — and no write path to an existing descriptor exists.
                     unreachable;
                 }
                 break :blk self.registry.componentDefaultBytes(cid);
@@ -987,8 +968,6 @@ pub const World = struct {
         return self.entity_locations.get(id);
     }
 
-    // ─── Spawn / despawn ─────────────────────────────────────────────────
-
     /// Spawn an entity with the `(Transform, Velocity)` archetype.
     /// Generational id drawn from the identity store; archetype found
     /// or created on first call.
@@ -1028,11 +1007,8 @@ pub const World = struct {
         const named_ids = [_]ComponentId{ id_t, id_v };
         const named_vals = [_][]const u8{ std.mem.asBytes(&transform), std.mem.asBytes(&velocity) };
         const split = self.splitByStorage(ids[0..]);
-        // Without this, `addSparsePayloads` below unwraps `sparse_stores.get(cid).?`
-        // on a store that was never declared and PANICS. The comment above says
-        // the split exists for "the day one of them is registered differently";
-        // that day it panicked, which is what makes this line the point rather
-        // than the comment.
+        // Without this, `addSparsePayloads` below unwraps
+        // `sparse_stores.get(cid).?` on a store never declared, and PANICS.
         try self.ensureSparseStores(gpa, split.sparse);
         const arch = try self.getOrCreateArchetype(gpa, split.table);
 
@@ -1041,11 +1017,9 @@ pub const World = struct {
         errdefer self.identity.release(eid);
 
         // THE CALLER'S VALUES, never `null, null`. Null writes the REGISTRY
-        // DEFAULT, so a component registered `.sparse` silently lost the value
-        // this entry was handed — the two named payloads reaching only the
-        // archetype's columns below. `spawnDynamic` passes null CORRECTLY, having
-        // no values at all, which is why the mutation helper's count assertion
-        // refused a first attempt aimed at both sites.
+        // DEFAULT, so a component registered `.sparse` would silently lose the
+        // value this entry was handed. `spawnDynamic` passes null correctly,
+        // having no values at all.
         try self.addSparsePayloads(gpa, eid, split.sparse, named_vals[0..], named_ids[0..]);
         errdefer self.removeSparsePayloads(eid, split.sparse);
 
@@ -1187,12 +1161,6 @@ pub const World = struct {
         return eid;
     }
 
-    /// Despawn an entity by handle. Returns `error.StaleEntityHandle`
-    /// when the handle's index is unknown, the slot is already freed,
-    /// or the generation does not match. Updates the swapped-in
-    /// entity's location atomically with the chunk-level swap. Purges the
-    /// entity's active-extension set so its owned name copies
-    /// are freed here rather than stranded until `World.deinit`.
     /// Reclaim `arch`'s chunk at `chunk_idx` when it is empty, repairing the
     /// locations the reclamation renumbers.
     ///
@@ -1226,6 +1194,11 @@ pub const World = struct {
         self.reclaimChunk(gpa, arch, loc.chunk_idx);
     }
 
+    /// Despawn an entity by handle. `error.StaleEntityHandle` when the handle's
+    /// index is unknown, the slot is already freed, or the generation does not
+    /// match. Updates the swapped-in entity's location atomically with the
+    /// chunk-level swap, and purges the entity's active-extension set so its
+    /// owned name copies are freed here rather than stranded until `deinit`.
     pub fn despawn(self: *World, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
         try self.identity.validate(id);
         const location = self.entity_locations.get(id) orelse return error.StaleEntityHandle;
@@ -1233,34 +1206,15 @@ pub const World = struct {
         const arch = self.archetypes.items[location.archetype_idx];
         self.removeSlotAndReclaim(gpa, arch, location);
         _ = self.entity_locations.remove(id);
-        // Sweep every sparse store. Placed before `identity.release` for
-        // reading order and NOT as a correctness condition — a first version of
-        // this comment claimed otherwise and was refuted by its own
-        // counter-factual: moving the sweep after the release leaves the whole
-        // suite green. The reason is that `positionOf` compares the generation
-        // against the STORE's own copy of the handle (`dense.items[pos]`) and
-        // never consults the identity store, so releasing the index cannot
-        // change what `removeEntity(id)` finds. An order dependency would need
-        // a sweep keyed on something the identity store owns, and there is
-        // none.
+        // Before `identity.release` for reading order, NOT as a correctness
+        // condition: `positionOf` compares the generation against the STORE's own
+        // copy of the handle and never consults the identity store, so releasing
+        // the index cannot change what `removeEntity` finds.
         _ = self.sparse_stores.removeEntity(id);
         self.purgeEntityExtensions(gpa, id);
         self.identity.release(id);
     }
 
-    /// Whether `entity` carries `cid`, whichever backend stores it.
-    ///
-    /// Total and infallible — `false` for a stale handle, an unknown id or an
-    /// absent component, indistinguishably, which is the shape
-    /// `WeldEcsAPI.component_has` is frozen at (`ARCH-018`).
-    ///
-    /// **Not a convenience over `componentBytes() != null`.** The batched paths
-    /// ask presence to raise `DuplicateComponent`/`UnknownComponent`, and they
-    /// asked it of the ARCHETYPE — which answers `false` for a sparse component
-    /// the entity carries, so a batched add of an already-present sparse
-    /// component passed the check and reached `SparseSetStorage.add`'s own
-    /// assert: live in Debug, compiled to nothing in ReleaseFast, a silent
-    /// double insert in the mode a game ships.
     /// `entity`'s `changed_tick` for `cid`, whichever backend holds it, or null
     /// when the entity is stale or does not carry the component.
     ///
@@ -1314,6 +1268,17 @@ pub const World = struct {
         return self.current_tick;
     }
 
+    /// Whether `entity` carries `cid`, whichever backend stores it.
+    ///
+    /// Total and infallible — `false` for a stale handle, an unknown id or an
+    /// absent component, indistinguishably, the shape `WeldEcsAPI.component_has`
+    /// is frozen at (`ARCH-018`).
+    ///
+    /// **Not a convenience over `componentBytes() != null`.** The batched paths
+    /// ask presence of the ENTITY and never of its ARCHETYPE, which answers
+    /// `false` for a sparse component the entity carries — letting a batched add
+    /// of an already-present sparse component reach `SparseSetStorage.add`'s own
+    /// assert, live in Debug and compiled to nothing in ReleaseFast.
     pub fn hasComponentDyn(self: *const World, entity: EntityId, cid: ComponentId) bool {
         if (!self.identity.isLive(entity)) return false;
         const loc = self.entity_locations.get(entity) orelse return false;
@@ -1334,8 +1299,6 @@ pub const World = struct {
         return self.identity.isLive(id);
     }
 
-    // ─── Frame tick + typed component access ──────────────────────────
-
     /// Open a new frame. Bumps `current_tick` (wrapping arithmetic — a
     /// follow-up milestone handles the u32 wraparound)
     /// and clears every chunk's dirty bitset so `Changed<T>` queries
@@ -1344,15 +1307,11 @@ pub const World = struct {
         self.current_tick +%= 1;
         for (self.archetypes.items) |arch| arch.clearAllDirtyBitsets();
         self.resetTickObservations();
-        // No sparse arm, and the absence is an INVARIANT rather than an
-        // omission: a sparse store carries per-row `added`/`changed` ticks and
-        // NO dirty bitset, because the bitset exists to
-        // let a chunk-granular query skip a whole chunk — a granularity a
-        // sparse set does not have. An arm here would have nothing to clear.
-        // The guard for it is `SparseSetStorage.field_set_pin`, which lives
-        // where a field gets added rather than here where one is read: adding a
-        // bitset to the backend breaks that pin, and its message names this
-        // function.
+        // No sparse arm, and the absence is an INVARIANT: a sparse store carries
+        // per-row ticks and NO dirty bitset, the bitset existing to let a
+        // chunk-granular query skip a whole chunk — a granularity a sparse set
+        // does not have. Guarded by `SparseSetStorage.field_set_pin`, which lives
+        // where a field gets added and whose message names this function.
     }
 
     /// Read-only typed access to component `T` on `entity`. Returns `null` when
@@ -1452,8 +1411,6 @@ pub const World = struct {
         const chunk = arch.chunks.items[loc.chunk_idx];
         arch.markChanged(chunk, col, loc.slot, self.current_tick);
     }
-
-    // ─── Add / remove component (transition cache) ──────────
 
     /// Insert component `T` on `entity`. For a `.table` `T` this routes through
     /// the current archetype's `TransitionCache`: the first add of `T` from this
@@ -1738,13 +1695,10 @@ pub const World = struct {
         if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
 
         if (self.storageOf(cid_drop) == .sparse) {
-            // Mirrors the table arm's `assert(hasComponent)` below: removing an
-            // absent component is a programmer error on this entry. UNLIKE that
-            // arm, the release path is a no-op rather than undefined — the
-            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
-            // behind it would then be UB on the exact misuse the assert exists
-            // to name. Matching the table arm bit for bit would be matching a
-            // defect, so the absence is handled rather than assumed.
+            // Removing an absent component is a programmer error here, but the
+            // absence is HANDLED and not left to the assert: that is compiled to
+            // nothing in ReleaseFast, and a `.?` behind it would be UB on the
+            // exact misuse it exists to name.
             std.debug.assert(self.hasComponentDyn(entity, cid_drop));
             const store = self.sparse_stores.get(cid_drop) orelse return;
             _ = store.remove(entity);
@@ -1758,12 +1712,9 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            // `>= 1` and not `>= 2`: the EMPTY archetype is legal, so
-            // dropping an entity's last component is a transition to it rather
-            // than a programmer error. The `>= 2` this replaces was a leftover
-            // of an illegality since lifted — legal at the layout, still forbidden
-            // at the transition. Guaranteed by the `hasComponent(cid_drop)`
-            // check above, which is what makes the bound `1` and not `0`.
+            // `>= 1` and not `>= 2`: the EMPTY archetype is legal, so dropping
+            // an entity's last component is a transition to it. The bound is `1`
+            // and not `0` because `hasComponent(cid_drop)` was checked above.
             std.debug.assert(src_arch.component_ids.len >= 1);
             const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len - 1);
             defer gpa.free(target_ids);
@@ -1941,7 +1892,6 @@ pub const World = struct {
         if (dst_arch == src_arch) return;
 
         const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
-        // ── from here down: infallible (reserve-then-mutate boundary) ──
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
         const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
 
@@ -2261,13 +2211,8 @@ pub const World = struct {
         if (self.requiresRefusesRemoval(entity, cid_drop, &.{})) return;
 
         if (self.storageOf(cid_drop) == .sparse) {
-            // Mirrors the table arm's `assert(hasComponent)` below: removing an
-            // absent component is a programmer error on this entry. UNLIKE that
-            // arm, the release path is a no-op rather than undefined — the
-            // assert is compiled to nothing in ReleaseFast, and a `.?` sitting
-            // behind it would then be UB on the exact misuse the assert exists
-            // to name. Matching the table arm bit for bit would be matching a
-            // defect, so the absence is handled rather than assumed.
+            // See the twin in `removeComponentDynamic`: the absence is HANDLED
+            // and not left to the assert, which ReleaseFast compiles out.
             std.debug.assert(self.hasComponentDyn(entity, cid_drop));
             const store = self.sparse_stores.get(cid_drop) orelse return;
             _ = store.remove(entity);
@@ -2281,12 +2226,9 @@ pub const World = struct {
             if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
                 break :blk self.archetypes.items[target_idx];
             }
-            // `>= 1` and not `>= 2`: the EMPTY archetype is legal, so
-            // dropping an entity's last component is a transition to it rather
-            // than a programmer error. The `>= 2` this replaces was a leftover
-            // of an illegality since lifted — legal at the layout, still forbidden
-            // at the transition. Guaranteed by the `hasComponent(cid_drop)`
-            // check above, which is what makes the bound `1` and not `0`.
+            // `>= 1` and not `>= 2`: the EMPTY archetype is legal, so dropping
+            // an entity's last component is a transition to it. The bound is `1`
+            // and not `0` because `hasComponent(cid_drop)` was checked above.
             std.debug.assert(src_arch.component_ids.len >= 1);
             const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len - 1);
             defer gpa.free(target_ids);
@@ -2331,8 +2273,6 @@ pub const World = struct {
             .slot = dst_r.slot,
         });
     }
-
-    // ─── Queries ─────────────────────────────────────────────────────────
 
     /// Sugar — `world.query(gpa)` returns the no-filter
     /// `Query(.{Transform, Velocity}, .{})` over every materialised
@@ -2456,8 +2396,6 @@ pub const World = struct {
         };
     }
 
-    // ─── Resources ───────────────────────────────────────────────────────
-
     /// Add a resource. `init_bytes` is duplicated by the store.
     pub fn addResource(self: *World, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) !void {
         try self.resources.addResource(gpa, id, init_bytes);
@@ -2535,8 +2473,6 @@ pub const World = struct {
             }
         }
     }
-
-    // ─── Inspection helpers ──────────────────────────────────────────────
 
     /// Total chunk count across every archetype. Used by the bench
     /// harness for the report.
@@ -2901,7 +2837,6 @@ test "grouped ops reject duplicate / absent components (R11c) without panicking"
     try std.testing.expect(world.componentBytes(e, c) != null);
 }
 
-// ─── An emptied chunk is reclaimed ─────────────────────────────────────────
 //
 // `allocateSlot` fills only the TRAILING chunk, so a chunk drained by churn is
 // never refilled, and without reclamation the chunk count follows the cumulative
