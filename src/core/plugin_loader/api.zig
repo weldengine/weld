@@ -464,8 +464,8 @@ fn stub_tag_has_all(world: WeldWorldHandle, entity: WeldEntity, tags: ?[*]const 
 // WeldResourceAPI (cf. engine-c-api.md §6).
 // =============================================================
 
-/// Resources sub-API table (cf. `engine-c-api.md §6`). Stubbed in
-/// The wiring is unimplemented.
+/// Resources sub-API table (cf. `engine-c-api.md §6`). Declared as stubs — the
+/// wiring is unimplemented.
 pub const WeldResourceAPI = extern struct {
     resource_register: *const fn (
         world: WeldWorldHandle,
