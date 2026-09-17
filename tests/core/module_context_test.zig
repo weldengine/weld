@@ -1,5 +1,4 @@
-//! M1.1.15.1 / gate A — acceptance for `core.ModuleContext`
-//! (`engine-tier-interfaces.md` §0).
+//! Acceptance for `core.ModuleContext` (`engine-tier-interfaces.md` §0).
 //!
 //! Two tests, and the second is the NEGATIVE TWIN of the first. The first says the context
 //! carries four named fields; on its own that is satisfied by four fields chosen at random.

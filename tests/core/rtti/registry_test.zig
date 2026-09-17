@@ -1,17 +1,11 @@
-//! Registry tests.
+//! The RTTI registry: `register` then `lookup` giving back an identical
+//! `TypeInfo`, `lookupByName` indexing by `type_name`, a double `register` of
+//! one `(type_id, schema_hash)` being idempotent and one of two schemas
+//! returning `error.SchemaMismatch`.
 //!
-//! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Local acceptance criteria:
-//!
-//! - `register` then `lookup` returns an identical `TypeInfo`.
-//! - `lookupByName` indexes by `type_name`.
-//! - Double-`register` of the same `(type_id, schema_hash)` is
-//!   idempotent.
-//! - Double-`register` with different schemas returns
-//!   `error.SchemaMismatch`.
-//! - Round-trip `component → bytes → component` reconstructs the
-//!   original bit-for-bit, encoding and decoding via the `FieldDesc`
-//!   metadata only — no `@typeName` / `@TypeOf` at runtime.
+//! Then the round trip `component → bytes → component`, bit for bit, encoded
+//! and decoded through the `FieldDesc` metadata ALONE — no `@typeName` and no
+//! `@TypeOf` at runtime, which is the whole point of the registry.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -19,12 +13,10 @@ const weld_core = @import("weld_core");
 const rtti = weld_core.rtti;
 const Registry = rtti.Registry;
 
-// -- Synthetic POD components used by the round-trip path -------------
-//
-// Position / Velocity here are local to the test — they do NOT consume
-// or shadow the live ECS types from `src/core/ecs/components.zig`. E1
-// is standalone: no domain wiring (S6 IPC swap is E2, resources are
-// E3, events are E4).
+// Synthetic POD components for the round-trip path. `Position` and `Velocity`
+// are LOCAL to this test and neither consume nor shadow the live ECS types of
+// `src/core/ecs/components.zig`, so the registry is exercised with no domain
+// wiring behind it.
 
 const Position = extern struct {
     x: f32 = 0,

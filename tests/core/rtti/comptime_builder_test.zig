@@ -1,18 +1,11 @@
-//! Comptime builder tests.
+//! The comptime builder: primitives mapping to their `FieldKind`, a nested
+//! struct resolving to `.nested_struct` plus its `nested_type_id`, a fixed-size
+//! array carrying `count > 1`, an optional and an enum reaching their own kinds,
+//! and the POD validator refusing a pointer field.
 //!
-//! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Local acceptance criteria:
-//!
-//! 1. primitives map to the correct `FieldKind`
-//! 2. nested struct resolves to `.nested_struct` + `nested_type_id`
-//! 3. fixed-size array carries `count > 1`
-//! 4. optional is encoded as `kind = .optional`
-//! 5. enum is encoded as `kind = .enum_tag`
-//! 6. POD validator rejects pointer fields
-//!
-//! Each test feeds the comptime builder a synthetic POD struct (no
-//! `Position` / `Velocity` from the live ECS — those are untouched in
-//! E1) and inspects the produced `TypeInfo` / `isPOD` predicate.
+//! Every case feeds it a SYNTHETIC POD struct rather than the live ECS's
+//! `Position` / `Velocity`, so a change to those cannot move this file's
+//! answers.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -140,13 +133,10 @@ test "enum is encoded as kind = .enum_tag" {
 }
 
 test "isPOD rejects pointer-bearing structs (would @compileError via buildTypeInfo)" {
-    // Brief E1 §criterion 6: "pointer field produces compileError
-    // (verified via @compileError detected at test build)". We test
-    // the underlying `isPOD` predicate that gates the compile error,
-    // so the negative path can be exercised without breaking the test
-    // target's own compilation. The compile-error path itself is
-    // unconditional inside `buildTypeInfo` — see comptime_builder.zig
-    // top of `buildTypeInfo`.
+    // A pointer field must produce a `@compileError`, which a test cannot
+    // observe without breaking its own compilation — so what is exercised here
+    // is the `isPOD` predicate that GATES it. The compile-error path itself is
+    // unconditional at the top of `buildTypeInfo`.
     const Bad = struct { ptr: *u32 };
     try std.testing.expect(!rtti.isPOD(Bad));
 
@@ -161,11 +151,9 @@ test "isPOD rejects pointer-bearing structs (would @compileError via buildTypeIn
 }
 
 test "lifecycle defaults to .transient for resources, null otherwise" {
-    // Contract updated by M0.2 / E3 (cf. brief § Notes — technical
-    // decision E3 / lifecycle inference). `buildTypeInfo` reads
-    // `T.lifecycle` if declared, otherwise defaults to `.transient`
-    // for the `.resource` category and leaves the field null for
-    // every other category.
+    // `buildTypeInfo` reads `T.lifecycle` when declared; absent, it defaults to
+    // `.transient` for the `.resource` category and leaves the field null for
+    // every other.
     const Res = extern struct { tick: u64 = 0 };
     const info_res = comptime rtti.buildTypeInfo(Res, .resource);
     try std.testing.expectEqual(rtti.Category.resource, info_res.category);

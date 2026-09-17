@@ -7,9 +7,8 @@
 //! capabilities. Used by `tests/core/plugin_loader/load_unload_test.zig`
 //! to exercise the loader's happy path.
 //!
-//! Types are imported from `src/core/plugin_loader/desc.zig` via
-//! the `weld_plugin_abi` module declared in the main `build.zig`
-//! (decision Case 3 — cross-import, cf. brief § Notes).
+//! Types are imported from `src/core/plugin_loader/desc.zig` through
+//! the `weld_plugin_abi` module the main `build.zig` declares.
 
 const std = @import("std");
 const abi = @import("weld_plugin_abi");

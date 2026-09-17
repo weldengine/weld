@@ -1,11 +1,7 @@
-//! Resources lifecycle tag tests.
-//!
 //! Resources may declare a lifecycle via `pub const lifecycle:
 //! Lifecycle = .{config | state | transient};` in the struct
-//! itself. `rtti.buildTypeInfo(T, .resource)` reads this
-//! declaration at comptime; absent declaration defaults to
-//! `.transient` (cf. brief § Notes — technical decision E3 /
-//! lifecycle inference).
+//! itself. `rtti.buildTypeInfo(T, .resource)` reads that declaration
+//! at comptime, and an absent one defaults to `.transient`.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

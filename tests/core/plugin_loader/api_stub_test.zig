@@ -4,11 +4,10 @@
 //! (`WeldEcsAPI`, `WeldResourceAPI`, `WeldEventAPI`,
 //! `WeldServiceAPI`, `WeldMemoryAPI`, `WeldEditorAPI`,
 //! `WeldPlatformAPI`) and checks the stub return code. This test
-//! **freezes the surface**: any silent addition / removal / rename
-//! of a callback breaks the test. Any callback that does not
-//! return the stub default (i.e. that starts actually wiring
-//! the Tier 0) is detected too — the runtime wiring of the
-//! 7 sub-APIs is Phase 3 (brief § Out-of-scope).
+//! **freezes the surface**: a silent addition, removal or rename of
+//! a callback breaks the test, and so does a callback that stops
+//! returning the stub default — the runtime wiring of the seven
+//! sub-APIs is Phase 3.
 //!
 //! Verification convention:
 //!   - Functions returning `WeldResult`: must return
@@ -226,9 +225,8 @@ fn dummyJobFn(user_data: ?*anyopaque) callconv(.c) void {
 }
 
 test "stub_api WeldAPI table is wired" {
-    // Smoke check: the main table references each non-null
-    // sub-API (except `editor` which may be null in shipping;
-    // in M0.2 the stub editor is exposed).
+    // Smoke check: the main table references each non-null sub-API.
+    // `editor` may be null in a shipping build; the stub exposes it.
     const a = pl.stub_api;
     _ = a.ecs;
     _ = a.resource;

@@ -1,10 +1,8 @@
-//! Resources change-detection tests.
-//!
-//! Reuses the M0.1 tick-based mechanism (`World.current_tick` +
-//! per-archetype `changed_ticks`). `getResourceMut` auto-marks
-//! `changed_tick = current_tick` on the resource's slot via
-//! `world.getMut`, then `resourceChanged(T, since_tick)` reads
-//! the tick back.
+//! Resources change detection, on the ECS's own tick mechanism
+//! (`World.current_tick` plus the per-archetype `changed_ticks`):
+//! `getResourceMut` auto-marks `changed_tick = current_tick` on the
+//! resource's slot through `world.getMut`, and
+//! `resourceChanged(T, since_tick)` reads the tick back.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

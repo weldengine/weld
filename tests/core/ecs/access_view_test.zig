@@ -182,8 +182,6 @@ test "a view refuses to enter a dispatched body" {
     try testing.expect(!carriesMarked(*u32));
 }
 
-// ─── The erased world's identity ──────────────────────────────────────────
-
 const erased_read_spec = [_]Access{Access.reads(Velocity)};
 const erased_write_spec = [_]Access{Access.writes(Velocity)};
 /// A second declaration of the SAME set as `erased_read_spec`, kept apart on

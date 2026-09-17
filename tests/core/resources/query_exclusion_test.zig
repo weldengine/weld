@@ -97,8 +97,6 @@ test "user entity carrying a same-typed component coexists with the resource" {
     try std.testing.expectEqual(@as(u32, 1), matched);
 }
 
-// ─── The typed path, and the order the two scans divide ───────────────────
-
 test "a resource declared BEFORE a typed query is invisible to it" {
     const gpa = std.testing.allocator;
     var world = World.init();
