@@ -1,20 +1,18 @@
-//! AUTO-GENERATED placeholder — M0.2 / E5.
+//! AUTO-GENERATED — A PLACEHOLDER, and nothing consumes it yet.
 //!
-//! Per `engine-c-bindings.md` §2.1, this file is the canonical
-//! `.api.zig` description of the Wayland binding, produced by
+//! Per `engine-c-bindings.md` §2.1 this file is the canonical `.api.zig`
+//! description of the Wayland binding, produced by
 //! `tools/bindgen/adapters/wayland_xml.zig` from
 //! `bindings/upstream/wayland/wayland.xml` and the protocol XMLs.
 //!
-//! **M0.2 status — placeholder.** The wayland_xml adapter ports
-//! the legacy `tools/wayland_gen/` pipeline 1:1 and emits the Zig
-//! bindings directly to
-//! `src/core/platform/window/wayland_protocols/*.zig` without
-//! round-tripping through this `ApiDescription`. Decision
-//! technique (i) — cf.
-//! `briefs/M0.2-rtti-resources-events-bindgen.md` § Notes.
+//! What the adapter ACTUALLY does today is port the legacy
+//! `tools/wayland_gen/` pipeline one to one and emit the Zig bindings straight
+//! to `src/core/platform/window/wayland_protocols/*.zig`, with no round trip
+//! through this `ApiDescription` — the same choice taken on the Vulkan side and
+//! for the same reason.
 //!
-//! Phase 1+ adapters consuming the canonical `.api.zig` pipeline
-//! will populate this format end-to-end.
+//! An adapter consuming the canonical `.api.zig` pipeline populates this format
+//! end to end.
 
 const api = @import("../../tools/bindgen/core/api_description.zig");
 

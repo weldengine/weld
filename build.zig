@@ -474,10 +474,10 @@ pub fn build(b: *std.Build) void {
 
     // `zig build forge-determinism`: the determinism instrument, run
     // at ONE worker over the canonical scenario. The step is deliberately an
-    // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a test:
-    // A later milestone replays it at N workers and another on a rebuilt scheduler DAG, and a
-    // harness whose logic lived in its `main` would have to be re-entered through
-    // a process to be replayed. Its self-reproducibility and its artifact
+    // EXECUTABLE over a library (`tests/determinism/run.zig`) rather than a
+    // test, because it gets REPLAYED — at N workers, and on a rebuilt scheduler
+    // DAG — and a harness whose logic lived in its `main` would have to be
+    // re-entered through a process to be replayed at all. Its self-reproducibility and its artifact
     // liveness are ALSO asserted inside `zig build test`, where the same library
     // is exercised by `forge_3d`'s own suite.
     //
@@ -751,8 +751,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     etch_interp_driver_module.addImport("weld_core", core_module);
-    // Differential corpus — `tests/etch_interp/` houses 20 .etch
-    // programs and their sidecar `expected.zig` files. The facade enumerates
+    // Differential corpus — `tests/etch_interp/` houses the `.etch` programs
+    // and their sidecar `expected.zig` files. The facade enumerates
     // them and is consumed by `corpus_test.zig` (the test driver) and by
     // the bench harness. Sidecars in `programs/` reach the diff_runner
     // types through the `diff_runner` module dependency below.
@@ -842,7 +842,6 @@ pub fn build(b: *std.Build) void {
 
     const TestSpec = struct {
         path: []const u8,
-        // `spike` field removed, no entry needs it anymore.
         wl_protocols: bool = false,
         etch: bool = false,
         etch_interp: bool = false,
@@ -959,8 +958,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
         // EBNF harness: every ```etch example block parses clean.
         .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
-        // AST stable interface freeze: ≥20 Level-1 entry points
-        // (§10.3.1). Compilation is the cross-phase invariant.
+        // AST stable interface freeze: thirty Level-1 entry points (§10.3.1).
+        // Compilation is the cross-phase invariant.
         .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
         // interpreter hot-reload: edit rule body → AST swap →
         // behaviour change on the same live world, measured < 500 ms.
@@ -968,10 +967,10 @@ pub fn build(b: *std.Build) void {
         // full-grammar 500+ line integration reference: parse
         // < 50 ms + type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
-        // `@storage` consumed end to end: the mode reaches the
-        // registry, the storage does not move yet, and the codegen refuses a
-        // sparse program. `.etch = true` for `weld_etch`; `weld_core` is
-        // unconditional in this loop.
+        // `@storage` consumed end to end: the mode reaches the registry, a
+        // sparse component leaves the archetype signature, a rule selects on it
+        // and writes its row, and the codegen refuses a sparse program.
+        // `.etch = true` for `weld_etch`; `weld_core` is unconditional here.
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
         // TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
@@ -983,9 +982,10 @@ pub fn build(b: *std.Build) void {
         // cross-file scene/prefab validation (E1782 cross-scene,
         // E1786 cross-file prefab ref, E1791 cross-file prefab base).
         .{ .path = "tests/etch/crossfile_scene_prefab_test.zig", .etch = true },
-        // `import` directive parsing: the four grammar forms
-        // (whole / selective / aliased / per-item alias), IDENT+TYPE_IDENT items
-        // (D-D), and malformed-import recovery (resync, no UnsupportedConstructInS3).
+        // `import` directive parsing: the four grammar forms (whole, selective,
+        // aliased, per-item alias), items accepting IDENT as well as TYPE_IDENT,
+        // and malformed-import recovery — resync, and no
+        // `UnsupportedConstructInS3`.
         .{ .path = "tests/etch/import_parse_test.zig", .etch = true },
         // module graph + cycle (E0108), exports binding
         // (E0103/E0104), cross-file type resolution (no E0102).
@@ -1028,8 +1028,9 @@ pub fn build(b: *std.Build) void {
         // side-table entry (by-name, two-phase), loader patches the slot to the
         // target handle; unset = dead; absent target = UnresolvedCrossRef at cook.
         .{ .path = "tests/scene/crossref_test.zig", .scene = true, .dedicated_step = "test-crossref" },
-        // `extensions:` clause parse + AST + descriptors. The
-        // cook/binary + load portions land once the hooks-section shape unblocks.
+        // The `extensions:` clause from the parse to the executed hook: AST and
+        // descriptors, the cook and its binary tables, `applyExtensions` and the
+        // `on_attach` dispatch at load.
         .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
         // capstone: prefab instances + per-field override +
         // cross-ref + active extension in one scene, cook → load → ECS.
@@ -1039,8 +1040,9 @@ pub fn build(b: *std.Build) void {
         // per entity, after all entities exist). `weld_core` only (no `.scene`
         // flag → no `weld_etch`); builds the image in-memory via the writer.
         .{ .path = "tests/scene/load_roundtrip_test.zig" },
-        // resource `string` fields round-trip through the Tier-0
-        // persistent heap (intern on load, owned by `LoadResult`). `weld_core` only.
+        // resource `string` fields round-trip through the Tier-0 persistent
+        // heap — interned at load into a refcounted block owned by the
+        // resource's `StringSlot`. `weld_core` only.
         .{ .path = "tests/scene/load_resources_test.zig" },
         // common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
@@ -1118,10 +1120,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
-    // shared fail-fast watchdog for in-process concurrency tests
-    // (point-4 permanent guard; covers the scheduler.deinit-join site that
-    // masked the windows-2025/ReleaseSafe hang). Imported by tests via
-    // `@import("test_watchdog")`; only compiled into specs that use it.
+    // The shared fail-fast watchdog for in-process concurrency tests. It covers
+    // the `Scheduler.deinit`-join site that masked a windows-2025/ReleaseSafe
+    // hang. Imported by tests as `@import("test_watchdog")` and compiled only
+    // into the specs that use it.
     const watchdog_module = b.createModule(.{
         .root_source_file = b.path("tests/support/watchdog.zig"),
         .target = target,
@@ -1234,9 +1236,8 @@ pub fn build(b: *std.Build) void {
     // ----------------------------- editor + runtime stub binaries -----
     //
     // Two binaries at the canonical locations per
-    // `engine-directory-structure.md` §9.1, not in `src/spike/`.
-    // The spike that produced them was meant to leave code that survives: these stubs grow into the
-    // real editor and runtime.
+    // `engine-directory-structure.md` §9.1, and NOT under `src/spike/`: these
+    // stubs are where the real editor and runtime grow from.
 
     const runtime_module = b.createModule(.{
         .root_source_file = b.path("src/runtime/main.zig"),
@@ -2041,9 +2042,9 @@ pub fn build(b: *std.Build) void {
     etch_shim_run.stdio = .inherit; // show the ✓ lines during the build
     test_etch_step.dependOn(&etch_shim_run.step);
 
-    // Cook the 20 differential corpus programs into a single consolidated
-    // `corpus_codegen.zig`. The driver test imports it via the
-    // `corpus_codegen` module name.
+    // Cook the differential corpus programs into a single consolidated
+    // `corpus_codegen.zig`, which the driver test imports under the
+    // `corpus_codegen` module name. `codegen_corpus_build.zig` is the list.
     const cook_diff_run = b.addRunArtifact(etch_cook_exe);
     cook_diff_run.addArg("--output");
     const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
@@ -2317,7 +2318,7 @@ pub fn build(b: *std.Build) void {
     //   - `zig build bindgen -- --target wayland` — only Wayland
     //   - `zig build bindgen-vk`             — back-compat single adapter
     //   - `zig build bindgen-wayland`        — back-compat single adapter
-    //   - `zig build bindgen-verify`         — regenerate + diff vide gate
+    //   - `zig build bindgen-verify`         — regenerate + empty-diff gate
 
     const vk_gen_module = b.createModule(.{
         .root_source_file = b.path("tools/bindgen/adapters/vk_xml.zig"),
