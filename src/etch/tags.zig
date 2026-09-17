@@ -21,10 +21,9 @@
 //! per-block flat leaf order in the AST is NOT directly the bit_index order —
 //! the merged tree must be walked. For a single block the two coincide.
 //!
-//! The persistent structure is just `dotted-path -> Entry`; the build-time
-//! tree (children lists + roots) is scratch, dropped once bit indices land in
-//! the map. Namespace masks (`has_any_tag(.category)`) are computed by a prefix
-//! scan over the map keys (the leaf set is small).
+//! The persistent structure is `dotted-path -> Entry`; the build-time tree is
+//! scratch, dropped once the bit indices land in the map. Namespace masks are a
+//! prefix scan over the keys — the leaf set is small.
 
 const std = @import("std");
 
@@ -206,7 +205,6 @@ pub const TagTable = struct {
             if (item_kinds[item_i] != .tags_decl) continue;
             const td = arena.tags_decls.items[item_datas[item_i]];
 
-            // Namespaces (slab order = pre-order).
             var ns_i: u32 = td.ns_start;
             while (ns_i < td.ns_start + td.ns_len) : (ns_i += 1) {
                 const node_ns = arena.tag_namespaces.items[ns_i];
@@ -227,7 +225,6 @@ pub const TagTable = struct {
                 }
             }
 
-            // Leaves.
             var leaf_i: u32 = td.leaf_start;
             while (leaf_i < td.leaf_start + td.leaf_len) : (leaf_i += 1) {
                 const leaf = arena.tag_leaves.items[leaf_i];
@@ -288,8 +285,6 @@ fn emitDiag(
     });
 }
 
-// ─── inline tests ───────────────────────────────────────────────────────────
-
 const parser_mod = @import("parser.zig");
 
 const TestTable = struct {
@@ -344,13 +339,10 @@ test "tag table: single block, depth-first declaration-order bit indices" {
     try std.testing.expectEqual(@as(?u32, 3), t.table.leafBit("character.team.red"));
     try std.testing.expectEqual(@as(?u32, 6), t.table.leafBit("item.rarity.rare"));
 
-    // Namespaces resolve but carry no bit.
     try std.testing.expect(t.table.lookup("character.status") != null);
     try std.testing.expectEqual(@as(?u32, null), t.table.leafBit("character.status"));
-    // Unknown path.
     try std.testing.expectEqual(@as(?u32, null), t.table.leafBit("character.status.frozen"));
 
-    // Category mask: all leaves under `character.status`.
     var under: std.ArrayListUnmanaged(u32) = .empty;
     defer under.deinit(gpa);
     try t.table.collectUnder(gpa, "character.status", &under);

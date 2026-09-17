@@ -2,10 +2,9 @@
 //! `UnsupportedConstruct`, `SparseStorageUnsupported`, `NonPodComponent` and
 //! `InternalCodegenBug`.
 //!
-//! The codegen is fed an AST that has already passed the two-pass type-
-//! checker, so structural and POD violations should never reach this layer.
-//! They are listed for completeness — the codegen surfaces them as errors
-//! rather than panicking so a malformed AST cannot crash the caller.
+//! The codegen is fed an AST the two-pass type-checker has already accepted, so
+//! structural and POD violations should not reach here. They are surfaced as
+//! typed errors rather than panics so a malformed AST cannot crash the caller.
 
 const std = @import("std");
 
@@ -31,10 +30,9 @@ pub const CodegenError = error{
     /// ECS image contradicts its own source with nothing to say so. Parity is
     /// unimplemented.
     SparseStorageUnsupported,
-    /// A component declaration contains a non-POD field type. The
-    /// type-checker rejects these — the variant exists so a malformed AST
-    /// (e.g. a future caller forgetting to type-check) surfaces a clean
-    /// error instead of `@panic`.
+    /// A component declaration carries a non-POD field type. The type-checker
+    /// rejects these; the variant exists so an un-type-checked AST surfaces a
+    /// clean error instead of a panic.
     NonPodComponent,
     /// Internal invariant violated: an emitter received malformed inputs
     /// (e.g. a `field_access` whose receiver category is invalid). Indicates

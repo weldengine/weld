@@ -134,19 +134,14 @@ pub const Value = union(enum) {
     /// real empty block allocated at `addResource`). String elements are stored
     /// as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
-    /// A borrowed view over a resource `[K: V]` field's persistent-heap container
-    /// block. The `u64` is a `persistent` `type_map` block whose
-    /// payload is the owned insertion-ordered pair list. Same persistent-vs-rule-
-    /// arena split as `.map_ref`; the read path borrows it without incref (the
-    /// resource outlives the body). String keys and values are stored as owned
-    /// `.string_persistent`, POD inline. Never `0` for a live field.
+    /// A borrowed view over a resource `[K: V]` field's persistent-heap block,
+    /// whose payload is the owned insertion-ordered pair list. Same borrowing and
+    /// storage rules as `array_persistent`; never `0` for a live field.
     map_persistent: u64,
-    /// A borrowed view over a resource `Set<T>` field's persistent-heap container
-    /// block. The `u64` is a `persistent` `type_set` block whose
-    /// payload is the owned insertion-ordered unique-element list (same
-    /// `ArrayListUnmanaged(Value)` shape as `array_persistent`; the drop is
-    /// shared). Same persistent-vs-rule-arena split as `.set_ref`; borrowed on
-    /// read. String elements owned as `.string_persistent`, POD inline. Never `0`.
+    /// A borrowed view over a resource `Set<T>` field's persistent-heap block,
+    /// whose payload is the owned insertion-ordered unique-element list — the
+    /// same `ArrayListUnmanaged(Value)` shape as `array_persistent`, sharing its
+    /// drop and its borrowing rules. Never `0` for a live field.
     set_persistent: u64,
     /// A `TaskHandle` (`etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
@@ -283,8 +278,6 @@ pub const RuntimeErrorKind = enum {
     StaleComponentRef,
 };
 
-// ─── Arithmetic helpers ──────────────────────────────────────────────────
-
 /// Integer division with division-by-zero check. Returns `null` on divide
 /// by zero — the caller turns the error into a `RuntimeError`.
 pub fn intDiv(lhs: i64, rhs: i64) ?i64 {
@@ -319,8 +312,6 @@ pub fn intMulChecked(lhs: i64, rhs: i64) ?i64 {
     return std.math.mul(i64, lhs, rhs) catch null;
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "Value arithmetic int + int yields int" {
     const a = Value.fromInt(2);
     const b = Value.fromInt(3);
@@ -328,9 +319,9 @@ test "Value arithmetic int + int yields int" {
 }
 
 test "Value arithmetic int + float forbidden (no implicit coercion)" {
-    // The type-checker rejects this; the interpreter never sees the
-    // expression. The assertion is that a tag mismatch fails `Value.eql`, so
-    // the contract is explicit at runtime.
+    // The type-checker rejects this and the interpreter never sees it; what is
+    // asserted is that a tag mismatch fails `eql`, making the contract explicit
+    // at runtime too.
     const a = Value.fromInt(2);
     const b = Value.fromFloat(2.0);
     try std.testing.expect(!a.eql(b));
@@ -354,17 +345,15 @@ test "IntegerOverflow detected in ReleaseSafe" {
 }
 
 test "comparison between incompatible Values is a compile-time impossibility (asserts)" {
-    // The type-checker is the gate. At runtime, comparing values of
-    // different tags returns `false` — the test documents the contract.
+    // The type-checker is the gate; at runtime a tag mismatch is `false`.
     const a = Value.fromInt(1);
     const b = Value.fromBool(true);
     try std.testing.expect(!a.eql(b));
 }
 
 test "compound assignment +=, -=, *=, /=, %= behave per spec" {
-    // Compound ops are de-sugared by the interpreter into "load + op + store"
-    // before this module is involved. The test confirms the underlying
-    // helpers behave correctly.
+    // The interpreter de-sugars these into "load + op + store" before this
+    // module is involved; what is checked here are the underlying helpers.
     try std.testing.expectEqual(@as(?i64, 7), intAddChecked(5, 2));
     try std.testing.expectEqual(@as(?i64, 3), intSubChecked(5, 2));
     try std.testing.expectEqual(@as(?i64, 10), intMulChecked(5, 2));

@@ -1,8 +1,6 @@
-//! Emission primitives — small wrapper around `std.ArrayListUnmanaged(u8)`
-//! that tracks indentation and offers a few `printf`-style helpers. The
-//! codegen output is text Zig source; `zig fmt` will reformat trivia at
-//! build time so we only need to keep the structural indentation roughly
-//! right.
+//! Emission primitives — a wrapper around `std.ArrayListUnmanaged(u8)` tracking
+//! indentation, plus `printf`-style helpers. Output is Zig source text and `zig
+//! fmt` reformats trivia at build time, so only structural indentation matters.
 
 const std = @import("std");
 
@@ -14,12 +12,10 @@ pub const Writer = struct {
     gpa: std.mem.Allocator,
     indent: u32 = 0,
     /// Set by `lower.zig` whenever an emitted expression allocates from the
-    /// rule's threaded frame-arena allocator (`fa`) — string concat.
-    /// Consumed by the rule-classification two-pass: a
-    /// rule fn takes the conditional `fa` param iff its body emission set
-    /// this (Zig rejects both an unused param and a pointless discard, so
-    /// the classification must be exact — hence flag-on-emission, not a
-    /// body-walk approximation).
+    /// rule's frame arena (`fa`). A rule fn takes the conditional `fa` parameter
+    /// iff its body emission set this, and the classification must be EXACT
+    /// because Zig rejects both an unused parameter and a pointless discard —
+    /// hence flag-on-emission rather than a body-walk approximation.
     arena_used: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) Writer {
