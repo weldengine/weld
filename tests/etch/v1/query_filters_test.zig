@@ -1,15 +1,15 @@
 //! Interpreter ↔ filtered ECS queries.
 //!
 //! Exercises the interpreter's per-rule entity selection driven by the cached
-//! matching-archetype set (brief AD-1): presence (`has`), exclusion
+//! matching-archetype set: presence (`has`), exclusion
 //! (`not has`), value field-filters (`{ field == value }` and the ordered
 //! `{ field > value }` form), and full `and` / `or` / `not` composition. Each
 //! fixture rule writes a marker (`hit += 1`) onto the components it matches, so
 //! the test can assert WHICH entities were visited by reading the marker back,
 //! plus the per-rule matched-entity count via the public observable accessors.
 //!
-//! Every test runs on `std.testing.allocator`, so the suite doubles as the
-//! milestone's zero-leak gate: a missed `deinit` fails the test.
+//! Every test runs on `std.testing.allocator`, so the suite doubles as a
+//! zero-leak gate: a missed `deinit` fails it.
 
 const std = @import("std");
 const etch = @import("weld_etch");

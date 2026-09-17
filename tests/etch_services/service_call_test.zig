@@ -1,5 +1,5 @@
-//! End-to-end proof of the Phase 1 tree-walker service path (M1.1.15.2 G2,
-//! `etch-abi-zig.md` §8.7): a `.d.etch` declares, the type-checker resolves, the
+//! End-to-end proof of the Phase 1 tree-walker service path
+//! (`etch-abi-zig.md` §8.7): a `.d.etch` declares, the type-checker resolves, the
 //! interpreter dispatches into an ordinary Zig function, and a Zig error union
 //! comes back as an Etch `throw` a `try` / `catch` consumes.
 //!

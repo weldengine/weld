@@ -35,7 +35,7 @@ test "1000 query iterations allocate zero bytes after init" {
         _ = try world.spawn(gpa, Transform{}, Velocity{});
     }
 
-    // E3 queries own a heap-allocated matches list — build the query
+    // A query owns a heap-allocated matches list — build it
     // BEFORE the snapshot window so its construction allocation does
     // not count as steady-state. The dispatch loop itself stays
     // allocation-free.

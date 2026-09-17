@@ -1,13 +1,13 @@
 //! Permanent fail-fast watchdog for in-process concurrency tests.
 //!
-//! Wraps an ENTIRE test — worker spawn/join AND `Scheduler.deinit`'s worker
-//! `join()` — so a deadlock/livelock FAILS with a state dump in `<= timeout`
-//! instead of hanging silently until the CI build-runner kills the process at
-//! ~60 s. The deinit-join site is exactly the gap that masked the M1.0.1
+//! Wraps an ENTIRE test — worker spawn and join AND `Scheduler.deinit`'s own
+//! worker `join()` — so a deadlock or livelock FAILS with a state dump within
+//! the timeout instead of hanging silently until the CI build-runner kills the
+//! process at ~60 s. The deinit-join site is the gap that masked a
 //! windows-2025/ReleaseSafe scheduler hang: the dispatcher-spin watchdog in
-//! `publishWaveAndWait` does not cover it. This is the `engine-zig-conventions.md`
-//! §13 "wait-on-resource ⇒ ≤5 s internal timeout, fail not hang" rule made
-//! permanent, generalizing M0.2.1's `no_alloc_steady_state` watchdog.
+//! `publishWaveAndWait` does not reach it. It makes
+//! `engine-zig-conventions.md` §13 — wait on a resource ⇒ ≤ 5 s internal
+//! timeout, fail rather than hang — permanent.
 //!
 //! Usage — arm on the FIRST line and `defer disarm()` immediately, so disarm
 //! is the LAST defer to run (LIFO), i.e. AFTER the scheduler's deinit-join:
@@ -92,9 +92,9 @@ pub const Watchdog = struct {
                     sched.dumpStateTo(out) catch {};
                 }
                 out.flush() catch {};
-                // The test's threads/workers are stuck — joining would hang
-                // too. Abort with code 2 (the SchedulerLivelock signal,
-                // matching M0.2.1's `no_alloc_steady_state` watchdog).
+                // The test's threads and workers are stuck, so joining would
+                // hang too. Abort with code 2 — the SchedulerLivelock signal
+                // the stress harness counts hangs by.
                 std.process.exit(2);
             }
             std.Io.sleep(self.io, .{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};

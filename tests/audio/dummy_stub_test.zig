@@ -1,9 +1,7 @@
 //! Audio Dummy stub round-trip.
 //!
-//! Covers the acceptance test from the M0.3 brief:
-//!   - "Dummy backend init/deinit + play_sound + stop" — init backend,
-//!     play_sound returns valid VoiceId, stop with that VoiceId without
-//!     crash, deinit clean.
+//! Init the backend, `play_sound` returns a valid `VoiceId`, `stop` on that id
+//! does not crash, and `deinit` is clean.
 
 const std = @import("std");
 const weld_audio = @import("weld_audio");

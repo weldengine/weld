@@ -1,11 +1,9 @@
-//! `bindgen-check` and the `.d.etch` emitter (M1.1.15.2 G3,
-//! `engine-c-bindings.md` §8.4).
+//! `bindgen-check` and the `.d.etch` emitter (`engine-c-bindings.md` §8.4).
 //!
 //! These exercise the SAME two functions the CLI calls — `emit_detch.emit` and
 //! `emit_detch.diff` — so a regression in either is caught by `zig build test`
-//! and not only by the manual step. What the tests cannot do is run the build
-//! step itself; that counterfactual was run by hand, from BOTH sides, and its
-//! verbatim output is in the milestone brief.
+//! and not only by the manual step. What they CANNOT do is run the build step
+//! itself; that counter-factual is a hand run, from both sides.
 
 const std = @import("std");
 const emit_detch = @import("emit_detch");
@@ -151,8 +149,6 @@ test "the emitted artifact is a .d.etch the compiler accepts" {
     try std.testing.expect(toy.spec.methods[0].throws != toy.spec.methods[1].throws);
 }
 
-// ─── M1.1.15.2 G6 — the physics service and the sensor events ───────────────
-
 const physics = @import("forge_services");
 const sensor_events = @import("forge_sensor_events");
 
@@ -168,9 +164,10 @@ test "the physics service's committed .d.etch matches its ServiceSpec" {
     var lines: std.ArrayListUnmanaged(emit_detch.DiffLine) = .empty;
     defer lines.deinit(gpa);
     try std.testing.expect(!try emit_detch.diff(gpa, physics.declaration_source, rendered, &lines));
-    // FOUR queries, the FIVE mutation wrappers of G11, and `set_joint_motor` at G14. Pinned, and the number is the
-    // point: a method added to the spec without regenerating the artifact is the drift
-    // E1902 exists for, and this count is what makes the walk below non-vacuous.
+    // FOUR queries, FIVE mutation wrappers and `set_joint_motor`. Pinned, and
+    // the number is the point: a method added to the spec without regenerating
+    // the artifact is the drift E1902 exists for, and this count is what makes
+    // the walk below non-vacuous.
     try std.testing.expectEqual(@as(usize, 10), physics.spec.methods.len);
 }
 
@@ -202,7 +199,7 @@ test "the emitted physics and trigger declarations parse and resolve" {
 
 test "an Entity field carries no default and never a live handle" {
     // `0` IS A LIVE HANDLE to slot 0 generation 0 — the mistake
-    // `CharacterMoveResult.ground_body` made before M1.1.12 — and a raw all-ones
+    // `CharacterMoveResult.ground_body` once made — and a raw all-ones
     // pattern renders `-1`, which is not an entity in any reading. `Entity.null`,
     // the corpus's own spelling, is refused by the type-checker as a field
     // default. So the emitter writes NO default, which is the only thing that

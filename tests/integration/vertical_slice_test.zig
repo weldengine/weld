@@ -1,21 +1,17 @@
-//! M0.9 vertical slice — integration test.
+//! The vertical slice, in four facets:
 //!
-//! E3 facets:
 //!  1. Headless simulation — boot a World, spawn EXACTLY 100 entities, tick the
-//!     five cooked Etch rules 120× at fixed 60 Hz, assert count + that the
-//!     simulation ran (per-entity Counter == ticks).
-//!  2. Cross-file scene/prefab validation (E2-B) over the authored typed-ext
-//!     files: E1786/E1791/E1782 resolve; the two prefab `Health` refs are E1793
-//!     (cross-file type-import is the Phase 1 resolver — brief Blockers #2), so
-//!     the test asserts E2-B BEHAVIOUR, not diags == 0.
-//!
-//! E4 facets:
-//!  3. Asset cook + load — the slice's `slice_albedo.png` imports + cooks
-//!     through the real M0.6 pipeline to a `.texture.bin` whose header +
-//!     metadata + payload are exactly an 8×8 RGBA8 texture.
-//!  4. Input → sim effect — a synthesized SPACE key edge toggles the host
-//!     pause `Control`, and `stepIfRunning` gates the simulation on it (the
-//!     observable M0.3 input effect).
+//!     five cooked Etch rules 120× at a fixed 60 Hz, and assert both the count
+//!     and that the simulation ran (per-entity `Counter` == ticks).
+//!  2. Cross-file scene and prefab validation over the authored typed-extension
+//!     files: E1786, E1791 and E1782 resolve, while the two prefab `Health`
+//!     references are E1793 — cross-file type import belongs to the Phase 1
+//!     resolver — so what is asserted is the BEHAVIOUR and not `diags == 0`.
+//!  3. Asset cook and load — the slice's `slice_albedo.png` imports and cooks
+//!     through the real pipeline into a `.texture.bin` whose header, metadata
+//!     and payload are exactly an 8×8 RGBA8 texture.
+//!  4. Input → simulation effect — a synthesized SPACE key edge toggles the
+//!     host pause `Control`, and `stepIfRunning` gates the simulation on it.
 //!
 //! The render itself is not asserted here: the renderer fills buffers via
 //! `mapBuffer`, which the Null backend leaves `Unsupported`, so no slice-render
@@ -103,7 +99,7 @@ test "vertical slice cross-file scene/prefab validation" {
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .prefab_ref_not_found)); // E1786
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .prefab_base_not_found)); // E1791
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .duplicate_uuid)); // E1782
-    // Phase-0 boundary (brief Blockers #2): each prefab's `Health` ref is E1793.
+    // Each prefab's `Health` reference is E1793: see the header.
     try std.testing.expectEqual(@as(usize, 2), countCode(diags.items, .prefab_component_type_unknown));
     try std.testing.expectEqual(@as(usize, 2), diags.items.len);
 }
@@ -136,7 +132,7 @@ test "vertical slice input: SPACE toggles pause, gating the sim" {
     defer world.deinit(gpa);
     try sim.bootAndSpawn(&world, gpa);
 
-    // M0.3 raw pipeline: pumping a window key event populates InputRawState
+    // The raw pipeline: pumping a window key event populates `InputRawState`
     // (the keyboard array is scancode-indexed; SPACE = scancode 57 on evdev +
     // win32).
     var raw = InputRawState{};
@@ -169,7 +165,7 @@ test "vertical slice IPC: ModifyComponent over the transport applies to the live
     const new_x: f32 = before[0] + 7.5;
     const msg = ipc_loop.buildF32Edit(&world, 0, "Position", "x", new_x).?;
 
-    // The editor-stub sends a real ModifyComponent over the real M0.7 transport
+    // The editor stub sends a real `ModifyComponent` over the real transport
     // (AF_UNIX socket + framing); the slice's runtime-side decodes it and
     // applies it to the LIVE World via the diff_runner write path. This is the
     // C0.8 semantic loop end-to-end — assertable headless on every platform

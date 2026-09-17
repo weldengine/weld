@@ -1,4 +1,4 @@
-//! WAV import → cook → load round-trip (brief §Acceptance).
+//! WAV import → cook → load round-trip.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
@@ -8,7 +8,7 @@ const tone_wav = @embedFile("data/tone.wav");
 test "wav import-cook-load round-trip" {
     const gpa = std.testing.allocator;
 
-    // Oracle: the E3 RIFF PCM decoder.
+    // Oracle: the RIFF PCM decoder.
     var audio = try assets.importers.wav.decode(gpa, tone_wav);
     defer audio.deinit(gpa);
 

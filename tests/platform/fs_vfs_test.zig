@@ -1,12 +1,11 @@
 //! VFS resolver + `mmapFile`.
 //!
-//! Covers the two acceptance tests called out in the M0.3 brief:
-//!   - "VFS resolves assets:// cache:// user:// to absolute paths"
-//!   - "mmapFile reads cooked asset zero-copy"
+//! `assets://`, `cache://` and `user://` resolve to absolute paths, and
+//! `mmapFile` reads a cooked asset zero-copy.
 //!
-//! Tests with external resources have an internal timeout pattern via
-//! the std.testing.allocator (leak detector) + a bounded loop where
-//! applicable. `engine-zig-conventions.md` §13 expects ≤ 5 s wall-clock.
+//! Anything waiting on an external resource is bounded: the leak detector of
+//! `std.testing.allocator` plus a bounded loop where one applies, under
+//! `engine-zig-conventions.md` §13's 5 s ceiling.
 
 const std = @import("std");
 const weld = @import("weld_core");

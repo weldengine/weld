@@ -966,7 +966,7 @@ test "add-on-present on a SPARSE component fires the replacement, not the add" {
     // Add-on-present through the observer-dispatching apply. The direct entry
     // `addComponentDynamic` returns `DuplicateComponent` here — deliberately,
     // it is not the command-buffer contract — and this path tests presence
-    // FIRST and overwrites in place, which G3 made work for the sparse row by
+    // FIRST and overwrites in place, which reaches the sparse row by
     // routing `componentBytes` and `markComponentChangedDyn`.
     const c: Command = .{ .add_component = .{
         .entity = e,

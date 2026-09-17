@@ -1,14 +1,9 @@
-//! Instancing batcher tests — Phase 0 / M0.4.
+//! The instancing batcher: 1000 entities over 10 distinct (mesh, material)
+//! pairs give exactly 10 buckets, and 100k entities over 100 pairs stay under
+//! 100 drawcalls.
 //!
-//! Covers brief §Acceptance criteria > Tests:
-//! - `batcher groups entities by mesh and material` — 1000 entities, 10
-//!   distinct (mesh, material) → exactly 10 buckets
-//! - `batcher produces under 100 drawcalls for 100k entities on 100 distinct
-//!   mesh-material pairs` — strict assertion on the drawcalls counter
-//!
-//! The inline tests in `batcher.zig` cover the same cases. This file
-//! exists to match the brief check-list and expose the test via
-//! `tests/render/`.
+//! `batcher.zig`'s inline tests cover the same cases; this file exposes them
+//! under `tests/render/`.
 
 const std = @import("std");
 const render = @import("weld_render");

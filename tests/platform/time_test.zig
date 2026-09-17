@@ -1,13 +1,10 @@
 //! `sleepPrecise` precision and `nowNanos` monotonicity.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "sleepPrecise ms accuracy" — < 2 ms (Win32) / < 1 ms (Linux)
+//! `sleepPrecise` accuracy and `nowNanos` monotonicity.
 //!
-//! The brief gates are tight; CI runners are noisy. We allow a 5 ms
-//! ceiling on the inline measurement and document the brief gates in
-//! the test comment. The strict gates live in the dedicated bench
-//! (tests/platform/time_test.zig is for correctness, not perf
-//! certification — that comes in C0.7 acceptance benches Phase 1+).
+//! The specified gates — under 2 ms on Win32, under 1 ms on Linux — are tight
+//! and CI runners are noisy, so the ceiling asserted inline is far looser: this
+//! file is for CORRECTNESS, and the strict gates belong to the bench.
 
 const std = @import("std");
 const weld = @import("weld_core");
@@ -25,8 +22,8 @@ test "sleepPrecise ms accuracy" {
     const elapsed = time.nowNanos() - start;
 
     try std.testing.expect(elapsed >= 1_000_000);
-    // CI tolerance: brief gate is 2 ms (Win32) / 1 ms (Linux). We allow
-    // 50 ms here because GitHub Actions macOS / Linux runners can stall
+    // CI tolerance: the specified gate is 2 ms on Win32 and 1 ms on Linux, and
+    // 50 ms is allowed here because GitHub Actions macOS / Linux runners stall
     // arbitrarily under contention. The bench harness (Phase 1+) will
     // enforce the tight gate on the reference machine cold-isolated.
     try std.testing.expect(elapsed < 50_000_000);

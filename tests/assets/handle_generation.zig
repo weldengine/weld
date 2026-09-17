@@ -1,13 +1,11 @@
 //! Asset registry stale-handle acceptance test.
 //!
-//! Covers the E1 acceptance criterion (brief §Acceptance ▸ Tests):
-//! `test "stale handle after unload is rejected"` — allocate a handle
-//! ("load"), capture it, unload, and assert the captured handle no longer
-//! resolves (generation mismatch).
+//! Allocate a handle ("load"), capture it, unload, and assert the captured
+//! handle no longer resolves — a generation mismatch.
 //!
-//! E1 exercises this at the registry surface (the day-1-frozen identity
-//! layer). The full importer → cook → load → unload round-trip wires this
-//! same registry into the async loader at E5.
+//! Exercised at the REGISTRY surface, which is the frozen identity layer; the
+//! full importer → cook → load → unload round-trip wires that same registry
+//! into the async loader and is covered in `loader_async.zig`.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

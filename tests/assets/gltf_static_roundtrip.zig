@@ -1,4 +1,4 @@
-//! GlTF static import → cook → load round-trip (brief §Acceptance).
+//! glTF static import → cook → load round-trip.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
@@ -8,7 +8,7 @@ const cube_gltf = @embedFile("data/cube.gltf");
 test "gltf static import-cook-load round-trip" {
     const gpa = std.testing.allocator;
 
-    // Oracle: the E3 decoder.
+    // Oracle: the decoder.
     var mesh = try assets.codecs.gltf.decode(gpa, cube_gltf);
     defer mesh.deinit(gpa);
 

@@ -1,8 +1,7 @@
 //! `setAffinity` + `setPriority` smoke on spawned thread.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "setAffinity + setPriority on spawned thread" — thread completes
-//!     work after both calls return without error.
+//! A spawned thread completes its work after `setAffinity` and `setPriority`
+//! both return without error.
 
 const std = @import("std");
 const weld = @import("weld_core");
@@ -38,10 +37,10 @@ test "setAffinity + setPriority on spawned thread" {
 
     // Pin to core 0 — always exists. macOS no-ops.
     try threading.setAffinity(t, 0);
-    // Brief acceptance criterion says ".high" but on POSIX without
-    // CAP_SYS_NICE that requires SCHED_FIFO/RR. macOS no-ops anyway.
-    // We test .normal for portability — the contract is "returns without
-    // error", which we honor on all three platforms.
+    // `.normal` and not `.high`: on POSIX without `CAP_SYS_NICE` the latter
+    // requires `SCHED_FIFO`/`RR`, and macOS no-ops either way. The contract
+    // under test is "returns without error", which holds on all three
+    // platforms.
     try threading.setPriority(t, .normal);
 
     t.join();

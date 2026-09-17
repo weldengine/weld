@@ -249,8 +249,8 @@ test "removing a still-required requisite is SKIPPED and SIGNALLED" {
     try world.addComponentDynamic(gpa, e, mesh, &word(1));
 
     // No error: the removal is SKIPPED. An error here would abort a tick from
-    // the flush, which is the channel the brief refuses in its own words — "a
-    // deferred command turned into an unobservable tick failure".
+    // the flush — "a deferred command turned into an unobservable tick
+    // failure", which is the channel the contract refuses.
     try world.removeComponentDynamic(gpa, e, t);
 
     // The invariant HOLDS: `Mesh` is present and so is its closure.

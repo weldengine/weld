@@ -1,5 +1,5 @@
-//! Step (i) of the S2 brief: Wayland message-table layout gate. For the
-//! four interfaces the spike actually wires (`wl_surface`, `xdg_surface`,
+//! Wayland message-table layout gate. For the four interfaces actually wired
+//! (`wl_surface`, `xdg_surface`,
 //! `xdg_toplevel`, `zxdg_toplevel_decoration_v1`), pin:
 //!   * request opcodes match the protocol XML order,
 //!   * listener slot ordering matches the protocol XML event order,

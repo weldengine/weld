@@ -343,7 +343,7 @@ test "an all-negative query whose exclusion is SPARSE excludes per entity" {
 
     // `DynamicQuery` alone gets this WRONG, and the reason is structural rather
     // than a bug in it: its `without_ids` filter is evaluated at ARCHETYPE
-    // level, and since G3 a sparse component is in no archetype's signature —
+    // level, and a sparse component is in no archetype's signature —
     // so the exclusion matches nothing to exclude and both entities survive.
     // The two entities share one archetype here (`Frozen` routes away), which
     // is what makes the archetype-level answer indistinguishable.

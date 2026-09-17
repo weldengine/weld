@@ -1,14 +1,11 @@
 //! Wayland concurrent createWindow + destroyWindow stress.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "concurrent createWindow + destroyWindow" — 8 threads × 1000
-//!     iterations, timeout 5 s. Validates that the Wayland backend's
-//!     module-level state (libwayland loader once-init,
-//!     `wayland.live_state`) tolerates concurrent access.
+//! Concurrent `createWindow` and `destroyWindow` — 8 threads, timeout 5 s —
+//! against the Wayland backend's module-level state: the libwayland loader's
+//! once-init and `wayland.live_state`.
 //!
-//! The brief also calls this out as a target for the lefthook pre-push
-//! `-fsanitize=thread` rerun — the explicit data-race check happens
-//! there, in addition to the functional pass here.
+//! This is the FUNCTIONAL pass. The explicit data-race check is the lefthook
+//! pre-push `-fsanitize=thread` rerun.
 //!
 //! Skipped on non-Linux runners.
 
@@ -17,10 +14,9 @@ const builtin = @import("builtin");
 const weld = @import("weld_core");
 
 const NUM_THREADS: u32 = 8;
-// 1000 iterations is the brief target. We knock it down to 100 here
-// because each iteration round-trips with the compositor — on real
-// hardware that's microseconds, but headless / nested compositor
-// setups can stretch significantly.
+// The target is 1000 iterations, knocked down to 100 here because each one
+// round-trips with the compositor: microseconds on real hardware, but a
+// headless or nested compositor stretches that considerably.
 const ITERATIONS_PER_THREAD: u32 = 100;
 const TIMEOUT_MS: u64 = 30000;
 

@@ -307,7 +307,7 @@ test "composite steady-state — queries + change detection + cmd + observers do
     }
 
     // Build queries before the snapshot — their matches list is
-    // heap-allocated (E3) so construction must NOT count against
+    // heap-allocated, so construction must NOT count against
     // steady-state delta.
     var q_integrate = try world.queryFiltered(gpa, &.{ ecs.Transform, ecs.Velocity }, .{});
     defer q_integrate.deinit(gpa);

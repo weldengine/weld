@@ -1,6 +1,6 @@
-//! GAL capture-helper surface coverage — Phase 0 / M0.5 (item 2, §13).
+//! GAL capture-helper surface coverage.
 //!
-//! Exercises the public `gal.capture` surface (`encodePpm` + the
+//! Exercises the public `gal.capture` surface (`encodePpm` plus the
 //! `Device.captureFrameToPPM` method) so its bodies are analyzed by a real
 //! consumer (cf. `engine-zig-conventions.md` §13 — a public GAL symbol must
 //! be exercised by a test that calls it with realistic data and asserts the

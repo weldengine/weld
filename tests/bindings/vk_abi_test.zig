@@ -1,5 +1,5 @@
-//! Step (i) of the S2 brief: ABI gate for the generator emitting
-//! `src/core/platform/vk.zig`. For a representative subset of Vulkan
+//! ABI gate for the generator emitting `src/core/platform/vk.zig`. For a
+//! representative subset of Vulkan
 //! structs, the generated Zig `extern struct` is asserted to have the
 //! same `@sizeOf`, `@alignOf` and per-field `@offsetOf` as a reference
 //! `extern struct` declared inline here.

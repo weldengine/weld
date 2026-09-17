@@ -1,13 +1,12 @@
-//! Direct PPM PSNR gate — Phase 0 / M0.5 (item 1).
+//! The direct PPM PSNR gate.
 //!
-//! Reads the smoke-test capture at `out/smoke_test.ppm` (produced by a prior
-//! `run-example-triangle --smoke-test --capture-frame=N` step) and compares
-//! it against the committed golden via PSNR — WITHOUT rebuilding the render
-//! stack and WITHOUT re-running the triangle. This replaces the CI
-//! `runtime-smoke-test` "Verify PSNR" step's `zig build test-render-capture`
-//! invocation, which rebuilt the test target in ReleaseSafe AND re-spawned
-//! the triangle even though the PPM was already produced by the prior step.
-//! Cost saved: ~3-5 min/run (cf. brief item 1).
+//! Reads the smoke-test capture at `out/smoke_test.ppm`, produced by a prior
+//! `run-example-triangle --smoke-test --capture-frame=N` step, and compares it
+//! against the committed golden by PSNR — WITHOUT rebuilding the render stack
+//! and WITHOUT re-running the triangle. Going through
+//! `zig build test-render-capture` instead rebuilds the test target in
+//! ReleaseSafe and re-spawns the triangle for a PPM the previous step has
+//! already produced, at a measured 3-5 minutes per CI run.
 //!
 //! This module imports only `std` (no `weld_render`), so `zig build
 //! test-ppm-psnr` compiles in seconds. The gate skips when either PPM is
