@@ -99,8 +99,8 @@ pub const Body = struct {
     /// their first-order orientation step.
     ///
     /// **The integrators are not a safety net for the other two**: their step
-    /// sits below `if (flags[i].gameplay_authority) continue;`, so a `.solver`
-    /// body heals on the next tick and a `.gameplay` body is never visited.
+    /// sits below the gameplay-authority skip, so a `.solver` body heals on the
+    /// next tick and a `.gameplay` body is never visited.
     ///
     /// Every consumer that rotates a vector by this field relies on it: inertia
     /// transport, lever arms, the sleep chord, the ray transport of

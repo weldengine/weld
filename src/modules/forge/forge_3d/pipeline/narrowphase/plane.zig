@@ -54,8 +54,8 @@
 //! **Dependency discipline.** Imports `foundation` (math) and the sibling
 //! `support.zig` ONLY — never `gjk.zig`, `epa.zig`, `manifold.zig`, `raycast.zig`,
 //! `shapecast.zig`, `weld_forge`, `body*.zig`, `config.zig` or `broadphase.zig`.
-//! Identical to `raycast.zig` and `shapecast.zig`; the scalar is the comptime `T`
-//! and `forge_3d` instantiates it at `config.Real`. The shared `LocalHit` and
+//! The scalar is the comptime `T` and `forge_3d` instantiates it at
+//! `config.Real`. The shared `LocalHit` and
 //! `CastHit` live in `support.zig` for exactly this reason: the adapter that
 //! dispatches between a convex and a half-space by shape class must return ONE
 //! type.

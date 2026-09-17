@@ -350,6 +350,24 @@ positive observation rendered by the SAME apparatus in the SAME execution — ma
 present, capacity to fire proven, and a witness shaped like the real case. A guard
 written against a known failure diagnoses; it never authorises.
 
+### Three criteria for every comment written or touched
+
+Normative in `engine-zig-conventions.md` §12, which is the authority. This copy
+exists because a session starts before the corpus is attached.
+
+Three criteria, in this order, at every comment added or modified.
+
+- **Utility** — does the comment say what the code does not, and would a reader
+  get it wrong without it? If not, it goes.
+- **Coherence** — does it say something true, and ONLY ONCE? A fact written in
+  two places is two texts to correct the day it changes, and only one will be
+  found; and a sentence that restates the tag, or the name of the declaration
+  three lines below it, says nothing.
+- **Concision** — the load kept, stated short.
+
+No numeric bound: no line ceiling, no density target. §12's former three-line cap
+is WITHDRAWN.
+
 ### Cautious interpretation of inherited bench baselines
 
 - **The 14.2 ms this entry used to attribute to M0.1 HAS NO SOURCE, and the

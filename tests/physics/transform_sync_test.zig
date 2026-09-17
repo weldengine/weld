@@ -2915,9 +2915,7 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
 // `Body.rotation` IS UNIT AFTER EVERY GAMEPLAY WRITE. Three entries into one
 // invariant, each with its own test: `setBodyTransform`,
 // `moveKinematic`, and `sync_in.zig`'s per-tick seam, which forwards
-// `Transform.rot` — a bare `[4]f32` carrying no invariant. The integrator
-// renormalises BELOW `if (flags[i].gameplay_authority) continue;`, so nothing
-// downstream repairs a `.gameplay` body.
+// `Transform.rot` — a bare `[4]f32` carrying no invariant.
 
 /// `|q|² − 1` for the STORED rotation, in `f128`. INDEPENDENT of the writer's
 /// arithmetic by construction: widening is exact, this never divides or takes a

@@ -738,11 +738,6 @@ pub const BodyManager = struct {
     /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot` — a bare
     /// `[4]f32` carrying no invariant at all.
     ///
-    /// **Nothing downstream repairs it.** The single per-tick renormalisation
-    /// lives in `integration.zig` BELOW
-    /// `if (flags[i].gameplay_authority) continue;`, so a `.solver` body heals on
-    /// the next tick and a `.gameplay` body is never visited.
-    ///
     /// The refusal is at TRUE ZERO and covers the three inputs that denote no
     /// rotation: a zero quaternion, one carrying a NaN, one carrying an infinity
     /// — `normalize` is unguarded, so it answers NaN, NaN and an all-zero
@@ -2699,9 +2694,7 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
 
 const testing = std.testing;
 
-/// The stored quaternion is unit, judged in `f128`. INDEPENDENT of the writer's
-/// arithmetic by construction: it squares and sums in a wider type and never
-/// divides, and comparing `|q|²` removes the `sqrt` they would have shared.
+/// The stored quaternion is unit, judged in `f128`.
 fn expectUnit(q: Quatr) !void {
     const a = q.toArray();
     var acc: f128 = 0;
