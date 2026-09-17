@@ -4,7 +4,7 @@
 //! and applies the instance's overrides (both forms). Covers: an override-free
 //! instance equals the hand-authored equivalent (same archetype + bytes), both
 //! override forms (`Comp.field = v` and `Comp { field: v }`), N instances loading
-//! into the ECS through the M1.0.5 loader, and the single-entity boundary.
+//! into the ECS through the loader, and the single-entity boundary.
 //!
 //! Components are POD scalar (the cook's only component kind), so fixtures use f32.
 

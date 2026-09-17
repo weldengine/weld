@@ -1,15 +1,12 @@
-//! S6 schema_hash tests (per brief § Acceptance criteria › Tests).
-//!
-//! Two acceptance criteria:
-//!   - "schema_hash is comptime-stable" — recomputing the hash of the
+//! Two properties of `schema_hash`:
+//!   - it is COMPTIME-STABLE — recomputing the hash of the
 //!     same struct in this test must equal the hash baked into the
 //!     framing layer at production-code compile time. Re-evaluating
 //!     the comptime expression at the test's compilation time and
 //!     comparing it to a hard-coded reference proves both runs
 //!     produce the same value.
-//!   - "modifying a field changes the schema_hash" — an alternate
-//!     struct defined inside this file with one field renamed must
-//!     produce a different hash from the production struct.
+//!   - and it FOLLOWS THE SCHEMA — an alternate struct defined in this file
+//!     with one field renamed must hash differently from the production one.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -51,7 +48,7 @@ test "renaming a field changes schemaHash" {
 test "schemaHash distinguishes every message type" {
     // A subtle hash collision between two message types would mask
     // the schema-mismatch detection. Verify all 23 hashes are unique
-    // (13 S6 messages + `ShmRegionsHandoff` (E1) + 9 catalogue messages (E2)).
+    // (13 protocol messages, `ShmRegionsHandoff`, and 9 editor commands).
     const hashes = [_]u64{
         messages.schemaHash(messages.ProtocolHello),
         messages.schemaHash(messages.ProtocolHelloAck),

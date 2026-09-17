@@ -1,9 +1,8 @@
-//! Extended message-catalogue tests (brief § Acceptance
-//! criteria › Tests). Two layers:
+//! The extended message catalogue, in two layers:
 //!
 //!   1. Pure framing round-trips (`encode` → `decode` parity) for every
-//!      message added in M0.7 — portable, no runtime, validates the
-//!      wire format + schema_hash of each new type.
+//!      message of the catalogue — portable, no runtime, validating the
+//!      wire format and `schema_hash` of each type.
 //!   2. End-to-end handler behaviour against the real `weld-runtime`
 //!      binary (POSIX-gated, like `crash_recovery.zig`; the SCM_RIGHTS
 //!      pivot makes the cross-process attach work on macOS too):

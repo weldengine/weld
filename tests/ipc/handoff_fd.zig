@@ -2,7 +2,7 @@
 //!
 //! Exercises the SCM_RIGHTS primary-attach pivot (`engine-ipc.md`
 //! §4.8) at the `ShmRegion` level, one rung above the raw-socket fd
-//! loopback of `tests/ipc/fd_passing.zig` (the S6 G7 test):
+//! loopback of `tests/ipc/fd_passing.zig`:
 //!
 //!   1. Side A (editor) creates a region with `ShmRegion.create` and
 //!      keeps its fd via `ShmRegion.fd()`.

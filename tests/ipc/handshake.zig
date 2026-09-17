@@ -1,4 +1,4 @@
-//! S6 handshake tests — full `ProtocolHello` ↔ `ProtocolHelloAck`
+//! The handshake — a full `ProtocolHello` ↔ `ProtocolHelloAck`
 //! round-trip via `IpcServer` + `IpcClient`, exercised in-process
 //! with a dedicated thread for the runtime side (the server's
 //! `acceptOne` is blocking).

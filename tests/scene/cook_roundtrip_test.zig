@@ -4,9 +4,9 @@
 //! (`weld_core.scene.accessor`), and asserts that entities, archetypes, UUIDs,
 //! names, and parent links survive the round-trip byte-for-byte in meaning.
 //!
-//! Resource-block + determinism assertions are added in E3 (per the milestone
-//! découpage); the writer already serializes resources, but this E2 gate covers
-//! the entity/archetype/identity surface.
+//! The resource-block and determinism assertions live elsewhere: the writer
+//! serializes resources, and what this file covers is the entity, archetype and
+//! identity surface.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

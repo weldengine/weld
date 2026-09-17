@@ -143,7 +143,7 @@ test "prefab re-cook is byte-identical" {
 }
 
 test "cookPrefab rejects a scene source" {
-    // `extends` is COOKED as of M1.0.6 E5 (see tests/scene/extensions_test.zig);
+    // `extends` IS cooked (see `tests/scene/extensions_test.zig`);
     // here we only assert a `.prefab.etch` holding a `scene` is rejected.
     const gpa = std.testing.allocator;
     const scene_src =

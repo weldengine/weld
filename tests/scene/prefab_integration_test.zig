@@ -1,9 +1,9 @@
-//! M1.0.6 E3/E4/E6 — cross-module capstone: one scene exercising prefab
-//! instancing (with a per-field override), an entity→entity cross-reference, and
-//! an active extension, end to end (Etch cook → `.scene.bin` → ECS load). Asserts
-//! entity count, an overridden field, the resolved reference handle, the added
-//! extension component, and that the `on_attach` Tier-0 seam fired (hook
-//! EXECUTION is M1.0.9 — see extensions_test.zig).
+//! The cross-module capstone: ONE scene exercising prefab instancing with a
+//! per-field override, an entity→entity cross-reference and an active extension,
+//! end to end from the Etch cook through `.scene.bin` to the ECS load. It
+//! asserts the entity count, the overridden field, the resolved reference
+//! handle, the added extension component, and that the Tier-0 `on_attach` seam
+//! fired — executing the hook text is `extensions_test.zig`'s.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -145,24 +145,24 @@ test "scene with prefab instances, a cross-ref and an extension loads end to end
     const light_id = world.componentId("Light").?;
     const t1 = result.uuid_to_entity.get(uuidBytes(0x11)).?;
     const t2 = result.uuid_to_entity.get(uuidBytes(0x12)).?;
-    // E3: per-field override on T1 (intensity 3000), inherited on T2 (1500).
+    // Per-field override on T1 (intensity 3000), inherited on T2 (1500).
     try std.testing.expectApproxEqAbs(@as(f32, 3000.0), @as(f32, @bitCast(std.mem.readInt(u32, world.componentBytes(t1, light_id).?[0..4], .little))), 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 1500.0), @as(f32, @bitCast(std.mem.readInt(u32, world.componentBytes(t2, light_id).?[0..4], .little))), 1e-3);
 
-    // E4: Targeter.Target.who resolved to Boss's runtime handle.
+    // `Targeter.Target.who` resolved to Boss's runtime handle.
     const boss = result.uuid_to_entity.get(uuidBytes(0xb0)).?;
     const targeter = result.uuid_to_entity.get(uuidBytes(0x02)).?;
     const target_id = world.componentId("Target").?;
     const who = std.mem.readInt(u64, world.componentBytes(targeter, target_id).?[0..8], .little);
     try std.testing.expectEqual(@as(u64, @bitCast(boss)), who);
 
-    // E6: Boss got the extension's Weapon, and the on_attach seam fired once.
+    // Boss got the extension's `Weapon`, and the `on_attach` seam fired once.
     const weapon_id = world.componentId("Weapon").?;
     const wb = world.componentBytes(boss, weapon_id) orelse return error.WeaponNotAdded;
     try std.testing.expectEqual(@as(i32, 25), std.mem.readInt(i32, wb[0..4], .little));
     try std.testing.expectEqual(@as(u32, 1), AttachSpy.fired);
 
-    // M1.0.9 boundary: on_attach not executed → Boss.Health.max still 100.
+    // The hook TEXT is not executed here, so `Boss.Health.max` is still 100.
     const health_id = world.componentId("Health").?;
     try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, world.componentBytes(boss, health_id).?[4..8], .little));
 }

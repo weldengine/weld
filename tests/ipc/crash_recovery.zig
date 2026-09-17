@@ -1,9 +1,9 @@
-//! Crash-recovery + best-effort-replay tests (C0.4; brief E4). Drives
-//! the real `weld-runtime` binary end-to-end. **Un-gated to Windows in
-//! M0.7 / E4** (was POSIX-only): the per-OS differences are isolated in
-//! `spawnAndHandshake` (POSIX hands the viewport fd off via SCM_RIGHTS;
-//! Windows opens the named mapping by name, §2.2) and in the cleanup
-//! helpers. Clock/sleep use cross-platform `std` (no POSIX externs).
+//! Crash recovery and best-effort replay (C0.4), driving the real
+//! `weld-runtime` binary end to end. It runs on Windows as well as POSIX: the
+//! per-OS differences are isolated in `spawnAndHandshake` — POSIX hands the
+//! viewport fd off via SCM_RIGHTS, Windows opens the named mapping by name
+//! (§2.2) — and in the cleanup helpers, while the clock and sleep come from
+//! cross-platform `std` with no POSIX externs.
 //!
 //!   - kill -9 runtime → the editor's receive ends in EOF (detection).
 //!   - kill -9 → editor restarts + the first post-restart Echo round-trips.
@@ -18,8 +18,7 @@
 //! (`engine-zig-conventions.md` §13). The measured figures live in
 //! `validation/s6-go-nogo.md`.
 //!
-//! Windows behaviour is validated on Guy's PC + CI; macOS dev exercises
-//! the same paths thanks to the SCM_RIGHTS pivot (E1).
+//! macOS exercises the same paths as Linux thanks to the SCM_RIGHTS pivot.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -160,13 +159,13 @@ test "runtime kill -9 → the editor's receive ends in EOF" {
     sleepMs(io, 50); // let the runtime settle into its loops
     try platform_process.kill(&sp.proc);
 
-    // Detection is asserted as BEHAVIOUR — the receive ends in EOF — and never
+    // Detection is asserted as BEHAVIOUR — the receive ends in EOF — and NEVER
     // as a duration. The kill→EOF latency is a kernel scheduling quantity with
-    // no Weld code on its path; measured here it came out at 0-1 ms idle but
-    // 62-67 ms under the load `zig build test` creates for itself, and it did
-    // cross a 100 ms bound on one such run. Its home is the controlled
-    // measurement in `validation/s6-go-nogo.md` G4, per
-    // `engine-zig-conventions.md` §13, which keeps benchmarks out of tests.
+    // no Weld code on its path: measured here at 0-1 ms idle but 62-67 ms under
+    // the load `zig build test` creates for itself, and it crossed a 100 ms
+    // bound on one such run. Its home is the controlled measurement in
+    // `validation/s6-go-nogo.md`, `engine-zig-conventions.md` §13 keeping
+    // benchmarks out of tests.
     var scratch: [256]u8 = undefined;
     const detect_res = server.connection().recvFrame(&scratch);
     try std.testing.expectError(error.UnexpectedEof, detect_res);

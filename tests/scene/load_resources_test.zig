@@ -2,9 +2,9 @@
 //! heap. Cooks (in-memory, via the writer) a scene with one resource carrying a
 //! `string` field, loads it, and asserts the field reads back the cooked value:
 //! the loaded string is interned into `weld_core.memory.persistent` as a
-//! **refcounted** block owned by the resource's `StringSlot` (M1.1.1-HF1 / D1 —
-//! no longer owned by `LoadResult`), released here at test teardown exactly as
-//! the resource owner (the interp) would. `weld_core` only.
+//! **refcounted** block owned by the resource's `StringSlot` and NOT by
+//! `LoadResult`, released here at test teardown exactly as the resource's real
+//! owner — the interpreter — would. `weld_core` only.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -86,7 +86,7 @@ test "loader rejects a resource collection field (guard)" {
     // Resource `Bag { items: T[] }` — one 8-byte `CollectionSlot` at offset 0. The
     // scene cook writes a zeroed slot (ptr == 0); the loader must REJECT it (a
     // null container would crash the interpreter / leak an installed one), not
-    // silently install it. Full block reconstruction at load is M1.6, not here.
+    // silently install it. Full block reconstruction at load belongs elsewhere.
     const bag = try world.registry.registerComponentRaw(gpa, .{
         .name = "Bag",
         .size = 8,

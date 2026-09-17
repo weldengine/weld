@@ -1,12 +1,14 @@
-//! `extensions:` clause: parse + AST + descriptors (Claude.ai
-//! amendment). The clause `extensions: [STRING_LITERAL]` on `entity`/`instance`
-//! (after `uuid`/`parent`, before components) records active-extension prefab
-//! names by name (like `parent:` / cross-refs, D-B).
+//! The `extensions:` clause, from the parse to the executed hook.
 //!
-//! The cook/binary portions of E5/E6 (Entity Extensions Table + Prefab ID Table,
-//! the `extends` cook + `.prefab.bin` hooks section, `applyExtensions` + the
-//! `on_attach` dispatch at load) land here once the `.prefab.bin` hooks-section
-//! shape blocker is resolved — see `briefs/M1.0.6-…` Blockers.
+//! `extensions: [STRING_LITERAL]` on an `entity` or an `instance` — after
+//! `uuid` and `parent`, before the components — records active-extension prefab
+//! names BY NAME, as `parent:` and the cross-references do.
+//!
+//! What follows covers the whole chain: the AST and the descriptors, the cook
+//! and its binary portions (the Entity Extensions Table, the Prefab ID Table,
+//! the `extends` cook and the `.prefab.bin` hooks section), then
+//! `applyExtensions` and the `on_attach` dispatch at load, and finally the
+//! execution of the cooked hook text.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -269,8 +271,8 @@ test "scene extensions clause populates the Entity Extensions + Prefab ID tables
     try std.testing.expectEqual(@as(u32, 0), acc.hookCount());
 }
 
-// ── M1.1.1-HF4 — fatal cook error E1797 on additive extension conflict (§30.5) ──
-// (was M1.0.18's non-fatal warning; reject ratified — `error.ExtensionAdditiveConflict`)
+// A FATAL COOK ERROR on an additive extension conflict (§30.5).
+// Reject is the ratified policy, and not a non-fatal warning — `error.ExtensionAdditiveConflict`)
 
 /// Multi-entry in-process resolver mapping extension prefab names to their cooked
 /// bytes (the additive-conflict gate resolves extension component sets through
@@ -332,7 +334,7 @@ const ext_arsenal = // ArsenalModule: declares Weapon only
 // declare the same component, (b) an extension re-declares a base/earlier-extension
 // component, or (c) the same extension is listed twice — is a FATAL cook error
 // (`E1797 ExtensionAdditiveConflict` → `error.ExtensionAdditiveConflict`), the
-// strictly-additive `extends` reject policy (M1.1.1-HF4). Disjoint components cook
+// strictly-additive `extends` reject policy. Disjoint components cook
 // cleanly. Together with the runtime rejects (`error.ExtensionComponentConflict`
 // for a/b, `error.ExtensionAlreadyActive` for c) this guarantees `cooked ⇒ loadable`.
 
@@ -571,10 +573,10 @@ test "runtime activate rejects a component the entity already carries" {
     try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
 }
 
-// ── E6 — load applies extension components + fires the on_attach seam ──
+// LOAD applies the extension components and fires the `on_attach` seam.
 
-/// Tier-0 `on_attach` dispatch spy (the M1.0.9 Etch execution is out of scope;
-/// E6 only proves the seam fires with the right name + hook text).
+/// Tier-0 `on_attach` dispatch spy: it proves the SEAM fires with the right name
+/// and hook text, and nothing about executing that text.
 const AttachSpy = struct {
     var fired: u32 = 0;
     var saw_name: bool = false;
@@ -659,7 +661,7 @@ test "load applies extension components and the on_attach seam fires" {
     try std.testing.expect(AttachSpy.saw_text);
 
     // The bare Tier-0 seam (an AttachSpy callback, no Etch bridge bound) does NOT
-    // execute the hook — Health.max stays 100. The M1.0.9 headline test below
+    // execute the hook — Health.max stays 100. The execution test below
     // binds the real interpreter callback and asserts the `+= 50` effect (150).
     const health_id = world.componentId("Health").?;
     const hb = world.componentBytes(npc, health_id).?;
@@ -672,13 +674,13 @@ fn uuidBytes(last: u8) [16]u8 {
     return u;
 }
 
-// ── M1.0.9 — hook EXECUTION (the E6 seam now re-parses + runs the cooked text) ──
+// HOOK EXECUTION — the seam re-parses and runs the cooked text.
 //
-// These tests live here rather than inline in `interp.zig` (where the brief lists
+// These tests live here rather than inline in `interp.zig` (where one might list
 // the activate/deactivate/has/active tests) because they need the cook pipeline
 // (`scene_cook.cookPrefab`) + the loader, which would form a circular import from
 // `interp.zig` (`scene_cook` already imports `interp`). Same tier-dependency
-// reason as the M1.0.8 cross-file tests. See the brief's Recorded deviations.
+// reason as the cross-file tests.
 
 /// Cook `CombatModule extends BaseCharacter` to `.prefab.bin` bytes (adds
 /// `Weapon`; `on_attach` does `Health.max += 50`, `on_detach` `-= 50`). The
@@ -965,9 +967,9 @@ test "on_attach-issued structural command is drained before on_spawned" {
     // callback enqueues `add_component(Marker)` into the world's shared observer-
     // deferred buffer — the exact channel `execHookText` routes a hook's deferred
     // structural change into. (The interpreter has no `entity.add(T)`/`spawn` in
-    // bodies — S4 boundary — and tag mutation is not in the cookable hook subset,
+    // bodies, and tag mutation is not in the cookable hook subset,
     // so a cooked Etch hook cannot itself issue a deferred structural change; this
-    // Tier-0 stand-in exercises the same drain channel + ordering. See the brief's
+    // Tier-0 stand-in exercises the same drain channel and ordering. See the
     // Recorded deviations.)
     world.registerOnAttach(null, &DrainSpy.attachCb);
     try world.observer_registry.registerOnSpawned(gpa, null, &DrainSpy.onSpawnedCb);
@@ -1002,7 +1004,7 @@ const DrainSpy = struct {
     }
 };
 
-// ─── M1.B / G6 — an extension whose components are ALL sparse ───────────────
+// AN EXTENSION WHOSE COMPONENTS ARE ALL SPARSE.
 
 test "an ALL-SPARSE extension activates without touching the archetype" {
     const gpa = std.testing.allocator;
@@ -1066,7 +1068,7 @@ test "an ALL-SPARSE extension activates without touching the archetype" {
     // The extension's ONLY component is sparse, so `addComponentsDynamic` adds
     // nothing to the signature and takes its self-migration guard — the path
     // `world.zig` names as reachable from production only through
-    // `loader.activateExtension`, and which before G3-bis stranded the entity's
+    // `loader.activateExtension`, and which without the routing stranded the entity's
     // location on a freed slot.
     const arch = world.dynamicArchetype(arch_before_ext.archetype_idx);
     try std.testing.expect(!arch.hasComponent(weapon_id));
