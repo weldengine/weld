@@ -296,11 +296,11 @@ pub const ConstraintPoint = struct {
     /// warm-start applications the sum moves by the net change in `λₙ` over that run,
     /// and a point pushed then relaxed fully back to zero contributes zero.
     ///
-    /// It is therefore NEITHER the final `λₙ` (which the substeps rewrite) NOR a
-    /// boolean NOR a record of whether the point ever pushed — an earlier version of
-    /// this comment claimed the last of those, which the telescoping refutes. The
-    /// predicate is `total_normal_impulse != 0` on the value this sum ends the tick
-    /// with, taken literally; reference parity is on the arithmetic above.
+    /// It is therefore NEITHER the final `λₙ`, which the substeps rewrite, NOR a
+    /// boolean, NOR a record of whether the point ever pushed — the telescoping
+    /// refutes that last reading. The predicate is `total_normal_impulse != 0` on
+    /// the value this sum ends the tick with, taken literally; reference parity is
+    /// on the arithmetic above.
     ///
     /// NOT stored to the warm-start cache: that format is frozen at
     /// `(λₙ, world tangent)` and this quantity is per-tick bookkeeping, meaningless

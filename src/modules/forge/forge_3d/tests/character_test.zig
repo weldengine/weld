@@ -1032,8 +1032,8 @@ test "a capsule over the void is in_air on all five quantities" {
     // NOTHING in the scene but the character — whose own presence IS in the broadphase, and is
     // the only thing its downward sweep can find.
     //
-    // **This does NOT prove self-exclusion, and an earlier version of this comment claimed it
-    // did.** MEASURED: with the exclusion removed, this test and the four others that pin
+    // **This does NOT prove self-exclusion.** MEASURED: with the exclusion removed,
+    // this test and the four others that pin
     // `ground_body` to a real support all still pass. The reason is that what exclusion removes
     // is a contact between the probe and a body BIT-IDENTICAL to it at the same pose, whose
     // normal §3 declares geometrically UNDEFINED — and empirically that normal never qualifies
@@ -1207,9 +1207,9 @@ test "an exact tie is broken by the smaller BodyId under BOTH traversal orders" 
     // Without the tie-break the code keeps the LAST candidate offered, so:
     //   forward  [first, second] → no tie-break would answer `second`; the rule answers `first`
     //   reversed [second, first] → no tie-break would answer `first` too, same as the rule
-    // The forward case is therefore the one that pins the rule, and the reversed one shows the
-    // answer does not depend on the order. A first version of this test ran ONLY the reversed
-    // order and pinned nothing — measured: removing the tie-break broke no test at all.
+    // The forward case is therefore the one that PINS the rule and the reversed one
+    // shows the answer does not depend on the order. Running the reversed order alone
+    // pins nothing: removing the tie-break then breaks no test.
     for ([_]bool{ false, true }) |reversed| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);

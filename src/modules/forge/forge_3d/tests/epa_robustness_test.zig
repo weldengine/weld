@@ -2,11 +2,12 @@
 //!
 //! This file pins the `collideOrderedGeneric` (GJK → EPA → generateManifold)
 //! order-independence contract for deep, rotated convex pairs against
-//! INDEPENDENT separating-axis oracles (no GJK/EPA in the oracle path). At the
+//! INDEPENDENT separating-axis oracles (no GJK/EPA in the oracle path).
+//!
 //! It was written RED-FIRST: the polytope-corruption pin (wrong depth) and the
-//! 1-D Minkowski degenerate-normal pin both failed, and the
-//! order-equivalence sweep exposed the frame-dependence, BEFORE any `epa.zig` fix
-//! landed. The assertions target the ORACLE, never a recon transcript
+//! 1-D Minkowski degenerate-normal pin both failed, and the order-equivalence
+//! sweep exposed the frame-dependence, BEFORE any `epa.zig` fix landed. Every
+//! assertion targets the ORACLE and never a recon transcript
 //! (`engine-physics-forge.md` §3 Order-independence).
 //!
 //! Oracles:
@@ -288,13 +289,12 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
         try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
         try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
 
-        // Manifold-level EXACT bit negation — the CONSUMER guarantee (
-        // warm-start consumes manifolds, not EpaResults). On the count-1 point-core
-        // path, generateManifold's A-frame rotation is used ONLY for supporting-face
-        // selection; pointCoreContact returns `.normal = n_world` VERBATIM, so the
-        // The EPA bit-negation propagates to the manifold unchanged (a pure copy,
-        // platform-independent — no arithmetic on the normal between e.normal and
-        // the manifold).
+        // Manifold-level EXACT bit negation — the CONSUMER guarantee, warm-start
+        // consuming manifolds and not `EpaResult`s. On the count-1 point-core path
+        // `generateManifold`'s A-frame rotation serves ONLY supporting-face
+        // selection and `pointCoreContact` returns `.normal = n_world` VERBATIM, so
+        // the EPA bit-negation reaches the manifold unchanged — a pure copy, with
+        // no arithmetic on the normal in between.
         try testing.expect(ab.?.normal.eql(ba.?.normal.neg()));
 
         // Complement — the same bit negation at its SOURCE, the raw epa() normal
@@ -395,11 +395,11 @@ test "separated radius-0 boxes stay separated (band lower boundary)" {
 }
 
 test "rd-4 in-band false-deep is benign" {
-    // Complement of the "stay separated" boundary pin above: a core gap INSIDE the
-    // The band (`dist <= contact_margin`) must classify `.deep` (a non-enclosing
-    // terminal at noise distance from the origin) yet stay BENIGN downstream —
-    // near-zero penetration for hard cores, and the correct inflated depth for
-    // inflated boxes — in BOTH A/B orders.
+    // Complement of the "stay separated" boundary pin above: a core gap INSIDE
+    // the band (`dist <= contact_margin`) must classify `.deep` — a non-enclosing
+    // terminal at noise distance from the origin — yet stay BENIGN downstream:
+    // near-zero penetration for hard cores, the correct inflated depth for
+    // inflated boxes, in BOTH A/B orders.
     //
     // PRECISION: the gap is RELATIVE to the band, recomputed at `Real`. The band is
     // `m = conv_k · floatEps(Real) · coord_scale`, `coord_scale = |Δpos| +
