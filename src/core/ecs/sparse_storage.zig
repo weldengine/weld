@@ -127,13 +127,7 @@ pub const SparseSetStorage = struct {
     /// different pair leaves the count untouched, and the message names the
     /// field where the sets diverge.
     ///
-    /// Here, beside the fields, because here is where a field gets added. It
-    /// spent one round at file scope on a FALSE diagnosis — both
-    /// counter-factuals had compiled clean and I read that as a struct-body
-    /// `comptime` block not being analysed, when in fact my two mutation
-    /// patterns omitted the fields' `= 0` / `= .empty` defaults and had
-    /// silently matched nothing. A struct-body block IS analysed, measured with
-    /// an always-false probe; the move is undone rather than re-justified.
+    /// Beside the fields, because that is where a field gets added.
     const field_set_pin = [_][]const u8{
         "component_id", "elem_size",   "elem_align",
         "dense",        "added_ticks", "changed_ticks",
@@ -155,15 +149,12 @@ pub const SparseSetStorage = struct {
 
     /// Create an empty storage for `component_id`.
     pub fn init(component_id: ComponentId, elem_size: u16, elem_align: u16) SparseSetStorage {
-        // A component past the engine's own alignment bound would be stored
-        // mis-aligned by the `i * elem_size` row arithmetic, silently. The
-        // bound is `chunk_mod.ChunkAlignment`, which the table backend already
-        // applies to every SoA column, so this asserts the SAME contract rather
-        // than inventing a second one.
+        // Past this bound the `i * elem_size` row arithmetic stores mis-aligned,
+        // silently. It is `ChunkAlignment`, the same bound the table backend
+        // applies to every SoA column, and not a second one invented here.
         std.debug.assert(elem_align <= chunk_mod.ChunkAlignment);
-        // `@sizeOf` is a multiple of `@alignOf` for every Zig type, so a
-        // non-zero size that is not a multiple of its alignment cannot come
-        // from a real component and would break the row arithmetic.
+        // `@sizeOf` is a multiple of `@alignOf` for every Zig type, so a size
+        // that is not cannot come from a real component.
         std.debug.assert(elem_align == 0 or elem_size % elem_align == 0);
         return .{ .component_id = component_id, .elem_size = elem_size, .elem_align = elem_align };
     }
@@ -266,10 +257,9 @@ pub const SparseSetStorage = struct {
     /// correct argument for a zero-sized component.
     ///
     /// **Reserve-then-mutate** (invariant 7): every fallible step runs before
-    /// the first observable mutation, so a failure leaves the storage exactly
-    /// as it was — no half-written entry, and no `sparse[index]` designating an
-    /// uninitialised dense row. This is the repository's named invariant from
-    /// applied rather than re-derived.
+    /// the first observable mutation, so a failure leaves the storage exactly as
+    /// it was — no half-written entry, and no `sparse[index]` designating an
+    /// uninitialised dense row.
     ///
     /// Adding an entity that is already present is a programmer error and
     /// asserts: add-on-present is a REPLACEMENT and the decision belongs to the
@@ -496,8 +486,6 @@ pub const SparseStores = struct {
     }
 };
 
-// ─── inline tests — the seven invariants, one by one ──────────────────────
-//
 // Each invariant gets its own test and its own counter-factual, and the
 // counter-factual changes the OBJECT rather than the expected constant
 // (`engine-development-workflow.md` §5.5). Where an invariant is an ABSENCE it
@@ -531,15 +519,12 @@ const OneShotFail = struct {
     /// Allocation to fail, counted from zero over `alloc` ONLY. `null` fails
     /// nothing, which is how the count is measured.
     ///
-    /// **`resize` and `remap` are deliberately NOT counted, and that cost a
-    /// round.** Counting them looked more thorough and was wrong: an
-    /// `ArrayList` growing past its capacity first asks the allocator to extend
-    /// in place, and a refusal there is a ROUTINE MISS the list recovers from by
-    /// allocating a fresh block and copying. Failing it therefore induces no
-    /// OOM at all — the warm case of invariant 7 consumed its one shot on such
-    /// a resize and the add then SUCCEEDED, which is exactly the shape the test
-    /// read as the property failing. What this instrument must fail is the
-    /// allocation whose refusal ABORTS the operation, and that is `alloc`.
+    /// **`resize` and `remap` are deliberately NOT counted.** An `ArrayList`
+    /// growing past capacity first asks the allocator to extend in place, and a
+    /// refusal there is a ROUTINE MISS it recovers from by allocating fresh and
+    /// copying — so failing one induces no OOM and the add succeeds, which reads
+    /// as the property failing. What must fail is the allocation whose refusal
+    /// ABORTS the operation, and that is `alloc`.
     fail_at: ?usize,
     attempts: usize = 0,
 
@@ -587,8 +572,6 @@ const OneShotFail = struct {
         self.backing.rawFree(memory, alignment, ra);
     }
 };
-
-// ── Invariant 1 — swap-remove parity ──────────────────────────────────────
 
 test "invariant 1: swap-remove moves the trailing row AND both tick sidecars" {
     const gpa = testing.allocator;
@@ -647,8 +630,6 @@ test "invariant 1, counter-factual: removing the LAST entry relocates nothing" {
     try testing.expect(s.contains(e(0, 0)));
 }
 
-// ── Invariant 2 — no bitset, so no block skip ─────────────────────────────
-
 test "invariant 2: there is no bitset and no block-skip entry, and per-entry works" {
     // The ABSENCE, checked structurally at comptime so it cannot rot: the table
     // backend's block-granularity vocabulary must not exist here.
@@ -685,8 +666,6 @@ test "invariant 2: there is no bitset and no block-skip entry, and per-entry wor
     try testing.expectEqual(@as(usize, 6), scanned);
     try testing.expectEqual(@as(usize, 2), changed);
 }
-
-// ── Invariant 3 — despawn removes from every storage ──────────────────────
 
 test "invariant 3: the union sweep drops every sparse entry of an entity" {
     const gpa = testing.allocator;
@@ -738,8 +717,6 @@ test "invariant 3 + 6: a recycled index with a new generation inherits nothing" 
     try testing.expect(!s.contains(e(6, 0)));
 }
 
-// ── Invariant 4 — observer order at despawn ───────────────────────────────
-
 test "invariant 4: the union enumerates in ascending ComponentId" {
     const gpa = testing.allocator;
     var stores = SparseStores{};
@@ -772,8 +749,6 @@ test "invariant 4: the union enumerates in ascending ComponentId" {
     try testing.expectEqualSlices(ComponentId, &.{ 4, 8, 12 }, sink.seen[0..3]);
 }
 
-// ── Invariant 5 — zero-sized components ───────────────────────────────────
-
 test "invariant 5: a zero-sized component allocates no row buffer, ever" {
     const gpa = testing.allocator;
     var tag = SparseSetStorage.init(1, 0, 0);
@@ -802,8 +777,6 @@ test "invariant 5: a zero-sized component allocates no row buffer, ever" {
     try testing.expect(sized.rows_capacity > 0);
 }
 
-// ── Invariant 6 — EntityId generation ─────────────────────────────────────
-
 test "invariant 6: the sparse index is keyed by INDEX and generation decides" {
     const gpa = testing.allocator;
     var s = SparseSetStorage.init(1, 0, 0);
@@ -824,8 +797,6 @@ test "invariant 6: the sparse index is keyed by INDEX and generation decides" {
     // Slots below the inserted index are absent rather than uninitialised.
     for (s.sparse.items[0..5]) |slot| try testing.expectEqual(absent, slot);
 }
-
-// ── Invariant 7 — OOM rollback ────────────────────────────────────────────
 
 test "invariant 7: a failed add rolls back every fallible step, and a retry works" {
     // TWO sweeps, because one state cannot exercise both halves of the
