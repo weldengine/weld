@@ -199,9 +199,7 @@ test "on_despawned observer fires before chunk slot is reused" {
     defer DESPAWN_STATE = null;
 
     try world.registerOnDespawned(gpa, null, &onDespawnedObserver);
-    // Structural only: every mutation goes through the command buffer, which
-    // the access model deliberately has no category for. An empty set is
-    // therefore the true declaration, and it is written rather than defaulted.
+    // Empty declaration, as above: structural only.
     try sys.registerSystem(gpa, &world, .update, "despawn", spec_despawn, despawnSystem);
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
@@ -282,9 +280,7 @@ test "observer-issued structural mutations are queued for the next flush" {
     defer CHAIN_STATE = null;
 
     try world.registerOnSpawned(gpa, null, &onSpawnedChain);
-    // Structural only: every mutation goes through the command buffer, which
-    // the access model deliberately has no category for. An empty set is
-    // therefore the true declaration, and it is written rather than defaulted.
+    // Empty declaration, as above: structural only.
     try sys.registerSystem(gpa, &world, .update, "spawn_one", spec_spawn_one, spawnOneSystem);
 
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
@@ -308,9 +304,7 @@ test "observer-issued structural mutations are queued for the next flush" {
     // and on_spawned was NOT called for it.
     var sys2 = SystemScheduler.init();
     defer sys2.deinit(gpa);
-    // Structural only: every mutation goes through the command buffer, which
-    // the access model deliberately has no category for. An empty set is
-    // therefore the true declaration, and it is written rather than defaulted.
+    // Empty declaration, as above: structural only.
     try sys2.registerSystem(gpa, &world, .update, "noop", spec_noop, noopSystem);
     try sys2.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &chain_state);
 

@@ -459,11 +459,11 @@ test "a failed multi-sparse spawn leaves no half-populated entity" {
     // and retries"; a permanent-failure allocator exercises it strictly harder.
     //
     // The consequence for the success branch: it is reached only when `fail_at`
-    // is past the count this particular run performs, NOT because "a resize the
-    // list recovered from" — an earlier version of this comment said the latter
-    // and named a recovery the allocator's own semantics exclude. It stays
-    // because a spawn that succeeded must still be WHOLE, and `induced` is what
-    // keeps the sweep from passing by never entering the failure branch.
+    // is past the count this particular run performs, and NEVER because of "a
+    // resize the list recovered from" — the allocator's own semantics exclude
+    // such a recovery. It stays because a spawn that succeeded must still be
+    // WHOLE, and `induced` is what keeps the sweep from passing by never
+    // entering the failure branch.
     const gpa = testing.allocator;
 
     const pass1 = blk: {

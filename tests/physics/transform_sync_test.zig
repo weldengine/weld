@@ -2077,13 +2077,12 @@ test "a character pushes a simulated body and neither a kinematic nor a piloted 
     const vx_pil = pw.bm.linearVelocity(lanes[1].body).?.toArray()[0];
     const vx_sim = pw.bm.linearVelocity(lanes[2].body).?.toArray()[0];
 
-    // THE THIRD TERM, and its role is non-vacuity here too. The claim first written at
-    // this line — that a kinematic-versus-piloted comparison would pass under the old
-    // implementation — is FALSE and was refuted by running the counter-factual:
-    // `plannedPush` excludes the kinematic on body type, so with the push restored the
-    // kinematic reads 0 while the piloted one reads 6.666667 and the equality below
-    // catches it. What this assertion prevents is the other failure: three lanes where
-    // no character ever reached its target, on which `expectEqual(0, 0)` is green.
+    // THE THIRD TERM, and its role is non-vacuity. Do NOT read the equality below as
+    // passing under the old implementation: `plannedPush` excludes the kinematic on
+    // body type, so with the push restored the kinematic reads 0 while the piloted one
+    // reads 6.666667 and that equality catches it. What THIS assertion prevents is the
+    // other failure — three lanes where no character ever reached its target, on which
+    // `expectEqual(0, 0)` is green.
     try testing.expect(vx_sim > 0.01);
 
     // AND THE PILOTED ONE IS EXACTLY THE KINEMATIC ONE — no impulse reached either.

@@ -358,11 +358,10 @@ test "a cycle closed through a third system is refused too" {
     // successor is `a` and the predecessor is `b`, and they are distinct, so
     // reaching `b` takes walking `a`'s edges.
     //
-    // **It does NOT pin transitivity**, and an earlier form of this comment
-    // called it the discriminating case for the walk, which it is not: a
-    // bounded implementation that checks its seeds, expands ONE level and
-    // stops passes this test and the one above it. The four-node ring below
-    // is what refuses that form.
+    // **It does NOT pin transitivity**, and must not be read as the walk's
+    // discriminating case: a bounded implementation that checks its seeds,
+    // expands ONE level and stops passes this test and the one above it. The
+    // four-node ring below is what refuses that form.
     try sys.registerSystem(gpa, &world, .update, "chain_a", spec_chain_a, Nop(spec_chain_a).run);
     try sys.registerSystem(gpa, &world, .update, "chain_b", spec_chain_b, Nop(spec_chain_b).run);
     try std.testing.expectError(
