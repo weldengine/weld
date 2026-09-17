@@ -16,8 +16,8 @@
 //!   (range in `annot_pool`).
 //! - `comment_spans` is a parallel slab — not attached to NodeIds,
 //!   kept for a future trivia attachment.
-//! - `StableId` is absent (left at zero); it is owed by
-//!   when the editor injects `@id("uuid")`.
+//! - `StableId` is absent (left at zero). It is owed by the editor, which
+//!   injects `@id("uuid")`.
 //!
 //! Kind enums declare every EBNF v0.6 variant for API stability. The parser
 //! produces a subset; call sites switching on a kind enum must terminate
