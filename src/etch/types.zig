@@ -8065,8 +8065,6 @@ fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id
     }
 }
 
-// ─── tests ──────────────────────────────────────────────────────────────
-
 const parser_mod = @import("parser.zig");
 
 /// Bundle returned by the convenience `parseAndCheck` test helper —

@@ -1552,10 +1552,9 @@ pub const Parser = struct {
     /// `async` is parsed (its codegen rejects it); `throws` is parsed
     /// (its codegen folds into error handling).
     ///
-    /// the bodyless `.d.etch` form is NO LONGER out of scope
-    /// (this sentence used to say it was). Under `ParseMode.declaration_file`
-    /// every `fn` is signature-only, and one that carries a body is refused with
-    /// `E1900` at its opening brace.
+    /// The bodyless `.d.etch` form IS in scope: under
+    /// `ParseMode.declaration_file` every `fn` is signature-only, and one that
+    /// carries a body is refused with `E1900` at its opening brace.
     fn parseFnLike(self: *Parser, is_async: bool, allow_self: bool, allow_signature_only: bool, annotations: AnnotationRange) ParseError!ParsedFn {
         _ = try self.advance(); // 'fn'
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");

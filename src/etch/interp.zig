@@ -6760,8 +6760,6 @@ pub const Interpreter = struct {
     }
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
 fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     for (rd.resource_deps) |dep| {
         if (!world.resources.contains(dep.resource_id)) return false;
@@ -8021,8 +8019,6 @@ fn resolveTagOperandBits(ctx: *LowerWhenCtx, path_node: NodeId, out: *std.ArrayL
         try ctx.tag_table.collectUnder(ctx.gpa, buf.items, out);
     } else return error.InvalidProgram;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "run on empty AST returns zero-rule report" {
     const gpa = std.testing.allocator;
