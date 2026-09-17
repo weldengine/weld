@@ -1,19 +1,14 @@
-//! `@storage` consumed, and the Etch-side boundary of the day.
+//! `@storage` consumed, end to end from the annotation to the row.
 //!
-//! WRITTEN AT G1, when the gate's exit was a declared no-op: the mode reached
-//! the registry and nothing read it. That is no longer true — G2 delivered the
-//! backend and G3 the routing — so the no-op pin was REPLACED by its opposite
-//! rather than deleted, and this header is corrected rather than left standing
-//! beside its correction. What the file holds now: the recorded mode with its
-//! negative twin, the refusal diagnostics, an empty declaration, and the
-//! and — since G7 — a rule SELECTING an entity by a sparse component and
-//! writing its row, which is the G5 boundary pin replaced by its opposite.
+//! The recorded mode with its negative twin, the refusal diagnostics, an empty
+//! declaration, and a rule SELECTING an entity by a sparse component and
+//! writing its row — plus the union, `Changed<T>`, structural effects and the
+//! driver election under a sparse driver.
 //!
 //! Why the mode test matters more than its size suggests: `@storage` was
-//! recognised by the parser and validated for applicability since M0.8, and its
-//! VALUE was read by no code at all. This is the test that would have failed
-//! for the four months during which the annotation was a no-op, and there was
-//! none.
+//! recognised by the parser and validated for applicability for four months
+//! while its VALUE was read by no code at all. This is the test that would have
+//! failed throughout, and there was none.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
@@ -98,14 +93,9 @@ test "a sparse component leaves the archetype signature and lives in its own sto
 
     const e = try world.spawnDynamic(gpa, &[_]ComponentId{ burning, health });
 
-    // REPLACES the G1 pin `G1 leaves the mode a declared no-op: a sparse
-    // component still stores as table`, whose assertions were
-    // `expect(arch.hasComponent(burning))` and
-    // `expect(arch.hasComponent(health))` — both true then, because nothing
-    // read the mode. G3 is what ends that no-op, so the pin is replaced by its
-    // OPPOSITE rather than deleted: `burning` must now be ABSENT from the
-    // signature. (The G1 comment said G2 would change it; G2 delivered the
-    // backend and G3 the routing.)
+    // A SPARSE COMPONENT IS ABSENT FROM THE ARCHETYPE SIGNATURE. While the mode
+    // was a no-op both components were present here, and the difference between
+    // the two states is the whole of what the routing delivers.
     const loc = world.dynamicLocation(e).?;
     const arch = world.dynamicArchetype(loc.archetype_idx);
     try std.testing.expect(!arch.hasComponent(burning));
@@ -135,16 +125,16 @@ test "a sparse component leaves the archetype signature and lives in its own sto
 }
 
 test "an empty component declaration is legal, and its declared mode records" {
-    // The probe M1.B/G0 could not settle without compiling: the spec's own
-    // example of a sparse tag is `@storage(.sparse) component InCombat {}`, and
-    // NO Etch-declared empty component exists anywhere in the corpora. Reading
-    // the wiring said it should pass — `parseComponentDecl` loops
-    // `while (peek() != .rbrace)`, so an immediate `}` yields zero fields, and
-    // the type-checker has no field-count floor. This compiles that reading.
+    // AN EMPTY ETCH COMPONENT, which no corpus in the repository declares even
+    // though the spec's own example of a sparse tag is
+    // `@storage(.sparse) component InCombat {}`. Reading the wiring says it
+    // should pass — `parseComponentDecl` loops `while (peek() != .rbrace)`, so
+    // an immediate `}` yields zero fields, and the type-checker has no
+    // field-count floor — and this is what compiles that reading.
     //
-    // The zero-SIZE case has a table-side twin in production already
-    // (`Sleeping = extern struct {}`, `src/modules/forge/api/components.zig`),
-    // so what is new here is only the Etch spelling.
+    // The zero-SIZE case already has a table-side twin in production
+    // (`Sleeping = extern struct {}`, `src/modules/forge/api/components.zig`);
+    // what is new here is the Etch spelling.
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -232,37 +222,29 @@ test "a rule SELECTS an entity by a sparse component, and its body writes the ro
 
     const burning = world.registry.idOf("Burning").?;
     // Spawned from the REGISTRY DEFAULTS rather than a hand-built payload: the
-    // declaration says `remaining: float = 3.0`, so the default is the initial
+    // declaration says `remaining: float = 3.0`, so the default IS the initial
     // value, and a hand-built buffer would have to guess the layout the Etch
-    // front-end chose (a first version passed four bytes and tripped
-    // `assert(bytes.len == elem_size)` — my test, not the routing).
+    // front-end chose.
     const e = try world.spawnDynamic(gpa, &.{burning});
     try std.testing.expect(world.hasComponentDyn(e, burning));
-    // Etch's `float` is an f64 and the component is 8 bytes wide — measured, not
-    // assumed: a first version read an f32 at offset 0 and got 0, which is the
-    // low half of the f64. Three of this gate's failures were test premises
-    // about the Etch front-end and none was a routing defect.
+    // Etch's `float` is an f64 and the component is 8 bytes wide — measured and
+    // not assumed: an f32 read at offset 0 answers 0, which is the low half of
+    // the f64.
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), readF64(&world, e, burning), 1e-9);
 
     var report: weld_etch.RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
 
-    // THE G5 BOUNDARY PIN, REPLACED BY ITS OPPOSITE — the third time this
-    // milestone flips a pinned limit rather than deleting it, after
-    // `chunk.zig`'s "rejects empty component list" at G2 and G1's `@storage`
-    // no-op at G3.
+    // `2.0`, AND THE PATH IS WHAT MAKES IT SO. The selection goes through the
+    // mixed planner, which elects `Burning` as the driver — the only member, so
+    // smallest by default — walks its dense array, and hands each position to
+    // the shared per-entity body whose four guards take a storage-agnostic
+    // locator. The write `b.remaining -= 1.0` then lands in the sparse ROW
+    // through the bimodal `ComponentRef`.
     //
-    // What it asserted at G5: `3.0`, unchanged, because `when entity has
-    // Burning` resolved through `World.queryDynamic`, which matches by
-    // ARCHETYPE SIGNATURE — and since G3 a sparse component is in none, so the
-    // rule selected nothing and its body never ran. Measured, not predicted.
-    //
-    // What it asserts now: `2.0`. The selection goes through the mixed planner,
-    // which elects `Burning` as the driver — the only member, so smallest by
-    // default — walks its dense array, and hands each position to the shared
-    // per-entity body whose four guards take a storage-agnostic locator. The
-    // write `b.remaining -= 1.0` then lands in the sparse ROW through the
-    // bimodal `ComponentRef` G5 built.
+    // Resolved instead through `World.queryDynamic`, which matches by ARCHETYPE
+    // SIGNATURE, `when entity has Burning` selects NOTHING — a sparse component
+    // being in no signature — the body never runs and this reads `3.0`.
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), readF64(&world, e, burning), 1e-9);
 }
 
@@ -307,13 +289,11 @@ test "an all-negative rule VISITS an entity that carries only sparse components"
     var report: weld_etch.RuntimeReport = .{};
     try interp.stepOnce(&world, &report);
 
-    // THE OTHER HALF of the empty-archetype permission G2 opened and G3's report
-    // did not mention: G3 pinned that an all-negative query MATCHES the empty
-    // archetype (`dq.matching`), which is not the same claim as ITERATING it —
-    // "iterating a zero-column archetype has never been exercised anywhere",
-    // in the brief's own words. Measured here: `per_slot` starts at
-    // `@sizeOf(EntityId)`, so a zero-column archetype gets a real finite
-    // capacity, and the walk yields the entity.
+    // ITERATING the empty archetype, which is NOT the same claim as matching
+    // it: the matching is pinned elsewhere, on `dq.matching`, and a walk over a
+    // zero-column archetype was exercised nowhere. It works because `per_slot`
+    // starts at `@sizeOf(EntityId)`, so such an archetype gets a real finite
+    // capacity and the walk yields the entity.
     //
     // EXACTLY ONE: the `Frozen` carrier is excluded, so this is not "the rule
     // visits everything".
@@ -371,13 +351,12 @@ test "a disjunctive rule with a sparse term visits a both-matching entity ONCE" 
 /// `Changed<T>` sur un membre table quand le driver est sparse (le tick se lit
 /// par lookup, pas par scan)".
 ///
-/// Shaped after the established table-only test (`query_filters_test.zig`,
-/// "changed fires per-slot intra-archetype"): the change is produced INSIDE the
-/// tick by another rule and counted in a field, rather than stamped from
-/// outside before the first advance. A first version did the latter and failed
-/// on tick 1 — `initial_tick` is 0 and a `changed` filter tests
-/// `changedTick > last_run_tick`, so a stamp made before the clock moves is not
-/// a change. My premise, not the code.
+/// Shaped after the table-only test (`query_filters_test.zig`, "changed fires
+/// per-slot intra-archetype"): the change is produced INSIDE the tick by
+/// another rule and counted in a field, rather than stamped from outside before
+/// the first advance. Stamping from outside fails on tick 1 — `initial_tick` is
+/// 0 and a `changed` filter tests `changedTick > last_run_tick`, so a stamp
+/// made before the clock moves is not a change.
 const src_changed_mixed =
     \\@storage(.sparse)
     \\component Burning { remaining: float = 3.0 }
@@ -432,8 +411,6 @@ test "a change filter on a TABLE member holds when the driver is SPARSE" {
     // distinguish "the driver bounds the rule" from "the filter always passes".
     try std.testing.expectEqual(@as(i64, 0), readI64(&world, cold, hits));
 }
-
-// ─── M1.B / G8 — structural effects and observers under a SPARSE driver ─────
 
 const src_sparse_driven_add =
     \\@storage(.sparse)
@@ -512,12 +489,11 @@ test "the planner elects SPARSE, and the effect applies exactly once per matchin
     // driver-independent BY DESIGN; the cost is not. So the election is asserted
     // where it is decided, or this test's name would be a claim it cannot back.
     //
-    // *Since M1.B/P2-1 that place is the WALK and no longer the compilation:
-    // this asserted the plan built on an EMPTY world, which after the election
-    // moved is never what runs. The observable is taken ON the walk, so a walk
-    // that skipped its election could not satisfy it. The term's with-set names
-    // one member, sparse, so a sparse-driven walk IS a walk driven by
-    // `Burning` — the count carries the identity here.*
+    // *That place is the WALK and not the compilation: a plan built on an EMPTY
+    // world is never what runs. The observable is taken ON the walk, so a walk
+    // that skipped its election could not satisfy it — and the term's with-set
+    // names one member, sparse, so a sparse-driven walk IS a walk driven by
+    // `Burning` and the count carries the identity.*
     try std.testing.expectEqual(@as(u64, 1), report.sparse_driven_walks);
 
     // THE CORRECTNESS HALF — a multiplicity, never an order. The contract
@@ -553,15 +529,11 @@ test "the planner elects SPARSE, and the effect applies exactly once per matchin
     for (matching) |e| try std.testing.expect(world.hasComponentDyn(e, scorched));
 }
 
-// ─── M1.B / G9 — the counter is per TICK, on a `changed`-free program ───────
-
-/// **RE-POINTED at M1.B/P2-2, and the change repairs the test rather than only
-/// dodging a new diagnostic.** This program used `when entity has Mesh`, which
-/// is exactly the form P2-2 refuses statically — so it could no longer reach
-/// the RUNTIME refusal this test exists to count. Selecting on `Transform`
-/// instead leaves the requirer's presence unproven at compile time, which is
-/// the regime G9's channel owns, and makes the test honest about WHICH of the
-/// two channels it exercises.
+/// **THE SELECTION IS ON `Transform` AND NOT ON `Mesh`, deliberately.** Selecting
+/// on the requirer proves its presence at compile time, and the RUNTIME refusal
+/// this test counts would never be reached. Leaving it unproven is the regime
+/// this channel owns, and is what makes the test honest about which of the two
+/// channels it exercises.
 const src_requires_strip =
     \\component Transform { x: float = 0.0 }
     \\
@@ -592,8 +564,7 @@ test "the skip counter resets per tick even with NO `changed` filter" {
     // filter, so `stepOnce`'s `if (self.has_changed) world.beginFrame()` never
     // fires — which is exactly the regime the first version of the counter got
     // wrong. Without this assertion the test would pass on a program that DID
-    // carry one, and would not distinguish the two regimes at all: the defect
-    // caught in G8 by forcing `electDriver`, applied here before it can repeat.
+    // carry one and would not distinguish the two regimes at all.
     try std.testing.expect(!interp.has_changed);
 
     const transform = world.registry.idOf("Transform").?;
@@ -629,8 +600,6 @@ test "the skip counter resets per tick even with NO `changed` filter" {
     try std.testing.expect(world.hasComponentDyn(e, mesh));
     try std.testing.expect(world.hasComponentDyn(e, transform));
 }
-
-// ─── P1-2 — the union must apply EVERY term's per-entity filter ─────────────
 
 const src_union_two_sparse =
     \\component A { v: i32 = 0 }
@@ -685,13 +654,12 @@ test "P1-2: a union of two table-driven terms applies BOTH sparse filters" {
     try world.addComponentDynamic(gpa, e2, s2, &zero4);
 
     // THE SPARSE MEMBERS ARE MADE THE LARGEST, and without this the scene stops
-    // being a witness. Since M1.B/P2-1 the driver is elected AT THE WALK from
-    // live populations, where `S1` at 1 beats `A` at 3 and BOTH terms would be
-    // sparse-driven — the configuration this test exists to cover, a TABLE
-    // -driven term CARRYING a sparse member, would never occur and the test
-    // would stay green while measuring something else. Measured: with the
-    // padding the counter-factual on the dedup predicate reddens this test;
-    // without it, it reddens nothing at all.
+    // being a witness. The driver is elected AT THE WALK from live populations,
+    // where `S1` at 1 beats `A` at 3 and BOTH terms would be sparse-driven — so
+    // the configuration this test exists to cover, a TABLE-driven term CARRYING
+    // a sparse member, would never occur and the test would stay green while
+    // measuring something else. Measured: with the padding the counter-factual
+    // on the dedup predicate reddens this test; without it, it reddens nothing.
     //
     // 100 bystanders each, so `A` and `Hit` at 3 are the smallest members of
     // their terms and the election is `.table` on both.
@@ -716,8 +684,6 @@ test "P1-2: a union of two table-driven terms applies BOTH sparse filters" {
     try std.testing.expectEqual(@as(i32, 1), n2); // admitted by term 2 — {B, S2}
     try std.testing.expectEqual(@as(i32, 0), n3); // admitted by neither
 }
-
-// ─── Reprise / P1-4 — the arity is preserved, not capped in silence ─────────
 
 const src_seventeen =
     \\component R1 { v: i32 = 0 }
@@ -764,8 +730,6 @@ test "P1-4: a seventeenth requisite is not lost" {
     const r17 = world.registry.idOf("R17").?;
     try std.testing.expect(std.mem.indexOfScalar(ComponentId, world.registry.requiresClosure(big), r17) != null);
 }
-
-// ─── M1.B / P2-1 — the driver is elected AT THE WALK ───────────────────────
 
 /// One sparse member and one table member in the same with-set, which is the
 /// smallest shape in which an election has two outcomes.
@@ -933,8 +897,6 @@ test "P2-1 fix-as-you-go: requiresNamesOf frees exactly what it allocated" {
     try std.testing.expectEqualStrings("Transform", req[0]);
 }
 
-// ─── M1.B / P2-2 — the STATIC half of the `@requires` removal refusal ──────
-
 fn diagCodes(gpa: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged([]const u8)) !void {
     var pr = try weld_etch.parseSource(gpa, src);
     defer pr.deinit(gpa);
@@ -953,26 +915,24 @@ fn freeCodes(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) 
     list.deinit(gpa);
 }
 
-// ─── M1.B/P2-2 → P5 — `E1216` IS RETIRED, AND THIS FAMILY IS ITS RECORD ───
+// `E1216` IS RETIRED, AND THIS FAMILY IS ITS RECORD.
 //
-// The static refusal of a dead `@requires` removal refused CORRECT CODE five
-// times in three review rounds — a foreign receiver, a guarantee read as
-// permanent, a shadowed parameter name, an aliased removal, and a removal
-// performed by a call — and was removed by its own stop rule. Every test below
-// therefore asserts ZERO diagnostics, and each one is a program the checker
-// once refused or was one round away from refusing.
+// A STATIC refusal of a dead `@requires` removal refused CORRECT CODE five
+// times — a foreign receiver, a guarantee read as permanent, a shadowed
+// parameter name, an aliased removal, and a removal performed by a call — and
+// was withdrawn. Every test below therefore asserts ZERO diagnostics, and each
+// one is a program such a checker refused or was one case away from refusing.
 //
 // TWO THINGS A READER MUST NOT TAKE FOR COVERAGE. The six cases written as
 // NEGATIVE twins — `not`, one disjunct, a foreign receiver, a prior removal, a
-// rebound name, a second name — passed before the removal and pass after it, so
-// they no longer discriminate anything on this subject; they stay because the
-// programs are legal and that is worth pinning, not because they still bite.
-// And the counter-factual that restores the check reddens the four inverted
-// cases, the moved corpus fixture and the call case, and NOT those six.
+// rebound name, a second name — passed before the withdrawal and pass after it,
+// so they no longer discriminate anything on this subject; they stay because
+// the programs are legal and that is worth pinning, not because they still
+// bite. And the counter-factual that restores the check reddens the four
+// inverted cases, the moved corpus fixture and the call case, and NOT those six.
 //
-// The guarantee itself is asserted where it now lives: `tests/ecs/requires_test`
-// `G9/4`, `G9/5` and `P1-3` — a counted skip, no `on_remove`, and a grouped
-// removal that is allowed.
+// The guarantee itself is asserted where it lives, in `tests/ecs/requires_test`:
+// a counted skip, no `on_remove`, and a grouped removal that is allowed.
 
 const src_p22_guaranteed =
     \\component Transform { x: float = 0.0 }
@@ -1044,7 +1004,7 @@ const src_p22_two_hop =
 test "P2-2 -> P5: a TWO-HOP closure is accepted too" {
     // `Mesh` does not name `Transform`; `Body` does. The runtime's closure is
     // transitive and still refuses this removal at run — the transitivity is
-    // asserted at `requires_test` `G9/4`, on the world and not on the checker.
+    // asserted in `requires_test`, on the world and not on the checker.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
@@ -1077,8 +1037,6 @@ test "P2-2: a requirer in ONE disjunct is a legal removal" {
     try diagCodes(gpa, src_p22_one_disjunct, &codes);
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
-
-// ─── Review P1-C / P1-D — the receiver, and the guarantee's lifetime ───────
 
 const src_p22_foreign_receiver =
     \\component Transform { x: float = 0.0 }
@@ -1159,8 +1117,6 @@ test "P1-D -> P5: the REVERSED order is accepted, order no longer read" {
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
 
-// ─── Review P3 — the default is inverted, and the two forms that broke it ──
-
 const src_p3_masking =
     \\component Transform { x: float = 0.0 }
     \\
@@ -1210,16 +1166,14 @@ test "P3: a removal through a SECOND name retracts the guarantee too" {
     // The mirror image of the case above and the same cause: the retraction
     // was keyed by receiver, so a removal of the requirer through an alias was
     // not recorded and the guarantee survived a statement that destroyed it.
-    // `Mesh` is gone when `Transform` is removed, exactly as in the
-    // single-name form the P1-D pair already covers.
+    // `Mesh` is gone when `Transform` is removed, exactly as in the single-name
+    // form the pair above covers.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p3_alias, &codes);
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
-
-// ─── Review P5 — the CONTROL forms, which the inversion did not close ─────
 
 /// The requirer is removed by a CALL, not by a statement the checker reads as a
 /// removal. `removal_seen` is written at one site only — inside the `.remove`
@@ -1248,13 +1202,11 @@ test "P5: a removal through a CALL is legal, and was the fifth false refusal" {
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p5_call, &codes);
-    // Measured red before the removal: `1 diagnostic(s): E1216` on a program
+    // Measured red before the withdrawal: `1 diagnostic(s): E1216` on a program
     // whose second removal the runtime performs, the requirer being already
-    // gone. That is the fifth false refusal and the one the stop rule fired on.
+    // gone. That is the fifth false refusal, and the one that ended the check.
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
-
-// ─── Review P2-F — the requisite walk is sized on the graph ───────────────
 
 /// A cycle of 70 components. The walk declared `[64]StringId` and abandoned
 /// SILENTLY past it, so a cycle this long produced NO `requires_cycle` and the
@@ -1485,18 +1437,18 @@ test "P2-F: a cycle longer than the old 64-name frontier is refused" {
     var saw_cycle = false;
     for (codes.items) |c| {
         if (std.mem.eql(u8, c, "E0505")) saw_cycle = true;
-        // P1-G: every reference in this cycle is FORWARD for some member, and
-        // pass-1 resolution refused those. Nothing here is an unknown requisite.
+        // Every reference in this cycle is FORWARD for some member, and pass-1
+        // resolution used to refuse those. Nothing here is an unknown requisite.
         try std.testing.expect(!std.mem.eql(u8, c, "E0506"));
     }
     try std.testing.expect(saw_cycle);
 }
 
 /// A CHAIN of 70 requisites, not a cycle, whose last member the rule removes —
-/// declared in its NATURAL order, root first. It declared LEAF FIRST until
-/// P1-G, because `@requires` resolved in pass 1 and a forward reference was
-/// refused: a test whose declaration order is constrained by a defect documents
-/// the defect without saying so.
+/// declared in its NATURAL order, root first. Leaf-first is what a pass-1
+/// `@requires` resolution forces, a forward reference being refused there: a
+/// test whose declaration order is constrained by a defect documents the defect
+/// without saying so.
 const src_p2f_chain =
     \\@requires(C1)
     \\component C0 { v: i32 = 0 }
@@ -1721,17 +1673,15 @@ test "P2-F -> P5: a 70-name chain with a removal is accepted" {
     // THIS TEST LOST ITS OBJECT AND SAYS SO. It existed to prove the requisite
     // walk passes the old 64-name frontier, and the retired removal check was
     // that walk's only caller asking about a target other than the declaration
-    // itself. The frontier bound now rests entirely on `src_p2f_cycle` above,
-    // which reaches the same walk through `requiresReachesSelf` — a distinct
-    // source, verified, not this one read twice.
+    // itself. The frontier bound rests entirely on `src_p2f_cycle` above, which
+    // reaches the same walk through `requiresReachesSelf` — a distinct source,
+    // verified, and not this one read twice.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);
     try diagCodes(gpa, src_p2f_chain, &codes);
     try std.testing.expectEqual(@as(usize, 0), codes.items.len);
 }
-
-// ─── Review P1-G — a forward `@requires` reference resolves ────────────────
 
 const src_p1g_forward =
     \\@requires(Body)
@@ -1745,8 +1695,8 @@ test "P1-G: a `@requires` naming a component declared LATER resolves" {
     // everywhere else in the language; `checkRequiresAnnotation` ran in pass 1,
     // inside the loop that registers the symbols, so it asked the table for a
     // name it had not reached. A declaration order legal everywhere was illegal
-    // there — E0506 on correct code, the third instance of the class P1-C and
-    // P1-D closed.
+    // there — E0506 on correct code, the same class as the two receiver cases
+    // above.
     const gpa = std.testing.allocator;
     var codes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeCodes(gpa, &codes);

@@ -1,8 +1,8 @@
-//! `reference_500_lines.etch` — the M0.8 E7 full-grammar integration reference.
+//! `reference_500_lines.etch` — the full-grammar integration reference.
 //!
-//! One 500+ line file mixing EVERY v0.6 construct (Level-A foundations + the 17
-//! E4-E6 domain constructs + Level-C scene/prefab + generics + async). It is the
-//! at-scale integration proof:
+//! One 500+ line file mixing EVERY v0.6 construct: the Level-A foundations, the
+//! seventeen domain constructs, Level-C scene/prefab, generics and async. It is
+//! the at-scale integration proof:
 //!   • PARSE the whole file < 50 ms (measured median, the headline gate);
 //!   • TYPE-CHECK the whole file clean (every construct coexists in one unit);
 //!   • INTERPRET the Level-A behaviour (a dedicated `RefProbe` rule ticks the
@@ -69,7 +69,7 @@ test "reference_500_lines: ≥500 lines, parses clean, type-checks clean, parse 
     }
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
-    // PARSE-TIME — median of K passes, gate < 50 ms (the brief's headline).
+    // PARSE-TIME — median of K passes, gate < 50 ms.
     const K = 50;
     var samples: [K]u64 = undefined;
     var k: usize = 0;
@@ -86,11 +86,11 @@ test "reference_500_lines: ≥500 lines, parses clean, type-checks clean, parse 
         "[ref500] parse median ({s}): {d} ns ({d:.4} ms) over {d} passes\n",
         .{ @tagName(builtin.mode), median, @as(f64, @floatFromInt(median)) / std.time.ns_per_ms, K },
     );
-    // The brief's < 50 ms gate is a ReleaseSafe verdict (the S3 bench protocol —
-    // parse-time verdicts are taken in ReleaseSafe, never Debug). A Debug build
-    // walks the parser ~5-10× slower, so the strict gate is asserted only in a
-    // release mode; in Debug we only guard against a pathological regression.
-    // Guy's two-machine re-bench runs `zig build test-ref500 -Doptimize=ReleaseSafe`.
+    // The < 50 ms gate is a ReleaseSafe verdict: a parse-time verdict is never
+    // taken in Debug, where the parser walks 5-10× slower. So the strict gate is
+    // asserted in a release mode alone and Debug guards only against a
+    // pathological regression. The re-bench is
+    // `zig build test-ref500 -Doptimize=ReleaseSafe`.
     if (builtin.mode == .Debug) {
         try std.testing.expect(median < 300 * std.time.ns_per_ms);
     } else {

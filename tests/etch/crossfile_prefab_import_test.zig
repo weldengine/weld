@@ -1,11 +1,11 @@
-//! The E1793 unblock (the milestone's headline deliverable).
+//! The E1793 unblock.
 //!
-//! A `.prefab.etch` cannot declare its own components (typed-extension cardinality
-//! = exactly one `prefab`); it must `import` them. Before cross-file import, a
-//! valid prefab's component references wrongly tripped `E1793
-//! PrefabComponentTypeUnknown`. With E6's cross-arena component resolution, a
-//! prefab that imports its component types validates clean, and E1793 fires only
-//! for a genuinely-undeclared component.
+//! A `.prefab.etch` cannot declare its own components — typed-extension
+//! cardinality is exactly one `prefab` — so it must `import` them. Without
+//! cross-arena component resolution a valid prefab's component references trip
+//! `E1793 PrefabComponentTypeUnknown`; with it, a prefab that imports its
+//! component types validates clean and E1793 fires only for a genuinely
+//! undeclared component.
 
 const std = @import("std");
 const etch = @import("weld_etch");

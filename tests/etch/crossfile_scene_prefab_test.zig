@@ -1,6 +1,6 @@
-//! Cross-file scene/prefab validation. M0.8 delivered the
-//! intra-file resolution (E1782/E1786/E1791 against per-file sets); this
-//! exercises `etch.validateProject` over a minimal multi-file project graph:
+//! Cross-file scene/prefab validation: the intra-file resolution of E1782 /
+//! E1786 / E1791 runs against per-file sets, and this exercises
+//! `etch.validateProject` over a minimal multi-file project graph:
 //!   - E1786 PrefabRefNotFound — `instance of "X"` with X declared in NO file
 //!     (a prefab declared in ANOTHER file must resolve, i.e. not error).
 //!   - E1791 PrefabBaseNotFound — `prefab "Y" of "Z"` with Z in no file (a base

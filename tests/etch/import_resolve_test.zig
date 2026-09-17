@@ -1,11 +1,9 @@
-//! Cross-file `import` resolution under `validateProject`.
+//! Cross-file `import` resolution under `validateProject`: the module
+//! dependency graph, its topological order and cycle detection, then the
+//! selective-import resolution — cross-file type and const, and the codes that
+//! refuse.
 //!
-//! E4 scope (this file, initial): the module dependency graph + topological
-//! order + cycle detection (`E0108 ImportCycle`). E5/E6 extend it with the
-//! selective-import resolution tests (cross-file type/const, `E0104`).
-//!
-//! D-B reminder: the cycle code is `E0108`, NOT `E0101` (which is
-//! `DuplicateSymbol`, shipped since M0.x).
+//! The cycle code is `E0108` and NOT `E0101`, which is `DuplicateSymbol`.
 
 const std = @import("std");
 const etch = @import("weld_etch");
@@ -55,8 +53,8 @@ test "linear import is not a cycle" {
 test "selective import resolves a cross-file type" {
     const gpa = std.testing.allocator;
     // `main` imports the component `Health` from `lib` and uses it in a type
-    // position (`type HA = Health`). The imported `TYPE_IDENT` must resolve —
-    // no E0102 UndefinedSymbol (E6 applies the imported set to type resolution).
+    // position (`type HA = Health`). The imported `TYPE_IDENT` must resolve, so
+    // no E0102 UndefinedSymbol — the imported set reaches type resolution.
     const files = [_]etch.ProjectFile{
         .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
         .{ .name = "main.etch", .source =
@@ -87,7 +85,7 @@ test "unknown export errors (E0104)" {
 test "valid selective import emits no import diagnostic (binding)" {
     const gpa = std.testing.allocator;
     // `main` imports an item `lib` actually exports → the binding succeeds with no
-    // E0103/E0104 (TYPE_IDENT application + the prefab unblock are E6).
+    // E0103/E0104.
     const files = [_]etch.ProjectFile{
         .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
         .{ .name = "main.etch", .source = "import lib { Health }" },
@@ -115,7 +113,6 @@ test "selective import resolves a cross-file const" {
     const gpa = std.testing.allocator;
     // `lib` declares a top-level `const`; `main` selectively imports it. The
     // const is exported (public) and resolvable → no E0104 / E0107 / E0103.
-    // This clears the M1.0.7 deferred acceptance criterion (cross-file const).
     const files = [_]etch.ProjectFile{
         .{ .name = "lib.etch", .source = "const ROOM_CAP: int = 8" },
         .{ .name = "main.etch", .source = "import lib { ROOM_CAP }" },
@@ -131,8 +128,7 @@ test "selective import resolves a cross-file const" {
 test "import of a private item errors (E0107, activation)" {
     const gpa = std.testing.allocator;
     // `lib` declares a `private component`; `main` selectively imports it. The
-    // item is in `lib`'s exports flagged `.private` → exactly one E0107
-    // (activates the check wired-but-dormant since M1.0.7).
+    // item is in `lib`'s exports flagged `.private` → exactly one E0107.
     const files = [_]etch.ProjectFile{
         .{ .name = "lib.etch", .source = "private component Secret { hash: u32 = 0 }" },
         .{ .name = "main.etch", .source = "import lib { Secret }" },

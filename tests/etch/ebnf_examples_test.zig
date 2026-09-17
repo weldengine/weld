@@ -1,23 +1,19 @@
-//! M0.8 EBNF harness — extracts every fenced ```etch block from the in-repo
-//! example corpus (`ebnf_examples.md`) and feeds each to the parser, asserting
-//! that all of them parse without error. A doc example that uses a construct
-//! the parser does not yet support fails CI (brief §E1 + §E7).
+//! EBNF harness — extracts every fenced ```etch block from `ebnf_examples.md`
+//! and feeds each to the parser, so a documented example using a construct the
+//! parser does not support fails CI.
 //!
-//! The spec documents (`etch-grammar.md`, `etch-reference-part*.md`) are not in
-//! the repo, so the harness embeds an in-repo example corpus instead. The
-//! extraction machinery (markdown ```etch fences) is the reusable part: when
-//! the grammar enters the repo (re-evaluated in Phase 0) the same iterator can
-//! be pointed at it. As later stages land constructs, their example blocks are
-//! appended to `ebnf_examples.md`.
+//! The spec documents (`etch-grammar.md`, `etch-reference-part*.md`) live
+//! outside the repo, which is why the corpus is an in-repo file. The extraction
+//! machinery is the reusable half: the same iterator can be pointed at the
+//! grammar the day it enters the repo.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
 
 const examples_md = @embedFile("ebnf_examples.md");
 
-/// Minimum number of example blocks the corpus must contain. Raised to 82 at
-/// M0.9 / E2-A (the triple-quote block strictly increases the count vs the
-/// M0.8 close of 81), pinning the new block against accidental removal.
+/// Minimum number of example blocks the corpus must contain. Raised whenever a
+/// block is added, which is what pins the new one against accidental removal.
 const min_blocks: usize = 82;
 
 /// Iterates the fenced ```etch blocks of a markdown document, yielding the raw

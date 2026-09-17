@@ -1,13 +1,13 @@
 //! Interpreter hot-reload — edit a rule body → AST swap → behaviour change,
-//! measured under 500 ms (M0.8 E7).
+//! measured under 500 ms.
 //!
 //! There is no in-place AST swap: the Interpreter borrows `*const AstArena`
 //! and derives its compiled tables eagerly, so a reload re-parses the edited
 //! source into a fresh AST and re-runs `Interpreter.compile` on the SAME
 //! `World`. Live world state (entities, component bytes) survives because the
 //! world is external to the interpreter and `compile` is idempotent w.r.t.
-//! already-registered components (M0.8 E7 — reuse the existing id instead of
-//! erroring `DuplicateComponent`). The reload contract is a rule-body edit with
+//! already-registered components — it reuses the existing id rather than
+//! erroring `DuplicateComponent`. The reload contract is a rule-body edit with
 //! the declarations unchanged; a layout-changing reload is Phase 2+.
 
 const std = @import("std");
@@ -71,7 +71,7 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     var world = World.init();
     defer world.deinit(gpa);
 
-    // ── Running session on source A (+= 1 per tick).
+    // A running session on source A (+= 1 per tick).
     var pr_a = try weld_etch.parseSource(gpa, src_a);
     defer pr_a.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr_a.diagnostics.len);
@@ -89,8 +89,8 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     const v_a = readCounter(&world);
     try std.testing.expectEqual(@as(i64, 3), v_a);
 
-    // ── HOT-RELOAD critical section: edit (source B) -> re-parse -> AST swap
-    //    (re-compile on the SAME world) -> first tick under the new rule.
+    // The hot-reload critical section: edit to source B, re-parse, re-compile on
+    // the SAME world, then the first tick under the new rule.
     const t0 = time.nowNanos();
     var pr_b = try weld_etch.parseSource(gpa, src_b);
     defer pr_b.deinit(gpa);
@@ -102,8 +102,8 @@ test "interpreter hot-reload: edit rule body -> AST swap -> behaviour change < 5
     _ = try interp_b.runFor(&world, 1);
     const elapsed_ns = time.nowNanos() - t0;
 
-    // ── Behaviour change observed on the SAME entity / SAME live world:
-    //    the new rule added 5, so 3 -> 8 (the old +=1 rule no longer runs).
+    // The behaviour changed on the SAME entity of the SAME live world: the new
+    // rule adds 5, so 3 -> 8 and the old += 1 rule no longer runs.
     const v_b = readCounter(&world);
     try std.testing.expectEqual(@as(i64, 8), v_b);
     try std.testing.expect(v_b != v_a);

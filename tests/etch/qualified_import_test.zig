@@ -1,16 +1,16 @@
 //! Qualified `m.Type` resolution under `validateProject`.
 //!
-//! Gate E1: a whole-module import alias (`import lib as m`, or the implicit
-//! last-segment alias of a bare `import lib`) makes `m.Type` resolve as a
-//! type-name at exact parity with the selective import form — proven at the
-//! type-alias target position (`type HA = m.Health`, the M1.0.7 surface). The
-//! whole-module import names no members, so `E0104` (absent) / `E0107`
-//! (private) fire at the qualified USE site, not at the `import` binding.
+//! A whole-module import alias — `import lib as m`, or the implicit
+//! last-segment alias of a bare `import lib` — makes `m.Type` resolve as a
+//! type-name at exact parity with the selective import form, proven at the
+//! type-alias target position `type HA = m.Health`. The whole-module import
+//! names no members, so `E0104` (absent) and `E0107` (private) fire at the
+//! qualified USE site and not at the `import` binding.
 //!
-//! Gate E2 (visibility inheritance §10.2 + `W0902 PrivateTypeInPublicImpl`):
-//! a private type's inherent impl is not surfaced as public (structurally — an
-//! impl is never exported and a private type is unnameable cross-module), and a
-//! PUBLIC trait implemented for a PRIVATE target type warns `W0902`.
+//! Then visibility inheritance (§10.2) and `W0902 PrivateTypeInPublicImpl`: a
+//! private type's inherent impl is not surfaced as public — structurally, an
+//! impl is never exported and a private type is unnameable cross-module — while
+//! a PUBLIC trait implemented for a PRIVATE target type warns `W0902`.
 
 const std = @import("std");
 const etch = @import("weld_etch");
@@ -32,8 +32,8 @@ fn deinitDiags(gpa: std.mem.Allocator, diags: *std.ArrayListUnmanaged(etch.Diagn
 test "qualified type via aliased module resolves in a type-alias target" {
     const gpa = std.testing.allocator;
     // `import lib as m` + `type HA = m.Health` — the qualified twin of the
-    // M1.0.7 `type HA = Health` selective test. The alias resolves, `Health`
-    // is a public component export → zero resolution diagnostics.
+    // selective `type HA = Health`. The alias resolves and `Health` is a public
+    // component export → zero resolution diagnostics.
     const files = [_]etch.ProjectFile{
         .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
         .{ .name = "main.etch", .source =
@@ -127,8 +127,8 @@ test "unresolved alias receiver is E0102" {
 test "non-alias receiver is unaffected (selective + local resolution, no regression)" {
     const gpa = std.testing.allocator;
     // The alias machinery must not disturb the paths that already work: a
-    // selective import resolved as a bare type-name (`type HA = Health`, M1.0.7)
-    // and a local alias to a builtin (`type Score = int`) both stay clean. This
+    // selective import resolved as a bare type-name (`type HA = Health`) and a
+    // local alias to a builtin (`type Score = int`) both stay clean. This
     // guards the disambiguation order — a non-`.path` type node never enters the
     // qualified branch.
     const files = [_]etch.ProjectFile{

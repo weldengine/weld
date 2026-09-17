@@ -1,4 +1,4 @@
-//! Item 8 (M0.5): Etch identifiers that collide with Zig keywords.
+//! Etch identifiers that collide with Zig keywords.
 //!
 //! An Etch program may legitimately name a component / field / binding with a
 //! word that is a Zig keyword (`align`, `var`, `error`, `comptime`, …) — these

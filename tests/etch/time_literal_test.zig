@@ -1,14 +1,14 @@
-//! TIME_LITERAL expression arm — M0.8 E7 gate wiring (Guy's ruling 5).
+//! The TIME_LITERAL expression arm.
 //!
 //! A builtin `Time` exists in the type catalogue (`etch-grammar.md` §2.2,
-//! "Timestamp relatif"), so the `time_lit` §3.2 expression-literal arm is wired
-//! verbatim on the DURATION_LIT / COLOR_LITERAL precedent: the lexer already
-//! produces the `TIME_LITERAL` token (`HH:MM`); the parser now emits a
-//! `time_lit` expr (was a primary-switch default → parse error before E7); it
-//! type-checks as the builtin `Time`. EVALUATION stays fail-loud in both
-//! backends (no runtime semantics invented — the duration/color precedent);
-//! the descriptor renderer renders its canonical lexeme. (Routine `at HH:MM`
-//! triggers keep their own dedicated parse path, unchanged.)
+//! "Timestamp relatif"), so §3.2's `time_lit` expression-literal arm is wired
+//! on the DURATION_LIT / COLOR_LITERAL precedent: the lexer produces the
+//! `TIME_LITERAL` token (`HH:MM`), the parser emits a `time_lit` expr where a
+//! primary-switch default would give a parse error, and it type-checks as the
+//! builtin `Time`. EVALUATION stays fail-loud in both backends — no runtime
+//! semantics are invented, the same as for duration and color — and the
+//! descriptor renderer renders its canonical lexeme. A routine's `at HH:MM`
+//! trigger keeps its own dedicated parse path, unchanged.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
