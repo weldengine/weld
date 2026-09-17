@@ -29,7 +29,7 @@ pub const InvalidEntry = struct {
 /// `tests/etch/corpus_test.zig`. Each entry pins one `.etch` file
 /// the parser + type-checker must accept without diagnostics.
 pub const valid = [_]Entry{
-    // M1.B/P5 — this fixture was `invalid/E1216_requisite_removal.etch` and
+    // This fixture was `invalid/E1216_requisite_removal.etch` and
     // asserted a diagnostic. E1216 is retired, so the program it holds is
     // ACCEPTED, and the fixture moved rather than being deleted: it is the
     // narrowest form the retired check refused, and it belongs on the side of

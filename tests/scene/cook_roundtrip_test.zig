@@ -1,4 +1,4 @@
-//! M1.0.4 E2 — `.scene.etch` → cook → `.scene.bin` writer → zero-copy accessor
+//! `.scene.etch` → cook → `.scene.bin` writer → zero-copy accessor
 //! round-trip. Reads the committed fixture, cooks it (`weld_etch.scene_cook`),
 //! serializes the model (`weld_core.scene.writer`), opens the bytes
 //! (`weld_core.scene.accessor`), and asserts that entities, archetypes, UUIDs,

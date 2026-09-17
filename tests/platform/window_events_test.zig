@@ -1,4 +1,4 @@
-//! Tests M0.3 — WindowEvent union surface validation.
+//! WindowEvent union surface validation.
 //!
 //! Covers the acceptance tests called out in the M0.3 brief:
 //!   - "key down/up produces WindowEvent.key_down/key_up"

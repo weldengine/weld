@@ -1,4 +1,4 @@
-//! Tests M0.3 — `DynamicLib.open` / `lookup` / `close` round-trip.
+//! `DynamicLib.open` / `lookup` / `close` round-trip.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "open + lookup + close on system library" — opens libc.so.6 /

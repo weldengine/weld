@@ -109,15 +109,15 @@ pub const programs = [_]CodegenProgram{
     // Level-C scene/prefab (M0.8 E7).
     .{ .name = "p82_scene_village", .etch_path = "tests/etch_interp/programs/82_scene_village.etch" },
     .{ .name = "p83_prefab_walltorch", .etch_path = "tests/etch_interp/programs/83_prefab_walltorch.etch" },
-    // M0.8 E7 — full-grammar TOTAL codegen integration: the whole file cooks +
+    // Full-grammar TOTAL codegen integration: the whole file cooks +
     // Sema-compiles (codegen-compiles proof for every construct in one unit);
     // the Level-A behaviour is byte-exact interp↔codegen via corpus_facade.
     .{ .name = "p84_reference_500_codegen", .etch_path = "tests/etch_interp/programs/84_reference_500_codegen.etch" },
-    // M0.8 E7 — bare match-arm binding byte-exact (Guy's gate amendment).
+    // Bare match-arm binding byte-exact (Guy's gate amendment).
     .{ .name = "p85_match_binding", .etch_path = "tests/etch_interp/programs/85_match_binding.etch" },
-    // M0.9 E2-A — triple-quote `"""…"""` multiline + §1.4 dedent + `.len()`.
+    // Triple-quote `"""…"""` multiline + §1.4 dedent + `.len()`.
     .{ .name = "p86_triple_quote_multiline", .etch_path = "tests/etch_interp/programs/86_triple_quote_multiline.etch" },
-    // M0.9 E2-A — triple-quote with a multi-line interpolation (dedent vs
+    // Triple-quote with a multi-line interpolation (dedent vs
     // expression bytes, E2 review item 3).
     .{ .name = "p87_triple_quote_multiline_interp", .etch_path = "tests/etch_interp/programs/87_triple_quote_multiline_interp.etch" },
 };

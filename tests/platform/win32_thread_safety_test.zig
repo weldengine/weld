@@ -1,4 +1,4 @@
-//! Tests M0.3 — Win32 thread safety stress.
+//! Win32 thread safety stress.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "concurrent createWindow + destroyWindow" — 8 threads × 1000

@@ -1,4 +1,4 @@
-//! M0.7 / E2 — extended message-catalogue tests (brief § Acceptance
+//! Extended message-catalogue tests (brief § Acceptance
 //! criteria › Tests). Two layers:
 //!
 //!   1. Pure framing round-trips (`encode` → `decode` parity) for every

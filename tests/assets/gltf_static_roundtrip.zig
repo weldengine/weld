@@ -1,4 +1,4 @@
-//! M0.6 / E4 — glTF static import → cook → load round-trip (brief §Acceptance).
+//! GlTF static import → cook → load round-trip (brief §Acceptance).
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

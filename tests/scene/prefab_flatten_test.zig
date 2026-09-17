@@ -1,4 +1,4 @@
-//! M1.0.6 E3 — `instance of` flattening at scene cook. A prefab is cooked to its
+//! `instance of` flattening at scene cook. A prefab is cooked to its
 //! `.prefab.bin`, then a scene that instances it is cooked with a resolver that
 //! hands back those bytes; the instance's entity inherits the prefab's components
 //! and applies the instance's overrides (both forms). Covers: an override-free

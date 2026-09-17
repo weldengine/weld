@@ -1,4 +1,4 @@
-//! M0.1 / E1 — generational identity acceptance tests.
+//! Generational identity acceptance tests.
 //!
 //! Covers the two acceptance criteria listed in
 //! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E1

@@ -1,4 +1,4 @@
-//! M0.1 / E2 — generalised archetype storage acceptance tests.
+//! Generalised archetype storage acceptance tests.
 //!
 //! Covers the three acceptance criteria listed in
 //! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E2

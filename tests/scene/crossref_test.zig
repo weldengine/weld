@@ -1,4 +1,4 @@
-//! M1.0.6 E4 — entity→entity cross-references. A component `Entity` field is
+//! Entity→entity cross-references. A component `Entity` field is
 //! written `EntityId.dead` in its SoA column at cook and the reference carried in
 //! the Cross-references Table (by target entity NAME, the D-B by-name form);
 //! the loader patches the slot to the target's runtime handle. Covers: a forward

@@ -1,4 +1,4 @@
-//! Tests M0.3 — multi-monitor enumeration + currentMonitor + per-monitor DPI.
+//! Multi-monitor enumeration + currentMonitor + per-monitor DPI.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "enumerateMonitors + currentMonitor + per-monitor DPI"

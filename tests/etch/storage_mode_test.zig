@@ -1,4 +1,4 @@
-//! M1.B — `@storage` consumed, and the Etch-side boundary of the day.
+//! `@storage` consumed, and the Etch-side boundary of the day.
 //!
 //! WRITTEN AT G1, when the gate's exit was a declared no-op: the mode reached
 //! the registry and nothing read it. That is no longer true — G2 delivered the

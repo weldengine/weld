@@ -1,4 +1,4 @@
-//! M1.0.1 — permanent fail-fast watchdog for in-process concurrency tests.
+//! Permanent fail-fast watchdog for in-process concurrency tests.
 //!
 //! Wraps an ENTIRE test — worker spawn/join AND `Scheduler.deinit`'s worker
 //! `join()` — so a deadlock/livelock FAILS with a state dump in `<= timeout`

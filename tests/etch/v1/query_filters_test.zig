@@ -1,4 +1,4 @@
-//! M1.0.0 — Interpreter ↔ filtered ECS queries.
+//! Interpreter ↔ filtered ECS queries.
 //!
 //! Exercises the interpreter's per-rule entity selection driven by the cached
 //! matching-archetype set (brief AD-1): presence (`has`), exclusion
@@ -368,7 +368,7 @@ test "observable per-rule matched counts over mixed-filter rules" {
 }
 
 test "changed fires per-slot intra-archetype" {
-    // M1.0.1 — the `.etch` companion to the inline interpreter test of the same
+    // The `.etch` companion to the inline interpreter test of the same
     // name. Two entities share ONE {Health, Counter, Sel} archetype; `damage`
     // writes Health only for the `Sel.on == 1` slot, so `react` (`Health
     // changed`) hits that slot alone — per-slot, not per-archetype, granularity.

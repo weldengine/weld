@@ -1,4 +1,4 @@
-//! M0.6 / E5 — async loader + lifecycle acceptance.
+//! Async loader + lifecycle acceptance.
 //!
 //! Brief §Acceptance ▸ Tests: `test "async load does not block main thread"` —
 //! the main loop ticks while a load is in flight, the load completes, with an

@@ -1,4 +1,4 @@
-//! M1.0.5 E3 — resource `string` fields round-trip through the Tier-0 persistent
+//! Resource `string` fields round-trip through the Tier-0 persistent
 //! heap. Cooks (in-memory, via the writer) a scene with one resource carrying a
 //! `string` field, loads it, and asserts the field reads back the cooked value:
 //! the loaded string is interned into `weld_core.memory.persistent` as a

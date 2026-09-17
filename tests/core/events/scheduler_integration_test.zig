@@ -1,4 +1,4 @@
-//! M0.2 / E4 — scheduler integration: events drained at the
+//! Scheduler integration: events drained at the
 //! lifetime-appropriate boundary by a mini phase-walking driver.
 //!
 //! The "mini-scheduler" exercised here drives the bus's drain

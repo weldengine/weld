@@ -1,4 +1,4 @@
-//! Tests M0.3 — `setAffinity` + `setPriority` smoke on spawned thread.
+//! `setAffinity` + `setPriority` smoke on spawned thread.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "setAffinity + setPriority on spawned thread" — thread completes

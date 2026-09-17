@@ -1,4 +1,4 @@
-//! M0.1 / E6 — observer registry acceptance tests.
+//! Observer registry acceptance tests.
 //!
 //! Three tests cover the contract listed in
 //! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E6:

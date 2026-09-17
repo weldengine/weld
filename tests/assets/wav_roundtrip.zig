@@ -1,4 +1,4 @@
-//! M0.6 / E4 — WAV import → cook → load round-trip (brief §Acceptance).
+//! WAV import → cook → load round-trip (brief §Acceptance).
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

@@ -84,15 +84,15 @@ const p61 = @import("programs/61_filter_two_components.expected.zig");
 const p64 = @import("programs/64_when_expr_surface.expected.zig");
 const p65 = @import("programs/65_when_expr_archwalk.expected.zig");
 const p66 = @import("programs/66_named_args.expected.zig");
-// M0.8 E7 — full-grammar TOTAL codegen integration (Level-A byte-exact; the
+// Full-grammar TOTAL codegen integration (Level-A byte-exact; the
 // file's B/C constructs cook to descriptors, only RefProbe ticks).
 const p84 = @import("programs/84_reference_500_codegen.expected.zig");
-// M0.8 E7 — bare match-arm binding (`match x { n => … }`), byte-exact.
+// Bare match-arm binding (`match x { n => … }`), byte-exact.
 const p85 = @import("programs/85_match_binding.expected.zig");
-// M0.9 E2-A — triple-quote `"""…"""` multiline string + §1.4 common-indent
+// Triple-quote `"""…"""` multiline string + §1.4 common-indent
 // strip + `.len()`, byte-exact across interp ↔ codegen.
 const p86 = @import("programs/86_triple_quote_multiline.expected.zig");
-// M0.9 E2-A — triple-quote with a MULTI-LINE interpolation: the §1.4 dedent
+// Triple-quote with a MULTI-LINE interpolation: the §1.4 dedent
 // touches only the literal segments, never the interpolation's inner bytes
 // (E2 review item 3). Byte-exact across interp ↔ codegen.
 const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");

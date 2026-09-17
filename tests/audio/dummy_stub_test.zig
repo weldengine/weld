@@ -1,4 +1,4 @@
-//! Tests M0.3 — Audio Dummy stub round-trip.
+//! Audio Dummy stub round-trip.
 //!
 //! Covers the acceptance test from the M0.3 brief:
 //!   - "Dummy backend init/deinit + play_sound + stop" — init backend,

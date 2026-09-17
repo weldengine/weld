@@ -1,4 +1,4 @@
-//! M1.0.16 — qualified `m.Type` resolution under `validateProject`.
+//! Qualified `m.Type` resolution under `validateProject`.
 //!
 //! Gate E1: a whole-module import alias (`import lib as m`, or the implicit
 //! last-segment alias of a bare `import lib`) makes `m.Type` resolve as a

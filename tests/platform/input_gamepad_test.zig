@@ -1,4 +1,4 @@
-//! Tests M0.3 — gamepad connect/disconnect + raw stick values.
+//! Gamepad connect/disconnect + raw stick values.
 //!
 //! Covers the acceptance tests called out in the M0.3 brief:
 //!   - "gamepad connect/disconnect updates GamepadState.connected"

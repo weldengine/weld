@@ -1,4 +1,4 @@
-//! M0.1 / E7 — composite integration scenario.
+//! Composite integration scenario.
 //!
 //! Stitches every M0.1 feature into a single end-to-end test:
 //!

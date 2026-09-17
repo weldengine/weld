@@ -1,4 +1,4 @@
-//! M1.0.6 E5 — `extensions:` clause: parse + AST + descriptors (Claude.ai
+//! `extensions:` clause: parse + AST + descriptors (Claude.ai
 //! amendment). The clause `extensions: [STRING_LITERAL]` on `entity`/`instance`
 //! (after `uuid`/`parent`, before components) records active-extension prefab
 //! names by name (like `parent:` / cross-refs, D-B).
@@ -19,7 +19,7 @@ const scene = weld_core.scene;
 const Accessor = scene.accessor.Accessor;
 const World = weld_core.ecs.World;
 const EntityId = weld_core.ecs.EntityId;
-// M1.0.9 — hook execution (the interpreter binds the real on_attach/on_detach
+// Hook execution (the interpreter binds the real on_attach/on_detach
 // seam) + the deferred-drain stand-in (command buffer / observer registry).
 const Interpreter = weld_etch.Interpreter;
 const ComponentId = weld_core.ecs.registry.ComponentId;

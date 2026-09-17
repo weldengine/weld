@@ -1,4 +1,4 @@
-//! M1.0.7 / E3 — `import` directive parsing. `import` graduated from
+//! `import` directive parsing. `import` graduated from
 //! `non_s3_keywords` to `kw_import` (E1) with an `ImportDecl` AST node (E2);
 //! this exercises `parseImportDecl` over the four grammar forms (§5.2):
 //!   import a.b              (whole module)

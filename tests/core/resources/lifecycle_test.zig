@@ -1,4 +1,4 @@
-//! M0.2 / E3 — Resources lifecycle tag tests.
+//! Resources lifecycle tag tests.
 //!
 //! Resources may declare a lifecycle via `pub const lifecycle:
 //! Lifecycle = .{config | state | transient};` in the struct

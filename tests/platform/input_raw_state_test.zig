@@ -1,4 +1,4 @@
-//! Tests M0.3 — InputRawState event-driven transitions.
+//! InputRawState event-driven transitions.
 //!
 //! Covers the acceptance tests called out in the M0.3 brief:
 //!   - "keyboard pressed/released transitions"

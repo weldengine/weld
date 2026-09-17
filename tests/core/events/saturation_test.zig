@@ -1,4 +1,4 @@
-//! M0.2 / E4 — saturation semantics: drop-oldest + drops counter
+//! Saturation semantics: drop-oldest + drops counter
 //! + warning log threshold.
 
 const std = @import("std");

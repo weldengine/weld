@@ -1,4 +1,4 @@
-//! Tests M0.3 — Wayland concurrent createWindow + destroyWindow stress.
+//! Wayland concurrent createWindow + destroyWindow stress.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "concurrent createWindow + destroyWindow" — 8 threads × 1000

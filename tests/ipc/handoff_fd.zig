@@ -1,4 +1,4 @@
-//! M0.7 / E1 — shm attach via a received fd (`ShmRegion.fromFd`).
+//! Shm attach via a received fd (`ShmRegion.fromFd`).
 //!
 //! Exercises the SCM_RIGHTS primary-attach pivot (`engine-ipc.md`
 //! §4.8) at the `ShmRegion` level, one rung above the raw-socket fd

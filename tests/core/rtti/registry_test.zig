@@ -1,4 +1,4 @@
-//! M0.2 / E1 — registry tests.
+//! Registry tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
 //! § Local acceptance criteria:

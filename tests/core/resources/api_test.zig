@@ -1,4 +1,4 @@
-//! M0.2 / E3 — Resources API tests.
+//! Resources API tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E3
 //! § Local acceptance criteria:

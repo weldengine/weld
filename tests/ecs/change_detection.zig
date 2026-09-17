@@ -1,4 +1,4 @@
-//! M0.1 / E4 — tick-based change detection acceptance tests.
+//! Tick-based change detection acceptance tests.
 //!
 //! Covers the three acceptance criteria listed in
 //! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E4

@@ -1,4 +1,4 @@
-//! M0.2 / E6 — stub API surface freeze test.
+//! Stub API surface freeze test.
 //!
 //! Exhaustively enumerates each callback of the 7 sub-APIs
 //! (`WeldEcsAPI`, `WeldResourceAPI`, `WeldEventAPI`,

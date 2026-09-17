@@ -1,4 +1,4 @@
-//! M1.B / G3 — Tier 0 routing acceptance tests.
+//! Tier 0 routing acceptance tests.
 //!
 //! G3's claim is that every resolution entry and every structural mutator of
 //! `World` answers for BOTH storage backends, and that a sparse component's

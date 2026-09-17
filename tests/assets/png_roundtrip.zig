@@ -1,4 +1,4 @@
-//! M0.6 / E4 — PNG import → cook → load round-trip (brief §Acceptance).
+//! PNG import → cook → load round-trip (brief §Acceptance).
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

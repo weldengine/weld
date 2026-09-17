@@ -1,4 +1,4 @@
-//! Tests M0.3 — VFS resolver + `mmapFile`.
+//! VFS resolver + `mmapFile`.
 //!
 //! Covers the two acceptance tests called out in the M0.3 brief:
 //!   - "VFS resolves assets:// cache:// user:// to absolute paths"

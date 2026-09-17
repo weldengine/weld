@@ -1,4 +1,4 @@
-//! M0.6 / E4 — cooking-cache hit functional test (brief §Acceptance ▸ Benchmarks).
+//! Cooking-cache hit functional test (brief §Acceptance ▸ Benchmarks).
 //!
 //! A second cook of an unchanged asset hits the cache and returns the
 //! byte-identical artifact without re-cooking. This is the *correctness*

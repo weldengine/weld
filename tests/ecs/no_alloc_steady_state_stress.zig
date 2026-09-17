@@ -1,4 +1,4 @@
-//! M0.2.1 / E2 — stress variant of `no_alloc_steady_state.zig`.
+//! Stress variant of `no_alloc_steady_state.zig`.
 //!
 //! Runs the exact same composite steady-state scenario (4 archetypes
 //! × 4 systems × 1000 entities × 100 dispatchFrame iterations) but

@@ -1,4 +1,4 @@
-//! Tests M0.3 — `sleepPrecise` precision and `nowNanos` monotonicity.
+//! `sleepPrecise` precision and `nowNanos` monotonicity.
 //!
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "sleepPrecise ms accuracy" — < 2 ms (Win32) / < 1 ms (Linux)

@@ -1,4 +1,4 @@
-//! M1.0.7 — cross-file `import` resolution under `validateProject`.
+//! Cross-file `import` resolution under `validateProject`.
 //!
 //! E4 scope (this file, initial): the module dependency graph + topological
 //! order + cycle detection (`E0108 ImportCycle`). E5/E6 extend it with the

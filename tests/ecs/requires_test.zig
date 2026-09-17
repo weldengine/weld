@@ -1,4 +1,4 @@
-//! M1.B / G9 — `@requires`: closure, transaction, and the refusal channel.
+//! `@requires`: closure, transaction, and the refusal channel.
 //!
 //! Written at Tier 0, through `registerComponentRaw`'s `.requires` name list,
 //! so the semantics are exercised without the Etch front end in the loop: a

@@ -275,7 +275,7 @@ test "point_query_count signals its truncation instead of returning a capped tot
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G11 — the five MUTATION wrappers, and the journal's production path.
+// The five MUTATION wrappers, and the journal's production path.
 //
 // Every oracle below is DISCRIMINATING in the sense G6b fixed for this milestone:
 // it separates the entry from its plausible neighbour, not merely from doing
@@ -651,7 +651,7 @@ test "electedBodyOf answers exactly what electPublishers elects" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G14 — the two properties.
+// The two properties.
 // ---------------------------------------------------------------------------
 
 test "move_kinematic refused on a non-kinematic body leaves the state untouched" {

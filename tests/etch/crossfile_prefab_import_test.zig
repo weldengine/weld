@@ -1,4 +1,4 @@
-//! M1.0.7 / E6 — the E1793 unblock (the milestone's headline deliverable).
+//! The E1793 unblock (the milestone's headline deliverable).
 //!
 //! A `.prefab.etch` cannot declare its own components (typed-extension cardinality
 //! = exactly one `prefab`); it must `import` them. Before cross-file import, a

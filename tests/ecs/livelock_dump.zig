@@ -1,4 +1,4 @@
-//! M0.2.1 / E2 — diagnostic dump of the job scheduler + event bus
+//! Diagnostic dump of the job scheduler + event bus
 //! state when the test's scheduler-livelock watchdog fires. Read-only
 //! inspection of the public atomics + per-worker stats — no
 //! modification of production code is required.

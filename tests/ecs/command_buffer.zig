@@ -1,4 +1,4 @@
-//! M0.1 / E6 — command buffer acceptance tests.
+//! Command buffer acceptance tests.
 //!
 //! Covers the two tests called out in `briefs/M0.1-ecs-full.md`
 //! § Acceptance criteria › Tests for E6:

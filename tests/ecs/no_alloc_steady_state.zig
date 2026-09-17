@@ -1,4 +1,4 @@
-//! M0.1 / E7 — composite steady-state no-allocation test.
+//! Composite steady-state no-allocation test.
 //!
 //! Drives a scaled-down C0.1-like scenario (4 archetypes × 4 systems
 //! × 1000 entities total) over 100 dispatchFrame calls and asserts
@@ -28,7 +28,7 @@
 //! Together the three tests pin the alloc-free contract across the
 //! full M0.1 surface.
 //!
-//! M0.2.1 / E2 — watchdog harness. The dispatchFrame measurement
+//! Watchdog harness. The dispatchFrame measurement
 //! loop runs on a worker thread; the test thread polls a `done`
 //! atomic with a 5 s wall-clock budget (in the spirit of
 //! `engine-zig-conventions.md §13` on external-resource test
@@ -167,7 +167,7 @@ fn onDespawnedNoop(
     DESPAWN_OBSERVER_FIRED +%= 1;
 }
 
-/// M0.2.1 / E2 — argument bundle for the dispatch-loop worker
+/// Argument bundle for the dispatch-loop worker
 /// thread. The thread runs the full dispatchFrame loop, signalling
 /// completion via `done` so the watchdog can observe it.
 const DispatchArgs = struct {
@@ -203,7 +203,7 @@ fn dispatchLoop(args: *DispatchArgs) void {
     args.done.store(true, .release);
 }
 
-/// M0.2.1 / E2 — watchdog wrapper. Spawns `dispatchLoop` on a worker
+/// Watchdog wrapper. Spawns `dispatchLoop` on a worker
 /// thread, polls `done` every 50 ms up to a 5 s wall-clock budget.
 /// On timeout, dumps the scheduler + event bus state to stderr and
 /// aborts the test process with exit code 2 (= SchedulerLivelock).

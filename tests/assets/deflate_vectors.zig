@@ -1,4 +1,4 @@
-//! M0.6 / E2 — DEFLATE/zlib inflate known-vector acceptance tests.
+//! DEFLATE/zlib inflate known-vector acceptance tests.
 //!
 //! Vectors were produced by Python's `zlib` (the reference encoder) at
 //! authoring time and embedded verbatim; M0.6 ships no encoder, so inflate

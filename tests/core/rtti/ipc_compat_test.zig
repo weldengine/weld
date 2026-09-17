@@ -1,4 +1,4 @@
-//! M0.2 / E2 — IPC schema_hash golden values.
+//! IPC schema_hash golden values.
 //!
 //! Pins the RTTI-derived `schema_hash` byte sequence for the 5
 //! reference S6 messages (`ProtocolHello`, `SpawnEntity`,

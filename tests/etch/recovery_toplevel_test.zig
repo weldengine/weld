@@ -1,4 +1,4 @@
-//! M0.8 / E1 — top-level recovery sync-point.
+//! Top-level recovery sync-point.
 //!
 //! After a parse error inside a top-level construct the parser advances to
 //! the next top-level keyword (or EOF) and resumes, so a file with several

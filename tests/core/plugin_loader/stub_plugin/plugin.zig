@@ -1,4 +1,4 @@
-//! M0.2 / E6 — stub plugin for the load/unload tests.
+//! Stub plugin for the load/unload tests.
 //!
 //! Built as a dynamic library (`.so` / `.dll` / `.dylib`) that
 //! exports a single C symbol `weld_plugin_entry`. The stub returns

@@ -1,4 +1,4 @@
-//! M0.6 / E1 — asset registry stale-handle acceptance test.
+//! Asset registry stale-handle acceptance test.
 //!
 //! Covers the E1 acceptance criterion (brief §Acceptance ▸ Tests):
 //! `test "stale handle after unload is rejected"` — allocate a handle

@@ -41,7 +41,7 @@ test "1000 query iterations allocate zero bytes after init" {
     // allocation-free.
     var query = try world.query(gpa);
     defer query.deinit(gpa);
-    // M0.1 / E7 — single-archetype lookup via the fused multi-archetype API.
+    // Single-archetype lookup via the fused multi-archetype API.
     const first_chunk = query.chunkAt(0);
     const transforms_off = query.componentOffsetFor(first_chunk, 0);
     const velocities_off = query.componentOffsetFor(first_chunk, 1);

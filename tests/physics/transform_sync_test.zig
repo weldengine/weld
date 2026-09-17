@@ -1,4 +1,4 @@
-//! M1.1.15 — the solver → ECS publication.
+//! The solver → ECS publication.
 //!
 //! What this file measures is the SEAM: which body speaks for an entity, what is published per
 //! `BodyType`, and what the `Sleeping` marker does to publication. The ECS → solver direction
@@ -1567,7 +1567,7 @@ test "removing a body leaves its neighbour's journal entry untouched" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G10 — the resolution regime of a `.gameplay` DYNAMIC body, and the
+// The resolution regime of a `.gameplay` DYNAMIC body, and the
 // direction of the `solver → gameplay` transition.
 // ---------------------------------------------------------------------------
 
@@ -1759,7 +1759,7 @@ test "the gameplay authority flag reaches every body of the entity, not only the
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G12 — the consumption predicate: F1 and F2, which are one predicate.
+// The consumption predicate: F1 and F2, which are one predicate.
 //
 // They are in one gate because they COUPLE: admitting statics advances their
 // `consumed_tick`, which moves the baseline the diagnostic detects against, and
@@ -1960,7 +1960,7 @@ test "the diagnostic fires under solver authority and under no other" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G13 — piloted, never simulated.
+// Piloted, never simulated.
 //
 // **THREE BODIES AND NOT TWO, and the reason is NOT the one first written here.**
 // The draft said a two-body differential would pass under the implementation this
@@ -2205,7 +2205,7 @@ test "flipping to gameplay on an ALREADY SLEEPING body clears the sleep" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G15 — the diagnostic reaches production, and the two bypasses close.
+// The diagnostic reaches production, and the two bypasses close.
 // ---------------------------------------------------------------------------
 
 test "a forbidden mutation is observable from the PRODUCTION path" {
@@ -2530,7 +2530,7 @@ test "the FIRST forbidden mutation of a body's life is reported" {
 }
 
 // ---------------------------------------------------------------------------
-// M1.1.15.2 G18 — the three P2, which share one subject: the sleep regime.
+// The three P2, which share one subject: the sleep regime.
 // ---------------------------------------------------------------------------
 
 test "putToSleep refuses a piloted body before writing anything" {

@@ -1,4 +1,4 @@
-//! M0.1 / E3 — extended comptime queries acceptance tests.
+//! Extended comptime queries acceptance tests.
 //!
 //! Covers the four acceptance criteria listed in
 //! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E3

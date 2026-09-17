@@ -1,4 +1,4 @@
-//! M1.0.6 E2 — `.prefab.etch` → `cookPrefab` → `.prefab.bin` writer → accessor.
+//! `.prefab.etch` → `cookPrefab` → `.prefab.bin` writer → accessor.
 //! A prefab is a mini-scene: it cooks to the identical `.scene.bin` format, so it
 //! round-trips through the same `writer` + `accessor`. Covers the standalone form
 //! and the `of` variant (base inherited from its cooked `.prefab.bin`, field-merge

@@ -1,4 +1,4 @@
-//! M1.B / G7 — the mixed-query planner: the driver, and the proof that the
+//! The mixed-query planner: the driver, and the proof that the
 //! frozen surface did not move.
 //!
 //! The contract under test is `engine-ecs-internals.md` §2, *Driving set des

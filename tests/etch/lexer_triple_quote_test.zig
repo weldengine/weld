@@ -1,4 +1,4 @@
-//! M0.9 E2-A — triple-quote `"""…"""` multiline string literal.
+//! Triple-quote `"""…"""` multiline string literal.
 //!
 //! Lexer-level coverage: the new `multiline_string_literal` token, its byte
 //! boundaries, newline/quote-spanning bodies, the `"`-vs-`"""` greedy split,

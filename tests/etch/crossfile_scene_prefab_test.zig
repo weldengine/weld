@@ -1,4 +1,4 @@
-//! M0.9 E2-B — cross-file scene/prefab validation. M0.8 delivered the
+//! Cross-file scene/prefab validation. M0.8 delivered the
 //! intra-file resolution (E1782/E1786/E1791 against per-file sets); this
 //! exercises `etch.validateProject` over a minimal multi-file project graph:
 //!   - E1786 PrefabRefNotFound — `instance of "X"` with X declared in NO file

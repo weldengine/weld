@@ -1,4 +1,4 @@
-//! M1.0.5 E2 — runtime loader `.scene.bin` → ECS `World` round-trip.
+//! Runtime loader `.scene.bin` → ECS `World` round-trip.
 //!
 //! Builds a cooked scene image in memory via the M1.0.4 `writer` (no `.scene.etch`
 //! authoring, no filesystem), loads it with `scene.loader.loadFromBytes`, and

@@ -1,4 +1,4 @@
-//! M1.0.4 — scene cook negative cases. Each ill-formed scene yields a typed
+//! Scene cook negative cases. Each ill-formed scene yields a typed
 //! `CookError` (never a panic) and produces no `.scene.bin`.
 
 const std = @import("std");

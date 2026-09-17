@@ -1,4 +1,4 @@
-//! M0.2 / E3 — Resources change-detection tests.
+//! Resources change-detection tests.
 //!
 //! Reuses the M0.1 tick-based mechanism (`World.current_tick` +
 //! per-archetype `changed_ticks`). `getResourceMut` auto-marks
