@@ -1008,8 +1008,8 @@ pub const BodyManager = struct {
     /// A surface the sweep runs along or away from obstructs nothing, and a caller that resolves motion
     /// wants the nearest OBSTACLE rather than the nearest contact. Selecting on that predicate instead
     /// of selecting and then discarding is what makes it gapless: this entry returns ONE hit, so any
-    /// filter applied to its RESULT throws away every other sub-shape the cast never returned — three
-    /// earlier forms did exactly that, by body, by pair and by a bounded set, and each left a hole.
+    /// filter applied to its RESULT throws away every other sub-shape the cast never returned. Filtering
+    /// by body, by pair or by a bounded set all leave that hole.
     ///
     /// **A SIBLING RATHER THAN A PARAMETER, and the reason is measured rather than stylistic.** Adding
     /// the argument to `castShapeBody` itself would touch fourteen call sites inside INHERITED test
@@ -2269,7 +2269,7 @@ const MeshCastCollector = struct {
 
         // **THE NON-OPPOSING TEST, ON THE CONTACT'S OWN NORMAL AND AFTER THE CAST.**
         //
-        // An earlier form rejected the triangle BEFORE the cast, on its FACE normal, justified by "a
+        // Do NOT reject the triangle BEFORE the cast on its FACE normal, on the grounds that "a
         // translation cannot reach a plane it is parallel to". That is true of a PLANE and false of a
         // TRIANGLE, which is finite and reachable by its EDGE. MEASURED on a quad platform with an open
         // boundary edge, a capsule sweeping `+X` at four heights: the plain cast finds the edge at
@@ -2280,22 +2280,23 @@ const MeshCastCollector = struct {
         // **BOTH REGIMES CLASSIFY ON THE CONTACT, AND EACH IN ITS OWN FRAME.**
         //
         // At `d > 0` the cast's normal IS the contact's, and it lives in the PROBE's frame — so it is
-        // dotted with `direction_in_a` and never with `sweep_direction_local`, which is the BODY's. An
-        // earlier form mixed the two, and on a ROTATED mesh the product had no geometric meaning at all:
-        // a local `+Y` face turned into a world `−X` wall was hit by the plain cast and rejected by this
-        // one, at both precisions.
+        // dotted with `direction_in_a` and NEVER with `sweep_direction_local`, which is the BODY's.
+        // Mixing the two leaves the product with no geometric meaning on a ROTATED mesh: a local `+Y`
+        // face turned into a world `−X` wall is hit by the plain cast and rejected by this one, at
+        // both precisions.
         //
         // At `d == 0` the cast's normal is `−direction` and carries nothing, so the contact is resolved
         // by the MANIFOLD of that one triangle. The face normal was used here and it is NOT enough: a
         // capsule exactly tangent to an ACTIVE EDGE, moving parallel to the triangle's plane, is rejected
         // on the face normal and traverses — measured from `x = −0.3` to `x = 0.672` with the base still
-        // at `y = −0.3`, at both precisions. The hypothesis that "the depenetration owns that case" is
-        // refuted by that measurement, and the manifold is what carries an edge's real normal.
-        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** An earlier form
-        // computed the manifold below, used it, and dropped it; the caller then asked again over the
-        // WHOLE body and could be answered about the ceiling where this collector had retained the
-        // wall. Two answers to one geometric fact, with the body's yaw deciding which — the class this
-        // module refuses, and the reason the field exists rather than the recomputation.
+        // at `y = −0.3`, at both precisions — which refutes "the depenetration owns that case". The
+        // manifold is what carries an edge's real normal.
+        //
+        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** Computing the
+        // manifold below, using it and dropping it leaves the caller to ask again over the WHOLE body,
+        // where it can be answered about the ceiling while this collector retained the wall — two
+        // answers to one geometric fact with the body's yaw deciding which. Hence the field rather
+        // than the recomputation.
         var contact_normal: ?Vec3r = null;
         if (self.skip_non_opposing) {
             if (hit.distance > 0) {

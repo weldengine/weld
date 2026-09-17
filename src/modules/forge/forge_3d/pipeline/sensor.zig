@@ -228,11 +228,11 @@ const CandidateSink = struct {
         // **THE DISPATCH IS TOTAL, and no pair is out of domain.** A trigger is convex or a
         // half-space and never a triangle soup — `addBody` refuses the role on one, a surface
         // having no interior for a sensor to ask about (§1.11.17) — so the three arms below
-        // cover every reachable pair. An earlier version carried a DOMAIN BOUND here that
-        // refused {half-space, mesh} × {half-space, mesh}; it rested on a partition that
-        // grouped the two by BODY TYPE where the question is whether the shape has an
-        // INTERIOR, and the cell that made it look unavoidable — mesh against mesh — is
-        // unreachable once a mesh cannot be a trigger. The bound is gone, not narrowed.
+        // cover every reachable pair. Do NOT re-add a domain bound refusing
+        // {half-space, mesh} × {half-space, mesh}: such a bound groups the two by BODY
+        // TYPE where the question is whether the shape has an INTERIOR, and the cell that
+        // makes it look unavoidable — mesh against mesh — is unreachable once a mesh
+        // cannot be a trigger.
         const overlaps = if (self.trigger_probe) |p|
             // (1) convex trigger: it is the probe, against a body of any class.
             self.bm.overlapShapeBody(self.store, other, p.shape, p.position, p.rotation, .ignore)

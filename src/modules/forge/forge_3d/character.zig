@@ -631,10 +631,10 @@ pub const MoveResult = struct {
 /// One contact the move must react to: where it is and which way the surface faces.
 const Contact = struct {
     body: BodyId,
-    /// The sub-shape the normal came from. **Discarded by an earlier version, and that was the whole
-    /// defect**: `DeepestManifold` selects the deepest point over ALL sub-shapes of the body, so the
-    /// normal justifying a set-aside could come from one triangle while the cast had returned another
-    /// — a ceiling's normal excluding a wall.
+    /// The sub-shape the normal came from. **Carrying it is not bookkeeping**:
+    /// `DeepestManifold` selects the deepest point over ALL sub-shapes of the body, so
+    /// without it the normal justifying a set-aside can come from one triangle while the
+    /// cast returned another — a ceiling's normal excluding a wall.
     subshape_id: u32 = 0,
     /// Outward, surface → character — the same orientation `GroundInfo.normal` carries.
     normal: Vec3r,
@@ -1615,9 +1615,8 @@ pub const CharacterStore = struct {
         //
         // It is closed one level down: `sweepNearest` is asked for the nearest OPPOSING contact rather
         // than the nearest one, so a non-obstructing surface never becomes a candidate and this loop
-        // needs no set, no budget and no expiry of its own. Four earlier forms lived here — a body slot,
-        // a pair key, a bounded set, and their retry accounting — and each was a filter placed above the
-        // data it judged.
+        // needs no set, no budget and no expiry of its own. Do not close it HERE with a body slot, a
+        // pair key or a bounded set — every such form is a filter placed above the data it judges.
         var iteration: u32 = 0;
         while (iteration < max_slide_iterations) : (iteration += 1) {
             // **THE EMPTINESS TEST, THE DIRECTION AND THE DISTANCE COME FROM ONE REDUCTION.** Asking

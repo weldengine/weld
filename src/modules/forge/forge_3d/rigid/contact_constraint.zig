@@ -637,11 +637,10 @@ pub fn build(
     // `(pair_key, subshape_id)`, whose totality is argued at `lessByConstraintKey`.
     //
     // What `computePairs` dedups is the CANDIDATE PAIRS, so `pair_key` is unique per
-    // pair — never per constraint. A mesh pair contributes one constraint per
-    // contacting triangle, and the sub-shape index is the term that separates them;
-    // an earlier version of this comment inferred per-constraint uniqueness from the
-    // pair-level dedup, which the half-space made false. No hash containers
-    // anywhere on the path.
+    // PAIR and never per constraint — do not infer the second from the first. A mesh
+    // pair contributes one constraint per contacting triangle, and the sub-shape
+    // index is the term that separates them. No hash containers anywhere on the
+    // path.
     std.mem.sort(ContactConstraint, out.items, {}, lessByConstraintKey);
 }
 
