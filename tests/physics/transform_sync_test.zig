@@ -1,10 +1,9 @@
 //! The solver → ECS publication.
 //!
 //! What this file measures is the SEAM: which body speaks for an entity, what is published per
-//! `BodyType`, and what the `Sleeping` marker does to publication. The ECS → solver direction
-//! is M1.1.15.2's, with the Tier 1 Etch service — the tests that measured it left with it, and
-//! two more kept only their publication half. The physics itself is measured by `forge_3d`'s
-//! own suite and is not re-measured here.
+//! `BodyType`, what the `Sleeping` marker does to publication, and — in its second half — the
+//! ECS → solver direction with its authority model. The physics itself is measured by
+//! `forge_3d`'s own suite and is not re-measured here.
 //!
 //! Every assertion names an ENTITY and reads that entity's own components. An aggregate
 //! another entity could satisfy is not an assertion about the one named.
@@ -35,11 +34,10 @@ const gravity_y: Real = -9.81;
 /// The same timestep as `fixed_dt`, in the `f32` the frame context carries.
 const fixed_dt_f32: f32 = 1.0 / 60.0;
 
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_transform_system_stand_in: []const core.ecs.Access = &.{core.ecs.Access.writes(Transform)};
 const spec_sleeping_writer_stand_in: []const core.ecs.Access = &.{core.ecs.Access.writes(Sleeping)};
 
@@ -268,9 +266,8 @@ test "Sleeping tag tracks island state through both transitions" {
 
 test "publication authority per BodyType" {
     // The PUBLICATION half only. The reception half — a kinematic `Transform` written by
-    // gameplay reaching the solver — moved to M1.1.15.2 with `syncIn`; see Closing notes. Two
-    // assertions that the SOLVER had not moved were dropped with it: with no inward direction
-    // they held for every body and named nothing about authority.
+    // gameplay reaching the solver — belongs to `syncIn` and is measured in the second half
+    // of this file.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -351,8 +348,8 @@ test "publication does not mark a component whose value did not change" {
     try testing.expectEqualSlices(f32, &settled_pos, &ecs.get(Transform, b.entity).?.pos);
 
     // NON-VACUITY, and it is what separates this from a publication that writes NOTHING. The
-    // body is set moving through the INTERFACE — `syncIn` left for M1.1.15.2, so the ECS is no
-    // longer a way in — and the marks must then FIRE.
+    // body is set moving through the INTERFACE — not through the ECS, which under `.solver`
+    // authority is no way in — and the marks must then FIRE.
     pw.setLinearVelocity(b.body, vr(3, 0, 0));
 
     // A fresh tick the test does not touch: any stamp below is publication's own.
@@ -367,10 +364,9 @@ test "a character presence never publishes for its entity" {
     // the entity's own. Walked as an ordinary body it would publish its own velocity — exactly
     // zero forever, a presence being kinematic and moved by pose write — over the entity's.
     //
-    // This test measured a second half until the re-scope: that a gameplay `Transform` write
-    // did not teleport the presence. There is no inward direction left here, so that assertion
-    // held for EVERY body and discriminated nothing. The absence itself is pinned once, by
-    // name, in `no component write reaches the solver` below.
+    // That a gameplay `Transform` write does not teleport the presence is NOT asserted here:
+    // it holds for every body on this path and would discriminate nothing. The absence is
+    // pinned once, by name, in `no component write reaches the solver` below.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -405,10 +401,9 @@ test "a character presence never publishes for its entity" {
 }
 
 test "the registered system drives a real frame: the solver's pose reaches the ECS" {
-    // THE DELIVERABLE F5 NAMES. Before this, the composition entry had no caller outside this
-    // file: the seam existed only in its own tests, and the milestone shipped a mechanism
-    // nothing executed. What is measured here is the SCHEDULER path — `registerSystems` plus
-    // `dispatchFrame` — and not the direct composition the tests above drive.
+    // THE SCHEDULER PATH — `registerSystems` plus `dispatchFrame` — and not the direct
+    // composition the tests above drive. Without it the composition entry has no caller
+    // outside this file, and the seam exists only in its own tests.
     const gpa = testing.allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
@@ -434,8 +429,7 @@ test "the registered system drives a real frame: the solver's pose reaches the E
     try sync.registerSystems(gpa, &sched, &ecs);
 
     // ONE system: the publication rides the tick in `fixed_update`. Splitting it into a tick
-    // and a `post_update` publication is what lost a gameplay `Velocity` write, and the
-    // inward direction left for M1.1.15.2 — see Closing notes.
+    // and a `post_update` publication is what loses a gameplay `Velocity` write.
     try testing.expectEqual(@as(usize, 1), sched.systemCount());
 
     const start = ecs.get(Transform, faller.entity).?.pos[1];
@@ -454,8 +448,8 @@ test "a trigger sharing an entity with a solid body does not publish" {
     // distinguishes TWO kinds of island entry: the CONSTRAINT island it cannot enter, no pair
     // reaching it, and the INTEGRATION SINGLETON it does enter — which is why a dynamic trigger
     // can ever stop being integrated. §1.13.1 makes two-bodies-one-entity the normal shape, and
-    // the election settles which of the two speaks. The RECEPTION half of this test — sync-in pushing the entity's pose into the
-    // trigger — left for M1.1.15.2 with `syncIn`; see Closing notes.
+    // the election settles which of the two speaks. The RECEPTION half — sync-in pushing the
+    // entity's pose into the trigger — is measured in the second half of this file.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -483,9 +477,9 @@ test "a trigger sharing an entity with a solid body does not publish" {
 }
 
 test "resolving an unpublished world registers nothing" {
-    // P1-3, and the object is `resolve` ITSELF. It used to obtain its id by REGISTERING the
-    // handle type, and inside a system that meant `ctx.gpa` — the per-frame allocator — while
-    // a registration keeps the type's name for the world's whole life.
+    // THE OBJECT IS `resolve` ITSELF. Obtaining its id by REGISTERING the handle type means,
+    // inside a system, `ctx.gpa` — the per-frame allocator — while a registration keeps the
+    // type's name for the world's whole life.
     //
     // Isolated here rather than measured through a dispatch: since `registerSystems` declares
     // `WritesResource(PhysicsWorldRef)`, registration now interns that name legitimately, with
@@ -589,7 +583,7 @@ test "a lone dynamic trigger is integrated, so it publishes its own pose" {
 }
 
 test "a competing writer of Transform in fixed_update is refused at registration" {
-    // P1-2, and this is a FUTURE conflict written down rather than a defect here.
+    // A FUTURE conflict written down rather than a defect here.
     // `engine-coordinate-system.md` §4.3 runs `TransformSystem` at the head of `fixed_update`
     // AND in `post_update`, writing `Transform` in both, while `scheduler.zig` makes two
     // writers of one component in one phase a hard registration error with no declarative
@@ -626,8 +620,8 @@ test "the registered system declares the solver resource it mutates through the 
     // This test exists because its counter-factual first measured NOTHING: dropping the
     // declaration left every test green, which is a declaration nobody checks — and writing it
     // is what surfaced the dangling access slice. `ARCH-030` makes the declared set the TYPE
-    // of the view a system receives, so an undeclared mutation lets two physics modules sit in
-    // one phase with no edge between them.
+    // of the view a system receives, so an undeclared mutation would let two physics modules
+    // sit in one phase with no edge between them.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -644,8 +638,8 @@ test "the registered system declares the solver resource it mutates through the 
     }
     try testing.expect(declared);
 
-    // And nothing is registered in `pre_update` any more: the inward direction left with
-    // `syncIn`. Asserted rather than assumed, so a re-registration there is visible.
+    // And nothing is registered in `pre_update`: `syncIn` runs inside the tick's own system.
+    // Asserted rather than assumed, so a re-registration there is visible.
     try testing.expectEqual(@as(usize, 0), sched.systemsInPhase(.pre_update).len);
 }
 
@@ -666,8 +660,8 @@ fn addSibling(
 }
 
 test "publication order is unchanged by the index" {
-    // **THE DENSE `BodyId` INDEX OF M1.1.15.1 IS AN ACCELERATOR AND NOT AN ORDER**, and this
-    // is what says so. `proxyOf` became O(1) by reading a table keyed on the body index; the
+    // **THE DENSE `BodyId` INDEX IS AN ACCELERATOR AND NOT AN ORDER**, and this is what says
+    // so. `proxyOf` is O(1) by reading a table keyed on the body index; the
     // two orders that the publication actually depends on — the registration order of
     // `bodies`, and the identity order the election sorts by — must be exactly what they
     // were. The scene is built so REGISTRATION ORDER AND IDENTITY ORDER DISAGREE, because
@@ -721,8 +715,8 @@ test "publication order is unchanged by the index" {
 
     // (3) STEP 10 REFRESHED EVERY REGISTERED PROXY, whatever order it walked them in: each
     // body's stored fat box contains its tight box at the pose the tick ended on. A sweep
-    // that lost a body — the M1.1.15 gate C defect, where a registration gap made step 2
-    // prune every pair of one body — leaves that body's box stale and fails here.
+    // that lost a body — a registration gap making step 2 prune every pair of one body —
+    // leaves that body's box stale and fails here.
     var refreshed: usize = 0;
     for (pw.bodies.items) |entry| {
         const fat = pw.bp.proxyAabb(entry.proxy).?;
@@ -816,8 +810,8 @@ test "a solid body wins over a trigger of SMALLER identity" {
 test "a competing writer of Sleeping in fixed_update is refused at registration" {
     // The twin of the `Transform` conflict test. The publication adds and removes the marker,
     // so a second writer of it in the same phase must be refused — without the declaration it
-    // would pass the preflight, and `ARCH-030` will make the declared set the TYPE of the view
-    // a system receives at M1.A.
+    // would pass the preflight, and `ARCH-030` makes the declared set the TYPE of the view a
+    // system receives.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -839,10 +833,9 @@ test "a competing writer of Sleeping in fixed_update is refused at registration"
 }
 
 test "no component write reaches the solver: the inward direction is not wired" {
-    // THE ABSENCE, pinned ONCE and by name. Several tests used to carry an assertion of this
-    // shape as a second half — "the solver did not follow the ECS write" — and after the
-    // re-scope each held for every body and discriminated nothing, which is a test counted and
-    // half empty.
+    // THE ABSENCE, pinned ONCE and by name. An assertion of this shape carried as the second
+    // half of another test — "the solver did not follow the ECS write" — holds for every body
+    // there and discriminates nothing, which is a test counted and half empty.
     //
     // Driven through `registerSystems` and `dispatchFrame`, which is the PRODUCTION path: the
     // first version went through `stepAndPublish`, so an inward read reintroduced inside
@@ -912,7 +905,7 @@ test "no component write reaches the solver: the inward direction is not wired" 
 }
 
 test "the published handle is withdrawn before the world it names is destroyed" {
-    // P1-1, and the sequence is the whole test. `publishPhysicsWorld` writes raw pointers,
+    // THE SEQUENCE IS THE WHOLE TEST. `publishPhysicsWorld` writes raw pointers,
     // `PhysicsWorld.deinit` frees and poisons, and nothing used to clear the resource:
     // the accessor kept answering with a dead address and the next dispatch dereferenced it.
     // The ordinary runtime order being safe is not a contract.
@@ -1018,8 +1011,6 @@ test "publishing over a live publication is refused, and leaves the first in pla
     sync.unpublishPhysicsWorld(&ecs, &b);
 }
 
-// --- M1.1.15.2 G5b — the inward direction and the authority model -------------
-
 const sync_in = sync.in;
 const RigidBody = api.RigidBody;
 
@@ -1069,19 +1060,16 @@ test "dynamic gameplay-authoritative body is not published" {
     // gameplay left it, to the bit.
     try testing.expectEqual(@as(WorldRealT, 10), ecs.get(Transform, gameplay_side.entity).?.pos[1]);
 
-    // **ASSERTION REVERSED AT G13, BY THE CORPUS AND NOT BY A REFINEMENT.** It read
-    // `try testing.expect(solver_y < 10)` under a comment saying the body "kept its mass
-    // and its integration; only the publication was withheld" — transcribed at G5b from
-    // the contradictory prose `engine-corpus-map.md` anomaly 78 records. § *Autorité
-    // d'écriture* now says the opposite and says it as clause 1: a body under gameplay
-    // authority is **piloted, never simulated** — it does not integrate, no gravity, no
-    // velocity integration, no damping.
+    // **EXACTLY WHERE GAMEPLAY LEFT IT, and not merely below its starting height.**
+    // § *Autorité d'écriture* clause 1: a body under gameplay authority is **piloted,
+    // never simulated** — it does not integrate, no gravity, no velocity integration, no
+    // damping. A weaker `solver_y < 10` would pass on an implementation that kept the
+    // mass and the integration and withheld only the publication, which the corpus
+    // contradicted in a superseded form of that prose.
     //
-    // So the solver's own pose must be EXACTLY where gameplay left it, which is a
-    // strictly stronger statement than the one it replaces. What carried the
-    // non-vacuity — "it still stepped" — is now carried by the `.solver` sibling above,
-    // which DOES fall under the same gravity in the same scene: the difference between
-    // the two is the authority and nothing else.
+    // The non-vacuity is carried by the `.solver` sibling above, which DOES fall under
+    // the same gravity in the same scene: the difference between the two is the authority
+    // and nothing else.
     const solver_y = pw.bm.position(gameplay_side.body).?.toArray()[1];
     try testing.expectEqual(@as(Real, 10), solver_y);
 
@@ -1117,17 +1105,15 @@ test "no wake on an unchanged gameplay body" {
     // Keep ticking with NOBODY touching the ECS.
     for (0..200) |_| _ = try frameWithSyncIn(gpa, &pw, &ecs, &journal);
 
-    // **THE OBSERVABLE OF "NOT WOKEN" CHANGED AT G15, AND IT IS DECLARED.** These two
-    // lines read `try testing.expect(pw.bm.isSleeping(b.body).?)` — the body falling
-    // asleep was what showed nothing had woken it. The corrected § *Autorité d'écriture*
+    // **"NOT WOKEN" IS NOT OBSERVABLE THROUGH SLEEP HERE.** § *Autorité d'écriture*
     // gives a piloted body the KINEMATIC sleep regime, so it is a member of no island
-    // and never sleeps at all; that observable no longer exists and asserting it would
-    // be asserting the superseded regime.
+    // and never sleeps at all: asserting that it fell asleep would assert the wrong
+    // regime.
     //
-    // What replaces it is stronger rather than weaker, because it reads the SUBJECT of
-    // this test directly instead of a consequence: the pass reports zero wakes, and the
-    // body's velocity — which `wakeIndex` does not touch but which any spurious setter
-    // call would — is bit-unchanged over the window.
+    // What is read instead is the SUBJECT of this test directly rather than a
+    // consequence: the pass reports zero wakes, and the body's velocity — which
+    // `wakeIndex` does not touch but which any spurious setter call would — is
+    // bit-unchanged over the window.
     const v_before = pw.bm.linearVelocity(b.body).?.toArray();
     var total_woke: u32 = 0;
     for (0..30) |_| {
@@ -1346,8 +1332,8 @@ test "a gameplay-authoritative trigger follows before the sensor pass reads it" 
 test "the registered system runs syncIn before step when a journal is attached" {
     // THE ORDER, THROUGH THE SCHEDULER and not through a test's own composition. Without
     // this the inward direction would exist only where a test calls it — the very defect
-    // M1.1.15's closing pass fixed for the outward half, and the reason `syncIn` runs
-    // inside `stepAndPublishSystem` rather than in a caller's discipline.
+    // the outward half already met, and the reason `syncIn` runs inside
+    // `stepAndPublishSystem` rather than in a caller's discipline.
     const gpa = testing.allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
@@ -1405,12 +1391,12 @@ test "the change baseline advances on a comparison without difference" {
     var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // **F8.** The baseline used to advance only when a value was APPLIED, so a body
+    // A baseline advancing only when a value is APPLIED means a body
     // whose ECS and solver agree — which is every `.gameplay` body from creation until
-    // gameplay first moves it — kept `consumed_tick` at `null` FOREVER and was
-    // re-compared every tick. The tick predicate then filtered nothing, and the guard
-    // the two-predicate design exists for was carried entirely by the value comparison
-    // it was supposed to spare.
+    // gameplay first moves it — keeps `consumed_tick` at `null` FOREVER and is
+    // re-compared every tick. The tick predicate then filters nothing, and the guard the
+    // two-predicate design exists for is carried entirely by the value comparison it was
+    // supposed to spare.
     const b = try spawnLinked(gpa, &ecs, &pw, .kinematic, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
     try declare(gpa, &ecs, b.entity, .gameplay);
 
@@ -1460,10 +1446,10 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     var pw = PhysicsWorld.init(vr(0, 0, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // **G9, and the oracle has to be built so that INHERITANCE IS VISIBLE.** The
-    // journal was keyed by registration position and `removeBody` uses
-    // `orderedRemove` — its own comment says "ordered: the sweep order stays stable"
-    // — so the body after the removed one moved into its slot and took its entry.
+    // **THE ORACLE HAS TO BE BUILT SO THAT INHERITANCE IS VISIBLE.** Keyed by
+    // registration position, and with `removeBody` using `orderedRemove` — its own
+    // comment says "ordered: the sweep order stays stable" — the body after the removed
+    // one moves into its slot and takes its entry.
     //
     // Asserting that the neighbour "still works" is weaker than the claim. What has
     // to be shown is that it does NOT take the removed body's state, so the removed
@@ -1498,16 +1484,15 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     // on both fields.
     const before = journal.entryOf(neighbour.body).?;
     try testing.expectEqual(api.PhysicsAuthority.solver, before.last_authority);
-    // **ASSERTION WEAKENED AT G12, DELIBERATELY, AND THE LOSS IS NAMED.** This line read
-    // `try testing.expect(before.consumed_tick == null);` and it was true because nothing
-    // advanced a `.solver` baseline. G12 advances it for every `.solver` body, which is
-    // what closes the null-baseline trap of the forbidden-mutation diagnostic — so the
-    // two entries no longer differ on that field and inheriting it is no longer
-    // observable. It is also no longer harmful: both carry the same tick.
+    // **THIS ASSERTION IS DELIBERATELY WEAK, AND THE LOSS IS NAMED.** `consumed_tick`
+    // advances for every `.solver` body — which is what closes the null-baseline trap of
+    // the forbidden-mutation diagnostic — so the two entries no longer differ on that
+    // field and inheriting it is no longer observable. It is also no longer harmful:
+    // both carry the same tick.
     //
     // What still discriminates is `last_authority`, and it is the half that carried the
     // defect — the fabricated transition below comes from inheriting `.gameplay`, never
-    // from inheriting a tick. The load-bearing assertion of this test is unchanged.
+    // from inheriting a tick.
     try testing.expect(before.consumed_tick != null);
     try testing.expect(before.last_authority != doomed_entry.last_authority);
 
@@ -1534,7 +1519,7 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     // legitimate modification was ignored — the other direction of the same
     // corruption, and the one an "it still works" assertion would miss entirely.
     //
-    // TWO TICKS AND NOT ONE, SINCE G10: the `solver → gameplay` tick SEEDS the ECS from
+    // TWO TICKS AND NOT ONE: the `solver → gameplay` tick SEEDS the ECS from
     // the solver and consumes nothing, so a write made in the same tick as the flip is
     // overwritten by the solver's own state — by design, that state being the control
     // base gameplay is entitled to start from. Gameplay drives from the NEXT tick, and
@@ -1566,10 +1551,8 @@ test "removing a body leaves its neighbour's journal entry untouched" {
     try testing.expect(doomed_packed.generation != reused_packed.generation);
 }
 
-// ---------------------------------------------------------------------------
-// The resolution regime of a `.gameplay` DYNAMIC body, and the
-// direction of the `solver → gameplay` transition.
-// ---------------------------------------------------------------------------
+// The resolution regime of a `.gameplay` DYNAMIC body, and the direction of the
+// `solver → gameplay` transition.
 
 /// A platform of unit mass at `centre`, immobile under gravity so that the only thing
 /// separating the three configurations below is its INVERSE MASS during resolution.
@@ -1758,15 +1741,11 @@ test "the gameplay authority flag reaches every body of the entity, not only the
     try testing.expect(!pw.bm.hasGameplayAuthority(second).?);
 }
 
-// ---------------------------------------------------------------------------
-// The consumption predicate: F1 and F2, which are one predicate.
-//
-// They are in one gate because they COUPLE: admitting statics advances their
-// `consumed_tick`, which moves the baseline the diagnostic detects against, and
-// closing the diagnostic's null-baseline trap advances every `.solver` baseline,
-// which changes what admitting statics observes. Fixed apart, each reopens the
-// other.
-// ---------------------------------------------------------------------------
+// THE CONSUMPTION PREDICATE, and admitting statics is not separable from closing
+// the diagnostic's null-baseline trap. They COUPLE: admitting statics advances
+// their `consumed_tick`, which moves the baseline the diagnostic detects against,
+// and closing the trap advances every `.solver` baseline, which changes what
+// admitting statics observes. Fixed apart, each reopens the other.
 
 test "a static under solver authority takes its pose, and a QUERY sees it move" {
     const gpa = testing.allocator;
@@ -1775,9 +1754,9 @@ test "a static under solver authority takes its pose, and a QUERY sees it move" 
     var pw = PhysicsWorld.init(vr(0, gravity_y, 0), fixed_dt);
     defer pw.deinit(gpa);
 
-    // A STATIC under the DEFAULT authority, which is the whole point of F2: `.solver`
-    // is the default for every body type, so the excluded case was not an exotic
-    // corner — it was every static in every scene.
+    // A STATIC under the DEFAULT authority, and that is the whole point: `.solver` is
+    // the default for every body type, so excluding this case excludes not an exotic
+    // corner but every static in every scene.
     const wall = try spawnLinked(gpa, &ecs, &pw, .static, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 });
     try declare(gpa, &ecs, wall.entity, .solver);
     var journal: sync_in.Journal = .{};
@@ -1841,13 +1820,12 @@ test "an ECS write under solver authority is reported, and a non-write is not" {
     // entity's `Transform`. It is not a mutation, it is a state that has never been
     // reconciled, and the pass must not report it.
     //
-    // **What silences it changed at G17 and the assertion is now right for a different
-    // reason.** It used to be the null-baseline suppression — which also swallowed every
-    // body's FIRST real mutation. What silences it now is that its `Transform` was
-    // stamped at SPAWN, in an earlier tick, so `changedAt(..., now)` is false: nothing
-    // wrote it during this tick. A body written during the tick IS reported, first pass
-    // or not, which is what "the FIRST forbidden mutation of a body's life is reported"
-    // pins.
+    // **WHAT SILENCES IT IS THE TICK AND NOT A FIRST-PASS SUPPRESSION.** Its `Transform`
+    // was stamped at SPAWN, in an earlier tick, so `changedAt(..., now)` is false:
+    // nothing wrote it during this tick. Suppressing on a null baseline instead would
+    // swallow every body's FIRST real mutation — a body written during the tick IS
+    // reported, first pass or not, which is what "the FIRST forbidden mutation of a
+    // body's life is reported" pins.
     const unpublished = try ecs.spawn(gpa, .{ .pos = .{ 0, 0, 0 } }, .{});
     const far_shape = try pw.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
     _ = try pw.addBody(gpa, .{
@@ -1950,8 +1928,8 @@ test "the diagnostic fires under solver authority and under no other" {
     // EXACTLY ONE of the three. The `.gameplay` write is the authored path and the
     // static's is too, since the matrix consumes a static's pose under either
     // authority — so a count of three would mean the rule keys on the write, a count
-    // of two would mean it keys on the authority alone and forgot F2, and a count of
-    // zero would mean it keys on nothing.
+    // of two that it keys on the authority alone and forgot the static, and a count
+    // of zero that it keys on nothing.
     try testing.expectEqual(@as(u32, 1), r.forbidden_mutations);
     try testing.expectEqual(solver_side.body, r.first_forbidden.?);
     // The two authored writes really were applied, so their silence is a decision and
@@ -1959,23 +1937,16 @@ test "the diagnostic fires under solver authority and under no other" {
     try testing.expectEqual(@as(u32, 2), r.poses_applied);
 }
 
-// ---------------------------------------------------------------------------
 // Piloted, never simulated.
 //
-// **THREE BODIES AND NOT TWO, and the reason is NOT the one first written here.**
-// The draft said a two-body differential would pass under the implementation this
-// gate replaces. Measured, it would not: with either path restored, the kinematic
-// reads 0 and the piloted one reads a real value, so the equality catches it — on
-// the push path `expected 0, found 6.666667`.
-//
-// What the third term actually buys is NON-VACUITY, which is a different claim and
-// an indispensable one: without a `.solver` dynamic that must fall and must be
+// **THREE BODIES AND NOT TWO, and the third is a NON-VACUITY witness rather than
+// the discriminant.** The two-body differential does discriminate: with either
+// path restored the kinematic reads 0 and the piloted one a real value, so the
+// equality catches it — on the push path, `expected 0, found 6.666667`. What the
+// third term buys is that without a `.solver` dynamic which must fall and must be
 // pushed, `expectEqual(kinematic, piloted)` is `expectEqual(0, 0)` and passes on a
-// scene where no gravity reached anything and no character ever touched a body — a
-// lane mis-built, a character stopping short, a gravity left at zero. G12 taught
-// that a guard written from a correct prediction can still be measured on a scene
-// that cannot fail; this is the same lesson applied to a differential.
-// ---------------------------------------------------------------------------
+// scene where no gravity reached anything and no character ever touched a body: a
+// lane mis-built, a character stopping short, a gravity left at zero.
 
 test "a piloted body does not integrate, exactly as a kinematic does not" {
     const gpa = testing.allocator;
@@ -2091,19 +2062,16 @@ test "a character pushes a simulated body and neither a kinematic nor a piloted 
 }
 
 test "a piloted body follows the kinematic sleep regime: no island, no sleep" {
-    // **THE RESERVE OF § *Autorité d'écriture*, CLOSED — AND THIS TEST ASSERTED THE
-    // OPPOSITE UNTIL G15.** It was called "the sleep path is measured, not reasoned" and
-    // it pinned that a piloted body DOES fall asleep, at the window. That measurement
-    // was true of the code as it then stood and it is what closed the reserve; the
-    // corrected regime then decided the other way. A piloted body follows the KINEMATIC
-    // regime — member of no island, therefore never a sleep candidate — because it
-    // presents the same infinite mass, and linking through it would fuse otherwise
-    // independent islands.
+    // **A PILOTED BODY NEVER SLEEPS**, and the reason is the regime rather than the
+    // window: it follows the KINEMATIC one — member of no island, therefore never a
+    // sleep candidate — because it presents the same infinite mass, and linking through
+    // it would fuse otherwise independent islands.
     //
-    // The finding that measurement produced SURVIVES the reversal and is asserted below:
-    // the sleep path must not make a piloted velocity evolve. It is now unreachable by
-    // this route, which is exactly why the guard in `putToSleep` stays — an unreachable
-    // path is not an absent one, and `putToSleep` is a public primitive.
+    // A measurement taken while a piloted body still did fall asleep produced a finding
+    // that outlives the change and is asserted below: the sleep path must not make a
+    // piloted velocity evolve. That path is now unreachable by this route, which is
+    // exactly why the guard in `putToSleep` stays — an unreachable path is not an absent
+    // one, and `putToSleep` is a public primitive.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -2204,12 +2172,10 @@ test "flipping to gameplay on an ALREADY SLEEPING body clears the sleep" {
     try testing.expect(pw.bm.isSleeping(b.body).?);
 }
 
-// ---------------------------------------------------------------------------
 // The diagnostic reaches production, and the two bypasses close.
-// ---------------------------------------------------------------------------
 
 test "a forbidden mutation is observable from the PRODUCTION path" {
-    // **P1-a. The pass produced the diagnostic and the production path threw it away.**
+    // **THE PASS PRODUCES THE DIAGNOSTIC AND THE PRODUCTION PATH USED TO THROW IT AWAY.**
     // `stepAndPublishSystem` writes `_ = try in.syncIn(...)` — the registered system has
     // nowhere to return a `SyncInResult` to — so the only reader of
     // `forbidden_mutations` was a test calling `syncIn` by hand. A diagnostic no
@@ -2303,9 +2269,9 @@ fn forbiddenWriterSystem(ctx: core.ecs.SystemContextOf(&forbidden_writer_spec)) 
 }
 
 test "addImpulse through the PUBLIC interface does not move a piloted body" {
-    // **P1-b, the THIRD impulse path.** `BodyManager.addImpulse` applied the STORED
-    // inverse mass, so the public `PhysicsModule.addImpulse` reached a `.gameplay`
-    // dynamic body's velocity — and nothing repaired it: `syncOut` withholds
+    // **THE THIRD IMPULSE PATH.** With `BodyManager.addImpulse` applying the STORED
+    // inverse mass, the public `PhysicsModule.addImpulse` reaches a `.gameplay` dynamic
+    // body's velocity — and nothing repairs it: `syncOut` withholds
     // publication from a piloted body and `syncIn` does not push a `Velocity` nobody
     // wrote. The ECS said one thing and the solver another, durably.
     //
@@ -2384,7 +2350,7 @@ fn supportScene(gpa: std.mem.Allocator, kind: api.BodyType) !struct { slept: boo
 }
 
 test "a piloted support behaves as a kinematic one, to the bit" {
-    // **P1-c, and the island exclusion alone did NOT give this.** Measured after it: a
+    // **THE ISLAND EXCLUSION ALONE DOES NOT GIVE THIS.** Measured with it in place: a
     // box resting on a kinematic support slept and one on a static support slept, while
     // one on a piloted support did NOT. The cause was `sleep.isAwake`, which judged any
     // `.dynamic` body a motion source unconditionally — so the pair was never deferred,
@@ -2419,10 +2385,10 @@ test "a piloted support behaves as a kinematic one, to the bit" {
 }
 
 test "a second syncIn in one tick is not mistaken for an explicit wrapper" {
-    // **P2-a.** The restore branch asks "does a wrapper own this tick" and it read
-    // `consumed_tick == now` — a value the pass ALSO writes, at the end of its own
-    // sweep. A second `syncIn` call within one tick therefore read the first call's own
-    // bookkeeping as a wrapper's mark.
+    // The restore branch asks "does a wrapper own this tick", and reading
+    // `consumed_tick == now` answers it with a value the pass ALSO writes, at the end of
+    // its own sweep — so a second `syncIn` call within one tick reads the first call's
+    // own bookkeeping as a wrapper's mark.
     //
     // **The subject is a KINEMATIC `.solver` body, and it has to be.** That is where the
     // restore does something no other path would: `syncOut` publishes a kinematic's
@@ -2466,12 +2432,11 @@ test "a second syncIn in one tick is not mistaken for an explicit wrapper" {
 }
 
 test "the FIRST forbidden mutation of a body's life is reported" {
-    // **P1 of the fourth review, and the defect was in the ORACLE as much as in the
-    // code.** `stale_baseline` suppressed the report on a body's first pass; the
-    // baseline then advanced and `syncOut` repaired the divergence, so that first
-    // mutation was lost DEFINITIVELY — nothing would ever report it. And the test
-    // written for the diagnostic began with a QUIET FRAME, which established the
-    // baseline and stepped over exactly the case the guard has to catch.
+    // **THE DEFECT LIVES IN THE ORACLE AS MUCH AS IN THE CODE.** Suppressing the report
+    // on a body's first pass loses that first mutation DEFINITIVELY: the baseline then
+    // advances and `syncOut` repairs the divergence, so nothing would ever report it.
+    // And a test beginning with a QUIET FRAME establishes the baseline and steps over
+    // exactly the case the guard has to catch.
     //
     // So this scene has NO first frame. The body is created, and the very next thing
     // that happens is the frame in which it is mutated.
@@ -2529,16 +2494,13 @@ test "the FIRST forbidden mutation of a body's life is reported" {
     try testing.expectEqual(@as(u64, 1), journal.diagnostics.forbidden_mutations);
 }
 
-// ---------------------------------------------------------------------------
-// The three P2, which share one subject: the sleep regime.
-// ---------------------------------------------------------------------------
+// Three properties sharing one subject: the sleep regime.
 
 test "putToSleep refuses a piloted body before writing anything" {
-    // **P2-D, and the property is the FLAG as much as the velocity.** The guard added at
-    // G13 sat BELOW `sleeping = true`, so a piloted body kept its velocity and was marked
-    // asleep anyway — after which `isAwake` returns false on the flag and the primitive
-    // contradicts the regime it implements. The test written then read the velocity only,
-    // so it passed over exactly half of what it claimed.
+    // **THE PROPERTY IS THE FLAG AS MUCH AS THE VELOCITY.** A guard placed BELOW
+    // `sleeping = true` leaves a piloted body with its velocity and marked asleep anyway
+    // — after which `isAwake` returns false on the flag and the primitive contradicts the
+    // regime it implements. A test reading the velocity alone passes over half of it.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -2567,12 +2529,11 @@ test "putToSleep refuses a piloted body before writing anything" {
 }
 
 test "the sleep window does not age while a body is piloted" {
-    // **P2-B, and the defect was a DECLARANT that said what the code did not do.** A
-    // comment at the transition site asserted the window restarts at the flip. It did
-    // not: `updateWindows` filtered on `body_type` and `sleeping` only, so a piloted body
-    // held still saturated `sleep_time`, and on the flip back to `.solver` — pose and
-    // velocity unchanged, so no setter wakes it — it rejoined its island with a FULL
-    // window and could sleep on the first tick.
+    // **THE WINDOW RESTARTS AT THE FLIP, and nothing but this makes it so.** With
+    // `updateWindows` filtering on `body_type` and `sleeping` alone, a piloted body held
+    // still saturates `sleep_time`, and on the flip back to `.solver` — pose and velocity
+    // unchanged, so no setter wakes it — it rejoins its island with a FULL window and can
+    // sleep on the first tick.
     const gpa = testing.allocator;
     var ecs = World.init();
     defer ecs.deinit(gpa);
@@ -2610,8 +2571,8 @@ test "the sleep window does not age while a body is piloted" {
 }
 
 test "flipping a MULTI-BODY entity to gameplay wakes every one of its bodies" {
-    // **P2-C.** The transition ran below the election gate, so only the body that carries
-    // the entity's pose left the sleep; the others kept `flags.sleeping` under gameplay
+    // Run below the election gate, the transition leaves the sleep only for the body that
+    // carries the entity's pose; the others keep `flags.sleeping` under gameplay
     // authority, where `isAwake` rejects them before it ever consults the authority.
     //
     // The reasoning is the one already established for the authority MIRROR: the election
@@ -2672,8 +2633,6 @@ test "flipping a MULTI-BODY entity to gameplay wakes every one of its bodies" {
     try testing.expectEqual(@as(u32, 0), r.forbidden_mutations);
 }
 
-// --- M1.1.15.2 G19 — a spawn is not a mutation ------------------------------
-
 const G19Mode = enum { idle, spawn_only, spawn_then_mutate, tier1_write };
 var g19_mode: G19Mode = .idle;
 var g19_pw: ?*PhysicsWorld = null;
@@ -2729,8 +2688,7 @@ fn g19OnSpawned(
     // `try` and not `catch return`: the observer already returns `anyerror!void` and the
     // scheduler propagates, so swallowing here would turn an `addBody` failure into a
     // late assertion somewhere downstream — and leave the ECS entity created with no
-    // body. An instrument that hides a cause instead of surfacing it is the class this
-    // milestone chased throughout.
+    // body. An instrument that hides a cause instead of surfacing it is no instrument.
     _ = try pw.addBody(gpa, desc);
     g19_target = entity;
     if (g19_mode == .spawn_then_mutate) {
@@ -2746,15 +2704,15 @@ fn g19OnSpawned(
 const g19_spec = [_]core.ecs.Access{core.ecs.Access.writes(Transform)};
 
 test "a spawn is not a mutation, and a mutation after a spawn in the same tick is" {
-    // **P1 of the fifth review.** The value comparison was short-circuited on a kinematic
-    // body — derived from the exact fact that `syncOut` never publishes its pose, and
-    // from the WRONG one. A kinematic `.solver` body is piloted by NOBODY: one moved
+    // **THE VALUE COMPARISON MUST NOT BE SHORT-CIRCUITED ON A KINEMATIC BODY**, however
+    // exact the fact it would rest on — that `syncOut` never publishes its pose. A
+    // kinematic `.solver` body is piloted by NOBODY: one moved
     // through the API is `.gameplay`, and the wrapper writes both sides in one breath. So
     // under `.solver` the two agree permanently and the comparison is meaningful there as
     // everywhere else.
     //
-    // What the short-circuit cost: `World.spawn` stamps `changed_tick` AND `added_tick`
-    // at the current tick, so EVERY kinematic `.solver` created during a frame was
+    // What the short-circuit costs: `World.spawn` stamps `changed_tick` AND `added_tick`
+    // at the current tick, so EVERY kinematic `.solver` created during a frame is
     // reported, identical poses or not.
     //
     // **The three properties live in ONE scene**, or the correction breaks one to repair
@@ -2831,11 +2789,10 @@ test "a spawn is not a mutation, and a mutation after a spawn in the same tick i
 }
 
 test "gameplay and sleeping are incompatible on all three paths, transition or not" {
-    // **P2-B of the fifth review, and the shape of the fix is the finding.** The wake was
-    // carried by the code that detects the TRANSITION to `.gameplay`, so it was lost
-    // exactly where the transition does not happen. A transition is an EVENT; "gameplay
-    // and sleeping are incompatible" is a PROPERTY of the regime, and an invariant is
-    // maintained rather than triggered.
+    // **THE SHAPE OF THE FIX IS THE FINDING.** Carried by the code that detects the
+    // TRANSITION to `.gameplay`, the wake is lost exactly where the transition does not
+    // happen. A transition is an EVENT; "gameplay and sleeping are incompatible" is a
+    // PROPERTY of the regime, and an invariant is maintained rather than triggered.
     //
     // The three paths are the owner's and each is exercised below — none of them is a
     // transition, which is why none of them was covered.
@@ -2906,8 +2863,8 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
         try testing.expect(!pw.bm.isSleeping(b.body).?);
     }
 
-    // --- PATH 3: the one G18 already covered, kept so the invariant is shown to subsume
-    // the transition rather than replace it. A body asleep at the moment of the flip.
+    // --- PATH 3: the one the transition already covered, kept so the invariant is shown
+    // to subsume it rather than replace it. A body asleep at the moment of the flip.
     {
         var ecs = World.init();
         defer ecs.deinit(gpa);
@@ -2955,9 +2912,8 @@ test "gameplay and sleeping are incompatible on all three paths, transition or n
     }
 }
 
-// ─── `Body.rotation` is unit after every gameplay write ────────────────────
-//
-// Three entries into one invariant, each with its own test: `setBodyTransform`,
+// `Body.rotation` IS UNIT AFTER EVERY GAMEPLAY WRITE. Three entries into one
+// invariant, each with its own test: `setBodyTransform`,
 // `moveKinematic`, and `sync_in.zig`'s per-tick seam, which forwards
 // `Transform.rot` — a bare `[4]f32` carrying no invariant. The integrator
 // renormalises BELOW `if (flags[i].gameplay_authority) continue;`, so nothing

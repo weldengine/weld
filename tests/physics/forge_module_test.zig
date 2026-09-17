@@ -78,17 +78,14 @@ const Fixture = struct {
     }
 };
 
-// --- the surface's shape -----------------------------------------------------
-
 /// The frozen `PhysicsModule` entries this adapter PRESENTS, by name. Written out rather
 /// than derived from `@typeInfo`'s declaration list, so that an entry DISAPPEARING is a
 /// failure here instead of a silently shorter walk.
 ///
 /// **THIRTY-TWO, the whole frozen surface.** `engine-tier-interfaces.md` §12 puts the
-/// total at 32 `assertFn`, of which 29 exclude `init`, `deinit` and `step`;
-/// `getTriggerOverlaps` and `setJointMotor` joined it at §12 versions 0.12 and 0.14.
-/// This list asserts PRESENCE only. Do NOT add an assertion of ABSENCE here: it outlives
-/// the absence it describes and then guards nothing.
+/// total at 32 `assertFn`, of which 29 exclude `init`, `deinit` and `step`. This list
+/// asserts PRESENCE only. Do NOT add an assertion of ABSENCE here: it outlives the
+/// absence it describes and then guards nothing.
 const frozen_entries = [_][]const u8{
     "init",                  "deinit",             "step",
     "addBody",               "removeBody",         "setBodyTransform",
@@ -104,8 +101,9 @@ const frozen_entries = [_][]const u8{
 };
 
 /// The entries `engine-tier-interfaces.md` §1 declares `void` under the moved-log
-/// uniqueness invariant, plus `resizeCharacter`, which §1 keeps fallible and which is the
-/// control that makes the walk non-vacuous.
+/// uniqueness invariant. `resizeCharacter` is deliberately NOT among them — §1 keeps it
+/// fallible, and the test asserts that separately as the control that makes this walk
+/// non-vacuous.
 const void_pose_entries = [_][]const u8{ "setBodyTransform", "moveKinematic", "setCharacterPosition" };
 
 /// The four entries that fill a caller slice, and that `engine-tier-interfaces.md` §1 types
@@ -117,8 +115,8 @@ const fallible_query_entries = [_][]const u8{ "raycastAll", "overlapShape", "ove
 test "Forge3DModule satisfies PhysicsModule with no allocator on any entry" {
     // THE SIZE OF WHAT IS WALKED, first. A probe that finds zero offenders across zero
     // entries is a probe that measured nothing, and `engine-tier-interfaces.md` §12 gives
-    // the number this has to be: THIRTY `assertFn`, of which 27 exclude the three
-    // lifecycle entries. The count is asserted, not printed.
+    // the number this has to be: THIRTY-TWO `assertFn`, the three lifecycle entries
+    // included. The count is asserted, not printed.
     const frozen_total: usize = 32; // `engine-tier-interfaces.md` §12
     try testing.expectEqual(frozen_total, frozen_entries.len);
 
@@ -191,8 +189,7 @@ test "the frozen void entries are void, and resizeCharacter is not" {
     }
 
     // THE CONTROL: `resizeCharacter` CREATES a capsule, an allocation with nothing to do
-    // with the moved log, so it cannot
-    // join the three however the broadphase is bounded.
+    // with the moved log, so it cannot join the three however the broadphase is bounded.
     const rc = @typeInfo(@TypeOf(Forge3DModule.resizeCharacter)).@"fn";
     try testing.expect(@typeInfo(rc.return_type.?) == .error_union);
 
@@ -242,8 +239,6 @@ test "the adapter owns the allocator across a body lifecycle" {
     m.removeBody(body);
     m.destroyShape(shape);
 }
-
-// --- the step failure contract ------------------------------------------------
 
 /// An allocator that fails the n-th allocation attempt **once** and then passes everything
 /// through.
@@ -511,7 +506,6 @@ test "a failed step propagates, and the ECS publication does not run after it" {
     ));
 }
 
-// --- the surface's BEHAVIOUR -------------------------------------------------
 //
 // **A SIGNATURE WALK IS HALF A SURFACE, AND THE OTHER HALF IS WHERE THE DEFECTS LIVE.**
 // Everything above asserts that the entries EXIST and have the declared shape. Not one of
@@ -639,8 +633,8 @@ test "no entry caps its answer below the caller's slice" {
     try testing.expectEqual(n_bodies, by_box);
 
     // THE PROBE IS CUBIC ON PURPOSE. Do NOT stretch it: a 1000 x 2 x 2 box is a 500:1
-    // aspect ratio, which is past the ~30:1 the GJK path is
-    // documented reliable to for radius-0 box cores. Measured, same 400 bodies and the same
+    // aspect ratio, past the ~30:1 the GJK path is documented reliable to for radius-0 box
+    // cores. Measured, same 400 bodies and the same
     // query with only the probe's shape changed: 500:1 answers 265, 1:1 answers 400. That is
     // the known narrowphase limit and NOT the staging under test, so the probe is chosen to
     // stay inside it — a test that cannot tell its own subject from a neighbouring limit
@@ -795,8 +789,8 @@ test "the four single-result query entries answer about the scene" {
     const q = api.RaycastQuery{ .origin = av3(-5, 0, 0), .direction = av3(1, 0, 0), .max_distance = 100 };
 
     // raycast — never called before. Asserted on the ENTITY and on the DISTANCE, because a
-    // projection defect would show up in the first and a scalar-crossing
-    // defect in the second. The box spans [4.5, 5.5], so the near face is at 9.5 from -5.
+    // projection defect shows up in the first and a scalar-crossing defect in the second.
+    // The box spans [4.5, 5.5], so the near face is at 9.5 from -5.
     const hit = s.m.raycast(q) orelse return error.ExpectedHit;
     try testing.expectEqual(@as(u32, 11), hit.entity.index);
     try testing.expectApproxEqAbs(@as(f32, 9.5), hit.distance, 1e-3);
@@ -896,9 +890,9 @@ test "pointQuery does not cap either, and deduplicates at the same time" {
 test "under an exhausted allocator all four multi-result entries REPORT" {
     // ALL FOUR REPORT, and an oracle asserting that three DEGRADE to a correct prefix while
     // `overlapShape` alone reports would pin the wrong contract — a difference of shape on
-    // one staging path, one failure, four entries. `engine-tier-interfaces.md` §1 types
-    // all four
-    // `anyerror!u32`: §0's prohibition is the entry that ALLOCATES AND HAS NO CHANNEL, and a
+    // one staging path, one failure, four entries. `engine-tier-interfaces.md` §1 types all
+    // four `anyerror!u32`: §0's prohibition is the entry that ALLOCATES AND HAS NO CHANNEL,
+    // and a
     // `u32` truncating in silence is that entry under a different return type.
     const gpa = testing.allocator;
     var s = try Scene.init(gpa);
@@ -1113,8 +1107,7 @@ test "the public path answers under truncation, and the guard stays silent" {
     // Do NOT promise anything about the RUN — not "never wrong", not "no duplicate", not
     // "duplicate-free and ordered", not "true unless the premise broke during the run".
     // Every such form is too wide for one structural reason: `dedupEntities` does not see
-    // the
-    // run, it sees the window it is handed. With `out.len == 2` and an owner sequence
+    // the run, it sees the window it is handed. With `out.len == 2` and an owner sequence
     // `[3, 5, 1]`, the first pass receives `[3, 5]`, finds it ordered — because it IS — fills
     // the slice and returns before `want` ever doubles. The `1` never enters an observed
     // buffer, and no wording turns a windowed observation into a statement about what it
@@ -1294,7 +1287,7 @@ test "the three joint entries are presentable and fail loud" {
     }
 
     // FOUR scalars per MOTOR, never per axis. **TWO ceilings, by axis NATURE and not per
-    // axis** (§12 version 0.15) — which is why the structural pin below counts fields
+    // axis** (§12) — which is why the structural pin below counts fields
     // rather than naming them. A single `max_force` could not govern `six_dof`, which
     // drives three linear and three angular axes at once — a scalar cannot be in newtons
     // and in newton-metres together — and that is the variant the exclusion matters for.
