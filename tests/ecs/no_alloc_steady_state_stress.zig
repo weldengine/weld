@@ -1,53 +1,32 @@
-//! Stress variant of `no_alloc_steady_state.zig`.
+//! Stress variant of `no_alloc_steady_state.zig`: the same composite scenario
+//! (4 archetypes × 4 systems × 1000 entities × 100 `dispatchFrame` iterations)
+//! wrapped in synthetic noise that reproduces the pre-push hook's load profile,
+//! each kind aimed at a distinct contention path:
 //!
-//! Runs the exact same composite steady-state scenario (4 archetypes
-//! × 4 systems × 1000 entities × 100 dispatchFrame iterations) but
-//! wraps it with synthetic concurrent noise that mimics the pre-push
-//! hook's overall load profile:
+//!   - **CPU** — `2 × CPU count` threads on tight ALU loops. The
+//!     oversubscription is the point: the pre-push runs several parallel
+//!     `zig build` / `zig test` well past the logical cardinality, and the
+//!     scheduler's workers must compete for cores against them.
 //!
-//!   - **CPU noise threads** — `noise_cpu_thread_count = 2 × CPU count`
-//!     threads spinning on tight ALU loops (M0.2.1 / E2bis addition #1 —
-//!     oversubscription to reproduce the real CPU contention of the
-//!     pre-push where several parallel `zig build`/`zig test`
-//!     far exceed the physical cardinality). Drains CPU
-//!     bandwidth so the scheduler's workers compete for cores against
-//!     background work — equivalent to the parallel `zig build` +
-//!     `zig build test` processes that run during the pre-push hook.
+//!   - **Allocator** — 4 threads cycling malloc / free on a separate page
+//!     allocator, which on macOS wakes the kernel's VM subsystem and adds
+//!     latency to the very syscalls the job scheduler's mutex and condvar
+//!     stand on.
 //!
-//!   - **Allocator pressure threads** — 4 threads doing rapid
-//!     malloc / free cycles on a separate page allocator. Drives
-//!     memory-allocator contention which (on macOS at least) wakes
-//!     up the kernel's VM subsystem and adds latency to syscalls
-//!     used by the job scheduler's mutex / condvar primitives.
+//!   - **Fork** — 8 threads looping `spawnAndWait` on `zig version` (10–30 ms
+//!     each) to keep the fork / clone / exec / wait paths hot, as the parallel
+//!     subcompilers do.
 //!
-//!   - **Process fork threads** (M0.2.1 / E2bis addition #2) — 8 threads
-//!     each looping `spawnAndWait` on `zig version` (~10-30 ms per
-//!     spawn) to drive the kernel's fork/clone/exec/wait paths. The
-//!     pre-push hook fans out parallel `zig build` subcompilers — this
-//!     addition reproduces that fork churn synthetically.
+//!   - **FS I/O** — 4 threads looping create + writeAll(1 MB) + flush + sync +
+//!     close + reopen + readAll + close on a per-thread temporary file, for the
+//!     page cache pressure and writeback of intermediate object writes.
 //!
-//!   - **FS I/O threads** (M0.2.1 / E2bis addition #3) — 4 threads each
-//!     looping `create + writeAll(1MB) + flush + sync + close +
-//!     reopen + readAll(1MB) + close` on a per-thread temporary file
-//!     in cwd. Drives page cache pressure, dirty-page writeback, and
-//!     fsync syscalls — the I/O footprint of `zig build` writing
-//!     intermediate objects.
+//! What the noise does is extend every `std.Thread.yield()` and `dispatchPhase`
+//! inter-step gap past the worker spin window, forcing `work_available` parks —
+//! which is what exposes a lost wake if one exists.
 //!
-//! Together these reproduce the H1bis → H2 amplification chain
-//! documented in the brief § Notes : the noise extends every
-//! `std.Thread.yield()` and `dispatchPhase` inter-step gap past
-//! the worker spin window, forcing more `work_available` parks,
-//! and (suspected) exposing the latent wake-lost race in
-//! `std.Io.Condition.waitUncancelable`.
-//!
-//! Stop criterion E2 (cf. brief § Step decomposition):
-//! reproduction > 90 % over 50 local runs. If reproduction stays
-//! below this threshold, the brief mandates Case 2 — return to
-//! Claude.ai (no autonomous decision to widen the noise).
-//!
-//! Watchdog : identical to `no_alloc_steady_state.zig` — 5 s budget
-//! per dispatchFrame loop (warm-up + measurement), dump state and
-//! exit(2) on timeout.
+//! Watchdog identical to `no_alloc_steady_state.zig`: 5 s per dispatch loop,
+//! dump state and `exit(2)` on timeout.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -67,11 +46,10 @@ const QDamage = ecs.Query(&.{Health}, .{});
 const QChangedHealth = ecs.Query(&.{Health}, .{ecs.Changed(Health)});
 const QCleanup = ecs.Query(&.{Health}, .{});
 
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_integrate: []const ecs.Access = &.{ ecs.Access.reads(ecs.Velocity), ecs.Access.writes(ecs.Transform) };
 const spec_damage: []const ecs.Access = &.{ecs.Access.writes(Health)};
 const spec_changed_reader: []const ecs.Access = &.{ecs.Access.reads(Health)};
@@ -166,8 +144,6 @@ fn onDespawnedNoop(
     DESPAWN_OBSERVER_FIRED +%= 1;
 }
 
-// ── Noise threads ─────────────────────────────────────────────────────────
-
 /// CPU noise — tight ALU loop. Volatile read/write through `sink`
 /// prevents the optimizer from eliminating the loop body.
 var CPU_NOISE_SINK: u64 align(64) = 0;
@@ -207,11 +183,9 @@ fn allocPressureThread(stop: *std.atomic.Value(bool)) void {
     }
 }
 
-/// M0.2.1 / E2bis addition #2 — Process fork churn. Repeatedly spawns
-/// `zig version` (a fast print-and-exit subprocess) so the kernel's
-/// fork / clone / exec / wait paths and the page-table / fd / signal
-/// machinery stay hot — mimics the pre-push hook's parallel `zig
-/// build` subcompilers without doing real compilation work.
+/// Fork churn: repeated `zig version` spawns — a print-and-exit subprocess —
+/// keep the kernel's fork / clone / exec / wait paths and the page-table, fd
+/// and signal machinery hot, without doing any real compilation.
 fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
     while (!stop.load(.monotonic)) {
         var child = std.process.spawn(io, .{
@@ -223,11 +197,9 @@ fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
     }
 }
 
-/// M0.2.1 / E2bis addition #3 — FS I/O churn. Each thread maintains a
-/// per-tid temporary file in cwd (typically `.zig-cache/o/.../`) and
-/// loops the full write + fsync + read cycle on 1 MB to drive page
-/// cache and writeback contention — the I/O footprint of the pre-push
-/// hook's `zig build` intermediate object writes.
+/// FS I/O churn: a per-tid temporary file in cwd (typically under
+/// `.zig-cache/o/`), looping the full write + fsync + read cycle on 1 MB for
+/// page cache and writeback contention.
 fn fsIOThread(stop: *std.atomic.Value(bool), io: std.Io, tid: u32) void {
     const gpa = std.heap.page_allocator;
     var path_buf: [64]u8 = undefined;
@@ -267,8 +239,6 @@ fn fsIOThread(stop: *std.atomic.Value(bool), io: std.Io, tid: u32) void {
     // Best-effort cleanup. exit(2) from the watchdog bypasses this.
     cwd.deleteFile(io, path) catch {};
 }
-
-// ── Watchdog harness (mirrors no_alloc_steady_state.zig) ─────────────────
 
 const DispatchArgs = struct {
     sys: *ecs.SystemScheduler,
@@ -340,20 +310,16 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     const gpa = counting.allocator();
     const io = std.testing.io;
 
-    // ── Spin up noise threads BEFORE world setup so they're hot
-    //    by the time the scheduler dispatch begins. ────────────────────
+    // The noise starts BEFORE world setup so it is already hot when the first
+    // dispatch runs.
     var stop_flag = std.atomic.Value(bool).init(false);
-    // M0.2.1 / E2bis addition #1 — CPU oversubscription (2× physical
-    // cardinality) to reproduce the pre-push contention, where several
-    // parallel `zig build`/`zig test` far exceed the number of logical
-    // cores.
+    // CPU oversubscription at 2× the logical cardinality: the pre-push's
+    // parallel `zig build` / `zig test` far exceed the number of cores.
     const cpu_count = (std.Thread.getCpuCount() catch 4) * 2;
     const alloc_thread_count: usize = 4;
-    // M0.2.1 / E2bis addition #2 — fork churn (8 threads of repeated
-    // spawn to mimic the parallel subcompilers of the pre-push).
+    // Fork churn, 8 threads of repeated spawn.
     const proc_thread_count: usize = 8;
-    // M0.2.1 / E2bis addition #3 — FS I/O churn (4 threads write+fsync+read
-    // 1 MB in a loop for page cache pressure + writeback).
+    // FS I/O churn, 4 threads writing, fsyncing and re-reading 1 MB in a loop.
     const fsio_thread_count: usize = 4;
     var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
     defer std.testing.allocator.free(cpu_threads);
@@ -368,10 +334,9 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     var n_proc_started: usize = 0;
     var n_fsio_started: usize = 0;
     defer {
-        // Stop all started noise threads at scope exit. Done in
-        // `defer` so it runs even if watchdog `exit(2)`s — well,
-        // exit(2) bypasses defers; but on the healthy-completion
-        // path this cleanup is required for the leak detector.
+        // Only the healthy-completion path reaches this — the watchdog's
+        // `exit(2)` bypasses every defer — and on that path the leak detector
+        // requires it.
         stop_flag.store(true, .release);
         for (cpu_threads[0..n_cpu_started]) |t| t.join();
         for (alloc_threads[0..n_alloc_started]) |t| t.join();
@@ -391,19 +356,16 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
         fsio_threads[n_fsio_started] = try std.Thread.spawn(.{}, fsIOThread, .{ &stop_flag, io, @as(u32, @intCast(n_fsio_started)) });
     }
 
-    // ── World + scheduler setup. ─────────────────────────────────────
     var world = ecs.World.init();
     defer world.deinit(gpa);
 
-    // E9b: GLOBAL teardown watchdog covering Scheduler.deinit()/join() — the
-    // site the local per-dispatch `runWithWatchdog` below does NOT cover. Armed
-    // immediately before the Scheduler (after the noise threads) so the 5 s
-    // window wraps the scheduler lifecycle + deinit/join tightly, not the noise
-    // spin-up; `defer disarm()` is declared before `defer jobs_sched.deinit` so
-    // LIFO keeps it armed through deinit/join. It uses `io` + its own thread
-    // stack, never the counting `gpa`, so it can't perturb the measured delta
-    // (the before/after `snapshot` window further down). The local
-    // `runWithWatchdog` stays in place (complementary dispatch-side coverage).
+    // A GLOBAL watchdog, covering the teardown `Scheduler.deinit()`/`join()`
+    // that the per-dispatch `runWithWatchdog` below does NOT reach. Armed after
+    // the noise threads so its 5 s window wraps the scheduler lifecycle tightly
+    // rather than the spin-up, with `defer disarm()` declared before
+    // `defer jobs_sched.deinit` so LIFO keeps it armed through deinit and join.
+    // It uses `io` and its own thread stack, never the counting `gpa`, so it
+    // cannot perturb the measured delta.
     var wd: watchdog.Watchdog = .{};
     try wd.arm(io, watchdog.default_timeout_ns, "stress steady-state — composite scenario under concurrent CPU and allocator noise");
     defer wd.disarm();
@@ -496,8 +458,8 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     try sys.registerSystem(gpa, &world, .update, "changed_reader", spec_changed_reader, changedReaderSystem);
     try sys.registerSystem(gpa, &world, .post_update, "cleanup", spec_cleanup, cleanupSystem);
 
-    // Warm-up window — same 10 dispatchFrame as the non-stress test
-    // so the alloc-free contract carries over.
+    // The same 10-dispatch warm-up as the non-stress test, so the alloc-free
+    // contract carries over unchanged.
     var iter_done_warmup = std.atomic.Value(u32).init(0);
     var done_warmup = std.atomic.Value(bool).init(false);
     var err_warmup: anyerror!void = {};

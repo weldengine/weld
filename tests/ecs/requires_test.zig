@@ -3,10 +3,6 @@
 //! Written at Tier 0, through `registerComponentRaw`'s `.requires` name list,
 //! so the semantics are exercised without the Etch front end in the loop: a
 //! front-end regression must not read as a `@requires` regression.
-//!
-//! The five guards and the tests their counter-factuals must redden were
-//! written into the brief BEFORE this file existed. Any gap between that list
-//! and the measured result is a finding, in either direction.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -41,8 +37,6 @@ fn word(v: u64) [8]u8 {
     std.mem.writeInt(u64, &b, v, .little);
     return b;
 }
-
-// ─── Guard 1 — a cycle is an error, not a fixpoint ──────────────────────────
 
 test "a requires cycle is refused, and a DIAMOND is not" {
     const gpa = testing.allocator;
@@ -107,8 +101,6 @@ test "a FORWARD reference resolves — names, not ids, is why" {
     try world.registry.finalizeRequires(gpa);
     try testing.expectEqualSlices(ComponentId, &.{b}, world.registry.requiresClosure(a));
 }
-
-// ─── Guard 2 — the closure is added TRANSACTIONALLY ─────────────────────────
 
 test "adding a component adds its whole closure, in one migration" {
     const gpa = testing.allocator;
@@ -225,8 +217,6 @@ test "the closure applies identically to a SPARSE member" {
     try testing.expect(arch.hasComponent(t));
 }
 
-// ─── Guards 3, 4, 5 — removal ───────────────────────────────────────────────
-
 test "removing the REQUIRER removes nothing else" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -312,12 +302,10 @@ test "a GROUPED removal of the requisite with its dependents is allowed" {
     try testing.expect(world.hasComponentDyn(e2, mesh));
 }
 
-// ─── Reprise / P1-1 — the closure applies on EVERY add and spawn path ───────
-//
-// The derived inventory measured the rule applied at ONE of SIX terminal
-// paths — no path delegates to a sibling — so five were ignoring it in
-// silence. One test per site, plus the observer half, plus the idempotence
-// that must stay green and would be a regression if it reddened.
+// THE CLOSURE APPLIES ON EVERY ADD AND SPAWN PATH. There are SIX terminal ones
+// and no path delegates to a sibling, so the rule holding at one of them says
+// nothing about the other five — which is why there is one test per site, plus
+// the observer half, plus the idempotence that must stay green.
 
 fn setupMeshTransform(world: *World, gpa: std.mem.Allocator) !struct { mesh: ComponentId, transform: ComponentId } {
     const t = try reg(world, gpa, "Transform", &.{}, .table);
@@ -430,9 +418,8 @@ test "P1-1: the typed add expands the closure" {
     try testing.expect(world.hasComponentDyn(e, c.transform));
 }
 
-// ─── Reprise / P1-3 — an observer describes a state that HAS TAKEN PLACE ────
-//
-// Derived over the six command kinds rather than started from the site the
+// AN OBSERVER DESCRIBES A STATE THAT HAS TAKEN PLACE. Derived over the six
+// command kinds rather than started from the site the
 // review named. Four are already in the right order and are the positive
 // witnesses: `.add_component`'s replace arm overwrites unconditionally before
 // `on_replaced`, its fresh arm migrates before `on_add`, `.spawn` spawns before
@@ -503,7 +490,7 @@ test "P1-3: a stale deferred despawn fires no on_despawned" {
     try testing.expectEqual(@as(usize, 0), Spy.fired);
 }
 
-// ─── Review P1-B — the ADD path notifies every component it added ───────────
+// The ADD path notifies every component it added.
 
 test "P1-B: on_add fires for a closure member on the deferred ADD path" {
     const gpa = testing.allocator;
@@ -567,7 +554,7 @@ test "P1-B: a requisite ALREADY present is not re-notified" {
     try testing.expectEqual(@as(usize, 0), Seen.n);
 }
 
-// ─── Review P4 — the add path allocated once per COMMAND ────────────────────
+// The add path used to allocate once per COMMAND.
 
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
 

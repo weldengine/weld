@@ -1,43 +1,24 @@
-//! Composite steady-state no-allocation test.
+//! Composite steady-state no-allocation test: 4 archetypes × 4 systems × 1000
+//! entities over 100 `dispatchFrame` calls, measured after the setup and
+//! warm-up window closes. It sits between `no_alloc_in_simulation_test.zig`
+//! (one archetype, query-only) and `no_alloc_scheduler_dispatch.zig` (jobs
+//! only), and each of its four surfaces is there for a path it covers:
 //!
-//! Drives a scaled-down C0.1-like scenario (4 archetypes × 4 systems
-//! × 1000 entities total) over 100 dispatchFrame calls and asserts
-//! that no allocation happens after the warm-up + setup window
-//! closes. Exercises every M0.1 surface a real game tick touches:
+//! - **Queries** with mixed filters (none, `With(T)`, `Changed(T)`) —
+//!   `forEachChunk` and the lazy re-scan.
+//! - **Change detection** — the per-slot evaluation against the dirty bitset
+//!   and the `changed_tick` columns, run every frame.
+//! - **Command buffer** — a system that records the deferred-mutation path
+//!   without ever issuing a command, so the `commandCount == 0` fast path of
+//!   `dispatchPhase`'s flush loop is what runs.
+//! - **Observer registry** — one `on_despawned` observer with nothing to
+//!   dispatch, so `hasPendingDeferred` returns false every frame.
 //!
-//! - **Queries** with mixed filters (no-filter, `With(T)`,
-//!   `Changed(T)`) — proves `forEachChunk` + the lazy re-scan path
-//!   stays alloc-free in steady state.
-//! - **Change detection** — one system reads `Changed(Health)` so
-//!   the per-slot evaluation runs every frame against the dirty
-//!   bitset + `changed_tick` columns.
-//! - **Command buffer** — one system records the deferred-mutation
-//!   path but never actually issues a command (the `health <= 0`
-//!   branch never fires because the bench keeps health > 0). This
-//!   exercises the `commandCount == 0` fast-path in
-//!   `dispatchPhase`'s flush loop.
-//! - **Observer registry** — one `on_despawned` observer is
-//!   registered. Since no entity is despawned during the steady-
-//!   state loop, the registry's dispatch path runs at zero cost
-//!   per frame (`hasPendingDeferred` returns false, the inner loop
-//!   is skipped).
-//!
-//! Tighter than the existing `no_alloc_in_simulation_test.zig`
-//! (single archetype, query-only iteration). Wider than the
-//! `no_alloc_scheduler_dispatch.zig` test (jobs-only dispatch).
-//! Together the three tests pin the alloc-free contract across the
-//! full M0.1 surface.
-//!
-//! Watchdog harness. The dispatchFrame measurement
-//! loop runs on a worker thread; the test thread polls a `done`
-//! atomic with a 5 s wall-clock budget (in the spirit of
-//! `engine-zig-conventions.md §13` on external-resource test
-//! timeouts). On timeout, the test dumps the
-//! job scheduler + event bus state via `livelock_dump.zig` and
-//! aborts the test process with exit code 2 — that becomes the
-//! signal the stress loop harness uses to count hangs vs healthy
-//! runs. The dump targets the brief's E3 discriminant (H2 wake-lost
-//! vs H4 job-lost vs H1bis isolated).
+//! The measurement loop runs on a worker thread and the test thread polls a
+//! `done` atomic against a 5 s budget (`engine-zig-conventions.md` §13). On
+//! timeout it dumps the scheduler and event bus state through `livelock_dump`
+//! and aborts with exit code 2, which is the signal the stress harness counts
+//! hangs by.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -57,11 +38,10 @@ const QDamage = ecs.Query(&.{Health}, .{});
 const QChangedHealth = ecs.Query(&.{Health}, .{ecs.Changed(Health)});
 const QCleanup = ecs.Query(&.{Health}, .{});
 
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_integrate: []const ecs.Access = &.{ ecs.Access.reads(ecs.Velocity), ecs.Access.writes(ecs.Transform) };
 const spec_damage: []const ecs.Access = &.{ecs.Access.writes(Health)};
 const spec_changed_reader: []const ecs.Access = &.{ecs.Access.reads(Health)};
@@ -217,7 +197,6 @@ fn runWithWatchdog(args: *DispatchArgs) !void {
         const now = std.Io.Clock.now(.awake, args.io);
         const elapsed_ns: i96 = start.durationTo(now).nanoseconds;
         if (elapsed_ns > timeout_ns) {
-            // Timeout — dump state and abort.
             var stderr_buf: [8192]u8 = undefined;
             var stderr_writer = std.Io.File.stderr().writer(args.io, &stderr_buf);
             const stderr = &stderr_writer.interface;
@@ -248,14 +227,12 @@ test "composite steady-state — queries + change detection + cmd + observers do
     const gpa = counting.allocator();
     const io = std.testing.io;
 
-    // E9b: GLOBAL teardown watchdog covering Scheduler.deinit()/join() (the
-    // site the local per-dispatch `runWithWatchdog` below does NOT cover). Armed
-    // outside the measured no-allocation region (the before/after `snapshot`
-    // window further down) — the watchdog uses `io` + its own thread stack, never
-    // the counting `gpa`, so it cannot perturb the measured delta. `defer
-    // disarm()` is declared BEFORE `defer jobs_sched.deinit` so LIFO keeps the
-    // watchdog armed through deinit/join. The local `runWithWatchdog` stays in
-    // place (complementary dispatch-side coverage).
+    // A GLOBAL watchdog, covering the teardown `Scheduler.deinit()`/`join()`
+    // that the per-dispatch `runWithWatchdog` below does NOT reach. It is armed
+    // outside the measured window and uses `io` plus its own thread stack, never
+    // the counting `gpa`, so it cannot perturb the delta. `defer disarm()` is
+    // declared BEFORE `defer jobs_sched.deinit` so LIFO keeps it armed through
+    // deinit and join.
     var wd: watchdog.Watchdog = .{};
     try wd.arm(io, watchdog.default_timeout_ns, "composite steady-state — queries + change detection + cmd + observers do not allocate post-warmup");
     defer wd.disarm();

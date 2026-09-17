@@ -1,31 +1,8 @@
-//! Composite integration scenario.
-//!
-//! Stitches every M0.1 feature into a single end-to-end test:
-//!
-//! 1. Spawn 1 000 entities across 4 archetypes (250 per).
-//! 2. Despawn ~10 % of the entities (100 from each archetype).
-//! 3. Re-spawn 10 % (slot reuse — new entities should land on the
-//!    freed slots with bumped generations).
-//! 4. Drive a 10-tick simulation loop:
-//!    - integrate_motion (W:Transform, R:Velocity)
-//!    - damage_resolution (W:Health)
-//!    - changed_reader (R:Health, filter Changed(Health))
-//!    - observer on_despawned counter
-//!    - on tick 5: despawn another batch via the cmd buffer so the
-//!      cmd buffer flush + observer dispatch path is exercised
-//!      under the simulation loop.
-//! 5. Verify:
-//!    - Live entity count is correct (initial - 10% + 10% - cmd despawns).
-//!    - Stale handles from step 2 return `error.StaleEntityHandle`.
-//!    - Slot reuse: at least some re-spawned entities have an index
-//!      from the despawned set (proves the free list works).
-//!    - Generational rejection: the original (despawned, then reused)
-//!      handles still fail.
-//!    - Change detection coherence: every entity with Health has its
-//!      `changed_tick` strictly greater than `last_run_tick` at the
-//!      end of each tick (damage_resolution wrote to all of them).
-//!    - Observer count matches expected (1 per cmd-buffer-despawned
-//!      entity in tick 5; cumulative across ticks).
+//! Composite scenario: 1 000 entities over 4 archetypes, a despawn / re-spawn
+//! round that forces slot reuse, then a 10-tick loop driving motion, damage,
+//! a `Changed(Health)` reader and an `on_despawned` observer — with a
+//! cmd-buffer despawn batch at tick 5 so the flush and the observer dispatch
+//! are exercised from inside the loop rather than beside it.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -44,11 +21,10 @@ const QIntegrate = ecs.Query(&.{ ecs.Transform, ecs.Velocity }, .{});
 const QDamage = ecs.Query(&.{Health}, .{});
 const QChangedHealth = ecs.Query(&.{Health}, .{ecs.Changed(Health)});
 
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_integrate: []const Access = &.{ Access.reads(ecs.Velocity), Access.writes(ecs.Transform) };
 const spec_damage: []const Access = &.{Access.writes(Health)};
 const spec_cmd_despawn: []const Access = &.{};
@@ -151,7 +127,7 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
     const s_def = Sprite{};
     const a_def = AI{};
 
-    // ── Step 1: spawn 250 entities per archetype = 1000 total ──
+    // Step 1 — 250 entities per archetype, 1000 total.
     var initial_eids: std.ArrayListUnmanaged(ecs.EntityId) = .empty;
     defer initial_eids.deinit(gpa);
     try initial_eids.ensureUnusedCapacity(gpa, 1000);
@@ -183,7 +159,7 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
     }
     try std.testing.expectEqual(@as(usize, 1000), world.entityCount());
 
-    // ── Step 2: despawn the first 100 from each archetype = 400 ──
+    // Step 2 — despawn the first 100 of each archetype, 400 in all.
     var despawned_eids: std.ArrayListUnmanaged(ecs.EntityId) = .empty;
     defer despawned_eids.deinit(gpa);
     try despawned_eids.ensureUnusedCapacity(gpa, 400);
@@ -204,10 +180,8 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
         try std.testing.expectError(error.StaleEntityHandle, r);
     }
 
-    // ── Step 3: re-spawn 100 entities of archetype 1 (T,V,M,H) ──
-    // The free list from the despawn batch should let the identity
-    // store recycle index slots — assert at least one re-spawned
-    // entity reuses an index that was freed in step 2.
+    // Step 3 — re-spawn 100 of archetype 1 (T,V,M,H). The free list left by
+    // step 2 is what should make the identity store recycle index slots.
     var respawned_eids: std.ArrayListUnmanaged(ecs.EntityId) = .empty;
     defer respawned_eids.deinit(gpa);
     try respawned_eids.ensureUnusedCapacity(gpa, 100);
@@ -226,8 +200,6 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
     }
     try std.testing.expectEqual(@as(usize, 700), world.entityCount());
 
-    // Slot reuse check: at least one re-spawned eid has an index
-    // from a despawned eid (with bumped generation).
     var reuse_count: usize = 0;
     for (respawned_eids.items) |new_eid| {
         for (despawned_eids.items) |old_eid| {
@@ -246,7 +218,7 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
         try std.testing.expect(!world.isLive(eid));
     }
 
-    // ── Step 4: build queries + register systems + register observer ──
+    // Step 4 — queries, systems, observer.
     var q_integrate = try world.queryFiltered(gpa, &.{ ecs.Transform, ecs.Velocity }, .{});
     defer q_integrate.deinit(gpa);
     var q_damage = try world.queryFiltered(gpa, &.{Health}, .{});
@@ -267,40 +239,36 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
 
     try sys.registerSystem(gpa, &world, .fixed_update, "integrate", spec_integrate, integrateSystem);
     try sys.registerSystem(gpa, &world, .update, "damage", spec_damage, damageSystem);
-    // Structural only: every mutation goes through the command buffer, which
-    // the access model deliberately has no category for. An empty set is
-    // therefore the true declaration, and it is written rather than defaulted.
+    // Structural only: the mutation goes through the command buffer, which the
+    // access model has no category for, so the empty set is the true
+    // declaration and is written rather than defaulted.
     try sys.registerSystem(gpa, &world, .post_update, "cmd_despawn", spec_cmd_despawn, cmdDespawnSystem);
 
-    // ── Step 4: 10 ticks. On tick 5, set up pending despawns ──
+    // Step 5 — 10 ticks, with the pending despawns armed at tick 5.
     var to_despawn_at_tick_5: [50]ecs.EntityId = undefined;
     for (0..50) |k| to_despawn_at_tick_5[k] = respawned_eids.items[k];
 
     var tick: u32 = 0;
     while (tick < 10) : (tick += 1) {
-        // Set up the per-tick pending despawn list before
-        // dispatch. Tick 5 fires the despawns; other ticks have
-        // an empty list so cmd_despawn records nothing.
+        // Only tick 5 fills the list; on every other tick `cmd_despawn` finds
+        // it empty and records nothing.
         state.pending_despawns = if (tick == 5) to_despawn_at_tick_5[0..] else &.{};
         try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
 
-        // Change detection coherence: after damage_resolution runs,
-        // every entity with Health has changed_tick == current_tick.
-        // Verify on a sampled entity.
+        // `damage_resolution` writes every Health, so a sampled entity's
+        // `changed_tick` must have reached `current_tick`.
         if (tick == 0) {
             const sample = respawned_eids.items[80]; // one we did NOT despawn
             try std.testing.expect(world.isLive(sample));
         }
     }
 
-    // ── Step 5: verifications ──
-    // Live count: 700 (post step 3) - 50 (cmd despawned at tick 5) = 650.
+    // 700 after step 3, minus the 50 despawned at tick 5.
     try std.testing.expectEqual(@as(usize, 650), world.entityCount());
 
     // Observer fired exactly 50 times (one per cmd despawn).
     try std.testing.expectEqual(@as(usize, 50), OBSERVED_DESPAWNS);
 
-    // The 50 cmd-despawned eids are stale.
     for (to_despawn_at_tick_5) |eid| {
         try std.testing.expect(!world.isLive(eid));
     }

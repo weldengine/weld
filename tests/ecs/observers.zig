@@ -1,22 +1,6 @@
-//! Observer registry acceptance tests.
-//!
-//! Three tests cover the contract listed in
-//! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E6:
-//!
-//! - `test "on_add observer is called during flush after add_component"`
-//!   — record an `addComponent(Tag)` through the cmd buffer, register
-//!   an `on_add` observer for `Tag`, drive `dispatchFrame`, assert
-//!   the observer fired exactly once with the correct entity + cid.
-//! - `test "on_despawned observer fires before chunk slot is reused"`
-//!   — the observer must be able to read the entity's components
-//!   one last time. Asserts `world.isLive(entity)` returns true and
-//!   `world.get(Tag, entity)` returns the right value INSIDE the
-//!   callback.
-//! - `test "observer-issued structural mutations are queued for the
-//!    next flush"` — observer reacts to a spawn by spawning another
-//!    entity. The second entity must NOT appear during the CURRENT
-//!    flush (no re-entrancy); it must appear after the NEXT
-//!    `dispatchFrame` (one flush-point latency).
+//! Observer registry contract: an observer fires at the flush, an
+//! `on_despawned` observer can still read the entity one last time, and a
+//! structural mutation an observer issues waits for the NEXT flush.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -43,18 +27,13 @@ const CommandBuffer = command_buffer_mod.CommandBuffer;
 const registry_mod = weld_core.ecs.registry;
 const ComponentId = registry_mod.ComponentId;
 
-// ─── Components used by the tests ─────────────────────────────────────────
-
 const Tag = extern struct { v: u32 = 0 };
 const Marker = extern struct { id: u32 = 0 };
 
-// ─── Test 1 — on_add fires after add_component ────────────────────────────
-
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_add_tag: []const Access = &.{};
 const spec_despawn: []const Access = &.{};
 const spec_spawn_one: []const Access = &.{};
@@ -134,8 +113,6 @@ test "on_add observer is called during flush after add_component" {
     try std.testing.expectEqual(expected_cid, state.last_cid);
 }
 
-// ─── Test 2 — on_despawned fires before slot reuse ────────────────────────
-
 const DespawnObserverState = struct {
     entity_was_live: bool = false,
     tag_value_seen: u32 = 0,
@@ -204,17 +181,12 @@ test "on_despawned observer fires before chunk slot is reused" {
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
 
-    // Inside the callback the entity was still live and its Tag was
-    // still readable with the sentinel value.
     try std.testing.expect(state.entity_was_live);
     try std.testing.expectEqual(@as(u32, 1234), state.tag_value_seen);
 
-    // After the flush, the despawn has been applied.
     try std.testing.expect(!world.isLive(entity));
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 }
-
-// ─── Test 3 — observer-issued mutations queue for next flush ──────────────
 
 const ChainState = struct {
     on_spawned_count: u32 = 0,
@@ -285,33 +257,24 @@ test "observer-issued structural mutations are queued for the next flush" {
 
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 
-    // ── First dispatchFrame ──────────────────────────────────────
-    // System spawns 1 entity via cmd buffer. On flush, the spawn
-    // applies → on_spawned fires → observer queues a second spawn
-    // into deferred. The deferred spawn must NOT apply this round.
+    // First frame: the system spawns through the cmd buffer, the flush applies
+    // it, `on_spawned` fires, and the observer queues a second spawn into the
+    // deferred buffer — which must NOT apply this round.
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &chain_state);
 
     try std.testing.expectEqual(@as(u32, 1), chain_state.on_spawned_count);
     try std.testing.expectEqual(@as(usize, 1), world.entityCount());
 
-    // ── Second dispatchFrame ─────────────────────────────────────
-    // Replace the spawning system with a no-op so we observe ONLY
-    // the deferred buffer drain. The previous flush's deferred
-    // spawn must apply now and on_spawned must fire a second time
-    // (no — actually, the observer-issued spawn does NOT re-fire
-    // observers per the no-recursion contract; the rawApplyCommand
-    // path skips the dispatch). Verify the second entity exists
-    // and on_spawned was NOT called for it.
+    // Second frame, with the spawning system replaced by a no-op so what is
+    // observed is the deferred drain ALONE: the queued spawn applies now, and
+    // `on_spawned` does NOT fire for it — a deferred command goes through
+    // `rawApplyCommand`, which skips observer dispatch (no recursion).
     var sys2 = SystemScheduler.init();
     defer sys2.deinit(gpa);
     // Empty declaration, as above: structural only.
     try sys2.registerSystem(gpa, &world, .update, "noop", spec_noop, noopSystem);
     try sys2.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &chain_state);
 
-    // The deferred spawn from the previous flush has applied —
-    // entity count went from 1 to 2.
     try std.testing.expectEqual(@as(usize, 2), world.entityCount());
-    // The chain observer did NOT re-fire because deferred cmds
-    // bypass observer dispatch (no-recursion contract).
     try std.testing.expectEqual(@as(u32, 1), chain_state.on_spawned_count);
 }

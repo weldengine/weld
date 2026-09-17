@@ -37,8 +37,6 @@ test "spawn and despawn 100k entities without leak" {
     try std.testing.expectEqual(@as(usize, 0), world.entityCount());
 }
 
-// ─── M1.B / G2 — the EMPTY archetype ──────────────────────────────────────
-
 test "an entity spawns into the EMPTY archetype, is locatable, and despawns" {
     // The archetype of zero components became legal at M1.B/G2. The reason is
     // not the sparse backend's convenience: an entity ALWAYS has an archetype,

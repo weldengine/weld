@@ -51,8 +51,6 @@ fn visitSet(gpa: std.mem.Allocator, q: *const hybrid.SparseDrivenQuery, world: *
     return slice;
 }
 
-// ─── The case neither of the two conflicting rules covered ──────────────────
-
 test "two sparse members of opposite cardinality: the smaller drives, and the visited SET is identical either way" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -167,8 +165,6 @@ test "an all-table query elects .table and this planner is not on its path" {
     try testing.expectEqual(hybrid.Driver.table, hybrid.electDriver(&world, &.{}));
 }
 
-// ─── `not has T` on a sparse T is a per-entity test ─────────────────────────
-
 test "not-has on a SPARSE member is a per-entity membership test" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -240,31 +236,13 @@ test "the locator reaches a component of EITHER backend" {
     try testing.expectEqual(@as(u64, 22), std.mem.readInt(u64, tloc.componentBytes(&world, spa).?[0..8], .little));
 }
 
-// ─── The frozen surface, ENUMERATED rather than declared ────────────────────
-
-/// Every public declaration name of the ECS root as of M1.B/G7, and the ONLY
-/// list this gate is allowed to grow.
+/// Every public declaration name of the ECS root, and the ONLY list this pin is
+/// allowed to grow.
 ///
-/// This is the control the gate owes, and its form matters: it ENUMERATES the
-/// inspected surface and reports its SIZE, so a REMOVAL breaks it and an
-/// UNNAMED ADDITION breaks it. A test asserting only
-/// `WELD_ECS_PROTOCOL_VERSION == 1` would pass while a frozen entry was
-/// deleted underneath it.
-///
-/// The two names the hybrid-storage milestone added are `sparse_storage` and
-/// `hybrid_query`, plus `StorageKind`. Additive to the `World` API on the
-/// precedent written at `world.zig`'s `queryDynamic`: "The C0.5 freeze covers
-/// the Tier-0 ↔ Tier-1 module interfaces, not internal `World` methods, so this
-/// does not breach it."
-///
-/// **Four names arrive with declared-access enforcement, and that addition is
-/// NOT additive — it is why the protocol version moves.** `view`, `View`,
-/// `Access` and `SystemContextOf` are the declaration surface `ARCH-030`
-/// requires. They come with two removals on the same frozen surface, which no
-/// precedent above covers: `SystemDescriptor.accesses` loses its empty default,
-/// and `SystemContext` loses its `*World`. Both are breaking for any Tier-1
-/// caller, so `WELD_ECS_PROTOCOL_VERSION` goes to 2 — the tracked migration
-/// `root.zig` prescribes for exactly this case, not a freeze failure.
+/// The form is what makes it a control: it ENUMERATES the inspected surface and
+/// reports its SIZE, so a REMOVAL breaks it and an UNNAMED ADDITION breaks it.
+/// A test asserting only `WELD_ECS_PROTOCOL_VERSION` would pass while a frozen
+/// entry was deleted underneath it.
 const ecs_root_surface = [_][]const u8{
     "WELD_ECS_PROTOCOL_VERSION", "entity",            "components",
     "tick",                      "change_detection",  "chunk",
@@ -315,8 +293,7 @@ comptime {
     // A REMOVAL or a rename breaks the first loop; an ADDITION nobody named
     // breaks the second, and the message names it. Compile-time rather than
     // runtime because a surface pin should stop the build, and because
-    // `std.debug.assert` would be compiled to nothing in ReleaseFast — the
-    // class this milestone has met four times (M1.1.15.1's H1).
+    // `std.debug.assert` is compiled to nothing in ReleaseFast.
     for (ecs_root_surface) |name| {
         if (!@hasDecl(ecs, name)) @compileError(
             "the ECS surface LOST a declaration: " ++ name ++
@@ -339,11 +316,11 @@ test "the ECS protocol is at 2, over an ENUMERATED surface" {
     // and this test reports the SIZE they walked so the control cannot narrow
     // in silence.
     //
-    // It reads 2 because two entries of the frozen surface were REMOVED, not
-    // because four were added: `SystemDescriptor.accesses` no longer defaults to
-    // empty and `SystemContext` no longer carries a `*World`. `root.zig` names
-    // both shapes as covered by this version and prescribes the bump for a
-    // breaking change.
+    // It reads 2 because two entries were REMOVED, not because four were added:
+    // `SystemDescriptor.accesses` no longer defaults to empty and
+    // `SystemContext` no longer carries a `*World`. Both are breaking for a
+    // Tier-1 caller, which is the case `root.zig` prescribes the bump for; the
+    // four names declared-access enforcement ADDED would have moved nothing.
     try testing.expectEqual(@as(u32, 2), ecs.WELD_ECS_PROTOCOL_VERSION);
     const actual = std.meta.declarations(ecs);
     std.debug.print(
@@ -352,8 +329,6 @@ test "the ECS protocol is at 2, over an ENUMERATED surface" {
     );
     try testing.expectEqual(ecs_root_surface.len, actual.len);
 }
-
-// ─── The planner half of the empty-archetype permission ─────────────────────
 
 test "an all-negative query whose exclusion is SPARSE excludes per entity" {
     const gpa = testing.allocator;
@@ -438,8 +413,7 @@ test "an ALL-NEGATIVE query visits an entity carrying only sparse components" {
     const burning = try reg(&world, gpa, "Burning", .sparse);
     const frozen = try reg(&world, gpa, "Frozen", .table);
 
-    // Carries ONLY a sparse component, so it lives in the EMPTY archetype —
-    // legal since G2, and the case G2's own guard-lift opened.
+    // Carries ONLY a sparse component, so it lives in the EMPTY archetype.
     const bare = try world.spawnDynamic(gpa, &.{burning});
     const carrier = try world.spawnDynamic(gpa, &.{frozen});
 
@@ -450,16 +424,16 @@ test "an ALL-NEGATIVE query visits an entity carrying only sparse components" {
     var it = tq.iterator(&world);
     while (it.next()) |loc| try seen.append(gpa, loc.entity());
 
-    // THE PLANNER HALF of the permission G2 opened: an all-negative term
-    // matches the zero-column archetype, and its entities are VISITED. G3
-    // pinned the matching, G5 pinned the visit through the interpreter, and
-    // this is the planner's own answer.
+    // THE PLANNER'S OWN ANSWER on the empty archetype: an all-negative term
+    // matches the zero-column archetype, and its entities are VISITED. The
+    // matching and the visit through the interpreter are pinned elsewhere; this
+    // is the third.
     try testing.expectEqual(@as(usize, 1), seen.items.len);
     try testing.expectEqual(bare, seen.items[0]);
     try testing.expect(std.mem.indexOfScalar(EntityId, seen.items, carrier) == null);
 }
 
-// ─── G8 — the dense range as a unit of dispatch ─────────────────────────────
+// The dense range as a unit of split.
 
 fn sumRange(r: hybrid.DenseRange, total: *usize, n_ranges: *usize, min_len: *usize, max_len: *usize) void {
     total.* += r.len();
@@ -530,42 +504,37 @@ test "a target above the population yields one range per entity, never an empty 
 }
 
 test "the dispatch sites are ENUMERATED and the bound holds at each" {
-    // The brief asks that the bound be "checked over the whole set of dispatch
-    // call sites, and the check reports how many it inspected". The MECHANISM is
-    // `refuseCommandBufferInArgs`, a comptime refusal inside the dispatch entry
-    // — exact, where a lint rule would flag a NAME and carry a tokenizer's false
-    // negatives. This test is the REPORT: it names the two dispatch entries and
-    // asserts each carries the refusal.
-    // The entries that hand an argument tuple to a body, and which of them
-    // dispatches ACROSS WORKERS — the distinction a first version of this gate
-    // got wrong by comparing its own new path against the one that never
-    // carried the hazard.
+    // The bound's MECHANISM is `refuseCommandBufferInArgs`, a comptime refusal
+    // inside each dispatch entry — exact, where a lint rule would flag a NAME
+    // and carry a tokenizer's false negatives. This list is the REPORT: which
+    // entries hand an argument tuple to a body, and which of those dispatch
+    // ACROSS WORKERS, that second half being the distinction that matters.
     //
-    // THE LIST IS DERIVED, NOT MAINTAINED BY HAND, and the recipe is here so the
-    // next reader re-derives it in one pass instead of trusting it: every
-    // function in `src/` whose signature carries BOTH `comptime Body: anytype`
-    // and `args: anytype` is an arg-passing entry. At M1.B/G10 that derivation
-    // returns SIX. *A hand-kept version of this list said FOUR — it predated
+    // THE LIST IS DERIVED, NOT MAINTAINED BY HAND, and the recipe is written
+    // here so the next reader re-derives it in one pass instead of trusting it:
+    // every function in `src/` whose signature carries BOTH
+    // `comptime Body: anytype` and `args: anytype` is an arg-passing entry. That
+    // derivation returns SIX. *A hand-kept version said FOUR: it predated
     // `addDenseRangeJobs` and had never contained `jobs.Scheduler.dispatch`,
-    // whose directory G8's sweep did not cover. This repository has found a
-    // hand-kept enumeration short three times (`ARCH-031` rule 5 at ten against
+    // whose directory the sweep did not cover. This repository has found a
+    // hand-kept enumeration short three times — `ARCH-031` rule 5 at ten against
     // three, the `Core` switch at eleven against six, the regime declarants at
-    // nine against seven), which is why the predicate is written down and the
-    // count is asserted against it.*
+    // nine against seven — which is why the predicate is written down and the
+    // count asserted against it.*
     const entries = [_][]const u8{
         "Query.runChunkAt", // across workers — GUARDED
         "JobBuilder.addJob", // across workers — GUARDED
-        "JobBuilder.addDenseRangeJobs", // across workers — GUARDED (M1.B/G10 B1)
-        "jobs.Scheduler.dispatch", // across workers — GUARDED (M1.B/G10 B2)
+        "JobBuilder.addDenseRangeJobs", // across workers — GUARDED
+        "jobs.Scheduler.dispatch", // across workers — GUARDED
         "SparseDrivenQuery.forEachDenseRange", // CALLING thread — guarded anyway
         "Query.forEachChunk", // CALLING thread — no hazard, unguarded
     };
-    // ALL FOUR that dispatch across workers carry the refusal, as of B2. The
-    // fourth was reachable only after the predicate moved to `foundation` and
+    // ALL FOUR that dispatch across workers carry the refusal. The fourth only
+    // became reachable once the predicate moved to `foundation` and
     // `CommandBuffer` began declaring its own refusal: `src/core/jobs/` cannot
     // import `ecs/command_buffer.zig` without acquiring `world.zig`, measured,
-    // and the pre-existing `jobs/ -> ecs/archetype.zig` edge is no precedent
-    // for that — `archetype.zig` imports no `world.zig`.
+    // and the pre-existing `jobs/ -> ecs/archetype.zig` edge is no precedent for
+    // that — `archetype.zig` imports no `world.zig`.
     //
     // `dispatchBatch` is NOT in this list and owes nothing: a `Job` carries an
     // erased `ctx_ptr: *anyopaque`, so no argument type survives to be tested,
@@ -582,9 +551,9 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
 
     // The sparse-driven entry carries the refusal — asserted by the fact that a
     // legitimate arg tuple compiles, which is the only half a passing test can
-    // show. The REFUSING half cannot be a test: `@compileError` fires at compile
-    // time, so it is a counter-factual run by hand and its exact message is
-    // recorded in the gate report. That asymmetry is stated rather than hidden.
+    // show. The REFUSING half cannot be a test at all: `@compileError` fires at
+    // compile time, so it is a counter-factual run by hand. That asymmetry is
+    // stated rather than hidden.
     ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{ @as(usize, 1), @as(f32, 2.0) }));
     ecs.command_buffer.refuseCommandBufferInArgs(@TypeOf(.{&@as(usize, 3)}));
     // The marker's own contract, asserted rather than assumed: the type
@@ -593,14 +562,14 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
     // this tier's re-export — the SAME function `src/core/jobs/scheduler.zig`
     // calls through `foundation`, which is what lets the bound cross a tier
     // that cannot name `CommandBuffer`. Equivalence with the identity-comparing
-    // form B2 replaced was measured over 21 type cases with zero
+    // form it replaced was measured over 21 type cases with zero
     // disagreements, `**T` and `[3]T` included; these four pin the corners.
     const carries = ecs.command_buffer.carriesMarked;
     try testing.expect(carries(ecs.command_buffer.CommandBuffer));
     try testing.expect(carries(*ecs.command_buffer.CommandBuffer));
     try testing.expect(carries(?*ecs.command_buffer.CommandBuffer));
-    // NON-VACUITY. `*World` was this control until P1-5 made the walk sound,
-    // and it FLIPPED: `World.observer_registry` is an `ObserverRegistry` whose
+    // NON-VACUITY. `*World` was this control until the walk became sound, and
+    // it FLIPPED: `World.observer_registry` is an `ObserverRegistry` whose
     // `deferred` field is a `CommandBuffer`, so `*World` transitively carries
     // the marked type and the guard now refuses it.
     //
@@ -617,10 +586,6 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
     // `observer_registry.deferred` and can record structural changes from a
     // worker, which the one-level predicate could not see.
     //
-    // **M1.A.0 will find this half done.** `ARCH-030` is delivered there as a
-    // comptime view parameterised by the declared access set; the dispatch side
-    // of its first test holds as of M1.B's reprise, a milestone early and
-    // without being aimed at. It must not be rebuilt.
     //
     // The control is replaced rather than the walk narrowed, and by TWO types: a
     // synthetic one that carries nothing by construction, and a real engine type
@@ -630,7 +595,7 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
     try testing.expect(!carries(*ecs.Chunk));
     try testing.expect(carries(*World)); // the flip, asserted rather than hidden
 
-    // P1-5 — THE SHAPE THE OLD PREDICATE'S DOC DECLARED NONEXISTENT. It did not
+    // THE SHAPE THE OLD PREDICATE'S DOC DECLARED NONEXISTENT. It did not
     // traverse struct fields and justified that "for a shape no call site has",
     // while `scheduler.zig` carries `cmd: *CommandBuffer` as a FIELD of
     // `SystemContext` — in the file the bound guards. A justification false
@@ -643,7 +608,7 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
     const Cyclic = struct { next: ?*@This() = null, v: u32 = 0 };
     try testing.expect(!carries(Cyclic));
 
-    // REVIEW P2-E — THE ERROR UNION, which fell through the old `else => false`.
+    // THE ERROR UNION, which fell through the old `else => false`.
     // `anyerror!*CommandBuffer` passed the bound and a worker recovered the
     // pointer with a `catch`; the form list is now DERIVED from
     // `std.builtin.Type` with an exhaustive switch, so the day Zig adds a form
@@ -675,15 +640,14 @@ test "the dispatch sites are ENUMERATED and the bound holds at each" {
     try testing.expectEqual(@as(usize, 5), guarded);
 }
 
-// ─── G10 / B1 — the dense range as a unit of DISPATCH, not only of SPLIT ────
-//
-// G8 above proves the SPLIT: the ranges cover the population exactly once and
-// differ by at most one. It proves nothing about dispatch, because
-// `forEachDenseRange` runs its bodies on the CALLING thread. What follows is
-// the other half of `engine-ecs-internals.md` §7's parity — that a range
-// reaches a WORKER the way a chunk does — and its oracle is built to tell
-// "reached a worker" apart from "ran here", without which a `dispatchBatch`
-// that silently ran everything inline would pass.
+// THE DENSE RANGE AS A UNIT OF DISPATCH, not only of split. The split is proven
+// above — the ranges cover the population exactly once and differ by at most one
+// — and proves nothing about dispatch, `forEachDenseRange` running its bodies on
+// the CALLING thread. What follows is the other half of
+// `engine-ecs-internals.md` §7's parity, that a range reaches a WORKER the way a
+// chunk does, and its oracle is built to tell "reached a worker" apart from "ran
+// here" — without which a `dispatchBatch` silently running everything inline
+// would pass.
 
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
 const JobBuilder = ecs.JobBuilder;
@@ -721,7 +685,7 @@ test "a dense range reaches a worker, and the same body agrees with the same-thr
     const n_ranges = q.rangeCount(&world, target);
     try testing.expectEqual(@as(usize, 5), n_ranges);
 
-    // (1) The same-thread reference, through the entry G8 delivered.
+    // (1) The same-thread reference.
     const hits_same = try gpa.alloc(u8, n_entities);
     defer gpa.free(hits_same);
     @memset(hits_same, 0);
@@ -730,7 +694,7 @@ test "a dense range reaches a worker, and the same body agrees with the same-thr
     var probe_same: DispatchProbe = .{ .hits = hits_same, .tids = tids_same };
     q.forEachDenseRange(&world, target, markRange, .{&probe_same});
 
-    // (2) The dispatched run, through the entry B1 delivers.
+    // (2) The dispatched run.
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
@@ -768,10 +732,10 @@ test "a dense range reaches a worker, and the same body agrees with the same-thr
 
     // (5) PARITY, as a differential on the same `Body`: one chunk body serves
     // `forEachChunk`, `runChunkAt` and `addJob` alike, and one range body must
-    // serve both range entries. This is independent of the coverage property
-    // G8 pins — a `rangeAt` that overlapped identically on both paths would
-    // pass here and fail there, and a trampoline passing the wrong value would
-    // pass there and fail here.
+    // serve both range entries. Independent of the coverage property pinned
+    // above — a `rangeAt` that overlapped identically on both paths would pass
+    // here and fail there, and a trampoline passing the wrong value would pass
+    // there and fail here.
     try testing.expectEqualSlices(u8, hits_same, hits_disp);
     for (hits_disp) |h| try testing.expectEqual(@as(u8, 1), h);
 }
