@@ -38,9 +38,8 @@
 //! deliberately do NOT — they index a space the caller is expected to have
 //! stabilised by calling `chunkCount` first, which is the dispatch protocol
 //! `JobBuilder` follows. Cost in steady-state: `usize == usize` per
-//! entry. No registry side, no notification mechanism on the world — pure polling at
-//! iteration time. It closes a debt accepted when command buffers made mid-frame
-//! archetype creation real.
+//! entry. No registry side, no notification mechanism on the world — pure polling
+//! at iteration time.
 
 const std = @import("std");
 const archetype_mod = @import("archetype.zig");
@@ -137,7 +136,6 @@ pub fn Changed(comptime T: type) type {
 /// arrays so the resulting struct never captures a pointer to a
 /// `comptime var` local (Zig 0.16 forbids that).
 pub fn Query(comptime Components: []const type, comptime filters: anytype) type {
-    // Pass 1 — count each filter bucket and surface the predicate.
     comptime var w_count: usize = 0;
     comptime var wo_count: usize = 0;
     comptime var ch_count: usize = 0;
@@ -160,8 +158,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
     const CHCOUNT = ch_count;
     const PRED = predicate;
 
-    // Pass 2 — populate fixed-size arrays inside `comptime` blocks so
-    // the resulting values are immutable consts, not comptime vars.
     const W_TYPES: [WCOUNT]type = comptime blk: {
         var arr: [WCOUNT]type = undefined;
         var i: usize = 0;
@@ -184,11 +180,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         }
         break :blk arr;
     };
-    // Changed<T> must reference a component already in `Components`
-    // so the per-match column_indices map points at the right
-    // archetype column. Record T's index inside the tuple for each
-    // Changed filter — slotPasses then reads
-    // `match.column_indices[changed_components_index]`.
     const CH_COMPONENT_INDICES: [CHCOUNT]usize = comptime blk: {
         var arr: [CHCOUNT]usize = undefined;
         var i: usize = 0;
@@ -292,13 +283,8 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// `Self.empty()` directly).
         pub fn maybeRescan(self: *Self) void {
             const view = self.archetype_view orelse return;
-            // The per-match action: resolve each required component's
-            // column index and append the `Match`. `appendBounded` would
-            // error on OOM — but a Query built via queryFiltered always
-            // carries a heap gpa, and the matches list only grows by
-            // O(world archetype delta). On OOM we panic — losing a match
-            // silently is a worse failure mode than crashing (would
-            // corrupt the iteration's chunkCount/chunkAt contract).
+            // Panics on OOM: losing a match silently would corrupt the
+            // `chunkCount`/`chunkAt` index contract for the whole dispatch.
             const Appender = struct {
                 fn onMatch(s: *Self, arch: *Archetype) void {
                     var indices: [Components.len]u32 = undefined;
@@ -311,10 +297,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
                     }) catch @panic("Query.maybeRescan: out of memory appending new match");
                 }
             };
-            // The tail scan + singleton skip + `archetypeMatches`
-            // call live in the shared `rescanNewArchetypes` helper, which
-            // the dynamic (`ComponentId`-keyed) query path reuses verbatim.
-            // One matcher, one rescan body, two callers.
             _ = rescanNewArchetypes(
                 view,
                 &self.last_seen_archetype_count,
@@ -354,10 +336,9 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// expected to have invoked `chunkCount` first (which does
         /// the rescan and stabilises the index space for the rest
         /// of the dispatch). The dispatch protocol in `JobBuilder`
-        /// follows this contract: one `chunkCount` followed by N
-        /// `chunkAt(i)` calls. Skipping the rescan on the hot path
-        /// is a perf optimisation — staging 640 chunks × the rescan
-        /// overhead added ~10 µs to the ECS bench.
+        /// follows this contract: one `chunkCount` then N `chunkAt(i)` calls.
+        /// Do not add the rescan here — measured at ~10 µs over 640 staged
+        /// chunks on the ECS bench.
         pub fn chunkAt(self: *const Self, i: usize) *Chunk {
             var idx = i;
             for (self.matches.items) |m| {
@@ -393,16 +374,11 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// linear scan of `matches`, O(matchCount)) is paid once, not
         /// once per chunk.
         ///
-        /// Multi-archetype callers (the C0.1 bench's 10 systems) call
-        /// `componentOffsetFor(chunk, i)` inside the chunk body itself
+        /// Multi-archetype callers call it inside the chunk body itself,
         /// because the offset varies between matched archetypes.
         ///
-        /// Panics if the chunk is not part of any match — only a
-        /// programmer error since `forEachChunk` and `chunkAt` only
-        /// hand out chunks from matched archetypes.
-        ///
-        /// Replaces an older single-archetype-only
-        /// `componentOffset(comptime i)` helper.
+        /// Panics if the chunk belongs to no match — programmer error only,
+        /// since `forEachChunk` and `chunkAt` hand out matched chunks alone.
         pub fn componentOffsetFor(self: *const Self, chunk: *Chunk, comptime i: usize) u16 {
             const m = self.matchFor(chunk) orelse @panic("componentOffsetFor on a non-match chunk");
             return m.archetype.layout.component_offsets[m.column_indices[i]];
@@ -441,8 +417,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
                 if (!f(archetype, chunk, slot)) return false;
             }
             if (Self.changed_component_indices.len > 0) {
-                // The match is needed to recover the archetype's
-                // column index for each Changed<T> filter.
                 const match = self.matchFor(chunk) orelse return false;
                 inline for (Self.changed_component_indices) |ci| {
                     const col = match.column_indices[ci];
@@ -470,17 +444,14 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
             }
         }
 
-        /// Run `Body` on the chunk at global index `idx`. Used by the
-        /// scheduler to dispatch chunks across workers via the same
-        /// `chunkAt(i)` protocol. The caller is expected to have
-        /// invoked `chunkCount` first, which triggers the rescan and
-        /// stabilises the index space for the rest of the dispatch.
+        /// Run `Body` on the chunk at global index `idx`. Used by the scheduler
+        /// to dispatch chunks across workers via the same `chunkAt(i)` protocol.
+        /// The caller must have invoked `chunkCount` first, which triggers the
+        /// rescan and stabilises the index space for the rest of the dispatch.
+        ///
+        /// Carries the job-body bound because THIS is a real dispatch entry;
+        /// `forEachChunk` is a double loop on the calling thread and needs none.
         pub fn runChunkAt(self: *Self, idx: usize, comptime Body: anytype, args: anytype) void {
-            // No job body receives a command buffer. THIS is a real
-            // dispatch entry: its doc above says "used by the scheduler to
-            // dispatch chunks across workers". `forEachChunk` above is a double
-            // loop on the CALLING thread and carries no such hazard, which is
-            // why the bound belongs here and not there.
             command_buffer_mod.refuseCommandBufferInArgs(@TypeOf(args));
             const chunk = self.chunkAt(idx);
             @call(.auto, Body, .{chunk} ++ args);
@@ -488,13 +459,6 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
     };
 }
 
-// ─── Convenience for the world's matching routine ─────────────────────────
-
-/// Helper consumed by `World` when populating the matches list. Returns
-/// `true` if `arch` satisfies the requested component / with / without
-/// component-id sets. Predicate evaluation happens at iteration time
-/// inside `slotPasses` — at archetype-matching time we only care about
-/// the structural shape.
 /// Is `arch` visible to a USER query?
 ///
 /// A singleton-entity resource lives in an archetype of its own (`ARCH-006`)
@@ -507,9 +471,12 @@ pub fn visibleToUserQueries(arch: *const Archetype) bool {
     return !arch.is_singleton;
 }
 
-/// Does `arch` match this id set, FOR A USER QUERY? Visibility is folded in
-/// rather than left to callers: BOTH scans of the typed path go through here,
-/// so neither can be written without it.
+/// Does `arch` match this id set, FOR A USER QUERY? Consumed by `World` when it
+/// populates a matches list; only the structural shape is tested here, the
+/// predicate running later in `slotPasses`.
+///
+/// Visibility is folded in rather than left to callers: BOTH scans of the typed
+/// path go through here, so neither can be written without it.
 pub fn archetypeMatches(
     arch: *const Archetype,
     required_ids: []const ComponentId,
@@ -536,14 +503,14 @@ pub fn archetypeMatches(
 /// to the full archetype count and returns the number of archetypes scanned
 /// this call (0 in the steady state).
 ///
-/// This is the single lazy-rescan body. Both the comptime `Query.maybeRescan`
-/// (which appends a typed `Match` with resolved column indices) and the
-/// runtime `DynamicQuery.maybeRescan` (which appends the bare archetype)
-/// route through it — the interpreter no longer carries its own copy of the
-/// rescan loop. The matcher (`archetypeMatches`) is likewise shared.
+/// The single lazy-rescan body: the comptime `Query.maybeRescan` (appending a
+/// typed `Match` with resolved column indices) and the runtime
+/// `DynamicQuery.maybeRescan` (appending the bare archetype) both route through
+/// it, as they do through `archetypeMatches`.
 ///
-/// Cheap in the steady state: one `usize` equality, no heap traffic. The
-/// scan itself is `O(new)` over archetype count.
+/// Only the TAIL is scanned — existing matches stay valid, archetype pointers
+/// being stable for the world's lifetime. Cheap in the steady state: one `usize`
+/// equality, no heap traffic.
 pub fn rescanNewArchetypes(
     view: ArchetypeView,
     last_seen: *usize,
@@ -555,8 +522,6 @@ pub fn rescanNewArchetypes(
 ) usize {
     const all = view.archetypes_slice(view.ctx);
     if (all.len == last_seen.*) return 0;
-    // Scan only the tail — existing matches remain valid (archetype
-    // pointers are stable for the world's lifetime).
     const tail = all[last_seen.*..];
     for (tail) |arch| {
         if (!archetypeMatches(arch, required_ids, with_ids, without_ids)) continue;
