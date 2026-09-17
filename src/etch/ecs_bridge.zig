@@ -29,13 +29,10 @@ const Tick = weld_core.ecs.tick.Tick;
 // bridge so a name-only Etch `entity.activate_extension("X")` resolves at runtime.
 const ExtensionResolver = weld_core.scene.loader.ExtensionResolver;
 
-// Module-private aliases shadowing the value module — `EntityId`,
-// `Value`, `ComponentRef` are not exported because no external caller
-// drives the bridge by hand; they enter the rule body through
-// `interp.zig` which already has its own re-exports. `EntityId` here
-// is the u64 wire form stored in `Value.entity_id`; the bridge bitcasts
-// it back to the core `(index, generation)` struct when reaching into
-// the world.
+// Module-private: no external caller drives the bridge by hand, and the rule
+// body reaches these through `interp.zig`'s own re-exports. `EntityId` here is
+// the u64 wire form in `Value.entity_id`, bitcast back to the core packed
+// `(index, generation)` when reaching into the world.
 const EntityId = value_mod.EntityId;
 const Value = value_mod.Value;
 const ComponentRef = value_mod.ComponentRef;
@@ -118,8 +115,6 @@ pub const Bridge = struct {
     pub fn resourceIdOf(self: *const Bridge, name: []const u8) ?ComponentId {
         return self.resources.get(name);
     }
-
-    // ─── Component access ────────────────────────────────────────────────
 
     /// Resolve `entity.get(T)` into a ref on the `(entity, component)` pair.
     /// Liveness and carriage are answered here AND again at every dereference:
@@ -210,8 +205,6 @@ pub const Bridge = struct {
         const chunk = arch.chunks.items[loc.chunk_idx];
         arch.markChanged(chunk, idx, loc.slot, tick);
     }
-
-    // ─── Resource access ─────────────────────────────────────────────────
 
     pub fn readResourceField(
         registry: *const Registry,
@@ -316,8 +309,6 @@ pub const Bridge = struct {
         if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
     }
 };
-
-// ─── Byte ↔ Value conversion ─────────────────────────────────────────────
 
 /// Decode the on-storage byte representation of a field into the
 /// interpreter's tagged `Value`. The width to read is dictated by
@@ -494,8 +485,6 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
     }
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "readBytesAsValue / writeValueAsBytes roundtrip on int" {
     var buf: [8]u8 = undefined;
     try writeValueAsBytes(.int_, &buf, .{ .int_ = -42 });
@@ -518,9 +507,8 @@ test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
 }
 
 test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
-    // A type
-    // incoherence at the bridge is a recoverable typed error on EVERY kind
-    // branch — never a runtime `@panic`.
+    // A type incoherence at the bridge is a recoverable typed error on EVERY
+    // kind branch, never a runtime panic.
     var buf: [8]u8 = undefined;
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.int_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
@@ -536,7 +524,6 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }
 
-// ─── The handle is a pair, and the same one in both modes ──────────────────
 //
 // The round-trip pair tests that ONE resolution serves two storage modes —
 // `etch-reference-part1.md` §5.3 a. Here rather than in `tests/etch/` because
@@ -638,7 +625,6 @@ test "componentRefOf still refuses a component the entity does NOT carry" {
     );
 }
 
-// ─── A ref outliving its entity ───────────────────────────────────────────
 //
 // Both tests run on `.table` AND on `.sparse` in the same body, so what they
 // establish is "one resolution, two modes" rather than "one mode works".

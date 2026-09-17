@@ -65,15 +65,9 @@ pub const DiagnosticCode = enum {
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // E0502 AnnotationMisapplied
-    // The two argument-schema codes `etch-resolver-types.md` §13.3
-    // steps 3 and 4 specify. NEITHER existed in the tree before they were minted:
-    // the whole E05xx range held `annotation_misapplied` alone, and
-    // `types.zig`'s own doc comment declared argument validation out of the
-    // scope of the debt that preceded them. The plan says the check
-    // is "activated", which presupposed an existence they did not have — so
-    // these are MINTED here, not enabled. `E0501 UnknownAnnotation` stays
-    // out: its activation is gated on sorting the thirty-three corpus names
-    // that have no enum variant (§13.3.1, binding order of operations).
+    // The two argument-schema codes of `etch-resolver-types.md` §13.3, steps 3
+    // and 4. `E0501 UnknownAnnotation` stays OUT: it is gated on sorting the
+    // thirty-three corpus annotation names that have no enum variant (§13.3.1).
     annotation_arg_mismatch, // E0503 AnnotationArgMismatch (arity, name or value outside the declared domain)
     annotation_arg_not_const, // E0504 AnnotationArgNotConst (well-formed argument expression that is not const-evaluable)
     requires_cycle, // E0505 RequiresCycle (`@requires` closure is not a DAG)
@@ -107,17 +101,15 @@ pub const DiagnosticCode = enum {
     observer_signature_mismatch, // E1208 ObserverSignatureMismatch (param shape ≠ lifecycle kind)
     observer_component_invalid, // E1209 ObserverComponentInvalid (annotation component arg arity / not a declared component)
     observer_rule_conflict, // E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
-    // E1216 RequisiteRemovalRefused is RETIRED, and the number stays
-    // reserved rather than freed: a later E1216 on another subject would be a
-    // collision of meaning for anyone re-reading this code or
-    // its corpus. The static check refused correct code five times in three
-    // review rounds and was removed by its own stop rule; the `@requires`
-    // removal guarantee lives on the runtime channel alone
-    // (`World.requiresRefusesRemoval`). Same shape as E1642 / E1643 below —
+    // E1216 is RETIRED and its number stays RESERVED rather than freed: a later
+    // E1216 on another subject would collide in meaning for anyone re-reading
+    // this code or the corpus. The static check refused correct code and was
+    // removed; the `@requires` removal guarantee lives on the runtime channel
+    // alone (`World.requiresRefusesRemoval`). Same shape as E1642 / E1643 below:
     // a variant with its code and name arms and no emitter.
     requisite_removal_refused, // E1216 RequisiteRemovalRefused (RETIRED: the static form refused correct code; runtime-only)
 
-    // ── behavior (500-E1519, etch-validation-ecs.md §8) ──
+    // ── behavior (E1500-E1519, etch-validation-ecs.md §8) ──
     behavior_root_missing, // E1500 BehaviorRootMissing
     behavior_empty_composite, // E1501 BehaviorEmptyComposite
     behavior_invalid_leaf, // E1502 BehaviorInvalidLeaf (unknown behavior/routine referenced by a leaf intrinsic)
@@ -126,7 +118,7 @@ pub const DiagnosticCode = enum {
     behavior_when_clause_not_bool, // E1505 BehaviorWhenClauseNotBool
     behavior_recursion, // E1506 BehaviorRecursion
 
-    // ── quest (540-E1559, etch-validation-ecs.md §10) ──
+    // ── quest (E1540-E1559, etch-validation-ecs.md §10) ──
     quest_empty_stages, // E1540 QuestEmptyStages
     duplicate_stage_name, // E1541 DuplicateStageName
     quest_requires_not_bool, // E1542 QuestRequiresNotBool
@@ -140,7 +132,7 @@ pub const DiagnosticCode = enum {
     event_reference_not_found, // E1550 EventReferenceNotFound
     no_main_objective, // W1541 NoMainObjective (warning)
 
-    // ── routine (520-E1539, etch-validation-ecs.md §9) ──
+    // ── routine (E1520-E1539, etch-validation-ecs.md §9) ──
     routine_empty_segments, // E1520 RoutineEmptySegments
     duplicate_segment_name, // E1521 DuplicateSegmentName
     trigger_invalid, // E1522 TriggerInvalid
@@ -150,7 +142,7 @@ pub const DiagnosticCode = enum {
     interrupt_target_invalid, // E1526 InterruptTargetInvalid
     action_invalid_return, // E1527 ActionInvalidReturn
 
-    // ── dialogue (560-E1579, etch-validation-ecs.md §11) ──
+    // ── dialogue (E1560-E1579, etch-validation-ecs.md §11) ──
     dialogue_empty, // E1560 DialogueEmpty
     duplicate_branch_label, // E1561 DuplicateBranchLabel
     branch_reference_not_found, // E1562 BranchReferenceNotFound
@@ -160,7 +152,7 @@ pub const DiagnosticCode = enum {
     choice_condition_not_bool, // E1566 ChoiceConditionNotBool
     dialogue_event_type_unknown, // E1567 EventTypeUnknown (dialogue emit)
 
-    // ── ability (580-E1599, etch-validation-ecs.md §12, the
+    // ── ability (E1580-E1599, etch-validation-ecs.md §12, the
     // items 12-15 ruling transposition onto the §8.5 grammar shape; E1585
     // HandlerInvalidReturn and W1580 DuplicateHandler are RESERVED — the
     // ruled shape has no handlers) ──
