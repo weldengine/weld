@@ -31,20 +31,11 @@
 /// breaking change — a tracked migration, not a freeze failure (the
 /// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
 ///
-/// At 2 since declared-access enforcement (`ARCH-030`). FOUR of the shapes this
-/// version covers changed, and all four are breaking for a Tier-1 caller:
-/// `SystemDescriptor.accesses` lost its empty default, `SystemContext` lost its
-/// `*World`, `CommandBuffer` lost its `world` — so `flush` and `init` moved with
-/// it — and `RegistrationError` gained `DependencyCycle`, which breaks an
-/// exhaustive `switch` even though `registerSystem`'s inferred `!void` reads
-/// unchanged. That last one RIDES this bump rather than asking for a second:
-/// one version covers one milestone's breaking set, and a number incremented
-/// per change would stop meaning "the surface a caller compiled against".
-/// The additions beside them (`view`, `View`, `Access`, `SystemContextOf`)
-/// would not on their own have moved this number.
+/// One version covers one milestone's breaking SET, never one change: a number
+/// incremented per shape would stop meaning "the surface a caller compiled
+/// against". Additions alone never move it. At 2 since declared-access
+/// enforcement (`ARCH-030`).
 pub const WELD_ECS_PROTOCOL_VERSION: u32 = 2;
-
-// ─── Sub-module re-exports — keeps `weld_core.ecs.<file>.<symbol>` reachable ──
 
 /// Generational identity store (`EntityIdentityStore`, `EntityId`).
 pub const entity = @import("entity.zig");
@@ -71,20 +62,15 @@ pub const registry = @import("registry.zig");
 /// Opt-in per component through `@storage(.sparse)`; `table` remains the
 /// default.
 pub const sparse_storage = @import("sparse_storage.zig");
-/// The mixed-query planner and its DISTINCT iteration type. Additive
-/// to the ECS surface on the precedent written at `world.zig`'s `queryDynamic`:
-/// the C0.5 freeze covers the Tier-0 ↔ Tier-1 module interfaces, not internal
-/// `World` methods. `tests/ecs/hybrid_query_test.zig` guards the version by
-/// ENUMERATING this surface and reporting its size rather than by declaring the
-/// version unchanged.
+/// The mixed-query planner and its DISTINCT iteration type. Additive, so it
+/// moves no protocol version — the C0.5 freeze covers the Tier-0 ↔ Tier-1
+/// interfaces, not internal `World` methods.
 pub const hybrid_query = @import("hybrid_query.zig");
 /// Deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
-/// Runtime, `ComponentId`-keyed byte resource store: the permanent Etch
-/// resource backend (interpreter + codegen + bridge), NOT superseded by the
-/// singleton-entity system in `src/core/resources/`. The two coexist as
-/// two models for two consumers (cf. the dual-resource doc on `World.resources`
-/// / `World.singleton_resources` in world.zig).
+/// Runtime, `ComponentId`-keyed byte resource store — the permanent Etch
+/// backend. NOT superseded by the singleton-entity system in
+/// `src/core/resources/`: the two are separate models for separate consumers.
 pub const resources = @import("resources.zig");
 /// Comptime-typed query consumed by the Etch → Zig codegen.
 pub const comptime_query = @import("comptime_query.zig");
@@ -96,8 +82,6 @@ pub const observers = @import("observers.zig");
 /// a `*World`, and the comptime membership test that makes an undeclared
 /// access a compile error (`ARCH-030`).
 pub const view = @import("view.zig");
-
-// ─── Flat public API ──────────────────────────────────────────────────────
 
 /// Top-level ECS world. Owns archetypes, identities, registry,
 /// resources, observer registry, current tick.
@@ -127,9 +111,8 @@ pub const Transform = world.Transform;
 /// The canonical archetype's Velocity component (`linear`, `angular`).
 pub const Velocity = world.Velocity;
 
-/// Byte-level archetype storage. Public for callers that walk
-/// archetypes directly (the bench, the Etch interpreter); typical
-/// consumers go through `World.queryFiltered` instead.
+/// Byte-level archetype storage. Public for callers that walk archetypes
+/// directly; typical consumers go through `World.queryFiltered`.
 pub const Archetype = world.Archetype;
 
 /// 16 KiB byte-level chunk. Surfaced by `Query.chunkAt(i)` and by
@@ -238,10 +221,8 @@ pub const JobBuilder = scheduler.JobBuilder;
 /// returns, which is `anyerror`. See the declaration for why.
 pub const RegistrationError = scheduler.RegistrationError;
 
-/// Turn a declared access set into the runtime descriptors the DAG reads.
-///
-/// Exposed for a PREFLIGHT — a caller that wants to know what a spec would
-/// conflict with before registering it. It derives the accesses ALONE, which
-/// is why it is safe to expose where `SystemDescriptor.of` is not: there is no
-/// `run` beside them for the result to disagree with.
+/// Turn a declared access set into the runtime descriptors the DAG reads, for a
+/// caller that wants to know what a spec would conflict with before registering
+/// it. Safe to expose where `SystemDescriptor.of` is not, because it derives the
+/// accesses ALONE — there is no `run` beside them to disagree with.
 pub const descriptorsOf = scheduler.descriptorsOf;

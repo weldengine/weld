@@ -1,22 +1,13 @@
 //! FROZEN — see `engine-phase-0-criteria.md` C0.5.
 //!
-//! Tier 0 resource store — singleton storage indexed by `ComponentId`.
-//! Each resource carries a `dirty` flag set by `getMutResource` and cleared
-//! by `tickBoundary`. Used by the `when resource T changed` filter (see
-//! `engine-ecs-internals.md` §5 — change detection; this implements a
-//! degenerate per-resource dirty bit, full tick-based detection is Phase
-//! 0.5).
+//! Tier 0 resource store — singleton byte buffers indexed by `ComponentId`,
+//! each with a `dirty` flag set by `getMutResource`, cleared by `tickBoundary`
+//! and read by the `when resource T changed` filter. Sizes come from the
+//! registry; the Etch bridge reaches fields through its `FieldDesc` offsets.
 //!
-//! Resource storage is byte-level: each entry holds a heap-allocated
-//! `[]u8` (size from the registry) plus a dirty flag. The Etch bridge
-//! reads or writes fields through the registry's `FieldDesc` offsets.
-//!
-//! Every buffer is over-aligned to `ChunkAlignment`
-//! so generated code can form a typed `*R` over the bytes — `@alignCast`
-//! sound in ReleaseSafe, ABI pointer identity (`etch-abi-zig.md` §3.1).
-//! UNCONDITIONAL: one alignment regime for every resource buffer regardless
-//! of access path (two regimes by access path would reopen an
-//! interpreter/codegen divergence); byte-offset access works unchanged.
+//! Every buffer is over-aligned to `ChunkAlignment` so generated code can form
+//! a typed `*R` over the bytes. UNCONDITIONALLY so, whatever the access path —
+//! two regimes would reopen an interpreter/codegen divergence.
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
@@ -48,9 +39,8 @@ const Entry = struct {
     dirty: bool,
 };
 
-/// Per-world store of singleton resources, keyed by `ComponentId`.
-/// Owns the raw byte buffer for each resource plus a per-entry dirty
-/// flag flipped on `getMutResource` and cleared on `tickBoundary`.
+/// Per-world store of singleton resources, keyed by `ComponentId`. Owns every
+/// byte buffer it holds.
 pub const ResourceStore = struct {
     entries: std.AutoHashMapUnmanaged(ComponentId, Entry) = .empty,
 
@@ -65,10 +55,9 @@ pub const ResourceStore = struct {
         self.* = undefined;
     }
 
-    /// Add a new resource. `init_bytes` is copied into a freshly allocated
-    /// buffer (length must match the registry's `componentSize(id)`),
-    /// over-aligned to `BufferAlignment`. Initial `dirty` is `false`.
-    /// Adding an already-present resource returns `error.DuplicateResource`.
+    /// Add a new resource, copying `init_bytes` into an over-aligned buffer —
+    /// its length must match the registry's `componentSize(id)`. Initial `dirty`
+    /// is `false`; an already-present id returns `error.DuplicateResource`.
     pub fn addResource(self: *ResourceStore, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) ResourceError!void {
         if (self.entries.contains(id)) return ResourceError.DuplicateResource;
         const buf = try gpa.alignedAlloc(u8, comptime .fromByteUnits(BufferAlignment), init_bytes.len);
@@ -96,12 +85,9 @@ pub const ResourceStore = struct {
         return e.dirty;
     }
 
-    /// Set a resource's dirty bit to an explicit value. **Tier-0-internal seam**,
-    /// not a public runtime / Etch / plugin API: the scene loader's rollback path
-    /// (a different Zig file — hence `pub`) restores the pre-load dirty state
-    /// after a rejected transaction, because `getMutResource` (called during both
-    /// the failed load and the rollback) unconditionally sets `dirty = true`.
-    /// No-op if the resource is absent.
+    /// Set a resource's dirty bit explicitly; no-op if absent. Tier-0-internal
+    /// seam, NOT a runtime / Etch / plugin API — `pub` only so the scene loader's
+    /// rollback can undo the `dirty = true` that `getMutResource` forced.
     pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
         const e = self.entries.getPtr(id) orelse return;
         e.dirty = value;
@@ -118,15 +104,12 @@ pub const ResourceStore = struct {
         while (it.next()) |e| e.dirty = false;
     }
 
-    /// Remove a resource. Clears its dirty bit as a side effect of
-    /// removal. Returns `error.UnknownResource` if absent.
+    /// Remove a resource, freeing its buffer. `error.UnknownResource` if absent.
     pub fn removeResource(self: *ResourceStore, gpa: std.mem.Allocator, id: ComponentId) ResourceError!void {
         const kv = self.entries.fetchRemove(id) orelse return ResourceError.UnknownResource;
         gpa.free(kv.value.bytes);
     }
 };
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "addResource then getResource roundtrip" {
     const gpa = std.testing.allocator;
@@ -172,8 +155,6 @@ test "resource buffers are chunk-aligned (Option A)" {
     var store = ResourceStore.init();
     defer store.deinit(gpa);
 
-    // An odd-sized init slice from an arbitrary (1-byte-aligned) source —
-    // the stored buffer must still come back over-aligned.
     const bytes = [_]u8{ 1, 2, 3, 4, 5 };
     try store.addResource(gpa, 9, bytes[0..]);
     const got = store.getResource(9).?;
@@ -197,7 +178,7 @@ test "setDirty restores an explicit dirty state" {
 
     const bytes = [_]u8{1};
     try store.addResource(gpa, 5, &bytes);
-    _ = store.getMutResource(5).?; // forces dirty = true
+    _ = store.getMutResource(5).?;
     try std.testing.expect(store.isDirty(5));
 
     store.setDirty(5, false);
@@ -205,6 +186,5 @@ test "setDirty restores an explicit dirty state" {
     store.setDirty(5, true);
     try std.testing.expect(store.isDirty(5));
 
-    // Absent resource → no-op, no crash.
     store.setDirty(999, false);
 }

@@ -6,17 +6,11 @@
 //! and yields a comptime-typed tuple of pointers `(*T1, *T2, ...)` per
 //! matching slot.
 //!
-//! This is the path the codegen consumes — each rule emits one
-//! `query(world, .{...})` invocation, and Zig's comptime monomorphises
-//! one iterator type per distinct tuple of component types. The total
-//! number of distinct instantiations is the figure reported by
-//! `bench-etch-compile`.
+//! The path the codegen consumes: one `query(world, .{...})` per rule, one
+//! monomorphised iterator type per distinct tuple.
 //!
-//! Coexists with the single-archetype `world.query()` (which still
-//! covers the comptime `(Transform, Velocity)` path). They do not share
-//! storage — `query` here only sees archetypes spawned via
-//! `world.spawnDynamic`, the path the codegen and the differential
-//! corpus runner use.
+//! It does NOT see the same storage as the single-archetype `world.query()` —
+//! only archetypes spawned via `world.spawnDynamic` reach this iterator.
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
@@ -29,12 +23,9 @@ const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
 const Chunk = arch_dyn_mod.Chunk;
 const World = world_mod.World;
 
-/// Generic iterator over entities whose archetype contains all of
-/// `tuple`'s component types. Comptime-monomorphised per distinct
-/// `tuple`. The `Row` type is a comptime tuple struct (`.@"0"`, `.@"1"`,
-/// …) of `*Ti` pointers into the chunk's SoA arrays — readers and writers
-/// alike go through these pointers, no `Value` tagged union on the hot
-/// path.
+/// Iterator over entities whose archetype contains every type in `tuple`,
+/// monomorphised per distinct `tuple`. `Row` is a tuple struct (`.@"0"`,
+/// `.@"1"`, …) of `*Ti` pointers straight into the chunk's SoA arrays.
 pub fn ComptimeQuery(comptime tuple: anytype) type {
     const types_count: usize = tuple.len;
     return struct {
@@ -70,7 +61,6 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
 
         pub fn next(self: *Self) ?Row {
             while (true) {
-                // If we have a chunk in progress, yield its next slot.
                 if (self.cur_chunk) |chunk| {
                     if (self.slot < self.cur_count) {
                         var row: Row = undefined;
@@ -83,7 +73,6 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                         self.slot += 1;
                         return row;
                     }
-                    // Chunk exhausted — advance to next chunk in current arch.
                     self.chunk_idx += 1;
                     self.slot = 0;
                     if (self.cur_arch) |arch| {
@@ -93,14 +82,11 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                             continue;
                         }
                     }
-                    // Archetype exhausted — fall through to find next match.
                     self.cur_chunk = null;
                     self.cur_arch = null;
                     self.arch_idx += 1;
                     self.chunk_idx = 0;
                 }
-                // Find the next archetype that contains every required
-                // component.
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
                     if (!query_mod.visibleToUserQueries(arch)) continue;
@@ -131,14 +117,10 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
     };
 }
 
-/// Comptime entry point. The `tuple` value is e.g. `.{Counter, Position}`
-/// at the call site; Zig monomorphises one return type per distinct
-/// `tuple`.
+/// Comptime entry point — `.{Counter, Position}` at the call site.
 pub fn query(world: *World, comptime tuple: anytype) ComptimeQuery(tuple) {
     return ComptimeQuery(tuple).init(world);
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "query yields typed rows over a single dynamic archetype" {
     const gpa = std.testing.allocator;
@@ -153,20 +135,17 @@ test "query yields typed rows over a single dynamic archetype" {
     const id_b = try world.registry.registerComponent(gpa, B);
     try world.registry.registerAlias(gpa, "B", id_b);
 
-    // Spawn 3 entities into an archetype {A, B}.
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
         _ = try world.spawnDynamic(gpa, &[_]ComponentId{ id_a, id_b });
     }
 
-    // Mutate via the query iterator.
     var it = query(&world, .{ A, B });
     while (it.next()) |row| {
         row.@"0".v += 7;
         row.@"1".f += 1.5;
     }
 
-    // Confirm every spawned entity received the mutation.
     var checked: u32 = 0;
     var it2 = query(&world, .{ A, B });
     while (it2.next()) |row| {
@@ -190,10 +169,9 @@ test "query skips archetypes missing required components" {
     const id_b = try world.registry.registerComponent(gpa, B);
     try world.registry.registerAlias(gpa, "B", id_b);
 
-    // One entity has only A, another has only B, third has both.
-    _ = try world.spawnDynamic(gpa, &[_]ComponentId{id_a}); // entity 0
-    _ = try world.spawnDynamic(gpa, &[_]ComponentId{id_b}); // entity 1
-    _ = try world.spawnDynamic(gpa, &[_]ComponentId{ id_a, id_b }); // entity 2
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{id_a});
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{id_b});
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{ id_a, id_b });
 
     var count_ab: u32 = 0;
     var it = query(&world, .{ A, B });
