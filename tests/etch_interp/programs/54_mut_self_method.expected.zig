@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-5 mut-self
+/// Diff-runner fixture: 1 tick. Exercises the mut-self
 /// codegen closure (part1 §8.3, resolver-types §7.6):
 ///
 /// - `c.bump(40)` / `c.bump(1)` mutate the receiver through a `mut self`

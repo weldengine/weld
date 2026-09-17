@@ -1,4 +1,4 @@
-//! S5 parity check: both runners against every corpus program must reach
+//! The parity check: both runners, against every corpus program, must reach
 //! the same expected post-tick state. The driver already asserts the
 //! final world matches each sidecar's `expected`; running both backends
 //! against that same expected establishes the parity transitively (if

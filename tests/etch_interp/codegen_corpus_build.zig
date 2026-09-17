@@ -1,9 +1,8 @@
-//! S5 build helper — single source of truth for the list of differential
-//! corpus programs that get cooked by `tools/etch_cook` at `zig build`
-//! time. Both `build.zig` (to drive the `addRunArtifact` invocation) and
-//! the unit tests (for assertions about the codegen output) import this
-//! file. Kept in `tests/etch_interp/` next to the programs themselves so
-//! the namespace ↔ path mapping is co-located with the corpus.
+//! Single source of truth for the differential corpus programs `tools/etch_cook`
+//! cooks at `zig build` time. Both `build.zig`, which drives the
+//! `addRunArtifact` invocation, and the unit tests, which assert on the codegen
+//! output, import this file — and it lives beside the programs so the
+//! namespace ↔ path mapping stays co-located with the corpus.
 
 /// Each entry pairs a namespace identifier (the name of the nested struct
 /// emitted into the consolidated `corpus_codegen.zig`) with the relative
@@ -14,8 +13,8 @@ pub const CodegenProgram = struct {
     etch_path: []const u8,
 };
 
-/// Pinned list of the 20 differential programs that `tools/etch_cook`
-/// cooks into the consolidated `corpus_codegen.zig` during `zig build`.
+/// Pinned list of the differential programs `tools/etch_cook` cooks into the
+/// consolidated `corpus_codegen.zig` during `zig build`.
 pub const programs = [_]CodegenProgram{
     .{ .name = "p01_arith_int_let", .etch_path = "tests/etch_interp/programs/01_arith_int_let.etch" },
     .{ .name = "p02_arith_float_compound", .etch_path = "tests/etch_interp/programs/02_arith_float_compound.etch" },
@@ -78,13 +77,13 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p59_resource_receiver", .etch_path = "tests/etch_interp/programs/59_resource_receiver.etch" },
     .{ .name = "p60_event_observer_resource", .etch_path = "tests/etch_interp/programs/60_event_observer_resource.etch" },
     .{ .name = "p61_filter_two_components", .etch_path = "tests/etch_interp/programs/61_filter_two_components.etch" },
-    // Level-B programs (M0.8 E4): cooked + compiled like every program
-    // (the Sema proof), but diffed on the SERIALIZED IR by
-    // `levelb_ir_diff_test.zig` — they have no world-state sidecar.
+    // Level-B programs: cooked and compiled like every other one — the Sema
+    // proof — but diffed on the SERIALIZED IR by `levelb_ir_diff_test.zig`,
+    // since they have no world-state sidecar.
     .{ .name = "p62_data_table", .etch_path = "tests/etch_interp/programs/62_data_table.etch" },
     .{ .name = "p63_routine_daily", .etch_path = "tests/etch_interp/programs/63_routine_daily.etch" },
-    // §6 when-surface extension (M0.8 E4, item-4 ruling) — Level A,
-    // byte-exact world-state differentials on both emission paths.
+    // The §6 when-surface extension — Level A, byte-exact world-state
+    // differentials on both emission paths.
     .{ .name = "p64_when_expr_surface", .etch_path = "tests/etch_interp/programs/64_when_expr_surface.etch" },
     .{ .name = "p65_when_expr_archwalk", .etch_path = "tests/etch_interp/programs/65_when_expr_archwalk.etch" },
     .{ .name = "p66_named_args", .etch_path = "tests/etch_interp/programs/66_named_args.etch" },
@@ -92,32 +91,32 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p68_quest_escort", .etch_path = "tests/etch_interp/programs/68_quest_escort.etch" },
     .{ .name = "p69_dialogue_merchant", .etch_path = "tests/etch_interp/programs/69_dialogue_merchant.etch" },
     .{ .name = "p70_ability_fireball", .etch_path = "tests/etch_interp/programs/70_ability_fireball.etch" },
-    // Level-B presentation (M0.8 E5): serialized-IR diffs, no world-state
-    // sidecar (nothing executes).
+    // Level-B presentation: serialized-IR diffs, no world-state sidecar,
+    // nothing executes.
     .{ .name = "p71_theme_dark", .etch_path = "tests/etch_interp/programs/71_theme_dark.etch" },
     .{ .name = "p72_motion_ui", .etch_path = "tests/etch_interp/programs/72_motion_ui.etch" },
     .{ .name = "p73_input_mapping", .etch_path = "tests/etch_interp/programs/73_input_mapping.etch" },
     .{ .name = "p74_widget_panel", .etch_path = "tests/etch_interp/programs/74_widget_panel.etch" },
     .{ .name = "p75_locale_en", .etch_path = "tests/etch_interp/programs/75_locale_en.etch" },
-    // Level-B render/animation/audio/cinematic (M0.8 E6).
+    // Level-B render, animation, audio and cinematic.
     .{ .name = "p76_effect_explosion", .etch_path = "tests/etch_interp/programs/76_effect_explosion.etch" },
     .{ .name = "p77_audio_graph_laser", .etch_path = "tests/etch_interp/programs/77_audio_graph_laser.etch" },
     .{ .name = "p78_audio_score_exploration", .etch_path = "tests/etch_interp/programs/78_audio_score_exploration.etch" },
     .{ .name = "p79_sequence_intro", .etch_path = "tests/etch_interp/programs/79_sequence_intro.etch" },
     .{ .name = "p80_anim_graph_locomotion", .etch_path = "tests/etch_interp/programs/80_anim_graph_locomotion.etch" },
     .{ .name = "p81_shader_pbr", .etch_path = "tests/etch_interp/programs/81_shader_pbr.etch" },
-    // Level-C scene/prefab (M0.8 E7).
+    // Level-C scene and prefab.
     .{ .name = "p82_scene_village", .etch_path = "tests/etch_interp/programs/82_scene_village.etch" },
     .{ .name = "p83_prefab_walltorch", .etch_path = "tests/etch_interp/programs/83_prefab_walltorch.etch" },
     // Full-grammar TOTAL codegen integration: the whole file cooks +
     // Sema-compiles (codegen-compiles proof for every construct in one unit);
     // the Level-A behaviour is byte-exact interp↔codegen via corpus_facade.
     .{ .name = "p84_reference_500_codegen", .etch_path = "tests/etch_interp/programs/84_reference_500_codegen.etch" },
-    // Bare match-arm binding byte-exact (Guy's gate amendment).
+    // Bare match-arm binding, byte-exact.
     .{ .name = "p85_match_binding", .etch_path = "tests/etch_interp/programs/85_match_binding.etch" },
     // Triple-quote `"""…"""` multiline + §1.4 dedent + `.len()`.
     .{ .name = "p86_triple_quote_multiline", .etch_path = "tests/etch_interp/programs/86_triple_quote_multiline.etch" },
-    // Triple-quote with a multi-line interpolation (dedent vs
-    // expression bytes, E2 review item 3).
+    // Triple-quote with a multi-line interpolation: the dedent must touch the
+    // literal segments and never the interpolation's own bytes.
     .{ .name = "p87_triple_quote_multiline_interp", .etch_path = "tests/etch_interp/programs/87_triple_quote_multiline_interp.etch" },
 };

@@ -1,6 +1,6 @@
-//! Differential corpus driver — runs every program in `corpus_facade` via
-//! the S4 tree-walking interpreter `Runner` and compares the final world
-//! state against each sidecar's `expected`.
+//! Differential corpus driver — runs every program of `corpus_facade` through
+//! the tree-walking interpreter's `Runner` and compares the final world state
+//! against each sidecar's `expected`.
 
 const std = @import("std");
 const corpus = @import("corpus_facade");

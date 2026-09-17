@@ -1,4 +1,4 @@
-//! S4 differential-test runner backed by the tree-walking interpreter.
+//! Differential-test runner backed by the tree-walking interpreter.
 //!
 //! Implements the `Runner` contract consumed by `diff_runner.zig`:
 //!   pub fn setup(gpa, world, source) !Runner
@@ -14,9 +14,8 @@ const World = weld_core.ecs.world.World;
 const Diagnostic = weld_etch.Diagnostic;
 const Ast = weld_etch.Ast;
 
-/// S4 interpreter-backed runner — drives `diff_runner.runProgram` by
-/// parsing + type-checking + running the Etch source through the
-/// tree-walking interpreter.
+/// Drives `diff_runner.runProgram` by parsing, type-checking and running the
+/// Etch source through the tree-walking interpreter.
 pub const Runner = struct {
     /// Heap-allocated so the `*const Ast` pointer stored on the
     /// `Interpreter` remains valid after the Runner is moved/returned.

@@ -1,7 +1,6 @@
-//! S5 differential corpus driver against the Zig codegen runner. Same
-//! shape as `corpus_test.zig` for the interpreter (S4), but plugs the
-//! codegen-backed `Runner`. The driver and the corpus facade are unchanged
-//! between S4 and S5 — only the runner module differs.
+//! The differential corpus driven against the Zig codegen runner. Same shape as
+//! `corpus_test.zig`, which drives the interpreter: the driver and the corpus
+//! facade are identical and only the runner module differs.
 
 const std = @import("std");
 const corpus = @import("corpus_facade");
