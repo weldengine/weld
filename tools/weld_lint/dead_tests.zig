@@ -138,10 +138,12 @@ pub const exclusions = [_]Exclusion{
     .{
         .prefix = "src/etch/zig_codegen/",
         .reason = "the subtree IS elaborated — two live test targets reach `codegen_zig` through " ++
-            "the `weld_etch` module boundary — but the subset the wire-in ADDS does not compile: " ++
-            "`zig_codegen/tests/` and `cache.zig`, where `std.fs.cwd()` was removed at Zig 0.16 " ++
-            "and the replacement takes an `io` parameter these functions do not have, so the " ++
-            "repair changes the codegen cache's public signatures",
+            "the `weld_etch` module boundary — but the subset the wire-in ADDS does not compile, " ++
+            "on TWO Zig 0.16 removals and not one. `std.fs.cwd()` is gone, `std.fs` being a " ++
+            "deprecation shim: `std.Io.Dir.cwd()` replaces it and takes no argument, but every " ++
+            "`Dir` method now takes an `io` these functions do not have, so the repair changes " ++
+            "the codegen cache's public signatures. `Io.Dir` also carries no `realpath`, which " ++
+            "has NO replacement and is the FIRST error elaboration reports",
         .owner = "M1.D.5",
     },
 };
