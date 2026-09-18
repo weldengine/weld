@@ -17,10 +17,18 @@
 //!     per-block expected verdict, which "extract and parse" has nowhere to put.
 //!   - ONE is a defect in the document: EBNF comment syntax `(* … *)` inside an
 //!     ```etch fence.
-//!   - EIGHT are real divergence between documented and parsed Etch. The sharpest
-//!     is `import ui.theme`: `theme` has since become a top-level keyword, so a
-//!     documented import became unparseable without either side noticing. One
-//!     other breaks the grammar's OWN rule on positional-before-named arguments.
+//!   - EIGHT are real divergence between documented and parsed Etch, and THE SIDE
+//!     IS NOT UNIFORM. `import ui.theme` is the document's: `theme` has since
+//!     become a top-level keyword, so a documented import became unparseable
+//!     without either side noticing. A widget block is the PARSER's: it carries a
+//!     trailing comma in an argument list, which `arg_list` explicitly permits
+//!     (`arg , { "," , arg } , [ "," ]`), and the parser refuses it in all three
+//!     argument shapes under two messages that name the wrong fault — one of them
+//!     the positional-before-named rule, which the block does not break. The same
+//!     optional comma is HONOURED in array, struct, map and match-arm literals, so
+//!     the refusal is confined to argument lists. The other six are unattributed:
+//!     one side was measured, and generalising from it is how the widget block was
+//!     first misfiled here.
 //!
 //! So the corpus below is CURATED to parse, not extracted, and that is the
 //! property the harness rests on. What it cannot do is notice a construct the
