@@ -440,7 +440,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(asset_pipeline_tests).step);
 
     // inline tests inside src/foundation/** (traits + kernels).
-    // simd.zig re-exports traits/portable/dispatch/kernels, so they are all
+    // simd/root.zig re-exports traits/portable/dispatch/kernels, so they are all
     // reachable and analysed (engine-zig-conventions.md §13).
     const foundation_tests = b.addTest(.{ .root_module = foundation_module });
     test_step.dependOn(&b.addRunArtifact(foundation_tests).step);
