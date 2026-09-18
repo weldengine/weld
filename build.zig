@@ -972,6 +972,9 @@ pub fn build(b: *std.Build) void {
         // and writes its row, and the codegen refuses a sparse program.
         // `.etch = true` for `weld_etch`; `weld_core` is unconditional here.
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
+        // one test per type-checker diagnostic code: each names its code and
+        // asserts PRESENCE, so it reddens the day emission stops.
+        .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },
         // TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // the consolidated cook library.
