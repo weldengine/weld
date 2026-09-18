@@ -19,9 +19,35 @@
 //! - `StableId` is absent (left at zero). It is owed by the editor, which
 //!   injects `@id("uuid")`.
 //!
-//! Kind enums declare every EBNF v0.6 variant for API stability. The parser
-//! produces a subset; call sites switching on a kind enum must terminate
-//! with `else => @panic("unsupported")`.
+//! Kind enums declare every EBNF v0.6 variant for API stability, and the parser
+//! produces a SUBSET — but WHICH subset is not knowable from this tree, and that
+//! is measured rather than suspected. Four methods disagree, and each one's error
+//! direction is now known:
+//!
+//!   - the two-way marker sections this block once carried yielded 80, which
+//!     counted only the variants marked reserved YET REACHED and excluded the 18
+//!     marked implemented — never a subset size, so never comparable to the rest;
+//!   - a builder-call sweep over `src/etch/` yields 92, which counts every
+//!     producer in the module and not the parser;
+//!   - the same sweep restricted to `parser.zig` yields 0 for `StmtKind` and
+//!     `TypeNodeKind` while 12 and 6 are demonstrably produced — this parser does
+//!     not pass literal kinds at those call sites, so a search over arguments
+//!     cannot reach it;
+//!   - parsing all 402 in-repo Etch sources WITNESSES 83, which is a lower bound:
+//!     `const_decl` is unwitnessed there and an inline test below proves it
+//!     produced. Widening to this file's own test corpus reaches 94, still a lower
+//!     bound — `import_decl` is producible and named in neither corpus, the
+//!     sources exercising it being Zig string literals rather than `.etch` files.
+//!
+//! The count is therefore a function of the corpus, and the only figure worth
+//! engraving comes from a corpus built to hold ONE witness per variant. None is
+//! engraved here, and a fifth number obtained by a fifth method is not progress.
+//!
+//! This block used to close by telling call sites to terminate a switch on a kind
+//! enum with `else => @panic("unsupported")`. That string occurs exactly ONCE in
+//! `src/` — in that line itself. No call site has ever honoured it, and the tree's
+//! later practice is the opposite: an exhaustive switch with no `else`, so the
+//! compiler names every site that owes a decision when a variant is added.
 
 const std = @import("std");
 const token_mod = @import("token.zig");
