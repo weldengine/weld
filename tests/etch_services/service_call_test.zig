@@ -188,6 +188,59 @@ test "failing toy method propagates to try/catch" {
     try std.testing.expectEqual(@as(u32, 2), r.calls);
 }
 
+// WHAT A ZIG ERROR ARRIVES AS, PINNED BECAUSE NOTHING ELSE OBSERVES IT.
+//
+// This asserts a DIVERGENCE, not a contract. `etch-abi-zig.md` §11.5.1 requires a
+// service exposing `throws` to declare a domain enum and a mapping table, and
+// names this exact behaviour as the failure mode it exists to close: collapsing an
+// error space onto one variant and moving the real identity into `message`.
+// `interp.zig`'s converter is a two-way branch — `OutOfMemory`, else `io_fail` —
+// so it is that failure mode verbatim.
+//
+// TWO THINGS ARE WRONG AND ONLY ONE IS THE MISSING FIELD. The builtin `Error`
+// carries `message`, `code`, `source` where §11.5 carries a fourth, `kind`, for
+// the domain identity. But `code` is filled WRONG TOO: its five categories match
+// the spec's set exactly, and §11.5.1 chooses among them by what a generic caller
+// can do — an out-of-range argument is `invalid_arg`. `error.TooBig` is exactly
+// that and arrives as `io_fail`.
+//
+// The sibling test above asserts `err.message.len()` and no test anywhere asserts
+// the CODE of a Zig-originated error, so the collapse is currently unobserved.
+// WHEN THE DIVERGENCE CLOSES THIS TEST REDDENS, and that is its purpose: delete it
+// then, rather than adjust the expected value.
+
+test "a Zig error arrives as io_fail whatever it meant (divergence pin)" {
+    const gpa = std.testing.allocator;
+    var r = try run(gpa, accumulator ++
+        \\
+        \\rule use_service(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let acc = entity.get_mut(Acc)
+        \\  try {
+        \\    acc.out = toy.risky(5)
+        \\  } catch err {
+        \\    acc.err_out = match err.code {
+        \\      ErrorCode.io_fail => 1,
+        \\      ErrorCode.network_timeout => 2,
+        \\      ErrorCode.invalid_arg => 3,
+        \\      ErrorCode.permission_denied => 4,
+        \\      ErrorCode.out_of_memory => 5,
+        \\    }
+        \\    acc.msg_len = err.message.len()
+        \\  }
+        \\}
+    , false);
+    defer r.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    // 1 == io_fail. The value a correct mapping would give is 3, `invalid_arg`.
+    try std.testing.expectEqual(@as(i64, 1), r.err_out);
+    // And the identity survives only as a string: `@errorName(error.TooBig)`.
+    try std.testing.expectEqual(@as(i64, 6), r.msg_len);
+}
+
 test "a throwing service call with no try is E0902" {
     const gpa = std.testing.allocator;
     var r = try run(gpa, accumulator ++
