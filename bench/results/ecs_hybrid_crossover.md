@@ -1,5 +1,20 @@
 # ECS hybrid-storage crossover — M1.B / G10
 
+> **HEAD NOTE added 2026-09-18 at M1.D/S4/G4 — half of the premise stated below
+> is FALSE at the current head, and the conclusion survives on the other half.**
+> This report reads "chunk compaction is INTRA-chunk only and `archetype.zig`
+> releases no chunk, so the count follows the cumulative number of adds and never
+> the live population". The FIRST clause still holds. The second does not:
+> `releaseChunkIfEmpty` frees a chunk at zero occupancy
+> (`src/core/ecs/archetype.zig:381`) and `World.reclaimChunk`
+> (`src/core/ecs/world.zig:1173`) performs the renumbering repair, both delivered
+> by S2/G2 of this same milestone — AFTER these numbers were taken. The figures
+> are the record of the run that produced them and are NOT refreshed; what is
+> corrected is the mechanism sentence, because `M1.D.7`'s oracle would otherwise
+> inherit a claim the tree contradicts. What reclaim does NOT do is compact a
+> chunk that stabilises ABOVE zero, which is the shape this report measures.
+
+
 **REPORTED, NOT GATED, and permanently so.** `engine-ecs-internals.md` §2 states that no
 switch frequency and no population percentage can be engraved as a threshold, and names
 this bench as what produces them instead. There is no future gate here: the output IS the
