@@ -206,6 +206,104 @@ pub fn parseBaseline(
     }
 }
 
+/// What one baseline entry turned out to be in this run.
+pub const Divergence = union(enum) {
+    /// Same path, different digest: the token stream changed under a stable
+    /// name. This is the failure the baseline exists to catch.
+    moved: struct { path: []const u8, baseline: []const u8, current: []const u8 },
+    /// The path is gone and exactly one file this run visited, absent from the
+    /// baseline, carries its digest bit for bit.
+    renamed: struct { from: []const u8, to: []const u8 },
+    /// The path is gone and SEVERAL unlisted files carry its digest, so no
+    /// destination can be named.
+    ambiguous: struct { from: []const u8, count: usize },
+    /// The path is gone and nothing this run visited carries its digest.
+    missing: struct { path: []const u8 },
+};
+
+/// The classification of a whole baseline against a whole run.
+pub const CheckResult = struct {
+    findings: []const Divergence,
+    /// Findings that fail the check — everything except a resolved rename.
+    failures: usize,
+    /// Resolved renames, which do not fail but do make the baseline stale.
+    renames: usize,
+};
+
+/// Classify each baseline entry against `seen`, a `path -> digest` map of this run.
+///
+/// A RENAME AND AN EDIT ARE DIFFERENT OUTCOMES AND THE CHECK OWES THEM DIFFERENT
+/// VERDICTS. `fingerprint` takes the source and never the path, so moving a file
+/// leaves its digest bit-identical; a baseline path that vanished while an
+/// unlisted file in the same run carries that exact digest is therefore a
+/// displacement, and the token stream this baseline guards did not move. Before
+/// this split the two arrived as one `MISSING` and the remedy printed at the
+/// failure branch — undo the edit — named an act a deliberate `git mv` has not
+/// performed, so the only mechanical fix left was the regeneration that same
+/// text forbids.
+///
+/// The pairing must be UNIQUE to be a verdict. Digests are unique across this
+/// tree today, measured, but that is a property of the tree and not of the
+/// function: two files with identical token streams — two empty ones, for
+/// instance — collide by construction. Several candidates therefore yield
+/// `.ambiguous` and FAIL, because what the check would otherwise be asserting is
+/// that content survived under exactly one new path, which it cannot establish.
+pub fn classify(
+    arena: std.mem.Allocator,
+    entries: []const BaselineEntry,
+    seen: *const std.StringHashMapUnmanaged([]const u8),
+) !CheckResult {
+    var listed: std.StringHashMapUnmanaged(void) = .empty;
+    defer listed.deinit(arena);
+    for (entries) |e| try listed.put(arena, e.path, {});
+
+    // Digest -> how many files this run visited that the baseline does not list,
+    // and the first of them. Built once, so the lookup below is not a scan.
+    const Candidate = struct { count: usize, first: []const u8 };
+    var unlisted: std.StringHashMapUnmanaged(Candidate) = .empty;
+    defer unlisted.deinit(arena);
+    var it = seen.iterator();
+    while (it.next()) |kv| {
+        if (listed.contains(kv.key_ptr.*)) continue;
+        const gop = try unlisted.getOrPut(arena, kv.value_ptr.*);
+        if (gop.found_existing) {
+            gop.value_ptr.count += 1;
+        } else {
+            gop.value_ptr.* = .{ .count = 1, .first = kv.key_ptr.* };
+        }
+    }
+
+    var findings: std.ArrayList(Divergence) = .empty;
+    var failures: usize = 0;
+    var renames: usize = 0;
+    for (entries) |e| {
+        const got = seen.get(e.path) orelse {
+            if (unlisted.get(e.digest)) |c| {
+                if (c.count == 1) {
+                    try findings.append(arena, .{ .renamed = .{ .from = e.path, .to = c.first } });
+                    renames += 1;
+                } else {
+                    try findings.append(arena, .{ .ambiguous = .{ .from = e.path, .count = c.count } });
+                    failures += 1;
+                }
+            } else {
+                try findings.append(arena, .{ .missing = .{ .path = e.path } });
+                failures += 1;
+            }
+            continue;
+        };
+        if (!std.mem.eql(u8, got, e.digest)) {
+            try findings.append(arena, .{ .moved = .{
+                .path = e.path,
+                .baseline = e.digest,
+                .current = got,
+            } });
+            failures += 1;
+        }
+    }
+    return .{ .findings = findings.items, .failures = failures, .renames = renames };
+}
+
 test "density partitions the non-blank lines and ignores blanks" {
     const c = countSource(
         \\const a = 1;
@@ -364,4 +462,100 @@ test "a malformed baseline line is an error, never a silent skip" {
         error.MalformedBaseline,
         parseBaseline(arena_state.allocator(), "deadbeef\tsrc/a.zig\n", &out),
     );
+}
+
+test "a rename is not a token change, so the check stays green" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = "a" ** 64;
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/b.zig", d);
+    const r = try classify(arena, &.{.{ .digest = d, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 0), r.failures);
+    try std.testing.expectEqual(@as(usize, 1), r.renames);
+    try std.testing.expectEqualStrings("src/a.zig", r.findings[0].renamed.from);
+    try std.testing.expectEqualStrings("src/b.zig", r.findings[0].renamed.to);
+}
+
+test "an edit under a stable name is the failure the baseline exists to catch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/a.zig", "b" ** 64);
+    const r = try classify(arena, &.{.{ .digest = "a" ** 64, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 1), r.failures);
+    try std.testing.expectEqual(@as(usize, 0), r.renames);
+    try std.testing.expectEqualStrings("src/a.zig", r.findings[0].moved.path);
+}
+
+test "a path that moved AND changed is missing, never a rename" {
+    // The discriminating case: a new file exists, so a pairing by NAME would
+    // find one. Only the digest separates a displacement from an edit.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/b.zig", "b" ** 64);
+    const r = try classify(arena, &.{.{ .digest = "a" ** 64, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 1), r.failures);
+    try std.testing.expectEqualStrings("src/a.zig", r.findings[0].missing.path);
+}
+
+test "a deletion with nothing carrying its digest is missing" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const r = try classify(arena, &.{.{ .digest = "a" ** 64, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 1), r.failures);
+    try std.testing.expectEqualStrings("src/a.zig", r.findings[0].missing.path);
+}
+
+test "two candidates at one digest cannot name a destination, so the check fails" {
+    // Reachable by construction: two files with identical token streams share a
+    // digest, and two empty ones always do.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = "a" ** 64;
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/b.zig", d);
+    try seen.put(arena, "src/c.zig", d);
+    const r = try classify(arena, &.{.{ .digest = d, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 1), r.failures);
+    try std.testing.expectEqual(@as(usize, 0), r.renames);
+    try std.testing.expectEqual(@as(usize, 2), r.findings[0].ambiguous.count);
+}
+
+test "a file the baseline already lists is not a rename destination" {
+    // Without the listed-path exclusion, a genuine deletion pairs to whatever
+    // duplicate content the tree already held and the check goes green.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = "a" ** 64;
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/b.zig", d);
+    const r = try classify(arena, &.{
+        .{ .digest = d, .path = "src/a.zig" },
+        .{ .digest = d, .path = "src/b.zig" },
+    }, &seen);
+    try std.testing.expectEqual(@as(usize, 1), r.failures);
+    try std.testing.expectEqual(@as(usize, 0), r.renames);
+    try std.testing.expectEqualStrings("src/a.zig", r.findings[0].missing.path);
+}
+
+test "a run matching its baseline reports nothing at all" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = "a" ** 64;
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/a.zig", d);
+    const r = try classify(arena, &.{.{ .digest = d, .path = "src/a.zig" }}, &seen);
+    try std.testing.expectEqual(@as(usize, 0), r.failures);
+    try std.testing.expectEqual(@as(usize, 0), r.renames);
+    try std.testing.expectEqual(@as(usize, 0), r.findings.len);
 }

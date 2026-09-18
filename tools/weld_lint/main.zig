@@ -241,7 +241,8 @@ fn runCensus(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, 
 ///
 /// A path in the baseline that this run did not visit is reported too: a check
 /// that silently ignores a vanished file stops checking exactly when a file is
-/// deleted.
+/// deleted. It is reported as a RENAME when an unlisted file of this run carries
+/// its digest, and that outcome does not fail — `census.classify` carries why.
 fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8, out: *std.Io.Writer) !u8 {
     var baseline_path: ?[]const u8 = null;
     var paths: std.ArrayList([:0]const u8) = .empty;
@@ -296,28 +297,57 @@ fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const 
         return 2;
     };
 
-    var moved: usize = 0;
-    for (entries.items) |e| {
-        const got = seen.get(e.path) orelse {
-            try out.print("fingerprint: MISSING {s} — in the baseline, not in this run\n", .{e.path});
-            moved += 1;
-            continue;
-        };
-        if (!std.mem.eql(u8, got, e.digest)) {
-            try out.print("fingerprint: MOVED {s}\n  baseline {s}\n  current  {s}\n", .{ e.path, e.digest, got });
-            moved += 1;
-        }
-    }
     if (entries.items.len == 0) {
         try out.writeAll("fingerprint: baseline is EMPTY — the check proves nothing\n");
         return 2;
     }
-    if (moved != 0) {
-        try out.print("fingerprint: {d} file(s) moved against the baseline.\n", .{moved});
-        try out.writeAll("A comment pass must leave the token stream bit-identical. Do NOT regenerate\n" ++
-            "the baseline to make this green: read the diff of the named file and undo the\n" ++
+    const result = try census.classify(arena, entries.items, &seen);
+    for (result.findings) |f| switch (f) {
+        .moved => |m| try out.print(
+            "fingerprint: MOVED {s}\n  baseline {s}\n  current  {s}\n",
+            .{ m.path, m.baseline, m.current },
+        ),
+        .renamed => |r| try out.print(
+            "fingerprint: RENAMED {s} -> {s} — same digest, so no token moved\n",
+            .{ r.from, r.to },
+        ),
+        .ambiguous => |a| try out.print(
+            "fingerprint: AMBIGUOUS {s} — gone, and {d} unlisted files carry its digest\n",
+            .{ a.from, a.count },
+        ),
+        .missing => |m| try out.print(
+            "fingerprint: MISSING {s} — in the baseline, not in this run, and no file here carries its digest\n",
+            .{m.path},
+        ),
+    };
+    if (result.failures != 0) {
+        // ONE REMEDY PER OUTCOME. A single trailer over three of them is the defect
+        // this split exists to remove, one level up: the text would name an act two
+        // of the three readers have not performed.
+        var saw_moved = false;
+        var saw_missing = false;
+        var saw_ambiguous = false;
+        for (result.findings) |f| switch (f) {
+            .moved => saw_moved = true,
+            .missing => saw_missing = true,
+            .ambiguous => saw_ambiguous = true,
+            .renamed => {},
+        };
+        try out.print("fingerprint: {d} file(s) diverged against the baseline.\n", .{result.failures});
+        if (saw_moved) try out.writeAll("A comment pass must leave the token stream bit-identical. Do NOT regenerate\n" ++
+            "the baseline to make this green: read the diff of the MOVED file and undo the\n" ++
             "code edit that produced it.\n");
+        if (saw_missing) try out.writeAll("A MISSING file is gone and no file here carries its content. Restore it, or if\n" ++
+            "the deletion is deliberate, drop its row — removing a row is not regenerating one.\n");
+        if (saw_ambiguous) try out.writeAll("An AMBIGUOUS row cannot be resolved by content, several files carrying that\n" ++
+            "digest. Name the destination by hand, or leave the row and say why.\n");
         return 1;
+    }
+    if (result.renames != 0) {
+        try out.print("fingerprint: {d} file(s) renamed and none diverged.\n", .{result.renames});
+        try out.writeAll("Rewrite the PATH of each row named above. Its digest is unchanged, which is\n" ++
+            "what separates that edit from the regeneration refused on the failure path.\n");
+        return 0;
     }
     try out.print("fingerprint: {d} file(s) unchanged against {s}.\n", .{ entries.items.len, bp });
     return 0;
