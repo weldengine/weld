@@ -3,9 +3,29 @@
 //! parser does not support fails CI.
 //!
 //! The spec documents (`etch-grammar.md`, `etch-reference-part*.md`) live
-//! outside the repo, which is why the corpus is an in-repo file. The extraction
-//! machinery is the reusable half: the same iterator can be pointed at the
-//! grammar the day it enters the repo.
+//! outside the repo, which is why the corpus is an in-repo file.
+//!
+//! POINTING THIS ITERATOR AT THE GRAMMAR WOULD NOT WORK, and that is measured
+//! rather than expected. This header used to promise it as the plan for the day
+//! the grammar enters the repo. Fed the grammar's own 15 ```etch blocks, the
+//! parser refuses 11, in three distinct classes:
+//!
+//!   - TWO are refused BY DESIGN — a block using `override`, which is reserved
+//!     and absent from the accepted top-level set, and one declaring a
+//!     `service`, valid only in a `.d.etch`. A grammar documents the language
+//!     including what a plain `.etch` must reject, so extraction needs a
+//!     per-block expected verdict, which "extract and parse" has nowhere to put.
+//!   - ONE is a defect in the document: EBNF comment syntax `(* … *)` inside an
+//!     ```etch fence.
+//!   - EIGHT are real divergence between documented and parsed Etch. The sharpest
+//!     is `import ui.theme`: `theme` has since become a top-level keyword, so a
+//!     documented import became unparseable without either side noticing. One
+//!     other breaks the grammar's OWN rule on positional-before-named arguments.
+//!
+//! So the corpus below is CURATED to parse, not extracted, and that is the
+//! property the harness rests on. What it cannot do is notice a construct the
+//! spec documents and nobody transcribed — the divergence above is measured on
+//! the grammar's 15 blocks and unmeasured on the corpus's other 951.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
