@@ -1,9 +1,7 @@
-//! Tests M0.3 — Win32 thread safety stress.
+//! Win32 thread safety stress.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "concurrent createWindow + destroyWindow" — 8 threads × 1000
-//!     iterations, timeout 5 s, class_atom stable, class_open_count
-//!     returns to 0, no deadlock.
+//! Concurrent `createWindow` and `destroyWindow` — 8 threads — with
+//! `class_atom` stable, `class_open_count` back to 0, and no deadlock.
 //!
 //! Skipped on non-Windows runners (the test exercises the live Win32 API).
 //! The file compiles on all platforms but the `win32_backend` import only
@@ -15,15 +13,14 @@ const weld = @import("weld_core");
 const window_api = weld.platform.window;
 
 const NUM_THREADS: u32 = 8;
-// Brief target is 1000 iterations per thread (8000 windows total).
-// CI windows-2025 runners cannot create+destroy windows fast enough to
-// hit that within the 5s brief budget — observed exit-code-3 because
-// the test's bail-on-timeout left worker threads running and tripped
-// std.testing.allocator's leak detection at test exit. Reduced to 100
-// (800 windows total) matching the wayland_thread_safety_test cadence.
-// Timeout widened to 30 s to absorb CI variance — the brief assertions
-// (class_atom stable, class_open_count returns to 0, no deadlock) are
-// still meaningful and a real deadlock would never finish in 30 s.
+// The target is 1000 iterations per thread, 8000 windows in all. CI
+// windows-2025 runners cannot create and destroy windows fast enough to reach
+// that within a 5 s budget — the observed failure was exit code 3, the
+// bail-on-timeout leaving worker threads running and tripping
+// `std.testing.allocator`'s leak detection at exit — so it is 100 per thread,
+// 800 windows, matching `wayland_thread_safety_test`'s cadence. The timeout is
+// 30 s to absorb CI variance: the assertions still mean what they meant, and a
+// real deadlock would never finish inside it.
 const ITERATIONS_PER_THREAD: u32 = 100;
 const TIMEOUT_MS: u64 = 30000;
 
@@ -55,7 +52,7 @@ test "concurrent createWindow + destroyWindow" {
     // returns from the test while worker threads are still running, and
     // testing.allocator would then false-positive a leak on the worker-
     // thread allocations that haven't completed their destroy cycle yet.
-    // The brief gate is "no deadlock + class_atom stable +
+    // The gate is "no deadlock + class_atom stable +
     // class_open_count returns to 0" — heap accounting is not part of
     // the contract here.
     const gpa = std.heap.page_allocator;
@@ -66,7 +63,7 @@ test "concurrent createWindow + destroyWindow" {
     // Warm-up: trigger the class once-init before reading atom_before.
     // Without this warm-up, atom_before would be 0 (no class yet) and
     // the stability check (atom_before == atom_after) would trivially
-    // fail. The brief gate is 'class atom stable across the 8×N
+    // fail. The gate is 'class atom stable across the 8×N
     // concurrent create/destroy cycles' — not 'class atom equals 0
     // at test start'.
     {
@@ -108,12 +105,12 @@ test "concurrent createWindow + destroyWindow" {
     try std.testing.expectEqual(@as(u32, 0), window_api.classOpenCount());
 
     // Brief gate is "no deadlock, class_atom stable, class_open_count
-    // returns to 0" — the three assertions above. The brief does NOT
+    // returns to 0" — the three assertions above. It does NOT
     // gate "every create succeeded". On the GitHub Actions windows-2025
     // runner, a small fraction of the 800 CreateWindowExW calls under
     // 8-way concurrent stress return NULL (transient — most likely a
     // USER object kernel quota momentarily exhausted by the cycling
-    // pace). The brief invariants still hold (atom unchanged, refcount
+    // pace). The invariants still hold (atom unchanged, refcount
     // returns to 0, no deadlock), confirming the thread-safety patch is
     // sound. We tolerate < 5% transient create failures here; a stricter
     // test would need a less synthetic stress (real WM_* traffic + DPI

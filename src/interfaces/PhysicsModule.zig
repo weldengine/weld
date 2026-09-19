@@ -5,12 +5,12 @@
 //! comptime surface guard covers all thirty-two entries; no entry may be added, removed or
 //! re-typed without bumping the constant.
 //!
-//! **THIS PARAGRAPH AND THE TEST BELOW MOVE TOGETHER.** They are two halves of one claim,
-//! and inverting one without the other is how this header came to state the opposite of what
-//! its own guard asserted. A test asserting a fact ABOUT the file, while the file says the
-//! opposite in prose, is a guard that cannot see the thing it guards. Do NOT trust proximity
-//! to catch that: both halves fit in one editor window, and adjacency is what MASKS the
-//! divergence rather than what prevents it.
+//! **THIS PARAGRAPH AND THE TEST BELOW MOVE TOGETHER.** They are two halves of one claim, and
+//! inverting one without the other leaves the header stating the opposite of what its own
+//! guard asserts. A test asserting a fact ABOUT the file, while the file says the opposite in
+//! prose, is a guard that cannot see the thing it guards. Do NOT trust proximity to catch
+//! that: both halves fit in one editor window, and adjacency MASKS the divergence rather than
+//! preventing it.
 //!
 //! **The count, and the two numbers are distinct rather than one of them being wrong.**
 //! `engine-tier-interfaces.md` §12 disambiguates them: the surface carries **thirty-two**

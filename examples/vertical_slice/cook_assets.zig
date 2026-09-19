@@ -1,12 +1,12 @@
-//! M0.9 vertical-slice offline asset cook (E4).
+//! The vertical slice's offline asset cook.
 //!
 //! Cooks the slice's single source asset — `assets/slice_albedo.png` — through
-//! the real M0.6 pipeline (import → intermediate `AssetDoc` + RGBA8 blob → cook
-//! → `.texture.bin`) and writes the runtime `.bin` to disk. The slice host then
-//! loads that `.bin` at runtime via the M0.6 async `Loader` and uploads it to a
-//! GPU texture (`copyBufferToTexture`). This is the offline half of the
-//! "source → intermediate → .bin → runtime load" chain; the user-facing
-//! `weld cook` CLI is Phase 1.
+//! the real pipeline (import → intermediate `AssetDoc` + RGBA8 blob → cook →
+//! `.texture.bin`) and writes the runtime `.bin` to disk. The slice host then
+//! loads it through the async `Loader` and uploads it to a GPU texture with
+//! `copyBufferToTexture`. This is the OFFLINE half of the
+//! source → intermediate → `.bin` → runtime-load chain; the user-facing
+//! `weld cook` CLI is a later milestone's.
 //!
 //! Usage (wired as `zig build cook-vertical-slice-assets`):
 //!   cook_assets <input.png> <output.texture.bin>
@@ -19,9 +19,8 @@ const assets = @import("weld_asset_pipeline");
 const default_in = "examples/vertical_slice/assets/slice_albedo.png";
 const default_out = "zig-out/vertical-slice-assets/slice_albedo.texture.bin";
 
-/// Fixed identity for the slice's albedo — deterministic so re-cooks are
-/// reproducible (the generate-once/preserve-forever policy is the offline
-/// `weld cook` CLI's job, Phase 1).
+/// Fixed identity for the slice's albedo, so a re-cook is reproducible. The
+/// generate-once, preserve-forever policy belongs to the `weld cook` CLI.
 const albedo_uuid = "0190b3f0-1c2d-7e4a-8b6c-5117ce0a1be0";
 
 pub fn main(init: std.process.Init) !void {

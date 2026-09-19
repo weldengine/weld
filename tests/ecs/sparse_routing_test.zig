@@ -1,9 +1,10 @@
-//! M1.B / G3 — Tier 0 routing acceptance tests.
+//! Tier 0 routing acceptance tests.
 //!
-//! G3's claim is that every resolution entry and every structural mutator of
-//! `World` answers for BOTH storage backends, and that a sparse component's
-//! presence never enters an archetype signature. These tests are written on
-//! that claim rather than on the implementation: each asserts what an entity
+//! The claim under test is that every resolution entry and every structural
+//! mutator of `World` answers for BOTH storage backends, and that a sparse
+//! component's presence never enters an archetype signature. These tests are
+//! written on that claim rather than on the implementation: each asserts what an
+//! entity
 //! CARRIES and where it does NOT appear, and where the claim is a guard the
 //! test is accompanied by a counter-factual that changes the OBJECT — the
 //! storage mode of a component, the set of ids handed to an entry — and never
@@ -51,8 +52,6 @@ fn word(v: u64) [8]u8 {
 fn readWord(bytes: []const u8) u64 {
     return std.mem.readInt(u64, bytes[0..8], .little);
 }
-
-// ─── The mode's reason to exist: no migration ───────────────────────────────
 
 test "adding a sparse component migrates nothing" {
     const gpa = testing.allocator;
@@ -137,8 +136,6 @@ test "removing a sparse component migrates nothing and drops the row" {
     try testing.expectEqual(@as(usize, 0), world.sparse_stores.getConst(mark).?.len());
 }
 
-// ─── The routed presence question ───────────────────────────────────────────
-
 test "hasComponentDyn is total: stale handle, unknown id and absent component" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -176,9 +173,9 @@ test "a batched add refuses an already-present SPARSE component" {
     const e = try world.spawnDynamicWithValues(gpa, &.{ pos, mark }, &.{ &word(1), &word(2) });
 
     // `mark` is present, in the sparse store. The archetype does not know that,
-    // so the pre-G3 check would have passed and the add would have reached the
-    // storage's own assert — stripped in ReleaseFast, hence a silent double
-    // insert. The refusal is the guard.
+    // so an archetype-only check passes and the add reaches the storage's own
+    // assert — stripped in ReleaseFast, hence a silent double insert. The
+    // refusal is the guard.
     try testing.expectError(
         error.DuplicateComponent,
         world.addComponentsDynamic(gpa, e, &.{ extra, mark }, &.{ &word(3), &word(4) }),
@@ -217,8 +214,6 @@ test "a batched add of a mixed set migrates the table half only" {
     try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, t_new).?));
     try testing.expectEqual(@as(u64, 3), readWord(world.componentBytes(e, s_new).?));
 }
-
-// ─── The prepared trio ──────────────────────────────────────────────────────
 
 test "a prepared remove keeps the sparse row readable until commit" {
     const gpa = testing.allocator;
@@ -294,9 +289,9 @@ test "a prepared remove of a sparse-only set builds no new signature" {
     const arch_before = world.dynamicLocation(e).?.archetype_idx;
 
     // `src_len - cids.len` would have been `1 - 1 == 0` here and produced the
-    // EMPTY archetype — a wrong answer that only became expressible once G2
-    // made the empty archetype legal. The partition is what keeps the target
-    // equal to the source.
+    // EMPTY archetype — a wrong answer that only became expressible once the
+    // empty archetype became legal. The partition is what keeps the target equal
+    // to the source.
     try world.removeComponentsDynamic(gpa, e, &.{s_go});
 
     try testing.expectEqual(arch_before, world.dynamicLocation(e).?.archetype_idx);
@@ -325,8 +320,6 @@ test "a prepared remove refuses an absent sparse component by name, not by shape
     try world.removeComponentsDynamic(gpa, e, &.{s_absent});
     try testing.expect(!world.hasComponentDyn(e, s_absent));
 }
-
-// ─── Despawn, change marking, tags ──────────────────────────────────────────
 
 test "despawn sweeps every sparse store, and a recycled index inherits nothing" {
     const gpa = testing.allocator;
@@ -432,18 +425,16 @@ test "a tag mutation sets AND clears a bit through the routed entry" {
     try testing.expectEqual(@as(usize, 1), world.sparse_stores.getConst(tagset).?.len());
     try testing.expectEqual((@as(u64, 1) << 3) | (@as(u64, 1) << 5), readWord(world.componentBytes(e, tagset).?));
 
-    // And clearing must reach the row. The pre-G3 body fell into `else if
-    // (set)` with `set == false` and did NOTHING — a silent no-op, the failure
-    // mode this assertion exists for.
+    // And clearing must reach the row. An earlier body fell into `else if (set)`
+    // with `set == false` and did NOTHING — a silent no-op, the failure mode
+    // this assertion exists for.
     try world.applyTagMutation(gpa, e, tagset, 3, false);
     try testing.expectEqual(@as(u64, 1) << 5, readWord(world.componentBytes(e, tagset).?));
 }
 
-// ─── Reserve-then-mutate, at the World level ────────────────────────────────
-
 test "a failed multi-sparse spawn leaves no half-populated entity" {
-    // `SparseSetStorage.add` is reserve-then-mutate per store (G2 invariant 7),
-    // which says nothing about a spawn that populates THREE of them: a failure
+    // `SparseSetStorage.add` is reserve-then-mutate PER STORE, which says
+    // nothing about a spawn that populates THREE of them: a failure
     // on the third would leave the first two committed, and a half-populated
     // entity is exactly the observable mutation the invariant forbids. The
     // World-level unwind is what this sweeps.
@@ -459,11 +450,11 @@ test "a failed multi-sparse spawn leaves no half-populated entity" {
     // and retries"; a permanent-failure allocator exercises it strictly harder.
     //
     // The consequence for the success branch: it is reached only when `fail_at`
-    // is past the count this particular run performs, NOT because "a resize the
-    // list recovered from" — an earlier version of this comment said the latter
-    // and named a recovery the allocator's own semantics exclude. It stays
-    // because a spawn that succeeded must still be WHOLE, and `induced` is what
-    // keeps the sweep from passing by never entering the failure branch.
+    // is past the count this particular run performs, and NEVER because of "a
+    // resize the list recovered from" — the allocator's own semantics exclude
+    // such a recovery. It stays because a spawn that succeeded must still be
+    // WHOLE, and `induced` is what keeps the sweep from passing by never
+    // entering the failure branch.
     const gpa = testing.allocator;
 
     const pass1 = blk: {
@@ -531,8 +522,6 @@ test "a failed multi-sparse spawn leaves no half-populated entity" {
     try testing.expect(induced > 0);
 }
 
-// ─── The empty archetype, and what an all-negative query may see ────────────
-
 test "an all-negative dynamic query matches the empty archetype" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -541,8 +530,8 @@ test "an all-negative dynamic query matches the empty archetype" {
     const pos = try reg(&world, gpa, "Pos", .table);
     const frozen = try reg(&world, gpa, "Frozen", .table);
 
-    // An entity with NO table component — legal since G2 — and one with a
-    // component the query excludes.
+    // An entity with NO table component at all, and one with a component the
+    // query excludes.
     const bare = try world.spawnDynamic(gpa, &.{});
     const carrier = try world.spawnDynamicWithValues(gpa, &.{frozen}, &.{&word(1)});
     const bare_arch = world.dynamicLocation(bare).?.archetype_idx;
@@ -551,8 +540,8 @@ test "an all-negative dynamic query matches the empty archetype" {
 
     // `archetypeMatches` falls through to `true` when required and with are
     // both empty, so an all-negative term matches an archetype carrying
-    // nothing. That was unreachable before G2 — the empty archetype could not
-    // exist — and it is a PERMISSION rather than a defect: an entity that
+    // nothing. That was unreachable while the empty archetype could not exist,
+    // and it is a PERMISSION rather than a defect: an entity that
     // carries no `Frozen` genuinely satisfies `without Frozen`.
     var dq = try world.queryDynamic(gpa, &.{}, &.{frozen});
     defer dq.deinit(gpa);
@@ -592,8 +581,8 @@ test "an entity carrying ONLY sparse components lives in the empty archetype" {
 
     // Backs the contract written on `dynamicLocation`: it never returns null
     // for a live handle, sparse-only entities included, because the table half
-    // of the split is EMPTY and the empty archetype is legal since G2. Before
-    // that, this spawn had no destination at all.
+    // of the split is EMPTY and the empty archetype is legal. Before it was,
+    // this spawn had no destination at all.
     const loc = world.dynamicLocation(e) orelse return error.SparseOnlyEntityHasNoLocation;
     try testing.expectEqual(@as(usize, 0), world.dynamicArchetype(loc.archetype_idx).component_ids.len);
     try testing.expect(world.isLive(e));
@@ -611,12 +600,10 @@ test "an entity carrying ONLY sparse components lives in the empty archetype" {
     try testing.expect(world.dynamicLocation(e) != null);
 }
 
-// ─── G3 review refusal — four defects, each pinned before its fix ───────────
-//
-// Raised by an adversarial review of the G3 diff and CONFIRMED at the code
-// before anything was written here. Three of the four are G3's own doing, and
-// in two of them the comment at the site asserted the opposite of what the code
-// did — the exact family this gate spent itself cataloguing.
+// FOUR DEFECTS, each pinned before its fix. Raised by an adversarial review and
+// confirmed at the code before anything was written here. In two of them the
+// comment at the site asserted the opposite of what the code did — the exact
+// family this file spent itself cataloguing.
 
 test "a batched remove of a SPARSE-ONLY set leaves the entity on a live slot" {
     const gpa = testing.allocator;
@@ -683,14 +670,12 @@ test "a tag mutation on a stale handle is a silent no-op, not a propagated error
     const e = try world.spawnDynamic(gpa, &.{});
     try world.despawn(gpa, e);
 
-    // The pre-G3 body opened with `entity_locations.get(entity) orelse return`,
-    // so a stale handle was silently ignored — which is what the command-buffer
-    // flush needs, a tag recorded for an entity despawned later in the same
-    // tick being ordinary. G3 replaced that head with `componentBytes`, which
-    // answers null for a stale handle and falls into the `else if (set)` arm,
-    // where `addComponentDynamic` validates the handle and returns
-    // `error.StaleEntityHandle` — aborting the whole flush. The comment at the
-    // site claimed the behaviour was preserved; it was not.
+    // A STALE HANDLE MUST BE SILENTLY IGNORED HERE, which is what the
+    // command-buffer flush needs: a tag recorded for an entity despawned later
+    // in the same tick is ordinary. Routing the head through `componentBytes`
+    // breaks that — it answers null for a stale handle and falls into the
+    // `else if (set)` arm, where `addComponentDynamic` validates the handle and
+    // returns `error.StaleEntityHandle`, aborting the whole flush.
     try world.applyTagMutation(gpa, e, tagset, 3, true);
     try world.applyTagMutation(gpa, e, tagset, 3, false);
     // Not merely "did not error": nothing was created for a dead entity.
@@ -812,15 +797,11 @@ test "a duplicate sparse id in a spawn is refused, not written twice" {
     try testing.expectEqual(@as(u64, 2), readWord(world.componentBytes(e, s2).?));
 }
 
-// ─── G4 — the TABLE twins of F4/F5 ──────────────────────────────────────────
-//
-// The G3 review closed the sparse halves and REPORTED these two, whose
-// preconditions predate M1.B and were carried by `std.debug.assert` alone —
-// compiled to nothing in ReleaseFast, which is the mode a game ships and the
-// one `ci.yml`'s single ReleaseFast cell exists to cover (its own comment names
-// this class: "the guard was absent precisely where its breach silently returns
-// an entity twice"). Converting them to active checks RESTORES a contract that
-// is already written; it does not invent one.
+// THE TABLE TWINS of the two refusals above. Their preconditions were carried
+// by `std.debug.assert` alone — compiled to nothing in ReleaseFast, the mode a
+// game ships and the one `ci.yml`'s single ReleaseFast cell exists to cover.
+// Converting them to active checks RESTORES a contract that is already written;
+// it does not invent one.
 //
 // They live in this file because the class was found through the sparse arm and
 // the two halves must not drift apart again.
@@ -896,8 +877,6 @@ test "a duplicate TABLE id in the default-payload spawn is refused" {
     try testing.expectEqual(@as(usize, 1), world.entityCount());
 }
 
-// ─── G4 — the three apply switches, over the union ──────────────────────────
-
 const observers_mod = weld_core.ecs.observers;
 const EntityId = weld_core.ecs.EntityId;
 const Command = weld_core.ecs.Command;
@@ -955,9 +934,9 @@ test "on_remove at despawn fires over the UNION, ascending by component id" {
     const c: Command = .{ .despawn = .{ .entity = e } };
     try observers_mod.applyWithObservers(c, &world.observer_registry, &world, gpa);
 
-    // Four firings, ascending, sparse ones INCLUDED. Before G4 the arm walked
-    // `arch.component_ids` alone, so `s1` and `s3` never fired at all — an
-    // observer silently skipped, which no caller can detect.
+    // Four firings, ascending, sparse ones INCLUDED. An arm walking
+    // `arch.component_ids` alone never fires `s1` and `s3` at all — an observer
+    // silently skipped, which no caller can detect.
     try testing.expectEqualSlices(ComponentId, &.{ t0, s1, t2, s3 }, log.ids.items);
 }
 
@@ -987,7 +966,7 @@ test "add-on-present on a SPARSE component fires the replacement, not the add" {
     // Add-on-present through the observer-dispatching apply. The direct entry
     // `addComponentDynamic` returns `DuplicateComponent` here — deliberately,
     // it is not the command-buffer contract — and this path tests presence
-    // FIRST and overwrites in place, which G3 made work for the sparse row by
+    // FIRST and overwrites in place, which reaches the sparse row by
     // routing `componentBytes` and `markComponentChangedDyn`.
     const c: Command = .{ .add_component = .{
         .entity = e,
@@ -1048,16 +1027,15 @@ const Queuer = struct {
 };
 
 test "each of the THREE apply switches carries the routing on all six kinds" {
-    // The brief's own words: "A change landing in one and not the others is the
-    // dominant defect shape of this milestone." So the count is reported PER
-    // PATH, on its own line, and a path that covers five kinds is visible as
-    // five — not hidden inside a single aggregate that passes.
+    // A change landing in one path and not the others is the defect shape here,
+    // so the count is reported PER PATH, on its own line: a path covering five
+    // kinds is visible as five, not hidden inside an aggregate that passes.
     const gpa = testing.allocator;
 
     var covered = [_]usize{ 0, 0, 0 };
     const path_names = [_][]const u8{ "CommandBuffer.applyOne", "applyWithObservers", "applyRawCommand (deferred drain)" };
 
-    // ── path 0: CommandBuffer.applyOne ──────────────────────────────────
+    // Path 0: `CommandBuffer.applyOne`.
     {
         var world = World.init();
         defer world.deinit(gpa);
@@ -1093,7 +1071,7 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
         if (world.sparse_stores.getConst(s).?.len() == 0 and !world.isLive(e)) covered[0] += 1;
     }
 
-    // ── path 1: applyWithObservers ──────────────────────────────────────
+    // Path 1: `applyWithObservers`.
     {
         var world = World.init();
         defer world.deinit(gpa);
@@ -1116,7 +1094,7 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
         if (world.sparse_stores.getConst(s).?.len() == 0 and !world.isLive(eid)) covered[1] += 1;
     }
 
-    // ── path 2: applyRawCommand, reached only through the deferred drain ─
+    // Path 2: `applyRawCommand`, reached only through the deferred drain.
     for (all_kinds, 0..) |_, k| {
         var world = World.init();
         defer world.deinit(gpa);
@@ -1183,8 +1161,6 @@ test "each of the THREE apply switches carries the routing on all six kinds" {
     }
 }
 
-// ─── G5 — the public surface gains a tick reader ────────────────────────────
-
 test "changedTickOf answers for BOTH backends, and the modes are twins" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -1205,11 +1181,10 @@ test "changedTickOf answers for BOTH backends, and the modes are twins" {
     world.beginFrame();
     world.markComponentChangedDyn(e, s);
 
-    // The sparse tick MOVED and the table one did not. Before G5 the public
-    // surface had no tick reader at all: every consumer reached the archetype
-    // through the two-call idiom, which answers for the table half only, so a
-    // sparse component read as NEVER CHANGED — a wrong answer with no
-    // diagnostic anywhere.
+    // The sparse tick MOVED and the table one did not. Without a tick reader on
+    // the public surface every consumer reaches the archetype through the
+    // two-call idiom, which answers for the table half only — so a sparse
+    // component reads as NEVER CHANGED, a wrong answer with no diagnostic.
     try testing.expectEqual(world.current_tick, world.changedTickOf(e, s).?);
     try testing.expectEqual(t0, world.changedTickOf(e, t).?);
 

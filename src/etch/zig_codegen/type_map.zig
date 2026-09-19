@@ -4,12 +4,10 @@
 //! Values in generated code are native Zig types, never a `Value` tagged
 //! union on the hot path.
 //!
-//! The integer-family variants (`i32`, `u32`, `f32`, `f64`) are mapped to
-//! themselves — the type-checker only registers `int`/`float`/`bool` as
-//! recognised builtin POD types for components (cf. `etch/types.zig`
-//! `BuiltinType`), but the lexer accepts the wider names so we map them to
-//! avoid surprises if a later widening reaches the codegen
-//! before the type-checker is updated.
+//! The integer-family names (`i32`, `u32`, `f32`, `f64`) map to themselves. The
+//! type-checker registers only `int`/`float`/`bool` as builtin POD component
+//! types, but the lexer accepts the wider names, so mapping them keeps a later
+//! widening from reaching the codegen before the checker knows about it.
 
 const std = @import("std");
 
@@ -21,14 +19,10 @@ pub const MapError = error{UnsupportedEtchType};
 /// emitted verbatim into the cooked `.zig` output, no quoting.
 pub const ZigTypeName = []const u8;
 
-/// Return the Zig type name to emit for an Etch type identifier. The Etch
-/// type identifier is the string written in the source (`int`, `float`,
-/// `bool`, `i32`, `u32`, `f32`, `f64`, or a user-declared component name).
-///
-/// For user types (`Health`, `Position`, ...) the caller passes through the
-/// original name — Etch component names map 1:1 to Zig struct names per the
-/// rule that a component or resource maps 1:1 to an `extern
-/// struct` under a matching name, with no prefix.
+/// The Zig type name to emit for an Etch type identifier — the string written
+/// in the source. `null` for a user-declared name, which the caller passes
+/// through unchanged: an Etch component maps 1:1 to an `extern struct` of the
+/// same name, with no prefix.
 pub fn mapBuiltin(name: []const u8) ?ZigTypeName {
     if (std.mem.eql(u8, name, "int")) return "i64";
     if (std.mem.eql(u8, name, "float")) return "f64";
@@ -40,18 +34,16 @@ pub fn mapBuiltin(name: []const u8) ?ZigTypeName {
     return null;
 }
 
-/// Zig literal suffix for a numeric default expression. Used when emitting
-/// field defaults to avoid `error: comptime cast not allowed` between e.g.
-/// `i64` and the literal type of `0`.
+/// Whether `name` denotes a float primitive. Read when emitting a field's
+/// default so the literal is cast, avoiding `comptime cast not allowed`.
 pub fn isFloatLikeZigType(name: []const u8) bool {
     return std.mem.eql(u8, name, "f32") or
         std.mem.eql(u8, name, "f64") or
         std.mem.eql(u8, name, "float");
 }
 
-/// Return `true` when the canonical Zig type name in `name` denotes
-/// one of the integer primitives the codegen knows about — used when
-/// emitting numeric literal defaults to pick the right cast / suffix.
+/// Whether `name` denotes an integer primitive the codegen knows. Same use as
+/// `isFloatLikeZigType`: picking the cast for a numeric literal default.
 pub fn isIntLikeZigType(name: []const u8) bool {
     return std.mem.eql(u8, name, "i32") or
         std.mem.eql(u8, name, "u32") or
@@ -64,12 +56,10 @@ test "type mapping int=>i64 float=>f64 bool=>bool" {
     try std.testing.expectEqualStrings("i64", mapBuiltin("int").?);
     try std.testing.expectEqualStrings("f64", mapBuiltin("float").?);
     try std.testing.expectEqualStrings("bool", mapBuiltin("bool").?);
-    // Wider-named primitives map to themselves.
     try std.testing.expectEqualStrings("i32", mapBuiltin("i32").?);
     try std.testing.expectEqualStrings("u32", mapBuiltin("u32").?);
     try std.testing.expectEqualStrings("f32", mapBuiltin("f32").?);
     try std.testing.expectEqualStrings("f64", mapBuiltin("f64").?);
-    // User types are nullable through this helper.
     try std.testing.expect(mapBuiltin("Health") == null);
 }
 

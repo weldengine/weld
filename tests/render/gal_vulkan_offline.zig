@@ -1,20 +1,10 @@
-//! GAL Vulkan backend offline test — Phase 0 / M0.4.
+//! GAL Vulkan backend, offline: Device init, `supports()`, `getQueue` and
+//! teardown — and nothing else, a swapchain needing a real window and surface.
+//! The smoke-test PPM in `examples/triangle/` is what covers the swapchain, on
+//! the three GPU configurations.
 //!
-//! Covers brief §Acceptance criteria > Tests:
-//! `Vulkan backend init and teardown over lavapipe — init Device, create
-//! swapchain headless surface, clean teardown. Skip if `LAVAPIPE_AVAILABLE=0`.`
-//!
-//! Phase 0 : swapchain creation requires a real window+surface
-//! (cf. brief §Out-of-scope macOS — on macOS the test is skipped since
-//! Weld macOS = Phase 2+). The test therefore runs:
-//! - Linux : attempts the Vulkan init via native loader, skips if the lib is absent
-//! - Windows : likewise
-//! - macOS : skip with explicit mention
-//!
-//! The test exercises **only** the Device init + supports() + getQueue + teardown.
-//! The swapchain requires a surface, out of scope for the offline test. The smoke
-//! test PPM in `examples/triangle/` covers the Phase 0 swapchain on the
-//! 3 GPU configs (cf. brief §Observable behavior).
+//! Linux and Windows attempt the Vulkan init through the native loader and skip
+//! when the library is absent; macOS skips outright.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -5,10 +5,10 @@
 
 /// General-purpose math types (Vec/Quat/Mat3/Aabb, generic over the scalar;
 /// f32 aliases + generics). Operates one value at a time; imports no `simd`.
-pub const math = @import("math/math.zig");
+pub const math = @import("math/root.zig");
 
 /// Batched-SIMD kernels.
-pub const simd = @import("simd/simd.zig");
+pub const simd = @import("simd/root.zig");
 
 /// Types a dispatched job body must never receive, declared by the type and
 /// tested by a tier-agnostic comptime predicate. Consumed by BOTH `src/core/ecs`

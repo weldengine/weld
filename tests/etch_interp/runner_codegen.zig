@@ -1,4 +1,4 @@
-//! S5 differential-test runner backed by the Zig codegen output.
+//! Differential-test runner backed by the Zig codegen output.
 //!
 //! Setup looks up the program by name in the pre-cooked `corpus_codegen`
 //! module (an `@import` of the consolidated `.zig` file produced by
@@ -17,9 +17,8 @@ const corpus_codegen = @import("corpus_codegen");
 
 const World = weld_core.ecs.world.World;
 
-/// S5 codegen-backed runner — drives `diff_runner.runProgram` by
-/// dispatching into the consolidated `corpus_codegen` namespace
-/// produced at build time by `tools/etch_cook`.
+/// Drives `diff_runner.runProgram` by dispatching into the consolidated
+/// `corpus_codegen` namespace `tools/etch_cook` produces at build time.
 pub const Runner = struct {
     program: corpus_codegen.Program,
 

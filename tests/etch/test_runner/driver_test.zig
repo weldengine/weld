@@ -1,4 +1,4 @@
-//! M1.0.15 acceptance driver for the Etch test runner. Drives the PUBLIC
+//! Acceptance driver for the Etch test runner. Drives the PUBLIC
 //! `weld_etch` surface (parseSource → TypeChecker.check → test_runner.run) from
 //! OUTSIDE the etch module, over the `.etch` fixtures in this directory
 //! (`@embedFile`d so the tests track the real files the `etch_test` shim reads)
@@ -11,8 +11,6 @@ const weld_etch = @import("weld_etch");
 const Diagnostic = weld_etch.Diagnostic;
 const DiagnosticCode = weld_etch.diagnostics.DiagnosticCode;
 const TestStatus = weld_etch.TestStatus;
-
-// ─── helpers ────────────────────────────────────────────────────────────────
 
 /// Parse + type-check (both asserted clean) + run a source's tests; returns the
 /// report (caller `deinit`s). A throwaway `std.Io.Threaded` supplies the clock.

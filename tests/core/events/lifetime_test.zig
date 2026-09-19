@@ -1,4 +1,4 @@
-//! M0.2 / E4 — lifetime drain semantics + cursor invalidation.
+//! Lifetime drain semantics + cursor invalidation.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

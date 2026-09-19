@@ -4611,11 +4611,9 @@ test "the frictionless-slider residual is rounding, not energy injection" {
     // without a machine. A ten-digit decimal in a permanent pin is unverifiable,
     // and that is exactly how the first version of this number survived review.
     //
-    // THAT FIRST VERSION READ 1 717 988 150 AND WAS WRONG BY 5/4, because it was
-    // `relative excess / eps`, which counts ULP AT 1.0 while the question is about
-    // ULP AT 5.0. A quantity computed on one base and reported on another — the
-    // same shape as collected-versus-source, local-versus-cell, and
-    // `live_tests`-versus-collected-total earlier in this milestone.
+    // A decimal written here once read 1 717 988 150 and was wrong by 5/4: it was
+    // `relative excess / eps`, which counts ULP AT 1.0 where the question is ULP AT
+    // 5.0. Recomputing the bound on the wrong base is the mistake to avoid.
     //
     // THE f64 RESIDUAL'S CAUSE IS NOT ATTRIBUTED, and deliberately so. An earlier
     // measured exactly 5.0 there; three ULP appear today. Two changes sit between

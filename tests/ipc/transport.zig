@@ -1,9 +1,8 @@
-//! S6 transport tests — exercises `IpcSocket.listen/connect/accept/
-//! send/recv` on a real OS socket.
+//! Transport — `IpcSocket.listen/connect/accept/send/recv` on a real OS socket.
 //!
-//! Defense against the macOS hang the previous session diagnosed
-//! (write 64 KB single-threaded on AF_UNIX SOCK_STREAM deadlocks
-//! once the kernel send-buffer fills, since no reader drains it):
+//! Writing 64 KB single-threaded on an AF_UNIX SOCK_STREAM deadlocks once the
+//! kernel send buffer fills, no reader draining it — hence the first two rules
+//! below, and the third is the cleanup every test owes:
 //!   - Large-payload tests spawn a reader thread that consumes bytes
 //!     in parallel.
 //!   - Every test installs a 5 s recv timeout on its server-side
@@ -13,10 +12,9 @@
 //!   - The listen socket and any unix socket file are unlinked on
 //!     test scope exit (`defer`).
 //!
-//! Skipped on Windows: the named-pipe backend has different timeout
-//! semantics (`PIPE_WAIT` vs `PIPE_NOWAIT` + `WaitNamedPipe`); the
-//! Windows pathway lands in Phase 0.6 alongside the editor / runtime
-//! Windows execution.
+//! Skipped on Windows: the named-pipe backend has different timeout semantics
+//! (`PIPE_WAIT` against `PIPE_NOWAIT` + `WaitNamedPipe`), so the timeouts these
+//! tests rest on do not transpose.
 
 const std = @import("std");
 const builtin = @import("builtin");

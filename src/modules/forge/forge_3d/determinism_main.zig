@@ -103,19 +103,12 @@ pub fn main(init: std.process.Init) !void {
     // P1-2 — GENERATION WRITES AND EXITS. It reads no committed witness at all:
     // not to compare, not to validate a length.
     //
-    // The earlier form kept going, and the earlier correction — printing the
-    // comparison instead of gating on it — only fixed the case where the FORMAT is
-    // stable. The real case is a STRUCTURAL change: one more mobile body, a
-    // different `pose_stride`, and `divergenceFrame` raises
-    // `ReferenceWindowLengthMismatch`, which is an ERROR and not the `failed`
-    // boolean that was being neutralised. Under `set -euo pipefail` the CI step
-    // then dies AFTER writing the three files and BEFORE uploading them.
-    //
-    // MEASURED before this change, with one extra scalar per body in the pose dump:
-    // `rc=1`, `error: ReferenceWindowLengthMismatch`, three files on disk. And a
-    // structural change is exactly what the next scenario correction produces, so
-    // this path had to work before it was needed — the third time that ordering has
-    // imposed itself on this milestone, for the same reason each time.
+    // Reading one would break exactly where regeneration matters. A STRUCTURAL
+    // change — one more mobile body, a different `pose_stride` — makes
+    // `divergenceFrame` raise `ReferenceWindowLengthMismatch`, an ERROR and not a
+    // `failed` boolean, so under `set -euo pipefail` the CI step dies AFTER writing
+    // the three files and BEFORE uploading them. MEASURED with one extra scalar per
+    // body in the pose dump: `rc=1`, that error, three files on disk.
     if (write_dir) |dir| {
         var name_buf: [128]u8 = undefined;
         try writeFile(io, dir, try std.fmt.bufPrint(&name_buf, "continuous-chain-{s}-{s}.bin", .{ precision_tag, mode_tag }), a.chain.items);
@@ -126,11 +119,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // THE CHAIN IS ALWAYS COMPARED, AND GATED ONLY WHERE LEVEL 1 APPLIES. The
-    // earlier form SKIPPED the comparison outright on any non-x86_64 host, which
-    // threw away the strongest signal available: measured, the
-    // eight committed witnesses are BIT-IDENTICAL between `ubuntu-24.04` (x86_64)
-    // and aarch64-macOS, the 1000-frame chains included.
+    // THE CHAIN IS ALWAYS COMPARED, AND GATED ONLY WHERE LEVEL 1 APPLIES. Skipping
+    // the comparison on a non-x86_64 host throws away the strongest signal there
+    // is: measured, the eight committed witnesses are BIT-IDENTICAL between
+    // `ubuntu-24.04` (x86_64) and aarch64-macOS, the 1000-frame chains included.
     //
     // That is not a surprise once the arithmetic is pinned. IEEE-754 specifies the
     // correctly-rounded result of `+ - * /`, `sqrt` and comparisons, so two

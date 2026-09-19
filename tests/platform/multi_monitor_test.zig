@@ -1,7 +1,6 @@
-//! Tests M0.3 — multi-monitor enumeration + currentMonitor + per-monitor DPI.
+//! Multi-monitor enumeration + currentMonitor + per-monitor DPI.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "enumerateMonitors + currentMonitor + per-monitor DPI"
+//! `enumerateMonitors`, `currentMonitor` and per-monitor DPI.
 //!
 //! Skipped on platforms without a window subsystem (the stub backend
 //! returns error.UnsupportedPlatform for both query functions).
@@ -39,9 +38,9 @@ test "enumerateMonitors + currentMonitor + per-monitor DPI" {
     try std.testing.expect(monitors.len >= 1);
 
     for (monitors) |m| {
-        // DPI scale must be > 0 — the default 1.0 is a sentinel that
-        // means "unknown" only if the backend never populated it. Both
-        // backends populate it in M0.3.
+        // DPI scale must be > 0. The default 1.0 is a sentinel meaning
+        // "unknown" only where a backend never populated it, and both
+        // implementing backends do.
         try std.testing.expect(m.dpi_scale > 0.0);
     }
 

@@ -89,12 +89,9 @@ pub const refusal_marker = "weld-access-refused";
 ///
 /// A write grants a read of the same type; a read never grants a write. Carries
 /// no `comptime` block so a run-time test can assert it — the compile error
-/// lives in `require` below.
+/// lives in `require` below. The loop is `inline` because `Access` carries a
+/// `type` field and no runtime loop can hold one.
 pub fn grants(comptime spec: []const Access, comptime T: type, comptime want: Use) bool {
-    // `inline`, because `Access` carries a `type` field and is therefore
-    // comptime-only: a runtime loop cannot hold one. The function still has no
-    // `comptime` block, so a run-time test can call it — the split this file's
-    // header states.
     inline for (spec) |a| {
         if (a.T != T) continue;
         const granted = switch (want) {
@@ -108,11 +105,8 @@ pub fn grants(comptime spec: []const Access, comptime T: type, comptime want: Us
     return false;
 }
 
-/// Render `spec` as declared, for a refusal message.
-///
-/// A refusal that names only what was refused leaves the reader to guess what
-/// was declared, which is the shape `job_bound.reasonOf` degenerated into: a
-/// structurally correct refusal that explains nothing.
+/// Render `spec` as declared, for a refusal message. A refusal that names only
+/// what was refused leaves the reader guessing what WAS declared.
 fn renderSpec(comptime spec: []const Access) []const u8 {
     comptime {
         if (spec.len == 0) return "{ } (an explicitly empty declaration)";
@@ -149,46 +143,30 @@ fn require(comptime spec: []const Access, comptime T: type, comptime want: Use) 
     }
 }
 
-/// A world seen through ONE declared set, as a type distinct per set.
+/// A world seen through ONE declared set, as a type distinct per set — which is
+/// what makes a view's transported pointer non-interchangeable.
 ///
-/// **This is what makes a view's transported pointer non-interchangeable, and
-/// without it the restriction had a free bypass that was not the one the file
-/// header describes.** As `*anyopaque` the field's type was the same for every
-/// spec, so `View(&write_spec).fromErased(ctx.view.world_erased)` promoted a
-/// read declaration to a write one with no cast, no builtin and no
-/// diagnostic — a plain call. Keyed on the spec, that same expression is a
-/// type error, and reaching across takes an explicit `@ptrCast` between two
-/// distinct opaque types: deliberate, greppable, and visible in review.
+/// Do NOT weaken this to `*anyopaque`: the field's type would be the same for
+/// every spec, so `View(&write_spec).fromErased(ctx.view.world_erased)` would
+/// promote a read declaration to a write one with no cast and no diagnostic.
+/// Keyed on the spec, that expression is a type error and reaching across takes
+/// an explicit `@ptrCast` between two distinct opaque types.
 ///
-/// **Memoisation is on the slice's IDENTITY, not its value, and that was
-/// measured rather than assumed.** Naming one `const spec` yields one type
-/// wherever it is named, so a trampoline and the body it calls agree; two
-/// separately declared but identical sets yield two types, so a promotion
-/// between them is refused. Both directions are what this needs — the second
-/// is stricter than necessary and costs nothing, since no legitimate path
-/// promotes a view to a set it was not built from.
+/// Memoisation is on the slice's IDENTITY, not its value. Naming one `const
+/// spec` yields one type wherever it is named, so a trampoline and the body it
+/// calls agree; two separately declared but identical sets yield two types, so a
+/// promotion between them is refused.
 pub fn ErasedFor(comptime spec: []const Access) type {
     return opaque {
-        /// Read at comptime by `foundation.job_bound`. **This type is not a
-        /// view, and that is exactly why it needs the marker.** A `View` is
-        /// refused in a dispatched body's arguments because it reaches any
-        /// entity of the world by handle; a `*ErasedFor(spec)` is what a view
-        /// rebuilds itself from with NO cast — `fromErased` takes precisely
-        /// this type — so passing one into a worker hands over the same reach
-        /// under a different name.
+        /// Read at comptime by `foundation.job_bound`. This type is not a view,
+        /// and that is exactly why it needs the marker: `fromErased` takes it
+        /// directly, so passing one into a worker hands over a view's whole
+        /// reach under another name.
         ///
-        /// **It was born without this, and the shape of that omission is the
-        /// reason the text sits here rather than in a commit message.** This
-        /// type was created to close a promotion between views, and the
-        /// guarantee its twin carried lives in ANOTHER FILE
-        /// (`foundation/job_bound.zig`), so nothing at the point of creation
-        /// recalled that a new carrier of a world owes it. The rule, stated
-        /// where the next such type will be written: **any type through which a
-        /// `*World` can be recovered must declare this marker, whatever else it
-        /// is for.** `carriesMarkedIn` enters every composite and follows
-        /// pointers, so declaring it here covers the bare pointer and every
-        /// wrapper around one; both forms are exercised in
-        /// `tests/core/ecs/access_counterproof/`.
+        /// The general rule, stated where the next such type will be written:
+        /// ANY type through which a `*World` can be recovered must declare this
+        /// marker, whatever else it is for. The walk enters every composite, so
+        /// declaring it here covers the bare pointer and every wrapper.
         pub const weld_no_job_body: []const u8 =
             "this is the erased world a view is rebuilt from — `View(spec).fromErased` " ++
             "takes it directly, with no cast — so a worker holding one reaches any " ++
@@ -314,8 +292,6 @@ pub fn View(comptime spec: []const Access) type {
     };
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 const testing = std.testing;
 
 const A = extern struct { v: u32 = 0 };
@@ -334,16 +310,14 @@ const mixed_spec = [_]Access{
 test "a write grants a read of the same component, and a read never grants a write" {
     const spec: []const Access = &mixed_spec;
 
-    // Declared read: readable, not writable.
     try testing.expect(grants(spec, A, .component_read));
     try testing.expect(!grants(spec, A, .component_write));
 
-    // Declared write: writable AND readable — the asymmetry the one production
-    // system depends on, since every publication path reads before it writes.
+    // Writable AND readable — the asymmetry the one production system depends
+    // on, since every publication path reads before it writes.
     try testing.expect(grants(spec, B, .component_write));
     try testing.expect(grants(spec, B, .component_read));
 
-    // Undeclared: neither.
     try testing.expect(!grants(spec, C, .component_read));
     try testing.expect(!grants(spec, C, .component_write));
 }
@@ -356,9 +330,8 @@ test "resource uses answer on their own axis, never on the component one" {
     try testing.expect(grants(spec, R2, .resource_write));
     try testing.expect(grants(spec, R2, .resource_read));
 
-    // A resource declaration grants NOTHING on the component axis, and a
-    // component declaration nothing on the resource axis. Without this the two
-    // namespaces would silently merge — they already share the id pool.
+    // The two axes never leak into each other: they already share the id pool,
+    // so without this the namespaces would silently merge.
     try testing.expect(!grants(spec, R1, .component_read));
     try testing.expect(!grants(spec, B, .resource_read));
 }
@@ -381,15 +354,13 @@ test "a view carries its declaration on its type" {
 test "two views over different declarations are different types" {
     const s1 = [_]Access{Access.reads(A)};
     const s2 = [_]Access{Access.writes(A)};
-    // The restriction lives in the type, so two declarations that differ must
-    // not collapse to one instantiation — if they did, a read-only system would
-    // silently inherit a writer's surface.
+    // Were these one instantiation, a read-only system would silently inherit
+    // a writer's surface.
     try testing.expect(View(&s1) != View(&s2));
 }
 
 test "the refusal marker is what a counter-proof harness matches on" {
-    // The harness greps the compiler's output for this exact string. An exit
-    // code cannot tell a refused build from one that died earlier, so the
-    // marker is load-bearing and pinned here rather than left to a fixture.
+    // An exit code cannot tell a refused build from one that died earlier, so
+    // the harness greps for this exact string and it is pinned here.
     try testing.expectEqualStrings("weld-access-refused", refusal_marker);
 }

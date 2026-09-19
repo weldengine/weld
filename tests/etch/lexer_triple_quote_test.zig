@@ -1,4 +1,4 @@
-//! M0.9 E2-A — triple-quote `"""…"""` multiline string literal.
+//! Triple-quote `"""…"""` multiline string literal.
 //!
 //! Lexer-level coverage: the new `multiline_string_literal` token, its byte
 //! boundaries, newline/quote-spanning bodies, the `"`-vs-`"""` greedy split,
@@ -70,7 +70,7 @@ test "double quote is not a triple quote (greedy split)" {
 }
 
 /// Walk the arena's expr column and return the interned bytes of the first
-/// `string_lit` (M0.9 E2-A pins the §1.4 dedent through this).
+/// `string_lit` — the §1.4 dedent is pinned through this.
 fn firstStringLit(arena: *const etch.Ast) ?[]const u8 {
     var i: usize = 0;
     while (i < arena.exprs.len) : (i += 1) {

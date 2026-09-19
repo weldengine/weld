@@ -1,4 +1,4 @@
-//! M0.2 / E6 — plugin loader happy / error path tests.
+//! Plugin loader happy / error path tests.
 //!
 //! Exercises `Loader.loadPlugin` + `unloadPlugin` against three
 //! stub libraries built by the main `build.zig`:

@@ -29,13 +29,10 @@ const Tick = weld_core.ecs.tick.Tick;
 // bridge so a name-only Etch `entity.activate_extension("X")` resolves at runtime.
 const ExtensionResolver = weld_core.scene.loader.ExtensionResolver;
 
-// Module-private aliases shadowing the value module — `EntityId`,
-// `Value`, `ComponentRef` are not exported because no external caller
-// drives the bridge by hand; they enter the rule body through
-// `interp.zig` which already has its own re-exports. `EntityId` here
-// is the u64 wire form stored in `Value.entity_id`; the bridge bitcasts
-// it back to the core `(index, generation)` struct when reaching into
-// the world.
+// Module-private: no external caller drives the bridge by hand, and the rule
+// body reaches these through `interp.zig`'s own re-exports. `EntityId` here is
+// the u64 wire form in `Value.entity_id`, bitcast back to the core packed
+// `(index, generation)` when reaching into the world.
 const EntityId = value_mod.EntityId;
 const Value = value_mod.Value;
 const ComponentRef = value_mod.ComponentRef;
@@ -62,6 +59,10 @@ pub const BridgeError = error{
     UnknownField,
     TypeMismatch,
     OutOfMemory,
+    /// A `ComponentRef` whose entity is dead or no longer carries the component,
+    /// detected at DEREFERENCE (§5.3 c). Distinct from `UnknownEntity` and
+    /// `UnknownComponent`, which ask the same two questions at CONSTRUCTION.
+    StaleComponentRef,
 };
 
 /// One bridge instance per Etch program run. Lives for the same
@@ -115,12 +116,9 @@ pub const Bridge = struct {
         return self.resources.get(name);
     }
 
-    // ─── Component access ────────────────────────────────────────────────
-
-    /// Resolve `entity.get(T)` (or `get_mut`). Returns a `ComponentRef` whose
-    /// arm follows the component's storage mode: `(chunk, slot)` for a `.table`
-    /// component, the ENTITY alone for a `.sparse` one, which has no chunk to
-    /// point at and is re-resolved per access.
+    /// Resolve `entity.get(T)` into a ref on the `(entity, component)` pair.
+    /// Liveness and carriage are answered here AND again at every dereference:
+    /// this reports a program error, `refBytes` a lifetime one.
     pub fn componentRefOf(
         world: *World,
         entity: EntityId,
@@ -128,52 +126,29 @@ pub const Bridge = struct {
         mutable: bool,
     ) BridgeError!ComponentRef {
         const core_id: CoreEntityId = @bitCast(entity);
-        const loc = world.dynamicLocation(core_id) orelse return BridgeError.UnknownEntity;
-        // The MODE decides the arm, and the presence question is the routed one:
-        // asking `arch.componentIndex` for a sparse id answers null, which is
-        // indistinguishable from the entity not carrying it — the same error a
-        // caller gets for a component the entity really does not carry.
+        if (world.dynamicLocation(core_id) == null) return BridgeError.UnknownEntity;
         if (!world.hasComponentDyn(core_id, component_id)) return BridgeError.UnknownComponent;
-        if (world.storageOf(component_id) == .sparse) {
-            return .{
-                .component_id = component_id,
-                .mutable = mutable,
-                .where = .{ .sparse = entity },
-            };
-        }
-        const arch = world.dynamicArchetype(loc.archetype_idx);
-        const chunk = arch.chunks.items[loc.chunk_idx];
         return .{
+            .entity = entity,
             .component_id = component_id,
             .mutable = mutable,
-            .where = .{ .table = .{ .chunk_ptr = chunk, .slot = loc.slot } },
         };
     }
 
-    /// The component's bytes for this handle, whichever backend holds them.
+    /// The component's bytes for this handle, re-resolved from the ENTITY.
     ///
-    /// ONE place, not four: the three accessors below each re-derived the
-    /// archetype from `chunk_ptr` and asked for the column, so the bimodal
-    /// decision would have had to be written three times — and a change landing
-    /// in one site and not its siblings is this milestone's dominant defect
-    /// shape.
+    /// ONE path for both backends: `World.componentBytes` asks whether the
+    /// entity is live and whether it still carries the component, so a handle
+    /// that outlived either fails instead of answering another row's bytes.
+    ///
+    /// The cost is one location lookup per access rather than a pointer
+    /// dereference. It is the price of `etch-reference-part1.md` §5.3 a — a ref
+    /// is a pair, re-resolved at every access — and it is confined to the
+    /// interpreter: the codegen emits no `ComponentRef`.
     fn refBytes(world: *World, ref: ComponentRef) BridgeError![]u8 {
-        switch (ref.where) {
-            .table => |t| {
-                const chunk: *Chunk = @ptrCast(@alignCast(t.chunk_ptr));
-                const arch = world.dynamicArchetype(chunk.header().archetype_id);
-                const idx = arch.componentIndex(ref.component_id) orelse return BridgeError.UnknownComponent;
-                return arch.componentSlot(chunk, idx, t.slot);
-            },
-            .sparse => |wire| {
-                const core_id: CoreEntityId = @bitCast(wire);
-                // Through the World-level entry, which is bimodal and which
-                // deliberately does NOT stamp a change — the table arm does not
-                // either, and `markComponentChanged` owns the stamp.
-                return world.componentBytes(core_id, ref.component_id) orelse
-                    BridgeError.UnknownComponent;
-            },
-        }
+        const core_id: CoreEntityId = @bitCast(ref.entity);
+        return world.componentBytes(core_id, ref.component_id) orelse
+            BridgeError.StaleComponentRef;
     }
 
     pub fn readComponentField(
@@ -218,21 +193,18 @@ pub const Bridge = struct {
         // shorter and would DROP the explicit `tick`. The sparse storage's own
         // `markChanged` takes a tick too, so the parameter survives on both
         // sides and the caller's contract does not move.
-        switch (ref.where) {
-            .table => |t| {
-                const chunk: *Chunk = @ptrCast(@alignCast(t.chunk_ptr));
-                const arch = world.dynamicArchetype(chunk.header().archetype_id);
-                const idx = arch.componentIndex(ref.component_id) orelse return;
-                arch.markChanged(chunk, idx, t.slot, tick);
-            },
-            .sparse => |wire| {
-                const core_id: CoreEntityId = @bitCast(wire);
-                if (world.sparse_stores.get(ref.component_id)) |store| store.markChanged(core_id, tick);
-            },
-        }
-    }
 
-    // ─── Resource access ─────────────────────────────────────────────────
+        const core_id: CoreEntityId = @bitCast(ref.entity);
+        if (world.storageOf(ref.component_id) == .sparse) {
+            if (world.sparse_stores.get(ref.component_id)) |store| store.markChanged(core_id, tick);
+            return;
+        }
+        const loc = world.dynamicLocation(core_id) orelse return;
+        const arch = world.dynamicArchetype(loc.archetype_idx);
+        const idx = arch.componentIndex(ref.component_id) orelse return;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        arch.markChanged(chunk, idx, loc.slot, tick);
+    }
 
     pub fn readResourceField(
         registry: *const Registry,
@@ -337,8 +309,6 @@ pub const Bridge = struct {
         if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
     }
 };
-
-// ─── Byte ↔ Value conversion ─────────────────────────────────────────────
 
 /// Decode the on-storage byte representation of a field into the
 /// interpreter's tagged `Value`. The width to read is dictated by
@@ -515,8 +485,6 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
     }
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "readBytesAsValue / writeValueAsBytes roundtrip on int" {
     var buf: [8]u8 = undefined;
     try writeValueAsBytes(.int_, &buf, .{ .int_ = -42 });
@@ -539,9 +507,8 @@ test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
 }
 
 test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
-    // A type
-    // incoherence at the bridge is a recoverable typed error on EVERY kind
-    // branch — never a runtime `@panic`.
+    // A type incoherence at the bridge is a recoverable typed error on EVERY
+    // kind branch, never a runtime panic.
     var buf: [8]u8 = undefined;
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.int_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
@@ -557,13 +524,10 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }
 
-// ─── The handle is bimodal ─────────────────────────────────────────────────
 //
-// `ComponentRef` was chunk-anchored, and a sparse component has no chunk. These
-// tests live here rather than in `tests/etch/` because the bridge is not
-// exported from the Etch root, and exporting it to reach a test would widen the
-// public surface for the test's convenience. The end-to-end counterpart — a
-// rule selecting an entity by a sparse component and writing its row — is
+// The round-trip pair tests that ONE resolution serves two storage modes —
+// `etch-reference-part1.md` §5.3 a. Here rather than in `tests/etch/` because
+// the bridge is not exported from the Etch root; the end-to-end counterpart is
 // pinned in `tests/etch/storage_mode_test.zig`.
 
 fn registerProbe(gpa: std.mem.Allocator, world: *World, mode: weld_core.ecs.StorageKind) !ComponentId {
@@ -659,4 +623,80 @@ test "componentRefOf still refuses a component the entity does NOT carry" {
         BridgeError.UnknownComponent,
         Bridge.componentRefOf(&world, @bitCast(eid), cid, false),
     );
+}
+
+//
+// Both tests run on `.table` AND on `.sparse` in the same body, so what they
+// establish is "one resolution, two modes" rather than "one mode works".
+
+/// Spawn `n` probes carrying `cid` and give each a distinguishable value, so a
+/// read landing on the wrong row is visible rather than coincidentally right.
+fn spawnProbes(
+    gpa: std.mem.Allocator,
+    world: *World,
+    cid: ComponentId,
+    values: []const f64,
+    out: []CoreEntityId,
+) !void {
+    for (values, 0..) |v, i| {
+        out[i] = try world.spawnDynamic(gpa, &.{cid});
+        const ref = try Bridge.componentRefOf(world, @bitCast(out[i]), cid, true);
+        try Bridge.writeComponentField(&world.registry, ref, world, "v", .{ .float_ = v });
+    }
+}
+
+fn probeValue(world: *World, cid: ComponentId, e: CoreEntityId) f64 {
+    const bytes = world.componentBytes(e, cid).?;
+    return @bitCast(std.mem.readInt(u64, bytes[0..8], .little));
+}
+
+test "a ref to a despawned entity is refused, not resolved onto its successor" {
+    for ([_]weld_core.ecs.StorageKind{ .table, .sparse }) |mode| {
+        const gpa = std.testing.allocator;
+        var world = World.init();
+        defer world.deinit(gpa);
+
+        const cid = try registerProbe(gpa, &world, mode);
+        var e: [2]CoreEntityId = undefined;
+        try spawnProbes(gpa, &world, cid, &.{ 11.0, 22.0 }, &e);
+
+        const ref_a = try Bridge.componentRefOf(&world, @bitCast(e[0]), cid, true);
+
+        try world.despawn(gpa, e[0]);
+        try std.testing.expectApproxEqAbs(@as(f64, 22.0), probeValue(&world, cid, e[1]), 1e-12);
+
+        try std.testing.expectError(
+            BridgeError.StaleComponentRef,
+            Bridge.readComponentField(&world.registry, ref_a, &world, "v"),
+        );
+        try std.testing.expectError(
+            BridgeError.StaleComponentRef,
+            Bridge.writeComponentField(&world.registry, ref_a, &world, "v", .{ .float_ = 99.0 }),
+        );
+
+        try std.testing.expectApproxEqAbs(@as(f64, 22.0), probeValue(&world, cid, e[1]), 1e-12);
+    }
+}
+
+test "a ref to a SURVIVOR whose row moved still writes that survivor" {
+    for ([_]weld_core.ecs.StorageKind{ .table, .sparse }) |mode| {
+        const gpa = std.testing.allocator;
+        var world = World.init();
+        defer world.deinit(gpa);
+
+        const cid = try registerProbe(gpa, &world, mode);
+        var e: [2]CoreEntityId = undefined;
+        try spawnProbes(gpa, &world, cid, &.{ 11.0, 22.0 }, &e);
+
+        const ref_b = try Bridge.componentRefOf(&world, @bitCast(e[1]), cid, true);
+
+        try world.despawn(gpa, e[0]);
+
+        try Bridge.writeComponentField(&world.registry, ref_b, &world, "v", .{ .float_ = 99.0 });
+
+        try std.testing.expectApproxEqAbs(@as(f64, 99.0), probeValue(&world, cid, e[1]), 1e-12);
+
+        const read = try Bridge.readComponentField(&world.registry, ref_b, &world, "v");
+        try std.testing.expectApproxEqAbs(@as(f64, 99.0), read.float_, 1e-12);
+    }
 }

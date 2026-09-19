@@ -1,12 +1,12 @@
-//! M1.0.4 E2 — `.scene.etch` → cook → `.scene.bin` writer → zero-copy accessor
+//! `.scene.etch` → cook → `.scene.bin` writer → zero-copy accessor
 //! round-trip. Reads the committed fixture, cooks it (`weld_etch.scene_cook`),
 //! serializes the model (`weld_core.scene.writer`), opens the bytes
 //! (`weld_core.scene.accessor`), and asserts that entities, archetypes, UUIDs,
 //! names, and parent links survive the round-trip byte-for-byte in meaning.
 //!
-//! Resource-block + determinism assertions are added in E3 (per the milestone
-//! découpage); the writer already serializes resources, but this E2 gate covers
-//! the entity/archetype/identity surface.
+//! The resource-block and determinism assertions live elsewhere: the writer
+//! serializes resources, and what this file covers is the entity, archetype and
+//! identity surface.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

@@ -95,6 +95,13 @@ fn collectInTrivia(
 /// A `tests` segment INSIDE the perimeter stays in — `src/modules/forge/forge_3d/tests/`
 /// is production source under `src/`. Only a leading `tests` segment is out, which
 /// is why this tests the first segment and not any segment.
+/// Whether `file` is inside the perimeter the comment rules judge.
+///
+/// TAKES A REPO-RELATIVE PATH. The verdict is the first real segment, so an
+/// absolute path answers on `Users` or `home` and the excluded subtree comes
+/// back inside the perimeter. Nothing here can repair that — the repo root is
+/// not knowable from the path — so the guarantee is `scan.isRepoRelative`,
+/// enforced at the walk root, and this predicate rests on it.
 pub fn inPerimeter(file: []const u8) bool {
     var i: usize = 0;
     while (i < file.len) {
@@ -128,6 +135,11 @@ pub fn inPerimeter(file: []const u8) bool {
 /// reddens that test, deliberately — an allowlist with no removal condition
 /// becomes permanent, and re-opening one is a decision that should cost a
 /// conversation rather than a line.
+///
+/// The loop that confronted each entry with the files a run walked lived in
+/// `main.zig` under `if (pending.len != 0)` and was REMOVED as unreachable: a
+/// report no execution can reach is not a report. Re-opening an entry owes that
+/// loop back, or the entry silences a rule with nothing saying so.
 pub const Pending = struct {
     /// Repo-relative path prefix, `/`-separated.
     prefix: []const u8,
@@ -186,12 +198,6 @@ test "isGenerated fires on the marker and only on the first line" {
     // Not a comment at all on line one.
     try std.testing.expect(!isGenerated("pub const x = 1; // AUTO-GENERATED\n"));
     try std.testing.expect(!isGenerated(""));
-}
-
-/// Whether `file` is under `prefix`. Exposed so the caller can confront each
-/// declared entry with the files it actually walked.
-pub fn matchesPending(file: []const u8, prefix: []const u8) bool {
-    return hasPathPrefix(file, prefix);
 }
 
 /// Whether `file` starts with the `/`-separated `prefix`, on either separator.
@@ -384,18 +390,18 @@ test "an unread entry is still inside the perimeter" {
 test "a prefix matches whole segments only" {
     // Without segment-wise comparison a prefix would swallow a sibling whose name
     // merely starts with it.
-    try std.testing.expect(matchesPending("src/core/ecs/world.zig", "src/core"));
-    try std.testing.expect(!matchesPending("src/corelib/x.zig", "src/core"));
-    try std.testing.expect(!matchesPending("src/cor/x.zig", "src/core"));
+    try std.testing.expect(hasPathPrefix("src/core/ecs/world.zig", "src/core"));
+    try std.testing.expect(!hasPathPrefix("src/corelib/x.zig", "src/core"));
+    try std.testing.expect(!hasPathPrefix("src/cor/x.zig", "src/core"));
 }
 
 test "a prefix reads the same path spelled with either separator" {
-    try std.testing.expect(matchesPending("src\\core\\ecs\\world.zig", "src/core"));
+    try std.testing.expect(hasPathPrefix("src\\core\\ecs\\world.zig", "src/core"));
 }
 
 test "a single-file entry matches that file and not its neighbours" {
-    try std.testing.expect(matchesPending("src/demo_etch_codegen.zig", "src/demo_etch_codegen.zig"));
-    try std.testing.expect(!matchesPending("src/demo_etch_codegen_other.zig", "src/demo_etch_codegen.zig"));
+    try std.testing.expect(hasPathPrefix("src/demo_etch_codegen.zig", "src/demo_etch_codegen.zig"));
+    try std.testing.expect(!hasPathPrefix("src/demo_etch_codegen_other.zig", "src/demo_etch_codegen.zig"));
 }
 
 test "no ledger entry subsumes another" {

@@ -1,13 +1,13 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-8 anonymous
+/// Diff-runner fixture: 1 tick. Exercises the anonymous
 /// struct literal `.{ … }` (check mode, resolver-types §4 — the expected
 /// type comes from the context) in its two wired positions:
 ///
 /// - `let q: Pt = .{ x: 40, y: 2 }` — the let annotation supplies the type
 ///   (interp materializes a `Pt`, codegen emits the qualified `Pt{ … }`).
 /// - `Box { p: .{ x: 7, y: 5 }, k: 30 }` — the declared struct field type
-///   supplies it (the tranche-4 field-value propagation extended from the
+///   supplies it (the field-value propagation extended from the
 ///   bare enum variant to the whole literal), through a struct-typed STRUCT
 ///   field (part1 §5.5 nested POD structs).
 pub const config: driver.Config = .{ .ticks = 1 };

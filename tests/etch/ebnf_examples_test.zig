@@ -1,23 +1,47 @@
-//! M0.8 EBNF harness — extracts every fenced ```etch block from the in-repo
-//! example corpus (`ebnf_examples.md`) and feeds each to the parser, asserting
-//! that all of them parse without error. A doc example that uses a construct
-//! the parser does not yet support fails CI (brief §E1 + §E7).
+//! EBNF harness — extracts every fenced ```etch block from `ebnf_examples.md`
+//! and feeds each to the parser, so a documented example using a construct the
+//! parser does not support fails CI.
 //!
-//! The spec documents (`etch-grammar.md`, `etch-reference-part*.md`) are not in
-//! the repo, so the harness embeds an in-repo example corpus instead. The
-//! extraction machinery (markdown ```etch fences) is the reusable part: when
-//! the grammar enters the repo (re-evaluated in Phase 0) the same iterator can
-//! be pointed at it. As later stages land constructs, their example blocks are
-//! appended to `ebnf_examples.md`.
+//! The spec documents (`etch-grammar.md`, `etch-reference-part*.md`) live
+//! outside the repo, which is why the corpus is an in-repo file.
+//!
+//! POINTING THIS ITERATOR AT THE GRAMMAR WOULD NOT WORK, and that is measured
+//! rather than expected. This header used to promise it as the plan for the day
+//! the grammar enters the repo. Fed the grammar's own 15 ```etch blocks, the
+//! parser refuses 11, in three distinct classes:
+//!
+//!   - TWO are refused BY DESIGN — a block using `override`, which is reserved
+//!     and absent from the accepted top-level set, and one declaring a
+//!     `service`, valid only in a `.d.etch`. A grammar documents the language
+//!     including what a plain `.etch` must reject, so extraction needs a
+//!     per-block expected verdict, which "extract and parse" has nowhere to put.
+//!   - ONE is a defect in the document: EBNF comment syntax `(* … *)` inside an
+//!     ```etch fence.
+//!   - EIGHT are real divergence between documented and parsed Etch, and THE SIDE
+//!     IS NOT UNIFORM. `import ui.theme` is the document's: `theme` has since
+//!     become a top-level keyword, so a documented import became unparseable
+//!     without either side noticing. A widget block is the PARSER's: it carries a
+//!     trailing comma in an argument list, which `arg_list` explicitly permits
+//!     (`arg , { "," , arg } , [ "," ]`), and the parser refuses it in all three
+//!     argument shapes under two messages that name the wrong fault — one of them
+//!     the positional-before-named rule, which the block does not break. The same
+//!     optional comma is HONOURED in array, struct, map and match-arm literals, so
+//!     the refusal is confined to argument lists. The other six are unattributed:
+//!     one side was measured, and generalising from it is how the widget block was
+//!     first misfiled here.
+//!
+//! So the corpus below is CURATED to parse, not extracted, and that is the
+//! property the harness rests on. What it cannot do is notice a construct the
+//! spec documents and nobody transcribed — the divergence above is measured on
+//! the grammar's 15 blocks and unmeasured on the corpus's other 951.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");
 
 const examples_md = @embedFile("ebnf_examples.md");
 
-/// Minimum number of example blocks the corpus must contain. Raised to 82 at
-/// M0.9 / E2-A (the triple-quote block strictly increases the count vs the
-/// M0.8 close of 81), pinning the new block against accidental removal.
+/// Minimum number of example blocks the corpus must contain. Raised whenever a
+/// block is added, which is what pins the new one against accidental removal.
 const min_blocks: usize = 82;
 
 /// Iterates the fenced ```etch blocks of a markdown document, yielding the raw

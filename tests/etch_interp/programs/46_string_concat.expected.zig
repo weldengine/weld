@@ -1,8 +1,7 @@
 const driver = @import("diff_runner");
 
 /// Diff-runner fixture: 1 tick. `run` assigns `Acc.out = ("ab" + "cd").len()`
-/// and `Acc.out2 = (prefix + "cd" + "e").len()` — exercises the M0.8
-/// sub-slice-C tranche-1b string concat surface: a literal+literal concat, an
+/// and `Acc.out2 = (prefix + "cd" + "e").len()` — exercises the string concat surface: a literal+literal concat, an
 /// ident-lhs concat (string-ness propagated through a `let` binding), and a
 /// nested (left-associated) concat. Interp side: `.add` intercept → per-body
 /// `string_run` store; codegen side: `std.mem.concat(fa, ...)` in the tick's

@@ -1,13 +1,12 @@
-//! Triangle example — Phase 0 / M0.4.
+//! The triangle example — a public GAL consumer.
 //!
-//! Public GAL consumer. On Vulkan-capable platforms (Windows / Linux)
-//! this opens a Tier 0 window, drives the Vulkan backend end-to-end
-//! (device → surface → swapchain → render pass clear → present), and
-//! exits on close or after the smoke-test budget. On platforms without
-//! a Tier 0 windowing backend (macOS Phase 2+, stubs) the Null backend
-//! path keeps the CI scaffold working.
+//! On a Vulkan-capable platform it opens a Tier 0 window and drives the Vulkan
+//! backend end to end — device → surface → swapchain → render-pass clear →
+//! present — exiting on close or after the smoke-test budget. Where there is no
+//! Tier 0 windowing backend, the Null backend path keeps the CI scaffold
+//! working.
 //!
-//! Supported flags (brief §Observable behavior):
+//! Supported flags:
 //! - `--smoke-test`                — non-interactive, exit after 1 frame
 //! - `--capture-frame=N`           — exit after frame N (smoke-test only)
 //! - `--gpu-prefer=<discrete|integrated|index:N>` — hardware selection
@@ -91,8 +90,8 @@ const TriangleVertex = extern struct {
     color: [3]f32,
 };
 
-/// RGB triangle in NDC clip space — bottom-left red, bottom-right green,
-/// top blue. Patterns from S2 (`/tmp/s2-ref/src/spike/vk_setup.zig:triangle`).
+/// RGB triangle in NDC clip space — bottom-left red, bottom-right green, top
+/// blue.
 const TRIANGLE_VERTICES = [_]TriangleVertex{
     .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1.0, 0.0, 0.0 } },
     .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 1.0, 0.0 } },
@@ -148,11 +147,10 @@ const TrianglePipeline = struct {
             .label = "triangle.vb",
             .size = @sizeOf(@TypeOf(TRIANGLE_VERTICES)),
             .usage = .{ .vertex = true, .copy_dst = true },
-            // Phase 0 simplification: host-visible vertex buffer + map.
-            // S2 uses a device-local buffer + staging upload; the GAL
-            // path will gain a `device.writeBuffer` helper Phase 1+
-            // that hides the staging dance. For now host-visible is
-            // sufficient for 3 vertices.
+            // A host-visible vertex buffer and a map, where a device-local
+            // buffer with a staging upload is the real shape. Host-visible is
+            // enough for three vertices, and the staging dance belongs behind a
+            // `device.writeBuffer` helper the GAL does not have yet.
             .host_visible = true,
         });
         errdefer device.destroyBuffer(vb);
@@ -203,8 +201,8 @@ fn frameClearColor(frame: u32) gal.types.ColorClear {
 }
 
 /// Render frame `frame_idx` into an offscreen R8G8B8A8_UNORM texture, then
-/// delegate the GPU readback + PPM write to the public GAL helper
-/// `Device.captureFrameToPPM` (M0.5 item 2; cf. `gal/capture.zig`). The
+/// delegate the GPU readback and the PPM write to the public GAL helper
+/// `Device.captureFrameToPPM` (see `gal/capture.zig`). The
 /// render leaves the texture in `transfer_src` layout. The `pipeline` argument is the same
 /// triangle pipeline used in the interactive loop — drawn over the
 /// clear-color background so the captured PPM exercises the full
@@ -254,10 +252,10 @@ fn captureFrame(
     try device.submit(enc, .{ .fence = fence });
     try device.waitFence(fence, std.math.maxInt(u64));
 
-    // Readback + PPM encode/write now live on the public GAL surface
-    // (`Device.captureFrameToPPM`, M0.5 item 2). The render above left the
-    // offscreen texture in `transfer_src` layout, the contract the helper
-    // expects (cf. `gal/capture.zig`).
+    // The readback and the PPM encode live on the public GAL surface
+    // (`Device.captureFrameToPPM`). The render above left the offscreen texture
+    // in `transfer_src` layout, which is the contract that helper expects (see
+    // `gal/capture.zig`).
     try device.captureFrameToPPM(allocator, io, offscreen, FRAME_WIDTH, FRAME_HEIGHT, path);
     log.info("captured frame {d} -> {s}", .{ frame_idx, path });
 }

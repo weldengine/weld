@@ -26,11 +26,9 @@
 //! sphere/capsule stay on the generic path; a rounded box returns `.not_handled`.
 //!
 //! **Classification parity with the generic oracle.** The `separated` decision
-//! mirrors `gjk.zig` exactly — `dist − r_sum > conv_k · floatEps(T) ·
-//! coord_scale` with `conv_k = 16` and `coord_scale = |Δcentres| +
-//! coreExtent(a) + coreExtent(b)` (point → 0, box → `|half_extents|`) — so an
-//! exact inflated touch stays a contact and the fast/generic boundary agrees
-//! (up to the documented flip band).
+//! is `gjk.zig`'s, on its margin and its coordinate scale — so an exact
+//! inflated touch stays a contact and the fast/generic boundary agrees, up to
+//! the documented flip band.
 //!
 //! **Box radius invariant.** A box core in a fast pair must have `radius == 0`
 //! (the forge_3d box invariant). A rounded box (`radius > 0`) returns
@@ -150,9 +148,9 @@ fn boxExtent(comptime T: type, he: math.Vec(3, T)) T {
     return he.length();
 }
 
-/// The `separated` contact margin — `conv_k · floatEps(T) · coord_scale`,
-/// `conv_k = 16`, identical to `gjk.zig`'s so a fast pair and its generic oracle
-/// classify the touch/separated boundary the same way (up to the flip band).
+/// The `separated` contact margin, which must stay `gjk.zig`'s: a fast pair and
+/// its generic oracle have to classify the touch/separated boundary the same
+/// way, up to the flip band.
 fn contactMargin(comptime T: type, coord_scale: T) T {
     const conv_k: T = 16;
     return conv_k * std.math.floatEps(T) * coord_scale;

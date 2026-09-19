@@ -1,14 +1,12 @@
-//! M0.2 / E4 — scheduler integration: events drained at the
+//! Scheduler integration: events drained at the
 //! lifetime-appropriate boundary by a mini phase-walking driver.
 //!
-//! The "mini-scheduler" exercised here drives the bus's drain
-//! cadence directly — `bus.drainAtBoundary(.phase)` between every
-//! phase, `.tick` + `.frame` at end of frame. This is the same
-//! sequence the M0.1 `SystemScheduler.dispatchFrame` performs
-//! (cf. `src/core/ecs/scheduler.zig`, post-E4 edit). The test
-//! lives outside the full scheduler so it can express assertions
-//! at intermediate boundaries without spinning up job system
-//! infrastructure.
+//! The mini-scheduler drives the bus's drain cadence directly —
+//! `bus.drainAtBoundary(.phase)` between every phase, `.tick` and
+//! `.frame` at end of frame — which is the sequence
+//! `SystemScheduler.dispatchFrame` performs. It lives outside the
+//! real scheduler so assertions can be made at intermediate
+//! boundaries without spinning up the job system.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -107,8 +105,8 @@ test "world.event_bus is wired into the scheduler dispatch path" {
     const got = (try world.event_bus.poll(PhaseEv, &cur)).?;
     try std.testing.expectEqual(@as(u32, 99), got.seq);
 
-    // Drain via the world reference exactly as the post-E4
-    // scheduler does at each phase transition.
+    // Drained through the world reference, exactly as the scheduler
+    // does at each phase transition.
     world.event_bus.drainAtBoundary(.phase);
     try std.testing.expectError(error.CursorInvalidated, world.event_bus.poll(PhaseEv, &cur));
 }

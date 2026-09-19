@@ -85,8 +85,6 @@ const TrampolineFn = worker_mod.TrampolineFn;
 const ComponentId = registry_mod.ComponentId;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
 
-// ─── Phase pipeline ────────────────────────────────────────────────────────
-
 /// Canonical phase pipeline. Dispatched once per
 /// `dispatchFrame` in declaration order:
 ///
@@ -110,8 +108,6 @@ pub const Phase = enum(u8) {
 
     pub const count = std.meta.fields(@This()).len;
 };
-
-// ─── Access descriptors ────────────────────────────────────────────────────
 
 /// Kind tag distinguishing component reads/writes from resource
 /// reads/writes. Components and resources share the same DAG
@@ -171,9 +167,8 @@ pub fn Writes(comptime T: type) AccessDescriptor {
 pub fn ReadsResource(comptime R: type) AccessDescriptor {
     const Wrapper = struct {
         fn resolve(world: *World, gpa: std.mem.Allocator) anyerror!ComponentId {
-            // The component-id pool is shared with resources
-            // so the DAG can reason about them. A
-            // proper resource registry.
+            // Resources share the component-id pool so the DAG can order them;
+            // a registry of their own lands with the resource API.
             return try world.ensureComponentRegistered(gpa, R);
         }
     };
@@ -197,8 +192,6 @@ pub fn WritesResource(comptime R: type) AccessDescriptor {
         .resolve = &Wrapper.resolve,
     };
 }
-
-// ─── Frame / system context ────────────────────────────────────────────────
 
 /// Per-frame state surfaced to every system. `dt` is the seconds
 /// elapsed since the previous frame (provided by `dispatchFrame`);
@@ -272,12 +265,11 @@ pub fn SystemContextOf(comptime spec: []const view_mod.Access) type {
 /// retires a hazard the inline `&.{ … }` form carries at every hand-written
 /// registration: `registerSystem` stores the caller's slice without duplicating
 /// it, and a temporary dangles the moment the registering function returns.
+///
+/// Held as a CONTAINER-level `const` and not built in a `comptime` block: only
+/// the former has static storage, and a block-local would be a pointer into
+/// comptime memory Zig refuses to hand a run-time caller.
 pub fn descriptorsOf(comptime spec: []const view_mod.Access) []const AccessDescriptor {
-    // Held as a container-level `const` rather than built in a `comptime`
-    // block and returned by pointer: a container-level constant has static
-    // storage, which is the whole property this function exists to give the
-    // scheduler. A block-local would be a pointer into comptime memory that
-    // Zig refuses to hand to a run-time caller.
     const Derived = struct {
         const list = blk: {
             var out: [spec.len]AccessDescriptor = undefined;
@@ -357,8 +349,6 @@ pub const SystemDescriptor = struct {
     }
 };
 
-// ─── JobBuilder ────────────────────────────────────────────────────────────
-
 /// Accumulator for the heterogeneous job batch dispatched at the
 /// end of a topological level. Owns an arena allocator that stores
 /// the per-system args alongside the `Job` array — each system's
@@ -401,12 +391,9 @@ pub const JobBuilder = struct {
     ) !void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
-        // No job body receives a command buffer. This entry hands `args` to a
-        // body the worker pool runs, and it is one of FOUR such entries — the
-        // count is not a remark: a derived enumeration in the suite asserts it,
-        // so adding a fifth without its bound goes red. The bound lives on the
-        // TYPE (`command_buffer.refuseCommandBufferInArgs`) precisely so each
-        // reaches it from its own imports rather than one carrying it alone.
+        // No job body receives a command buffer. One of FOUR such entries, and
+        // the count is asserted by a derived enumeration in the suite — a fifth
+        // added without its bound goes red.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const Trampoline = struct {
@@ -437,24 +424,19 @@ pub const JobBuilder = struct {
     /// Stage the dense ranges of a sparse-driven query into the builder, one
     /// job per range, with `Body` as the trampoline target.
     ///
-    /// **This is the entry that makes `engine-ecs-internals.md` §7's parity
-    /// real**: a chunk becomes a unit of work by being handed to `addJob`
-    /// above, and until this existed a dense range was split, bounded and
-    /// never dispatched — `forEachDenseRange` runs its bodies on the CALLING
-    /// thread, exactly like `Query.forEachChunk`. The split was delivered at
-    /// The consumption is here.
+    /// **The entry that makes `engine-ecs-internals.md` §7's parity real**: a
+    /// dense range becomes a unit of work here, as a chunk does at `addJob`.
+    /// `forEachDenseRange` splits and bounds but runs its bodies on the CALLING
+    /// thread, exactly like `Query.forEachChunk`.
     ///
-    /// Parity is EXACT on the property that matters, and inexact on one point
-    /// that is stated rather than implied. Exact: the same `Body` serves the
-    /// same-thread entry and this one, because `forEachDenseRange` calls it
-    /// with a `DenseRange` BY VALUE and this trampoline dereferences and
-    /// passes the same value — the way one chunk body serves `forEachChunk`,
-    /// `runChunkAt` and `addJob` alike. Inexact: a chunk is a heap allocation
-    /// and IS its own `chunk_ptr`, while a `DenseRange` is two integers with
-    /// no storage identity, so the ranges are materialised into the builder's
-    /// arena and the job carries a pointer to one of them. The arena's
-    /// lifetime is the level (`reset` is `.retain_capacity`), which is exactly
-    /// the lifetime `args` already has.
+    /// Parity is EXACT where it matters: one `Body` serves both entries, because
+    /// `forEachDenseRange` passes a `DenseRange` BY VALUE and this trampoline
+    /// dereferences and passes the same value. It is inexact on one point, stated
+    /// rather than implied — a chunk is a heap allocation and IS its own
+    /// `chunk_ptr`, while a `DenseRange` is two integers with no storage
+    /// identity, so the ranges are materialised into the builder's arena and the
+    /// job carries a pointer into it. That arena's lifetime is the level, which
+    /// is the lifetime `args` already has.
     ///
     /// `target` is the caller's, as it is on `forEachDenseRange` — the natural
     /// granularity of a chunk query is `chunkCount()` and a dense array has
@@ -470,8 +452,7 @@ pub const JobBuilder = struct {
         args: anytype,
     ) !void {
         const ArgsType = @TypeOf(args);
-        // The same bound as `addJob`, for the same reason: a worker owns its
-        // range and nothing else.
+        // The same bound as `addJob`: a worker owns its range and nothing else.
         command_buffer_mod.refuseCommandBufferInArgs(ArgsType);
 
         const n = sq.rangeCount(world, target);
@@ -503,8 +484,6 @@ pub const JobBuilder = struct {
         }
     }
 };
-
-// ─── DAG ───────────────────────────────────────────────────────────────────
 
 /// Per-phase access tracker: which already-registered systems read
 /// or write a given component / resource id. Used by
@@ -572,8 +551,6 @@ const PhaseState = struct {
     }
 };
 
-// ─── Errors ────────────────────────────────────────────────────────────────
-
 /// The two refusals `SystemScheduler.registerSystem` decides, plus the usual
 /// `OutOfMemory`.
 ///
@@ -619,8 +596,6 @@ pub const RegistrationError = error{
     DependencyCycle,
     OutOfMemory,
 };
-
-// ─── SystemScheduler ───────────────────────────────────────────────────────
 
 /// Phase-based system registry + implicit DAG + concurrent
 /// intra-phase dispatch.
@@ -675,13 +650,19 @@ pub const SystemScheduler = struct {
     /// popped, and THAT scheduler is unusable: the next registration's
     /// walk and the next `computeLevels` both index on it out of
     /// bounds. A caller cannot tell the two apart from the error
-    /// alone, so the conservative reading is the right one — but the
-    /// sentence that said every allocation failure here leaves an
-    /// unusable scheduler was false for most of them. The debt is
+    /// alone, so the conservative reading is the right one. The debt is
     /// recorded in `engine-ecs-internals.md`.
     ///
     /// Invalidates any cached topological levels for the affected
     /// phase — the next `dispatchFrame` recomputes them.
+    ///
+    /// **An EXPLICITLY empty declaration is not refused.** What `ARCH-030`
+    /// forbids is the IMPLICIT empty set, and `spec` being a mandatory comptime
+    /// parameter makes omitting it a COMPILE error — stronger than the
+    /// registration error the invariant asks for. Refusing `&.{}` would add
+    /// nothing besides: the body then receives `View(&.{})`, whose `get` and
+    /// `getMut` refuse at comptime for every `T`, so a system that declares
+    /// nothing cannot reach a column and has no edge to place.
     pub fn registerSystem(
         self: *SystemScheduler,
         gpa: std.mem.Allocator,
@@ -691,29 +672,6 @@ pub const SystemScheduler = struct {
         comptime spec: []const view_mod.Access,
         comptime body: fn (SystemContextOf(spec)) anyerror!void,
     ) !void {
-        // **AN EMPTY DECLARATION IS NOT REFUSED, AND THE REASON IS THE TYPE.**
-        //
-        // What `ARCH-030` forbids is the IMPLICIT empty set — the one an
-        // omission produces — and it requires that registering without a
-        // declaration FAIL rather than silently yield one. `spec` is a
-        // mandatory comptime parameter, so omitting it is a COMPILE error,
-        // which is stronger than the registration error the invariant asks
-        // for. A hand-written `&.{}` is a declaration its author made, not an
-        // omission that happened to them.
-        //
-        // And refusing it would add no safety, because the entry above already
-        // makes an empty declaration SELF-VERIFYING: the body receives
-        // `SystemContextOf(&.{})`, hence `View(&.{})`, whose `get` and `getMut`
-        // refuse at comptime for every `T` — pinned by `view.zig`'s « an empty
-        // declaration grants nothing ». A system that declares nothing cannot
-        // reach a column, so it has no edge to place, which is a property and
-        // not an oversight.
-        //
-        // Before the pairing was closed an empty set could lie: the declaration
-        // and the body were independent, so nothing stopped a body that wrote
-        // `A` from being registered with no declaration at all. After it, the
-        // set a body is typed against IS the set the DAG reads. That is what
-        // makes the refusal redundant rather than merely inconvenient.
         return self.registerDescriptor(gpa, world, SystemDescriptor.of(phase, name, spec, body));
     }
 
@@ -747,19 +705,16 @@ pub const SystemScheduler = struct {
         const phase_idx = @intFromEnum(desc.phase);
         const phase = &self.phases[phase_idx];
 
-        // Resolve accesses to ComponentIds via the world registry.
         const resolved = try gpa.alloc(ComponentId, desc.accesses.len);
         defer gpa.free(resolved);
         for (desc.accesses, 0..) |access, i| {
             resolved[i] = try access.resolve(world, gpa);
         }
 
-        // First pass — conflict detection. Two writes on the same
-        // id in the same phase = registration error. No state OF THE
-        // SCHEDULER is mutated until we know the system is admissible;
-        // the resolution above has already registered the named types
-        // in the world's registry, idempotently, and that survives a
-        // refusal.
+        // First pass — conflict detection. No state OF THE SCHEDULER is mutated
+        // until the system is known admissible; the resolution above has already
+        // registered the named types in the world's registry, idempotently, and
+        // that survives a refusal.
         for (desc.accesses, resolved) |access, cid| {
             if (access.kind == .writes or access.kind == .writes_resource) {
                 if (phase.tracker.writers.get(cid)) |writers| {
@@ -797,38 +752,24 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Third pass — cycle detection, still ahead of the commit.
+        // Third pass — cycle detection, still ahead of the commit. Pass 1 only
+        // ever looks at ONE id, so two systems that CROSS — `Reads(T), Writes(U)`
+        // against `Writes(T), Reads(U)` — pass it individually and together force
+        // both edges. Left to `computeLevels` that surfaces at the first dispatch,
+        // under an error naming a duplicated write that does not exist, with the
+        // offending descriptor already committed.
         //
-        // Pass 1 refuses two writers of the SAME id and nothing more. Two
-        // systems that CROSS — one declaring `Reads(T), Writes(U)`, the other
-        // `Writes(T), Reads(U)` — pass it individually and together force both
-        // edges, closing a two-node cycle that no per-component check can see:
-        // the cycle is a property of the pair, and pass 1 only ever looks at
-        // one id at a time.
+        // A plain REACHABILITY walk over the existing edges suffices: the graph
+        // before this registration is acyclic, so any new cycle runs through
+        // `new_idx` and is exactly `new_idx → s → … → p → new_idx`. Two colours
+        // are enough where `registry.zig`'s closure needs three, because the
+        // question is reachability and not cycle-finding — a diamond is a node
+        // reached twice and revisiting it changes no answer.
         //
-        // Left to `computeLevels`, that failure surfaces at the FIRST DISPATCH
-        // instead of at the registration that caused it, under an error naming
-        // a duplicated write that does not exist, and with the offending
-        // descriptor already committed. So it is refused here, where the
-        // caller still holds the declaration that is wrong.
-        //
-        // The walk is a plain reachability over the EXISTING edges, and two
-        // properties make that enough. The graph before this registration is
-        // acyclic — this check is what keeps it so, from an empty graph
-        // onwards — hence any new cycle passes through `new_idx`, and such a
-        // cycle is exactly `new_idx → s → … → p → new_idx` for some successor
-        // `s` and some predecessor `p`. And a two-colour visited set suffices
-        // where `registry.zig`'s `@requires` closure needs three, because the
-        // question here is REACHABILITY and not cycle-finding: a diamond is
-        // simply a node reached twice, and revisiting it could not change the
-        // answer.
-        //
-        // The acyclicity it rests on holds for a scheduler whose registrations
-        // all returned. `registerSystem` is not transactional for itself —
-        // `engine-ecs-internals.md` carries that Tier 0 debt, and
-        // `forge/sync.zig`'s preflight states the consequence — so a scheduler
-        // that has seen an `OutOfMemory` here is unusable, and this invariant
-        // is not what rescues it.
+        // That acyclicity holds only for a scheduler whose registrations all
+        // returned: `registerSystem` is not transactional for itself, so one that
+        // has seen an `OutOfMemory` here is unusable and this walk does not
+        // rescue it.
         if (incoming.items.len > 0 and outgoing.items.len > 0) {
             const visited = try gpa.alloc(bool, phase.systems.items.len);
             defer gpa.free(visited);
@@ -856,15 +797,10 @@ pub const SystemScheduler = struct {
             }
         }
 
-        // Fourth pass — commit. Append the new system, extend edges,
-        // record accesses in the tracker, invalidate cached levels.
+        // Fourth pass — commit.
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
 
-        // Allocate the per-system command buffer alongside the
-        // descriptor. It borrows no world — a buffer that did would hand the
-        // system back the unrestricted handle its view withholds — and uses
-        // `gpa` as its backing allocator.
         try phase.command_buffers.append(gpa, CommandBuffer.init(gpa));
         errdefer {
             var popped_cb = phase.command_buffers.pop();
@@ -877,18 +813,13 @@ pub const SystemScheduler = struct {
             if (popped) |*p| p.deinit(gpa);
         }
 
-        // For each incoming dependency, append `new_idx` to that
-        // system's outgoing list (predecessor → new_idx).
         for (incoming.items) |dep| {
             try phase.edges.items[dep].append(gpa, new_idx);
         }
-        // For each outgoing dependency, append the successor to the
-        // new system's outgoing list (new_idx → successor).
         for (outgoing.items) |succ| {
             try phase.edges.items[new_idx].append(gpa, succ);
         }
 
-        // Record accesses in the tracker.
         for (desc.accesses, resolved) |access, cid| {
             const which = switch (access.kind) {
                 .reads, .reads_resource => &phase.tracker.readers,
@@ -899,7 +830,6 @@ pub const SystemScheduler = struct {
             try entry.value_ptr.append(gpa, new_idx);
         }
 
-        // Invalidate cached levels — DAG topology changed.
         if (phase.levels) |*levels| {
             for (levels.items) |*lvl| lvl.deinit(gpa);
             levels.deinit(gpa);
@@ -954,8 +884,6 @@ pub const SystemScheduler = struct {
         world.beginFrame();
         var frame = FrameContext{ .dt = dt, .user = user };
 
-        // Lazy-init the cross-frame JobBuilder on first use so the
-        // arena is built only once per scheduler lifetime.
         if (self.builder == null) self.builder = JobBuilder.init(gpa);
         const builder = &self.builder.?;
 
@@ -968,16 +896,12 @@ pub const SystemScheduler = struct {
                 }
                 try dispatchPhase(self, world, gpa, io, jobs, &frame, builder, phase_idx);
             }
-            // Drain `.phase`-lifetime event queues at
-            // every phase transition (after every phase, including
-            // empty ones, so the cadence is invariant to the
-            // registered system topology).
+            // After EVERY phase, empty ones included, so the drain cadence is
+            // invariant to the registered system topology.
             world.event_bus.drainAtBoundary(.phase);
         }
-        // End-of-frame drains. The two are collapsed
-        // fixed-tick and render into a single dispatch, so `.tick`
-        // and `.frame` fire together. Kept distinct so the call
-        // sites can diverge later.
+        // Fixed tick and render are one dispatch here, so `.tick` and `.frame`
+        // fire together. Kept as two calls so they can diverge later.
         world.event_bus.drainAtBoundary(.tick);
         world.event_bus.drainAtBoundary(.frame);
     }
@@ -1042,7 +966,6 @@ pub const SystemScheduler = struct {
         const phase = &self.phases[phase_idx];
         const n = phase.systems.items.len;
 
-        // Compute in-degree for every node.
         const in_degree = try gpa.alloc(u32, n);
         defer gpa.free(in_degree);
         @memset(in_degree, 0);
@@ -1076,21 +999,10 @@ pub const SystemScheduler = struct {
                 // milestone can take away without this line noticing. An
                 // `unreachable` proven somewhere else is a bet on a proof that
                 // can move; an error costs a branch that never runs.
-                //
-                // **A second reason was written here and was FALSE.** It said
-                // the branch also covers a scheduler left half-mutated by a
-                // registration that failed on `OutOfMemory`. It does not: such
-                // a scheduler carries an edge naming an index the rollback
-                // popped, and the in-degree count twenty lines above faults on
-                // it — `in_degree[target] += 1` with `target == n` — before
-                // any level is built. The scenario cannot reach this line, so
-                // citing it justified the branch with something the code does
-                // not do. Nothing else about the branch changes.
                 lvl.deinit(gpa);
                 return error.DependencyCycle;
             }
-            // Mark these nodes as scheduled by setting their
-            // in_degree to a sentinel high enough to never reappear.
+            // Sentinel: marks these nodes scheduled so they never reappear.
             for (lvl.system_indices.items) |idx| {
                 in_degree[idx] = std.math.maxInt(u32);
                 for (phase.edges.items[idx].items) |target| {
@@ -1107,14 +1019,10 @@ pub const SystemScheduler = struct {
     }
 };
 
-// ─── helpers ───────────────────────────────────────────────────────────────
-
 fn appendUnique(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged(u32), value: u32) !void {
     for (list.items) |existing| if (existing == value) return;
     try list.append(gpa, value);
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
 

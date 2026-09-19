@@ -2,23 +2,16 @@
 //!
 //! Two cooperating layers feed the `Changed<T>` query filter:
 //!
-//! - **Tick sidecars** (`added_tick[N]`, `changed_tick[N]` per chunk
-//!   column). Per-slot 32-bit ticks that record the world tick at
-//!   which a component was first attached to its entity / last
-//!   modified. Lives next to the SoA columns in each chunk; the
-//!   offset math is in `chunk.zig`'s `ChunkLayout` and the typed
-//!   accessors are on `Archetype`.
-//! - **Dirty bitset** (per chunk). One bit per slot; set when **any**
-//!   component in that slot is modified during the current frame.
-//!   Cleared by `World.beginFrame` so the bit only carries
-//!   "modified since the start of this frame" semantics. Lets
-//!   `Changed<T>` queries skip whole chunks where the bitset is
-//!   all-zero before paying the per-slot `changed_tick` comparison.
+//! - **Tick sidecars** (`added_tick[N]`, `changed_tick[N]` per chunk column):
+//!   the world tick at which a component was attached / last modified.
+//! - **Dirty bitset** (per chunk): one bit per slot, set when any component in
+//!   that slot changes, cleared by `World.beginFrame` — so it means "modified
+//!   since the start of this frame" and lets a `Changed<T>` query skip a whole
+//!   chunk before paying the per-slot tick comparison.
 //!
-//! This module owns the bitset abstraction. The byte-level chunk
-//! layout (where the bits live) is computed in `chunk.zig`; the
-//! per-component tick column accessors are on `Archetype`. The wiring
-//! that auto-marks a slot via `get_mut(T)` lives in `world.zig`.
+//! This module owns only the bitset. Its byte layout is computed in
+//! `chunk.zig`, the tick accessors are on `Archetype`, and the `get_mut(T)`
+//! auto-mark is in `world.zig`.
 
 const std = @import("std");
 
@@ -43,24 +36,17 @@ pub fn isDirty(bitset: DirtyBitset, slot: u32) bool {
     return (bitset[word_idx] & (@as(u64, 1) << bit_idx)) != 0;
 }
 
-/// Reset every bit to zero. Called by `World.beginFrame` on every
-/// chunk so the bitset only ever carries "modified since the start
-/// of this frame" semantics.
+/// Reset every bit to zero.
 pub fn clearAll(bitset: DirtyBitset) void {
     @memset(bitset, 0);
 }
 
-/// `true` iff every word in the bitset is zero. Hot path for the
-/// dirty-skip optimisation — bodies that filter by `Changed<T>`
-/// can early-out a chunk when this returns `true`. Accepts a
-/// `[]const u64` so callers holding a read-only bitset (the
-/// `dirtyBitsetConst` accessor) can probe without dropping `const`.
+/// `true` iff every word is zero — the chunk early-out for `Changed<T>`. Takes
+/// `[]const u64` so a read-only holder can probe without dropping `const`.
 pub fn isAllZero(bitset: []const u64) bool {
     for (bitset) |word| if (word != 0) return false;
     return true;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "setDirty / isDirty round-trip" {
     var words: [4]u64 = .{ 0, 0, 0, 0 };

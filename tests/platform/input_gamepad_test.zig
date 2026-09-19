@@ -1,8 +1,7 @@
-//! Tests M0.3 — gamepad connect/disconnect + raw stick values.
+//! Gamepad connect/disconnect + raw stick values.
 //!
-//! Covers the acceptance tests called out in the M0.3 brief:
-//!   - "gamepad connect/disconnect updates GamepadState.connected"
-//!   - "gamepad sticks raw values in [-1, 1] without deadzone"
+//! Connect and disconnect move `GamepadState.connected`, and the sticks report
+//! raw values in [-1, 1] with NO deadzone applied.
 
 const std = @import("std");
 const weld = @import("weld_core");

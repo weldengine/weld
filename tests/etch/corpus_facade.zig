@@ -14,7 +14,7 @@ pub const Entry = struct {
     source: []const u8,
 };
 
-/// Embedded entry for an invalid S3 corpus fixture — adds the expected
+/// Embedded entry for an invalid corpus fixture — adds the expected
 /// diagnostic code parsed from the filename prefix.
 pub const InvalidEntry = struct {
     name: []const u8,
@@ -25,11 +25,11 @@ pub const InvalidEntry = struct {
     source: []const u8,
 };
 
-/// Embedded list of the valid S3 corpus fixtures consumed by
+/// Embedded list of the valid corpus fixtures consumed by
 /// `tests/etch/corpus_test.zig`. Each entry pins one `.etch` file
 /// the parser + type-checker must accept without diagnostics.
 pub const valid = [_]Entry{
-    // M1.B/P5 — this fixture was `invalid/E1216_requisite_removal.etch` and
+    // This fixture was `invalid/E1216_requisite_removal.etch` and
     // asserted a diagnostic. E1216 is retired, so the program it holds is
     // ACCEPTED, and the fixture moved rather than being deleted: it is the
     // narrowest form the retired check refused, and it belongs on the side of
@@ -84,7 +84,7 @@ pub const valid = [_]Entry{
     .{ .name = "abilities/fireball.etch", .source = @embedFile("corpus/valid/abilities/fireball.etch") },
 };
 
-/// Embedded list of the invalid S3 corpus fixtures. Each entry pins
+/// Embedded list of the invalid corpus fixtures. Each entry pins
 /// an `.etch` file plus the diagnostic code (`E0xxx`) the corpus
 /// driver expects the parser / type-checker to emit.
 pub const invalid = [_]InvalidEntry{

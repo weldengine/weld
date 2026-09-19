@@ -8,8 +8,9 @@ cast, type aliases, assert, match, ranges + for-in, collections (arrays / maps,
 indexing, slicing), closures, loop/break/continue, and throw/try/catch.
 
 The spec docs are not in the repo (engine-spec decision); this file is the
-in-repo example source the harness embeds. When the grammar enters the repo
-(re-evaluated in Phase 0), the harness can point @embedFile at it directly. As
+in-repo example source the harness embeds. It is CURATED rather than extracted:
+every block here must parse, which the spec's own blocks do not all do — the
+harness header carries that measurement and why extraction is not the plan. As
 later stages land constructs, their example blocks are appended here. -->
 
 # EBNF example blocks (E1)

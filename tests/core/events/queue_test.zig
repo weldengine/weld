@@ -1,4 +1,4 @@
-//! M0.2 / E4 — Event queue / bus basic semantics.
+//! Event queue / bus basic semantics.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

@@ -1,8 +1,9 @@
-//! Examples / triangle — Phase 0 / M0.4.
+//! The triangle example.
 //!
-//! Standalone Zig sub-project that consumes Weld via `b.dependency("weld", ...)`.
-//! Demonstrates the public GAL integration — a living architectural test of
-//! the API's external consumability (brief §Scope + §Notes decision 12).
+//! A standalone Zig sub-project consuming Weld through
+//! `b.dependency("weld", …)`. It demonstrates the public GAL integration and
+//! is the living architectural test of the API's external consumability: it
+//! breaks the day the engine stops being consumable from outside.
 
 const std = @import("std");
 
@@ -10,9 +11,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Dependency on the Weld engine (local path in the Phase 0 monolithic
-    // repo). Phase 5+: potentially url + hash if separable extraction
-    // is validated (cf. ARCH-017).
+    // The engine, by local path while the repo is monolithic. It becomes a url
+    // plus hash the day separable extraction is validated (`ARCH-017`).
     const weld = b.dependency("weld", .{
         .target = target,
         .optimize = optimize,
@@ -23,10 +23,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    // Public surface of the `weld_render` module (GAL Phase 0 surface) +
-    // Tier 0 `platform.window` via `weld_core` (canonical Tier 0 public
-    // API per engine-platform.md §4). No import of internals beyond that
-    // (brief §Notes known pitfalls).
+    // The PUBLIC surface alone: `weld_render`'s GAL, plus Tier 0
+    // `platform.window` through `weld_core` (`engine-platform.md` §4). Reaching
+    // an internal from here would defeat the point of the sub-project.
     main_module.addImport("weld_render", weld.module("weld_render"));
     main_module.addImport("weld_core", weld.module("weld_core"));
     // Pre-compiled SPIR-V (triangle.vert/frag + viewport_blit) — shared

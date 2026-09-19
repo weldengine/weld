@@ -1,29 +1,20 @@
-//! M0.2.1 / E2 — diagnostic dump of the job scheduler + event bus
-//! state when the test's scheduler-livelock watchdog fires. Read-only
-//! inspection of the public atomics + per-worker stats — no
-//! modification of production code is required.
+//! Read-only dump of the job scheduler and event bus state, printed when the
+//! test watchdog fires on a suspected scheduler livelock. Three signatures the
+//! output is meant to tell apart:
 //!
-//! The output is calibrated for the brief's E3 discriminant
-//! (cf. § Notes top-1 / top-2):
+//!   - **wake lost** — `pending_count > 0` over an extended period, every
+//!     worker carrying `parks_completed > 0`, and `chunk_count > 0`. A worker
+//!     parked on `work_available` with a stale `last_generation` is only
+//!     inferable here from the gap between `chunk_count` and
+//!     `sum(chunks_processed)`, that field living on the worker's stack.
 //!
-//!   - **H2 (wake-lost) signature** : `pending_count > 0` for an
-//!     extended period, all workers carry `parks_completed > 0`,
-//!     and `chunk_count > 0`. At least one worker is parked on
-//!     `work_available` with `last_generation < scheduler.generation`
-//!     — only inferable indirectly here from the gap between
-//!     `chunk_count` and `sum(chunks_processed)` since
-//!     `last_generation` lives in the worker's stack.
+//!   - **job lost (Chase-Lev race)** — `pending_count` stably positive with
+//!     `sum(chunks_processed)` not progressing, and no worker parked recently
+//!     (low `parks_completed`).
 //!
-//!   - **H4 (job lost / Chase-Lev race) signature** : `pending_count`
-//!     stably positive with `sum(chunks_processed)` not progressing,
-//!     and no worker parked recently (low `parks_completed`).
-//!     Pattern less expected under M0.2 noise — escalates to Cas 2
-//!     per the brief's § Notes if observed.
-//!
-//!   - **H1bis isolated signature** : test does NOT hang (watchdog
-//!     never fires), but `parks_completed` is unusually high. Would
-//!     hint at the inter-dispatch gap growing past the spin window
-//!     without exposing the H2 latent race.
+//!   - **spin window too short** — no hang at all, but `parks_completed`
+//!     unusually high: the inter-dispatch gap outgrew the spin window without
+//!     exposing a lost wake.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -32,10 +23,9 @@ const Scheduler = weld_core.jobs.scheduler.Scheduler;
 const World = weld_core.ecs.World;
 
 /// Print a snapshot of the job scheduler's runtime state to `writer`.
-/// Delegates to `Scheduler.dumpStateTo` — the implementation lives in
-/// production code so the over-decrement assertion panic path
-/// (`src/core/jobs/scheduler.zig:overDecrementPanic`) reuses the same
-/// output format. Keeps test diagnostics and runtime panic in sync.
+/// Delegates to `Scheduler.dumpStateTo`: the implementation lives in production
+/// code so `overDecrementPanic` prints the same format, and the two never
+/// drift.
 pub fn dumpJobScheduler(sched: *const Scheduler, writer: *std.Io.Writer) !void {
     try sched.dumpStateTo(writer);
 }

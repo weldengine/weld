@@ -1,11 +1,9 @@
-//! vk_gen Raw variants tests — Phase 0 / M0.4.
+//! `vk_gen`'s Raw variants.
 //!
-//! Covers brief §Acceptance criteria > Tests:
-//! - `vkAcquireNextImageKHR emits Raw variant` — checks presence in
-//!   the generated output
-//! - `vkCreateBuffer does not emit Raw variant` — checks absence (negative
-//!   case — the function is in the raw_targets list, vkCreateBuffer
-//!   is not)
+//! - `vkAcquireNextImageKHR` emits one — checked by presence in the generated
+//!   output.
+//! - `vkCreateBuffer` does not — the negative case: the first is in the
+//!   `raw_targets` list and the second is not.
 //!
 //! Strategy: grep on the post-bindgen `src/core/platform/vk.zig`, checks
 //! the presence of `acquireNextImageKHRRaw` (on Device) and the absence of
@@ -42,8 +40,8 @@ test "vkAcquireNextImage2KHR emits Raw variant" {
 }
 
 test "vkCreateBuffer does not emit Raw variant" {
-    // If Device.createBufferRaw existed, @hasDecl would report it. The
-    // emitter's raw_targets list contains only the 3 brief targets.
+    // If `Device.createBufferRaw` existed, `@hasDecl` would report it. The
+    // emitter's `raw_targets` list holds three entries and this is not one.
     try std.testing.expect(!@hasDecl(vk.Device, "createBufferRaw"));
 }
 

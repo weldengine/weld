@@ -1,32 +1,12 @@
-//! M0.1 / E5b — implicit DAG + concurrent intra-phase acceptance.
+//! The implicit DAG: a writer of X ordered before a reader of X, disjoint
+//! write sets landing on one topological level, and the two refusals
+//! `registerSystem` decides.
 //!
-//! Three tests cover the acceptance criteria listed in
-//! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E5b:
-//!
-//! - `implicit DAG orders system that writes X before system that
-//!   reads X` — register `Writes(Position)` then `Reads(Position)`
-//!   in the same phase, run `dispatchFrame`, observe via a shared
-//!   log that the writer executes before the reader.
-//! - `systems with disjoint write sets run concurrently in the
-//!   same phase` — chosen method **(c) + (b)**: (c) read
-//!   `SystemScheduler.topologicalLevels(.update)` and assert all
-//!   four `Writes(A..D)` systems land on level 0; (b) measure the
-//!   wall-clock of a single `dispatchFrame` with four CPU-bound
-//!   bodies (~5 ms each) and assert it is significantly below
-//!   `4 × 5 ms` — proof that workers do interleave the level's
-//!   heterogeneous jobs.
-//! - `unresolvable conflict between two writes raises a
-//!   registration error` — register two systems with `Writes(X)`
-//!   in the same phase; the second `registerSystem` returns
-//!   `error.WriteWriteConflict`.
-//!
-//! Three later tests cover the SECOND refusal, which the acceptance
-//! criteria above do not name because the per-component conflict
-//! matrix cannot express it: two systems whose declarations cross
-//! close a cycle in the phase's DAG while conflicting on no single
-//! id. They pin the refusal, the transitive case that tells a real
-//! graph walk from a comparison of two sets, and the crossing
-//! declaration that is legal and must still register.
+//! The second refusal is the one the per-component conflict matrix cannot
+//! express: two systems whose declarations CROSS close a cycle in the phase's
+//! DAG while conflicting on no single id. The tests for it pin the refusal, the
+//! transitive case that tells a real graph walk from a comparison of two sets,
+//! and the crossing declaration that is legal and must still register.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -45,8 +25,6 @@ const SystemContext = sys_sched_mod.SystemContext;
 const Reads = sys_sched_mod.Reads;
 const Writes = sys_sched_mod.Writes;
 
-// ─── Components used by the tests ─────────────────────────────────────────
-
 const Position = extern struct { x: f32 = 0, y: f32 = 0 };
 const Velocity = extern struct { dx: f32 = 0, dy: f32 = 0 };
 const TagA = extern struct { v: u32 = 0 };
@@ -54,13 +32,10 @@ const TagB = extern struct { v: u32 = 0 };
 const TagC = extern struct { v: u32 = 0 };
 const TagD = extern struct { v: u32 = 0 };
 
-// ─── Test 1 — DAG ordering ────────────────────────────────────────────────
-
-// ─── Declared access sets ──────────────────────────────────────────────────
-//
-// One per registered system, named after it. `registerSystem` derives BOTH
-// the DAG's descriptors and the body's context type from the set named here,
-// so a body cannot be paired with a declaration that does not describe it.
+// One declared access set per registered system, named after it.
+// `registerSystem` derives BOTH the DAG's descriptors and the body's context
+// type from the set named here, so a body cannot be paired with a declaration
+// that does not describe it.
 const spec_reader: []const Access = &.{Access.reads(Position)};
 const spec_writer: []const Access = &.{Access.writes(Position)};
 const spec_heavy_a: []const Access = &.{Access.writes(TagA)};
@@ -157,16 +132,6 @@ test "implicit DAG orders system that writes X before system that reads X" {
     try std.testing.expectEqualStrings("reader", log.entries.items[1]);
 }
 
-// ─── Test 2 — disjoint writes parallelism ─────────────────────────────────
-//
-// Pure structural assertion (method (c) from the E5b brief). The
-// original test also shipped a method (b) wall-clock timing check
-// (`expect(elapsed < 50 ms)` for four CPU-bound bodies running
-// concurrently), but it failed on the GitHub Actions Windows
-// runner (2 vCPUs) where the four bodies cannot actually overlap.
-// The timing assertion was removed in the M0.1 hotfix; only the
-// platform-independent topological-level check remains.
-
 /// A body that does nothing, typed against the set it is registered with.
 ///
 /// It is GENERIC because a body's parameter type is now its declaration: one
@@ -206,39 +171,19 @@ test "systems with disjoint write sets run concurrently in the same phase" {
     try sys.registerSystem(gpa, &world, .update, "heavy_c", spec_heavy_c, NopHeavy(spec_heavy_c).run);
     try sys.registerSystem(gpa, &world, .update, "heavy_d", spec_heavy_d, NopHeavy(spec_heavy_d).run);
 
-    // ── Method (c) — structural assertion ────────────────────────
-    // Pure DAG-level check : all four `Writes(TagA..D)` systems
-    // have disjoint write sets, so they MUST land on the same
-    // topological level. This is platform-independent and the
-    // only assertion that gates CI.
+    // The assertion is STRUCTURAL and that is the only kind that gates CI: it
+    // reads the level assignment, which is platform-independent.
     const levels = try sys.topologicalLevels(gpa, .update);
     try std.testing.expectEqual(@as(usize, 1), levels.len);
     try std.testing.expectEqual(@as(usize, 4), levels[0].system_indices.items.len);
 
-    // ── Method (b) intentionally removed — non-portable across CI hardware ─
-    //
-    // The original implementation timed a `dispatchFrame` with four
-    // CPU-bound bodies and asserted `elapsed_ns < 50 ms` to confirm
-    // the workers actually interleaved the level's jobs. The bound
-    // was calibrated for the M4 Pro 14-core dev box where four
-    // ~5 ms bodies clearly land under 50 ms when concurrent.
-    //
-    // It failed on the GitHub Actions Windows runner (2 vCPUs)
-    // because two cores cannot overlap four bodies — the wall-clock
-    // degenerates near-serial (~20 ms) even though the DAG
-    // correctly tagged the systems as parallel-eligible. The
-    // method (c) structural assertion above is the platform-
-    // independent gate; the timing was always meant as a sanity
-    // check and is dropped here per the M0.1 hotfix journal entry
-    // ("Hotfix CI Windows post-E7").
-    //
-    // Lesson recorded in the brief: when a test ships a method (b)
-    // timing assertion, ALWAYS pair it with a method (c) structural
-    // fallback as the only CI gate. Hardware-dependent timing is
-    // not portable across runners we do not control.
+    // DO NOT RE-ADD A WALL-CLOCK ASSERTION HERE. One timed a `dispatchFrame`
+    // with four CPU-bound bodies against a 50 ms bound calibrated on a 14-core
+    // dev box, and it failed on a 2-vCPU Windows runner — where two cores
+    // cannot overlap four bodies and the wall clock degenerates near-serial
+    // (~20 ms) while the DAG has correctly tagged the systems parallel. A
+    // timing bound measures the runner; the level assignment measures the DAG.
 }
-
-// ─── Test 3 — registration conflict ───────────────────────────────────────
 
 test "unresolvable conflict between two writes raises a registration error" {
     const gpa = std.testing.allocator;
@@ -250,10 +195,9 @@ test "unresolvable conflict between two writes raises a registration error" {
 
     try sys.registerSystem(gpa, &world, .update, "writer_a", spec_writer_a, Nop(spec_writer_a).run);
 
-    // A second writer on the same component in the same phase
-    // with no explicit ordering must be rejected at registration
-    // (cf. brief Notes — Bevy's silent serialization is
-    // explicitly not the model).
+    // A second writer on the same component in the same phase, with no explicit
+    // ordering, is refused at registration — Bevy's silent serialization is
+    // deliberately not the model.
     try std.testing.expectError(
         error.WriteWriteConflict,
         sys.registerSystem(gpa, &world, .update, "writer_b", spec_writer_b, Nop(spec_writer_b).run),
@@ -269,8 +213,6 @@ test "unresolvable conflict between two writes raises a registration error" {
     try sys.registerSystem(gpa, &world, .update, "reader_a", spec_reader_a, Nop(spec_reader_a).run);
     try sys.registerSystem(gpa, &world, .update, "reader_b", spec_reader_b, Nop(spec_reader_b).run);
 }
-
-// ─── Test 4 — registration cycle ──────────────────────────────────────────
 
 test "crossing declarations that close a cycle are refused at registration" {
     const gpa = std.testing.allocator;
@@ -358,11 +300,10 @@ test "a cycle closed through a third system is refused too" {
     // successor is `a` and the predecessor is `b`, and they are distinct, so
     // reaching `b` takes walking `a`'s edges.
     //
-    // **It does NOT pin transitivity**, and an earlier form of this comment
-    // called it the discriminating case for the walk, which it is not: a
-    // bounded implementation that checks its seeds, expands ONE level and
-    // stops passes this test and the one above it. The four-node ring below
-    // is what refuses that form.
+    // **It does NOT pin transitivity**, and must not be read as the walk's
+    // discriminating case: a bounded implementation that checks its seeds,
+    // expands ONE level and stops passes this test and the one above it. The
+    // four-node ring below is what refuses that form.
     try sys.registerSystem(gpa, &world, .update, "chain_a", spec_chain_a, Nop(spec_chain_a).run);
     try sys.registerSystem(gpa, &world, .update, "chain_b", spec_chain_b, Nop(spec_chain_b).run);
     try std.testing.expectError(

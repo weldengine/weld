@@ -35,6 +35,31 @@ const ignored_path_substrings = [_][]const u8{
     "tests/core/ecs/access_counterproof",
 };
 
+/// Whether `path` is repo-relative, which every path this tool handles must be.
+///
+/// THE WHOLE TOOL IS KEYED ON REPO-RELATIVE SPELLINGS and an absolute argument
+/// breaks three things at once, none of them loudly. `comment_scan.inPerimeter`
+/// verdicts on the FIRST segment, which for `/Users/…/tests` is `Users`, so the
+/// excluded subtree comes back inside the perimeter and the comment rules fire
+/// over it — measured, `lint tests` exits 0 where `lint <abs>/tests` exits 1 on
+/// the same files. `fingerprint` writes the walked spelling into the baseline,
+/// so an absolute run emits a machine-local path no other machine can match,
+/// which is the hazard `census.normalizePath` already answers for separators.
+/// And `census` reports rows nobody can key on.
+///
+/// Refused at the walk root rather than repaired downstream: the repo root is
+/// not knowable from the path, so any normalisation here would be a guess.
+pub fn isRepoRelative(path: []const u8) bool {
+    if (path.len == 0) return true;
+    if (path[0] == '/' or path[0] == '\\') return false;
+    // A Windows drive letter, `C:/` or `C:\`.
+    if (path.len >= 3 and path[1] == ':' and (path[2] == '/' or path[2] == '\\')) {
+        const c = path[0];
+        if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return false;
+    }
+    return true;
+}
+
 /// Append every `.zig` file reachable from `path` to `out`. `path` may
 /// be a regular file (added directly if it ends with `.zig`) or a
 /// directory (walked recursively). Strings are duplicated into `arena`.
@@ -44,6 +69,7 @@ pub fn collectZigFiles(
     path: []const u8,
     out: *std.ArrayList([]const u8),
 ) !void {
+    if (!isRepoRelative(path)) return error.PathNotRepoRelative;
     const cwd = std.Io.Dir.cwd();
     const stat = cwd.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
@@ -164,4 +190,29 @@ pub fn readSourceZ(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]
     }
     if (written != size) return error.UnexpectedEndOfFile;
     return buf;
+}
+
+test "a repo-relative path is accepted in every spelling the walker produces" {
+    try std.testing.expect(isRepoRelative("src/core/ecs/world.zig"));
+    try std.testing.expect(isRepoRelative("src\\core\\ecs\\world.zig"));
+    try std.testing.expect(isRepoRelative("./tests/ecs/x.zig"));
+    try std.testing.expect(isRepoRelative("tests"));
+    // The empty string is the caller's problem, not the boundary's.
+    try std.testing.expect(isRepoRelative(""));
+}
+
+test "an absolute path is refused, which is what keeps tests out of the perimeter" {
+    // The measured case: `inPerimeter` reads `Users` as the first segment, so the
+    // excluded subtree returns to the perimeter under this spelling alone.
+    try std.testing.expect(!isRepoRelative("/Users/x/weld/tests/ecs/y.zig"));
+    try std.testing.expect(!isRepoRelative("/"));
+    try std.testing.expect(!isRepoRelative("\\\\server\\share\\x.zig"));
+}
+
+test "a Windows drive letter is absolute, and a bare colon is not" {
+    try std.testing.expect(!isRepoRelative("C:/weld/tests/x.zig"));
+    try std.testing.expect(!isRepoRelative("d:\\weld\\tests\\x.zig"));
+    // NON-VACUITY: the drive test must not swallow an ordinary name holding `:`.
+    try std.testing.expect(isRepoRelative("src/a:b/x.zig"));
+    try std.testing.expect(isRepoRelative("ab:/x.zig"));
 }

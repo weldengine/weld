@@ -1,7 +1,8 @@
 //! Minimal column-major 4×4 matrix math for the vertical-slice camera.
 //!
-//! Phase 0 has no general math library (only RTTI `Vec3`/`Mat4` shape
-//! examples), so the slice host carries just enough to build a camera MVP:
+//! There is no general math library reachable from here — only the RTTI
+//! `Vec3`/`Mat4` shape examples — so the slice host carries just enough to
+//! build a camera MVP:
 //! a right-handed `lookAt` + a Vulkan-convention `perspective` (clip-space
 //! depth `[0, 1]`, Y axis flipped vs OpenGL). Stored as `[16]f32`
 //! column-major — the layout a GLSL `mat4` uniform expects, so the bytes go

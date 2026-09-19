@@ -228,11 +228,11 @@ const CandidateSink = struct {
         // **THE DISPATCH IS TOTAL, and no pair is out of domain.** A trigger is convex or a
         // half-space and never a triangle soup — `addBody` refuses the role on one, a surface
         // having no interior for a sensor to ask about (§1.11.17) — so the three arms below
-        // cover every reachable pair. An earlier version carried a DOMAIN BOUND here that
-        // refused {half-space, mesh} × {half-space, mesh}; it rested on a partition that
-        // grouped the two by BODY TYPE where the question is whether the shape has an
-        // INTERIOR, and the cell that made it look unavoidable — mesh against mesh — is
-        // unreachable once a mesh cannot be a trigger. The bound is gone, not narrowed.
+        // cover every reachable pair. Do NOT re-add a domain bound refusing
+        // {half-space, mesh} × {half-space, mesh}: such a bound groups the two by BODY
+        // TYPE where the question is whether the shape has an INTERIOR, and the cell that
+        // makes it look unavoidable — mesh against mesh — is unreachable once a mesh
+        // cannot be a trigger.
         const overlaps = if (self.trigger_probe) |p|
             // (1) convex trigger: it is the probe, against a body of any class.
             self.bm.overlapShapeBody(self.store, other, p.shape, p.position, p.rotation, .ignore)
@@ -354,12 +354,10 @@ pub const SensorState = struct {
     ) !void {
         try collectOverlaps(gpa, bp, bm, store, &self.overlaps);
 
-        // All three reservations before any swap, and the FIRST one is on `previous` and not
-        // on `current`: the swap below makes the previous buffer the new `current`, so
-        // reserving on `current` here would grow the buffer that is about to become the
-        // comparison copy and leave the rebuilt one short. A first version did exactly that
-        // and papered over it with a post-swap `catch unreachable` on a path that really can
-        // fail — the reservation is simply moved to the right buffer instead.
+        // All three reservations before any swap, and the FIRST is on `previous` and
+        // NOT on `current`: the swap below makes the previous buffer the new
+        // `current`, so reserving on `current` here grows the buffer about to become
+        // the comparison copy and leaves the rebuilt one short.
         // Each delta holds at most the sum of the two sets.
         try self.previous.ensureTotalCapacity(gpa, self.overlaps.items.len);
         const delta_bound = self.overlaps.items.len + self.current.items.len;

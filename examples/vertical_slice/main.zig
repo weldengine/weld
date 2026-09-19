@@ -1,14 +1,14 @@
-//! M0.9 vertical slice — host entry (E4).
+//! The vertical slice's host entry.
 //!
-//! Boots the ECS world + cooked Etch gameplay (sim.zig), then dispatches on
-//! platform + flags:
-//!   - default (Vulkan-capable + window): `render.runInteractive` — windowed
-//!     forward render of the live scene, M0.3 input (SPACE toggles pause)
-//!     driving the sim.
-//!   - `--smoke-test`: `render.runSmoke` — headless offscreen render of the
-//!     final state → PPM capture (CI lavapipe; "the frame composes").
-//!   - `--headless` (or no Vulkan window backend, e.g. macOS Phase 0): pure
-//!     60 Hz sim loop, prints the E3 OK line. No GPU.
+//! Boots the ECS world and the cooked Etch gameplay of `sim.zig`, then
+//! dispatches on platform and flags:
+//!   - default, with a Vulkan-capable window: `render.runInteractive` — a
+//!     windowed forward render of the live scene, with input driving the sim
+//!     (SPACE toggles pause).
+//!   - `--smoke-test`: `render.runSmoke` — a headless offscreen render of the
+//!     final state to a PPM capture, which is what CI lavapipe checks composes.
+//!   - `--headless`, or wherever there is no Vulkan window backend: a pure
+//!     60 Hz sim loop printing its OK line, no GPU.
 //!
 //! `sim` + `render` are re-exported so the integration test (which imports this
 //! module as `slice`) reaches the pure helpers and `render.composeNull`.
@@ -77,10 +77,10 @@ pub fn main(init: std.process.Init) !void {
     defer world.deinit(gpa);
     try sim.bootAndSpawn(&world, gpa);
 
-    // C0.8 (E5): drive one real component edit over the M0.7 IPC transport
-    // (editor-stub thread → runtime-side apply, in-process), then let the
-    // render reflect it. Socket-only, so it runs on every platform incl. the
-    // headless fallback. With --ipc-edit the smoke renders the post-edit world.
+    // Drive ONE real component edit over the IPC transport — editor-stub thread
+    // to runtime-side apply, in-process — then let the render reflect it.
+    // Socket-only, so it runs on every platform including the headless
+    // fallback; under `--ipc-edit` the smoke renders the post-edit world.
     if (ipc_edit) {
         if (ipc_loop.buildF32Edit(&world, 0, "Position", "x", ipc_edit_x)) |msg| {
             ipc_loop.runOneEdit(gpa, &world, msg) catch |e|
@@ -113,8 +113,8 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// Pure 60 Hz simulation loop (no GPU) — the E3 behaviour, used on macOS dev
-/// and as the render fallback.
+/// The pure 60 Hz simulation loop, no GPU — used where there is no window
+/// backend, and as the render fallback.
 fn runHeadless(world: *World, gpa: std.mem.Allocator, io: std.Io, ticks: u32) !void {
     var t: u32 = 0;
     while (t < ticks) : (t += 1) sim.step(world, gpa);

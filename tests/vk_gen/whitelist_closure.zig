@@ -1,14 +1,13 @@
-//! vk_gen whitelist closure tests — Phase 0 / M0.4.
+//! `vk_gen`'s whitelist closure.
 //!
-//! Covers brief §Acceptance criteria > Tests:
-//! - `reachability fixed-point converges under 20 iterations` — on XML
-//!   Vulkan SDK 1.4.341.0 with the Phase 0 whitelist, iterations < 20.
-//! - `non-whitelisted enum variants are filtered` — `VkAccessFlagBits2`
-//!   must not include the bits of extensions outside the whitelist.
+//! - the reachability fixed point converges in under 20 iterations on the
+//!   Vulkan SDK 1.4.341.0 XML with the current whitelist;
+//! - non-whitelisted enum variants are filtered — `VkAccessFlagBits2` must not
+//!   carry the bits of extensions outside it.
 //!
-//! Phase 0: these tests run indirectly via the `bindgen-verify` gate
-//! (which regenerates + diffs). The file here exercises measurable
-//! properties on the `src/core/platform/vk.zig` output:
+//! Both hold indirectly through the `bindgen-verify` gate, which regenerates
+//! and diffs. What this file measures are properties of the generated
+//! `src/core/platform/vk.zig`:
 //! - VkResult does not contain the filtered extension variants
 //! - VkStructureType has a reasonable number of variants (< 500
 //!   post-closure vs ~1700 pre-closure)
@@ -24,15 +23,15 @@ const weld_core = @import("weld_core");
 const vk = weld_core.platform.vk;
 
 test "non-whitelisted enum variants are filtered" {
-    // Phase 0: VkResult after closure does NOT contain error_incompatible_display_khr
-    // (from the non-whitelisted VK_KHR_display) nor error_invalid_shader_nv (from
-    // the non-whitelisted VK_NV_glsl_shader).
+    // After closure `VkResult` carries neither `error_incompatible_display_khr`
+    // (from the non-whitelisted `VK_KHR_display`) nor `error_invalid_shader_nv`
+    // (from the non-whitelisted `VK_NV_glsl_shader`).
     //
     // We use std.meta.fields to enumerate the variants actually
     // present and verify the absence of the filtered targets.
     const t = std.testing;
 
-    // Phase 0: VkResult is a non-exhaustive enum `enum(i32) { ... , _ }`.
+    // `VkResult` is a non-exhaustive enum, `enum(i32) { …, _ }`.
     // The filtered variants are not accessible via `@hasField` nor
     // via a static reference. We use comptime iteration over
     // std.meta.fields which returns a comptime-known slice.
@@ -58,17 +57,16 @@ test "non-whitelisted enum variants are filtered" {
 }
 
 test "StructureType is bounded post-closure" {
-    // Pre-closure: VkStructureType had 1700+ variants (half came
-    // from unused extensions). Post-closure brief D-S2-vk-whitelist:
-    // expected < 500 variants. Current measurement (commit 1aa181c): 293.
+    // `VkStructureType` carries 1700+ variants before the closure, half of them
+    // from unused extensions, and under 500 after it. Measured at 293.
     const fields = std.meta.fields(vk.StructureType);
     try std.testing.expect(fields.len > 50); // sanity: core 1.0-1.3 + 5 ext
     try std.testing.expect(fields.len < 500); // upper bound post-closure
 }
 
 test "reachability fixed-point converges under 20 iterations" {
-    // Note: strict convergence is validated indirectly by the fact
-    // that `bindgen-verify` regenerates the binding without hang/timeout. The
+    // Strict convergence is established indirectly, by `bindgen-verify`
+    // regenerating the binding with no hang and no timeout. The
     // `parser.closeOverTypes` code (parser.zig ~line 1247) explicitly bounds
     // to 32 iterations and sets `changed = false` at the end of the pass — exit
     // guaranteed.

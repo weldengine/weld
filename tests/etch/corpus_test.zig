@@ -1,4 +1,4 @@
-//! S3 Etch corpus driver — enumerates every `.etch` file in
+//! Etch corpus driver — enumerates every `.etch` file in
 //! `tests/etch/corpus/` (via the shared facade module) and asserts:
 //!
 //! - Files under `valid/**` produce zero diagnostics from `parse` +

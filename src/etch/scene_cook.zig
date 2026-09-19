@@ -205,10 +205,9 @@ pub fn cookScene(
     const scene_decl = try b.findScene(diag_out);
     const model = try b.build(scene_decl, base_resolver, diag_out);
 
-    // `model` owns the cook arena by value — a copy of `b.arena` (build: `.arena =
-    // self.arena`, scene_cook build return), so the two share one arena. Do NOT
-    // add `errdefer model.deinit()` — it double-frees it, `errdefer
-    // b.arena.deinit()` above already covering the failure paths.
+    // `model` owns the cook arena BY VALUE — a copy of `b.arena` — so the two
+    // share one arena. Adding `errdefer model.deinit()` double-frees it; the
+    // `errdefer b.arena.deinit()` above already covers every failure path.
     return .{ .model = model, .registry = registry };
 }
 
@@ -277,14 +276,9 @@ pub fn cookPrefab(
     const prefab_decl = try b.findPrefab(diag_out);
     const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
 
-    // `model` owns the cook arena by value — a copy of `b.arena` (buildPrefab:
-    // `.arena = self.arena`), so the two share one arena. Do NOT add
-    // `errdefer model.deinit()` — it double-frees it, `errdefer
-    // b.arena.deinit()` above already covering the failure paths.
+    // Same shared-arena rule as `cookScene`: no `errdefer model.deinit()`.
     return .{ .model = model, .registry = registry };
 }
-
-// ── Builder ──────────────────────────────────────────────────────────────────
 
 /// One in-progress entity, accumulated before archetype grouping. `comp_ids` is
 /// sorted ascending and `comp_blobs[i]` is the `componentSize(comp_ids[i])`-byte
@@ -1409,8 +1403,6 @@ fn hexNibble(c: u8) ?u8 {
         else => null,
     };
 }
-
-// ── tests ─────────────────────────────────────────────────────────────────
 
 test "parseUuid round-trips a canonical UUID" {
     const u = parseUuid("7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e").?;

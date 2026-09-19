@@ -7,15 +7,14 @@
 //!   and by callers that want full control over the output sink.
 //! - `generateToPath(gpa, source_path, source, output_dir, cache_dir)` —
 //!   end-to-end: parse + type-check + lower + write file. Skips the write
-//!   step on cache-hit (per-file xxHash cache).
+//!   step on a cache hit (per-file content hash).
 //! - `cookTree(gpa, inputs, output_dir, cache_dir)` — drive the per-file
 //!   generation over a slice of input files. A published surface with no
 //!   current in-tree consumer — the bench harness and the build-graph
 //!   cooks consume the CONSOLIDATED pipeline below.
 //! - `consolidate.cookConsolidated(gpa, named_sources, &out)` — render N
-//!   in-memory sources into one consolidated `.zig`. The `etch_cook`
-//! CLI is a thin shim over it;
-//!   the bench harness calls it in-process.
+//!   in-memory sources into one consolidated `.zig`. The `etch_cook` CLI is a
+//!   thin shim over it; the bench harness calls it in-process.
 
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
@@ -25,7 +24,7 @@ const diag_mod = @import("../diagnostics.zig");
 
 /// AST → cooked Zig lowering step (the main codegen body).
 pub const lower = @import("lower.zig");
-/// xxHash-based per-file cache that lets unchanged sources skip emission.
+/// Per-file content-hash cache that lets unchanged sources skip emission.
 pub const cache = @import("cache.zig");
 /// Codegen error set + diagnostic helpers.
 pub const errors = @import("errors.zig");
@@ -60,7 +59,7 @@ pub const Outcome = struct {
     /// `true` if the file was regenerated; `false` if the cache hit and
     /// the on-disk artifact was reused as-is.
     regenerated: bool,
-    /// xxHash of the source content (always populated).
+    /// Content hash of the source (always populated).
     source_hash: Hash,
 };
 

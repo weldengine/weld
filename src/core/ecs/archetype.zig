@@ -1,12 +1,9 @@
 //! Generalised byte-level archetype storage.
 //!
-//! A comptime-typed `Archetype(Components)` and
-//! a `DynamicArchetype` are collapsed into a single byte-level `Archetype` that
-//! both spawn paths can share. The chunk layout is computed from the
-//! component sizes + alignments registered with the world (cf.
-//! `registry.zig`). Comptime-typed access is layered on top via the
-//! `query.zig` view; transitions between archetypes are routed through
-//! the per-archetype `TransitionCache`.
+//! One byte-level `Archetype` shared by both spawn paths. Its chunk layout is
+//! computed from the component sizes and alignments registered with the world;
+//! comptime-typed access is layered on top by `query.zig`, and transitions
+//! between archetypes go through the per-archetype `TransitionCache`.
 //!
 //! Locked invariants:
 //!
@@ -18,9 +15,13 @@
 //!   `componentSize(component_ids[i])` / `componentAlignment(...)`.
 //!   They are cached locally so the hot paths (append, removeSwap,
 //!   componentSlot) do not need to bounce through the registry.
-//! - `chunks` grows monotonically on append; `removeSwap` performs an
-//!   in-chunk swap-and-pop and never frees the trailing empty chunk
-//!   (the empty-chunk reclamation policy is a later-milestone tweak).
+//! - `removeSwap` performs an IN-CHUNK swap-and-pop; a chunk it empties is
+//!   freed by `releaseChunkIfEmpty`, which the OWNER calls because reclaiming
+//!   a chunk can RENUMBER one other chunk and only the world holds the
+//!   locations that name it.
+//! - A chunk index is valid only between two structural mutations of its
+//!   archetype: `removeSwap` moves a row under any live iterator, and a
+//!   reclamation moves a whole chunk's index.
 //! - The `TransitionCache` lifetime is tied to the owning archetype —
 //!   the cached `ArchetypeId` values are indices into the world's
 //!   archetype list, so they stay valid as long as the world does
@@ -57,16 +58,13 @@ pub const ArchetypeError = chunk_mod.ArchetypeError;
 /// `Location` so any entity handle can be resolved in O(1).
 pub const ArchetypeId = u32;
 
-/// Position of an entity in the world: which archetype, which chunk
-/// inside that archetype, which slot inside that chunk. Replaces the
-/// per-path locations the world used to maintain separately
-/// — there is now exactly one location type, populated by the unified
-/// `entity_locations` map.
+/// Position of an entity in the world: which archetype, which chunk inside it,
+/// which slot inside that chunk. The world's one location type, populated by
+/// `entity_locations`.
 ///
-/// `archetype_idx` is named to match the older `DynamicLocation` field
-/// the Etch interpreter + bridge already consume, even though under the
-/// hood it is the same value as the archetype's stable `archetype_id`
-/// (an index into `World.archetypes`).
+/// `archetype_idx` is named for the older `DynamicLocation` field the Etch
+/// interpreter and bridge consume; it holds the archetype's stable
+/// `archetype_id`, an index into `World.archetypes`.
 pub const Location = struct {
     archetype_idx: ArchetypeId,
     chunk_idx: u32,
@@ -157,22 +155,23 @@ pub const Archetype = struct {
     /// than this flag's name suggests, and a reader must not take it for an
     /// invariant over every query.
     is_singleton: bool = false,
+    /// Chunks freed by `releaseChunkIfEmpty`. STATS-ONLY: a length that never
+    /// rose proves nothing, so asserting on `chunks.items.len` alone cannot tell
+    /// a release from an allocation that never happened.
+    chunks_released: u64 = 0,
 
-    /// Initialise the archetype with the given sorted component list. An EMPTY
-    /// list is accepted and yields the archetype of an entity whose whole set is
-    /// sparse; nothing here asserts against it, and the body says why.
+    /// Initialise the archetype with the given sorted component list.
+    ///
+    /// An EMPTY list is legal and yields the archetype of an entity whose whole
+    /// set is sparse — an entity ALWAYS has an archetype. Making it optional
+    /// would create a second entity lifecycle that despawn, the observers, the
+    /// three spawn paths and `dynamicLocation` would each have to tell apart.
     pub fn init(
         gpa: std.mem.Allocator,
         registry: *const Registry,
         archetype_id: ArchetypeId,
         component_ids: []const ComponentId,
     ) ArchetypeError!Archetype {
-        // An EMPTY component list is legal: an entity whose whole
-        // set is sparse still has an archetype, because an entity ALWAYS has
-        // one. Making it optional would create a second entity lifecycle that
-        // despawn, the observers, the three spawn paths and `dynamicLocation`
-        // would each have to tell apart.
-
         const ids = try gpa.dupe(ComponentId, component_ids);
         errdefer gpa.free(ids);
         std.mem.sort(ComponentId, ids, {}, comptime std.sort.asc(ComponentId));
@@ -212,8 +211,6 @@ pub const Archetype = struct {
         self.* = undefined;
     }
 
-    // ─── Inspection ──────────────────────────────────────────────────────
-
     pub fn capacity(self: *const Archetype) u32 {
         return self.layout.capacity;
     }
@@ -243,8 +240,6 @@ pub const Archetype = struct {
         return self.componentIndex(component_id) != null;
     }
 
-    // ─── Spawn / despawn primitives ──────────────────────────────────────
-
     /// Reserve a slot in the trailing chunk (allocating a new chunk when
     /// the current one is full) without writing any component data. The
     /// caller is responsible for filling the slot's component columns
@@ -264,16 +259,12 @@ pub const Archetype = struct {
         const slot = hdr.entity_count;
         hdr.entity_count = slot + 1;
 
-        // Stamp every component's sidecars at the new slot.
         for (self.component_ids, 0..) |_, i| {
             const added = chunk.addedTickColumn(&self.layout, i);
             const changed = chunk.changedTickColumn(&self.layout, i);
             added[slot] = tick;
             changed[slot] = tick;
         }
-        // A freshly appended slot is considered dirty for the current
-        // frame so first-frame `Changed<T>` queries pick it up before
-        // any write occurs.
         change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
 
         return .{
@@ -282,13 +273,9 @@ pub const Archetype = struct {
         };
     }
 
-    /// Append a fresh entity initialised from the registry's default
-    /// bytes for every component. The `tick` parameter stamps both
-    /// `added_tick` and `changed_tick` sidecars and is propagated by
-    /// callers from `World.current_tick`. Mirrors the older
-    /// `spawnDefault` shape with one extra `Tick` argument — the
-    /// Etch path and the runtime-query tests pass through via the
-    /// `archetype_dynamic.zig` re-export.
+    /// Append a fresh entity initialised from the registry's default bytes for
+    /// every component. `tick` stamps both sidecars and callers propagate it
+    /// from `World.current_tick`.
     pub fn spawnDefault(
         self: *Archetype,
         gpa: std.mem.Allocator,
@@ -348,8 +335,6 @@ pub const Archetype = struct {
             hdr.entity_count = last;
             return null;
         }
-        // Copy each component column's `last` byte slot into `slot`,
-        // plus the matching `added_tick` / `changed_tick` entries.
         for (self.component_ids, 0..) |_, i| {
             const dst = self.componentSlot(chunk, i, slot);
             const src = self.componentSlot(chunk, i, last);
@@ -360,14 +345,10 @@ pub const Archetype = struct {
             const changed = chunk.changedTickColumn(&self.layout, i);
             changed[slot] = changed[last];
         }
-        // Carry the dirty bit so a `Changed<T>` query that was about
-        // to inspect the trailing slot still treats the relocated
-        // entity as dirty.
         const bitset = chunk.dirtyBitset(&self.layout);
         if (change_detection.isDirty(bitset, last)) {
             change_detection.setDirty(bitset, slot);
         } else {
-            // Clear the destination bit so we don't carry stale state.
             const word_idx: usize = @intCast(slot / 64);
             const bit_idx: u6 = @intCast(slot % 64);
             bitset[word_idx] &= ~(@as(u64, 1) << bit_idx);
@@ -380,6 +361,39 @@ pub const Archetype = struct {
         return moved_id;
     }
 
+    /// Free the chunk at `chunk_idx` when it holds no entity; answer the index
+    /// whose occupants were RENUMBERED by the free, or `null` when none were.
+    ///
+    /// Reclamation is the OWNER's call, never `removeSwap`'s. Freeing a chunk
+    /// that is not the trailing one moves the trailing chunk into its index, and
+    /// every entity in THAT chunk then carries a stale `Location.chunk_idx`. The
+    /// archetype holds no locations and cannot repair them, so a caller that
+    /// ignores the answer leaves entities naming a chunk that moved.
+    ///
+    /// `null` covers two cases alike to the caller — "not empty" and "the
+    /// trailing chunk was freed" — since neither renumbers anything. Only
+    /// `chunks_released` tells them apart.
+    ///
+    /// Reclaiming at all matters because `allocateSlot` fills only the TRAILING
+    /// chunk: a chunk drained by churn is never refilled, so the count follows
+    /// cumulative appends rather than live population until `dispatchBatch`
+    /// refuses the archetype at its chunk ceiling.
+    pub fn releaseChunkIfEmpty(self: *Archetype, gpa: std.mem.Allocator, chunk_idx: u32) ?u32 {
+        const chunk = self.chunks.items[chunk_idx];
+        if (chunk.header().entity_count != 0) return null;
+
+        const last_idx: u32 = @intCast(self.chunks.items.len - 1);
+        gpa.destroy(chunk);
+        self.chunks_released += 1;
+        if (chunk_idx == last_idx) {
+            _ = self.chunks.pop();
+            return null;
+        }
+        self.chunks.items[chunk_idx] = self.chunks.items[last_idx];
+        _ = self.chunks.pop();
+        return chunk_idx;
+    }
+
     fn allocChunk(self: *Archetype, gpa: std.mem.Allocator) ArchetypeError!*Chunk {
         const chunk = try gpa.create(Chunk);
         errdefer gpa.destroy(chunk);
@@ -387,8 +401,6 @@ pub const Archetype = struct {
         try self.chunks.append(gpa, chunk);
         return chunk;
     }
-
-    // ─── Byte-level accessors (shared by query view + Etch bridge) ──────
 
     /// Pointer to a single component slot — `sizes[i]` bytes long.
     /// `i` is the index into `component_ids`, not a public ComponentId.
@@ -414,8 +426,6 @@ pub const Archetype = struct {
     pub fn entityIdsConst(self: *const Archetype, chunk: *const Chunk) [*]const EntityId {
         return @ptrCast(@alignCast(&chunk.bytes[self.layout.entity_ids_offset]));
     }
-
-    // ─── Change-detection helpers ───────────────────────────────────────
 
     /// Mark `(comp_idx, slot)` as modified at `tick`. Writes the
     /// `changed_tick` sidecar and sets the slot's dirty bit so chunk-
@@ -457,18 +467,14 @@ pub const Archetype = struct {
     }
 };
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "Archetype init pins sorted component_ids and registry-driven sizes/aligns" {
     const gpa = std.testing.allocator;
     var reg = Registry.init();
     defer reg.deinit(gpa);
 
     const Health = extern struct { current: f32 = 0, max: f32 = 100 };
-    // Tag uses `u32` rather than `u8` because the
-    // `FieldKind` registry whitelist does not include `u8`
-    // yet. The test only cares that two
-    // components with distinct sizes/aligns sort correctly.
+    // `u32` and not `u8`: the `FieldKind` registry whitelist has no `u8`. All
+    // this needs is two components with distinct sizes and alignments.
     const Tag = extern struct { v: u32 = 0 };
 
     const id_h = try reg.registerComponent(gpa, Health);
@@ -516,7 +522,6 @@ test "removeSwap returns the swapped entity id and leaves the chunk consistent" 
     try std.testing.expectEqual(a_id, ids[0]);
     try std.testing.expectEqual(c_id, ids[1]);
 
-    // The component column moved with the entity id.
     const x_slot1: *const Pos = @ptrCast(@alignCast(arch.componentSlot(chunk, 0, 1).ptr));
     try std.testing.expectEqual(@as(f32, 3), x_slot1.x);
 
@@ -537,7 +542,6 @@ test "transition cache stores and retrieves add/remove targets" {
     var arch = try Archetype.init(gpa, &reg, 0, &[_]ComponentId{id_p});
     defer arch.deinit(gpa);
 
-    // Initially empty.
     try std.testing.expect(arch.transitions.add.get(id_p) == null);
 
     try arch.transitions.add.put(gpa, id_p, 7);

@@ -1,5 +1,5 @@
 //! The Tier 1 physics service called from a rule, and the sensor deltas
-//! translated onto the Tier 0 bus (M1.1.15.2 G6).
+//! translated onto the Tier 0 bus.
 
 const std = @import("std");
 const core = @import("weld_core");
@@ -120,9 +120,9 @@ test "an Etch rule calls the physics service and receives its result" {
         .world = &ecs,
         .persistent_allocator = gpa,
         .system_scheduler = &scheduler,
-        // The job scheduler is the one field with no cheap real instance, and this
-        // milestone's `init` provably never reads it — the same placeholder
-        // `forge_module_test`'s fixture uses, for the same reason.
+        // The job scheduler is the one field with no cheap real instance, and `init`
+        // provably never reads it — the same placeholder `forge_module_test`'s fixture
+        // uses, for the same reason.
         .job_scheduler = @ptrFromInt(@alignOf(core.jobs.scheduler.Scheduler)),
     };
     var m = try module.Forge3DModule.init(&mod_ctx);
@@ -210,8 +210,6 @@ test "the two sensor deltas reach the Tier 0 bus as TriggerEnter and TriggerExit
     try testing.expectEqual(@as(u32, 1), r3.exited);
 }
 
-// --- M1.1.15.2 G8 — F7 --------------------------------------------------------
-
 test "point_query_count signals its truncation instead of returning a capped total" {
     const gpa = testing.allocator;
     var ecs = World.init();
@@ -274,15 +272,13 @@ test "point_query_count signals its truncation instead of returning a capped tot
     try testing.expectEqual(@as(i64, 0), try physics.pointQueryCount(&ctx, 500, 0, 0, -1));
 }
 
-// ---------------------------------------------------------------------------
-// M1.1.15.2 G11 — the five MUTATION wrappers, and the journal's production path.
+// The five MUTATION wrappers, and the journal's production path.
 //
-// Every oracle below is DISCRIMINATING in the sense G6b fixed for this milestone:
-// it separates the entry from its plausible neighbour, not merely from doing
-// nothing. `move_kinematic` is separated from `set_body_transform` by the DERIVED
+// Every oracle below is DISCRIMINATING in one precise sense: it separates the
+// entry from its plausible NEIGHBOUR and not merely from doing nothing.
+// `move_kinematic` is separated from `set_body_transform` by the DERIVED
 // velocity, `move_character` from `set_character_position` by the sweep,
 // `resize_character` from a boolean by its third outcome.
-// ---------------------------------------------------------------------------
 
 const Transform = core.ecs.components.Transform;
 const Velocity = api.Velocity;
@@ -351,17 +347,17 @@ test "move_kinematic derives both velocities and mirrors them in the same call" 
     defer r.deinit();
 
     const p = try r.spawnLinked(.kinematic, .{ 1, 0.25, 1 }, .{ 0, 0, 0 });
-    // **DECLARED `.gameplay`, and G21 is what makes that necessary.** The entry now
-    // refuses a subject that is not under gameplay authority: the corpus states that a
-    // kinematic moved through the API IS `.gameplay`, and that is a guarantee only if
-    // something imposes it. This scene used to carry no `RigidBody` at all — hence the
-    // `.solver` default — and succeeded, which is the premise being unfounded.
+    // **DECLARED `.gameplay`, and the entry is what makes that necessary.** It refuses
+    // a subject not under gameplay authority: the corpus states that a kinematic moved
+    // through the API IS `.gameplay`, and that is a guarantee only if something imposes
+    // it. A scene carrying no `RigidBody` at all — hence the `.solver` default — used to
+    // succeed here, which is the premise being unfounded.
     try r.ecs.addComponent(gpa, p.entity, RigidBody, .{ .authority = .gameplay });
     const dt: f64 = 1.0 / 60.0;
 
     // A PURE ROTATION, and that choice is the discrimination. A linear-only
     // implementation reaches the right POSITION on a combined move and passes a test
-    // that reads position — the defect class M1.1.15 named on `moveKinematic` itself.
+    // that reads position — the defect class named on `moveKinematic` itself.
     // A quarter turn about Y with no translation has no linear answer to hide behind.
     const s = @sin(@as(f64, std.math.pi / 4.0));
     const c = @cos(@as(f64, std.math.pi / 4.0));
@@ -369,8 +365,8 @@ test "move_kinematic derives both velocities and mirrors them in the same call" 
 
     // BOTH velocities are derived. The angular one is the half a translation cannot
     // produce, and its VALUE discriminates between the two plausible derivations: the
-    // engine's is `ω = 2 · vec(q_target · conj(q_current)) / dt`, which is trig-free by
-    // design (M1.1.15) and yields `2·sin(θ/2)/dt`, NOT the exact axis-angle `θ/dt`. At a
+    // engine's is `ω = 2 · vec(q_target · conj(q_current)) / dt`, trig-free by design,
+    // and yields `2·sin(θ/2)/dt`, NOT the exact axis-angle `θ/dt`. At a
     // quarter turn the two are 84.85 and 94.25 — ten per cent apart — so this reads the
     // form and not merely the presence of a rotation.
     const quarter_turn_omega: f32 = @floatCast(2.0 * s * 60.0); // 84.8528
@@ -650,10 +646,6 @@ test "electedBodyOf answers exactly what electPublishers elects" {
     try testing.expect(sync.characterOf(&r.m.world, a) == null);
 }
 
-// ---------------------------------------------------------------------------
-// M1.1.15.2 G14 — the two properties.
-// ---------------------------------------------------------------------------
-
 test "move_kinematic refused on a non-kinematic body leaves the state untouched" {
     const gpa = testing.allocator;
     var r: Rig = undefined;
@@ -715,9 +707,8 @@ test "set_joint_motor resolves as §5 writes it, and fails loud" {
     // `physics.set_joint_motor(...)`, dispatched on the service, against the EMITTED
     // declaration that `bindgen-check` guards — never a literal written here.
     //
-    // The arguments take RD-2's scalar decomposition: §5 passes a `JointId` and an
-    // aggregate `?JointMotor`, and the Phase 1 tree-walker carries neither. The residual
-    // is named in the journal rather than papered over.
+    // The arguments are decomposed into scalars: §5 passes a `JointId` and an aggregate
+    // `?JointMotor`, and the Phase 1 tree-walker carries neither.
     var h = try check(gpa,
         \\component Door { open: int = 0 }
         \\rule open_door(entity: Entity)
@@ -753,7 +744,7 @@ test "set_joint_motor resolves as §5 writes it, and fails loud" {
 
     // AND IT FAILS LOUD rather than answering success. `Forge3DModule` has no joints, so
     // the wrapper propagates — a stub returning `void` would be the truncated-success
-    // class closed three times in this milestone.
+    // class again.
     var r: Rig = undefined;
     try Rig.init(gpa, &r);
     defer r.deinit();
@@ -768,16 +759,16 @@ test "set_joint_motor resolves as §5 writes it, and fails loud" {
 }
 
 test "move_kinematic refuses a subject that is not gameplay-authoritative" {
-    // **P1 of the sixth review, and the fault was in the CONTRACT before the code.** The
-    // owner document says a kinematic body moved through the API is `.gameplay`. That is
-    // a guarantee only if something imposes it — and nothing did: this entry read neither
+    // **THE FAULT WAS IN THE CONTRACT BEFORE IT WAS IN THE CODE.** The owner document
+    // says a kinematic body moved through the API is `.gameplay`. That is a guarantee
+    // only if something imposes it — and nothing did: this entry read neither
     // `RigidBody.authority` nor wrote it, and succeeded on an entity carrying no
-    // `RigidBody` at all. G19's removal of the kinematic short-circuit rested on that
-    // premise.
+    // `RigidBody` at all. Removing the kinematic short-circuit from the mutation
+    // diagnostic rested on that premise.
     //
-    // **The property is the STATE AFTER the refusal**, the same discipline as G14's
-    // body-type refusal: pose, both velocities, the journal mark and the ECS mirror are
-    // captured before and confronted after.
+    // **The property is the STATE AFTER the refusal**, the same discipline as the
+    // body-type refusal above: pose, both velocities, the journal mark and the ECS
+    // mirror are captured before and confronted after.
     const gpa = testing.allocator;
     var r: Rig = undefined;
     try Rig.init(gpa, &r);

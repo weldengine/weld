@@ -296,11 +296,11 @@ pub const ConstraintPoint = struct {
     /// warm-start applications the sum moves by the net change in `λₙ` over that run,
     /// and a point pushed then relaxed fully back to zero contributes zero.
     ///
-    /// It is therefore NEITHER the final `λₙ` (which the substeps rewrite) NOR a
-    /// boolean NOR a record of whether the point ever pushed — an earlier version of
-    /// this comment claimed the last of those, which the telescoping refutes. The
-    /// predicate is `total_normal_impulse != 0` on the value this sum ends the tick
-    /// with, taken literally; reference parity is on the arithmetic above.
+    /// It is therefore NEITHER the final `λₙ`, which the substeps rewrite, NOR a
+    /// boolean, NOR a record of whether the point ever pushed — the telescoping
+    /// refutes that last reading. The predicate is `total_normal_impulse != 0` on
+    /// the value this sum ends the tick with, taken literally; reference parity is
+    /// on the arithmetic above.
     ///
     /// NOT stored to the warm-start cache: that format is frozen at
     /// `(λₙ, world tangent)` and this quantity is per-tick bookkeeping, meaningless
@@ -637,11 +637,10 @@ pub fn build(
     // `(pair_key, subshape_id)`, whose totality is argued at `lessByConstraintKey`.
     //
     // What `computePairs` dedups is the CANDIDATE PAIRS, so `pair_key` is unique per
-    // pair — never per constraint. A mesh pair contributes one constraint per
-    // contacting triangle, and the sub-shape index is the term that separates them;
-    // an earlier version of this comment inferred per-constraint uniqueness from the
-    // pair-level dedup, which the half-space made false. No hash containers
-    // anywhere on the path.
+    // PAIR and never per constraint — do not infer the second from the first. A mesh
+    // pair contributes one constraint per contacting triangle, and the sub-shape
+    // index is the term that separates them. No hash containers anywhere on the
+    // path.
     std.mem.sort(ContactConstraint, out.items, {}, lessByConstraintKey);
 }
 

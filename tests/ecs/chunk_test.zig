@@ -1,9 +1,5 @@
-//! Byte-level chunk tests — M0.1 / E2 replaced the comptime-generic
-//! `Chunk(Components)` with a 16 KiB raw buffer + an `ChunkLayout`
-//! descriptor computed from registered component sizes + alignments.
-//! These tests cover the locked invariants surfaced by `chunk.zig`:
-//! total size, alignment, header init, and the layout computation
-//! against a reference (Transform, Velocity)-shaped component set.
+//! Byte-level chunk invariants: total size, alignment, header init, and the
+//! `ChunkLayout` computed from registered component sizes and alignments.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -39,10 +35,8 @@ test "computeLayout against (Transform, Velocity) yields a sensible capacity" {
     defer gpa.free(layout.added_tick_offsets);
     defer gpa.free(layout.changed_tick_offsets);
 
-    // Post-E4 the layout reserves sidecars (added_tick + changed_tick
-    // + dirty bitset) inside the same 16 KiB budget, dropping the
-    // capacity below the pre-E4 ~185 reference. The bound below is a
-    // sanity check, not a precise lock.
+    // The sidecars (added_tick + changed_tick + dirty bitset) share the same
+    // 16 KiB budget, so this is a sanity bound and not a precise lock.
     try std.testing.expect(layout.capacity >= 140);
     try std.testing.expect(layout.capacity <= 200);
 
@@ -50,7 +44,6 @@ test "computeLayout against (Transform, Velocity) yields a sensible capacity" {
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[0] % 16);
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[1] % 16);
 
-    // entity_ids[] is 8-byte aligned (matches `@alignOf(EntityId)`).
     try std.testing.expectEqual(@as(u16, 0), layout.entity_ids_offset % @sizeOf(EntityId));
 }
 

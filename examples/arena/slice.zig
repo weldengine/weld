@@ -1,9 +1,8 @@
-//! `examples/arena/` — the M1.1.15.2 bidirectional Etch slice, driven end to end
-//! (G7).
+//! The bidirectional Etch slice, driven end to end.
 //!
-//! **A mechanism nothing executes is the defect M1.1.15 named and this milestone
-//! has closed twice.** So the slice is not a directory to read: `run` is called
-//! by a test, and what it returns is what the rules observed.
+//! **A mechanism nothing executes is not delivered.** So this slice is not a
+//! directory to read: `run` is called by a test, and what it returns is what
+//! the rules observed.
 //!
 //! The tick order is the one the whole milestone is built on, and it is written
 //! out here because a slice is where a reader looks for it:
@@ -198,11 +197,11 @@ pub fn run(gpa: std.mem.Allocator, ticks: u32) !Observed {
     try interp.addEventSource(enter_bridge.source());
 
     // --- the frames ---
-    // THE NORMATIVE TICK ORDER, and the slice runs it whole since G11 — gameplay rules
-    // first, then the inbound seam, then the step, then the outbound seam
-    // (`engine-physics-forge.md` § *Autorite d'ecriture*). Before G11 the slice ran
-    // `step` and `syncOut` only, because no rule mutated anything; a rule that commands
-    // a pose makes `syncIn` part of what the slice must exercise.
+    // THE NORMATIVE TICK ORDER, RUN WHOLE: gameplay rules first, then the inbound
+    // seam, then the step, then the outbound seam (`engine-physics-forge.md`
+    // § *Autorité d'écriture*). `step` and `syncOut` alone would suffice while no
+    // rule mutates anything — a rule that COMMANDS a pose is what makes `syncIn`
+    // part of what the slice has to exercise.
     var t: u32 = 0;
     while (t < ticks) : (t += 1) {
         ecs.beginFrame();

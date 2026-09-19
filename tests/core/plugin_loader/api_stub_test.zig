@@ -1,14 +1,13 @@
-//! M0.2 / E6 — stub API surface freeze test.
+//! Stub API surface freeze test.
 //!
 //! Exhaustively enumerates each callback of the 7 sub-APIs
 //! (`WeldEcsAPI`, `WeldResourceAPI`, `WeldEventAPI`,
 //! `WeldServiceAPI`, `WeldMemoryAPI`, `WeldEditorAPI`,
 //! `WeldPlatformAPI`) and checks the stub return code. This test
-//! **freezes the surface**: any silent addition / removal / rename
-//! of a callback breaks the test. Any callback that does not
-//! return the stub default (i.e. that starts actually wiring
-//! the Tier 0) is detected too — the runtime wiring of the
-//! 7 sub-APIs is Phase 3 (brief § Out-of-scope).
+//! **freezes the surface**: a silent addition, removal or rename of
+//! a callback breaks the test, and so does a callback that stops
+//! returning the stub default — the runtime wiring of the seven
+//! sub-APIs is Phase 3.
 //!
 //! Verification convention:
 //!   - Functions returning `WeldResult`: must return
@@ -226,9 +225,8 @@ fn dummyJobFn(user_data: ?*anyopaque) callconv(.c) void {
 }
 
 test "stub_api WeldAPI table is wired" {
-    // Smoke check: the main table references each non-null
-    // sub-API (except `editor` which may be null in shipping;
-    // in M0.2 the stub editor is exposed).
+    // Smoke check: the main table references each non-null sub-API.
+    // `editor` may be null in a shipping build; the stub exposes it.
     const a = pl.stub_api;
     _ = a.ecs;
     _ = a.resource;
@@ -237,4 +235,30 @@ test "stub_api WeldAPI table is wired" {
     _ = a.service;
     try std.testing.expect(a.editor != null);
     _ = a.platform;
+}
+
+test "the seven surfaces are frozen by COUNT, which is what an addition breaks" {
+    // The checks above name every callback, so a REMOVAL or a RENAME stops the
+    // file compiling. They cannot see an ADDITION — a new stub-defaulted field is
+    // simply never called — and this file's header claimed all three for the whole
+    // of its life. The count closes the third that was false.
+    //
+    // A bump here is a deliberate act: the surface is frozen against
+    // `engine-c-api.md` §4-§11, and adding a callback is a protocol change before
+    // it is a test change.
+    const surfaces = .{
+        .{ pl.api.WeldEcsAPI, 24 },
+        .{ pl.api.WeldResourceAPI, 8 },
+        .{ pl.api.WeldEventAPI, 6 },
+        .{ pl.api.WeldServiceAPI, 2 },
+        .{ pl.api.WeldMemoryAPI, 8 },
+        .{ pl.api.WeldEditorAPI, 17 },
+        .{ pl.api.WeldPlatformAPI, 14 },
+    };
+    inline for (surfaces) |row| {
+        try std.testing.expectEqual(
+            @as(usize, row[1]),
+            @typeInfo(row[0]).@"struct".fields.len,
+        );
+    }
 }

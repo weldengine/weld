@@ -1,8 +1,8 @@
-//! Generic differential driver for the S4 Etch interpreter test corpus.
+//! Generic differential driver for the Etch corpus.
 //!
-//! Parameterised by a `Runner` type that exposes `setup`, `step`, and
-//! `finalize`. S4 wires the tree-walking interpreter (`runner_interp.zig`);
-//! S5 will plug a codegen runner without modifying this file.
+//! Parameterised by a `Runner` type exposing `setup`, `step` and `finalize`,
+//! so the tree-walking interpreter (`runner_interp.zig`) and the Zig codegen
+//! (`runner_codegen.zig`) drive the same corpus through this one file.
 //!
 //! For each program:
 //! 1. `Runner.setup(gpa, world, source)` parses + type-checks + compiles
@@ -102,15 +102,12 @@ pub const ResourceCheck = struct {
 ///   pub fn step(self: *Runner, gpa: std.mem.Allocator, world: *World) !void;
 ///   pub fn finalize(self: *Runner, gpa: std.mem.Allocator, world: *World) void;
 ///
-/// The S5 codegen runner uses `name` to dispatch into the pre-compiled
-/// `corpus_codegen` consolidated module; the S4 interpreter runner ignores
-/// it (just compiles from `source`). Passing both keeps the contract
-/// uniform across backends without forcing one to parse the other's
-/// preferred input.
-/// Generic differential driver: spawns the sidecar's initial world,
-/// runs `config.ticks` ticks through `Runner`, then asserts the world
-/// matches `expected`. Used by both the S4 interpreter and the S5
-/// codegen runners.
+/// The codegen runner dispatches on `name` into the pre-compiled
+/// `corpus_codegen` module; the interpreter runner ignores it and compiles
+/// from `source`. Passing BOTH keeps one contract across the two backends
+/// without forcing either to parse the other's preferred input.
+/// Spawns the sidecar's initial world, runs `config.ticks` ticks through
+/// `Runner`, then asserts the world matches `expected`.
 pub fn runProgram(
     gpa: std.mem.Allocator,
     comptime Runner: type,
@@ -284,10 +281,9 @@ fn writeFieldValue(kind: FieldKind, bytes: []u8, v: FieldValue) void {
             const x: f32 = @floatCast(v.float_);
             @memcpy(bytes[0..@sizeOf(f32)], std.mem.asBytes(&x));
         },
-        // The S4 differential corpus is POD-only: `string`/enum resource fields
-        // (M1.0.3), `Entity` component fields (M1.0.6) and collection resource
-        // fields (M1.0.17) are exercised elsewhere, never by this corpus, so
-        // these kinds never reach the runner.
+        // The differential corpus is POD-only: `string` and enum resource
+        // fields, `Entity` component fields and collection resource fields are
+        // exercised elsewhere, so those kinds never reach the runner.
         .string_, .enum_, .entity_, .array_, .map_, .set_ => unreachable,
     }
 }
@@ -320,8 +316,8 @@ fn readFieldValue(kind: FieldKind, bytes: []const u8) FieldValue {
             @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(f32)]);
             break :blk .{ .float_ = v };
         },
-        // POD-only corpus — `.string_`/`.enum_` (M1.0.3), `.entity_` (M1.0.6) and
-        // collection kinds (M1.0.17) never enter it (see `writeFieldValue`).
+        // POD-only corpus: `.string_`, `.enum_`, `.entity_` and the collection
+        // kinds never enter it (see `writeFieldValue`).
         .string_, .enum_, .entity_, .array_, .map_, .set_ => unreachable,
     };
 }

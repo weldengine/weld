@@ -29,8 +29,8 @@
 //!
 //! **Dependency discipline.** Imports `foundation` (math) and the sibling `support.zig`
 //! ONLY — never `manifold.zig`, `gjk.zig`, `epa.zig`, `raycast.zig`, `weld_forge`,
-//! `body*.zig`, `config.zig` or `broadphase.zig`. Identical to `plane.zig`; the scalar is
-//! the comptime `T` and `forge_3d` instantiates it at `config.Real`.
+//! `body*.zig`, `config.zig` or `broadphase.zig`. The scalar is the comptime `T`
+//! and `forge_3d` instantiates it at `config.Real`.
 
 const std = @import("std");
 const math = @import("foundation").math;

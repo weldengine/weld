@@ -1,12 +1,10 @@
 //! Byte-level chunk — the storage unit shared by every archetype.
 //!
-//! A comptime-typed `Chunk(Components)` is generalised into a single byte-level `Chunk`
-//! (16 KiB buffer + minimal header). The runtime `ChunkLayout` descriptor pinned per
-//! archetype tells consumers where each component column lives inside the buffer; typed
-//! access flows through a comptime view defined in `query.zig`.
+//! A 16 KiB buffer plus a minimal header. The per-archetype `ChunkLayout`
+//! says where each column lives inside it; typed access goes through the
+//! comptime view in `query.zig`.
 //!
-//! The layout carries three change-detection sidecars
-//! that live inside the same 16 KiB buffer:
+//! Three change-detection sidecars live inside that same buffer:
 //!
 //! - `added_tick[N][capacity]u32` — per-component, per-slot tick of
 //!   first attachment to the entity.
@@ -16,14 +14,8 @@
 //!   reset by `World.beginFrame`; lets queries skip whole chunks
 //!   without per-slot inspection.
 //!
-//! The sidecars reduce the effective per-slot budget, so the capacity drops slightly
-//! against a sidecar-free layout (~16 % for the (Transform, Velocity) archetype).
-//!
-//! Layout matches `archetype_dynamic.Chunk` byte-for-byte for
-//! the component columns + entity_ids; the new sidecars trail at the
-//! end of the chunk. The Etch interpreter / bridge keep working
-//! through the `archetype_dynamic.zig` re-export because they only
-//! consume `component_offsets[]` and `entity_ids_offset`.
+//! The sidecars trail the columns and cost per-slot budget: capacity drops
+//! about 16 % against a sidecar-free layout for (Transform, Velocity).
 //!
 //! Locked invariants (per `engine-ecs-internals.md` §2):
 //!
@@ -80,16 +72,14 @@ pub const ChunkLayout = struct {
     component_offsets: []u16,
     /// Byte offset of the `entity_ids[]` array. 8-byte aligned.
     entity_ids_offset: u16,
-    /// Byte offset of each per-component `added_tick[capacity]u32`
-    /// column. Same length and ordering as `component_offsets`. A
-    /// change-detection sidecar.
+    /// Byte offset of each per-component `added_tick[capacity]u32` column, same
+    /// length and ordering as `component_offsets`.
     added_tick_offsets: []u16,
-    /// Byte offset of each per-component `changed_tick[capacity]u32`
-    /// column. Same length and ordering as `component_offsets`. A
-    /// change-detection sidecar.
+    /// Byte offset of each per-component `changed_tick[capacity]u32` column,
+    /// same length and ordering as `component_offsets`.
     changed_tick_offsets: []u16,
-    /// Byte offset of the per-chunk `dirty_bitset[ceil(capacity/64)]u64`.
-    /// 8-byte aligned change-detection sidecar.
+    /// Byte offset of the per-chunk `dirty_bitset[ceil(capacity/64)]u64`,
+    /// 8-byte aligned.
     dirty_bitset_offset: u16,
     /// Number of `u64` words in the dirty bitset = `ceil(capacity / 64)`.
     dirty_bitset_word_count: u16,
@@ -102,16 +92,6 @@ pub const ChunkLayout = struct {
 pub const ArchetypeError = error{
     LayoutTooLarge,
     OutOfMemory,
-    // `EmptyComponentList` was removed when the EMPTY archetype
-    // became legal. An entity always has an archetype — making it optional
-    // would create a second entity lifecycle that despawn, the observers, the
-    // three spawn paths and `dynamicLocation` would each have to distinguish —
-    // so an entity whose whole component set is sparse lives in the archetype
-    // of zero components. With both producers gone the variant had no
-    // reachable cause, and an error no caller can provoke is an assertion, not
-    // an error; the repository has removed a dead public variant for that
-    // reason before. Nothing outside `chunk.zig` / `archetype.zig` switched on
-    // it — measured, one deprecated alias and no exhaustive switch.
 };
 
 /// Aligned raw 16 KiB buffer underpinning a single chunk. Type-erased on
@@ -158,12 +138,9 @@ pub const Chunk = struct {
         };
     }
 
-    // ─── Change-detection sidecar accessors ─────────────────────────────
-
-    /// Pointer to the `added_tick[capacity]u32` column for component
-    /// index `comp_idx`. Length is the chunk's `capacity` (every slot
-    /// has a tick, including unused trailing slots — the sidecar
-    /// is sized to the layout, not the live entity count).
+    /// Pointer to the `added_tick[capacity]u32` column for component index
+    /// `comp_idx`. Sized to the LAYOUT, not the live entity count — trailing
+    /// unused slots carry a tick too.
     pub fn addedTickColumn(self: *Chunk, layout: *const ChunkLayout, comp_idx: usize) [*]Tick {
         const off = layout.added_tick_offsets[comp_idx];
         return @ptrCast(@alignCast(&self.bytes[off]));
@@ -202,18 +179,17 @@ pub const Chunk = struct {
     }
 };
 
-/// Compute a `ChunkLayout` for the given column sizes + alignments. The
-/// algorithm picks the largest capacity `N` such that the full layout
-/// — header + component columns + entity_ids + added_tick + changed_tick
-/// + dirty_bitset — fits within `ChunkSize`. Offsets land in
-/// freshly-allocated slices owned by the caller.
+/// Compute a `ChunkLayout` for the given column sizes + alignments: the largest
+/// capacity `N` whose full layout — header, component columns, entity_ids,
+/// added_tick, changed_tick, dirty_bitset — fits within `ChunkSize`. The offset
+/// slices are freshly allocated and owned by the caller.
 ///
 /// An EMPTY column list is legal and yields a positive capacity: the per-slot
 /// cost is then the entity id plus the dirty bitset alone, which is what the
 /// archetype of an entity carrying only sparse components needs.
 ///
-/// Errors: `LayoutTooLarge` if no capacity fits, `OutOfMemory` from the slice
-/// allocations.
+/// The `per_slot` arithmetic inside only SEEDS the search with an upper bound;
+/// `fits` is the authority on whether a capacity actually fits.
 pub fn computeLayout(
     gpa: std.mem.Allocator,
     sizes: []const u16,
@@ -221,10 +197,6 @@ pub fn computeLayout(
 ) ArchetypeError!ChunkLayout {
     const header_size: usize = std.mem.alignForward(usize, @sizeOf(ChunkHeader), ChunkAlignment);
 
-    // Per-slot byte cost: components + entity id + 2 × `Tick` per
-    // component (added + changed) + ~1 bit for the dirty bitset. Used
-    // only to seed the capacity search loop with a reasonable upper
-    // bound — the precise check happens in `fits` below.
     var per_slot: usize = @sizeOf(EntityId);
     for (sizes) |s| per_slot += s;
     per_slot += 2 * @sizeOf(Tick) * sizes.len;
@@ -244,31 +216,26 @@ pub fn computeLayout(
     errdefer gpa.free(changed_offsets);
 
     var off: usize = header_size;
-    // Component columns.
     for (sizes, aligns, 0..) |sz, al, i| {
         off = std.mem.alignForward(usize, off, @max(ChunkAlignment, @as(usize, al)));
         offsets[i] = @intCast(off);
         off += @as(usize, sz) * n;
     }
-    // entity_ids[capacity].
     off = std.mem.alignForward(usize, off, @alignOf(EntityId));
     const entity_ids_offset: u16 = @intCast(off);
     off += @sizeOf(EntityId) * n;
-    // added_tick[N][capacity].
     for (added_offsets, 0..) |*slot, i| {
         _ = i;
         off = std.mem.alignForward(usize, off, @alignOf(Tick));
         slot.* = @intCast(off);
         off += @sizeOf(Tick) * n;
     }
-    // changed_tick[N][capacity].
     for (changed_offsets, 0..) |*slot, i| {
         _ = i;
         off = std.mem.alignForward(usize, off, @alignOf(Tick));
         slot.* = @intCast(off);
         off += @sizeOf(Tick) * n;
     }
-    // dirty_bitset[ceil(capacity/64)]u64.
     off = std.mem.alignForward(usize, off, @alignOf(u64));
     const dirty_bitset_offset: u16 = @intCast(off);
     const word_count: usize = (n + 63) / 64;
@@ -294,7 +261,6 @@ fn fits(sizes: []const u16, aligns: []const u16, n: usize, header_size: usize) b
     }
     off = std.mem.alignForward(usize, off, @alignOf(EntityId));
     off += @sizeOf(EntityId) * n;
-    // added_tick + changed_tick — N columns each, capacity slots each.
     var i: usize = 0;
     while (i < sizes.len) : (i += 1) {
         off = std.mem.alignForward(usize, off, @alignOf(Tick));
@@ -305,13 +271,10 @@ fn fits(sizes: []const u16, aligns: []const u16, n: usize, header_size: usize) b
         off = std.mem.alignForward(usize, off, @alignOf(Tick));
         off += @sizeOf(Tick) * n;
     }
-    // dirty bitset — ceil(n/64) u64 words.
     off = std.mem.alignForward(usize, off, @alignOf(u64));
     off += ((n + 63) / 64) * @sizeOf(u64);
     return off <= ChunkSize;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "chunk total size is 16 KiB" {
     try std.testing.expectEqual(@as(usize, ChunkSize), @sizeOf(Chunk));
@@ -322,10 +285,9 @@ test "chunk alignment is at least 16 bytes" {
 }
 
 test "computeLayout ACCEPTS an empty component list" {
-    // **AN EMPTY COMPONENT LIST IS LEGAL, and this is the same call that once
-    // refused it.** An entity ALWAYS has an archetype, so the archetype of zero
-    // components has to exist. Do NOT re-introduce the refusal: it fails HERE
-    // rather than surfacing three layers up as a spawn that cannot happen.
+    // An entity ALWAYS has an archetype, so the archetype of zero components
+    // must exist. Re-introducing the old refusal fails here rather than three
+    // layers up as a spawn that cannot happen.
     const gpa = std.testing.allocator;
     const layout = try computeLayout(gpa, &.{}, &.{});
     defer {
@@ -333,19 +295,14 @@ test "computeLayout ACCEPTS an empty component list" {
         gpa.free(layout.added_tick_offsets);
         gpa.free(layout.changed_tick_offsets);
     }
-    // A positive capacity, and the per-slot cost is the entity id plus the
-    // bitset alone — there are no component columns to price.
     try std.testing.expect(layout.capacity > 0);
     try std.testing.expectEqual(@as(usize, 0), layout.component_offsets.len);
     try std.testing.expectEqual(@as(usize, 0), layout.added_tick_offsets.len);
 }
 
 test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries sidecars" {
-    // The layout reserves added_tick + changed_tick columns
-    // + a dirty bitset, so the capacity drops below the sidecar-free reference
-    // (185) but stays comfortably above 140. The capacity check is a
-    // sanity bound, not a precise lock — the precise value is
-    // observable via the bench harness.
+    // The capacity bounds are a sanity check, not a lock: the sidecars put it
+    // below the sidecar-free reference of 185 without pinning a value.
     const gpa = std.testing.allocator;
     const layout = try computeLayout(gpa, &.{ 48, 32 }, &.{ 16, 16 });
     defer gpa.free(layout.component_offsets);
@@ -355,15 +312,12 @@ test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries 
     try std.testing.expect(layout.capacity >= 140);
     try std.testing.expect(layout.capacity <= 180);
 
-    // Component columns 16-byte aligned for SIMD.
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[0] % 16);
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[1] % 16);
 
-    // Sidecar columns 4-byte aligned (size of Tick).
     try std.testing.expectEqual(@as(u16, 0), layout.added_tick_offsets[0] % @sizeOf(Tick));
     try std.testing.expectEqual(@as(u16, 0), layout.changed_tick_offsets[0] % @sizeOf(Tick));
 
-    // Bitset 8-byte aligned, sized to ceil(capacity/64).
     try std.testing.expectEqual(@as(u16, 0), layout.dirty_bitset_offset % @alignOf(u64));
     try std.testing.expectEqual(@as(u16, @intCast((layout.capacity + 63) / 64)), layout.dirty_bitset_word_count);
 }

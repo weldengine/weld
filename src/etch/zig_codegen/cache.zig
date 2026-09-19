@@ -1,38 +1,29 @@
-//! Per-file content-hash cache for the codegen.
+//! Per-file content-hash cache for the codegen, keyed by a hash of the source
+//! `.etch` content and stored under `zig-out/etch-gen/.cache/`.
 //!
-//! Keyed by the xxHash of the source `.etch` content, at per-file
-//! granularity, stored under `zig-out/etch-gen/.cache/`.
+//! `shouldRegenerate` answers `true` on a miss or a mismatch; callers write the
+//! fresh hash with `writeHash` after regenerating.
 //!
-//! Each call to `shouldRegenerate(input_path, source_bytes, cache_dir)`
-//! returns `true` when the cache miss / mismatch and `false` when the
-//! cached hash already matches the freshly-computed one. Callers write the
-//! up-to-date hash via `writeHash(...)` after a successful regeneration.
-//!
-//! The hash file lives at
-//!     <cache_dir>/<base64(input_path)>.hash
-//! and contains the raw 8-byte hash followed by `\n` (so it's grep-able
-//! during debugging). The base64 step keeps the cache directory flat —
-//! nested paths in the input set don't require nested directories.
+//! The hash file lives at `<cache_dir>/<hash of input_path>.hash` and holds the
+//! raw 8-byte content hash plus a `\n`. Hashing the PATH is what keeps the
+//! directory flat — a nested input path needs no nested directory.
 
 const std = @import("std");
 
-/// xxHash-style 64-bit content digest written next to each generated
-/// `.zig` file so the codegen can skip emission when the source is
-/// unchanged.
+/// 64-bit content digest written beside each generated `.zig` file so the
+/// codegen can skip emission when the source is unchanged.
 pub const Hash = u64;
 
-/// xxHash64 of the source content. xxHash is specified,
-/// but the Zig stdlib only exposes Wyhash and Fnv1a; Wyhash has identical
-/// design goals (high speed, low collision) and is the closest in-tree
-/// substitute. Documented here so the choice is explicit.
+/// Wyhash of the source content. The spec names xxHash; the Zig stdlib exposes
+/// only Wyhash and Fnv1a, and Wyhash has the same design goals. Stated because
+/// the corpus and the code disagree on the name.
 pub fn computeHash(bytes: []const u8) Hash {
     return std.hash.Wyhash.hash(0, bytes);
 }
 
-/// Cache filename derived from the input file path. We use a stable hash
-/// of the path so the directory layout stays flat — no nested folders to
-/// create — and the path content is recoverable from the suffix written
-/// inside the cache file (see `writeHash`).
+/// Cache filename derived from the input path by hashing it, so the directory
+/// layout stays flat. The path itself is NOT recoverable from the name or from
+/// the file, which holds the content hash alone.
 fn cacheFileName(gpa: std.mem.Allocator, input_path: []const u8) ![]u8 {
     var hasher = std.hash.Wyhash.init(0xCA0FFE5);
     hasher.update(input_path);
@@ -40,9 +31,8 @@ fn cacheFileName(gpa: std.mem.Allocator, input_path: []const u8) ![]u8 {
     return try std.fmt.allocPrint(gpa, "{x:0>16}.hash", .{path_hash});
 }
 
-/// Returns the cached hash for `input_path` if present, `null` otherwise.
-/// Missing cache directory is treated as cache miss (no allocation churn
-/// on first run).
+/// The cached hash for `input_path`, or `null`. A missing cache directory reads
+/// as a miss.
 pub fn readCachedHash(gpa: std.mem.Allocator, cache_dir: []const u8, input_path: []const u8) !?Hash {
     const filename = try cacheFileName(gpa, input_path);
     defer gpa.free(filename);
@@ -80,10 +70,8 @@ pub fn writeHash(gpa: std.mem.Allocator, cache_dir: []const u8, input_path: []co
     try file.writeAll(&buf);
 }
 
-/// Combined check — returns true if the source's hash differs from the
-/// cached one (or the cache is missing entirely). Callers regenerate the
-/// `.zig` file when this returns true, then call `writeHash` with the new
-/// hash.
+/// `true` when the source's hash differs from the cached one, or the cache is
+/// missing. Callers regenerate, then call `writeHash`.
 pub fn shouldRegenerate(gpa: std.mem.Allocator, cache_dir: []const u8, input_path: []const u8, source: []const u8) !bool {
     const current = computeHash(source);
     const cached = readCachedHash(gpa, cache_dir, input_path) catch |err| switch (err) {

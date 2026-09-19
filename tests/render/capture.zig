@@ -1,11 +1,10 @@
-//! Smoke-test capture PSNR — Phase 0 / M0.4 § Scope — Post-Review Complement.
+//! Smoke-test capture PSNR.
 //!
-//! Drives `examples/triangle` in capture mode and compares the produced
-//! PPM against `tests/golden/smoke_test_software.ppm`. Skipped on
-//! platforms without a Vulkan window backend (macOS Phase 2+) and when
-//! the golden has not been committed yet (the golden is generated once
-//! on Linux + lavapipe + weston headless, validated visually by Guy,
-//! then committed — cf. brief § Scope — Post-Review Complement).
+//! Drives `examples/triangle` in capture mode and compares the produced PPM
+//! against `tests/golden/smoke_test_software.ppm`. Skipped on a platform with
+//! no Vulkan window backend, and when the golden is not committed: it is
+//! generated once on Linux + lavapipe + weston headless, checked visually, then
+//! committed.
 //!
 //! PSNR formula: 20 * log10(MAX_I / sqrt(MSE)). Gate is ≥ 40 dB which
 //! tolerates the typical ±1/255 quantization noise across compositors

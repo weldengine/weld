@@ -11,9 +11,15 @@
 //!   - `setPriority(thread, .high | .normal | .low)` — adjusts scheduling
 //!     priority.
 //!
-//! Used by the job system scheduler (worker pinning) and by an eventual
-//! audio thread (Tier 1) which needs high priority + dedicated
-//! core.
+//! NO PRODUCTION CALLER. Measured: the only `setAffinity` call outside this file
+//! is its own test, and `src/core/jobs/` names affinity nowhere — so the job
+//! system does NOT pin its workers, and an earlier version of this paragraph
+//! said it did. The intended consumers, a pinning scheduler and a Tier 1 audio
+//! thread wanting a dedicated core, are why the helper exists; neither has
+//! arrived. A bench protocol asking for pinned workers therefore has nothing to
+//! set: the mechanism exists, nothing calls it, and on macOS the call is a
+//! documented no-op — so pinning is reachable only on Linux and Windows, where
+//! no orchestrator runs today.
 
 const std = @import("std");
 const builtin = @import("builtin");

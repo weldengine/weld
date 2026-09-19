@@ -1,15 +1,7 @@
-//! M0.2 / E1 — hash determinism + sensitivity tests.
-//!
-//! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Local acceptance criteria:
-//!
-//! - `type_id` is comptime-deterministic (two invocations on the same
-//!   type produce the same value).
-//! - `schema_hash` is sensitive to the order of fields.
-//! - `schema_hash` is **sensitive** to the type name (acted decision:
-//!   the algorithm mixes `@typeName(T)` into the hash, so two layout-
-//!   equivalent types with different names yield distinct hashes; cf.
-//!   `hash.zig` top-level comment).
+//! Hash determinism and sensitivity: `type_id` is comptime-deterministic, and
+//! `schema_hash` is sensitive to field ORDER and to the type NAME — the
+//! algorithm mixes `@typeName(T)` into the digest, so two layout-equivalent
+//! types with different names hash differently (`hash.zig`, top-level).
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -55,10 +47,9 @@ test "schema_hash is sensitive to field order" {
 }
 
 test "schema_hash is sensitive to the type name (layout-equivalent types differ)" {
-    // Decision recorded in `hash.zig`: the algorithm includes the
-    // `@typeName(T)` in the digest. Two structs whose layout is
-    // identical but whose name differs therefore produce distinct
-    // `schema_hash` values.
+    // The algorithm includes `@typeName(T)` in the digest, so two structs of
+    // identical layout and different names produce distinct `schema_hash`
+    // values.
     const Alpha = struct { x: f32, y: f32 };
     const Beta = struct { x: f32, y: f32 };
     const ha = comptime rtti.computeSchemaHash(Alpha);

@@ -1,6 +1,7 @@
-//! The toy Tier 1 service M1.1.15.2 G2 is proven on (`etch-abi-zig.md` §8.7,
-//! whose closing line says the interop gates prove themselves on a toy service
-//! and never on the physics, which is only the first consumer).
+//! The toy Tier 1 service the interop path is proven on. `etch-abi-zig.md`
+//! §8.7 closes on exactly that requirement: the interop gates prove themselves
+//! on a toy service and never on the physics, which is only the first
+//! consumer.
 //!
 //! It is deliberately not physics-shaped: three methods covering the three
 //! things the tree-walker path has to get right — a value comes back, a Zig
@@ -49,7 +50,7 @@ pub fn label(ctx: *Ctx, prefix: []const u8) []const u8 {
 /// The toy's `ServiceSpec` (`etch-abi-zig.md` §8.1). Parameter NAMES are
 /// declared because Zig carries none; every type and the `throws` flag are
 /// derived from the implementations above.
-/// Payload of the toy event a Tier 1 module publishes to Etch (M1.1.15.2 G4).
+/// Payload of the toy event a Tier 1 module publishes to Etch.
 /// `extern` because it crosses a module boundary; the emitter refuses a struct
 /// with no layout guarantee, and the layout is what makes the field ORDER a
 /// fact rather than a compiler choice.
@@ -81,8 +82,7 @@ pub const spec = services.ServiceSpec{
 };
 
 /// The toy's `.d.etch`, EMBEDDED from the emitted artifact rather than written
-/// here (M1.1.15.2 G3). At G2 this was a hand-written constant, and the file said
-/// so; the emitter now produces `toy.d.etch` from `spec` and `zig build
+/// here: the emitter produces `toy.d.etch` from `spec` and `zig build
 /// bindgen-check` guards it, so the divergence E1902 names cannot survive a
-/// build. Nothing about this service's surface is written by hand any more.
+/// build. Nothing about this service's surface is written by hand.
 pub const declaration_source = @embedFile("toy.d.etch");

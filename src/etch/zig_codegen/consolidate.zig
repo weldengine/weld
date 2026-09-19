@@ -53,8 +53,6 @@ pub fn cookConsolidated(
 ) ConsolidateError!CookStats {
     try emitConsolidatedHeader(gpa, out);
 
-    // Per-input Level-B descriptor flags — drive the
-    // `Program.write_descriptors` wiring in the programs table.
     var descriptor_flags = try gpa.alloc(bool, inputs.len);
     defer gpa.free(descriptor_flags);
 
@@ -133,9 +131,8 @@ fn cookInto(gpa: std.mem.Allocator, in: NamedSource, buffer: *std.ArrayListUnman
     defer body.deinit(gpa);
     const stats = try lower.generateFile(gpa, &pr.ast, in.name, &body);
 
-    // Strip the per-file imports — they are emitted once at the top of the
-    // consolidated file. The consolidated header above declares every
-    // import the generated body relies on.
+    // The consolidated header above already declares every import a generated
+    // body relies on, so the per-file ones are stripped.
     const body_no_imports = stripImports(body.items);
 
     // Wrap the program in a nested namespace named after the input.

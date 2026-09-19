@@ -1,4 +1,4 @@
-//! M0.2 / E4 — saturation semantics: drop-oldest + drops counter
+//! Saturation semantics: drop-oldest + drops counter
 //! + warning log threshold.
 
 const std = @import("std");
@@ -58,16 +58,15 @@ test "drops counter is reset after drainAtBoundary" {
 }
 
 test "drops above warning threshold emits a warn log on drain" {
-    // This test deliberately drives the queue past DROPS_WARN_THRESHOLD, so
-    // the drain emits `std.log.scoped(.events).warn`. That warn is EXPECTED
-    // output, not a failure: `zig build test` surfaces it as a benign
-    // "failed command: …--listen=-" line while the build still exits 0 and
-    // the test passes. A capture-based assertion would need a custom std.log
-    // sink on the test runner — `std_options` declared in a test file is
-    // ignored because the runner, not the test file, is the compilation root
-    // — which is out of scope here. Correctness is therefore checked by
-    // "drops exceed threshold, drain does not crash, drops reset". The
-    // threshold is public surface, so the test pins its value.
+    // Driving the queue past `DROPS_WARN_THRESHOLD` makes the drain emit a
+    // `std.log.scoped(.events).warn`, which is EXPECTED output and not a
+    // failure: `zig build test` surfaces it as a benign "failed command:
+    // …--listen=-" line while the build exits 0 and the test passes. Asserting
+    // on the text would need a custom `std.log` sink on the test RUNNER —
+    // `std_options` in a test file is ignored, the runner being the compilation
+    // root — so what is checked instead is that the drops exceed the threshold,
+    // that the drain does not crash, and that the count resets. The threshold is
+    // public surface, so its value is pinned.
     try std.testing.expectEqual(@as(u64, 10), events.DROPS_WARN_THRESHOLD);
 
     const gpa = std.testing.allocator;

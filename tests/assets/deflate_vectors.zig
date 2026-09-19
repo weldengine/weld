@@ -1,13 +1,10 @@
-//! M0.6 / E2 — DEFLATE/zlib inflate known-vector acceptance tests.
+//! DEFLATE/zlib inflate known-vector acceptance tests.
 //!
-//! Vectors were produced by Python's `zlib` (the reference encoder) at
-//! authoring time and embedded verbatim; M0.6 ships no encoder, so inflate
-//! is validated bit-exact against an independent compressor. The fixed and
-//! dynamic streams were selected by inspecting the first block's BTYPE bits
-//! (01 = fixed, 10 = dynamic).
-//!
-//! Brief §Acceptance ▸ Tests: `test "inflate fixed huffman"`,
-//! `test "inflate dynamic huffman"`.
+//! The vectors were produced by Python's `zlib` — the reference encoder — and
+//! embedded verbatim: the engine ships no encoder, so inflate is validated
+//! bit-exact against an independent compressor. The fixed and dynamic streams
+//! were told apart by inspecting the first block's BTYPE bits (01 = fixed,
+//! 10 = dynamic).
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
@@ -31,10 +28,10 @@ const zlib_expected = "Weld zlib wrapper round-trip with ADLER32 trailer verific
 
 // -----------------------------------------------------------------------------
 
-// R3 (M1.1.1-HF3): `inflate` / `zlib.decompress` now take a `max_out` budget.
-// Positive vectors pass the exact expected length (also asserting the exact-size
-// path succeeds); negative vectors pass a generous cap they never reach (each
-// errors before any output byte is produced).
+// `inflate` and `zlib.decompress` take a `max_out` budget. A positive vector
+// passes the EXACT expected length, which also asserts that the exact-size path
+// succeeds; a negative one passes a generous cap it never reaches, each erroring
+// before a single output byte is produced.
 const neg_cap: usize = 64;
 
 test "inflate fixed huffman" {

@@ -1,4 +1,4 @@
-//! M0.2 / E6 — stub plugin variant that does NOT export
+//! Stub plugin variant that does NOT export
 //! `weld_plugin_entry`.
 //!
 //! Used by `tests/core/plugin_loader/load_unload_test.zig` to

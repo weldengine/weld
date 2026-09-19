@@ -37,12 +37,9 @@ pub const ComponentId = u32;
 /// and was for a time the only backend implemented; `sparse` is the explicit
 /// opt-in a declaration carries through `@storage(.sparse)`.
 ///
-/// Declared HERE and nowhere else, deliberately. `etch-resolver-types.md`
-/// §13.3.1 states the rule that makes this the right home: an annotation
-/// argument's type is either a language type or a domain defined and citable at
-/// the owner of the EFFECT — never a name introduced by the schema table. The
-/// Etch front-end therefore validates through `fromName` instead of re-listing
-/// the two spellings, so the domain has one text form in the tree.
+/// Declared HERE and nowhere else: the Etch front-end validates through
+/// `fromName` rather than re-listing the two spellings, so the domain has one
+/// text form in the tree (`etch-resolver-types.md` §13.3.1).
 pub const StorageKind = enum {
     table,
     sparse,
@@ -57,10 +54,12 @@ pub const StorageKind = enum {
     }
 };
 
-/// Coarse-grained tag for primitive fields. The interpreter uses this to
-/// decide how to read or write raw bytes. The Etch subset only exercises
-/// `int_`, `float_`, `bool_`; the integer-family variants are reserved
-/// for future extension.
+/// Coarse-grained tag for primitive fields, telling the interpreter how to read
+/// or write raw bytes. The Etch subset exercises only `int_`, `float_`, `bool_`.
+///
+/// `sizeBytes` for `.string_` must equal `@sizeOf(persistent.StringSlot)`, and
+/// for the three collection kinds `@sizeOf(persistent.CollectionSlot)`; both are
+/// asserted in `ecs_bridge.zig`.
 pub const FieldKind = enum {
     int_, // i64
     float_, // f64
@@ -94,13 +93,10 @@ pub const FieldKind = enum {
     /// cook the slot is written `dead` and an entity→entity reference is carried by
     /// the Cross-references Table, resolved to the target's handle at load.
     entity_,
-    /// A dynamic-array field slot (`T[]`): a `CollectionSlot`
-    /// (`{ ptr: u64 }`, 8 bytes, 8-aligned, `src/core/memory/persistent.zig`)
-    /// holding the persistent-heap pointer of the owned container block. Like
-    /// `.string_`, **resource-only by construction** — the Etch validator gates
-    /// collection fields to resources, so no component SoA slot ever carries one
-    /// (the POD invariant, `ARCH-004`, is untouched). Tier 0 stores/
-    /// copies the 8 raw slot bytes; the Etch runtime owns the container's lifetime.
+    /// A dynamic-array field slot (`T[]`): a `CollectionSlot` (`{ ptr: u64 }`,
+    /// 8 bytes, 8-aligned) holding the persistent-heap pointer of the owned
+    /// container block. **Resource-only by construction** like `.string_`. Tier 0
+    /// copies the 8 raw slot bytes; the Etch runtime owns the container.
     array_,
     /// A map field slot (`[K: V]`). Same 8-byte `CollectionSlot`
     /// discipline and resource-only gating as `.array_`.
@@ -118,13 +114,9 @@ pub const FieldKind = enum {
             .u32_ => @sizeOf(u32),
             .f32_ => @sizeOf(f32),
             .f64_ => @sizeOf(f64),
-            // `{ ptr: u64, len: u32 }` padded to 8-alignment — must equal
-            // `@sizeOf(persistent.StringSlot)` (asserted in `ecs_bridge.zig`).
             .string_ => 16,
-            .enum_ => @sizeOf(u32), // declaration-order discriminant
-            .entity_ => @sizeOf(EntityId), // 8 (packed u64)
-            // `CollectionSlot { ptr: u64 }` — 8 bytes; must equal
-            // `@sizeOf(persistent.CollectionSlot)` (asserted in `ecs_bridge.zig`).
+            .enum_ => @sizeOf(u32),
+            .entity_ => @sizeOf(EntityId),
             .array_, .map_, .set_ => 8,
         };
     }
@@ -165,13 +157,10 @@ pub const FieldDesc = struct {
     name: []const u8,
     offset: u16,
     kind: FieldKind,
-    /// For a `.enum_` field (resource-only): the Etch-interned id of
-    /// the declared enum type name (an AST `StringId`, kept opaque by Tier-0 —
-    /// a plain `u32`, never dereferenced here). Lets the Etch bridge rebuild a
-    /// typed `enum_value{ type_name, variant }` on read with no string pool.
-    /// Stored as the id (not a string) so it needs no allocation and cannot
-    /// dangle when the AST outlives nothing while the registry persists in the
-    /// world. `0` and unused for every non-`.enum_` kind.
+    /// For a `.enum_` field: the Etch-interned id of the declared enum type
+    /// name, opaque to Tier 0 and never dereferenced here. An id and not a
+    /// string, so it needs no allocation and cannot dangle when the AST dies
+    /// before the registry. `0` and unused for every other kind.
     enum_type_name_id: u32 = 0,
 };
 
@@ -184,24 +173,50 @@ pub const ComponentDesc = struct {
     default_bytes: []const u8,
     fields: []const FieldDesc,
     /// Storage backend. `table` unless the declaration carried
-    /// `@storage(.sparse)`. **Never part of on-disk identity**: a
-    /// `SchemaEntry` carries name, size and alignment, and the mode comes from
-    /// this runtime registry at load (`engine-scene-serialization.md` §4), so a
-    /// component changing mode invalidates no cooked scene and demands no
-    /// re-cook. Defaulted, so every existing initializer of this struct stays
-    /// source-compatible and absence of the annotation yields `table` by
-    /// construction rather than by a branch somebody has to remember.
+    /// `@storage(.sparse)`. **Never part of on-disk identity**: a `SchemaEntry`
+    /// carries name, size and alignment, and the mode comes from this runtime
+    /// registry at load, so a component changing mode invalidates no cooked scene
+    /// and demands no re-cook.
     storage: StorageKind = .table,
-    /// DIRECT requisites, by NAME — the `@requires(A, B)` list, variadic
-    /// (`etch-reference-part3.md` §6). Names and not ids because a declaration
-    /// may name a component registered LATER: Etch admits forward references,
-    /// and resolving at registration would make the closure depend on
-    /// declaration order. The transitive closure is computed once by
-    /// `finalizeRequires` after every registration and read per add — never
-    /// re-walked per add, which `engine-ecs-internals.md` §3 requires in those
-    /// words. Defaulted, so every existing initializer stays source-compatible.
+    /// DIRECT requisites, by NAME — the variadic `@requires(A, B)` list. Names
+    /// and not ids because a declaration may name a component registered LATER:
+    /// Etch admits forward references, so resolving at registration would make
+    /// the closure depend on declaration order. The transitive closure is
+    /// computed once by `finalizeRequires` and read per add, never re-walked per
+    /// add (`engine-ecs-internals.md` §3).
     requires: []const []const u8 = &.{},
 };
+
+/// The 64-bit schema identity of `desc` (`engine-ecs-internals.md` §13), over
+/// `(name, size, alignment, [(field name, kind, offset) in declaration order])`.
+///
+/// - **Derived at REGISTRATION, not at `comptime`.** A component declared in
+///   Etch has no Zig type when the engine is compiled.
+/// - **Size and alignment are IN the tuple**, not only the fields: a component
+///   with no named field — the builtin `TagSet`, an opaque block sized by the
+///   program's tag table — is discriminated by nothing else.
+/// - **Storage mode is OUT of it.** `table` or `sparse` is a property of this
+///   registry and not of the layout (`ARCH-005`), so changing it provokes
+///   neither refusal nor migration.
+///
+/// Sensitive to a field added in EXISTING padding, since offsets enter the hash.
+///
+/// **Not the Tier 0 RTTI digest, and never compared with it**: they run over
+/// different field descriptors, with different `kind` domains and offset widths.
+/// A reload confrontation is always between two values of the SAME computation.
+pub fn schemaDigestOf(desc: ComponentDesc) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(desc.name);
+    h.update(std.mem.asBytes(&desc.size));
+    h.update(std.mem.asBytes(&desc.alignment));
+    for (desc.fields) |f| {
+        h.update(f.name);
+        const k: u16 = @intFromEnum(f.kind);
+        h.update(std.mem.asBytes(&k));
+        h.update(std.mem.asBytes(&f.offset));
+    }
+    return h.final();
+}
 
 /// Surfaced by `Registry.registerComponent`, `registerComponentRaw`,
 /// and `registerAlias`; lookup paths never fail (return `?T`).
@@ -215,12 +230,14 @@ pub const RegistryError = error{
 const Entry = struct {
     desc: ComponentDesc,
     /// The TRANSITIVE closure of `desc.requires`, flattened to ids, computed
-    /// once by `finalizeRequires`. Beside the descriptor and not inside it
-    /// because the descriptor is what a CALLER supplies and this is what the
-    /// registry DERIVES — one authority per question, the rule this milestone
-    /// settled at registration. Empty until finalisation, and empty forever for a
-    /// component with no requisites.
+    /// once by `finalizeRequires`. Empty until finalisation, and empty forever
+    /// for a component with no requisites. Beside the descriptor rather than
+    /// inside it: the descriptor is what a CALLER supplies, this is what the
+    /// registry DERIVES, and one question gets one authority.
     closure: []const ComponentId = &.{},
+    /// Schema identity, derived at registration — beside the descriptor for the
+    /// same reason `closure` is.
+    schema_digest: u64 = 0,
 };
 
 /// Runtime registry of component (and resource) type descriptions.
@@ -250,7 +267,6 @@ pub const Registry = struct {
         for (self.entries.items) |*e| {
             gpa.free(e.desc.name);
             gpa.free(e.desc.default_bytes);
-            // FieldDesc.name slices were each dup'd individually.
             for (e.desc.fields) |f| gpa.free(f.name);
             gpa.free(e.desc.fields);
             for (e.desc.requires) |r| gpa.free(r);
@@ -276,8 +292,6 @@ pub const Registry = struct {
         const default_owned = try gpa.dupe(u8, desc.default_bytes);
         errdefer gpa.free(default_owned);
 
-        // Duplicate every FieldDesc name individually; the array itself is
-        // also owned.
         const fields_owned = try gpa.alloc(FieldDesc, desc.fields.len);
         errdefer gpa.free(fields_owned);
         var dup_count: usize = 0;
@@ -293,9 +307,6 @@ pub const Registry = struct {
             dup_count += 1;
         }
 
-        // Owned copies, freed in `deinit` — same discipline as `name` and the
-        // field names. `dup_req` counts what is already duplicated so a failure
-        // mid-loop frees exactly those and no more.
         const requires_owned = try gpa.alloc([]const u8, desc.requires.len);
         errdefer gpa.free(requires_owned);
         var dup_req: usize = 0;
@@ -305,19 +316,30 @@ pub const Registry = struct {
             dup_req += 1;
         }
 
-        try self.entries.append(gpa, .{ .desc = .{
-            .name = name_owned,
-            .size = desc.size,
-            .alignment = desc.alignment,
-            .default_bytes = default_owned,
-            .fields = fields_owned,
-            .storage = desc.storage,
-            .requires = requires_owned,
-        } });
+        try self.entries.append(gpa, .{
+            .desc = .{
+                .name = name_owned,
+                .size = desc.size,
+                .alignment = desc.alignment,
+                .default_bytes = default_owned,
+                .fields = fields_owned,
+                .storage = desc.storage,
+                .requires = requires_owned,
+            },
+            .schema_digest = schemaDigestOf(desc),
+        });
         errdefer _ = self.entries.pop();
 
         try self.by_name.put(gpa, name_owned, id);
         return id;
+    }
+
+    /// The schema identity recorded for `id` at registration, or `null` when `id`
+    /// names no entry. A reload compares it with `schemaDigestOf` of the
+    /// CANDIDATE — two values of one computation, never against the RTTI digest.
+    pub fn schemaDigest(self: *const Registry, id: ComponentId) ?u64 {
+        if (id >= self.entries.items.len) return null;
+        return self.entries.items[id].schema_digest;
     }
 
     /// Register a component whose layout is known at Zig compile time. The
@@ -348,9 +370,8 @@ pub const Registry = struct {
         });
     }
 
-    /// The three-colour mark of the closure walk. NAMED and declared once: the
-    /// same `enum(u8) { … }` written at two sites is two distinct types, which
-    /// is what the compiler said the first time.
+    /// The three-colour mark of the closure walk. Declared ONCE: the same
+    /// `enum(u8) { … }` written at two sites is two distinct types.
     const Colour = enum(u8) { white, grey, black };
 
     /// Resolve every `@requires` name list to ids and flatten the TRANSITIVE
@@ -370,11 +391,13 @@ pub const Registry = struct {
     /// An unknown requisite name is also an error: `@requires(Nonexistent)`
     /// silently ignored would leave the invariant unenforceable for that
     /// component while reporting nothing.
+    ///
+    /// The walk is depth-first with a THREE-colour mark — white unvisited, grey
+    /// on the current path, black done — and grey-on-grey is the cycle. Do NOT
+    /// reduce it to a two-colour visited set: that cannot tell a cycle from a
+    /// diamond (`A requires B, C`; `B requires D`; `C requires D`), and a
+    /// diamond is legal.
     pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
-        // Depth-first with a THREE-COLOUR mark: white unvisited, grey on the
-        // current path, black done. Grey-on-grey is the cycle — a two-colour
-        // visited set cannot tell a cycle from a diamond, and a diamond
-        // (`A requires B, C`; `B requires D`; `C requires D`) is legal.
         const n = self.entries.items.len;
         const colour = try gpa.alloc(Colour, n);
         defer gpa.free(colour);
@@ -393,6 +416,8 @@ pub const Registry = struct {
         }
     }
 
+    /// Sorts the closure ASCENDING by id: the add path applies it in that order, so
+    /// the order must be a pure function of the program and never of the walk.
     fn closeOne(self: *Registry, gpa: std.mem.Allocator, id: ComponentId, colour: []Colour) !void {
         if (colour[id] == .black) return;
         if (colour[id] == .grey) return error.RequiresCycle;
@@ -402,13 +427,11 @@ pub const Registry = struct {
         errdefer acc.deinit(gpa);
         for (self.entries.items[id].desc.requires) |req_name| {
             const req = self.by_name.get(req_name) orelse return error.UnknownRequisite;
-            if (req == id) return error.RequiresCycle; // self-requirement
+            if (req == id) return error.RequiresCycle;
             try self.closeOne(gpa, req, colour);
             try appendUnique(gpa, &acc, req);
             for (self.entries.items[req].closure) |t| try appendUnique(gpa, &acc, t);
         }
-        // Ascending id: the add path applies the closure in this order, so the
-        // order must be a pure function of the program and not of the walk.
         const flat = try acc.toOwnedSlice(gpa);
         std.mem.sort(ComponentId, flat, {}, std.sort.asc(ComponentId));
         self.entries.items[id].closure = flat;
@@ -511,7 +534,36 @@ pub const Registry = struct {
     }
 };
 
-// ─── tests ────────────────────────────────────────────────────────────────
+test "the digest is blind to the default bytes" {
+    // A DEPENDENT RESTS ON THIS. `interp.schemaDigestFor` passes `&.{}` for
+    // `default_bytes` so the hot-reload pre-validation pass can confront every
+    // declared schema WITHOUT materialising a single default — materialising them
+    // allocates immortal persistent blocks, which a pass that may refuse must not
+    // do. That shortcut is only sound while this property holds.
+    //
+    // If a future change makes the digest read the defaults, this test fires and
+    // names where to go: `schemaDigestFor` must then be given the real bytes, and
+    // the pre-pass must materialise them and own their rollback.
+    const fields = [_]FieldDesc{.{ .name = "v", .offset = 0, .kind = .int_ }};
+    const a: ComponentDesc = .{
+        .name = "T",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &fields,
+    };
+    var b = a;
+    b.default_bytes = &[_]u8{7} ** 8;
+    try std.testing.expectEqual(schemaDigestOf(a), schemaDigestOf(b));
+
+    // NON-VACUITY: the digest is not blind to everything. A field offset moves it,
+    // so the equality above is a property of `default_bytes` and not of a hash
+    // that ignores its input.
+    var c = a;
+    const moved = [_]FieldDesc{.{ .name = "v", .offset = 4, .kind = .int_ }};
+    c.fields = &moved;
+    try std.testing.expect(schemaDigestOf(a) != schemaDigestOf(c));
+}
 
 test "registerComponent assigns stable ComponentId" {
     const gpa = std.testing.allocator;
@@ -568,7 +620,6 @@ test "componentDefaultBytes initializes per registered default" {
     const bytes = reg.componentDefaultBytes(id);
     try std.testing.expectEqual(@as(usize, @sizeOf(Health)), bytes.len);
 
-    // Reading the bytes back as a Health value yields the defaults.
     var buf: Health = undefined;
     @memcpy(std.mem.asBytes(&buf), bytes);
     try std.testing.expectEqual(@as(f64, 100.0), buf.current);

@@ -1,7 +1,6 @@
-//! S6 long fuzz harness — promoted to a nightly target at M0.7 / E4
-//! (was manual-only at S6). Stresses the **whole message catalogue**, not
-//! just `Echo`: each iteration the writer picks a random message type
-//! (incl. `ShmRegionsHandoff`, hardened in E1, and every E2 command) and
+//! The long fuzz harness, run nightly. It stresses the WHOLE message
+//! catalogue and not just `Echo`: each iteration the writer picks a random
+//! message type — `ShmRegionsHandoff` and every editor command included — and
 //! sends a well-formed frame. Interleaving heterogeneous frame *sizes* is
 //! the real test — it exercises the length-prefixed framing's delimiting
 //! over tens of millions of back-to-back frames (the "no magic desync"
@@ -13,9 +12,9 @@
 //!
 //!     zig build test-ipc-fuzz-1h -- --duration-ms=3000
 //!
-//! Cross-platform — runs on Linux / macOS / Windows. The nightly cron
-//! (`.github/workflows/nightly-fuzz.yml`) runs it on Linux + Windows and
-//! archives the stdout digest as an artifact (G3 gate).
+//! Cross-platform — Linux, macOS and Windows. The nightly cron
+//! (`.github/workflows/nightly-fuzz.yml`) runs it on Linux and Windows and
+//! archives the stdout digest as an artifact.
 
 const std = @import("std");
 const builtin = @import("builtin");

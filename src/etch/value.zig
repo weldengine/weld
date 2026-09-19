@@ -21,53 +21,33 @@ pub const EntityId = u64;
 /// bridge to distinguish a missing handle from any valid entity.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
-/// A handle onto a component's bytes for one entity. NOT chunk-anchored: the
-/// `where` field below is bimodal, and a `.sparse` component designates no chunk
-/// and no slot. The interpreter resolves `entity.get(T)` / `entity.get_mut(T)`
-/// into one of these, which the bridge dereferences when the rule body reads or
-/// writes a field. `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
+/// A handle onto one entity's component bytes.
+///
+/// **A ref designates an `(entity, component)` PAIR, never a memory location**
+/// (`etch-reference-part1.md` §5.3 a): it is re-resolved at EVERY access through
+/// `World.componentBytes`, so no migration, compaction or swap-remove can make
+/// it designate another entity's bytes. **`@storage` therefore has no semantic
+/// effect**, which is the property this shape holds.
+///
+/// **Liveness and carriage are checked at each dereference**, not only at the
+/// `get`/`get_mut` that produced the handle (§5.3 c), in every build mode; a
+/// stale one answers `BridgeError.StaleComponentRef`.
+///
+/// **A ref held beyond its rule body is therefore safe** (§5.3 corollary): a
+/// scope snapshot copies a `Value` VERBATIM and `AsyncTask.locals` retains it
+/// across a suspension, so the handle outlives the tick BY CONSTRUCTION and its
+/// safety cannot rest on the deferral of structural ops.
+///
+/// Rule-arena handles — a runtime-produced string, array, map or set — have the
+/// opposite lifetime: their store is reset at the body boundary, so the resolver
+/// refuses their capture with `E0223`.
+///
+/// `mutable = false` for `get(T)`, `true` for `get_mut(T)`.
 pub const ComponentRef = struct {
+    /// The Etch wire form; `@bitCast` to the core packed handle at use.
+    entity: EntityId,
     component_id: u32,
     mutable: bool,
-    /// WHERE the bytes live, and the field is bimodal.
-    ///
-    /// **The two arms are asymmetric ON PURPOSE.** Sparse keeps the ENTITY and
-    /// re-resolves per access, because a row POINTER would be invalidated by any
-    /// swap-remove in that store — and the lookup is an array index plus a
-    /// generation compare, cheaper than the hash a table ref already pays.
-    ///
-    /// **The table arm HAS that hazard.** A `chunk_ptr` + `slot` is invalidated
-    /// by a swap-remove in its chunk or by an archetype migration — that is, by
-    /// a component REMOVE, ADD or DESPAWN. So a handle held across a structural
-    /// mutation is safe in sparse and unsafe in table, which makes `@storage` —
-    /// presented everywhere as a choice with no semantic effect — change the
-    /// lifetime semantics of a value visible from Etch.
-    ///
-    /// **What makes that unreachable is TEMPORAL, not structural.** Nothing in
-    /// the language forbids the shape: `let r = entity.get_mut(H)` then
-    /// `entity.remove(M)` then `r.hp = 99` type-checks with zero diagnostics.
-    /// The three ops that MOVE a row are DEFERRED from a rule body since
-    /// a rule body, so no row moves while the body runs.
-    ///
-    /// **An immediate SPAWN is not a counter-example and must not be recorded as
-    /// one:** `Archetype.allocateSlot` appends, and an append relocates no
-    /// existing row, so a spawn leaves every handle valid.
-    ///
-    /// **And preserving that deferral does not preserve every capture — the
-    /// sibling case has one more guardian.** `hybrid_query.zig`'s sparse-driven
-    /// iterator holds a SLICE of its driver's dense array, which an APPEND
-    /// invalidates, and what keeps an immediate spawn out of a rule body there
-    /// is the type-checker refusing `test_world()` outside a test body. The rule
-    /// belongs to `etch-memory-model.md` and is stated on the OPERATIONS rather
-    /// than on a handle's lifetime, so the charge falls on whoever makes a
-    /// structural op immediate rather than on every future capture site.
-    where: Where,
-
-    pub const Where = union(enum) {
-        table: struct { chunk_ptr: *anyopaque, slot: u32 },
-        /// The `u64` wire form, bitcast to the core packed handle at use.
-        sparse: EntityId,
-    };
 };
 
 /// A handle to a resource's backing bytes in the world `ResourceStore`.
@@ -154,19 +134,14 @@ pub const Value = union(enum) {
     /// real empty block allocated at `addResource`). String elements are stored
     /// as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
-    /// A borrowed view over a resource `[K: V]` field's persistent-heap container
-    /// block. The `u64` is a `persistent` `type_map` block whose
-    /// payload is the owned insertion-ordered pair list. Same persistent-vs-rule-
-    /// arena split as `.map_ref`; the read path borrows it without incref (the
-    /// resource outlives the body). String keys and values are stored as owned
-    /// `.string_persistent`, POD inline. Never `0` for a live field.
+    /// A borrowed view over a resource `[K: V]` field's persistent-heap block,
+    /// whose payload is the owned insertion-ordered pair list. Same borrowing and
+    /// storage rules as `array_persistent`; never `0` for a live field.
     map_persistent: u64,
-    /// A borrowed view over a resource `Set<T>` field's persistent-heap container
-    /// block. The `u64` is a `persistent` `type_set` block whose
-    /// payload is the owned insertion-ordered unique-element list (same
-    /// `ArrayListUnmanaged(Value)` shape as `array_persistent`; the drop is
-    /// shared). Same persistent-vs-rule-arena split as `.set_ref`; borrowed on
-    /// read. String elements owned as `.string_persistent`, POD inline. Never `0`.
+    /// A borrowed view over a resource `Set<T>` field's persistent-heap block,
+    /// whose payload is the owned insertion-ordered unique-element list — the
+    /// same `ArrayListUnmanaged(Value)` shape as `array_persistent`, sharing its
+    /// drop and its borrowing rules. Never `0` for a live field.
     set_persistent: u64,
     /// A `TaskHandle` (`etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
@@ -297,9 +272,11 @@ pub const RuntimeErrorKind = enum {
     /// covers the failing condition; the message (compared values, custom
     /// reason) travels alongside via the interpreter's `pending_message`.
     AssertFailed,
+    /// A component ref dereferenced after its entity died or lost the component.
+    /// Its own kind rather than `UnsupportedExpr`, because §5.3 c requires a
+    /// CLEAR message: the expression is supported and the handle is not.
+    StaleComponentRef,
 };
-
-// ─── Arithmetic helpers ──────────────────────────────────────────────────
 
 /// Integer division with division-by-zero check. Returns `null` on divide
 /// by zero — the caller turns the error into a `RuntimeError`.
@@ -335,8 +312,6 @@ pub fn intMulChecked(lhs: i64, rhs: i64) ?i64 {
     return std.math.mul(i64, lhs, rhs) catch null;
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 test "Value arithmetic int + int yields int" {
     const a = Value.fromInt(2);
     const b = Value.fromInt(3);
@@ -344,9 +319,9 @@ test "Value arithmetic int + int yields int" {
 }
 
 test "Value arithmetic int + float forbidden (no implicit coercion)" {
-    // The type-checker rejects this; the interpreter never sees the
-    // expression. The assertion is that a tag mismatch fails `Value.eql`, so
-    // the contract is explicit at runtime.
+    // The type-checker rejects this and the interpreter never sees it; what is
+    // asserted is that a tag mismatch fails `eql`, making the contract explicit
+    // at runtime too.
     const a = Value.fromInt(2);
     const b = Value.fromFloat(2.0);
     try std.testing.expect(!a.eql(b));
@@ -370,17 +345,15 @@ test "IntegerOverflow detected in ReleaseSafe" {
 }
 
 test "comparison between incompatible Values is a compile-time impossibility (asserts)" {
-    // The type-checker is the gate. At runtime, comparing values of
-    // different tags returns `false` — the test documents the contract.
+    // The type-checker is the gate; at runtime a tag mismatch is `false`.
     const a = Value.fromInt(1);
     const b = Value.fromBool(true);
     try std.testing.expect(!a.eql(b));
 }
 
 test "compound assignment +=, -=, *=, /=, %= behave per spec" {
-    // Compound ops are de-sugared by the interpreter into "load + op + store"
-    // before this module is involved. The test confirms the underlying
-    // helpers behave correctly.
+    // The interpreter de-sugars these into "load + op + store" before this
+    // module is involved; what is checked here are the underlying helpers.
     try std.testing.expectEqual(@as(?i64, 7), intAddChecked(5, 2));
     try std.testing.expectEqual(@as(?i64, 3), intSubChecked(5, 2));
     try std.testing.expectEqual(@as(?i64, 10), intMulChecked(5, 2));

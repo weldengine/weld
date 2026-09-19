@@ -272,8 +272,6 @@ fn dump(subject: []const []const u8, reference: []const []const u8) void {
     for (reference) |i| std.debug.print("  {s}\n", .{i});
 }
 
-// ─── tests ────────────────────────────────────────────────────────────────
-
 const testing = std.testing;
 
 test "an alias chain resolves to the body's label" {

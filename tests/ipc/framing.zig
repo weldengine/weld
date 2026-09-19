@@ -1,12 +1,6 @@
-//! S6 framing tests (per brief § Acceptance criteria › Tests).
-//! Pure-logic tests — no syscalls, no threads, no shm. Cover the six
-//! framing failure modes enumerated in the brief and the happy path.
-//!
-//! Lives as a dedicated test executable under `tests/ipc/` rather
-//! than inline next to `src/core/ipc/framing.zig` per the brief's
-//! "Acceptance criteria › Tests" enumeration. Each test runs in
-//! the same process so per-test isolation is provided by the test
-//! runner itself; no external resource cleanup is required.
+//! Framing: the six failure modes and the happy path. Pure logic — no
+//! syscalls, no threads, no shm — so every test runs in the same process and
+//! the runner's own isolation suffices, with no external resource to clean up.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

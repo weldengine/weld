@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-3 dynamic
+/// Diff-runner fixture: 1 tick. Exercises the dynamic
 /// array vertical — a `T[]` local on the frame arena (codegen) / per-body
 /// collection store (interp):
 ///

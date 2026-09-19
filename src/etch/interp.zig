@@ -1412,6 +1412,14 @@ pub const Interpreter = struct {
         // so the array drop (decref string elements + deinit) applies verbatim.
         persistent.registerDrop(persistent.type_set, dropPersistentArray);
 
+        // PRE-VALIDATION, before the first mutation of the world. Pass A below
+        // registers as it walks, so a refusal raised where it is DETECTED leaves
+        // every earlier declaration of a rejected program in a live world. The
+        // confrontation therefore happens here, while the world is still the one
+        // the previous image left behind, and Pass A runs only once every declared
+        // schema is known to match.
+        try verifySchemas(gpa, ast, &world.registry, &tag_table);
+
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
@@ -1444,23 +1452,43 @@ pub const Interpreter = struct {
         // its raw bytes as bits.
         var tagset_id: ?ComponentId = null;
         if (tag_table.leaf_count > 0) {
+            // ONE DESCRIPTOR FOR BOTH ARMS. The reuse arm used to take the
+            // existing id with no confrontation while only the fresh arm derived
+            // the size from `tag_table.words()` — so a reload crossing a 64-tag
+            // word boundary kept the NARROWER `TagSet` and every entity's tag
+            // bitfield was silently too small. `etch-validation-ecs.md` §13 names
+            // this component as the case the size in the digest exists to
+            // protect. The two arms now cannot disagree about the layout,
+            // because there is one layout and they read it.
+            const size: u16 = @intCast(tag_table.words() * 8);
+            const zeroed = try gpa.alloc(u8, size);
+            defer gpa.free(zeroed);
+            @memset(zeroed, 0);
+            const desc = tagSetDesc(size, zeroed);
             // Idempotent on a hot-reload re-compile: reuse the
             // already-registered `TagSet` instead of erroring DuplicateComponent.
             if (world.registry.idOf("TagSet")) |existing| {
+                const candidate = weld_core.ecs.registry.schemaDigestOf(desc);
+                // An ABSENT digest refuses. Measured: the registry has exactly
+                // one entry-append site and it always derives the digest, and
+                // `existing` came from `idOf` so it is in range — so the null
+                // arm is unreachable today and its direction costs nothing. It
+                // is a refusal rather than an accept because an unknown layout
+                // is not a matching layout, and refusing a reload leaves the
+                // running session on the program it already has.
+                const stored = world.registry.schemaDigest(existing) orelse ~candidate;
+                if (stored != candidate) {
+                    std.log.warn(
+                        "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
+                            "live: size={d}; new: size={d} ({d} tag(s))",
+                        .{ world.registry.componentSize(existing), size, tag_table.leaf_count },
+                    );
+                    return error.SchemaChanged;
+                }
                 try bridge.mapComponent(gpa, "TagSet", existing);
                 tagset_id = existing;
             } else {
-                const size: u16 = @intCast(tag_table.words() * 8);
-                const zeroed = try gpa.alloc(u8, size);
-                defer gpa.free(zeroed);
-                @memset(zeroed, 0);
-                const id = try world.registry.registerComponentRaw(gpa, .{
-                    .name = "TagSet",
-                    .size = size,
-                    .alignment = 8,
-                    .default_bytes = zeroed,
-                    .fields = &.{},
-                });
+                const id = try world.registry.registerComponentRaw(gpa, desc);
                 try bridge.mapComponent(gpa, "TagSet", id);
                 tagset_id = id;
             }
@@ -6760,8 +6788,6 @@ pub const Interpreter = struct {
     }
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
 fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     for (rd.resource_deps) |dep| {
         if (!world.resources.contains(dep.resource_id)) return false;
@@ -6872,6 +6898,7 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
 fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
+        error.StaleComponentRef => .StaleComponentRef,
         else => .UnsupportedExpr,
     };
 }
@@ -6888,6 +6915,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .TypeMismatch => "type mismatch",
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
+        .StaleComponentRef => "component ref outlived its entity",
     };
 }
 
@@ -7260,43 +7288,182 @@ fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: 
 /// `pub` so the scene cook can drive `compileTypeDecl` against its own registry.
 pub const RegKind = enum { component, resource };
 
-/// Register one Etch `component`/`resource` declaration into `registry`,
-/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
-/// its compile-time default bytes (POD via `evalConst`, resource `string` via
-/// an immortal persistent block, resource `enum` via the variant discriminant).
-/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
-/// re-compile, idempotent). `bridge` records the name→id mapping.
+/// The `TagSet` descriptor, derived in ONE place. Both the pre-pass and the
+/// registration arm read it, for the reason `schemaDigestFor` exists: a builtin
+/// whose layout is computed twice is a builtin whose two computations can differ,
+/// and that difference IS the defect this milestone closed at the reuse arm.
 ///
-/// Operates on a bare `*Registry` — World-free by construction (it never touches
-/// archetypes/entities). The interpreter passes `&world.registry`; the
-/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
-/// standalone `Registry` so registration is shared, not duplicated.
-pub fn compileTypeDecl(
+/// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
+/// digest does not read it (see `schemaDigestFor`).
+fn tagSetDesc(size: u16, default_bytes: []const u8) weld_core.ecs.registry.ComponentDesc {
+    return .{
+        .name = "TagSet",
+        .size = size,
+        .alignment = 8,
+        .default_bytes = default_bytes,
+        .fields = &.{},
+    };
+}
+
+/// Confront every schema this program declares against the live registry BEFORE
+/// the first registration.
+///
+/// **A refusal per declaration is not a refusal.** `compileTypeDecl` refuses a
+/// changed layout where it meets it, and Pass A walks declarations in order, so a
+/// program whose third type changed left the first two registered in a world that
+/// then kept running the PREVIOUS program — components belonging to an image that
+/// was rejected, permanently, with nothing announcing them. The `TagSet` arm is
+/// worse still: it runs AFTER the whole of Pass A, so a reload that merely crossed
+/// a 64-tag word boundary stranded every type the program declares.
+///
+/// The requirement a refusal exists to serve is that the previous image survive
+/// it. Intact is a property of the WORLD and not of the declaration being
+/// examined, so the check belongs where the world is still untouched.
+///
+/// WHAT THIS PASS DOES NOT COVER, and it is named rather than implied: an
+/// `OutOfMemory` in the middle of Pass A still leaves a half-registration. That is
+/// a different failure — exhaustion, not a layout change — with its own remedies,
+/// and closing it means a rollback path the registry has never had. This pass
+/// makes the SchemaChanged path total; it does not make registration
+/// transactional.
+///
+/// The builtin time resources are deliberately absent, and the honest reason is
+/// narrower than "their descriptor is a constant". It IS one — `types.zig`'s
+/// `builtin_resources` — but that says nothing about what is registered under
+/// those NAMES, since nothing reserves them. What excludes them is that this pass
+/// walks the PROGRAM's declarations and the builtins are not among them: their own
+/// registration arm is first-compile-only (`idOf` → map → `continue`), so a reload
+/// mutates nothing there and there is no half-registration to prevent.
+///
+/// A residual that is NOT this pass's and predates it: a program declaring a
+/// `resource GameTime` of its own registers under that name in Pass A, the builtin
+/// arm then takes its `continue`, and the `findField(gid, "dt").?` that follows
+/// unwraps a field the user's type need not have. That is a missing name
+/// reservation, and it fails by panic rather than by diagnostic.
+fn verifySchemas(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     registry: *Registry,
-    bridge: *Bridge,
-    name: []const u8,
+    tag_table: *const tags_mod.TagTable,
+) !void {
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        const kind = ast.items.items(.kind)[i];
+        const data = ast.items.items(.data)[i];
+        const shape: struct {
+            name: []const u8,
+            fields_start: u32,
+            fields_len: u32,
+            reg_kind: RegKind,
+        } = switch (kind) {
+            .component_decl => blk: {
+                const decl = ast.component_decls.items[data];
+                break :blk .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .component,
+                };
+            },
+            .resource_decl => blk: {
+                const decl = ast.resource_decls.items[data];
+                break :blk .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .resource,
+                };
+            },
+            else => continue,
+        };
+
+        // A name the registry does not hold cannot fail this check: the refusal
+        // lives in `compileTypeDecl`'s reuse arm and nowhere else. Skipping it is
+        // not an optimisation, it is the check's domain.
+        const existing_id = registry.idOf(shape.name) orelse continue;
+
+        var layout = computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind) catch |e| switch (e) {
+            // An invalid field type is a PROGRAM error the type-checker reports
+            // with a span. Letting it through here hands the same diagnosis to
+            // `compileTypeDecl`, which is where it has always been raised — this
+            // pass judges layout IDENTITY, never program validity.
+            error.InvalidProgram => continue,
+            else => return e,
+        };
+        defer layout.deinit(gpa);
+
+        const candidate = schemaDigestFor(shape.name, layout);
+        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+                .{
+                    shape.name,
+                    registry.componentSize(existing_id),
+                    registry.componentAlignment(existing_id),
+                    registry.componentFields(existing_id).len,
+                    layout.size,
+                    layout.alignment,
+                    layout.fields.items.len,
+                },
+            );
+            return error.SchemaChanged;
+        }
+    }
+
+    // `TagSet` LAST among the checks and still BEFORE every mutation, which is the
+    // whole point: its own registration arm sits after Pass A, so confronting it
+    // there could never protect the types Pass A had already written.
+    if (tag_table.leaf_count > 0) {
+        if (registry.idOf("TagSet")) |existing| {
+            const size: u16 = @intCast(tag_table.words() * 8);
+            const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}));
+            if ((registry.schemaDigest(existing) orelse ~candidate) != candidate) {
+                std.log.warn(
+                    "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
+                        "live: size={d}; new: size={d} ({d} tag(s))",
+                    .{ registry.componentSize(existing), size, tag_table.leaf_count },
+                );
+                return error.SchemaChanged;
+            }
+        }
+    }
+}
+
+/// The LAYOUT half of a type declaration: field descriptors, size, alignment.
+/// Extracted because it is EXACTLY what a schema digest reads and nothing more —
+/// `Registry.schemaDigestOf` hashes name, size, alignment and each field's
+/// (name, kind, offset), and never `default_bytes`. Materialising the defaults is
+/// the other half of `compileTypeDecl`, it allocates immortal persistent blocks,
+/// and the digest never looks at them.
+///
+/// That split is what makes the pre-validation pass in `Interpreter.compile` cheap
+/// and side-effect-free: it can confront every declared schema against the live
+/// registry BEFORE the first registration, without materialising one default and
+/// without an intermediate to cache for the pass that follows.
+const Layout = struct {
+    fields: std.ArrayListUnmanaged(FieldDesc) = .empty,
+    size: usize = 0,
+    alignment: usize = 1,
+
+    fn deinit(self: *Layout, gpa: std.mem.Allocator) void {
+        self.fields.deinit(gpa);
+    }
+};
+
+/// Compute a declaration's layout. Mutates NOTHING outside the returned value —
+/// no registry write, no bridge mapping, no persistent allocation — which is the
+/// property the pre-pass rests on and the reason this is a function rather than a
+/// comment inside `compileTypeDecl`.
+fn computeLayout(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
-    /// DIRECT `@requires` names, already read from the declaration. Passed
-    /// RESOLVED for the same reason `storage` is: this function receives no
-    /// declaration node, so it cannot read an annotation itself, and handing it
-    /// the names keeps the reading in ONE place shared by both callers.
-    requires: []const []const u8,
-    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
-    /// not as the annotation range, deliberately: this function receives no
-    /// declaration node — it takes `name`,
-    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
-    /// `annotations_extra` at all — and widening it to take the node would give
-    /// the registry seam a dependency on AST item shape that its three callers
-    /// do not share. `storageModeOf` is the single resolver they share instead.
-    storage: StorageKind,
-    literals: *std.ArrayListUnmanaged([*]u8),
-) !ComponentId {
-    var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
-    defer fields.deinit(gpa);
+) !Layout {
+    var out: Layout = .{};
+    errdefer out.deinit(gpa);
     var size: usize = 0;
     var max_align: usize = 1;
 
@@ -7332,19 +7499,93 @@ pub fn compileTypeDecl(
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
         size = off + kind.sizeBytes();
-        try fields.append(gpa, .{
+        try out.fields.append(gpa, .{
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
             .kind = kind,
             .enum_type_name_id = enum_type_id,
         });
     }
-    size = std.mem.alignForward(usize, size, max_align);
+    out.size = std.mem.alignForward(usize, size, max_align);
+    out.alignment = max_align;
+    return out;
+}
+
+/// The ONE derivation of a declaration's schema digest, read by the registration
+/// site and by the pre-pass alike. Two derivations of one quantity is how the two
+/// come to disagree, and a pre-pass that disagrees with the site it protects is
+/// worse than no pre-pass: it would refuse reloads the site accepts, or wave
+/// through the ones it refuses.
+///
+/// **It takes a name and a layout, and nothing else, because nothing else is
+/// hashed.** `schemaDigestOf` reads the name, the size, the alignment and each
+/// field's (name, kind, offset) — measured, and pinned by `registry.zig`'s « the
+/// digest is blind to the default bytes », which names this function as its
+/// dependent. `default_bytes`, `storage` and `requires` are all absent from it.
+///
+/// Taking a `storage` and a `requires` this function cannot use would be a
+/// signature declaring an influence it does not have, and it cost the pre-pass an
+/// allocation of `@requires` names for a quantity that never reaches the hash.
+///
+/// The consequence is NOT hidden by that omission and is not this function's to
+/// repair: a reload that changes only a component's `@storage` mode or its
+/// `@requires` set produces the same digest and is ACCEPTED. Whether schema
+/// identity should cover them belongs to whoever owns `schemaDigestOf`.
+fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
+    return weld_core.ecs.registry.schemaDigestOf(.{
+        .name = name,
+        .size = @intCast(layout.size),
+        .alignment = @intCast(layout.alignment),
+        .default_bytes = &.{},
+        .fields = layout.fields.items,
+    });
+}
+
+/// Register one Etch `component`/`resource` declaration into `registry`,
+/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
+/// its compile-time default bytes (POD via `evalConst`, resource `string` via
+/// an immortal persistent block, resource `enum` via the variant discriminant).
+/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
+/// re-compile, idempotent). `bridge` records the name→id mapping.
+///
+/// Operates on a bare `*Registry` — World-free by construction (it never touches
+/// archetypes/entities). The interpreter passes `&world.registry`; the
+/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
+/// standalone `Registry` so registration is shared, not duplicated.
+pub fn compileTypeDecl(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    registry: *Registry,
+    bridge: *Bridge,
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    reg_kind: RegKind,
+    /// DIRECT `@requires` names, already read from the declaration. Passed
+    /// RESOLVED for the same reason `storage` is: this function receives no
+    /// declaration node, so it cannot read an annotation itself, and handing it
+    /// the names keeps the reading in ONE place shared by both callers.
+    requires: []const []const u8,
+    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
+    /// not as the annotation range, deliberately: this function receives no
+    /// declaration node — it takes `name`,
+    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
+    /// `annotations_extra` at all — and widening it to take the node would give
+    /// the registry seam a dependency on AST item shape that its three callers
+    /// do not share. `storageModeOf` is the single resolver they share instead.
+    storage: StorageKind,
+    literals: *std.ArrayListUnmanaged([*]u8),
+) !ComponentId {
+    var layout = try computeLayout(gpa, ast, fields_start, fields_len, reg_kind);
+    defer layout.deinit(gpa);
+    const fields = layout.fields;
+    const size = layout.size;
+    const max_align = layout.alignment;
+    var f_i: u32 = 0;
 
     var default_buf: []u8 = try gpa.alloc(u8, size);
     defer gpa.free(default_buf);
     @memset(default_buf, 0);
-    f_i = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
         const fd = fields.items[f_i];
@@ -7404,14 +7645,32 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    // Idempotent re-registration. A second Interpreter
-    // compiled on the SAME world — an AST swap, e.g. edit a rule body and
-    // re-compile — re-visits the unchanged component/resource decls. Reuse the
-    // existing id instead of erroring `DuplicateComponent`, so the live world
-    // state (entities, component bytes, resource values) survives the swap.
-    // The hot-reload contract is a rule-body edit with the declarations
-    // UNCHANGED; a layout-changing reload (archetype migration) is unimplemented.
     if (registry.idOf(name)) |existing_id| {
+        // THE LAST LINE OF DEFENCE, not the first. `Interpreter.compile` confronts
+        // every declared schema before it registers anything, so a hot-reload
+        // never reaches this arm with a changed layout. This check stays because
+        // `scene_cook.zig` drives this function against its own registry and does
+        // NOT go through that pass — and because a refusal that exists only in the
+        // caller is a refusal the next caller will not have.
+        //
+        // An ABSENT digest refuses, for the reason given at the `TagSet` arm.
+        const candidate = schemaDigestFor(name, layout);
+        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+                .{
+                    name,
+                    registry.componentSize(existing_id),
+                    registry.componentAlignment(existing_id),
+                    registry.componentFields(existing_id).len,
+                    size,
+                    max_align,
+                    fields.items.len,
+                },
+            );
+            return error.SchemaChanged;
+        }
         switch (reg_kind) {
             .component => try bridge.mapComponent(gpa, name, existing_id),
             .resource => try bridge.mapResource(gpa, name, existing_id),
@@ -8001,8 +8260,6 @@ fn resolveTagOperandBits(ctx: *LowerWhenCtx, path_node: NodeId, out: *std.ArrayL
         try ctx.tag_table.collectUnder(ctx.gpa, buf.items, out);
     } else return error.InvalidProgram;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "run on empty AST returns zero-rule report" {
     const gpa = std.testing.allocator;

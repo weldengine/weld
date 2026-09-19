@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-3 map
+/// Diff-runner fixture: 1 tick. Exercises the map
 /// vertical — an int-keyed map local as an insertion-ordered pair list in
 /// BOTH backends (the codegen mirrors the interpreter's store), so the
 /// two-binding iteration order is byte-exact by construction:
