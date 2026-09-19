@@ -534,6 +534,37 @@ pub const Registry = struct {
     }
 };
 
+test "the digest is blind to the default bytes" {
+    // A DEPENDENT RESTS ON THIS. `interp.schemaDigestFor` passes `&.{}` for
+    // `default_bytes` so the hot-reload pre-validation pass can confront every
+    // declared schema WITHOUT materialising a single default — materialising them
+    // allocates immortal persistent blocks, which a pass that may refuse must not
+    // do. That shortcut is only sound while this property holds.
+    //
+    // If a future change makes the digest read the defaults, this test fires and
+    // names where to go: `schemaDigestFor` must then be given the real bytes, and
+    // the pre-pass must materialise them and own their rollback.
+    const fields = [_]FieldDesc{.{ .name = "v", .offset = 0, .kind = .int_ }};
+    const a: ComponentDesc = .{
+        .name = "T",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &fields,
+    };
+    var b = a;
+    b.default_bytes = &[_]u8{7} ** 8;
+    try std.testing.expectEqual(schemaDigestOf(a), schemaDigestOf(b));
+
+    // NON-VACUITY: the digest is not blind to everything. A field offset moves it,
+    // so the equality above is a property of `default_bytes` and not of a hash
+    // that ignores its input.
+    var c = a;
+    const moved = [_]FieldDesc{.{ .name = "v", .offset = 4, .kind = .int_ }};
+    c.fields = &moved;
+    try std.testing.expect(schemaDigestOf(a) != schemaDigestOf(c));
+}
+
 test "registerComponent assigns stable ComponentId" {
     const gpa = std.testing.allocator;
     var reg = Registry.init();

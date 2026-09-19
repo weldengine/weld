@@ -738,6 +738,12 @@ pub const BodyManager = struct {
     /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot` — a bare
     /// `[4]f32` carrying no invariant at all.
     ///
+    /// `pub` because the two `PhysicsWorld` entries above must apply it BEFORE
+    /// they commit anything: both write a pose in several steps, and one of them
+    /// derives velocities from the rotation it is about to write. Reaching the
+    /// invariant only here would let them commit a position, or publish a velocity
+    /// derived from a quaternion the store then normalises or drops.
+    ///
     /// The refusal is at TRUE ZERO and covers the three inputs that denote no
     /// rotation: a zero quaternion, one carrying a NaN, one carrying an infinity
     /// — `normalize` is unguarded, so it answers NaN, NaN and an all-zero
@@ -745,7 +751,7 @@ pub const BodyManager = struct {
     /// it. Refusing LEAVES the previous unit value, which keeps `Body.rotation`
     /// unit unconditionally: a stored NaN propagates silently into every world
     /// AABB, query and contact that reads the body.
-    fn normalizedForStore(q: Quatr) ?Quatr {
+    pub fn normalizedForStore(q: Quatr) ?Quatr {
         const a = q.toArray();
         const norm_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
         if (!(norm_sq > 0) or !std.math.isFinite(norm_sq)) return null;

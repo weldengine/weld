@@ -214,9 +214,13 @@ pub const Divergence = union(enum) {
     /// The path is gone and exactly one file this run visited, absent from the
     /// baseline, carries its digest bit for bit.
     renamed: struct { from: []const u8, to: []const u8 },
-    /// The path is gone and SEVERAL unlisted files carry its digest, so no
-    /// destination can be named.
-    ambiguous: struct { from: []const u8, count: usize },
+    /// The path is gone and the pairing is not UNIQUE, so no destination can be
+    /// named. Both sides are carried because either can be the plural one and the
+    /// reader needs to know which: `destinations` counts unlisted files bearing the
+    /// digest, `claimants` counts baseline paths that vanished bearing it. A single
+    /// number could not say whether one file was offered to several claimants or
+    /// several files to one.
+    ambiguous: struct { from: []const u8, destinations: usize, claimants: usize },
     /// The path is gone and nothing this run visited carries its digest.
     missing: struct { path: []const u8 },
 };
@@ -273,17 +277,53 @@ pub fn classify(
         }
     }
 
+    // Digest -> how many baseline entries this run did NOT find, the mirror of
+    // `unlisted`. Without it the uniqueness the doc above demands is only half
+    // established: `unlisted` counts CANDIDATES, so it catches one source offered
+    // several destinations and misses several sources offered ONE. Two identical
+    // files deleted while a third carrying their content appeared were both
+    // reported as renames to that third path — one of them necessarily false, and
+    // a real deletion announced as a move, which is the one verdict this check
+    // exists to keep honest.
+    //
+    // Counted rather than CONSUMED, deliberately: consuming would hand the single
+    // destination to whichever claimant `entries` happens to reach first, which is
+    // a verdict manufactured from list order. `.ambiguous` is the honest answer
+    // and the one the doc already prescribes.
+    var claims: std.StringHashMapUnmanaged(usize) = .empty;
+    defer claims.deinit(arena);
+    for (entries) |e| {
+        if (seen.contains(e.path)) continue;
+        const gop = try claims.getOrPut(arena, e.digest);
+        gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+    }
+
     var findings: std.ArrayList(Divergence) = .empty;
     var failures: usize = 0;
     var renames: usize = 0;
     for (entries) |e| {
         const got = seen.get(e.path) orelse {
             if (unlisted.get(e.digest)) |c| {
-                if (c.count == 1) {
+                // UNREACHABLE, and refusing anyway. `claims` is built over exactly
+                // `!seen.contains(e.path)` and this branch is reached only when
+                // `seen.get(e.path)` was null — the same predicate — so the entry
+                // is always present and at least 1. Were it ever absent, 2 refuses
+                // the pairing: an unknown claimant count is not a count of one, and
+                // a default that permits is a default that hides.
+                const claimants = claims.get(e.digest) orelse 2;
+                if (c.count == 1 and claimants == 1) {
                     try findings.append(arena, .{ .renamed = .{ .from = e.path, .to = c.first } });
                     renames += 1;
                 } else {
-                    try findings.append(arena, .{ .ambiguous = .{ .from = e.path, .count = c.count } });
+                    // BOTH sides reported, neither synthesized. A `@max` of the two
+                    // prints a number the reader cannot attribute: for two vanished
+                    // paths sharing one destination it would say `2` under a message
+                    // declaring two destination FILES, of which there is one.
+                    try findings.append(arena, .{ .ambiguous = .{
+                        .from = e.path,
+                        .destinations = c.count,
+                        .claimants = claimants,
+                    } });
                     failures += 1;
                 }
             } else {
@@ -526,7 +566,8 @@ test "two candidates at one digest cannot name a destination, so the check fails
     const r = try classify(arena, &.{.{ .digest = d, .path = "src/a.zig" }}, &seen);
     try std.testing.expectEqual(@as(usize, 1), r.failures);
     try std.testing.expectEqual(@as(usize, 0), r.renames);
-    try std.testing.expectEqual(@as(usize, 2), r.findings[0].ambiguous.count);
+    try std.testing.expectEqual(@as(usize, 2), r.findings[0].ambiguous.destinations);
+    try std.testing.expectEqual(@as(usize, 1), r.findings[0].ambiguous.claimants);
 }
 
 test "a file the baseline already lists is not a rename destination" {
@@ -545,6 +586,44 @@ test "a file the baseline already lists is not a rename destination" {
     try std.testing.expectEqual(@as(usize, 1), r.failures);
     try std.testing.expectEqual(@as(usize, 0), r.renames);
     try std.testing.expectEqualStrings("src/a.zig", r.findings[0].missing.path);
+}
+
+test "two vanished sources cannot share one destination" {
+    // The MIRROR of the test two above, and the direction the count does not
+    // reach: `unlisted` counts candidates on the CURRENT side only, so one new
+    // file is offered to every missing baseline entry carrying its digest. Both
+    // are reported as renames to the same path — one of them necessarily false,
+    // and a real deletion masked as a move.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = "a" ** 64;
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try seen.put(arena, "src/c.zig", d);
+    const r = try classify(arena, &.{
+        .{ .digest = d, .path = "src/a.zig" },
+        .{ .digest = d, .path = "src/b.zig" },
+    }, &seen);
+    try std.testing.expectEqual(@as(usize, 0), r.renames);
+    try std.testing.expectEqual(@as(usize, 2), r.failures);
+    // THE MIRROR of the sibling's numbers, and why one figure cannot serve: here
+    // the plural side is the CLAIMANTS and there is exactly one destination file.
+    // A report naming `destinations` alone would say `1` for a pairing refused
+    // precisely because two paths claim it.
+    try std.testing.expectEqual(@as(usize, 1), r.findings[0].ambiguous.destinations);
+    try std.testing.expectEqual(@as(usize, 2), r.findings[0].ambiguous.claimants);
+
+    // NOT COVERED, AND NOT COVERABLE FROM A DIGEST. One source and one
+    // destination at a COLLIDING digest still read as a rename: two unrelated
+    // files with identical token streams are, to this function, one file that
+    // moved. The doc above already states that digest uniqueness is a property of
+    // the tree rather than of the check; this is that statement's consequence,
+    // and separating the two cases needs an input the baseline does not carry.
+    var lone: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try lone.put(arena, "src/unrelated.zig", d);
+    const one_to_one = try classify(arena, &.{.{ .digest = d, .path = "src/gone.zig" }}, &lone);
+    try std.testing.expectEqual(@as(usize, 1), one_to_one.renames);
+    try std.testing.expectEqual(@as(usize, 0), one_to_one.failures);
 }
 
 test "a run matching its baseline reports nothing at all" {

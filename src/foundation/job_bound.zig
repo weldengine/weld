@@ -113,19 +113,48 @@ fn reasonOfIn(comptime T: type, comptime seen: []const type) []const u8 {
         .array => |a| reasonOfIn(a.child, next),
         .error_union => |eu| reasonOfIn(eu.payload, next),
         .vector => |v| reasonOfIn(v.child, next),
+        // NO PRE-TEST, AND THE LOOP DOES NOT STOP ON A SILENT FIELD. These two
+        // arms used to gate on `carriesMarked(f.type)`, which walks with a FRESH
+        // visited set, and then answer `reasonOfIn(f.type, next)`, which walks
+        // with the CURRENT one. On a self-referential field the predicate said
+        // yes through the cycle while the reason walk stopped ON the cycle and
+        // answered `no_reason` — and the `break` abandoned every field after it,
+        // so a marked sibling declared behind the recursive one was never read.
+        // The refusal fired and explained nothing.
+        //
+        // Recursing per field with `next` and continuing past a field that has no
+        // reason makes this arm the exact mirror of `carriesMarkedIn`'s, which is
+        // what the contract two doc comments up demands: the two walk in step.
         .@"struct" => |st| blk: {
             inline for (st.fields) |f| {
-                if (carriesMarked(f.type)) break :blk reasonOfIn(f.type, next);
+                const r = reasonOfIn(f.type, next);
+                if (!std.mem.eql(u8, r, no_reason)) break :blk r;
             }
             break :blk no_reason;
         },
         .@"union" => |un| blk: {
             inline for (un.fields) |f| {
-                if (carriesMarked(f.type)) break :blk reasonOfIn(f.type, next);
+                const r = reasonOfIn(f.type, next);
+                if (!std.mem.eql(u8, r, no_reason)) break :blk r;
             }
             break :blk no_reason;
         },
-        else => no_reason,
+
+        // EXHAUSTIVE, with no `else`, because `carriesMarkedIn` is — and the two
+        // are required to walk in step. An `else` here would let a future kind be
+        // given a decision in the predicate while this walk silently kept
+        // answering `no_reason`: the divergence would compile, and a refusal that
+        // explains nothing is what that costs. The compiler is what holds the
+        // contract the doc states; leaving it to the doc is how the two parted
+        // company the first time.
+        .type, .void, .noreturn, .bool, .int, .float => no_reason,
+        .comptime_float, .comptime_int, .undefined, .null, .enum_literal => no_reason,
+
+        .error_set => no_reason,
+        .@"enum" => no_reason,
+        .@"fn" => no_reason,
+        .@"opaque" => no_reason,
+        .frame, .@"anyframe" => no_reason,
     };
 }
 
@@ -184,4 +213,34 @@ test "the production shape is the one that used to be blank" {
     const Ctx = struct { cmd: *MarkedProbe, tick: u64, frame: ?*anyopaque };
     try std.testing.expect(carriesMarked(Ctx));
     try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Ctx));
+}
+
+test "a cyclic field does not swallow a marked sibling behind it" {
+    // `carriesMarked` walked with a FRESH visited set and `reasonOfIn` with the
+    // CURRENT one, so on `link` the predicate said yes while the reason walk
+    // stopped on the cycle and answered `no_reason` — and the `break` then
+    // abandoned `m` entirely. The refusal fired and explained nothing.
+    const Node = struct {
+        link: ?*@This(),
+        m: *MarkedProbe,
+    };
+    try std.testing.expect(carriesMarked(Node));
+    try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Node));
+
+    // THE UNION ARM, carrying the identical defect and swept with it. Asserted
+    // rather than assumed: the two arms are separate code, so a fix applied to
+    // one only would pass the struct case above and leave this one blank.
+    const Cyclic = union(enum) {
+        link: ?*@This(),
+        m: *MarkedProbe,
+    };
+    try std.testing.expect(carriesMarked(Cyclic));
+    try std.testing.expectEqualStrings(MarkedProbe.weld_no_job_body, reasonOf(Cyclic));
+
+    // NOT COVERED, AND HARMLESS BY CONSTRUCTION. `no_reason` is a plain string,
+    // so a marker whose declared reason is literally "no reason declared" reads
+    // as absence and the walk keeps looking. The answer is still that string —
+    // the marker's own text, verbatim — so nothing is misreported; only a later
+    // field's reason may be preferred to it. Closing it would mean a sentinel the
+    // public `no_reason` is not, for a collision that costs nothing.
 }

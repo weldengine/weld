@@ -5718,9 +5718,24 @@ pub const TypeChecker = struct {
     /// literal string, a persistent resource collection. The direction is chosen
     /// and not incidental: a false refusal is a compile error the author reads
     /// and works around, a missed escape is a use-after-free nobody sees.
+    ///
+    /// **THE ARMS ARE DERIVED FROM `Value`, NOT FROM INTUITION.** Every variant
+    /// of `value.zig` documented "same lifetime rules as `array_ref`" — reset at
+    /// the rule-body boundary — has its producing `ResolvedType` here:
+    /// `string_run`, `array_ref`, `map_ref`, `set_ref`, `closure`, `struct_ref`
+    /// and `optional`. The last three were absent while this comment already
+    /// claimed "every type", and `Value.optional` is a handle into a per-body
+    /// store whatever its payload, so `?int` escapes exactly as `?string` does.
+    ///
+    /// **WHAT IT DOES NOT COVER, and cannot.** A local resolving to `.unknown`
+    /// or `.generic` carries no payload information at all, so a rule-arena
+    /// value reaching a capture through one of those is NOT refused. That is not
+    /// an omission to repair here: the type is the only thing this predicate
+    /// sees, and those two variants are the statement that the type is unknown.
     fn isRuleArenaType(t: ResolvedType) bool {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
+            .closure, .struct_t, .optional => true,
             .builtin => |b| b == .string_,
             else => false,
         };
@@ -12777,6 +12792,87 @@ test "a timer capturing a rule-arena array is E0223, and its negative twin is cl
     );
     defer unreferenced.deinit(gpa);
     try expectNoCode(unreferenced.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "the three rule-arena stores the type predicate used to miss are refused" {
+    // DERIVED FROM `Value`, not guessed: `optional`, `struct_ref` and `closure`
+    // each carry "same lifetime rules as `array_ref`" in `value.zig`, and each
+    // was absent from `isRuleArenaType` while its doc claimed "every type". The
+    // cost of the miss is not a missing diagnostic, it is a use-after-free.
+    const gpa = std.testing.allocator;
+
+    var opt = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let m = [1: 10]
+        \\  let hit = m[1]
+        \\  after(0.5s) {
+        \\    if let v = hit { }
+        \\  }
+        \\}
+    );
+    defer opt.deinit(gpa);
+    try expectAnyCode(opt.diagnostics.items, .rule_arena_value_escapes);
+
+    var strct = try parseAndCheck(gpa,
+        \\struct Spec { hp: int }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let s = Spec { hp: 1 }
+        \\  after(0.5s) {
+        \\    let n = s.hp
+        \\  }
+        \\}
+    );
+    defer strct.deinit(gpa);
+    try expectAnyCode(strct.diagnostics.items, .rule_arena_value_escapes);
+
+    var clos = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let double = |x: int| x * 2
+        \\  after(0.5s) {
+        \\    let n = double(2)
+        \\  }
+        \\}
+    );
+    defer clos.deinit(gpa);
+    try expectAnyCode(clos.diagnostics.items, .rule_arena_value_escapes);
+
+    // NON-VACUITY, and it is NOT the adjacent case. This program captures an int
+    // and stays clean because an int is genuinely not rule-arena — the opposite
+    // reason to the uncovered one, where a value that IS rule-arena goes
+    // unrefused because its type could not be resolved. An earlier version of
+    // this comment claimed the two were the same reason; they are contraries,
+    // and a test that stood on that claim would have pinned nothing.
+    //
+    // What it does establish is that the widened predicate is not blanket: a
+    // clean capture is still accepted after three arms were added to it.
+    //
+    // THE ADJACENT CASE IS DECLARED, NOT TESTED. A local resolving to `.unknown`
+    // or `.generic` is not refused, and no test here covers it: such a local
+    // exists only where resolution already failed and emitted its own
+    // diagnostic, so a program reaching it is not one this predicate is the last
+    // guard for. Naming it beats a probe that would measure something else.
+    var pod = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let count = 3
+        \\  after(0.5s) {
+        \\    let n = count + 1
+        \\  }
+        \\}
+    );
+    defer pod.deinit(gpa);
+    try expectNoCode(pod.diagnostics.items, .rule_arena_value_escapes);
 }
 
 test "escape_false_refusal: the conservative rule also refuses two SAFE captures" {

@@ -217,3 +217,146 @@ test "a type absent from the new program does not fail the reload" {
     try reloadOn(gpa, &world, src_no_counter);
     try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
 }
+
+const src_tags_narrow =
+    \\tags {
+    \\  a { t00, t01 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+const src_tags_wide =
+    \\tags {
+    \\  a { t00, t01, t02, t03, t04, t05, t06, t07, t08, t09, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31, t32, t33, t34, t35, t36, t37, t38, t39, t40, t41, t42, t43, t44, t45, t46, t47, t48, t49, t50, t51, t52, t53, t54, t55, t56, t57, t58, t59, t60, t61, t62, t63, t64 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// Same width as `src_tags_narrow`, different tag NAMES. Feeds the adjacent
+/// case pinned below.
+const src_tags_renamed =
+    \\tags {
+    \\  a { u00, u01 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+test "a reload widening TagSet past a word boundary is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    const cid = world.registry.idOf("TagSet").?;
+    const size_before = world.registry.componentSize(cid);
+    try std.testing.expectEqual(@as(usize, 8), size_before);
+
+    // 65 tags need two words: 8 bytes -> 16. Before the fix the reuse arm took
+    // the existing id with no confrontation, so the interpreter went on writing
+    // 16 bytes into an 8-byte column.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_wide));
+    try std.testing.expectEqual(size_before, world.registry.componentSize(cid));
+}
+
+test "a reload renaming tags within one word is accepted — the adjacent case" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    const cid = world.registry.idOf("TagSet").?;
+
+    // ADJACENT CASE, ACCEPTED AND OUT OF THE REFUSAL'S SCOPE. `schemaDigestOf`
+    // hashes name, size, alignment and each FIELD's (name, kind, offset); the
+    // `TagSet` descriptor carries `fields = &.{}` because it is a bitfield and
+    // not a struct. So tag IDENTITY is not expressible in the digest at all:
+    // renaming or reordering tags without crossing a word boundary keeps the
+    // same size, hence the same digest, and the reload is accepted while the
+    // bit assignment of live entities now denotes different tags.
+    //
+    // Refusing it needs a digest over the tag table's own content — a different
+    // mechanism from the layout digest this test's sibling exercises, and NOT a
+    // gap in it. Pinned as accepted so the boundary is observable rather than
+    // asserted in prose.
+    try reloadOn(gpa, &world, src_tags_renamed);
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+const src_r3_partial =
+    \\component Extra { x: int = 0 }
+    \\component Counter { value: int = 0, extra: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+test "a refused reload leaves no half-registered type behind" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+
+    // `Extra` is declared BEFORE `Counter`, so Pass A registers it and only then
+    // meets `Counter`'s changed layout and refuses.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_r3_partial));
+
+    try std.testing.expect(world.registry.idOf("Extra") == null);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+const src_tags_live =
+    \\tags {
+    \\  a { t00, t01 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+const src_tags_wide_plus_new =
+    \\tags {
+    \\  a { t00, t01, t02, t03, t04, t05, t06, t07, t08, t09, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31, t32, t33, t34, t35, t36, t37, t38, t39, t40, t41, t42, t43, t44, t45, t46, t47, t48, t49, t50, t51, t52, t53, t54, t55, t56, t57, t58, t59, t60, t61, t62, t63, t64 }
+    \\}
+    \\component Extra { x: int = 0 }
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+test "a TagSet refusal leaves no half-registered type behind either" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_live);
+
+    // THE CASE A PER-SITE REFUSAL CANNOT REACH, and the reason the confrontation
+    // is a pass rather than a check at each registration: `TagSet` registers AFTER
+    // the whole declaration loop, so refusing it where it is met leaves every type
+    // the program declared already in the world. Here nothing about `Counter`
+    // changed and `Extra` is new — only the tag count crossed a word boundary.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_wide_plus_new));
+
+    try std.testing.expect(world.registry.idOf("Extra") == null);
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(world.registry.idOf("TagSet").?));
+}

@@ -568,8 +568,14 @@ pub const PhysicsWorld = struct {
     ///
     /// Composes the wake: the body itself, because a teleport is an external mutation
     /// (§1.8.4), and W4 on its retained partners, because a body that moves changes what
-    /// supports the sleepers around it and they cannot see it happen. No-op on a stale
-    /// handle.
+    /// supports the sleepers around it and they cannot see it happen.
+    ///
+    /// **TWO no-ops, and both precede every write.** A stale handle, and a `rotation`
+    /// that denotes no rotation — zero, NaN or infinite. The second exists because this
+    /// entry writes the pose in TWO steps and `setRotation` refuses such an input on its
+    /// own: committing the position and keeping the old orientation is half a
+    /// teleportation, which is worse than none. Neither no-op composes the wake, so a
+    /// caller counting wakes counts writes that happened.
     ///
     /// **W4 IS APPLIED TO A DYNAMIC BODY TOO, and §1.8.5 now says so.** The reasoning that
     /// carried the decision, kept because it is what the amended text rests on: a sleeper
@@ -600,11 +606,17 @@ pub const PhysicsWorld = struct {
         rotation: config.Quatr,
     ) void {
         _ = self.bm.position(id) orelse return; // stale handle
+        // Same class as `moveKinematic` above, and swept with it: this entry
+        // writes the pose in two steps, so a rotation `setRotation` would drop
+        // left the position committed and the orientation stale — half a
+        // teleportation. It derives no velocity, which is why it is the milder
+        // half of the class and not a separate one.
+        const rot = BodyManager.normalizedForStore(rotation) orelse return;
 
         self.wakeRetainedPartners(id);
         self.bm.wakeBody(id);
         self.bm.setPosition(id, position);
-        self.bm.setRotation(id, rotation);
+        self.bm.setRotation(id, rot);
         self.refreshProxy(id);
     }
 
@@ -655,6 +667,12 @@ pub const PhysicsWorld = struct {
     /// velocities are computed before the pose is written, because computing them after
     /// would difference the target against itself. That was always a data-flow requirement
     /// and never a transactional one.
+    ///
+    /// **TWO no-ops, and both precede every write** — a stale handle, and a
+    /// `target_rotation` that denotes no rotation. The second is not symmetry with
+    /// `setBodyTransform`: here the angular velocity is DERIVED from that rotation, so
+    /// letting it through published a velocity for a pose the body would not reach.
+    /// Neither no-op composes the wake.
     pub fn moveKinematic(
         self: *PhysicsWorld,
         id: BodyId,
@@ -666,10 +684,19 @@ pub const PhysicsWorld = struct {
         const current_position = self.bm.position(id) orelse return; // stale handle
         const current_rotation = self.bm.rotation(id).?;
 
+        // THE DERIVATION AND THE WRITE READ ONE ROTATION, normalised HERE.
+        // `setRotation` stores `normalizedForStore(q) orelse return`, so deriving
+        // from the raw argument answered a velocity for a pose the body does not
+        // reach — doubled for a target of twice the unit norm — and a target
+        // denoting no rotation committed a position and two velocities while the
+        // rotation was silently dropped. Refusing before the first commit is the
+        // same early return this entry already takes on a stale handle.
+        const target = BodyManager.normalizedForStore(target_rotation) orelse return;
+
         const inv_dt = 1.0 / dt;
         const linear = target_position.sub(current_position).scale(inv_dt);
 
-        var dq = target_rotation.mul(current_rotation.conjugate());
+        var dq = target.mul(current_rotation.conjugate());
         if (dq.w < 0) dq = dq.scale(-1); // short path: q and −q are one rotation
         const angular = Vec3r.fromArray(.{ dq.x, dq.y, dq.z }).scale(2 * inv_dt);
 
@@ -678,7 +705,7 @@ pub const PhysicsWorld = struct {
         self.bm.setLinearVelocity(id, linear);
         self.bm.setAngularVelocity(id, angular);
         self.bm.setPosition(id, target_position);
-        self.bm.setRotation(id, target_rotation);
+        self.bm.setRotation(id, target);
         self.refreshProxy(id);
     }
 

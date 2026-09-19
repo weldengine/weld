@@ -1061,3 +1061,62 @@ test "removeBody refuses a character presence, and refuses it before any mutatio
     world.destroyCharacter(gpa, hero);
     try testing.expectEqual(before - 1, world.proxyCountIn(.dynamic));
 }
+
+test "moveKinematic derives the velocity of the pose it actually reaches" {
+    const gpa = testing.allocator;
+    const s: Real = 0.6;
+    const c: Real = 0.8;
+
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+    const a = try addBoxBody(gpa, &world, .kinematic, false, 1, .{ 0, 0, 0 });
+    world.moveKinematic(a, Vec3r.zero, .{ .x = 0, .y = s, .z = 0, .w = c }, fixed_dt);
+    const w_unit = world.bm.angularVelocity(a).?.toArray()[1];
+
+    // The store NORMALISES what it writes, so this twin reaches the same pose and
+    // must report the same angular velocity. Deriving from the raw target doubles it.
+    var twin = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer twin.deinit(gpa);
+    const b = try addBoxBody(gpa, &twin, .kinematic, false, 1, .{ 0, 0, 0 });
+    twin.moveKinematic(b, Vec3r.zero, .{ .x = 0, .y = 2 * s, .z = 0, .w = 2 * c }, fixed_dt);
+    const w_scaled = twin.bm.angularVelocity(b).?.toArray()[1];
+
+    try testing.expect(std.math.approxEqAbs(Real, w_unit, w_scaled, 1e-4));
+}
+
+test "a pose write whose rotation denotes no rotation commits nothing" {
+    const gpa = testing.allocator;
+    var world = PhysicsWorld.initNoSleep(Vec3r.zero, fixed_dt);
+    defer world.deinit(gpa);
+    const k = try addBoxBody(gpa, &world, .kinematic, false, 1, .{ 0, 0, 0 });
+
+    // `setRotation` drops a quaternion that denotes no rotation, so the call must
+    // commit NOTHING — position and both velocities included.
+    const pos_before = world.bm.position(k).?;
+    const nan = std.math.nan(Real);
+    world.moveKinematic(k, vr(5, 0, 0), .{ .x = nan, .y = 0, .z = 0, .w = 1 }, fixed_dt);
+
+    try testing.expectEqual(pos_before, world.bm.position(k).?);
+    try testing.expectEqual(Vec3r.zero, world.bm.linearVelocity(k).?);
+    try testing.expectEqual(Vec3r.zero, world.bm.angularVelocity(k).?);
+
+    // THE ADJACENT CASE, AND IT IS A CONSEQUENCE RATHER THAN A GAP. The same
+    // refusal was swept into `setBodyTransform`, which `sync_in.zig` calls with
+    // a bare `Transform.rot`. So a malformed rotation arriving from the ECS now
+    // refuses the WHOLE pose write, position included, where it used to move the
+    // body and keep the old orientation. That is the intended direction — half a
+    // teleportation is worse than none — and it is asserted here rather than left
+    // for a reader to discover from the seam.
+    const before_t = world.bm.position(k).?;
+    world.setBodyTransform(k, vr(9, 0, 0), .{ .x = 0, .y = 0, .z = 0, .w = 0 });
+    try testing.expectEqual(before_t, world.bm.position(k).?);
+
+    // NOT covered, and deliberately: a finite, non-unit rotation is NORMALISED and
+    // accepted, here as on the seam. The entry writes the pose the caller denotes;
+    // repairing the caller's own `Transform` component is not its job.
+    world.setBodyTransform(k, vr(9, 0, 0), .{ .x = 0, .y = 1.2, .z = 0, .w = 1.6 });
+    try testing.expectEqual(vr(9, 0, 0), world.bm.position(k).?);
+    const q = world.bm.rotation(k).?.toArray();
+    const n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    try testing.expect(std.math.approxEqAbs(Real, 1, n2, 1e-5));
+}

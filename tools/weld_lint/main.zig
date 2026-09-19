@@ -316,8 +316,9 @@ fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const 
             .{ r.from, r.to },
         ),
         .ambiguous => |a| try out.print(
-            "fingerprint: AMBIGUOUS {s} — gone, and {d} unlisted files carry its digest\n",
-            .{ a.from, a.count },
+            "fingerprint: AMBIGUOUS {s} — gone, and the pairing is not unique: " ++
+                "{d} unlisted file(s) carry its digest, {d} baseline path(s) claim it\n",
+            .{ a.from, a.destinations, a.claimants },
         ),
         .missing => |m| try out.print(
             "fingerprint: MISSING {s} — in the baseline, not in this run, and no file here carries its digest\n",
@@ -343,8 +344,10 @@ fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const 
             "code edit that produced it.\n");
         if (saw_missing) try out.writeAll("A MISSING file is gone and no file here carries its content. Restore it, or if\n" ++
             "the deletion is deliberate, drop its row — removing a row is not regenerating one.\n");
-        if (saw_ambiguous) try out.writeAll("An AMBIGUOUS row cannot be resolved by content, several files carrying that\n" ++
-            "digest. Name the destination by hand, or leave the row and say why.\n");
+        if (saw_ambiguous) try out.writeAll("An AMBIGUOUS row cannot be resolved by content: the pairing is not unique.\n" ++
+            "Either several files carry that digest, or several vanished rows claim the same\n" ++
+            "file — the row above says which. Name the destination of EACH such row by hand,\n" ++
+            "or leave them and say why.\n");
         return 1;
     }
     if (result.renames != 0) {
