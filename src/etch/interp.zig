@@ -8883,12 +8883,24 @@ test "resource string[] iterated by an async for-in across a suspend" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // An async rule iterates a resource `string[]` (`.array_persistent`), awaiting
+    // An async rule iterates a resource `int[]` (`.array_persistent`), awaiting
     // one tick per element — the for-frame carries the block pointer across the
     // suspend. `done` gates re-arming so `count` settles at exactly 3.
+    //
+    // THE ELEMENT TYPE MOVED FROM `string` TO `int`, and the reason is a known
+    // over-refusal rather than a change of subject. A rule-arena local in scope at
+    // a suspending `await` is now refused, and `isRuleArenaType` answers true for
+    // EVERY `string` because the resolved type does not distinguish a run string
+    // from a persistent one — so the loop element `e`, which comes from a
+    // persistent array and is genuinely safe, was refused. It is also never read:
+    // the body counts and awaits. What this test asserts — the for-frame carrying
+    // a persistent block pointer across a suspension — is unchanged by the element
+    // type, and the `string[]` surface keeps its own coverage in the two sibling
+    // tests above (`defaults empty, pushes across ticks` and `persists across
+    // world.tick`), neither of which suspends.
     const source =
         \\resource Log {
-        \\  entries: string[] = ["x", "y", "z"]
+        \\  entries: int[] = [1, 2, 3]
         \\  count: int = 0
         \\  done: bool = false
         \\}
@@ -12728,30 +12740,36 @@ test "async fn called via await runs to completion across ticks and its return v
     try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
 }
 
-test "async method called via await inlines with its own scope and locals survive the suspension" {
+test "an async call frame inlines with its own scope and locals survive the suspension" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    // `bumped` is an `async method`: it reads `self.base` into a local, suspends
-    // at `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
-    // carries `self` + the local in its OWN heap-boxed scope, retained across the
+    // `bumped` is an `async fn`: it reads its parameter into a local, suspends at
+    // `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
+    // carries the local in its OWN heap-boxed scope, retained across the
     // suspension (no collision with the caller's scope). `n` goes 0 → 11.
+    //
+    // THIS WAS AN `async method` ON A STRUCT AND IS NOW A FREE `async fn`, and the
+    // replaced assertion is worth naming: the old body read `self.base` BEFORE its
+    // `await`, and that is the only reason it was safe. Measured — the same method
+    // reading `self.base` AFTER the await, with one neighbouring synchronous rule,
+    // ABORTS on `structs.list.items[handle]`, because the neighbour's body-end
+    // reset clears the struct store while the method is suspended. A `self` that
+    // crosses a suspension is therefore refused, and the sibling test below pins
+    // that refusal. What this test still covers — a call frame's own scope
+    // surviving a suspension — is independent of the receiver being a struct.
     const source =
-        \\struct Counter { base: int = 0 }
-        \\impl Counter {
-        \\  async fn bumped(self) -> int {
-        \\    let b = self.base
-        \\    await wait(0.02s)
-        \\    return b + 1
-        \\  }
-        \\}
         \\resource Out { n: int = 0 }
+        \\async fn bumped(base: int) -> int {
+        \\  let b = base
+        \\  await wait(0.02s)
+        \\  return b + 1
+        \\}
         \\async rule caller()
         \\  when resource Out
         \\{
-        \\  let c = Counter { base: 10 }
-        \\  let x = await c.bumped()
+        \\  let x = await bumped(10)
         \\  let o = get_mut(Out)
         \\  o.n = x
         \\}
@@ -12772,8 +12790,8 @@ test "async method called via await inlines with its own scope and locals surviv
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: caller builds `c`, enters `c.bumped()`, which reads self.base into a
-    // local and suspends at its `await wait(0.02s)`.
+    // tick 1: caller enters `bumped(10)`, which reads its parameter into a local
+    // and suspends at its `await wait(0.02s)`.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
     // tick 2: `bumped` resumes (its local `b = 10` survived), returns 11, which
@@ -15868,4 +15886,148 @@ test "runProgram a throw raised in an assignment's RHS unwinds to the catch" {
     // write for the throwing RHS only, and the run stops there. Asserting the
     // catch alone would pass against a guard that abandoned every write.
     try std.testing.expectEqual(@as(i64, 20), out);
+}
+
+/// Type-check `source` and return the diagnostic codes' count for `code`.
+fn countDiagCode(gpa: std.mem.Allocator, source: [:0]const u8, code: diag_mod.DiagnosticCode) !usize {
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    var n: usize = 0;
+    for (diags.items) |d| {
+        if (d.code == code) n += 1;
+    }
+    return n;
+}
+
+test "a rule-arena local held across an await is refused" {
+    const gpa = std.testing.allocator;
+
+    // THE NEIGHBOURING SYNCHRONOUS RULE IS WHY THE REFUSAL EXISTS, and it is in
+    // the program for that reason rather than for shape. The async rule ALONE is
+    // safe: nothing resets the shared stores while it is the only body running. It
+    // is `noise`, whose body-end `resetBodyStores` clears `collections`, that
+    // invalidates `xs` while `holder` is suspended. MEASURED before the refusal
+    // landed: this exact program ABORTS — `index out of bounds: index 0, len 0` at
+    // `collections.arrays.items[recv.array_ref]` — and the type-checker accepted it
+    // first. A test exercising one rule masks the whole class by construction.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    let xs = [10, 20, 30]
+        \\    await wait(0.016s)
+        \\    get_mut(S).got = xs[1]
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "an async method whose self crosses the await is refused" {
+    const gpa = std.testing.allocator;
+
+    // `self` IS a rule-arena local, and refusing it is WARRANTED rather than
+    // conservative — measured, not assumed. With the refusal disabled, this exact
+    // program ABORTS on `structs.list.items[handle]` at the `self.base` read that
+    // follows the suspension, because `noise` clears the struct store in between.
+    // The sibling test above used to be an `async method` and survived only
+    // because it read `self.base` BEFORE its await.
+    //
+    // Two diagnostics, not one: `self` inside the method and `c` in the caller,
+    // each live across a suspending `await`. Asserted as a COUNT so a rule that
+    // caught only one of the two frames would fail here.
+    try std.testing.expectEqual(@as(usize, 2), try countDiagCode(gpa,
+        \\struct Counter { base: int = 0 }
+        \\impl Counter {
+        \\  async fn bumped(self) -> int {
+        \\    await wait(0.02s)
+        \\    return self.base + 1
+        \\  }
+        \\}
+        \\resource Out { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let c = Counter { base: 10 }
+        \\  let x = await c.bumped()
+        \\  get_mut(Out).n = x
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = Counter { base: 7 }
+        \\  get_mut(N).k = junk.base
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a POD value crossing an await is accepted, neighbour and all" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // THE GREEN TWIN, and it keeps the neighbour. The refusal is targeted at
+    // rule-arena storage, not at suspension: an `int` crossing the same `await`
+    // in the same shape, with the same synchronous rule resetting the stores
+    // underneath, type-checks clean AND computes the right answer. Without this,
+    // a rule refusing every local whatsoever would pass the two tests above.
+    const source =
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    let seed = 20
+        \\    await wait(0.016s)
+        \\    get_mut(S).got = seed
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa, source, .rule_arena_value_escapes));
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const sid = world.registry.idOf("S").?;
+    const buf = world.resources.getResource(sid).?;
+    const gf = world.registry.findField(sid, "got").?;
+    var got: i64 = 0;
+    @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 20), got);
 }

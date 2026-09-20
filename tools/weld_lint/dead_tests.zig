@@ -234,8 +234,8 @@ pub const uncollected = [_]Uncollected{
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // RE-DERIVED FROM THE SUITE, never from the closure. `zig build test --summary all`
-    // reported `2350/2369 tests passed (19 skipped)` on macOS when these values were
-    // last set, and the closure arrives at 2369 independently from the table above.
+    // reported `2354/2373 tests passed (19 skipped)` on macOS when these values were
+    // last set, and the closure arrives at 2373 independently from the table above.
     // Bumping either to match the other is the repair the failure message forbids: it
     // turns two computations of one quantity into arithmetic on itself, and the drift
     // it was built to catch becomes invisible.
@@ -247,8 +247,8 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     //
     // Windows is two lower by the `only_on = .windows` entries above.
     return switch (os) {
-        .windows => 2367,
-        else => 2369,
+        .windows => 2371,
+        else => 2373,
     };
 }
 

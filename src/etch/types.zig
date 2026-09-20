@@ -5732,10 +5732,76 @@ pub const TypeChecker = struct {
     /// value reaching a capture through one of those is NOT refused. That is not
     /// an omission to repair here: the type is the only thing this predicate
     /// sees, and those two variants are the statement that the type is unknown.
+    /// Refuse every rule-arena local IN SCOPE at a suspending `await`.
+    ///
+    /// **This fills `EscapeSite.async_frame`, which was declared and never
+    /// produced.** `etch-memory-model.md` names five snapshot sites — a stored
+    /// closure, a timer body, `branch`, `spawn`, the branches of `race`/`sync`,
+    /// and a local living across an `await` — and `openEscapeWindow` had three
+    /// callers covering the first four. The await site had its enum slot reserved
+    /// and no producer, so no widening of `isRuleArenaType` could ever reach it:
+    /// the hole was structural, not a missing case.
+    ///
+    /// What makes it a hole and not a nuisance: the per-body stores are reset by
+    /// ANY other rule body that runs during the suspension, so a local surviving
+    /// the `await` indexes a store that has been cleared. Measured, the cost is an
+    /// abort — `index out of bounds: index 0, len 0` on the array store — and the
+    /// type-checker accepted the program that produced it.
+    ///
+    /// **IN SCOPE, not read-after — deliberately the UPPER BOUND.** A rule refusing
+    /// only a local READ after the `await` costs zero false refusals on this suite
+    /// and is not liveness: it is a syntactic walk of the following statements, and
+    /// an indirect read through a closure or a branch escapes it. An instrument
+    /// that returns a memory-safety verdict on a syntactic criterion is the class
+    /// this milestone exists to remove, and the price of its escaping is the abort
+    /// above. Two known, bounded false refusals — each verified genuinely safe
+    /// rather than assumed so — are the accepted cost.
+    ///
+    /// The order is SORTED and not the map's: diagnostics are never sorted
+    /// downstream, so emission order is the order a reader sees, and a hash map's
+    /// iteration depends on its insertion and growth history.
+    fn refuseArenaLocalsAcrossAwait(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!void {
+        const ctx = ctx_opt orelse return;
+        var offenders: std.ArrayListUnmanaged(StringId) = .empty;
+        defer offenders.deinit(self.gpa);
+        var it = ctx.locals.iterator();
+        while (it.next()) |kv| {
+            if (isRuleArenaType(kv.value_ptr.type_)) try offenders.append(self.gpa, kv.key_ptr.*);
+        }
+        std.mem.sort(StringId, offenders.items, {}, std.sort.asc(StringId));
+        for (offenders.items) |name_id| {
+            try self.emit(
+                .rule_arena_value_escapes,
+                .error_,
+                self.arena.exprSpan(id),
+                "'{s}' lives in the rule body's arena and cannot be held across {s}, which outlives it",
+                .{ self.arena.strings.slice(name_id), EscapeSite.async_frame.label() },
+            );
+        }
+    }
+
     fn isRuleArenaType(t: ResolvedType) bool {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
             .closure, .struct_t, .optional => true,
+            // AN UNRESOLVED TYPE IS REFUSED, and this is not symmetry with the
+            // arms above: it is the admission that safety cannot be ESTABLISHED.
+            // `.unknown` carries two meanings under one tag — the fallback after a
+            // diagnostic, and a DEFERRAL emitted with no diagnostic at all (the
+            // `.optional` and `.some_lit` arms return it for a non-builtin
+            // payload). So `Spec?` arrives here as `.unknown`, and reading the tag
+            // as "a diagnostic already fired" let a struct-payload optional escape
+            // into a capture with nothing said. The cost of that reading was a
+            // SIGABRT reachable from ordinary code.
+            //
+            // `.generic` joins it for the reason its own doc gives — "operations
+            // are permissive, like `unknown`" — and costs nothing: measured, it
+            // adds zero refusals to the corpus.
+            //
+            // The direction is `E0223`'s own: a false refusal is a compile error
+            // the author reads, a missed capture is an abort in production.
+            // Measured at 0 false refusals over the whole suite.
+            .unknown, .generic => true,
             .builtin => |b| b == .string_,
             else => false,
         };
@@ -6119,6 +6185,7 @@ pub const TypeChecker = struct {
                 if (!self.current_is_async) {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
                 }
+                if (is_head and self.await_suspendable) try self.refuseArenaLocalsAcrossAwait(id, ctx_opt);
                 const aw = self.arena.awaitExpr(id);
                 switch (aw.target_kind) {
                     // `wait` / `wait_unscaled` take a Duration LITERAL, validated
@@ -7284,6 +7351,20 @@ pub const TypeChecker = struct {
         // element-typed arg, void return) and `len()` (→ int). Any other §13
         // method is an unimplemented stdlib activation → diagnostic here +
         // fail-loud codegen.
+        // A FIXED ARRAY HAD NO METHOD ARM AT ALL, so `items.len()` fell through to
+        // `.unknown` while `array_dyn`, `map_t` and `set_t` each answer `int`.
+        // Harmless while `.unknown` was permissive; the moment it is refused, this
+        // gap turns an `int` into a refused capture. It is the ONLY false refusal
+        // the conservative rule produced over the suite, and it had nothing to do
+        // with capture — closing it takes that cost to zero.
+        if (recv_t == .array_fixed) {
+            if (std.mem.eql(u8, method_slice, "len")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'len' takes no arguments", .{});
+                }
+                return ResolvedType{ .builtin = .int_ };
+            }
+        }
         if (recv_t == .array_dyn) {
             if (std.mem.eql(u8, method_slice, "push")) {
                 if (mc.args_len != 1) {
@@ -12906,4 +12987,31 @@ test "escape_false_refusal: the conservative rule also refuses two SAFE captures
     );
     defer literal.deinit(gpa);
     try expectAnyCode(literal.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "an optional whose payload is not a builtin is still refused" {
+    const gpa = std.testing.allocator;
+
+    // `.optional` with a NON-BUILTIN payload resolves to `.unknown` — the
+    // `.optional` arm and the `.some_lit` arm both defer, with no diagnostic —
+    // so before the conservative refusal this capture type-checked ENTIRELY
+    // CLEAN, zero diagnostics of any kind, while the optional store is reset at
+    // the rule-body boundary. The cost was a SIGABRT reachable from ordinary
+    // code, which is why an unresolved type is now refused rather than named an
+    // accepted adjacent case.
+    var v = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Spec { hp: int }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let s = Spec { hp: 1 }
+        \\  let maybe = some(s)
+        \\  after(0.5s) {
+        \\    if let got = maybe { }
+        \\  }
+        \\}
+    );
+    defer v.deinit(gpa);
+    try expectAnyCode(v.diagnostics.items, .rule_arena_value_escapes);
 }
