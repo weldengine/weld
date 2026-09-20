@@ -541,6 +541,11 @@ pub const TypeChecker = struct {
     /// an unlabeled `break`/`continue` targets an in-branch loop (legal); 0 means it
     /// would escape the task → E0907. Reset to 0 at branch entry (saved/restored);
     /// incremented by the `for`/`while` statement arms and `synthLoop`.
+    /// Enclosing `for` loops whose ITERATOR is retained across a suspension as a
+    /// handle into a per-body store. Not a count of locals: the iterated value is
+    /// nobody's local, which is exactly why walking `ctx.locals` cannot see it.
+    /// Saved and restored around each `for` body, the `conc_loop_depth` shape.
+    arena_iter_depth: u32 = 0,
     conc_loop_depth: u32 = 0,
     /// Stack of the labels of every labeled loop currently open,
     /// pushed/popped by `synthLoop`. Only the window past `conc_labels_base`
@@ -5405,6 +5410,13 @@ pub const TypeChecker = struct {
                 // fires only on the boundary-crossing ones).
                 self.conc_loop_depth += 1;
                 defer self.conc_loop_depth -= 1;
+                // The ITERATOR is what survives a suspension here, and it is
+                // nobody's local — `x` is the element, typically an `int`.
+                const iter_retained = iteratorRetainedAcrossSuspension(iter_t);
+                if (iter_retained) self.arena_iter_depth += 1;
+                defer if (iter_retained) {
+                    self.arena_iter_depth -= 1;
+                };
                 var i: u32 = 0;
                 while (i < f.body_len) : (i += 1) {
                     const body_stmt: NodeId = @bitCast(self.arena.extra.items[f.body_start + i]);
@@ -5644,6 +5656,13 @@ pub const TypeChecker = struct {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
         const saved_base = self.conc_labels_base;
+        // A timer body is a SNAPSHOT scheduled to run later, not a suspension of
+        // this task, so an enclosing `for`'s iterator is not retained by it. An
+        // `await` here is already E0901; without this reset the rule adds a
+        // second diagnostic to an already-refused program, which is the cascade
+        // `.unknown` exists to avoid. Third of the three boundaries.
+        const saved_iter = self.arena_iter_depth;
+        self.arena_iter_depth = 0;
         self.current_is_async = false;
         self.conc_branch = null;
         self.conc_loop_depth = 0;
@@ -5654,6 +5673,7 @@ pub const TypeChecker = struct {
             self.current_is_async = saved_async;
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
+            self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
         }
         var i: u32 = 0;
@@ -5780,6 +5800,43 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Does the `ForFrame` this loop pushes retain a handle into a per-body store
+    /// across a suspension?
+    ///
+    /// **THE QUESTION IS WHAT THE FRAME RETAINS, NOT WHAT THE AUTHOR NAMED.** The
+    /// interpreter's `ForIter` has five variants: `.range` is fully self-contained,
+    /// `.array` and `.map` carry an INDEX into the rule-arena collection store, and
+    /// `.array_persistent` / `.map_persistent` carry a block pointer that outlives
+    /// any body. Only the first is provably safe from a type alone, so everything
+    /// else is refused.
+    ///
+    /// **ONLY `.array_fixed` IS SEPARABLE, AND THE BOUNDARY WAS MEASURED CELL BY
+    /// CELL.** The resolved type does not carry the storage ZONE, so most iterables
+    /// cannot be told apart from their type alone:
+    ///
+    /// - `[1, 2, 3]` and a local bound to one resolve `.array_fixed`, and NO
+    ///   resource path produces that type — a `resource F { arr: int[3] }` field is
+    ///   not a collection field at all and its read is `undefined_symbol`. So
+    ///   `.array_fixed` is unambiguously rule-arena, and refusing it costs zero.
+    /// - `.array_dyn` is AMBIGUOUS: a resource `int[]` resolves there, and so does
+    ///   `let xs: int[] = [1, 2]`, a rule-arena literal given a slice type.
+    /// - `.map_t` is AMBIGUOUS the same way: a resource `[K: V]` and a local
+    ///   `let m = [1: 10]` are one type.
+    /// - `.range` is self-contained at runtime (`ForIter.range` holds two integers
+    ///   and a flag), so it is safe whatever its provenance.
+    ///
+    /// Separating the two ambiguous families needs the iterable's PROVENANCE, which
+    /// is a structural property of the expression and not of its type — and a
+    /// memory-safety verdict resting on a structural read is what this rule's
+    /// sibling refused. So this covers the half that is decidable from a type and
+    /// leaves the other half to the milestone entry that gives `ResolvedType` a
+    /// zone; refusing the ambiguous families instead would cost the ability to
+    /// iterate ANY resource collection inside an async rule, which is a capability
+    /// and not a false refusal.
+    fn iteratorRetainedAcrossSuspension(t: ResolvedType) bool {
+        return t == .array_fixed;
+    }
+
     fn isRuleArenaType(t: ResolvedType) bool {
         return switch (t) {
             .array_fixed, .array_dyn, .map_t, .set_t => true,
@@ -5810,6 +5867,13 @@ pub const TypeChecker = struct {
     fn checkConcBranchStmt(self: *TypeChecker, ctx: *RuleCtx, stmt: NodeId, kind: ConcBranchKind) TypeError!void {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
+        // A BRANCH BODY RUNS ON A CHILD TASK WITH ITS OWN FRAME STACK, so an
+        // enclosing `for`'s iterator is not retained by a suspension inside it.
+        // Measured: without this reset the rule fires on `for x in [..] { branch
+        // { await … } }`, a false refusal. Reset for the same reason and at the
+        // same three boundaries as `conc_loop_depth` beside it.
+        const saved_iter = self.arena_iter_depth;
+        self.arena_iter_depth = 0;
         const saved_base = self.conc_labels_base;
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
@@ -5824,6 +5888,7 @@ pub const TypeChecker = struct {
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
+            self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
         }
         try self.checkStmt(ctx, stmt);
@@ -5834,6 +5899,13 @@ pub const TypeChecker = struct {
     fn checkConcBodyRun(self: *TypeChecker, ctx: *RuleCtx, start: u32, len: u32, kind: ConcBranchKind) TypeError!void {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
+        // A BRANCH BODY RUNS ON A CHILD TASK WITH ITS OWN FRAME STACK, so an
+        // enclosing `for`'s iterator is not retained by a suspension inside it.
+        // Measured: without this reset the rule fires on `for x in [..] { branch
+        // { await … } }`, a false refusal. Reset for the same reason and at the
+        // same three boundaries as `conc_loop_depth` beside it.
+        const saved_iter = self.arena_iter_depth;
+        self.arena_iter_depth = 0;
         const saved_base = self.conc_labels_base;
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
@@ -5848,6 +5920,7 @@ pub const TypeChecker = struct {
             self.closeEscapeWindow(esc);
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
+            self.arena_iter_depth = saved_iter;
             self.conc_labels_base = saved_base;
         }
         var i: u32 = 0;
@@ -6185,7 +6258,22 @@ pub const TypeChecker = struct {
                 if (!self.current_is_async) {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
                 }
-                if (is_head and self.await_suspendable) try self.refuseArenaLocalsAcrossAwait(id, ctx_opt);
+                if (is_head and self.await_suspendable) {
+                    try self.refuseArenaLocalsAcrossAwait(id, ctx_opt);
+                    // NAMED ON THE ITERATION AND NOT ON A VARIABLE. Saying "'x'
+                    // lives in the rule body's arena" would be false: `x` is the
+                    // element, an `int` here. What is retained is the loop's
+                    // iterator, which the author never named.
+                    if (self.arena_iter_depth != 0) {
+                        try self.emit(
+                            .rule_arena_value_escapes,
+                            .error_,
+                            self.arena.exprSpan(id),
+                            "this `await` suspends inside a `for` whose iterator is retained across the suspension; the iterated value lives in the rule body's arena, and those stores are reset by any other rule body that runs meanwhile",
+                            .{},
+                        );
+                    }
+                }
                 const aw = self.arena.awaitExpr(id);
                 switch (aw.target_kind) {
                     // `wait` / `wait_unscaled` take a Duration LITERAL, validated

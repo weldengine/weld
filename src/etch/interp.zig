@@ -8878,7 +8878,7 @@ test "resource string[]/int[] pop demotes strings, returns POD inline, empty yie
     try std.testing.expectEqual(@as(i64, 10), last_num);
 }
 
-test "resource string[] iterated by an async for-in across a suspend" {
+test "resource int[] iterated by an async for-in across a suspend" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -16030,4 +16030,138 @@ test "a POD value crossing an await is accepted, neighbour and all" {
     var got: i64 = 0;
     @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
     try std.testing.expectEqual(@as(i64, 20), got);
+}
+
+test "a for-loop over a rule-arena value is refused when its body suspends" {
+    const gpa = std.testing.allocator;
+
+    // THE ITERATED VALUE IS NOBODY'S LOCAL. `x` is the element — an `int` — so a
+    // rule walking the named locals sees nothing to refuse, while the `ForFrame`
+    // retains a handle into the rule-arena collection store across the
+    // suspension. `noise` resets that store in between.
+    //
+    // MEASURED before the refusal landed: this program parses clean, type-checks
+    // clean — zero diagnostics of any kind — and then reports ONE runtime error,
+    // `forAdvance` bounds-checking the handle and failing loud rather than
+    // dereferencing a reset store. Loud, and still a program the contract says
+    // must not compile.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    for x in [10, 20, 30] {
+        \\      get_mut(S).got = get(S).got + x
+        \\      await wait(0.016s)
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "the iterator refusal covers only what a type can decide, and this pins the rest" {
+    const gpa = std.testing.allocator;
+
+    // A NAMED local of an ambiguous type IS covered — by the sibling rule, not by
+    // this one. `xs` is `.array_dyn` and `m` is `.map_t`, both of which
+    // `isRuleArenaType` answers true for, so walking the locals catches them. The
+    // iterator rule only has to reach what is nobody's local.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let xs: int[] = [1, 2]
+        \\  for x in xs {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+
+    // NOT COVERED, MEASURED AND PINNED RATHER THAN LEFT SILENT. An UNNAMED map
+    // literal is nobody's local, so the sibling rule cannot see it, and its
+    // resolved type `.map_t` is the one a resource `[K: V]` also produces — so this
+    // rule cannot separate it either. Refusing `.map_t` would remove the ability to
+    // iterate a resource map inside an async rule, a capability rather than a false
+    // refusal, and separating the two needs the iterable's provenance.
+    //
+    // Asserted as ZERO so the day `ResolvedType` carries the storage zone, this
+    // test fails and names exactly what to tighten.
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa,
+        \\resource S { done: bool = false }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  for k, v in [1: 10] {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a for-loop over a range is accepted though its body suspends" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // THE GREEN TWIN, and it keeps the neighbour. `ForIter.range` is fully
+    // self-contained — two integers and a flag, no store handle — so the same
+    // loop shape, suspending in the same place with the same rule resetting the
+    // stores underneath, type-checks clean AND computes the right answer.
+    // Without it, a rule refusing every suspending `for` would pass the sibling
+    // above: the refusal would then be aimed at the suspension rather than at
+    // the storage.
+    const source =
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    for x in 1..4 {
+        \\      get_mut(S).got = get(S).got + x
+        \\      await wait(0.016s)
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa, source, .rule_arena_value_escapes));
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 10);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const sid = world.registry.idOf("S").?;
+    const buf = world.resources.getResource(sid).?;
+    const gf = world.registry.findField(sid, "got").?;
+    var got: i64 = 0;
+    @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 6), got);
 }
