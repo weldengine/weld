@@ -16165,3 +16165,84 @@ test "a for-loop over a range is accepted though its body suspends" {
     @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
     try std.testing.expectEqual(@as(i64, 6), got);
 }
+
+test "a sync suspends the parent, so an arena value in scope is refused" {
+    const gpa = std.testing.allocator;
+
+    // NO `await` APPEARS IN THE PARENT'S OWN STATEMENTS. `beginRaceSync` parks the
+    // parent on `children_all`, so `xs` is exposed to the stores `noise` resets
+    // during the suspension exactly as it would be across an await — which is why
+    // arming the rule on the `await` node caught two of the three suspension
+    // sources and read as complete.
+    //
+    // The neighbouring synchronous rule is in the program for the same reason as
+    // in its siblings: it is what makes the refusal non-arbitrary.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let xs = [1, 2, 3]
+        \\  sync {
+        \\    { await wait(0.016s) }
+        \\  }
+        \\  get_mut(S).n = xs[0]
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).k = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a race inside a for-over-arena is refused, the loop variant" {
+    const gpa = std.testing.allocator;
+
+    // The `ForFrame` is retained across the race's suspension exactly as across an
+    // await's, and again with no `await` in the parent's own statements. The
+    // question is asked BEFORE the branch loop, which resets the iterator depth for
+    // the branch bodies — the depth that matters at this point is the enclosing one.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  for x in [10, 20] {
+        \\    race {
+        \\      { await wait(0.016s) }
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).k = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a sync with no arena value in scope stays accepted" {
+    const gpa = std.testing.allocator;
+
+    // THE GREEN TWIN. The refusal is aimed at rule-arena storage retained across a
+    // suspension, not at suspending: the same `sync`, in the same position, with a
+    // POD local instead of an array, is accepted. Without it, a rule refusing every
+    // `race`/`sync` outright would pass both counter-tests above.
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let count = 3
+        \\  sync {
+        \\    { await wait(0.016s) }
+        \\  }
+        \\  get_mut(S).n = count
+        \\}
+    , .rule_arena_value_escapes));
+}

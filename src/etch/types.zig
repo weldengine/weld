@@ -5577,6 +5577,16 @@ pub const TypeChecker = struct {
                     const ss = self.arena.sync_stmts.items[data];
                     break :blk .{ .branches_start = ss.branches_start, .branches_len = ss.branches_len };
                 };
+                // THE SAME SUSPENSION POINT AS AN `await`, armed on the same
+                // spine property. `beginRaceSync` parks the parent on
+                // `children_any`/`children_all`, so everything the parent retains
+                // is exposed to the stores any other rule body resets meanwhile —
+                // with no `await` in the parent's own statements. Asked BEFORE the
+                // branch loop, which resets `arena_iter_depth` for the branch
+                // bodies: the depth that matters here is the enclosing one.
+                if (self.await_suspendable) {
+                    try self.refuseArenaAcrossSuspension(self.arena.stmtSpan(stmt_id), ctx, if (kind == .race_stmt) "race" else "sync");
+                }
                 const branch_kind: ConcBranchKind = if (kind == .race_stmt) .race else .sync;
                 var i: u32 = 0;
                 while (i < range.branches_len) : (i += 1) {
@@ -5752,7 +5762,29 @@ pub const TypeChecker = struct {
     /// value reaching a capture through one of those is NOT refused. That is not
     /// an omission to repair here: the type is the only thing this predicate
     /// sees, and those two variants are the statement that the type is unknown.
-    /// Refuse every rule-arena local IN SCOPE at a suspending `await`.
+    /// Refuse every rule-arena value the parent retains across a SUSPENSION
+    /// POINT — the named locals, and the iterator of any enclosing `for`.
+    ///
+    /// **ARMED ON THE PROPERTY, NOT ON A KEYWORD, and the set was enumerated at
+    /// the interpreter.** Every origination of a parent suspension is a
+    /// `return .suspended` there: `stepBodyStmt`'s three `await` target arms
+    /// (`.task_done`, `.wait`/`.wait_unscaled`, the two event forms) and
+    /// `beginRaceSync`, which parks the parent on `children_any`/`children_all`.
+    /// `driveLoop`'s seven are that verdict propagating upward, not new sources,
+    /// and `branch`/`spawn` create DETACHED children so the parent runs on.
+    ///
+    /// So `race` and `sync` suspend with no `await` anywhere in the parent's own
+    /// statements. Arming on the `await` node caught two of the three and read as
+    /// complete, which is the unit error of the gate before this one moved one
+    /// level up: there the walked SET was the named locals instead of what the
+    /// frame retains; here the arming set was one keyword instead of every point
+    /// that suspends.
+    ///
+    /// `race`/`sync` suspend CONDITIONALLY — `beginRaceSync` returns `.advanced`
+    /// when no branch is admitted — and admission is a runtime guard, so the
+    /// refusal is conservative by necessity rather than by choice.
+    ///
+    /// Refuse every rule-arena local IN SCOPE at that point.
     ///
     /// **This fills `EscapeSite.async_frame`, which was declared and never
     /// produced.** `etch-memory-model.md` names five snapshot sites — a stored
@@ -5780,7 +5812,19 @@ pub const TypeChecker = struct {
     /// The order is SORTED and not the map's: diagnostics are never sorted
     /// downstream, so emission order is the order a reader sees, and a hash map's
     /// iteration depends on its insertion and growth history.
-    fn refuseArenaLocalsAcrossAwait(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!void {
+    fn refuseArenaAcrossSuspension(self: *TypeChecker, span: SourceSpan, ctx_opt: ?*RuleCtx, construct: []const u8) TypeError!void {
+        // THE ITERATOR HALF, first because it names no variable: saying "'x' lives
+        // in the arena" would be false, `x` being the element. What is retained is
+        // the loop's iterator, which the author never named.
+        if (self.arena_iter_depth != 0) {
+            try self.emit(
+                .rule_arena_value_escapes,
+                .error_,
+                span,
+                "this `{s}` suspends inside a `for` whose iterator is retained across the suspension; the iterated value lives in the rule body's arena, and those stores are reset by any other rule body that runs meanwhile",
+                .{construct},
+            );
+        }
         const ctx = ctx_opt orelse return;
         var offenders: std.ArrayListUnmanaged(StringId) = .empty;
         defer offenders.deinit(self.gpa);
@@ -5793,7 +5837,7 @@ pub const TypeChecker = struct {
             try self.emit(
                 .rule_arena_value_escapes,
                 .error_,
-                self.arena.exprSpan(id),
+                span,
                 "'{s}' lives in the rule body's arena and cannot be held across {s}, which outlives it",
                 .{ self.arena.strings.slice(name_id), EscapeSite.async_frame.label() },
             );
@@ -6258,21 +6302,13 @@ pub const TypeChecker = struct {
                 if (!self.current_is_async) {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
                 }
+                // `is_head` is the await-specific half — E0904's requirement that
+                // the await be the statement's full RHS. `await_suspendable` is
+                // NOT await-specific: its own doc calls it the async driver's
+                // frame-driven spine, a property of the POSITION, which is why the
+                // race/sync arm reuses it unchanged.
                 if (is_head and self.await_suspendable) {
-                    try self.refuseArenaLocalsAcrossAwait(id, ctx_opt);
-                    // NAMED ON THE ITERATION AND NOT ON A VARIABLE. Saying "'x'
-                    // lives in the rule body's arena" would be false: `x` is the
-                    // element, an `int` here. What is retained is the loop's
-                    // iterator, which the author never named.
-                    if (self.arena_iter_depth != 0) {
-                        try self.emit(
-                            .rule_arena_value_escapes,
-                            .error_,
-                            self.arena.exprSpan(id),
-                            "this `await` suspends inside a `for` whose iterator is retained across the suspension; the iterated value lives in the rule body's arena, and those stores are reset by any other rule body that runs meanwhile",
-                            .{},
-                        );
-                    }
+                    try self.refuseArenaAcrossSuspension(self.arena.exprSpan(id), ctx_opt, "await");
                 }
                 const aw = self.arena.awaitExpr(id);
                 switch (aw.target_kind) {
