@@ -9,9 +9,8 @@
 //! the state it just silently fixed, with no diagnostic anywhere. Installing
 //! happens once per thread, at creation, and once per process, at entry
 //! (`foundation/math/float_env.zig`, which states the RULE and deliberately
-//! enumerates nothing — this sentence used to say "Tier 0's job" and "its three
-//! call sites", and both were measured false: the set is ten and three of them
-//! are inside modules, a thread born in a module being a thread all the same).
+//! enumerates nothing: the site set is TEN and three of them are inside modules,
+//! a thread born in a module being a thread all the same).
 //!
 //! **Where the entry point is.** `PhysicsWorld.init` asserts the environment once,
 //! where a world begins, and the acceptance and determinism harnesses do the same

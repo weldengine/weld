@@ -1,14 +1,15 @@
-//! M0.9 vertical slice — simulation, scene init, and input (pure, no GPU).
+//! The vertical slice's simulation, scene init and input — pure, no GPU.
 //!
-//! The render-free core of the slice, shared by the host (`main.zig`) and the
-//! integration test. It boots an ECS `World` with the cooked gameplay
-//! components/rules (Option A host-spawn — brief Blockers #1), lays the 100
-//! entities out on a grid with gentle per-entity velocities, ticks the five
-//! cooked Etch rules at a fixed 60 Hz, and reads back live `Position` for the
-//! renderer. Input is the M0.3 raw path: a host pumps window events into an
-//! `InputRawState`; `Control.applyEdge` toggles a pause flag on the SPACE
-//! rising edge, and `stepIfRunning` gates the simulation on it — an observable
-//! effect on the sim driven by one input action.
+//! The render-free core, shared by the host (`main.zig`) and the integration
+//! test. It boots an ECS `World` with the cooked gameplay components and rules,
+//! the HOST doing the spawning, lays the 100 entities out on a grid with gentle
+//! per-entity velocities, ticks the five cooked Etch rules at a fixed 60 Hz,
+//! and reads live `Position` back for the renderer.
+//!
+//! Input takes the raw path: the host pumps window events into an
+//! `InputRawState`, `Control.applyEdge` toggles a pause flag on the SPACE
+//! rising edge, and `stepIfRunning` gates the simulation on it — one input
+//! action with an observable effect on the sim.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -19,11 +20,11 @@ const EntityId = weld_core.ecs.entity.EntityId;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const window = weld_core.platform.window;
 
-/// The slice spawns exactly 100 entities (C0.8 / brief E3).
+/// The slice spawns exactly 100 entities (C0.8).
 pub const entity_count: u32 = 100;
 /// Fixed 60 Hz timestep.
 pub const fixed_dt: f32 = 1.0 / 60.0;
-/// Default tick budget (≥ 120 per the brief's integration test).
+/// Default tick budget; the integration test asserts at least 120.
 pub const default_ticks: u32 = 120;
 
 /// Grid layout: 10 × 10, world-unit spacing between cells.
@@ -31,14 +32,15 @@ const grid_cols: u32 = 10;
 const grid_spacing: f32 = 2.0;
 
 /// Authored cross-file Etch content, embedded so the integration test can run
-/// `validateProject` over it WITHOUT loading/instantiating it (E2-B / E2-A).
-/// Never spawned — runtime scene instantiation is Phase 1.
+/// `validateProject` over it WITHOUT loading or instantiating it. Never
+/// spawned: runtime scene instantiation belongs to a later milestone.
 pub const scene_etch = @embedFile("world.scene.etch");
 pub const mob_prefab_etch = @embedFile("mob.prefab.etch");
 pub const elite_prefab_etch = @embedFile("elite.prefab.etch");
 
-/// The slice's single source asset (raw PNG bytes), exposed so the integration
-/// test can run the M0.6 import → cook pipeline over it without a disk file.
+/// The slice's single source asset as raw PNG bytes, exposed so the
+/// integration test can run the import → cook pipeline over it with no file on
+/// disk.
 pub const albedo_png = @embedFile("assets/slice_albedo.png");
 
 /// The component-id set every slice entity carries. Valid only after
@@ -120,11 +122,10 @@ pub const Control = struct {
 
     /// Toggle pause on a SPACE key-down edge (non-repeat). Reacts to the
     /// event's NORMALIZED `KeyCode` (`.code`) rather than the scancode-indexed
-    /// `InputRawState` keyboard array: in Phase 0 the array is keyed by raw OS
-    /// scancode (`applyEvent` uses `scancode & 0xFF`), and logical-key lookup
-    /// is the Tier-1 action mapping (Phase 1). The host still pumps every event
-    /// into `InputRawState` (the M0.3 resource pipeline); this reads the same
-    /// event stream by logical key.
+    /// `InputRawState` keyboard array: that array is keyed by raw OS scancode
+    /// (`applyEvent` uses `scancode & 0xFF`), and logical-key lookup belongs to
+    /// the Tier 1 action mapping. The host still pumps every event into
+    /// `InputRawState`; this reads the same stream by logical key.
     pub fn applyEvent(self: *Control, event: window.Event) void {
         switch (event) {
             .key_down => |ev| {
@@ -134,7 +135,7 @@ pub const Control = struct {
         }
     }
 
-    /// Step the simulation unless paused — the observable input effect.
+    /// Step the simulation unless paused — the observable effect of the input.
     pub fn stepIfRunning(self: *const Control, world: *World, gpa: std.mem.Allocator) void {
         if (!self.paused) step(world, gpa);
     }

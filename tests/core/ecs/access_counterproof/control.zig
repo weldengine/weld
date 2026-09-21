@@ -24,12 +24,10 @@ fn body(ctx: ecs.SystemContextOf(&spec)) anyerror!void {
     _ = ctx.view.changedTick(ecs.Velocity, e);
 }
 
-/// Registration is what forces the body to be analysed, and it is written as a
-/// function that is never called: `SystemDescriptor.of` is private now — the
-/// scheduler refuses to accept a `run` and an `accesses` supplied separately —
-/// so the only way in is the generic entry, which needs a live world this
-/// fixture has no reason to build. Without a reference Zig analyses neither the
-/// trampoline nor the body, and the file would compile by not looking.
+/// Never called, and referenced so Zig analyses it at all: without a reference
+/// neither the trampoline nor the body is analysed and the file compiles by not
+/// looking. The generic entry is the only way in — `SystemDescriptor.of` is
+/// private — and it takes a live world this fixture has no reason to build.
 fn wire(sched: *ecs.SystemScheduler, gpa: std.mem.Allocator, world: *ecs.World) !void {
     try sched.registerSystem(gpa, world, .update, "control", &spec, body);
 }

@@ -982,8 +982,8 @@ fn writeReport(
             \\
             \\**Bracket over {d} compared cell(s), {d} excluded for a refused wave: {s}**
             \\
-            \\| fraction | churn/s | carriers | archetypes T/S | chunks/ranges T first-max / S | first T/S (ns) | first allocs T/S | steady T/S (ns) | ratio T/S |
-            \\|---|---|---|---|---|---|---|---|---|
+            \\| fraction | churn/s | carriers | archetypes T/S | chunks/ranges T first-max / S | first T/S (ns) | first allocs T/S | steady T/S (ns) | steady allocs T/S | ratio T/S |
+            \\|---|---|---|---|---|---|---|---|---|---|
             \\
         , .{
             c.label,
@@ -1007,7 +1007,7 @@ fn writeReport(
                     // A refused wave has no steady figure, and printing a zero
                     // there would read as "instant" rather than "the job system
                     // declined the wave".
-                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | **DISPATCH FAILED** at {d} chunks | n/a |\n", .{
+                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | **DISPATCH FAILED** at {d} chunks | n/a | n/a |\n", .{
                         f,
                         ch,
                         p.table.cell.carriers,
@@ -1024,7 +1024,7 @@ fn writeReport(
                         @max(p.table.cell.overflow_chunks, p.sparse.cell.overflow_chunks),
                     });
                 } else {
-                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | {d}/{d} | {d:.3} |\n", .{
+                    try buf.print(gpa, "| {d:.3} | {d} | {d} | {d}/{d} | {d}-{d} / {d}-{d} | {d}/{d} | {d}/{d} | {d}/{d} | {d}/{d} | {d:.3} |\n", .{
                         f,
                         ch,
                         p.table.cell.carriers,
@@ -1040,6 +1040,8 @@ fn writeReport(
                         p.sparse.cell.first_allocs,
                         p.table.cell.steady_ns,
                         p.sparse.cell.steady_ns,
+                        p.table.cell.steady_allocs,
+                        p.sparse.cell.steady_allocs,
                         ratio(p.table.cell.steady_ns, p.sparse.cell.steady_ns),
                     });
                 }

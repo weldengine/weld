@@ -1,17 +1,17 @@
-//! Counter-proof 4 — promoting a read declaration to a write one by rebuilding
-//! a view over the pointer the restricted one carries.
+//! Promoting a read declaration to a write one by rebuilding a view over the
+//! pointer the restricted one carries.
 //!
 //! MUST NOT COMPILE. The body is declared `reads(Velocity)` and never calls
 //! `getMut` on its own view — it builds a SECOND view, declared
 //! `writes(Velocity)`, over the world pointer the first one transports, and
 //! writes through that.
 //!
-//! **On `main` this compiled.** `world_erased` was `*anyopaque`, the same type
-//! for every declared set, so `fromErased` accepted any view's pointer: no
-//! cast, no builtin, no diagnostic. The file header claimed the escape cost an
-//! explicit `@ptrCast` "a deliberate and greppable act", which was true of
-//! recovering a `*World` and false of the bypass that is actually useful. The
-//! refusal now lives in `fromErased`'s signature rather than in a check.
+//! **WITH `world_erased` TYPED `*anyopaque` THIS COMPILES.** That is the same
+//! type for every declared set, so `fromErased` accepts any view's pointer — no
+//! cast, no builtin, no diagnostic — while the header claims the escape costs
+//! an explicit `@ptrCast`, "a deliberate and greppable act": true of recovering
+//! a `*World` and false of the bypass that is actually useful. The refusal
+//! lives in `fromErased`'s signature and not in a check.
 //!
 //! The diagnostic is the COMPILER's and not the view's marker: nothing here
 //! reaches an access test, because the type error fires first — which is the
@@ -37,12 +37,10 @@ fn body(ctx: ecs.SystemContextOf(&read_spec)) anyerror!void {
     _ = promoted.getMut(ecs.Velocity, e);
 }
 
-/// Registration is what forces the body to be analysed, and it is written as a
-/// function that is never called: `SystemDescriptor.of` is private now — the
-/// scheduler refuses to accept a `run` and an `accesses` supplied separately —
-/// so the only way in is the generic entry, which needs a live world this
-/// fixture has no reason to build. Without a reference Zig analyses neither the
-/// trampoline nor the body, and the file would compile by not looking.
+/// Never called, and referenced so Zig analyses it at all: without a reference
+/// neither the trampoline nor the body is analysed and the file compiles by not
+/// looking. The generic entry is the only way in — `SystemDescriptor.of` is
+/// private — and it takes a live world this fixture has no reason to build.
 fn wire(sched: *ecs.SystemScheduler, gpa: std.mem.Allocator, world: *ecs.World) !void {
     try sched.registerSystem(gpa, world, .update, "view_promotion", &read_spec, body);
 }

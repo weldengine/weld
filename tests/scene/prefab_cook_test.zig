@@ -1,4 +1,4 @@
-//! M1.0.6 E2 — `.prefab.etch` → `cookPrefab` → `.prefab.bin` writer → accessor.
+//! `.prefab.etch` → `cookPrefab` → `.prefab.bin` writer → accessor.
 //! A prefab is a mini-scene: it cooks to the identical `.scene.bin` format, so it
 //! round-trips through the same `writer` + `accessor`. Covers the standalone form
 //! and the `of` variant (base inherited from its cooked `.prefab.bin`, field-merge
@@ -143,7 +143,7 @@ test "prefab re-cook is byte-identical" {
 }
 
 test "cookPrefab rejects a scene source" {
-    // `extends` is COOKED as of M1.0.6 E5 (see tests/scene/extensions_test.zig);
+    // `extends` IS cooked (see `tests/scene/extensions_test.zig`);
     // here we only assert a `.prefab.etch` holding a `scene` is rejected.
     const gpa = std.testing.allocator;
     const scene_src =

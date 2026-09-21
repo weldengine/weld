@@ -1203,10 +1203,8 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
             .event_decl => {
                 const decl = ast.event_decls.items[data];
                 // `EventBus.register(self, gpa, comptime T, cap, lifetime)` —
-                // `gpa` is the FIRST runtime arg (the queue's ring buffer is
-                // heap-allocated). The producer tranche emitted it without `gpa`
-                // (never Sema-compiled — events had no codegen differential);
-                // surfaced + fixed by the observer drain's `build-obj` check.
+                // `gpa` is the FIRST runtime arg, the queue's ring buffer being
+                // heap-allocated.
                 try w.printLine("try world.event_bus.register(gpa, {s}, 256, .tick);", .{ast.strings.slice(decl.name)});
             },
             else => {},

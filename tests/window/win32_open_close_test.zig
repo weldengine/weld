@@ -1,5 +1,5 @@
-//! Step (d) of the S2 brief: open + close a Win32 window 50× without
-//! leaking. Runs unconditionally on the Windows leg of the CI matrix and
+//! Open and close a Win32 window 50× without leaking. Runs unconditionally on
+//! the Windows leg of the CI matrix and
 //! is skipped (no-op success) on every other host so `zig build test` on
 //! macOS / Linux dev machines stays green.
 //!

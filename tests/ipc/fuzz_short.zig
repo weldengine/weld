@@ -1,13 +1,11 @@
-//! S6 short fuzz harness (60 s spec'd; 3 s in CI). Runs the
+//! The short fuzz harness — 60 s as specified, 3 s in CI. Runs the
 //! framing + traffic fuzz on a single in-process IPC socket pair
 //! (AF_UNIX on POSIX, Win32 named pipe on Windows). Writer thread
 //! emits a mix of valid frames and deliberately-corrupted byte
 //! streams, a reader thread on the matching socket consumes
 //! through `IpcConnection.recvFrame`. Valid frames must round-
 //! trip; corrupted frames must surface as a framing-layer error
-//! (no silent drops, no segfaults, no leaks). Replaces the
-//! historic "60-second smoke fuzz" the brief calls for under
-//! `Acceptance criteria > Tests`.
+//! (no silent drops, no segfaults, no leaks).
 //!
 //! Runs unconditionally inside `zig build test-ipc` to keep the
 //! framework warm; the manual-run 1 h variant lives in
@@ -142,10 +140,9 @@ test "60s framing + traffic fuzz produces zero crashes and zero leaks" {
     var ctx = FuzzCtx{
         .server_sock = &server,
         .client_sock = &client,
-        // 3 s in CI to keep `zig build test` snappy. The brief's
-        // 60 s "fuzz_short" gate is exercised by a manual run; the
-        // 1 h variant lives in `tests/ipc/fuzz_1h.zig`. Both
-        // archived to `validation/s6-go-nogo.md`.
+        // 3 s in CI to keep `zig build test` snappy; the specified 60 s is a
+        // manual run, and the 1 h variant lives in `tests/ipc/fuzz_1h.zig`.
+        // Both are archived to `validation/s6-go-nogo.md`.
         .duration_ms = 3 * 1000,
     };
     const reader = try std.Thread.spawn(.{}, readerLoop, .{ &ctx, gpa });

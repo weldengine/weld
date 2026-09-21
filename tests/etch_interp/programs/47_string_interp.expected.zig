@@ -2,7 +2,7 @@ const driver = @import("diff_runner");
 
 /// Diff-runner fixture: 1 tick. `run` assigns `Acc.out = msg.len()` where
 /// `msg = "hi {who}, n={n + 1}!"` and `Acc.out2 = "{1.5}|{true}|\{x}".len()`
-/// — exercises the M0.8 sub-slice-C tranche-1c interpolation surface: a
+/// — exercises the interpolation surface: a
 /// string-typed embedded ident (`{s}`), an embedded arithmetic expression
 /// (`{d}` on int), a float literal (`{d}` on f64, `@as`-pinned in the
 /// codegen), a bool (true/false text), and the `\{` escape (a literal `{x}`

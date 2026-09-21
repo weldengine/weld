@@ -1,12 +1,8 @@
-//! Render Graph topological sort tests — Phase 0 / M0.4.
+//! Render-graph topological sort: the order on a known DAG, the refusal on a
+//! cycle, and the WAW pair that must NOT read as one.
 //!
-//! Covers brief §Acceptance criteria > Tests:
-//! - `graph produces correct topological order on known DAG`
-//! - `graph detects cycle and returns error`
-//!
-//! These tests are already present inline in `graph.zig` but the brief
-//! requires a dedicated file — we duplicate them here to match the
-//! check-list exactly.
+//! `graph.zig` carries the first two inline as well; they are repeated here so
+//! the graph's ordering contract has a dedicated file.
 
 const std = @import("std");
 const render = @import("weld_render");
@@ -116,11 +112,11 @@ test "graph detects cycle and returns error" {
 }
 
 test "graph WAW two writers same resource: ordered by insertion, not a cycle" {
-    // M0.5 item 7 (latent bug repro): two passes writing the SAME resource
-    // with no RAW relation between them must be serialized by insertion order
-    // (lower index first), NOT reported as error.RenderGraphCycle. Guards the
-    // WAW-symmetry bug in `passDependsOn` (edges in both directions → false
-    // cycle). RED before the fix, green after.
+    // TWO PASSES WRITING THE SAME RESOURCE with no read-after-write relation
+    // between them must be serialized by insertion order, lower index first,
+    // and NOT reported as `error.RenderGraphCycle`. `passDependsOn` placing an
+    // edge in both directions is what manufactures that false cycle. RED before
+    // the fix, green after.
     var g = Graph.init(std.testing.allocator);
     defer g.deinit();
 

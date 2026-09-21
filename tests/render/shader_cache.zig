@@ -1,15 +1,14 @@
-//! Shader cache tests — Phase 0 / M0.4.
+//! The shader cache.
 //!
-//! Covers brief §Acceptance criteria > Tests:
 //! - `cache hit on unchanged source` — compile, compile again →
 //!   second compilation takes < 5 ms (cache lookup only)
 //! - `cache miss on modified source` — compile, modify 1 byte of the source,
 //!   compile again → effective recompilation
 //! - `cache miss on glslc version change` — simulates a version change
 //!
-//! The inline tests in `cache.zig` cover the hashing invariants. This
-//! file exercises the disk round-trip (lookup + insert + lookup hit) which
-//! does not lend itself to an inline test (requires filesystem cleanup).
+//! `cache.zig`'s inline tests cover the hashing invariants; this file exercises
+//! the DISK round-trip — lookup, insert, lookup hit — which needs filesystem
+//! cleanup and does not lend itself to an inline test.
 
 const std = @import("std");
 const render = @import("weld_render");

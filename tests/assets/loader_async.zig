@@ -1,9 +1,8 @@
-//! M0.6 / E5 — async loader + lifecycle acceptance.
+//! Async loader + lifecycle acceptance.
 //!
-//! Brief §Acceptance ▸ Tests: `test "async load does not block main thread"` —
-//! the main loop ticks while a load is in flight, the load completes, with an
-//! internal 5 s watchdog and clean teardown (S6 hang lesson,
-//! `engine-zig-conventions.md` §13).
+//! The main loop ticks while a load is in flight and the load completes, under
+//! an internal 5 s watchdog with clean teardown (`engine-zig-conventions.md`
+//! §13).
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

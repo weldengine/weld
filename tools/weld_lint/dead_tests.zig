@@ -138,10 +138,12 @@ pub const exclusions = [_]Exclusion{
     .{
         .prefix = "src/etch/zig_codegen/",
         .reason = "the subtree IS elaborated — two live test targets reach `codegen_zig` through " ++
-            "the `weld_etch` module boundary — but the subset the wire-in ADDS does not compile: " ++
-            "`zig_codegen/tests/` and `cache.zig`, where `std.fs.cwd()` was removed at Zig 0.16 " ++
-            "and the replacement takes an `io` parameter these functions do not have, so the " ++
-            "repair changes the codegen cache's public signatures",
+            "the `weld_etch` module boundary — but the subset the wire-in ADDS does not compile, " ++
+            "on TWO Zig 0.16 removals and not one. `std.fs.cwd()` is gone, `std.fs` being a " ++
+            "deprecation shim: `std.Io.Dir.cwd()` replaces it and takes no argument, but every " ++
+            "`Dir` method now takes an `io` these functions do not have, so the repair changes " ++
+            "the codegen cache's public signatures. `Io.Dir` also carries no `realpath`, which " ++
+            "has NO replacement and is the FIRST error elaboration reports",
         .owner = "M1.D.5",
     },
 };
@@ -232,16 +234,21 @@ pub const uncollected = [_]Uncollected{
 /// same table and not a second measurement, which is why the CI layer matters.
 pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // RE-DERIVED FROM THE SUITE, never from the closure. `zig build test --summary all`
-    // reported `2271/2290 tests passed (19 skipped)` on macOS when these values were
-    // last set, and the closure arrives at 2290 independently from the table above.
+    // reported `2360/2379 tests passed (19 skipped)` on macOS when these values were
+    // last set, and the closure arrives at 2379 independently from the table above.
     // Bumping either to match the other is the repair the failure message forbids: it
     // turns two computations of one quantity into arithmetic on itself, and the drift
     // it was built to catch becomes invisible.
     //
+    // The figure was MEASURED THREE TIMES because an earlier reading of it was wrong:
+    // a review subagent had registered a probe of its own into `build.zig`, and the
+    // total climbed 2369 → 2373 → 2375 across successive runs with no test of mine
+    // added. A total that moves while the tree is meant to be still is not a total.
+    //
     // Windows is two lower by the `only_on = .windows` entries above.
     return switch (os) {
-        .windows => 2288,
-        else => 2290,
+        .windows => 2377,
+        else => 2379,
     };
 }
 

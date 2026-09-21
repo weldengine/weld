@@ -1,10 +1,10 @@
-//! M1.0.6 E3 — `instance of` flattening at scene cook. A prefab is cooked to its
+//! `instance of` flattening at scene cook. A prefab is cooked to its
 //! `.prefab.bin`, then a scene that instances it is cooked with a resolver that
 //! hands back those bytes; the instance's entity inherits the prefab's components
 //! and applies the instance's overrides (both forms). Covers: an override-free
 //! instance equals the hand-authored equivalent (same archetype + bytes), both
 //! override forms (`Comp.field = v` and `Comp { field: v }`), N instances loading
-//! into the ECS through the M1.0.5 loader, and the single-entity boundary.
+//! into the ECS through the loader, and the single-entity boundary.
 //!
 //! Components are POD scalar (the cook's only component kind), so fixtures use f32.
 

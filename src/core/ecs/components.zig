@@ -1,23 +1,13 @@
-//! Canonical component definitions — `Transform` and `Velocity` POD `extern struct`.
-//!
-//! Layout:
-//! pos/rot/scale (resp. linear/angular) each on their own 16-byte lane via
-//! field-level `align(16)`. Total sizes are 48 (Transform) and 32 (Velocity)
-//! bytes, both 16-byte aligned — friendly to `@Vector(4, f32)` SIMD and to
-//! the chunk SoA layout (cf. `chunk.zig`). Per `engine-zig-conventions.md`
-//! §16, components are `extern struct` POD, carry no methods, and default
-//! every field. The trailing `_pad*` slots round each lane to 16 bytes.
+//! Canonical component definitions — `Transform` and `Velocity` POD `extern
+//! struct`. Each vector sits on its own 16-byte lane, `_pad*` rounding it out;
+//! sizes are 48 and 32. Changing either breaks `chunk.zig`'s capacity test.
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");
 
-/// Canonical generational entity identifier (`packed struct(u64)`,
-/// `(index, generation)` low-to-high). The 8-byte size assertion below
-/// pins the committed wire layout; the generational halves are an
-/// generational addition that closes slot reuse and
-/// stale-handle detection
-/// (generational indices). See `entity.zig` for the type definition and
-/// the matching `EntityIdentityStore`.
+/// Canonical generational entity identifier (`packed struct(u64)`, `(index,
+/// generation)` low-to-high). Defined in `entity.zig`; the assertion below pins
+/// its 8-byte wire layout.
 pub const EntityId = entity_mod.EntityId;
 
 /// Position, rotation (quaternion), and scale of an entity in world space.
@@ -30,7 +20,7 @@ pub const Transform = extern struct {
 };
 
 /// Linear and angular velocity of an entity (units per second / radians per
-/// second). The ECS bench body integrates `linear` against `Transform.pos`.
+/// second).
 pub const Velocity = extern struct {
     linear: [3]f32 align(16) = .{ 0, 0, 0 },
     _pad0: f32 = 0,
@@ -39,8 +29,6 @@ pub const Velocity = extern struct {
 };
 
 comptime {
-    // Lock the layout assumed by `chunk.zig` and the bench. Any future change
-    // to these sizes/alignments must update the chunk capacity test.
     std.debug.assert(@sizeOf(Transform) == 48);
     std.debug.assert(@alignOf(Transform) == 16);
     std.debug.assert(@sizeOf(Velocity) == 32);

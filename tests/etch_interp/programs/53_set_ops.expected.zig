@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-3bis Set
+/// Diff-runner fixture: 1 tick. Exercises the Set
 /// vertical — the `Set.new`/`Set.from` builtin associated calls plus the
 /// §15.2 method subset, as an insertion-ordered element list in BOTH
 /// backends (the codegen mirrors the interpreter's set store), so element

@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-6 throwing
+/// Diff-runner fixture: 1 tick. Exercises the throwing
 /// closure boundary: `thrown` PROPAGATES through the closure call —
 /// contrary to `returning`, exactly like `callFn` — and lands in the
 /// enclosing catch. Interp: the signal stays set across the closure call;

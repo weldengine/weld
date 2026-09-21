@@ -1,7 +1,7 @@
-//! Dedicated D-S5-etchcook-inproc test (M0.8 E3-D): the consolidated cook
-//! is a LIBRARY (`weld_etch.codegen_zig.consolidate`) consumable in-process
-//! — the `etch_cook` CLI is a thin file-I/O shim over it and the bench
-//! harness calls it directly, with no child process on the timed path.
+//! The consolidated cook is a LIBRARY (`weld_etch.codegen_zig.consolidate`)
+//! consumable in-process: the `etch_cook` CLI is a thin file-I/O shim over it,
+//! and the bench harness calls it directly so no child process sits on the
+//! timed path.
 
 const std = @import("std");
 const weld_etch = @import("weld_etch");

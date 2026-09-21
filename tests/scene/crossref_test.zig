@@ -1,6 +1,6 @@
-//! M1.0.6 E4 — entity→entity cross-references. A component `Entity` field is
+//! Entity→entity cross-references. A component `Entity` field is
 //! written `EntityId.dead` in its SoA column at cook and the reference carried in
-//! the Cross-references Table (by target entity NAME, the D-B by-name form);
+//! the Cross-references Table, by target entity NAME;
 //! the loader patches the slot to the target's runtime handle. Covers: a forward
 //! reference (target declared later — exercises the two-phase cook), an unset
 //! field staying `dead`, a reference to an absent entity rejected at cook
@@ -129,7 +129,7 @@ test "cook rejects a reference to an absent entity" {
     try std.testing.expect(diag.len > 0);
 }
 
-// ─── M1.B / G6 — a cross-ref borne by a SPARSE component ────────────────────
+// A CROSS-REF BORNE BY A SPARSE COMPONENT.
 
 test "a cross-ref resolves into a SPARSE component's row" {
     const gpa = std.testing.allocator;
@@ -155,7 +155,7 @@ test "a cross-ref resolves into a SPARSE component's row" {
 
     // `resolveCrossRefs` writes the resolved handle INTO the component's bytes
     // at the field's offset, and marks it changed — both through the World-level
-    // entries G3 made bimodal, so the write lands in the sparse ROW. This is the
+    // entries, which are bimodal, so the write lands in the sparse ROW. This is the
     // one production path in the loader that MUTATES a component after spawn,
     // and it had no sparse coverage.
     const a_target = std.mem.readInt(u64, world.componentBytes(a, link_id).?[0..8], .little);
@@ -176,7 +176,7 @@ test "a cross-ref resolves into a SPARSE component's row" {
     try std.testing.expectEqual(@as(usize, 2), world.sparse_stores.getConst(link_id).?.len());
 }
 
-// ─── M1.B / G6 — @storage(.sparse) through the ETCH COOK ────────────────────
+// `@storage(.sparse)` THROUGH THE ETCH COOK.
 
 const src_plain =
     \\component Marker { v: i32 = 0 }
@@ -218,9 +218,9 @@ test "@storage(.sparse) changes NOTHING in the cooked bytes" {
     // identity, which is the sentence that lets this milestone leave the frozen
     // codec shut.
     //
-    // This is also the seam the G6 recon found uncovered: every other test here
-    // hand-builds a `CookModel`, so nothing drove the annotation through the
-    // Etch front end.
+    // It is also the one seam nothing else covers: every other test here
+    // hand-builds a `CookModel`, so none of them drives the annotation through
+    // the Etch front end.
     try std.testing.expectEqualSlices(u8, b_plain, b_sparse);
 }
 

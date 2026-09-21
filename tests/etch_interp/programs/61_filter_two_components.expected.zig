@@ -4,9 +4,9 @@ const driver = @import("diff_runner");
 pub const config: driver.Config = .{ .ticks = 2 };
 
 /// Diff-runner fixture: world snapshot at tick 0. Four entities covering the
-/// two-filter quadrants (D-S4-multifilter). The third entity is the
+/// two-filter quadrants . The third entity is the
 /// load-bearing case: it passes the LAST filter (armor == 10) and fails the
-/// FIRST (current != 50) — under the pre-E3-D last-filter-wins overwrite,
+/// FIRST (current != 50) — under a last-filter-wins overwrite,
 /// BOTH backends wrongly incremented it (parity on wrong semantics), so only
 /// this hand-written expected state exposes the bug.
 pub const initial: driver.WorldSpec = .{

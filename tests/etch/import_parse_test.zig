@@ -1,12 +1,12 @@
-//! M1.0.7 / E3 — `import` directive parsing. `import` graduated from
-//! `non_s3_keywords` to `kw_import` (E1) with an `ImportDecl` AST node (E2);
-//! this exercises `parseImportDecl` over the four grammar forms (§5.2):
+//! `import` directive parsing — `parseImportDecl` over the four grammar forms
+//! of §5.2:
 //!   import a.b              (whole module)
 //!   import a.b { X, Y }     (selective)
 //!   import a.b as m         (whole module, aliased)
 //!   import a.b { X as Y }   (selective, per-item alias)
-//! plus D-D (items accept IDENT and TYPE_IDENT) and recovery (a malformed
-//! import resyncs at the next top-level keyword — no UnsupportedConstructInS3).
+//! plus the rule that items accept IDENT as well as TYPE_IDENT, and recovery: a
+//! malformed import resyncs at the next top-level keyword, and never reports
+//! `UnsupportedConstructInS3`.
 
 const std = @import("std");
 const etch = @import("weld_etch");
@@ -79,7 +79,7 @@ test "all four import forms parse" {
 
 test "import accepts TYPE_IDENT and IDENT items" {
     const gpa = std.testing.allocator;
-    // `Health` is a TYPE_IDENT, `gravity` is an IDENT — both legal items (D-D).
+    // `Health` is a TYPE_IDENT, `gravity` an IDENT — both are legal items.
     var result = try etch.parseSource(gpa, "import a.b { Health, gravity }");
     defer result.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);

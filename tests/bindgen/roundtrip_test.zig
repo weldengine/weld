@@ -1,22 +1,34 @@
-//! M0.2 / E5 — bindgen roundtrip gate.
-//!
-//! Non-negotiable mechanical criterion of the E5 brief: regenerate
-//! the bindings and verify `git diff --quiet` returns 0 on
-//! `bindings/generated/` + `src/core/platform/`. Any bit-for-bit
-//! divergence fails the test (and therefore the merge in CI).
-//!
-//! Implementation: invoke `zig build bindgen-verify` in a
-//! subprocess. The `bindgen-verify` step regenerates then runs
-//! `git diff --quiet` (cf. `build.zig`). If the subprocess exits
-//! with a non-zero code, either the regeneration diverged, or
-//! the git tree was not clean (uncommitted local changes) — in
-//! both cases the test blocks.
-
+//! Bindgen round-trip gate: a regen must produce no diff against the committed
+//! output. A non-zero exit has three causes — a real diff, an unclean tree, or a
+//! `git` that cannot run — and the third must not be reported as the first.
 const std = @import("std");
+
+/// Does `git` answer at all? `git --version` and not a diff, because it shares
+/// every failure mode that is ABOUT THE TOOL and none about the tree — a control
+/// able to fail for the reason under test proves nothing.
+fn gitAnswers(gpa: std.mem.Allocator, io: std.Io) bool {
+    const r = std.process.run(gpa, io, .{ .argv = &.{ "git", "--version" } }) catch return false;
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    return switch (r.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
 
 test "regen Vulkan + Wayland produces no diff vs committed (bindgen-verify gate)" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+
+    if (!gitAnswers(gpa, io)) {
+        std.debug.print(
+            "roundtrip_test: `git --version` does not answer — the bindgen gate " ++
+                "cannot be evaluated, and NO drift verdict is implied. On macOS this " ++
+                "is usually an unaccepted Xcode licence (`sudo xcodebuild -license`).\n",
+            .{},
+        );
+        return error.GitUnavailable;
+    }
 
     // Resolve the project root by climbing from the test's cwd.
     // `zig build test` runs tests from the project root.
@@ -42,6 +54,14 @@ test "regen Vulkan + Wayland produces no diff vs committed (bindgen-verify gate)
     switch (result.term) {
         .exited => |code| {
             if (code != 0) {
+                if (!gitAnswers(gpa, io)) {
+                    std.debug.print(
+                        "roundtrip_test: `git` stopped answering during the run — " ++
+                            "no drift verdict is implied.\n",
+                        .{},
+                    );
+                    return error.GitUnavailable;
+                }
                 std.debug.print(
                     "roundtrip_test: bindgen-verify exited with code {d}.\n" ++
                         "stdout:\n{s}\nstderr:\n{s}\n",

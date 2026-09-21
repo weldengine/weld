@@ -1,20 +1,19 @@
-//! M0.9 vertical slice — forward renderer (E4).
+//! The vertical slice's forward renderer.
 //!
-//! Drives the public GAL end-to-end to render the live ECS scene: one shared
-//! cube mesh instanced once per entity at the entity's `Position` (read from
-//! the world each frame), shaded by an M0.6-cooked albedo texture uploaded to
-//! the GPU via `copyBufferToTexture` (the primitive E4 implements), under a
-//! perspective camera with depth testing.
+//! Drives the public GAL end to end over the live ECS scene: one shared cube
+//! mesh, instanced once per entity at that entity's `Position` read from the
+//! world each frame, shaded by a cooked albedo texture uploaded through
+//! `copyBufferToTexture`, under a perspective camera with depth testing.
 //!
-//! Three entry points share the `Renderer` (resources + pipeline + draw):
-//!   - `runInteractive` — window + swapchain + present loop (hardware); pumps
-//!     M0.3 input (SPACE toggles pause) into the sim each frame.
-//!   - `runSmoke` — offscreen render of the final state → PPM capture, no
-//!     window/swapchain (headless lavapipe in CI; validation layers active in
-//!     Debug). "The frame composes without crash."
-//!   - `composeNull` — builds the full pipeline + records a frame over the
-//!     Null backend, exercising the whole path (incl. `copyBufferToTexture`)
-//!     on every platform incl. macOS (the integration test's render facet).
+//! Three entry points share the `Renderer` — its resources, pipeline and draw:
+//!   - `runInteractive` — window, swapchain and present loop, on hardware,
+//!     pumping input into the sim each frame (SPACE toggles pause).
+//!   - `runSmoke` — an offscreen render of the final state to a PPM capture,
+//!     no window and no swapchain: headless lavapipe in CI, validation layers
+//!     active in Debug. What it asserts is that the frame composes.
+//!   - `composeNull` — builds the full pipeline and records a frame over the
+//!     Null backend, so the whole path including `copyBufferToTexture` is
+//!     exercised on every platform.
 //!
 //! The renderer is generic over the GAL device type (`anytype`) so the same
 //! code runs on the Vulkan and Null backends — handles are device-agnostic
@@ -101,7 +100,7 @@ const Albedo = struct {
     }
 };
 
-/// Load the M0.6-cooked `.texture.bin` via the async `Loader` and return an
+/// Load the cooked `.texture.bin` through the async `Loader` and return an
 /// owned RGBA8 copy + its (square) dimension. The slice's albedo is square by
 /// construction, so the dimension derives from the payload length (the Loader
 /// surfaces the payload + header but not the metadata bytes; a square asset
@@ -224,7 +223,7 @@ pub const Renderer = struct {
         });
         errdefer device.destroyBuffer(camera_ub);
 
-        // Albedo texture + GPU upload via copyBufferToTexture (the E4 primitive).
+        // Albedo texture, uploaded through `copyBufferToTexture`.
         const albedo_tex = try device.createTexture(.{
             .label = "slice.albedo",
             .format = .rgba8_unorm,
@@ -339,9 +338,9 @@ pub const Renderer = struct {
     }
 };
 
-/// One-shot staging upload of RGBA8 bytes into a texture via the GAL
-/// `copyBufferToTexture` (the E4 primitive). The texture is left in
-/// shader-read layout, ready to sample.
+/// One-shot staging upload of RGBA8 bytes into a texture through the GAL's
+/// `copyBufferToTexture`. The texture is left in shader-read layout, ready to
+/// sample.
 fn uploadTexture(device: anytype, tex: gal.types.TextureHandle, rgba: []const u8, dim: u32) !void {
     const staging = try device.createBuffer(.{
         .label = "slice.albedo.staging",
@@ -373,8 +372,8 @@ fn uploadTexture(device: anytype, tex: gal.types.TextureHandle, rgba: []const u8
 
 // ============================================================== entry points =
 
-/// Interactive hardware path: window + swapchain + present loop, pumping M0.3
-/// input (SPACE toggles pause) into the sim each frame.
+/// The interactive hardware path: window, swapchain and present loop, pumping
+/// input into the sim each frame (SPACE toggles pause).
 pub fn runInteractive(gpa: std.mem.Allocator, io: std.Io, world: *World, asset_path: []const u8) !void {
     var albedo = try loadAlbedo(gpa, io, asset_path);
     defer albedo.deinit(gpa);
@@ -424,7 +423,7 @@ pub fn runInteractive(gpa: std.mem.Allocator, io: std.Io, world: *World, asset_p
                 .close => should_close = true,
                 else => {},
             }
-            raw_state.applyEvent(&raw, evt); // M0.3 resource pipeline
+            raw_state.applyEvent(&raw, evt); // the raw resource pipeline
             control.applyEvent(evt); // logical-key reaction (SPACE → pause)
         }
         if (should_close) break;
@@ -474,9 +473,9 @@ pub fn runInteractive(gpa: std.mem.Allocator, io: std.Io, world: *World, asset_p
 
 /// Headless offscreen smoke: advance the sim `ticks` times, render the final
 /// state once into an offscreen RGBA8 target, and capture it to `capture_path`.
-/// No window/swapchain. Validation layers active in Debug. "Frame composes
-/// without crash" — the CI lavapipe acceptance; visual correctness is
-/// hardware-validated.
+/// No window and no swapchain, with validation layers active in Debug. What it
+/// establishes is that the frame composes without crashing, which is the CI
+/// lavapipe acceptance; visual correctness is hardware-validated.
 pub fn runSmoke(gpa: std.mem.Allocator, io: std.Io, world: *World, asset_path: []const u8, ticks: u32, capture_path: []const u8) !void {
     var albedo = try loadAlbedo(gpa, io, asset_path);
     defer albedo.deinit(gpa);
@@ -535,13 +534,11 @@ pub fn runSmoke(gpa: std.mem.Allocator, io: std.Io, world: *World, asset_path: [
     log.info("vertical-slice: smoke frame captured -> {s} ({d} entities)", .{ capture_path, r.instance_count });
 }
 
-// NOTE on cross-platform render coverage: the renderer fills its vertex/index/
-// instance/uniform buffers via `mapBuffer`, which the Null backend leaves
-// `Unsupported` (it was built for the buffer-less triangle). No slice-render
-// path can therefore RUN on the Null backend, so there is no headless
-// `zig build test` render assertion on macOS. Coverage instead is: the render
-// code (incl. the `copyBufferToTexture` upload call in `uploadTexture`) is
-// COMPILE-checked on every platform (the slice module builds in CI on all
-// targets); the forward path is RUN on Linux lavapipe (the CI smoke,
-// `--smoke-test`, validation layers active in Debug); and visual correctness is
-// hardware-validated.
+// CROSS-PLATFORM RENDER COVERAGE, and what it is NOT. The renderer fills its
+// vertex, index, instance and uniform buffers through `mapBuffer`, which the
+// Null backend leaves `Unsupported` — it was built for the buffer-less
+// triangle — so no slice-render path can RUN there and there is no headless
+// render assertion in `zig build test`. What covers it instead: the render
+// code, the `copyBufferToTexture` call of `uploadTexture` included, is
+// COMPILE-checked on every platform, the forward path is RUN on Linux lavapipe
+// through the CI smoke, and visual correctness is hardware-validated.

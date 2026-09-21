@@ -223,6 +223,13 @@ pub const SyncInResult = struct {
     /// same reason: same direction, different cause, and a test that could not tell
     /// them apart would pass on either.
     restored: u32 = 0,
+    /// Bodies whose ECS `Transform.rot` did not denote a rotation, so the pose write
+    /// was NOT issued. Counted apart from `poses_applied` for this struct's standing
+    /// reason: they answer different questions, and a seam that folded a refusal into
+    /// its applied count would report work it did not do. Zero on any well-formed
+    /// scene; non-zero means something wrote a zero, NaN or infinite quaternion into
+    /// a `Transform`.
+    poses_rejected: u32 = 0,
     /// Bodies this pass touched with a waking setter. The number that must stay
     /// at zero when nothing changed.
     woke: u32 = 0,
@@ -580,13 +587,30 @@ pub fn syncIn(
                 if (!std.mem.eql(WorldReal, &t.pos, &pose.pos) or
                     !std.mem.eql(WorldReal, &t.rot, &pose.rot))
                 {
-                    pw.setBodyTransform(
-                        body,
-                        cross.vec3ToSolver(WorldVec3.fromArray(t.pos)),
+                    // NORMALISED HERE, and the write skipped when the component
+                    // denotes no rotation. `setBodyTransform` refuses such an input
+                    // — it writes a pose in two steps and half a teleportation is
+                    // worse than none — and its signature is frozen `void`, so the
+                    // seam cannot learn of the refusal after the fact. Deciding
+                    // before the call is what keeps `poses_applied` and `woke`
+                    // counting writes that happened.
+                    //
+                    // Through `BodyManager.normalizedForStore` and not a second
+                    // predicate: one question, one authority. The already-unit value
+                    // is passed on, so the entry's own guard cannot disagree.
+                    if (forge_3d.BodyManager.normalizedForStore(
                         cross.quatToSolver(WorldQuat.fromArray(t.rot)),
-                    );
-                    result.poses_applied += 1;
-                    applied_here = true;
+                    )) |rot| {
+                        pw.setBodyTransform(
+                            body,
+                            cross.vec3ToSolver(WorldVec3.fromArray(t.pos)),
+                            rot,
+                        );
+                        result.poses_applied += 1;
+                        applied_here = true;
+                    } else {
+                        result.poses_rejected += 1;
+                    }
                 }
             }
         }
@@ -611,9 +635,11 @@ pub fn syncIn(
         }
 
         if (applied_here) {
-            // Every setter above composes a wake — `setBodyTransform`
-            // unconditionally, the velocity setters before writing — so ONE
-            // count covers them and it is the number the guard watches.
+            // Every setter above composes a wake — `setBodyTransform` whenever it
+            // is reached, the velocity setters before writing — so ONE count covers
+            // them and it is the number the guard watches. `applied_here` is set
+            // only on a call that was ISSUED, which is why a rotation refused above
+            // reaches neither this counter nor `poses_applied`.
             result.woke += 1;
         }
         // The baseline moves on EXAMINATION, not on application. `woke` stays on

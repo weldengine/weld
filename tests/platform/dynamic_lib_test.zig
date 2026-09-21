@@ -1,9 +1,7 @@
-//! Tests M0.3 — `DynamicLib.open` / `lookup` / `close` round-trip.
+//! `DynamicLib.open` / `lookup` / `close` round-trip.
 //!
-//! Covers the acceptance test called out in the M0.3 brief:
-//!   - "open + lookup + close on system library" — opens libc.so.6 /
-//!     libSystem.B.dylib / kernel32.dll, looks up a well-known symbol,
-//!     closes without crash.
+//! Opens `libc.so.6` / `libSystem.B.dylib` / `kernel32.dll`, looks up a
+//! well-known symbol, and closes without crash.
 
 const std = @import("std");
 const weld = @import("weld_core");

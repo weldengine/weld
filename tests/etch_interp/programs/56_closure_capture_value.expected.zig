@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-6 capturing
+/// Diff-runner fixture: 1 tick. Exercises the capturing
 /// closure codegen (part1 §5.6 capture transparente, resolver-types §8.2
 /// value-by-copy): `factor` is snapshotted at closure CREATION (40), the
 /// source binding is mutated afterwards (100), and the call sees the

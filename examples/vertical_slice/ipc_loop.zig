@@ -1,21 +1,23 @@
-//! M0.9 vertical slice — IPC component-edit loop (E5 / C0.8).
+//! The vertical slice's IPC component-edit loop, which closes C0.8 end to end
+//! INSIDE the slice.
 //!
-//! Closes C0.8 end-to-end *inside the slice* (the slice IS the C0.8 runtime —
-//! it owns the live World from E3 and the world→viewport renderer from E4; this
-//! is NOT the C0.4 IPC-test runtime in `src/runtime`, whose `renderMire`/echo-
-//! ack are legitimate transport stubs). An editor-stub thread sends a REAL
-//! `ModifyComponent` over the REAL M0.7 transport (AF_UNIX socket + framing);
-//! the slice's runtime-side client receives it, decodes it, and applies it to
-//! the live World via the canonical `diff_runner`/`sim.setF32` write path
-//! (`field_offset` + `new_value` → memcpy into the component slot). The E4
-//! renderer then reflects the edit. No `src/` touched, no shim — host-glue over
-//! the existing engine, like E3/E4.
+//! The slice IS the C0.8 runtime: it owns the live World and the world →
+//! viewport renderer. This is NOT the IPC-test runtime of `src/runtime`, whose
+//! `renderMire` and echo-ack are legitimate transport stubs.
 //!
-//! Only the socket message path is exercised here (not the shm viewport): the
-//! slice renders through its own GAL viewport (`render.zig`), so this loop runs
-//! headlessly on every platform incl. macOS — the C0.8 SEMANTIC loop is fully
-//! assertable in `zig build test`; the VISUAL reflection is the lavapipe smoke
-//! + hardware.
+//! An editor-stub thread sends a REAL `ModifyComponent` over the REAL transport
+//! — AF_UNIX socket plus framing — and the slice's runtime-side client
+//! receives it, decodes it, and applies it to the live World through the
+//! canonical `sim.setF32` write path: `field_offset` plus `new_value`, memcpy'd
+//! into the component slot. The renderer then reflects the edit. Nothing under
+//! `src/` is touched and there is no shim; this is host glue over the engine as
+//! it stands.
+//!
+//! Only the socket message path runs here, not the shm viewport: the slice
+//! renders through its own GAL viewport, so the loop is headless on every
+//! platform. The SEMANTIC half is therefore fully assertable in
+//! `zig build test`, and the VISUAL reflection is the lavapipe smoke plus
+//! hardware.
 
 const std = @import("std");
 
@@ -122,7 +124,7 @@ fn runtimeClientThread(ctx: *RuntimeCtx) void {
     };
 }
 
-/// Run one editor→runtime component edit over the real M0.7 transport and
+/// Run one editor→runtime component edit over the real transport and
 /// apply it to `world`. The caller's thread is the editor-stub (server); a
 /// spawned thread is the runtime-side client that owns the apply. Returns once
 /// the round-trip completes (edit applied + `ModifyAck` received).

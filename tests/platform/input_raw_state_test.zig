@@ -1,8 +1,7 @@
-//! Tests M0.3 — InputRawState event-driven transitions.
+//! InputRawState event-driven transitions.
 //!
-//! Covers the acceptance tests called out in the M0.3 brief:
-//!   - "keyboard pressed/released transitions"
-//!   - "mouse delta accumulation per frame"
+//! Keyboard pressed/released transitions, and mouse delta accumulating per
+//! frame.
 
 const std = @import("std");
 const weld = @import("weld_core");

@@ -1,5 +1,4 @@
-//! The Tier 0 → Etch event bridge, and the ORDER that is its deliverable
-//! (M1.1.15.2 G4).
+//! The Tier 0 → Etch event bridge, and the ORDER that is its deliverable.
 //!
 //! The store carries a `Lifetime.tick` and is cleared at the head of every tick.
 //! A bridge that pushed on the WRONG SIDE of that clear would produce an event
@@ -92,8 +91,8 @@ fn tally(world: *World, field: usize) i64 {
 
 test "a .d.etch-declared event type resolves in a rule that observes it" {
     const gpa = std.testing.allocator;
-    // The G1 amendment's payoff, and the precondition of everything below: with
-    // `event_decl` outside §20.1's allow-list this file could not exist.
+    // The precondition of everything below: with `event_decl` outside §20.1's
+    // allow-list this file could not exist.
     var h = try check(gpa, observer_source);
     defer h.deinit(gpa);
     for (h.diagnostics.items) |d| std.debug.print("check {s}: {s}\n", .{ d.code.code(), d.primary_message });
@@ -152,7 +151,7 @@ test "toy event emitted from Zig is observed in a rule at the expected tick" {
     }, "ToyPing");
     try interp.addEventSource(bridge.source());
 
-    // ── TICK 1: Zig enqueues, the rule must observe it THIS tick ──
+    // TICK 1 — Zig enqueues, and the rule must observe it THIS tick.
     queue.enqueue(.{ .value = 41, .loud = true });
     var report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
@@ -163,15 +162,15 @@ test "toy event emitted from Zig is observed in a rule at the expected tick" {
     try std.testing.expectEqual(@as(usize, 1), bridge.pushed);
     try std.testing.expectEqual(@as(usize, 0), bridge.dropped);
 
-    // ── TICK 2: Zig enqueues NOTHING. The rule must observe nothing ──
-    // This is the half a single-tick test cannot carry: it pins that the store
+    // TICK 2 — Zig enqueues NOTHING, and the rule must observe nothing. This is
+    // the half a single-tick test cannot carry: it pins that the store
     // was CLEARED between the ticks, so tick 1's event is not still sitting
     // there. A drain that re-pushed, or a missing clear, both fail here.
     report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), tally(&world, 0));
     try std.testing.expectEqual(@as(i64, 41), tally(&world, 1));
 
-    // ── TICK 3: a second event, distinguishable from the first ──
+    // TICK 3 — a second event, distinguishable from the first.
     queue.enqueue(.{ .value = 7, .loud = false });
     report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);

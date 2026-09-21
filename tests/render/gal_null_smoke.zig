@@ -1,6 +1,5 @@
-//! GAL Null backend smoke — Phase 0 / M0.4.
+//! GAL Null backend smoke.
 //!
-//! Exercises the brief §Acceptance criteria > Tests pattern:
 //! - `Null backend completes a frame without panic` — Device + Queue +
 //!   BindGroup + RenderPipeline + 1 frame cycle without crash.
 //! - `Null backend satisfies comptime interface check` — verification that
@@ -15,8 +14,6 @@
 const std = @import("std");
 const gal = @import("weld_render");
 
-// ---------------------------------------------------------------------- Pins --
-//
 // Guarantee the analysis of the inline tests under `src/modules/render/gal/`.
 // The `gal/root.zig` module already re-exports its sub-files via `pub const`,
 // but we also pin explicitly to withstand a future refactor that would
@@ -29,8 +26,6 @@ comptime {
     _ = gal.barriers;
     _ = gal.null_backend;
 }
-
-// ---------------------------------------------------------------------- Tests --
 
 test "Null backend satisfies comptime interface check" {
     // If a method required by the interface is missing on the Null side, this
@@ -107,9 +102,9 @@ test "Null backend completes a frame without panic" {
     const image_index = try device.acquireNextImage(swap, image_ready, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u32, 0), image_index);
 
-    // M0.4 § Scope Post-Review extension : the swapchain image view
-    // accessor returns a non-zero handle (Null stub uses a monotonic
-    // counter — content is opaque, just `isValid()` matters).
+    // The swapchain image-view accessor returns a non-zero handle. The Null
+    // stub uses a monotonic counter, so the content is opaque and only
+    // `isValid()` matters.
     const swap_view = device.getSwapchainImageView(swap, image_index);
     try std.testing.expect(swap_view.isValid());
 
@@ -159,9 +154,9 @@ test "Null backend completes a frame without panic" {
     pass.draw(3, 1, 0, 0);
     pass.end();
 
-    // M0.4 § Scope Post-Review extension : copyTextureToBuffer is part of
-    // the public CommandEncoder surface. The Null backend no-ops, but the
-    // call must compile and accept the WebGPU-canonical struct triple.
+    // `copyTextureToBuffer` is part of the public `CommandEncoder` surface. The
+    // Null backend no-ops, but the call must compile and accept the
+    // WebGPU-canonical struct triple.
     const staging = try device.createBuffer(.{
         .label = "smoke_staging",
         .size = 1280 * 720 * 4,
@@ -185,7 +180,7 @@ test "Null backend reports no Phase 0 optional features" {
     const allocator = std.testing.allocator;
     var device = try gal.null_backend.Device.init(allocator, .{});
     defer device.deinit();
-    // Phase 0 : no escape hatch is marked as supported by the Null.
+    // No escape hatch is marked supported by the Null backend.
     try std.testing.expect(!device.supports(.timeline_semaphore));
     try std.testing.expect(!device.supports(.descriptor_indexing));
     try std.testing.expect(!device.supports(.ray_tracing));

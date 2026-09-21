@@ -89,18 +89,22 @@ pub const Body = struct {
     position: Vec3r,
     /// World-space orientation.
     ///
-    /// **INVARIANT: unit at the solver's precision, permanently.** `addBody`
-    /// establishes it — the descriptor rotation is `f32` by design
-    /// (`engine-physics-forge.md` §1.11.8), and an `f32`-unit quaternion widened
-    /// to `f64` is off by `|q|² − 1 ≈ 3e-8`, so the widened value is normalised at
-    /// creation — and both integrators maintain it, each re-normalising after its
-    /// first-order orientation step. It once held by accident
-    /// for a dynamic body from its first tick and NEVER for a static or kinematic
-    /// one, which are never integrated: a static collider's frame was scaled by
-    /// `1 ± 3e-8`, which at 10 km — the regime `-Dphysics_f64` exists for — is
-    /// 0.34 mm on geometry that never moves. Every consumer that rotates a vector
-    /// by this field relies on it: inertia transport, lever arms, the sleep chord,
-    /// the ray transport of `raycastBody`.
+    /// **INVARIANT: unit at the solver's precision, permanently.** THREE writers
+    /// establish it and none may be omitted. `addBody` normalises the descriptor
+    /// — which is `f32` by design (`engine-physics-forge.md` §1.11.8), and an
+    /// `f32`-unit quaternion widened to `f64` is off by `|q|² − 1 ≈ 3e-8`;
+    /// `setRotation` normalises every gameplay write, being the LAST point
+    /// `PhysicsWorld.setBodyTransform`, `moveKinematic` and `sync_in.zig`'s
+    /// per-tick seam all pass through; and both integrators re-normalise after
+    /// their first-order orientation step.
+    ///
+    /// **The integrators are not a safety net for the other two**: their step
+    /// sits below the gameplay-authority skip, so a `.solver` body heals on the
+    /// next tick and a `.gameplay` body is never visited.
+    ///
+    /// Every consumer that rotates a vector by this field relies on it: inertia
+    /// transport, lever arms, the sleep chord, the ray transport of
+    /// `raycastBody`.
     rotation: Quatr,
     /// World-space linear velocity.
     linear_velocity: Vec3r,

@@ -304,11 +304,9 @@ fn edgeUnlessOverflow(comptime T: type, from: Vec(3, T), to: Vec(3, T)) Vec(3, T
 /// One lane of a cross product, `a·d − b·c`, as a value TOGETHER WITH its own power-of-two exponent.
 ///
 /// **A cross is three INDEPENDENT 2×2 determinants, and a lane that leaves the range has no business
-/// dragging the other two down with it.** That was the defect in every earlier form: the repair was
-/// global where the failure is local. Measured, a triangle whose `z` lane overflows while `x` and
-/// `y` compute exactly had its `x` and `y` destroyed by a global reduction that pushed them below
-/// the subnormal floor; repairing per lane took the adversarial false-degenerate rate from 15.7 % to
-/// 4.8 % at `f32` and from 21.3 % to 5.9 % at `f64`.
+/// dragging the other two down with it.** Do NOT reduce globally: a triangle whose `z` lane
+/// overflows while `x` and `y` compute exactly has those two destroyed by a global reduction that
+/// pushes them below the subnormal floor.
 ///
 /// A repaired lane cannot always come back to the input scale — its true value may not be
 /// representable at all — so the exponent travels with the value and the caller reconciles the three
@@ -408,8 +406,7 @@ pub fn triangleCross(
         const r1 = edgeUnlessOverflow(T, v0, v2).toArray();
         // `laneUnlessOverflow(a, b, c, d)` computes `a·d − b·c`, so the four arguments are the
         // determinant's rows in that order and NOT the two cross operands in index order — a
-        // transposition here silently computes a different quantity, which is what the collinear
-        // pins caught on the first attempt.
+        // transposition here silently computes a different quantity.
         const lanes = [3]Lane{
             laneUnlessOverflow(T, r0[1], r0[2], r1[1], r1[2]), // e0.y·e1.z − e0.z·e1.y
             laneUnlessOverflow(T, r0[2], r0[0], r1[2], r1[0]), // e0.z·e1.x − e0.x·e1.z

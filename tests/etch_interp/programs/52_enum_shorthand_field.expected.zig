@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-4 enum
+/// Diff-runner fixture: 1 tick. Exercises the enum
 /// shorthand in struct-literal field-value position (check mode,
 /// resolver-types §4 + §3.5), including the part1 §10.2 canonical form:
 ///

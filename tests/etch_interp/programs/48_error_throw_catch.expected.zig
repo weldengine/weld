@@ -1,6 +1,6 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-2 error
+/// Diff-runner fixture: 1 tick. Exercises the error
 /// vertical end-to-end — the builtin `Error { message, code, source }` +
 /// `ErrorCode` (part1 §10.2), the flag+branch try/catch desugar, and the
 /// `throws`-fn out-param propagation:

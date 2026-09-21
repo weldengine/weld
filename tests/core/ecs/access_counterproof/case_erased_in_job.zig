@@ -1,4 +1,4 @@
-//! Counter-proof 5 — the erased world handed to a dispatched body, bare.
+//! The erased world handed to a dispatched body, bare.
 //!
 //! MUST NOT COMPILE. `View` has always been refused in a worker's arguments,
 //! because it reaches any entity of the world by handle while a worker owns one
@@ -6,11 +6,11 @@
 //! `fromErased` takes precisely this type — so passing one hands over the same
 //! reach under a different name.
 //!
-//! **It was NOT refused until the marker was put on the type.** `ErasedFor` was
+//! **NOTHING REFUSES IT UNTIL THE MARKER IS PUT ON THE TYPE.** `ErasedFor` was
 //! created to close a promotion between views and was born without the
-//! guarantee its twin carried, because that guarantee is implemented in another
-//! file. Measured before the fix: `carriesMarked(*ErasedFor)` returned false
-//! bare AND wrapped, while `carriesMarked(View)` returned true.
+//! guarantee its twin carried, that guarantee being implemented in another
+//! file. Measured: without the marker, `carriesMarked(*ErasedFor)` answers
+//! false bare AND wrapped, while `carriesMarked(View)` answers true.
 //!
 //! The subject here is the TYPE's marker, not an entry's wiring: that the four
 //! dispatching entries call this guard is asserted by the derived census in

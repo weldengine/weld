@@ -1,4 +1,4 @@
-//! Counter-proof 3 — a body paired with a declaration that does not describe it.
+//! A body paired with a declaration that does not describe it.
 //!
 //! MUST NOT COMPILE. The body is typed against `writes(Transform)` and the
 //! registration declares `reads(Velocity)`. Neither half is wrong on its own;
@@ -6,12 +6,12 @@
 //! to make impossible — the DAG orders the system on a set that has nothing to
 //! do with what the body touches.
 //!
-//! **This replaces a case that measured the wrong thing.** Its predecessor
-//! OMITTED the `accesses` field and asserted that Zig refuses a struct literal
-//! missing a field without a default — which Zig did already, with or without
-//! any of this milestone's work. A counter-proof that tests what the compiler
-//! does anyway is green for a reason unrelated to the invariant, and that is
-//! how the general form went unclosed while a fixture stood guard over it.
+//! **DO NOT WRITE THIS AS AN OMITTED `accesses` FIELD.** That asserts only
+//! that Zig refuses a struct literal missing a field without a default, which
+//! it does with or without any of this work: a counter-proof testing what the
+//! compiler does anyway is green for a reason unrelated to the invariant, and
+//! that is how the general form can go unclosed with a fixture standing guard
+//! over it.
 //!
 //! What closes it is not a check: `registerSystem` no longer ACCEPTS a `run`
 //! and an `accesses` supplied separately. It takes the declared set and the

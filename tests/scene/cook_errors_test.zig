@@ -1,4 +1,4 @@
-//! M1.0.4 — scene cook negative cases. Each ill-formed scene yields a typed
+//! Scene cook negative cases. Each ill-formed scene yields a typed
 //! `CookError` (never a panic) and produces no `.scene.bin`.
 
 const std = @import("std");
@@ -10,17 +10,16 @@ fn expectCookError(comptime want: anyerror, src: []const u8) !void {
     const gpa = std.testing.allocator;
     var msg: []const u8 = "";
     try std.testing.expectError(want, scene_cook.cook(gpa, src, &msg));
-    // A clear diagnostic accompanies the error (the brief: "a clear cook
+    // A clear diagnostic accompanies the error ("a clear cook
     // diagnostic, never a panic").
     try std.testing.expect(msg.len > 0);
 }
 
 test "instance of without a prefab resolver errors BasePrefabMissing" {
-    // M1.0.6 E3 replaced the M1.0.4 `InstanceOfUnsupported` boundary with real
-    // flattening: `cook` (the resolver-less wrapper) can no longer locate the
-    // referenced prefab, so an instance now errors `BasePrefabMissing` rather than
-    // a blanket "unsupported". Flattening with a resolver is covered in
-    // `tests/scene/prefab_flatten_test.zig`.
+    // `instance of` IS flattened, so the refusal is no longer a blanket
+    // "unsupported": `cook`, the resolver-less wrapper, simply cannot locate the
+    // referenced prefab, and that is what `BasePrefabMissing` names. Flattening
+    // with a resolver is `tests/scene/prefab_flatten_test.zig`.
     try expectCookError(error.BasePrefabMissing,
         \\scene "S" {
         \\  instance of "Torch" "T1" { }

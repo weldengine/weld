@@ -1,7 +1,7 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-6 block-body
-/// closure codegen AND the ratified return semantics (the E2 forward note):
+/// Diff-runner fixture: 1 tick. Exercises the block-body
+/// closure codegen AND the ratified return semantics:
 /// a `return` inside a closure exits the CLOSURE — it becomes the call's
 /// value — never the enclosing fn. `pick(7)` hits the internal `return 40`;
 /// the rule body CONTINUES and writes 40 + 2. A leaking `returning` signal

@@ -2,7 +2,7 @@ const driver = @import("diff_runner");
 
 /// Diff-runner fixture: 1 tick. `run` assigns `Acc.out = """…""".len()` where
 /// the triple-quote body is `\n    line one\n    line two\n    ` — exercises
-/// the M0.9 E2-A multiline string surface end-to-end: the lexer's
+/// the multiline string surface end-to-end: the lexer's
 /// `multiline_string_literal` token, the parser's §1.4 common-indent strip
 /// (the two content lines share a 4-space indent; the blank fence lines are
 /// excluded → common indent 4), and the builtin `.len()`. The dedented value

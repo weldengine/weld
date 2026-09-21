@@ -1,23 +1,7 @@
-//! M0.1 / E3 — extended comptime queries acceptance tests.
-//!
-//! Covers the four acceptance criteria listed in
-//! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E3
-//! (Extended comptime queries):
-//!
-//! - `test "With filter matches only archetypes containing all required
-//!   components"` — `Query(.{T}, .{With(U)})` skips archetypes that
-//!   hold T but not U.
-//! - `test "Without filter excludes archetypes containing the listed
-//!   components"` — `Query(.{T}, .{Without(V)})` skips archetypes that
-//!   hold both T and V.
-//! - `test "Predicate filter is applied per-entity within matched
-//!   archetypes"` — `Query(.{H}, .{Predicate(alivePredicate)})`. The
-//!   body calls `query.slotPasses(arch, chunk, slot)` inside the inner
-//!   loop and only counts entities that survive the predicate.
-//! - `test "query iteration order is archetype then chunk then slot"` —
-//!   spans two archetypes with two chunks each, records the visit
-//!   order of entity ids, and asserts the strict
-//!   archetype-creation → chunk-order → slot-order sequence.
+//! Extended comptime queries: the `With` / `Without` archetype filters, the
+//! per-slot `Predicate`, the archetype → chunk → slot iteration order, the lazy
+//! re-scan that absorbs an archetype created after construction, and the
+//! `ComponentId`-keyed dynamic path the interpreter drives.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -67,8 +51,6 @@ test "With filter matches only archetypes containing all required components" {
     try world.addComponent(gpa, c, Marker, .{ .kind = 2 });
     try world.addComponent(gpa, c, Health, .{});
 
-    // `Query(.{Transform}, .{With(Marker)})` keeps only archetypes
-    // that hold Marker on top of Transform.
     var q = try world.queryFiltered(gpa, &.{Transform}, .{With(Marker)});
     defer q.deinit(gpa);
 
@@ -83,9 +65,8 @@ test "With filter matches only archetypes containing all required components" {
     }
     try std.testing.expectEqual(@as(u32, 2), visited);
 
-    // `a` was never moved into a Marker archetype — it must not appear.
+    // `a` never moved into a Marker archetype.
     try std.testing.expect(q.matchFor(world.archetypes.items[world.dynamicLocation(a).?.archetype_idx].chunks.items[0]) == null);
-    // `b` and `c` both belong to a matched archetype.
     const b_chunk = world.archetypes.items[world.dynamicLocation(b).?.archetype_idx].chunks.items[0];
     try std.testing.expect(q.matchFor(b_chunk) != null);
     const c_chunk = world.archetypes.items[world.dynamicLocation(c).?.archetype_idx].chunks.items[0];
@@ -109,16 +90,11 @@ test "Without filter excludes archetypes containing the listed components" {
     const c = try world.spawn(gpa, Transform{}, Velocity{});
     try world.addComponent(gpa, c, Frozen, .{});
 
-    // Exactly two materialised archetypes after the migrations.
     try std.testing.expectEqual(@as(usize, 2), world.archetypeCount());
 
-    // `Query(.{Transform}, .{Without(Frozen)})` keeps only archetypes
-    // that do NOT hold Frozen.
     var q = try world.queryFiltered(gpa, &.{Transform}, .{Without(Frozen)});
     defer q.deinit(gpa);
 
-    // The (T,V) archetype is the only match — (T,V,Frozen) is
-    // filtered out.
     try std.testing.expectEqual(@as(usize, 1), q.matchCount());
 
     var visited: u32 = 0;
@@ -129,7 +105,6 @@ test "Without filter excludes archetypes containing the listed components" {
     }
     try std.testing.expectEqual(@as(u32, 1), visited);
 
-    // `a` is in the matched archetype; `b` and `c` are not.
     const a_arch = world.archetypes.items[world.dynamicLocation(a).?.archetype_idx];
     try std.testing.expect(q.matchFor(a_arch.chunks.items[0]) != null);
     const b_arch = world.archetypes.items[world.dynamicLocation(b).?.archetype_idx];
@@ -138,13 +113,9 @@ test "Without filter excludes archetypes containing the listed components" {
     try std.testing.expect(q.matchFor(c_arch.chunks.items[0]) == null);
 }
 
-// ─── Predicate test infrastructure ────────────────────────────────────────
-
-// File-scope mutable so the comptime-bound predicate can recover the
-// runtime Health `ComponentId`. The component-id-by-name lookup that
-// would let us avoid this lives in M0.2's RTTI cleanup (cf. brief
-// journal "transitional debt"). Reset at the start of every test that
-// uses the predicate.
+// File-scope mutable so the comptime-bound predicate can recover the runtime
+// Health `ComponentId` — there is no component-id-by-name lookup to reach it
+// with. Reset at the start of every test that uses the predicate.
 var test_health_component_id: u32 = std.math.maxInt(u32);
 
 fn aliveHealthPredicate(arch: *const Archetype, chunk: *Chunk, slot: u32) bool {
@@ -191,12 +162,8 @@ test "Predicate filter is applied per-entity within matched archetypes" {
     var counter: PredicateCounter = .{};
     q.forEachChunk(countAlive, .{ &q, &counter });
 
-    // Only the alive entity is counted — the predicate filtered out
-    // the dead one.
     try std.testing.expectEqual(@as(u32, 1), counter.counted);
 }
-
-// ─── Iteration order test infrastructure ──────────────────────────────────
 
 const VisitLog = struct {
     visits: std.ArrayListUnmanaged(VisitRecord) = .empty,
@@ -267,13 +234,10 @@ test "query iteration order is archetype then chunk then slot" {
         try ids_b.append(gpa, e);
     }
 
-    // Build a query that matches both archetypes (any archetype that
-    // contains Transform). No filter — predicate stays the default.
     var q = try world.queryFiltered(gpa, &.{Transform}, .{});
     defer q.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 2), q.matchCount());
-    // Each archetype owns at least 2 chunks given the spawn count.
     try std.testing.expect(q.matches.items[0].archetype.chunkCount() >= 2);
     try std.testing.expect(q.matches.items[1].archetype.chunkCount() >= 2);
 
@@ -297,7 +261,6 @@ test "query iteration order is archetype then chunk then slot" {
     // matches the spawn order.
     try std.testing.expectEqual(@as(usize, per_archetype * 2), log.visits.items.len);
 
-    // All A's visits come first.
     var idx: usize = 0;
     var slot_within_arch: u32 = 0;
     // First half: archetype A, entities spawned 0..per_archetype.
@@ -331,15 +294,11 @@ test "query iteration order is archetype then chunk then slot" {
     }
 }
 
-// ─── M0.1 / E6 — lazy archetype re-scan ──────────────────────────────────
-
 const command_buffer_mod = weld_core.ecs.command_buffer;
 const CommandBuffer = command_buffer_mod.CommandBuffer;
 
-// E6 dette acceptance — validates the lazy re-scan absorbed during
-// E6. Scenario: build a query, then materialise a new archetype via
-// a command-buffer flush. The next iteration entry on the query
-// must observe the new archetype without an explicit rebuild.
+// A query built BEFORE a command-buffer flush materialises a new archetype must
+// observe it on the next iteration entry, with no explicit rebuild.
 test "new archetype created during command buffer flush is visible to existing queries on next dispatch" {
     const gpa = std.testing.allocator;
     var world = World.init();
@@ -353,7 +312,6 @@ test "new archetype created during command buffer flush is visible to existing q
     var q = try world.queryFiltered(gpa, &.{Transform}, .{With(Marker)});
     defer q.deinit(gpa);
 
-    // No matching archetype yet — Marker has no live carrier.
     try std.testing.expectEqual(@as(usize, 0), q.matchCount());
     try std.testing.expectEqual(@as(usize, 0), q.chunkCount());
 
@@ -381,8 +339,6 @@ test "new archetype created during command buffer flush is visible to existing q
     try std.testing.expectEqual(@as(usize, 1), q.chunkCount());
 }
 
-// ─── M1.0.0 — dynamic (ComponentId-keyed) query ───────────────────────────
-//
 // The Etch interpreter holds resolved `ComponentId`s, not Zig types, so it
 // drives rule selection through `World.queryDynamic` rather than the comptime
 // `queryFiltered`. These two tests pin the contract the interpreter relies on:
@@ -456,7 +412,6 @@ test "dynamic query lazy rescan" {
     var dq = try world.queryDynamic(gpa, &.{ t_id, m_id }, &.{});
     defer dq.deinit(gpa);
 
-    // First iteration: the (T, Marker) archetype does not exist yet.
     const first_scanned = dq.maybeRescan();
     try std.testing.expect(first_scanned > 0); // scanned the existing (T,V) archetype
     try std.testing.expectEqual(@as(usize, 0), dq.matching.items.len);

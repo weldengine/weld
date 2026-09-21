@@ -1218,18 +1218,13 @@ pub fn Broadphase(comptime T: type) type {
         /// interface declares them: every one of them refreshes a proxy, so an allocating
         /// `update` forced an error union all the way up to a frozen surface that has none.
         ///
-        /// **THE PROPERTY THAT SURVIVED THE ERROR CHANNEL, and the one to protect.** The
-        /// earlier form reserved the log slot UP FRONT — before the hysteresis test — and
-        /// argued it from the failure path: a re-inserted proxy left unlogged could never
-        /// be logged again, since a retry would find the box already re-fattened, pass the
-        /// hysteresis test, and lose the move forever. That argument is about a retry, and
-        /// it dies with the error it protected against. **The property it protected does
-        /// not**: a re-inserted proxy is still never unlogged, and it is now held by two
-        /// mechanisms working together rather than by an ordering — the capacity reserved
-        /// at `insert` guarantees the append cannot fail, and `moved_mark` guarantees the
-        /// entry exists exactly once. Neither is optional: without the reserve the append
-        /// panics, without the mark the log grows with the number of MOVES and no reserve
-        /// could bound it.
+        /// **THE PROPERTY TO PROTECT: a re-inserted proxy is never left unlogged.** It no
+        /// longer rests on reserving the log slot before the hysteresis test — that ordering
+        /// guarded a retry path that went with the error channel — but on TWO mechanisms
+        /// working together. The capacity reserved at `insert` makes the append unable to
+        /// fail, and `moved_mark` makes the entry exist exactly once. Neither is optional:
+        /// without the reserve the append panics, without the mark the log grows with the
+        /// number of MOVES and no reserve could bound it.
         pub fn update(self: *Self, proxy: Proxy, tight_aabb: AabbT) void {
             // An UNBOUNDED shape has no box to move to, and it cannot move at all: a
             // half-space forces a STATIC body (`addBody` rejects any other with

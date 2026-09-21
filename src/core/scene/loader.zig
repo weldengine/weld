@@ -57,8 +57,8 @@ pub const RemapError = error{ UnknownComponent, SchemaMismatch } || std.mem.Allo
 /// Raised for a scene that opens and hashes valid but is structurally invalid —
 /// e.g. an entity whose parent ordinal points past the UUID table. **Distinct
 /// from `error.CorruptScene`** (a content-hash mismatch): the bytes are intact
-/// (the cook's `XxHash64` matches), the scene structure is not. A well-formed
-/// The cook never produces this — it is a defensive guard on external input.
+/// (the cook's `XxHash64` matches), the scene structure is not. The cook never
+/// produces one — this is a defensive guard on external input.
 pub const StructureError = error{MalformedScene};
 
 /// Resolves an extension prefab name (from the scene's Prefab ID Table) to its

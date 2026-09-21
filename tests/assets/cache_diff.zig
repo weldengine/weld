@@ -1,21 +1,19 @@
-//! M0.6 / E4 — cooking-cache hit functional test (brief §Acceptance ▸ Benchmarks).
+//! The cooking-cache hit, functionally.
 //!
 //! A second cook of an unchanged asset hits the cache and returns the
 //! byte-identical artifact without re-cooking. This is the *correctness*
-//! half of the brief's cache criterion: a miss → hit transition plus
+//! half of the cache criterion: a miss → hit transition plus
 //! byte-identity. It is deterministic and cross-host — no wall-clock
 //! assertion — so it belongs in the `zig build test` gate.
 //!
 //! The *performance* half — the cold-cook-vs-hit time differential — is a
 //! host- and load-dependent measurement, so it lives in the bench suite
-//! (`bench/asset_cache.zig`, `zig build bench-asset-cache`), measured under
-//! the opposable protocol on the reference machine. The original M0.6 test
-//! asserted an absolute millisecond ratio inside the correctness gate, which
-//! red-failed on slower / Windows CI runners (a single cache-hit sample can
-//! spike on a page fault, AV scan, or cold directory). That debt was flagged
-//! in the M0.7 brief (§ Acted deviations → "Known debt left untouched") and
-//! is resolved here by moving the timing out of the gate, leaving only the
-//! deterministic functional assertions below.
+//! (`bench/asset_cache.zig`, `zig build bench-asset-cache`), measured under the
+//! opposable protocol on the reference machine.
+//!
+//! DO NOT PUT AN ABSOLUTE MILLISECOND RATIO BACK IN THIS GATE. One lived here
+//! and red-failed on slower and Windows CI runners: a single cache-hit sample
+//! spikes on a page fault, an AV scan or a cold directory.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");

@@ -1,5 +1,4 @@
-//! Level-B serialized-IR differential (M0.8 E4 — LEVEL-B PROOF CONTRACT,
-//! brief journal 2026-06-10).
+//! The Level-B serialized-IR differential.
 //!
 //! For each Level-B program: the interpreter BUILDS the descriptors at
 //! compile (`Interpreter.descriptors`, build-structure) and the cooked Zig
@@ -33,20 +32,20 @@ const programs = [_]LevelBProgram{
     .{ .name = "p68_quest_escort", .source = @embedFile("programs/68_quest_escort.etch") },
     .{ .name = "p69_dialogue_merchant", .source = @embedFile("programs/69_dialogue_merchant.etch") },
     .{ .name = "p70_ability_fireball", .source = @embedFile("programs/70_ability_fireball.etch") },
-    // M0.8 E5 Level-B presentation.
+    // Level-B presentation.
     .{ .name = "p71_theme_dark", .source = @embedFile("programs/71_theme_dark.etch") },
     .{ .name = "p72_motion_ui", .source = @embedFile("programs/72_motion_ui.etch") },
     .{ .name = "p73_input_mapping", .source = @embedFile("programs/73_input_mapping.etch") },
     .{ .name = "p74_widget_panel", .source = @embedFile("programs/74_widget_panel.etch") },
     .{ .name = "p75_locale_en", .source = @embedFile("programs/75_locale_en.etch") },
-    // M0.8 E6 Level-B render/animation/audio/cinematic.
+    // Level-B render, animation, audio and cinematic.
     .{ .name = "p76_effect_explosion", .source = @embedFile("programs/76_effect_explosion.etch") },
     .{ .name = "p77_audio_graph_laser", .source = @embedFile("programs/77_audio_graph_laser.etch") },
     .{ .name = "p78_audio_score_exploration", .source = @embedFile("programs/78_audio_score_exploration.etch") },
     .{ .name = "p79_sequence_intro", .source = @embedFile("programs/79_sequence_intro.etch") },
     .{ .name = "p80_anim_graph_locomotion", .source = @embedFile("programs/80_anim_graph_locomotion.etch") },
     .{ .name = "p81_shader_pbr", .source = @embedFile("programs/81_shader_pbr.etch") },
-    // M0.8 E7 Level-C scene/prefab.
+    // Level-C scene and prefab.
     .{ .name = "p82_scene_village", .source = @embedFile("programs/82_scene_village.etch") },
     .{ .name = "p83_prefab_walltorch", .source = @embedFile("programs/83_prefab_walltorch.etch") },
 };

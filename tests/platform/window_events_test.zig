@@ -1,17 +1,13 @@
-//! Tests M0.3 — WindowEvent union surface validation.
+//! WindowEvent union surface validation.
 //!
-//! Covers the acceptance tests called out in the M0.3 brief:
-//!   - "key down/up produces WindowEvent.key_down/key_up"
-//!   - "mouse motion + delta + wheel events"
-//!   - "focus gained/lost + minimize/restore events"
+//! Key down and up producing `WindowEvent.key_down` / `key_up`, mouse motion,
+//! delta and wheel, focus gained and lost, minimize and restore.
 //!
-//! The full end-to-end "backend produces the right event" path requires
-//! a real OS window manager + simulated input injection, which is OS-
-//! specific and only meaningful on the target runner. These tests
-//! verify the union surface compiles and constructs correctly on every
-//! platform — the wave 5 / wave 6 commits add the actual emission paths,
-//! verified manually on Win11 + Fedora 44 in the observable-behavior
-//! section of the brief.
+//! The end-to-end path — a backend producing the right event — needs a real OS
+//! window manager and simulated input injection, which is OS-specific and only
+//! meaningful on the target runner. What these verify is that the UNION surface
+//! compiles and constructs correctly on every platform; the emission paths are
+//! validated manually on Win11 and Fedora 44.
 
 const std = @import("std");
 const weld = @import("weld_core");

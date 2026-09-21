@@ -718,15 +718,44 @@ pub const BodyManager = struct {
         self.poisonCachedBox(idx);
     }
 
-    /// Set the world-space orientation (mirror of `setPosition`; the caller owns
-    /// normalization). No-op on a stale/invalid handle. INTERNAL — see
-    /// `setPosition`.
+    /// Set the world-space orientation (mirror of `setPosition`). NORMALISED
+    /// here — see `normalizedForStore` for why the caller cannot be asked to.
+    /// No-op on a stale handle, and on an argument denoting no rotation.
+    /// INTERNAL — see `setPosition`.
     ///
     /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
         const idx = self.alloc.validate(id) orelse return;
-        self.bodies.items(.rotation)[idx] = new_rotation;
+        self.bodies.items(.rotation)[idx] = normalizedForStore(new_rotation) orelse return;
         self.poisonCachedBox(idx);
+    }
+
+    /// `q` as a UNIT quaternion, or `null` when it does not denote a rotation.
+    ///
+    /// **The column's invariant is established HERE because this is the last
+    /// point every writer passes through**: `PhysicsWorld.setBodyTransform` and
+    /// `moveKinematic`, both reachable from the frozen module surface, and
+    /// `sync_in.zig`'s per-tick seam, which forwards `Transform.rot` — a bare
+    /// `[4]f32` carrying no invariant at all.
+    ///
+    /// `pub` because the two `PhysicsWorld` entries above must apply it BEFORE
+    /// they commit anything: both write a pose in several steps, and one of them
+    /// derives velocities from the rotation it is about to write. Reaching the
+    /// invariant only here would let them commit a position, or publish a velocity
+    /// derived from a quaternion the store then normalises or drops.
+    ///
+    /// The refusal is at TRUE ZERO and covers the three inputs that denote no
+    /// rotation: a zero quaternion, one carrying a NaN, one carrying an infinity
+    /// — `normalize` is unguarded, so it answers NaN, NaN and an all-zero
+    /// quaternion respectively, each BREAKING the invariant rather than bending
+    /// it. Refusing LEAVES the previous unit value, which keeps `Body.rotation`
+    /// unit unconditionally: a stored NaN propagates silently into every world
+    /// AABB, query and contact that reads the body.
+    pub fn normalizedForStore(q: Quatr) ?Quatr {
+        const a = q.toArray();
+        const norm_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
+        if (!(norm_sq > 0) or !std.math.isFinite(norm_sq)) return null;
+        return q.normalize();
     }
 
     /// Invalidate the cached world box of a NON-DYNAMIC body whose pose has just been
@@ -980,8 +1009,8 @@ pub const BodyManager = struct {
     /// A surface the sweep runs along or away from obstructs nothing, and a caller that resolves motion
     /// wants the nearest OBSTACLE rather than the nearest contact. Selecting on that predicate instead
     /// of selecting and then discarding is what makes it gapless: this entry returns ONE hit, so any
-    /// filter applied to its RESULT throws away every other sub-shape the cast never returned — three
-    /// earlier forms did exactly that, by body, by pair and by a bounded set, and each left a hole.
+    /// filter applied to its RESULT throws away every other sub-shape the cast never returned. Filtering
+    /// by body, by pair or by a bounded set all leave that hole.
     ///
     /// **A SIBLING RATHER THAN A PARAMETER, and the reason is measured rather than stylistic.** Adding
     /// the argument to `castShapeBody` itself would touch fourteen call sites inside INHERITED test
@@ -2241,7 +2270,7 @@ const MeshCastCollector = struct {
 
         // **THE NON-OPPOSING TEST, ON THE CONTACT'S OWN NORMAL AND AFTER THE CAST.**
         //
-        // An earlier form rejected the triangle BEFORE the cast, on its FACE normal, justified by "a
+        // Do NOT reject the triangle BEFORE the cast on its FACE normal, on the grounds that "a
         // translation cannot reach a plane it is parallel to". That is true of a PLANE and false of a
         // TRIANGLE, which is finite and reachable by its EDGE. MEASURED on a quad platform with an open
         // boundary edge, a capsule sweeping `+X` at four heights: the plain cast finds the edge at
@@ -2252,22 +2281,23 @@ const MeshCastCollector = struct {
         // **BOTH REGIMES CLASSIFY ON THE CONTACT, AND EACH IN ITS OWN FRAME.**
         //
         // At `d > 0` the cast's normal IS the contact's, and it lives in the PROBE's frame — so it is
-        // dotted with `direction_in_a` and never with `sweep_direction_local`, which is the BODY's. An
-        // earlier form mixed the two, and on a ROTATED mesh the product had no geometric meaning at all:
-        // a local `+Y` face turned into a world `−X` wall was hit by the plain cast and rejected by this
-        // one, at both precisions.
+        // dotted with `direction_in_a` and NEVER with `sweep_direction_local`, which is the BODY's.
+        // Mixing the two leaves the product with no geometric meaning on a ROTATED mesh: a local `+Y`
+        // face turned into a world `−X` wall is hit by the plain cast and rejected by this one, at
+        // both precisions.
         //
         // At `d == 0` the cast's normal is `−direction` and carries nothing, so the contact is resolved
         // by the MANIFOLD of that one triangle. The face normal was used here and it is NOT enough: a
         // capsule exactly tangent to an ACTIVE EDGE, moving parallel to the triangle's plane, is rejected
         // on the face normal and traverses — measured from `x = −0.3` to `x = 0.672` with the base still
-        // at `y = −0.3`, at both precisions. The hypothesis that "the depenetration owns that case" is
-        // refuted by that measurement, and the manifold is what carries an edge's real normal.
-        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** An earlier form
-        // computed the manifold below, used it, and dropped it; the caller then asked again over the
-        // WHOLE body and could be answered about the ceiling where this collector had retained the
-        // wall. Two answers to one geometric fact, with the body's yaw deciding which — the class this
-        // module refuses, and the reason the field exists rather than the recomputation.
+        // at `y = −0.3`, at both precisions — which refutes "the depenetration owns that case". The
+        // manifold is what carries an edge's real normal.
+        //
+        // **AND THE NORMAL IT RENDERS THE VERDICT ON IS THE ONE IT HANDS BACK.** Computing the
+        // manifold below, using it and dropping it leaves the caller to ask again over the WHOLE body,
+        // where it can be answered about the ceiling while this collector retained the wall — two
+        // answers to one geometric fact with the body's yaw deciding which. Hence the field rather
+        // than the recomputation.
         var contact_normal: ?Vec3r = null;
         if (self.skip_non_opposing) {
             if (hit.distance > 0) {
@@ -2670,6 +2700,14 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
 
 const testing = std.testing;
 
+/// The stored quaternion is unit, judged in `f128`.
+fn expectUnit(q: Quatr) !void {
+    const a = q.toArray();
+    var acc: f128 = 0;
+    inline for (a) |c| acc += @as(f128, c) * @as(f128, c);
+    try testing.expect(@abs(acc - 1) <= 8 * @as(f128, std.math.floatEps(Real)));
+}
+
 test "pose mutators write the pose and no-op on a stale handle" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
@@ -2691,10 +2729,12 @@ test "pose mutators write the pose and no-op on a stale handle" {
 
     const p = Vec3r.fromArray(.{ 1, 2, 3 });
     const q = Quatr.fromAxisAngle(Vec3r.unit_z, 0.5);
+    const rot_tol: Real = 8 * std.math.floatEps(Real);
     bm.setPosition(kept, p);
     bm.setRotation(kept, q);
     try testing.expect(bm.position(kept).?.approxEql(p, 0));
-    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, rot_tol));
+    try expectUnit(bm.rotation(kept).?);
 
     // A stale handle (freed slot, bumped generation) writes nothing — neither into
     // its own freed slot nor anywhere else.
@@ -2704,5 +2744,6 @@ test "pose mutators write the pose and no-op on a stale handle" {
     try testing.expectEqual(@as(?Vec3r, null), bm.position(doomed));
     try testing.expectEqual(@as(?Quatr, null), bm.rotation(doomed));
     try testing.expect(bm.position(kept).?.approxEql(p, 0));
-    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, rot_tol));
+    try expectUnit(bm.rotation(kept).?);
 }

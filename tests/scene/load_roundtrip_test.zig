@@ -1,8 +1,8 @@
-//! M1.0.5 E2 — runtime loader `.scene.bin` → ECS `World` round-trip.
+//! Runtime loader `.scene.bin` → ECS `World` round-trip.
 //!
-//! Builds a cooked scene image in memory via the M1.0.4 `writer` (no `.scene.etch`
-//! authoring, no filesystem), loads it with `scene.loader.loadFromBytes`, and
-//! asserts the three E2 invariants:
+//! Builds a cooked scene image in memory through the `writer` — no
+//! `.scene.etch` authoring, no filesystem — loads it with
+//! `scene.loader.loadFromBytes`, and asserts three invariants:
 //!   T1 — every entity is instantiated and its component bytes survive verbatim;
 //!   T2 — `on_spawned` fires exactly once per loaded entity;
 //!   T3 — every loaded entity exists before any `on_spawned` fires (two-phase).
@@ -241,14 +241,14 @@ test "loadScene mmaps a cooked file and instantiates every entity" {
     try std.testing.expectEqual(@as(usize, n_entities), result.spawned.len);
 }
 
-// ─── M1.B / G6 — hybrid storage through the scene loader ────────────────────
+// HYBRID STORAGE THROUGH THE SCENE LOADER.
 //
 // The codec is NOT reopened and needs no change: the storage mode is a RUNTIME
 // REGISTRY property and never part of on-disk identity, and the loader does not
 // write column by column — it walks the blocks and INSTANTIATES ENTITY BY
 // ENTITY, handing `World.spawnDynamicWithValues` the block's full ComponentId
 // set plus each column's byte view at that entity's rank. That surface has been
-// bimodal since G3, so the bifurcation is entirely in the spawn path.
+// bimodal, so the bifurcation is entirely in the spawn path.
 //
 // `engine-scene-serialization.md` §4, rectified 2026-09-03: "C'est le `World`
 // qui place les octets, et c'est ce qui rend le second mode de stockage

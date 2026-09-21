@@ -27,11 +27,9 @@
 //! apply in the order they were recorded. Both ordering guarantees
 //! are deterministic and tested.
 //!
-//! Threading: the command buffer is single-threaded. Recording must
-//! happen on the main thread inside the `SystemFn` body — the worker
-//! trampolines that run chunk bodies do **not** get the cmd buffer,
-//! so they cannot record. Per-worker buffers + merge-at-flush is a
-//! a later refinement.
+//! Threading: single-threaded. Recording happens on the main thread inside the
+//! `SystemFn` body — the worker trampolines that run chunk bodies never receive
+//! the buffer, so they cannot record.
 //!
 //! Allocation: each `CommandBuffer` owns an arena. Payload bytes and
 //! per-spawn resolver/id/payload slices are duplicated into the arena so the
@@ -49,18 +47,9 @@ const registry_mod = @import("registry.zig");
 const job_bound = @import("foundation").job_bound;
 
 /// Refuse, at compile time, an argument tuple that carries a `CommandBuffer`
-/// into a body a worker pool runs.
-///
-/// `engine-ecs-internals.md` §7 states it as an absolute: no job body receives
-/// a command buffer. The reason travels WITH the type — see
-/// `CommandBuffer.weld_no_job_body` — and this function is the ECS-side name
-/// for `foundation.job_bound.refuseMarkedArgs`, kept so the call sites in this
-/// tier read in this tier's vocabulary.
-///
-/// The SITE SET is derived and asserted, not maintained by hand:
-/// `tests/ecs/hybrid_query_test.zig`'s job-bound control. Why placing the
-/// marker on the type is not the same as every entry calling it is written
-/// where that reasoning failed, at `src/core/jobs/scheduler.zig`'s dispatch.
+/// into a body a worker pool runs — `engine-ecs-internals.md` §7 states it as an
+/// absolute. The ECS-side name for `foundation.job_bound.refuseMarkedArgs`; the
+/// reason travels with the type, at `CommandBuffer.weld_no_job_body`.
 pub fn refuseCommandBufferInArgs(comptime ArgsType: type) void {
     job_bound.refuseMarkedArgs(ArgsType);
 }
@@ -79,13 +68,13 @@ pub const CommandKind = enum { spawn, despawn, add_component, remove_component, 
 /// Closure that registers a component type with a world's `Registry` if needed
 /// and returns its `ComponentId`.
 ///
-/// **This is what replaces the world the buffer used to hold.** Recording a
-/// deferred `add` needs the type; resolving the type needs the world; and a
-/// buffer that holds a world hands a system back the unrestricted handle its
-/// view exists to withhold — through a neighbouring field, with no cast and no
-/// diagnostic. So the type travels as a closure and the world arrives at
-/// `flush`. Same shape as `scheduler.AccessDescriptor.resolve`, for the same
-/// reason: a `comptime T` that must survive into a runtime value.
+/// This is what lets the buffer hold NO world. Recording a deferred `add` needs
+/// the type and resolving the type needs the world, but a buffer holding a world
+/// would hand every system the unrestricted handle its view exists to withhold —
+/// through a neighbouring field, with no cast and no diagnostic. So the type
+/// travels as a closure and the world arrives at `flush`. Same shape, and same
+/// reason, as `scheduler.AccessDescriptor.resolve`: a `comptime T` that must
+/// survive into a runtime value.
 pub const ComponentResolveFn = *const fn (world: *World, gpa: std.mem.Allocator) anyerror!ComponentId;
 
 /// Build the resolver for `T`.
@@ -172,12 +161,10 @@ pub const Command = union(CommandKind) {
 /// and the two in `observers.zig` — and the set of such functions is the
 /// derivation "every function that consumes a `Command` and mutates the world".
 ///
-/// It is placed here rather than as a pre-pass over a buffer because a pre-pass
-/// covers the buffers someone remembered to pass it: the Etch tick-boundary
-/// drain reads `observer_registry.deferred` through neither `flush` nor
-/// `flushWithObservers`, and a per-buffer pass missed it silently — the
-/// resolution never ran and `spawnDynamicWithValues` received a slice of
-/// `undefined` ids.
+/// Do NOT lift this into a pre-pass over a buffer: a pre-pass only covers the
+/// buffers someone remembered to hand it, and the Etch tick-boundary drain reads
+/// `observer_registry.deferred` through neither `flush` nor `flushWithObservers`.
+/// Missing it is silent — `spawnDynamicWithValues` just gets `undefined` ids.
 ///
 /// Idempotent: a command already carrying its id has no resolver and is left
 /// alone, so applying one twice resolves once.
@@ -194,8 +181,6 @@ pub fn resolveInPlace(cmd: *Command, world: *World, gpa: std.mem.Allocator) !voi
         .remove_component => |*r| {
             if (r.resolve) |f| r.component_id = try f(world, gpa);
         },
-        // The tag commands carry a `tagset_id` their caller already holds:
-        // nothing to resolve, and nothing that needs a world.
         .despawn, .set_tag, .clear_tag => {},
     }
 }
@@ -226,13 +211,11 @@ pub const CommandBuffer = struct {
 
     /// Construct a fresh command buffer.
     ///
-    /// **It holds no world, and that absence is the contract.** Zig has no
-    /// private field, so a buffer carrying a `*World` would hand every system
-    /// the unrestricted handle its declared-access view exists to withhold —
+    /// It holds no world, and that absence IS the contract. Zig has no private
+    /// field, so a buffer carrying a `*World` would hand every system the
+    /// unrestricted handle its declared-access view exists to withhold —
     /// `ctx.cmd.world.getMut(Anything, e)`, no cast, no diagnostic. The world
-    /// arrives at `flush`, and the type each command needs travels with the
-    /// command as a resolver. Encapsulation here is the REMOVAL of the datum,
-    /// never an envelope around it.
+    /// arrives at `flush`; the type each command needs travels with it.
     pub fn init(gpa: std.mem.Allocator) CommandBuffer {
         return .{
             .arena = std.heap.ArenaAllocator.init(gpa),
@@ -259,10 +242,11 @@ pub const CommandBuffer = struct {
         return self.commands.items.len;
     }
 
-    /// Record a deferred spawn. `values` is a tuple of component
-    /// values (e.g. `.{Transform{}, Velocity{}}`); each field's type
-    /// is resolved through `world.ensureComponentRegistered` and its
-    /// bytes are duplicated into the buffer's arena.
+    /// Record a deferred spawn. `values` is a tuple of component values (e.g.
+    /// `.{Transform{}, Velocity{}}`); each field's type resolves through
+    /// `world.ensureComponentRegistered` at flush and its bytes are duplicated
+    /// into the buffer's arena. Each field is materialised into a local first,
+    /// so `std.mem.asBytes` has a stable address to dupe from.
     pub fn spawn(self: *CommandBuffer, values: anytype) !void {
         const Args = @TypeOf(values);
         const info = @typeInfo(Args).@"struct";
@@ -277,8 +261,6 @@ pub const CommandBuffer = struct {
         inline for (info.fields, 0..) |field, i| {
             const T = field.type;
             resolvers[i] = resolverFor(T);
-            // Materialise the field as a local so `std.mem.asBytes`
-            // has a stable address, then dupe into the arena.
             const v: T = @field(values, field.name);
             payloads[i] = try arena_alloc.dupe(u8, std.mem.asBytes(&v));
         }
@@ -314,19 +296,14 @@ pub const CommandBuffer = struct {
             .add_component = .{
                 .entity = entity,
                 .resolve = resolverFor(T),
-                // Meaningless until `resolveComponentIds` runs; the field carries no
-                // default so that a recorder holding NEITHER a type nor an id
-                // cannot be written at all.
                 .component_id = undefined,
                 .bytes = bytes,
             },
         });
     }
 
-    /// Record a deferred component remove. The component must
-    /// already be registered in the world (or the remove will fail
-    /// at flush time with `StaleEntityHandle` if the type is
-    /// unknown).
+    /// Record a deferred component remove. `T` is registered on demand at
+    /// flush, so an unregistered type is not an error here.
     pub fn removeComponent(
         self: *CommandBuffer,
         entity: EntityId,
@@ -360,12 +337,8 @@ pub const CommandBuffer = struct {
         } });
     }
 
-    /// Apply every recorded command, in submission order, against
-    /// the world. Resets the buffer at the end so the system is
-    /// ready for the next frame. Observer dispatch is layered on top
-    /// via `flushWithObservers` (see `observers.zig`) — this raw
-    /// flush is used by tests that exercise the cmd-buffer logic in
-    /// isolation.
+    /// Apply every recorded command in submission order, then reset the buffer.
+    /// Fires no observer — `observers.flushWithObservers` is the layered form.
     pub fn flush(self: *CommandBuffer, world: *World) !void {
         for (self.commands.items) |cmd| {
             try self.applyOne(world, cmd);
@@ -414,8 +387,6 @@ pub const CommandBuffer = struct {
         }
     }
 };
-
-// ─── inline tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
 
@@ -468,7 +439,6 @@ test "CommandBuffer set_tag adds TagSet and sets the bit; clear_tag clears it" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // A `TagSet`-shaped component: one 64-bit word, zeroed default, no fields.
     const zero = [_]u8{0} ** 8;
     const tagset_id = try world.registry.registerComponentRaw(gpa, .{
         .name = "TagSet",

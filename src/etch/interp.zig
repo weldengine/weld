@@ -1412,6 +1412,14 @@ pub const Interpreter = struct {
         // so the array drop (decref string elements + deinit) applies verbatim.
         persistent.registerDrop(persistent.type_set, dropPersistentArray);
 
+        // PRE-VALIDATION, before the first mutation of the world. Pass A below
+        // registers as it walks, so a refusal raised where it is DETECTED leaves
+        // every earlier declaration of a rejected program in a live world. The
+        // confrontation therefore happens here, while the world is still the one
+        // the previous image left behind, and Pass A runs only once every declared
+        // schema is known to match.
+        try verifySchemas(gpa, ast, &world.registry, &tag_table);
+
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
@@ -1444,23 +1452,43 @@ pub const Interpreter = struct {
         // its raw bytes as bits.
         var tagset_id: ?ComponentId = null;
         if (tag_table.leaf_count > 0) {
+            // ONE DESCRIPTOR FOR BOTH ARMS. The reuse arm used to take the
+            // existing id with no confrontation while only the fresh arm derived
+            // the size from `tag_table.words()` — so a reload crossing a 64-tag
+            // word boundary kept the NARROWER `TagSet` and every entity's tag
+            // bitfield was silently too small. `etch-validation-ecs.md` §13 names
+            // this component as the case the size in the digest exists to
+            // protect. The two arms now cannot disagree about the layout,
+            // because there is one layout and they read it.
+            const size: u16 = @intCast(tag_table.words() * 8);
+            const zeroed = try gpa.alloc(u8, size);
+            defer gpa.free(zeroed);
+            @memset(zeroed, 0);
+            const desc = tagSetDesc(size, zeroed);
             // Idempotent on a hot-reload re-compile: reuse the
             // already-registered `TagSet` instead of erroring DuplicateComponent.
             if (world.registry.idOf("TagSet")) |existing| {
+                const candidate = weld_core.ecs.registry.schemaDigestOf(desc);
+                // An ABSENT digest refuses. Measured: the registry has exactly
+                // one entry-append site and it always derives the digest, and
+                // `existing` came from `idOf` so it is in range — so the null
+                // arm is unreachable today and its direction costs nothing. It
+                // is a refusal rather than an accept because an unknown layout
+                // is not a matching layout, and refusing a reload leaves the
+                // running session on the program it already has.
+                const stored = world.registry.schemaDigest(existing) orelse ~candidate;
+                if (stored != candidate) {
+                    std.log.warn(
+                        "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
+                            "live: size={d}; new: size={d} ({d} tag(s))",
+                        .{ world.registry.componentSize(existing), size, tag_table.leaf_count },
+                    );
+                    return error.SchemaChanged;
+                }
                 try bridge.mapComponent(gpa, "TagSet", existing);
                 tagset_id = existing;
             } else {
-                const size: u16 = @intCast(tag_table.words() * 8);
-                const zeroed = try gpa.alloc(u8, size);
-                defer gpa.free(zeroed);
-                @memset(zeroed, 0);
-                const id = try world.registry.registerComponentRaw(gpa, .{
-                    .name = "TagSet",
-                    .size = size,
-                    .alignment = 8,
-                    .default_bytes = zeroed,
-                    .fields = &.{},
-                });
+                const id = try world.registry.registerComponentRaw(gpa, desc);
                 try bridge.mapComponent(gpa, "TagSet", id);
                 tagset_id = id;
             }
@@ -6760,8 +6788,6 @@ pub const Interpreter = struct {
     }
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
-
 fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     for (rd.resource_deps) |dep| {
         if (!world.resources.contains(dep.resource_id)) return false;
@@ -6872,6 +6898,7 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
 fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
+        error.StaleComponentRef => .StaleComponentRef,
         else => .UnsupportedExpr,
     };
 }
@@ -6888,6 +6915,7 @@ fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
         .TypeMismatch => "type mismatch",
         .UncaughtThrow => "uncaught throw",
         .AssertFailed => "assertion failed",
+        .StaleComponentRef => "component ref outlived its entity",
     };
 }
 
@@ -7260,43 +7288,182 @@ fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: 
 /// `pub` so the scene cook can drive `compileTypeDecl` against its own registry.
 pub const RegKind = enum { component, resource };
 
-/// Register one Etch `component`/`resource` declaration into `registry`,
-/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
-/// its compile-time default bytes (POD via `evalConst`, resource `string` via
-/// an immortal persistent block, resource `enum` via the variant discriminant).
-/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
-/// re-compile, idempotent). `bridge` records the name→id mapping.
+/// The `TagSet` descriptor, derived in ONE place. Both the pre-pass and the
+/// registration arm read it, for the reason `schemaDigestFor` exists: a builtin
+/// whose layout is computed twice is a builtin whose two computations can differ,
+/// and that difference IS the defect this milestone closed at the reuse arm.
 ///
-/// Operates on a bare `*Registry` — World-free by construction (it never touches
-/// archetypes/entities). The interpreter passes `&world.registry`; the
-/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
-/// standalone `Registry` so registration is shared, not duplicated.
-pub fn compileTypeDecl(
+/// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
+/// digest does not read it (see `schemaDigestFor`).
+fn tagSetDesc(size: u16, default_bytes: []const u8) weld_core.ecs.registry.ComponentDesc {
+    return .{
+        .name = "TagSet",
+        .size = size,
+        .alignment = 8,
+        .default_bytes = default_bytes,
+        .fields = &.{},
+    };
+}
+
+/// Confront every schema this program declares against the live registry BEFORE
+/// the first registration.
+///
+/// **A refusal per declaration is not a refusal.** `compileTypeDecl` refuses a
+/// changed layout where it meets it, and Pass A walks declarations in order, so a
+/// program whose third type changed left the first two registered in a world that
+/// then kept running the PREVIOUS program — components belonging to an image that
+/// was rejected, permanently, with nothing announcing them. The `TagSet` arm is
+/// worse still: it runs AFTER the whole of Pass A, so a reload that merely crossed
+/// a 64-tag word boundary stranded every type the program declares.
+///
+/// The requirement a refusal exists to serve is that the previous image survive
+/// it. Intact is a property of the WORLD and not of the declaration being
+/// examined, so the check belongs where the world is still untouched.
+///
+/// WHAT THIS PASS DOES NOT COVER, and it is named rather than implied: an
+/// `OutOfMemory` in the middle of Pass A still leaves a half-registration. That is
+/// a different failure — exhaustion, not a layout change — with its own remedies,
+/// and closing it means a rollback path the registry has never had. This pass
+/// makes the SchemaChanged path total; it does not make registration
+/// transactional.
+///
+/// The builtin time resources are deliberately absent, and the honest reason is
+/// narrower than "their descriptor is a constant". It IS one — `types.zig`'s
+/// `builtin_resources` — but that says nothing about what is registered under
+/// those NAMES, since nothing reserves them. What excludes them is that this pass
+/// walks the PROGRAM's declarations and the builtins are not among them: their own
+/// registration arm is first-compile-only (`idOf` → map → `continue`), so a reload
+/// mutates nothing there and there is no half-registration to prevent.
+///
+/// A residual that is NOT this pass's and predates it: a program declaring a
+/// `resource GameTime` of its own registers under that name in Pass A, the builtin
+/// arm then takes its `continue`, and the `findField(gid, "dt").?` that follows
+/// unwraps a field the user's type need not have. That is a missing name
+/// reservation, and it fails by panic rather than by diagnostic.
+fn verifySchemas(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     registry: *Registry,
-    bridge: *Bridge,
-    name: []const u8,
+    tag_table: *const tags_mod.TagTable,
+) !void {
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        const kind = ast.items.items(.kind)[i];
+        const data = ast.items.items(.data)[i];
+        const shape: struct {
+            name: []const u8,
+            fields_start: u32,
+            fields_len: u32,
+            reg_kind: RegKind,
+        } = switch (kind) {
+            .component_decl => blk: {
+                const decl = ast.component_decls.items[data];
+                break :blk .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .component,
+                };
+            },
+            .resource_decl => blk: {
+                const decl = ast.resource_decls.items[data];
+                break :blk .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .resource,
+                };
+            },
+            else => continue,
+        };
+
+        // A name the registry does not hold cannot fail this check: the refusal
+        // lives in `compileTypeDecl`'s reuse arm and nowhere else. Skipping it is
+        // not an optimisation, it is the check's domain.
+        const existing_id = registry.idOf(shape.name) orelse continue;
+
+        var layout = computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind) catch |e| switch (e) {
+            // An invalid field type is a PROGRAM error the type-checker reports
+            // with a span. Letting it through here hands the same diagnosis to
+            // `compileTypeDecl`, which is where it has always been raised — this
+            // pass judges layout IDENTITY, never program validity.
+            error.InvalidProgram => continue,
+            else => return e,
+        };
+        defer layout.deinit(gpa);
+
+        const candidate = schemaDigestFor(shape.name, layout);
+        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+                .{
+                    shape.name,
+                    registry.componentSize(existing_id),
+                    registry.componentAlignment(existing_id),
+                    registry.componentFields(existing_id).len,
+                    layout.size,
+                    layout.alignment,
+                    layout.fields.items.len,
+                },
+            );
+            return error.SchemaChanged;
+        }
+    }
+
+    // `TagSet` LAST among the checks and still BEFORE every mutation, which is the
+    // whole point: its own registration arm sits after Pass A, so confronting it
+    // there could never protect the types Pass A had already written.
+    if (tag_table.leaf_count > 0) {
+        if (registry.idOf("TagSet")) |existing| {
+            const size: u16 = @intCast(tag_table.words() * 8);
+            const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}));
+            if ((registry.schemaDigest(existing) orelse ~candidate) != candidate) {
+                std.log.warn(
+                    "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
+                        "live: size={d}; new: size={d} ({d} tag(s))",
+                    .{ registry.componentSize(existing), size, tag_table.leaf_count },
+                );
+                return error.SchemaChanged;
+            }
+        }
+    }
+}
+
+/// The LAYOUT half of a type declaration: field descriptors, size, alignment.
+/// Extracted because it is EXACTLY what a schema digest reads and nothing more —
+/// `Registry.schemaDigestOf` hashes name, size, alignment and each field's
+/// (name, kind, offset), and never `default_bytes`. Materialising the defaults is
+/// the other half of `compileTypeDecl`, it allocates immortal persistent blocks,
+/// and the digest never looks at them.
+///
+/// That split is what makes the pre-validation pass in `Interpreter.compile` cheap
+/// and side-effect-free: it can confront every declared schema against the live
+/// registry BEFORE the first registration, without materialising one default and
+/// without an intermediate to cache for the pass that follows.
+const Layout = struct {
+    fields: std.ArrayListUnmanaged(FieldDesc) = .empty,
+    size: usize = 0,
+    alignment: usize = 1,
+
+    fn deinit(self: *Layout, gpa: std.mem.Allocator) void {
+        self.fields.deinit(gpa);
+    }
+};
+
+/// Compute a declaration's layout. Mutates NOTHING outside the returned value —
+/// no registry write, no bridge mapping, no persistent allocation — which is the
+/// property the pre-pass rests on and the reason this is a function rather than a
+/// comment inside `compileTypeDecl`.
+fn computeLayout(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
-    /// DIRECT `@requires` names, already read from the declaration. Passed
-    /// RESOLVED for the same reason `storage` is: this function receives no
-    /// declaration node, so it cannot read an annotation itself, and handing it
-    /// the names keeps the reading in ONE place shared by both callers.
-    requires: []const []const u8,
-    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
-    /// not as the annotation range, deliberately: this function receives no
-    /// declaration node — it takes `name`,
-    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
-    /// `annotations_extra` at all — and widening it to take the node would give
-    /// the registry seam a dependency on AST item shape that its three callers
-    /// do not share. `storageModeOf` is the single resolver they share instead.
-    storage: StorageKind,
-    literals: *std.ArrayListUnmanaged([*]u8),
-) !ComponentId {
-    var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
-    defer fields.deinit(gpa);
+) !Layout {
+    var out: Layout = .{};
+    errdefer out.deinit(gpa);
     var size: usize = 0;
     var max_align: usize = 1;
 
@@ -7332,19 +7499,93 @@ pub fn compileTypeDecl(
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
         size = off + kind.sizeBytes();
-        try fields.append(gpa, .{
+        try out.fields.append(gpa, .{
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
             .kind = kind,
             .enum_type_name_id = enum_type_id,
         });
     }
-    size = std.mem.alignForward(usize, size, max_align);
+    out.size = std.mem.alignForward(usize, size, max_align);
+    out.alignment = max_align;
+    return out;
+}
+
+/// The ONE derivation of a declaration's schema digest, read by the registration
+/// site and by the pre-pass alike. Two derivations of one quantity is how the two
+/// come to disagree, and a pre-pass that disagrees with the site it protects is
+/// worse than no pre-pass: it would refuse reloads the site accepts, or wave
+/// through the ones it refuses.
+///
+/// **It takes a name and a layout, and nothing else, because nothing else is
+/// hashed.** `schemaDigestOf` reads the name, the size, the alignment and each
+/// field's (name, kind, offset) — measured, and pinned by `registry.zig`'s « the
+/// digest is blind to the default bytes », which names this function as its
+/// dependent. `default_bytes`, `storage` and `requires` are all absent from it.
+///
+/// Taking a `storage` and a `requires` this function cannot use would be a
+/// signature declaring an influence it does not have, and it cost the pre-pass an
+/// allocation of `@requires` names for a quantity that never reaches the hash.
+///
+/// The consequence is NOT hidden by that omission and is not this function's to
+/// repair: a reload that changes only a component's `@storage` mode or its
+/// `@requires` set produces the same digest and is ACCEPTED. Whether schema
+/// identity should cover them belongs to whoever owns `schemaDigestOf`.
+fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
+    return weld_core.ecs.registry.schemaDigestOf(.{
+        .name = name,
+        .size = @intCast(layout.size),
+        .alignment = @intCast(layout.alignment),
+        .default_bytes = &.{},
+        .fields = layout.fields.items,
+    });
+}
+
+/// Register one Etch `component`/`resource` declaration into `registry`,
+/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
+/// its compile-time default bytes (POD via `evalConst`, resource `string` via
+/// an immortal persistent block, resource `enum` via the variant discriminant).
+/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
+/// re-compile, idempotent). `bridge` records the name→id mapping.
+///
+/// Operates on a bare `*Registry` — World-free by construction (it never touches
+/// archetypes/entities). The interpreter passes `&world.registry`; the
+/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
+/// standalone `Registry` so registration is shared, not duplicated.
+pub fn compileTypeDecl(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    registry: *Registry,
+    bridge: *Bridge,
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    reg_kind: RegKind,
+    /// DIRECT `@requires` names, already read from the declaration. Passed
+    /// RESOLVED for the same reason `storage` is: this function receives no
+    /// declaration node, so it cannot read an annotation itself, and handing it
+    /// the names keeps the reading in ONE place shared by both callers.
+    requires: []const []const u8,
+    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
+    /// not as the annotation range, deliberately: this function receives no
+    /// declaration node — it takes `name`,
+    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
+    /// `annotations_extra` at all — and widening it to take the node would give
+    /// the registry seam a dependency on AST item shape that its three callers
+    /// do not share. `storageModeOf` is the single resolver they share instead.
+    storage: StorageKind,
+    literals: *std.ArrayListUnmanaged([*]u8),
+) !ComponentId {
+    var layout = try computeLayout(gpa, ast, fields_start, fields_len, reg_kind);
+    defer layout.deinit(gpa);
+    const fields = layout.fields;
+    const size = layout.size;
+    const max_align = layout.alignment;
+    var f_i: u32 = 0;
 
     var default_buf: []u8 = try gpa.alloc(u8, size);
     defer gpa.free(default_buf);
     @memset(default_buf, 0);
-    f_i = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
         const fd = fields.items[f_i];
@@ -7404,14 +7645,32 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    // Idempotent re-registration. A second Interpreter
-    // compiled on the SAME world — an AST swap, e.g. edit a rule body and
-    // re-compile — re-visits the unchanged component/resource decls. Reuse the
-    // existing id instead of erroring `DuplicateComponent`, so the live world
-    // state (entities, component bytes, resource values) survives the swap.
-    // The hot-reload contract is a rule-body edit with the declarations
-    // UNCHANGED; a layout-changing reload (archetype migration) is unimplemented.
     if (registry.idOf(name)) |existing_id| {
+        // THE LAST LINE OF DEFENCE, not the first. `Interpreter.compile` confronts
+        // every declared schema before it registers anything, so a hot-reload
+        // never reaches this arm with a changed layout. This check stays because
+        // `scene_cook.zig` drives this function against its own registry and does
+        // NOT go through that pass — and because a refusal that exists only in the
+        // caller is a refusal the next caller will not have.
+        //
+        // An ABSENT digest refuses, for the reason given at the `TagSet` arm.
+        const candidate = schemaDigestFor(name, layout);
+        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+                .{
+                    name,
+                    registry.componentSize(existing_id),
+                    registry.componentAlignment(existing_id),
+                    registry.componentFields(existing_id).len,
+                    size,
+                    max_align,
+                    fields.items.len,
+                },
+            );
+            return error.SchemaChanged;
+        }
         switch (reg_kind) {
             .component => try bridge.mapComponent(gpa, name, existing_id),
             .resource => try bridge.mapResource(gpa, name, existing_id),
@@ -8001,8 +8260,6 @@ fn resolveTagOperandBits(ctx: *LowerWhenCtx, path_node: NodeId, out: *std.ArrayL
         try ctx.tag_table.collectUnder(ctx.gpa, buf.items, out);
     } else return error.InvalidProgram;
 }
-
-// ─── tests ────────────────────────────────────────────────────────────────
 
 test "run on empty AST returns zero-rule report" {
     const gpa = std.testing.allocator;
@@ -8621,17 +8878,29 @@ test "resource string[]/int[] pop demotes strings, returns POD inline, empty yie
     try std.testing.expectEqual(@as(i64, 10), last_num);
 }
 
-test "resource string[] iterated by an async for-in across a suspend" {
+test "resource int[] iterated by an async for-in across a suspend" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    // An async rule iterates a resource `string[]` (`.array_persistent`), awaiting
+    // An async rule iterates a resource `int[]` (`.array_persistent`), awaiting
     // one tick per element — the for-frame carries the block pointer across the
     // suspend. `done` gates re-arming so `count` settles at exactly 3.
+    //
+    // THE ELEMENT TYPE MOVED FROM `string` TO `int`, and the reason is a known
+    // over-refusal rather than a change of subject. A rule-arena local in scope at
+    // a suspending `await` is now refused, and `isRuleArenaType` answers true for
+    // EVERY `string` because the resolved type does not distinguish a run string
+    // from a persistent one — so the loop element `e`, which comes from a
+    // persistent array and is genuinely safe, was refused. It is also never read:
+    // the body counts and awaits. What this test asserts — the for-frame carrying
+    // a persistent block pointer across a suspension — is unchanged by the element
+    // type, and the `string[]` surface keeps its own coverage in the two sibling
+    // tests above (`defaults empty, pushes across ticks` and `persists across
+    // world.tick`), neither of which suspends.
     const source =
         \\resource Log {
-        \\  entries: string[] = ["x", "y", "z"]
+        \\  entries: int[] = [1, 2, 3]
         \\  count: int = 0
         \\  done: bool = false
         \\}
@@ -12471,30 +12740,36 @@ test "async fn called via await runs to completion across ticks and its return v
     try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
 }
 
-test "async method called via await inlines with its own scope and locals survive the suspension" {
+test "an async call frame inlines with its own scope and locals survive the suspension" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
-    // `bumped` is an `async method`: it reads `self.base` into a local, suspends
-    // at `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
-    // carries `self` + the local in its OWN heap-boxed scope, retained across the
+    // `bumped` is an `async fn`: it reads its parameter into a local, suspends at
+    // `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
+    // carries the local in its OWN heap-boxed scope, retained across the
     // suspension (no collision with the caller's scope). `n` goes 0 → 11.
+    //
+    // THIS WAS AN `async method` ON A STRUCT AND IS NOW A FREE `async fn`, and the
+    // replaced assertion is worth naming: the old body read `self.base` BEFORE its
+    // `await`, and that is the only reason it was safe. Measured — the same method
+    // reading `self.base` AFTER the await, with one neighbouring synchronous rule,
+    // ABORTS on `structs.list.items[handle]`, because the neighbour's body-end
+    // reset clears the struct store while the method is suspended. A `self` that
+    // crosses a suspension is therefore refused, and the sibling test below pins
+    // that refusal. What this test still covers — a call frame's own scope
+    // surviving a suspension — is independent of the receiver being a struct.
     const source =
-        \\struct Counter { base: int = 0 }
-        \\impl Counter {
-        \\  async fn bumped(self) -> int {
-        \\    let b = self.base
-        \\    await wait(0.02s)
-        \\    return b + 1
-        \\  }
-        \\}
         \\resource Out { n: int = 0 }
+        \\async fn bumped(base: int) -> int {
+        \\  let b = base
+        \\  await wait(0.02s)
+        \\  return b + 1
+        \\}
         \\async rule caller()
         \\  when resource Out
         \\{
-        \\  let c = Counter { base: 10 }
-        \\  let x = await c.bumped()
+        \\  let x = await bumped(10)
         \\  let o = get_mut(Out)
         \\  o.n = x
         \\}
@@ -12515,8 +12790,8 @@ test "async method called via await inlines with its own scope and locals surviv
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: caller builds `c`, enters `c.bumped()`, which reads self.base into a
-    // local and suspends at its `await wait(0.02s)`.
+    // tick 1: caller enters `bumped(10)`, which reads its parameter into a local
+    // and suspends at its `await wait(0.02s)`.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
     // tick 2: `bumped` resumes (its local `b = 10` survived), returns 11, which
@@ -15611,4 +15886,363 @@ test "runProgram a throw raised in an assignment's RHS unwinds to the catch" {
     // write for the throwing RHS only, and the run stops there. Asserting the
     // catch alone would pass against a guard that abandoned every write.
     try std.testing.expectEqual(@as(i64, 20), out);
+}
+
+/// Type-check `source` and return the diagnostic codes' count for `code`.
+fn countDiagCode(gpa: std.mem.Allocator, source: [:0]const u8, code: diag_mod.DiagnosticCode) !usize {
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    var n: usize = 0;
+    for (diags.items) |d| {
+        if (d.code == code) n += 1;
+    }
+    return n;
+}
+
+test "a rule-arena local held across an await is refused" {
+    const gpa = std.testing.allocator;
+
+    // THE NEIGHBOURING SYNCHRONOUS RULE IS WHY THE REFUSAL EXISTS, and it is in
+    // the program for that reason rather than for shape. The async rule ALONE is
+    // safe: nothing resets the shared stores while it is the only body running. It
+    // is `noise`, whose body-end `resetBodyStores` clears `collections`, that
+    // invalidates `xs` while `holder` is suspended. MEASURED before the refusal
+    // landed: this exact program ABORTS — `index out of bounds: index 0, len 0` at
+    // `collections.arrays.items[recv.array_ref]` — and the type-checker accepted it
+    // first. A test exercising one rule masks the whole class by construction.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    let xs = [10, 20, 30]
+        \\    await wait(0.016s)
+        \\    get_mut(S).got = xs[1]
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "an async method whose self crosses the await is refused" {
+    const gpa = std.testing.allocator;
+
+    // `self` IS a rule-arena local, and refusing it is WARRANTED rather than
+    // conservative — measured, not assumed. With the refusal disabled, this exact
+    // program ABORTS on `structs.list.items[handle]` at the `self.base` read that
+    // follows the suspension, because `noise` clears the struct store in between.
+    // The sibling test above used to be an `async method` and survived only
+    // because it read `self.base` BEFORE its await.
+    //
+    // Two diagnostics, not one: `self` inside the method and `c` in the caller,
+    // each live across a suspending `await`. Asserted as a COUNT so a rule that
+    // caught only one of the two frames would fail here.
+    try std.testing.expectEqual(@as(usize, 2), try countDiagCode(gpa,
+        \\struct Counter { base: int = 0 }
+        \\impl Counter {
+        \\  async fn bumped(self) -> int {
+        \\    await wait(0.02s)
+        \\    return self.base + 1
+        \\  }
+        \\}
+        \\resource Out { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let c = Counter { base: 10 }
+        \\  let x = await c.bumped()
+        \\  get_mut(Out).n = x
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = Counter { base: 7 }
+        \\  get_mut(N).k = junk.base
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a POD value crossing an await is accepted, neighbour and all" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // THE GREEN TWIN, and it keeps the neighbour. The refusal is targeted at
+    // rule-arena storage, not at suspension: an `int` crossing the same `await`
+    // in the same shape, with the same synchronous rule resetting the stores
+    // underneath, type-checks clean AND computes the right answer. Without this,
+    // a rule refusing every local whatsoever would pass the two tests above.
+    const source =
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    let seed = 20
+        \\    await wait(0.016s)
+        \\    get_mut(S).got = seed
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa, source, .rule_arena_value_escapes));
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const sid = world.registry.idOf("S").?;
+    const buf = world.resources.getResource(sid).?;
+    const gf = world.registry.findField(sid, "got").?;
+    var got: i64 = 0;
+    @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 20), got);
+}
+
+test "a for-loop over a rule-arena value is refused when its body suspends" {
+    const gpa = std.testing.allocator;
+
+    // THE ITERATED VALUE IS NOBODY'S LOCAL. `x` is the element — an `int` — so a
+    // rule walking the named locals sees nothing to refuse, while the `ForFrame`
+    // retains a handle into the rule-arena collection store across the
+    // suspension. `noise` resets that store in between.
+    //
+    // MEASURED before the refusal landed: this program parses clean, type-checks
+    // clean — zero diagnostics of any kind — and then reports ONE runtime error,
+    // `forAdvance` bounds-checking the handle and failing loud rather than
+    // dereferencing a reset store. Loud, and still a program the contract says
+    // must not compile.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    for x in [10, 20, 30] {
+        \\      get_mut(S).got = get(S).got + x
+        \\      await wait(0.016s)
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "the iterator refusal covers only what a type can decide, and this pins the rest" {
+    const gpa = std.testing.allocator;
+
+    // A NAMED local of an ambiguous type IS covered — by the sibling rule, not by
+    // this one. `xs` is `.array_dyn` and `m` is `.map_t`, both of which
+    // `isRuleArenaType` answers true for, so walking the locals catches them. The
+    // iterator rule only has to reach what is nobody's local.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { done: bool = false }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let xs: int[] = [1, 2]
+        \\  for x in xs {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+
+    // NOT COVERED, MEASURED AND PINNED RATHER THAN LEFT SILENT. An UNNAMED map
+    // literal is nobody's local, so the sibling rule cannot see it, and its
+    // resolved type `.map_t` is the one a resource `[K: V]` also produces — so this
+    // rule cannot separate it either. Refusing `.map_t` would remove the ability to
+    // iterate a resource map inside an async rule, a capability rather than a false
+    // refusal, and separating the two needs the iterable's provenance.
+    //
+    // Asserted as ZERO so the day `ResolvedType` carries the storage zone, this
+    // test fails and names exactly what to tighten.
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa,
+        \\resource S { done: bool = false }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  for k, v in [1: 10] {
+        \\    await wait(0.016s)
+        \\  }
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a for-loop over a range is accepted though its body suspends" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // THE GREEN TWIN, and it keeps the neighbour. `ForIter.range` is fully
+    // self-contained — two integers and a flag, no store handle — so the same
+    // loop shape, suspending in the same place with the same rule resetting the
+    // stores underneath, type-checks clean AND computes the right answer.
+    // Without it, a rule refusing every suspending `for` would pass the sibling
+    // above: the refusal would then be aimed at the suspension rather than at
+    // the storage.
+    const source =
+        \\resource S { done: bool = false, got: int = 0 }
+        \\resource N { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  if not get(S).done {
+        \\    get_mut(S).done = true
+        \\    for x in 1..4 {
+        \\      get_mut(S).got = get(S).got + x
+        \\      await wait(0.016s)
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).n = junk[0]
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa, source, .rule_arena_value_escapes));
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 10);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const sid = world.registry.idOf("S").?;
+    const buf = world.resources.getResource(sid).?;
+    const gf = world.registry.findField(sid, "got").?;
+    var got: i64 = 0;
+    @memcpy(std.mem.asBytes(&got), buf[gf.offset .. gf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 6), got);
+}
+
+test "a sync suspends the parent, so an arena value in scope is refused" {
+    const gpa = std.testing.allocator;
+
+    // NO `await` APPEARS IN THE PARENT'S OWN STATEMENTS. `beginRaceSync` parks the
+    // parent on `children_all`, so `xs` is exposed to the stores `noise` resets
+    // during the suspension exactly as it would be across an await — which is why
+    // arming the rule on the `await` node caught two of the three suspension
+    // sources and read as complete.
+    //
+    // The neighbouring synchronous rule is in the program for the same reason as
+    // in its siblings: it is what makes the refusal non-arbitrary.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let xs = [1, 2, 3]
+        \\  sync {
+        \\    { await wait(0.016s) }
+        \\  }
+        \\  get_mut(S).n = xs[0]
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).k = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a race inside a for-over-arena is refused, the loop variant" {
+    const gpa = std.testing.allocator;
+
+    // The `ForFrame` is retained across the race's suspension exactly as across an
+    // await's, and again with no `await` in the parent's own statements. The
+    // question is asked BEFORE the branch loop, which resets the iterator depth for
+    // the branch bodies — the depth that matters at this point is the enclosing one.
+    try std.testing.expectEqual(@as(usize, 1), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\resource N { k: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  for x in [10, 20] {
+        \\    race {
+        \\      { await wait(0.016s) }
+        \\    }
+        \\  }
+        \\}
+        \\rule noise()
+        \\  when resource N
+        \\{
+        \\  let junk = [7, 7, 7]
+        \\  get_mut(N).k = junk[0]
+        \\}
+    , .rule_arena_value_escapes));
+}
+
+test "a sync with no arena value in scope stays accepted" {
+    const gpa = std.testing.allocator;
+
+    // THE GREEN TWIN. The refusal is aimed at rule-arena storage retained across a
+    // suspension, not at suspending: the same `sync`, in the same position, with a
+    // POD local instead of an array, is accepted. Without it, a rule refusing every
+    // `race`/`sync` outright would pass both counter-tests above.
+    try std.testing.expectEqual(@as(usize, 0), try countDiagCode(gpa,
+        \\resource S { n: int = 0 }
+        \\async rule holder()
+        \\  when resource S
+        \\{
+        \\  let count = 3
+        \\  sync {
+        \\    { await wait(0.016s) }
+        \\  }
+        \\  get_mut(S).n = count
+        \\}
+    , .rule_arena_value_escapes));
 }

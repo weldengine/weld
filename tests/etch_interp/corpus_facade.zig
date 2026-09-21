@@ -1,12 +1,11 @@
-//! Comptime-enumerated registry of the S4 differential corpus. Same idea
-//! as `tests/etch/corpus_facade.zig` (S3): the facade sits next to the
-//! corpus so `@embedFile` works against the local package, and exposes a
-//! single `programs` array consumed by the test driver.
+//! Comptime-enumerated registry of the differential corpus, on the same idea as
+//! `tests/etch/corpus_facade.zig`: the facade sits beside the corpus so
+//! `@embedFile` works against the local package, and exposes one `programs`
+//! array.
 //!
-//! Each entry pairs a `.etch` source file with its `.expected.zig`
-//! sidecar (declaring `config`, `initial`, `expected` constants). The
-//! generic driver `diff_runner.zig` runs through every entry; S5 will
-//! reuse this same facade with a codegen runner.
+//! Each entry pairs a `.etch` source file with its `.expected.zig` sidecar,
+//! which declares the `config`, `initial` and `expected` constants. The generic
+//! driver `diff_runner.zig` walks every entry, once per backend.
 
 const driver = @import("diff_runner");
 
@@ -84,21 +83,21 @@ const p61 = @import("programs/61_filter_two_components.expected.zig");
 const p64 = @import("programs/64_when_expr_surface.expected.zig");
 const p65 = @import("programs/65_when_expr_archwalk.expected.zig");
 const p66 = @import("programs/66_named_args.expected.zig");
-// M0.8 E7 — full-grammar TOTAL codegen integration (Level-A byte-exact; the
-// file's B/C constructs cook to descriptors, only RefProbe ticks).
+// Full-grammar TOTAL codegen integration — Level-A byte-exact, the file's
+// B and C constructs cooking to descriptors while only `RefProbe` ticks.
 const p84 = @import("programs/84_reference_500_codegen.expected.zig");
-// M0.8 E7 — bare match-arm binding (`match x { n => … }`), byte-exact.
+// Bare match-arm binding (`match x { n => … }`), byte-exact.
 const p85 = @import("programs/85_match_binding.expected.zig");
-// M0.9 E2-A — triple-quote `"""…"""` multiline string + §1.4 common-indent
-// strip + `.len()`, byte-exact across interp ↔ codegen.
+// Triple-quote multiline string, the §1.4 common-indent strip and `.len()`,
+// byte-exact across interp ↔ codegen.
 const p86 = @import("programs/86_triple_quote_multiline.expected.zig");
-// M0.9 E2-A — triple-quote with a MULTI-LINE interpolation: the §1.4 dedent
-// touches only the literal segments, never the interpolation's inner bytes
-// (E2 review item 3). Byte-exact across interp ↔ codegen.
+// Triple-quote with a MULTI-LINE interpolation: the §1.4 dedent touches only
+// the literal segments and never the interpolation's inner bytes. Byte-exact
+// across interp ↔ codegen.
 const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");
 
-/// Embedded list of the 20 differential corpus programs consumed by
-/// the S4 interpreter test and the S5 codegen parity test.
+/// Embedded list of the differential corpus programs, consumed by the
+/// interpreter test and by the codegen parity test.
 pub const programs = [_]Program{
     .{ .name = "01_arith_int_let", .source = @embedFile("programs/01_arith_int_let.etch"), .config = p01.config, .initial = p01.initial, .expected = p01.expected },
     .{ .name = "02_arith_float_compound", .source = @embedFile("programs/02_arith_float_compound.etch"), .config = p02.config, .initial = p02.initial, .expected = p02.expected },

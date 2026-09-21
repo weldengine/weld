@@ -82,11 +82,9 @@ pub const SchedulerError = error{
     Unexpected,
 };
 
-/// Packed snapshot of (generation, chunk_count) loaded
-/// atomically by workers. Two helpers and a wrapper struct guarantee
-/// that a worker observing a given generation sees the matching
-/// chunk_count by construction (single 64-bit atomic load) — fixes
-/// the wave-lifecycle race the state dumps confirmed.
+/// Packed snapshot of (generation, chunk_count) loaded atomically by workers.
+/// Two helpers and a wrapper struct guarantee that a worker observing a given
+/// generation sees the matching chunk_count by construction — one 64-bit load.
 pub const GenAndN = struct { gen: u32, n: u32 };
 
 inline fn pack(gen: u32, n: u32) u64 {
@@ -124,19 +122,16 @@ pub const Scheduler = struct {
     /// phase via `dispatchBatch`).
     jobs: []Job,
 
-    /// Single atomic snapshot of `(generation: u32,
-    /// chunk_count: u32)`. Replaces an earlier split `chunk_count:
-    /// u32` + `generation: std.atomic.Value(u64)`. The split version
-    /// allowed a wave-lifecycle race where a worker observing the
-    /// older generation could read the newer chunk_count after a
-    /// preemption between the two field accesses, causing a double
-    /// `pushShare` and an over-decrement on `pending_count`, which the state
-    /// dumps confirmed. Packed atomic guarantees `(gen, n)` is
-    /// observed as a single snapshot by construction. `gen` is u32
-    /// (wraps at 2^32 dispatches ≈ 33 years at 3600 dispatches/s,
-    /// outside any product lifecycle). Workers compare `gen` against
-    /// their private `last_generation` to know they must push their
-    /// share; `n` provides the wave's chunk count without a second
+    /// Single atomic snapshot of `(generation: u32, chunk_count: u32)`.
+    ///
+    /// **DO NOT SPLIT THESE INTO TWO FIELDS.** A worker preempted between the
+    /// two accesses observes the older generation with the newer chunk_count,
+    /// which double-pushes its share and over-decrements `pending_count`. Packed,
+    /// `(gen, n)` is one snapshot by construction.
+    ///
+    /// `gen` is u32 — it wraps at 2^32 dispatches, about 33 years at 3600/s.
+    /// Workers compare it against their private `last_generation` to know they
+    /// must push their share; `n` carries the wave's chunk count with no second
     /// load.
     gen_and_n: std.atomic.Value(u64) align(64) = .init(0),
 
@@ -154,9 +149,8 @@ pub const Scheduler = struct {
     /// (`workerMain`), while `deinit` writes it — a non-atomic `bool` here
     /// is a data race (UB) the ReleaseFast/ReleaseSafe optimizer may hoist
     /// out of the spin loop, so a worker could spin forever on a cached
-    /// `false` and never observe shutdown. `.release` store pairs with the
-    /// `.acquire` loads on the read sites (surfaced while
-    /// diagnosing the windows-2025/ReleaseSafe scheduler hang).
+    /// `false` and never observe shutdown. The `.release` store pairs with the
+    /// `.acquire` loads on the read sites.
     shutdown: std.atomic.Value(bool) = .init(false),
 
     mu: std.Io.Mutex = .init,
@@ -164,11 +158,9 @@ pub const Scheduler = struct {
     /// Sleeping workers wake, observe the new generation, push their
     /// share, and resume work. The dispatcher does **not** use a
     /// matching `work_completed` condvar — it spins on
-    /// `pending_count` instead (the sleep/wake requirement
-    /// applies to the workers' idle path; making the dispatcher
-    /// also block on a condvar added measurable wake-up latency
-    /// without the CPU savings, see journal entry "bench S5a
-    /// regression breakdown").
+    /// `pending_count` instead: the sleep/wake requirement applies to the
+    /// WORKERS' idle path, and making the dispatcher block on a condvar too was
+    /// measured to add wake-up latency without the CPU savings.
     work_available: std.Io.Condition = .init,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) SchedulerError!Scheduler {
@@ -313,14 +305,9 @@ pub const Scheduler = struct {
         // that may be entering / leaving the parked path.
         self.mu.lockUncancelable(self.io);
         self.pending_count.store(n, .release);
-        // Atomic publish of `(gen, n)` as a single
-        // 64-bit store. Replaces the pre-fix split
-        // `chunk_count = n` + `generation.fetchAdd(1)` which left a
-        // window where workers could see the new generation with
-        // stale chunk_count (or vice versa) — the R1 race confirmed
-        // by the state dumps. Read-modify-write of `gen_and_n` is safe
-        // here because the dispatcher holds `mu` (sole writer in this
-        // critical section).
+        // One 64-bit store publishes `(gen, n)` together — see the field for
+        // why they may not be two. The read-modify-write is safe here because
+        // the dispatcher holds `mu` and is the sole writer in this section.
         const prev = unpack(self.gen_and_n.load(.acquire));
         self.gen_and_n.store(pack(prev.gen +% 1, n), .release);
         self.work_available.broadcast(self.io);
@@ -464,13 +451,19 @@ pub const Scheduler = struct {
 /// - Too high → idle workers burn CPU between actual frames; bad
 ///   for laptops and headless servers.
 ///
-/// 1024 rounds × ~200 ns/yield on macOS ≈ 200 µs spin window —
-/// large enough to absorb the inter-dispatch gap of a busy bench
-/// (≤10 µs measured between iterations) plus the wake-up jitter
-/// from OS scheduler reshuffles, and small enough that a truly idle
-/// scheduler settles to the parked state in well under a frame at
-/// 60 Hz.
-const idle_spin_rounds: u32 = 1024;
+/// Large enough to absorb the inter-dispatch gap of a busy bench (≤10 µs
+/// measured between iterations) plus the wake-up jitter from OS scheduler
+/// reshuffles.
+///
+/// **The window is WALL-CLOCK UNBOUNDED, and a reader must not size it from
+/// this number.** A round costs one `yield` plus a steal sweep, and a `yield`
+/// costs whatever the host gives it: measured single-threaded and unloaded on an
+/// M-series macOS dev box, 32 µs — so 1024 rounds ≈ 33 ms, not the microseconds
+/// a nanosecond-scale yield would suggest. Under contention it is far worse; a
+/// loaded CI runner has been observed at ≥ 6.9 ms per round, putting the same
+/// budget past five seconds. Anything that waits for a worker to park therefore
+/// waits on the HOST, not on this constant.
+pub const idle_spin_rounds: u32 = 1024;
 
 /// Dispatcher-side livelock watchdog budget. If a wave fails to
 /// drain within this wall-clock window, `publishWaveAndWait` is spinning

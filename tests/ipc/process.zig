@@ -1,8 +1,8 @@
 //! Process tests — `platform.process.spawnProcess` + `waitNonblock`
 //! + `isAlive` against the real `/bin/true` and `/bin/sleep` binaries
-//! (POSIX-gated). Plus `quoteArg` — the M0.7 / E3 Windows command-line
-//! quoter — tested cross-platform (no Windows needed) via golden cases
-//! and a round-trip through a reference `CommandLineToArgvW` parser.
+//! (POSIX-gated). Plus `quoteArg`, the Windows command-line quoter, tested
+//! cross-platform through golden cases and a round-trip against a reference
+//! `CommandLineToArgvW` parser — so no Windows is needed to exercise it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -91,9 +91,9 @@ test "spawn-then-kill terminates a long-running child" {
 
 test "spawnProcess runs a Windows binary and reaps exit 0" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // Anti-regression for the M0.7 / E3 addendum: the first real Windows
-    // run hit `CreateProcessW` → `error.SpawnFailed`. Exercise the path
-    // with a binary guaranteed present (`cmd.exe /c exit 0`).
+    // Anti-regression: the first real Windows run hit `CreateProcessW` →
+    // `error.SpawnFailed`. The path is exercised with a binary guaranteed
+    // present, `cmd.exe /c exit 0`.
     const gpa = std.testing.allocator;
     const exe = "C:\\Windows\\System32\\cmd.exe";
     const argv = [_][]const u8{ exe, "/c", "exit 0" };

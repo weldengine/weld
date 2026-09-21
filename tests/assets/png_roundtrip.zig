@@ -1,4 +1,4 @@
-//! M0.6 / E4 — PNG import → cook → load round-trip (brief §Acceptance).
+//! PNG import → cook → load round-trip.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
@@ -8,7 +8,7 @@ const checker_png = @embedFile("data/checker.png");
 test "png import-cook-load round-trip" {
     const gpa = std.testing.allocator;
 
-    // Oracle: the E3 decoder gives the expected RGBA8.
+    // Oracle: the decoder gives the expected RGBA8.
     var img = try assets.codecs.png.decode(gpa, checker_png);
     defer img.deinit(gpa);
 

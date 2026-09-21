@@ -87,15 +87,47 @@ pub fn main(init: std.process.Init) !u8 {
     return 2;
 }
 
+/// Walk each root into `files`, reporting a refused root instead of propagating.
+///
+/// Returns false when a root was refused, which every caller turns into exit 2.
+/// The refusal itself lives at `scan.collectZigFiles`; it is reported here
+/// because a propagated error reaches the user as a stack trace, and the thing
+/// worth saying is which spelling to use instead.
+fn walkRoots(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    roots: []const [:0]const u8,
+    fallback: []const []const u8,
+    files: *std.ArrayList([]const u8),
+    out: *std.Io.Writer,
+) !bool {
+    if (roots.len == 0) {
+        for (fallback) |p| try scan.collectZigFiles(arena, io, p, files);
+        return true;
+    }
+    for (roots) |p| {
+        scan.collectZigFiles(arena, io, p, files) catch |err| switch (err) {
+            error.PathNotRepoRelative => {
+                try out.print(
+                    "{s}: not repo-relative. Every path this tool handles is keyed on the\n" ++
+                        "repo spelling — the comment perimeter, the fingerprint baseline and the\n" ++
+                        "census rows all are. Run from the repo root and pass `tests`, not an\n" ++
+                        "absolute path.\n",
+                    .{p},
+                );
+                return false;
+            },
+            else => return err,
+        };
+    }
+    return true;
+}
+
 fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, out: *std.Io.Writer) !u8 {
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
 
-    if (paths.len == 0) {
-        for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
-    } else {
-        for (paths) |p| try scan.collectZigFiles(arena, io, p, &files);
-    }
+    if (!try walkRoots(arena, io, paths, &default_lint_paths, &files, out)) return 2;
 
     var diags: std.ArrayList(diag.Diagnostic) = .empty;
     defer diags.deinit(arena);
@@ -130,36 +162,6 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try out.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.col, d.rule, d.message });
     }
 
-    // THE COMMENT RULES STATE THEIR OWN COVERAGE, unconditionally. A declared
-    // unread subtree is not an exemption, and a green run that did not say so
-    // would read as full coverage — which is the failure mode a silent
-    // declaration always takes. The list is empty when the pass closes.
-    if (comment_scan.pending.len != 0) {
-        try out.print(
-            "comment rules: {d} subtree(s) not read yet by the conservation pass, so a clean run above covers the rest only:\n",
-            .{comment_scan.pending.len},
-        );
-        // Do NOT claim this prints on every run: the build runner suppresses a
-        // step's captured stdout on success, so under `zig build lint` it does
-        // not. What is true: it prints when the step FAILS, when the binary is
-        // run directly, and on the `comment-coverage` step, which exists for
-        // exactly that reason.
-        // Each entry is CONFRONTED with the files this run walked. An entry that
-        // matches nothing is stale — the subtree was renamed or removed — and a
-        // stale entry silences a rule over a path nobody is watching, which is the
-        // defect a declared list exists to prevent rather than to create.
-        for (comment_scan.pending) |p| {
-            var hits: usize = 0;
-            for (files.items) |file| {
-                if (comment_scan.inPerimeter(file) and comment_scan.matchesPending(file, p.prefix)) hits += 1;
-            }
-            if (hits == 0) {
-                try out.print("  STALE: {s} matches no file this run walked\n", .{p.prefix});
-            } else {
-                try out.print("  unread: {s} ({d} file(s))\n", .{ p.prefix, hits });
-            }
-        }
-    }
     return if (diags.items.len == 0) @as(u8, 0) else @as(u8, 1);
 }
 
@@ -208,8 +210,9 @@ fn runCoverage(arena: std.mem.Allocator, out: *std.Io.Writer) !u8 {
 /// §12). The one exception is an unreadable path, which is an I/O fault rather
 /// than a verdict on the tree.
 fn runCensus(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, out: *std.Io.Writer) !u8 {
-    var files = try collectPaths(arena, io, paths, &default_census_paths);
+    var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
+    if (!try walkRoots(arena, io, paths, &default_census_paths, &files, out)) return 2;
 
     var total: census.Counts = .{};
     for (files.items) |file| {
@@ -241,7 +244,8 @@ fn runCensus(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, 
 ///
 /// A path in the baseline that this run did not visit is reported too: a check
 /// that silently ignores a vanished file stops checking exactly when a file is
-/// deleted.
+/// deleted. It is reported as a RENAME when an unlisted file of this run carries
+/// its digest, and that outcome does not fail — `census.classify` carries why.
 fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8, out: *std.Io.Writer) !u8 {
     var baseline_path: ?[]const u8 = null;
     var paths: std.ArrayList([:0]const u8) = .empty;
@@ -260,8 +264,9 @@ fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const 
         try paths.append(arena, argv[i]);
     }
 
-    var files = try collectPaths(arena, io, paths.items, &default_census_paths);
+    var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
+    if (!try walkRoots(arena, io, paths.items, &default_census_paths, &files, out)) return 2;
 
     var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer seen.deinit(arena);
@@ -296,28 +301,60 @@ fn runFingerprint(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const 
         return 2;
     };
 
-    var moved: usize = 0;
-    for (entries.items) |e| {
-        const got = seen.get(e.path) orelse {
-            try out.print("fingerprint: MISSING {s} — in the baseline, not in this run\n", .{e.path});
-            moved += 1;
-            continue;
-        };
-        if (!std.mem.eql(u8, got, e.digest)) {
-            try out.print("fingerprint: MOVED {s}\n  baseline {s}\n  current  {s}\n", .{ e.path, e.digest, got });
-            moved += 1;
-        }
-    }
     if (entries.items.len == 0) {
         try out.writeAll("fingerprint: baseline is EMPTY — the check proves nothing\n");
         return 2;
     }
-    if (moved != 0) {
-        try out.print("fingerprint: {d} file(s) moved against the baseline.\n", .{moved});
-        try out.writeAll("A comment pass must leave the token stream bit-identical. Do NOT regenerate\n" ++
-            "the baseline to make this green: read the diff of the named file and undo the\n" ++
+    const result = try census.classify(arena, entries.items, &seen);
+    for (result.findings) |f| switch (f) {
+        .moved => |m| try out.print(
+            "fingerprint: MOVED {s}\n  baseline {s}\n  current  {s}\n",
+            .{ m.path, m.baseline, m.current },
+        ),
+        .renamed => |r| try out.print(
+            "fingerprint: RENAMED {s} -> {s} — same digest, so no token moved\n",
+            .{ r.from, r.to },
+        ),
+        .ambiguous => |a| try out.print(
+            "fingerprint: AMBIGUOUS {s} — gone, and the pairing is not unique: " ++
+                "{d} unlisted file(s) carry its digest, {d} baseline path(s) claim it\n",
+            .{ a.from, a.destinations, a.claimants },
+        ),
+        .missing => |m| try out.print(
+            "fingerprint: MISSING {s} — in the baseline, not in this run, and no file here carries its digest\n",
+            .{m.path},
+        ),
+    };
+    if (result.failures != 0) {
+        // ONE REMEDY PER OUTCOME. A single trailer over three of them is the defect
+        // this split exists to remove, one level up: the text would name an act two
+        // of the three readers have not performed.
+        var saw_moved = false;
+        var saw_missing = false;
+        var saw_ambiguous = false;
+        for (result.findings) |f| switch (f) {
+            .moved => saw_moved = true,
+            .missing => saw_missing = true,
+            .ambiguous => saw_ambiguous = true,
+            .renamed => {},
+        };
+        try out.print("fingerprint: {d} file(s) diverged against the baseline.\n", .{result.failures});
+        if (saw_moved) try out.writeAll("A comment pass must leave the token stream bit-identical. Do NOT regenerate\n" ++
+            "the baseline to make this green: read the diff of the MOVED file and undo the\n" ++
             "code edit that produced it.\n");
+        if (saw_missing) try out.writeAll("A MISSING file is gone and no file here carries its content. Restore it, or if\n" ++
+            "the deletion is deliberate, drop its row — removing a row is not regenerating one.\n");
+        if (saw_ambiguous) try out.writeAll("An AMBIGUOUS row cannot be resolved by content: the pairing is not unique.\n" ++
+            "Either several files carry that digest, or several vanished rows claim the same\n" ++
+            "file — the row above says which. Name the destination of EACH such row by hand,\n" ++
+            "or leave them and say why.\n");
         return 1;
+    }
+    if (result.renames != 0) {
+        try out.print("fingerprint: {d} file(s) renamed and none diverged.\n", .{result.renames});
+        try out.writeAll("Rewrite the PATH of each row named above. Its digest is unchanged, which is\n" ++
+            "what separates that edit from the regeneration refused on the failure path.\n");
+        return 0;
     }
     try out.print("fingerprint: {d} file(s) unchanged against {s}.\n", .{ entries.items.len, bp });
     return 0;
@@ -341,22 +378,6 @@ fn runDiffDensity(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !u8
         .{ c.code, c.comment, c.doc, c.blocks, c.density() },
     );
     return 0;
-}
-
-/// Collect `.zig` files from `paths`, or from `fallback` when `paths` is empty.
-fn collectPaths(
-    arena: std.mem.Allocator,
-    io: std.Io,
-    paths: []const [:0]const u8,
-    fallback: []const []const u8,
-) !std.ArrayList([]const u8) {
-    var files: std.ArrayList([]const u8) = .empty;
-    if (paths.len == 0) {
-        for (fallback) |p| try scan.collectZigFiles(arena, io, p, &files);
-    } else {
-        for (paths) |p| try scan.collectZigFiles(arena, io, p, &files);
-    }
-    return files;
 }
 
 /// `dead-tests` — every in-tree file holding a `test` block must belong to the

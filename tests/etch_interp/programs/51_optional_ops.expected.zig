@@ -1,8 +1,8 @@
 const driver = @import("diff_runner");
 
-/// Diff-runner fixture: 1 tick. Exercises the M0.8 E3-C tranche-4 Optional
+/// Diff-runner fixture: 1 tick. Exercises the Optional
 /// vertical — the ops `??` / `!` / `?.`, the `some(v)` / `none` match
-/// patterns, and the tranche-3 lift points `pop() -> T?` and `m[k] -> V?`:
+/// patterns, and the lift points `pop() -> T?` and `m[k] -> V?`:
 ///
 /// - `xs.pop() ?? -1` → 20 (some), `xs.pop()!` → 10, a third pop on the
 ///   emptied array → none → `?? -1` = -1 ⇒ popped = 29.

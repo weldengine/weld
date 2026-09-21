@@ -35,13 +35,13 @@ test "1000 query iterations allocate zero bytes after init" {
         _ = try world.spawn(gpa, Transform{}, Velocity{});
     }
 
-    // E3 queries own a heap-allocated matches list — build the query
+    // A query owns a heap-allocated matches list — build it
     // BEFORE the snapshot window so its construction allocation does
     // not count as steady-state. The dispatch loop itself stays
     // allocation-free.
     var query = try world.query(gpa);
     defer query.deinit(gpa);
-    // M0.1 / E7 — single-archetype lookup via the fused multi-archetype API.
+    // Single-archetype lookup via the fused multi-archetype API.
     const first_chunk = query.chunkAt(0);
     const transforms_off = query.componentOffsetFor(first_chunk, 0);
     const velocities_off = query.componentOffsetFor(first_chunk, 1);

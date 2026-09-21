@@ -61,13 +61,10 @@
 //! **THE STALE HALF FOLLOWS VISITED FILES, and that is what makes it correct under a partial
 //! scan.** `lint` also accepts an explicit path list — the `pre-commit` hook passes staged
 //! files — and a declaration whose file was not read says NOTHING: it is neither used nor
-//! stale, because nobody looked. Two earlier forms tried to establish COMPLETENESS of the scan
-//! instead — neither from an empty argument list nor from a set of root names: each form
-//! trades one wrong verdict for another, and the claim that canonicalising the paths is
-//! impossible at Zig 0.16 is FALSE, `std.process.currentPathAlloc` and
-//! `std.Io.Dir.realPathFileAbsoluteAlloc` both existing. The question does not need asking:
-//! a per-file fact answers it with neither a false positive nor a false negative, whatever
-//! the caller's spelling.
+//! stale, because nobody looked. Do NOT try to establish COMPLETENESS of the scan instead:
+//! neither an empty argument list nor a set of root names gives it, and each form trades one
+//! wrong verdict for another. A per-file fact needs the question asked at all — it answers
+//! with neither a false positive nor a false negative, whatever the caller's spelling.
 //!
 //! The one residual that reasoning leaves is a declaration whose file has been DELETED — never
 //! visited, hence never stale, hence immortal. Closed by testing that the declared path

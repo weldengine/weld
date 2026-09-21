@@ -1,4 +1,4 @@
-//! The bidirectional slice, run (M1.1.15.2 G7).
+//! The bidirectional slice, run.
 //!
 //! C1.0's gate is that an Etch rule reaches a Tier 1 module AND that a Tier 1
 //! module reaches an Etch rule. A slice that called without receiving would close

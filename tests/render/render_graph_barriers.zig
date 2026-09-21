@@ -1,6 +1,5 @@
-//! Render Graph auto-tracking barriers tests — Phase 0 / M0.4.
+//! Render-graph auto-tracking barriers.
 //!
-//! Covers brief §Acceptance criteria > Tests:
 //! - `auto-tracking inserts read-after-write barrier` — 2 passes, pass A
 //!   writes Texture T, pass B reads T → barrier image layout transition +
 //!   access mask inserted between A and B

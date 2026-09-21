@@ -1,4 +1,4 @@
-//! M0.2 / E6 — stub plugin variant claiming a future API version.
+//! Stub plugin variant claiming a future API version.
 //!
 //! Exports `weld_plugin_entry` exactly like the happy-path stub
 //! but with `api_version_min = 99`, well above the runtime's

@@ -1,5 +1,5 @@
-//! S6 fd-passing test (G7) — verifies that the editor side can
-//! transfer an opened file descriptor to the runtime side via
+//! The fd-passing test — the editor side transfers an opened file
+//! descriptor to the runtime side via
 //! `IpcSocket.sendWithHandles` (SCM_RIGHTS ancillary data) and that
 //! the runtime can write into the received fd, with the editor
 //! observing the written bytes through its own end.
@@ -10,9 +10,8 @@
 //! test self-contained (no temp files), and exercises the same
 //! cmsg path as `memfd_create`.
 //!
-//! Windows: `skipNow` per the S6 brief — Windows handle passing
-//! (`DuplicateHandle`) lands in Phase 3 alongside the GPU shared
-//! framebuffer (`engine-ipc.md` §4.7).
+//! Windows: `skipNow`. Handle passing there (`DuplicateHandle`) lands with the
+//! GPU shared framebuffer (`engine-ipc.md` §4.7).
 
 const std = @import("std");
 const builtin = @import("builtin");

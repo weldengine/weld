@@ -1,28 +1,11 @@
-//! M0.1 / E5a — system scheduler acceptance tests.
+//! System scheduler acceptance tests: phase pipeline order, worker count
+//! against CPU topology, and the park→wake cycle.
 //!
-//! Covers the three acceptance criteria listed in
-//! `briefs/M0.1-ecs-full.md` § Acceptance criteria › Tests for E5a:
-//!
-//! - `test "phases dispatch sequentially with end-of-phase barrier"` —
-//!   register systems across multiple phases. Each system writes its
-//!   `(phase, index_in_phase)` to a shared visit log. Assert: the
-//!   log order matches the canonical phase pipeline order and,
-//!   within a phase, the registration order.
-//! - `test "worker count matches CPU topology at startup"` —
-//!   `Scheduler.init` reports a worker count equal to
-//!   `std.Thread.getCpuCount() catch default_worker_count`.
-//! - `test "workers deterministically park then wake on dispatch"` —
-//!   M1.1.1-HF3 E9 deterministic replacement for the former fixed
-//!   40×50 ms window (which flaked / hung under CI load). Two phases,
-//!   each polled against the scheduler's park stats, bounded only by
-//!   the 5 s watchdog:
-//!     (a) after one dispatch, poll until `Σ parks_entered >
-//!         Σ parks_completed` — at least one worker is parked RIGHT
-//!         NOW (it incremented `parks_entered` under the park mutex and
-//!         is blocked in `waitUncancelable`, not yet woken);
-//!     (b) capture the completed count, dispatch again, poll until
-//!         `Σ parks_completed` strictly grows — the park→wake cycle is
-//!         proven. No wall-clock sleep window is used.
+//! The park test polls the scheduler's own stats and uses NO wall-clock window:
+//! a fixed 40×50 ms wait flaked and hung under CI load. It proves the two
+//! halves separately — `Σ parks_entered > Σ parks_completed` means a worker is
+//! parked RIGHT NOW, and `Σ parks_completed` growing after the next dispatch
+//! means one returned from `waitUncancelable`.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -43,8 +26,6 @@ const SystemContext = sys_sched_mod.SystemContext;
 const SystemContextOf = weld_core.ecs.SystemContextOf;
 const Access = weld_core.ecs.Access;
 
-// ─── Phase-ordering test infrastructure ───────────────────────────────────
-
 const VisitEntry = struct {
     phase: Phase,
     index_within_phase: u32,
@@ -57,12 +38,10 @@ const PhaseLog = struct {
     }
 };
 
-// ─── Declared access sets ─────────────────────────────────────────────────
-//
-// EMPTY, and deliberately: these five systems exercise the PHASE pipeline and
-// touch no component at all — each appends its name to a log reached through
-// `ctx.frame.user`. The DAG has nothing to order here, and the ordering under
-// test is the phase's.
+// The declared access sets are EMPTY, and deliberately: these five systems
+// exercise the PHASE pipeline and touch no component at all — each appends its
+// name to a log reached through `ctx.frame.user`. The DAG has nothing to order
+// here, and the ordering under test is the phase's.
 const spec_pre_a: []const Access = &.{};
 const spec_pre_b: []const Access = &.{};
 const spec_update_a: []const Access = &.{};
@@ -109,14 +88,10 @@ test "phases dispatch sequentially with end-of-phase barrier" {
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
 
-    // Register two systems in `pre_update` (testing intra-phase order),
-    // then one each in `update`, `post_update`, `pre_render`. Skip
-    // `fixed_update` and `late_update` to verify empty phases are
-    // skipped cleanly without breaking ordering.
-    //
-    // Each declares an empty access set, and that is what these bodies do: they
-    // append their phase to a log and touch no entity data. The set is written
-    // because omitting it no longer yields one.
+    // Two systems in `pre_update` to cover intra-phase order, then one each in
+    // `update`, `post_update` and `pre_render`. `fixed_update` and
+    // `late_update` are deliberately left empty: a skipped phase must not
+    // disturb the ordering.
     try sys.registerSystem(gpa, &world, .pre_update, "pre_a", spec_pre_a, logPreUpdateA);
     try sys.registerSystem(gpa, &world, .pre_update, "pre_b", spec_pre_b, logPreUpdateB);
     try sys.registerSystem(gpa, &world, .update, "update_a", spec_update_a, logUpdateA);
@@ -128,7 +103,6 @@ test "phases dispatch sequentially with end-of-phase barrier" {
 
     try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &log);
 
-    // Expected order: pre_a, pre_b, update_a, post, render.
     try std.testing.expectEqual(@as(usize, 5), log.entries.items.len);
     const expected = [_]VisitEntry{
         .{ .phase = .pre_update, .index_within_phase = 0 },
@@ -172,8 +146,8 @@ test "workers deterministically park then wake on dispatch" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Spawn enough entities to span multiple chunks so each dispatch
-    // gives every worker something to do, then has them go idle.
+    // Several chunks' worth, so each dispatch gives every worker something to do
+    // before it goes idle.
     const N: u32 = 2_000;
     var i: u32 = 0;
     while (i < N) : (i += 1) _ = try world.spawn(gpa, Transform{}, Velocity{});
@@ -186,40 +160,38 @@ test "workers deterministically park then wake on dispatch" {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
 
-    // Phase (a) — observe a worker parked RIGHT NOW.
-    //
-    // One dispatch of trivial work; idle workers then spin briefly and park on
-    // `work_available.waitUncancelable`, incrementing `parks_entered` under the
-    // park mutex before the wait. Poll until `Σ parks_entered > Σ parks_completed`:
-    // that strict inequality can only hold when a worker has entered a wait it
-    // has not yet woken from. The per-snapshot invariant
-    // `parks_completed <= parks_entered` (snapshot reads completed before entered)
-    // rules out a sampling artefact; and because this dispatch's wave has drained
-    // (no park↔wake churn), that entered-not-woken worker is a worker parked now.
-    // `std.Thread.yield` between polls; the 5 s watchdog armed above is
-    // the hard upper bound (a genuine regression — workers never parking — hangs
-    // here and the watchdog dumps the scheduler state, rather than a silent CI
-    // timeout).
+    // CONCURRENCY FACT: a snapshot reads `parks_completed` before
+    // `parks_entered`, so `entered > completed` can only hold when some worker
+    // has entered a wait it has not yet woken from.
     try sched.dispatch(&query, idleBody, .{});
+    const steals_at_dispatch = blk: {
+        const stats = try sched.snapshotStats(gpa);
+        defer gpa.free(stats);
+        var min: u64 = std.math.maxInt(u64);
+        for (stats) |s| min = @min(min, s.steals_attempted);
+        break :blk min;
+    };
     while (true) {
         std.Thread.yield() catch {};
         const stats = try sched.snapshotStats(gpa);
         defer gpa.free(stats);
         var entered: u64 = 0;
         var completed: u64 = 0;
+        var min_steals: u64 = std.math.maxInt(u64);
         for (stats) |s| {
             entered += s.parks_entered;
             completed += s.parks_completed;
+            min_steals = @min(min_steals, s.steals_attempted);
         }
         if (entered > completed) break; // at least one worker is parked now
+
+        const spent = min_steals - steals_at_dispatch;
+        if (spent > 2 * jobs_sched_mod.idle_spin_rounds) return error.WorkersDidNotParkAfterSpinBudget;
     }
 
-    // Phase (b) — prove the wake side of the cycle.
-    //
-    // Capture the current completed count (a worker is parked, so nothing raises
-    // it until the next dispatch), dispatch again, and poll until
-    // `Σ parks_completed` strictly grows — a parked worker returned from
-    // `waitUncancelable`.
+    // The wake side. A worker is parked, so nothing raises the completed count
+    // until the next dispatch — after which it growing means a parked worker
+    // returned from `waitUncancelable`.
     var completed_before: u64 = 0;
     {
         const stats = try sched.snapshotStats(gpa);
