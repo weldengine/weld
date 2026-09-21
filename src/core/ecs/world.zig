@@ -2939,3 +2939,120 @@ test "sustained churn keeps the chunk count on the live population" {
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
     try std.testing.expect(arch.chunks_released >= 4);
 }
+
+// ---------------------------------------------------------- partial reuse --
+//
+// The regime the reclamation-at-zero path does NOT reach: chunks that stabilise ABOVE
+// zero. They are never emptied, so nothing is released, and before `first_partial`
+// they were never refilled either — `allocateSlot` looked only at the trailing
+// chunk, so every spawn landed there and a half-empty chunk stayed half-empty.
+//
+// Every assertion below is on the chunk COUNT with `chunks_released` pinned at
+// ZERO beside it. The pairing is the point: a count that stays put while something
+// was reclaimed would be the other mechanism, and this one must be shown to work
+// with the other mechanism silent.
+
+test "a chunk left partial by churn is refilled, and nothing is reclaimed" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PA"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    // Drain a QUARTER of chunk 0 — enough to leave room, never enough to empty
+    // it, so the reclamation path cannot fire and take the credit.
+    const holes = cap / 4;
+    try std.testing.expect(holes > 0);
+    for (0..holes) |i| try world.despawn(gpa, ids.items[i]);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    // Spawn exactly as many back. The trailing chunk is FULL, so without reuse
+    // every one of these allocates into a FOURTH chunk.
+    for (0..holes) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+}
+
+test "a reused slot is reported at the chunk it actually landed in" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PB"));
+    const first = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 2 * cap) {
+        try ids.append(gpa, try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }}));
+    }
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    try world.despawn(gpa, ids.items[0]);
+
+    // THE LOCATION, not merely the count. `allocateSlot` used to answer
+    // `chunks.items.len - 1` unconditionally, which was right only while the
+    // trailing chunk was the sole possible destination; the moment an earlier
+    // chunk can be chosen, that answer names the wrong chunk and the entity is
+    // recorded where it is not. So this asserts chunk 0 AND reads the bytes back
+    // through the recorded location.
+    const reused = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 9, 0, 0, 0 }});
+    const loc = world.entity_locations.get(reused).?;
+    try std.testing.expectEqual(@as(u32, 0), loc.chunk_idx);
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    const bytes = world.componentBytes(reused, cid).?;
+    try std.testing.expectEqual(@as(u8, 9), bytes[0]);
+
+    // And the entity that removeSwap displaced is still readable at its new home.
+    for (ids.items[1..]) |e| {
+        const b = world.componentBytes(e, cid) orelse return error.SurvivorLost;
+        try std.testing.expectEqual(@as(u8, 7), b[0]);
+    }
+}
+
+test "first_partial is a lower bound: every chunk below it is full" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PC"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+
+    // Churn across three chunks, then re-fill, then churn again — the sequence
+    // that exercises lowering at `removeSwap` against advancing at `allocateSlot`.
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        for (0..cap / 8) |i| try world.despawn(gpa, ids.items[round * cap + i]);
+        for (0..cap / 8) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+        // THE INVARIANT, asserted as the bound it is declared to be — not as an
+        // equality with "the first partial chunk", which the field deliberately
+        // does not claim.
+        for (arch.chunks.items[0..arch.first_partial]) |c| {
+            try std.testing.expectEqual(arch.layout.capacity, c.header().entity_count);
+        }
+        try std.testing.expect(arch.first_partial <= arch.chunks.items.len);
+    }
+}

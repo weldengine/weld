@@ -142,6 +142,24 @@ pub const Archetype = struct {
     registry: *const Registry,
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
+    /// A LOWER BOUND on the index of any non-full chunk: every chunk below it is
+    /// full. Not "the first partial chunk" — that would be an equality nobody
+    /// could cheaply maintain, and stating it as a bound is what makes each
+    /// maintenance site decidable on its own. Lowering is ALWAYS safe (it can
+    /// only make the scan start earlier); advancing is what must be earned, and
+    /// `allocateSlot` earns it by walking past chunks it has just observed full.
+    ///
+    /// Without it `allocateSlot` filled only the TRAILING chunk, so a chunk left
+    /// half-empty by churn was never refilled and the count followed cumulative
+    /// appends rather than live population.
+    ///
+    /// **No entity moves to make this work.** `removeSwap` swaps the trailing
+    /// entity into the freed slot, so a chunk's occupants are always a dense
+    /// prefix and its free space is always at the tail — reuse appends there,
+    /// exactly as the trailing-chunk path already did. That is why this needs no
+    /// location repair and no `ComponentRef` change: nothing is invalidated
+    /// because nothing is displaced.
+    first_partial: u32 = 0,
     transitions: TransitionCache = .{},
     /// `true` iff this archetype hosts a singleton-entity
     /// resource. Set by `resources.setResource` after spawning the
@@ -248,13 +266,22 @@ pub const Archetype = struct {
     /// sidecars are initialised to `tick`, and the slot's dirty bit is
     /// set — the entity is "fresh" for the current frame.
     pub fn allocateSlot(self: *Archetype, gpa: std.mem.Allocator, tick: Tick) ArchetypeError!SpawnResult {
-        const chunk = blk: {
-            if (self.chunks.items.len > 0) {
-                const last = self.chunks.items[self.chunks.items.len - 1];
-                if (last.header().entity_count < self.layout.capacity) break :blk last;
-            }
-            break :blk try self.allocChunk(gpa);
-        };
+        // Walk forward from the bound, past chunks observed FULL, and record how
+        // far we got — that is the only place the bound advances, and it
+        // advances on an observation rather than on an assumption. The walk is
+        // amortised O(1): each step it takes is paid once per chunk until
+        // something lowers the bound again.
+        var idx = self.first_partial;
+        while (idx < self.chunks.items.len and
+            self.chunks.items[idx].header().entity_count >= self.layout.capacity) : (idx += 1)
+        {}
+        self.first_partial = idx;
+
+        const chunk = if (idx < self.chunks.items.len)
+            self.chunks.items[idx]
+        else
+            try self.allocChunk(gpa);
+        const chunk_idx: u32 = @intCast(idx);
         const hdr = chunk.header();
         const slot = hdr.entity_count;
         hdr.entity_count = slot + 1;
@@ -267,8 +294,11 @@ pub const Archetype = struct {
         }
         change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
 
+        // The CHOSEN index, not the trailing one. The old form was correct only
+        // because the only reachable destination was the last chunk; it becomes
+        // a wrong location the moment an earlier chunk can be the destination.
         return .{
-            .chunk_idx = @intCast(self.chunks.items.len - 1),
+            .chunk_idx = chunk_idx,
             .slot = slot,
         };
     }
@@ -330,6 +360,12 @@ pub const Archetype = struct {
         const chunk = self.chunks.items[chunk_idx];
         const hdr = chunk.header();
         std.debug.assert(slot < hdr.entity_count);
+        // This chunk is about to have room, so the bound cannot stay above it.
+        // Unconditional `@min` rather than a test on capacity: the bound is a
+        // LOWER bound, so lowering it when it was already low costs a comparison
+        // and can never be wrong, where a conditional would have to reason about
+        // the pre-removal count.
+        self.first_partial = @min(self.first_partial, chunk_idx);
         const last = hdr.entity_count - 1;
         if (slot == last) {
             hdr.entity_count = last;
@@ -387,10 +423,18 @@ pub const Archetype = struct {
         self.chunks_released += 1;
         if (chunk_idx == last_idx) {
             _ = self.chunks.pop();
+            // The list shrank; a bound past its end would make the walk skip the
+            // allocation branch's precondition. Clamp rather than reset, so what
+            // was earned about the chunks below is not thrown away.
+            self.first_partial = @min(self.first_partial, @as(u32, @intCast(self.chunks.items.len)));
             return null;
         }
         self.chunks.items[chunk_idx] = self.chunks.items[last_idx];
         _ = self.chunks.pop();
+        // The trailing chunk moved DOWN into `chunk_idx` and may be partial, so
+        // the bound must not sit above its new home. Clamping to the new length
+        // in the same expression keeps the bound inside the list after a pop.
+        self.first_partial = @min(self.first_partial, chunk_idx);
         return chunk_idx;
     }
 
