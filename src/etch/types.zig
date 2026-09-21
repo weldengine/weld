@@ -250,6 +250,30 @@ pub const builtin_resources = [_]BuiltinResource{
     } },
 };
 
+/// The builtin COMPONENT the interpreter injects when a program declares any
+/// tag. Named here rather than spelled at each site so the reservation below and
+/// the injection itself cannot disagree about which name is taken.
+pub const tagset_component_name = "TagSet";
+
+/// True iff `name` is one the engine itself registers into the ECS registry, so
+/// a program declaring a `component` or `resource` under it would collide.
+///
+/// DERIVED from `builtin_resources` rather than listed, so adding a builtin
+/// resource extends the reservation by itself — a second list is how the two
+/// come to disagree. The bound is `component` and `resource` and nothing else:
+/// those are the two declaration kinds that enter the registry by name, which is
+/// where `idOf` collides. A `struct` is by-value and never registered, and an
+/// `event` lives in its own namespace.
+///
+/// What the collision cost before this: the builtin injection arm in `interp.zig`
+/// finds the user's entry with `idOf`, takes its `continue`, and the offset
+/// resolution below it then unwraps `findField(gid, "dt").?` on a type that has
+/// no such field — a panic, with no diagnostic, on an ordinary program.
+pub fn isReservedEngineTypeName(name: []const u8) bool {
+    if (std.mem.eql(u8, name, tagset_component_name)) return true;
+    return builtinResourceByName(name) != null;
+}
+
 /// Descriptor lookup by resource name bytes. Consulted by the
 /// receiver-less `get(T)` resolution and by the builtin-resource field
 /// lookup; `interp.zig` iterates `builtin_resources` directly.
@@ -3319,6 +3343,16 @@ pub const TypeChecker = struct {
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
+    /// Refuse a `component`/`resource` declaration that takes a name the engine
+    /// itself registers. Reuses `E0101` with a contextual message rather than
+    /// minting a code, on the precedent set for duplicate `test` names: the fault
+    /// IS a duplicate symbol, the other declarant simply being the engine.
+    fn refuseReservedEngineName(self: *TypeChecker, name: StringId, span: SourceSpan, kind_word: []const u8) !void {
+        const slice = self.arena.strings.slice(name);
+        if (!isReservedEngineTypeName(slice)) return;
+        try self.emit(.duplicate_symbol, .error_, span, "'{s}' is registered by the engine; a {s} may not take that name", .{ slice, kind_word });
+    }
+
     fn pass1Collect(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3332,6 +3366,7 @@ pub const TypeChecker = struct {
             switch (kind) {
                 .component_decl => {
                     const decl = self.arena.component_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "component");
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.checkStorageAnnotation(decl);
@@ -3342,6 +3377,7 @@ pub const TypeChecker = struct {
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "resource");
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
@@ -5533,6 +5569,25 @@ pub const TypeChecker = struct {
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
                     const vt = self.synthHeadValue(value, ctx);
+                    // A `race` BRANCH'S RETURN IS A RETENTION POINT. The winner's
+                    // value is parked in `AsyncTask.result` and re-raised at the
+                    // race site several ticks later, after the rule arena has been
+                    // reset — and `result` is a bare `Value` that stabilises
+                    // nothing, where the sibling retention point at least
+                    // deep-copies a string.
+                    //
+                    // Keyed on what the point RETAINS and not on how the value was
+                    // written, which is the whole correction: `return a + "y"` was
+                    // already refused and `return "x" + "y"` was not, though both
+                    // park the same `.string_run` — the first only because `let a`
+                    // made it a local the sibling rule walks. The same predicate
+                    // as that rule, so the two cannot drift apart on which forms
+                    // count as arena-backed.
+                    if (self.conc_branch) |ck| {
+                        if (ck == .race and isRuleArenaType(vt)) {
+                            try self.emit(.rule_arena_value_escapes, .error_, self.arena.exprSpan(value), "this 'race' branch returns a value stored in the rule arena; the winner's value is parked and re-raised at the race site after the arena has been reset", .{});
+                        }
+                    }
                     if (self.current_fn_return) |ret| {
                         if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
                             try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
@@ -13153,4 +13208,233 @@ test "an optional whose payload is not a builtin is still refused" {
     );
     defer v.deinit(gpa);
     try expectAnyCode(v.diagnostics.items, .rule_arena_value_escapes);
+}
+
+/// Build a one-rule program whose body is `body`, with optional extra `decls`.
+/// Shared by the race-return retention tests below so every case differs in
+/// exactly the expression under test and in nothing else.
+fn raceReturnProgram(gpa: std.mem.Allocator, decls: []const u8, body: []const u8) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(
+        gpa,
+        "component C {{ out: int = 0 }}\n{s}async rule r(entity: Entity)\n  when entity has C\n{{\n  race {{ {{ return {s} }} await wait(1.0s) }}\n}}\n",
+        .{ decls, body },
+        0,
+    );
+}
+
+test "a race branch returning a rule-arena value is refused, per form" {
+    const gpa = std.testing.allocator;
+
+    // THE RETENTION POINT, NOT THE PRODUCTION SITE. A `race` branch's `return`
+    // value is parked in `AsyncTask.result` and re-raised at the race site
+    // several ticks later, after the rule arena has been reset. `result` is a
+    // bare `Value` and stabilises NOTHING — where `captureEventFilter` at least
+    // deep-copies a string.
+    //
+    // The refusal is keyed on what the point RETAINS, which is why every form
+    // is listed: before this, `return a + "y"` was refused and
+    // `return "x" + "y"` was not, though both park the same `.string_run` —
+    // the first only because `let a` made it a local that the sibling rule
+    // already walks. Coverage by accident of spelling.
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "[1, 2, 3]" }, // array literal
+        .{ .decls = "", .expr = "[1: 2]" }, // map literal
+        .{ .decls = "struct S { v: int = 0 }\n", .expr = "S { v: 1 }" }, // struct literal
+        .{ .decls = "", .expr = "Set.from([1, 2])" }, // set
+        .{ .decls = "", .expr = "some(41)" }, // optional
+        .{ .decls = "", .expr = "|x: int| x * 2" }, // closure
+        .{ .decls = "", .expr = "\"x\" + \"y\"" }, // string with NO local
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("form not refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a NON-arena value is still accepted — the green twin" {
+    const gpa = std.testing.allocator;
+
+    // NAMED BEFORE RUNNING. Without this the refusal above is satisfied by a
+    // rule that refuses every `race` return whatsoever, which would key on the
+    // SUSPENSION and not on the STORAGE — the distinction the whole entry is
+    // about. A bare string literal is in the AST pool (`.string_id`), not the
+    // rule arena, so it belongs on this side.
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "1" },
+        .{ .decls = "", .expr = "2.5" },
+        .{ .decls = "", .expr = "true" },
+        .{ .decls = "", .expr = "1 + 2" },
+        .{ .decls = "", .expr = "entity" },
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("green twin wrongly refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a bare string literal is refused — the MEASURED COST" {
+    const gpa = std.testing.allocator;
+
+    // THE FALSE REFUSAL, SHOWN RATHER THAN DECLARED. A bare `"x"` is an
+    // AST-pool handle (`.string_id`), copy-stable and outliving the arena, so
+    // parking it is safe and it is refused anyway.
+    //
+    // It is NOT separable at this point: `isRuleArenaType` answers on the
+    // RESOLVED type, and a literal, a concatenation and a resource-owned string
+    // are all `builtin .string_` — the zone is a property of the value, not of
+    // the type. Splitting them here would need the same thing the sibling rule
+    // needs and does not have.
+    //
+    // Taken deliberately, and for a reason beyond consistency: both retention
+    // points now consult ONE predicate, so a form can never count as
+    // arena-backed at one and not at the other. Measured cost on the repository:
+    // ZERO — the corpus contains no `race` construct at all, so nothing existing
+    // is refused by this. The cost is exactly this constructed case.
+    const src = try raceReturnProgram(gpa, "", "\"x\"");
+    defer gpa.free(src);
+    var c = try parseAndCheck(gpa, src);
+    defer c.deinit(gpa);
+    try expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes);
+
+    // SECOND CASE, AND IT IS A DIFFERENT ARM. A bare enum shorthand in a
+    // `return` has no expected type to resolve against and comes back
+    // `.unknown`, which the shared predicate refuses on the arbitrated ground
+    // that safety cannot be ESTABLISHED for an unresolved type. So this one is
+    // not the string over-refusal repeated — it is the `.unknown` arm, reached
+    // here by a value that happens to be a POD discriminant at runtime. Found
+    // by the green twin rejecting it, not by reading the predicate.
+    const en = try raceReturnProgram(gpa, "enum K { a, b }\n", ".b");
+    defer gpa.free(en);
+    var e2 = try parseAndCheck(gpa, en);
+    defer e2.deinit(gpa);
+    try expectAnyCode(e2.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "a scalar event filter is still accepted, and only a string can reach one" {
+    const gpa = std.testing.allocator;
+
+    // THE SECOND RETENTION POINT NEEDS NO REFUSAL, and this pins why rather
+    // than asserting it. `wake.filter` retains the captured filter values
+    // across ticks, and `captureEventFilter` stabilises STRINGS only — which is
+    // complete, because a string is the only rule-arena form that can reach an
+    // event field at all. Measured on the four other candidates: an `int?`
+    // field and an `int[]` field are refused as FIELD TYPES, a struct-valued
+    // filter is refused by the filter checker, and an enum filter carries a
+    // discriminant. If any of those four ever becomes legal, this test is where
+    // the assumption is written down.
+    const scalar =
+        \\component C { out: int = 0 }
+        \\enum K { a, b }
+        \\event E { n: int = 0, k: K = .a }
+        \\async rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  await global_event(E { n: 1, k: .b })
+        \\}
+    ;
+    var ok = try parseAndCheck(gpa, scalar);
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .rule_arena_value_escapes);
+
+    // An OPTIONAL event field is refused at the field type, so `some(…)` never
+    // reaches a captured filter.
+    var opt = try parseAndCheck(gpa,
+        \\event E { n: int? }
+    );
+    defer opt.deinit(gpa);
+    try expectAnyCode(opt.diagnostics.items, .undefined_symbol);
+
+    // A COLLECTION event field likewise — collections are resource-only.
+    var arr = try parseAndCheck(gpa,
+        \\event E { xs: int[] }
+    );
+    defer arr.deinit(gpa);
+    try expectAnyCode(arr.diagnostics.items, .undefined_symbol);
+}
+
+test "a component or resource may not take a name the engine registers" {
+    const gpa = std.testing.allocator;
+
+    // THE COLLISION WAS ACCEPTED AND THEN PANICKED, not diagnosed. `interp.zig`
+    // injects the builtin time resources after the user-declaration loop and
+    // skips any name already in the registry — so a user's `resource GameTime`
+    // won the name, the builtin arm took its `continue`, and the offset
+    // resolution below it unwrapped `findField(gid, "dt").?` on a type with no
+    // such field. The comment there asserted the lookups "cannot miss", which
+    // the `continue` arm is exactly the case that makes false.
+    //
+    // Every name is exercised, and both declaration kinds for each, because the
+    // registry is ONE namespace: a `component GameTime` collides as surely as a
+    // `resource` one.
+    const forms = [_][]const u8{
+        "resource GameTime { dt: float = 0.0 }",
+        "resource GameTime { zz: int = 0 }",
+        "resource UnscaledTime { zz: int = 0 }",
+        "resource RealTime { zz: int = 0 }",
+        "component GameTime { zz: int = 0 }",
+        "component UnscaledTime { zz: int = 0 }",
+        "component RealTime { zz: int = 0 }",
+        "component TagSet { zz: int = 0 }",
+        "resource TagSet { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("reserved name not refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "an ordinary component or resource name is untouched — the green twin" {
+    const gpa = std.testing.allocator;
+
+    // NAMED BEFORE RUNNING. Without it the refusal above is satisfied by a rule
+    // that refuses every declaration, and the reservation would be indistinguishable
+    // from a blanket. Includes two names that merely RESEMBLE the reserved ones —
+    // the predicate compares whole bytes, not a prefix.
+    const forms = [_][]const u8{
+        "resource Ordinary { zz: int = 0 }",
+        "component Ordinary { zz: int = 0 }",
+        "resource GameTimer { zz: int = 0 }",
+        "component TagSetup { zz: int = 0 }",
+        "resource Time { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("green twin wrongly refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "the reservation is DERIVED from the builtin table, not a second list" {
+    // If a builtin resource is added to `builtin_resources`, the reservation
+    // must extend by itself — a hand-kept list is how the two come to disagree,
+    // and the disagreement would be silent until a user picked the new name.
+    for (&builtin_resources) |*br| {
+        try std.testing.expect(isReservedEngineTypeName(br.name));
+    }
+    try std.testing.expect(isReservedEngineTypeName(tagset_component_name));
+    try std.testing.expect(!isReservedEngineTypeName("GameTimer"));
+    try std.testing.expect(!isReservedEngineTypeName(""));
 }
