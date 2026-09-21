@@ -92,6 +92,50 @@ pub const TagTable = struct {
         return (self.leaf_count + 63) / 64;
     }
 
+    /// Digest over WHICH TAG OWNS WHICH BIT — the identity `words()` cannot
+    /// express, since a size says how many words exist and never what they mean.
+    /// Feeds `ComponentDesc.content_digest`, so a reload that renames or
+    /// reorders tags inside one word is refused instead of silently redefining
+    /// every live entity's bits.
+    ///
+    /// **The map is never iterated to produce the output**, which is the
+    /// property this file's header makes load-bearing: a `bit_index` is a pure
+    /// function of declaration order, and hashing in hash-map order would make
+    /// the digest vary build to build. Leaves are PLACED at their own index in a
+    /// dense scratch array and read back in index order, so the iteration order
+    /// reaches nothing observable. That the array fills completely is asserted
+    /// rather than assumed — a hole would mean a duplicate or an out-of-range
+    /// index, and a digest over a partly-filled array is a digest over garbage.
+    ///
+    /// Hashes the leaf count first, then per index the path's length and bytes.
+    /// The length is explicit so that `a.bc` and `ab.c` cannot collide by
+    /// concatenation.
+    pub fn contentDigest(self: *const TagTable, gpa: std.mem.Allocator) !u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&self.leaf_count));
+        if (self.leaf_count == 0) return h.final();
+
+        const slots = try gpa.alloc([]const u8, self.leaf_count);
+        defer gpa.free(slots);
+        for (slots) |*sl| sl.* = &.{};
+
+        var it = self.map.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (!e.is_leaf) continue;
+            std.debug.assert(e.bit_index < self.leaf_count);
+            slots[e.bit_index] = kv.key_ptr.*;
+        }
+
+        for (slots) |path| {
+            std.debug.assert(path.len != 0);
+            const len: u32 = @intCast(path.len);
+            h.update(std.mem.asBytes(&len));
+            h.update(path);
+        }
+        return h.final();
+    }
+
     /// Look up a dotted path; `null` if it names neither a leaf nor a namespace.
     pub fn lookup(self: *const TagTable, path: []const u8) ?Entry {
         return self.map.get(path);

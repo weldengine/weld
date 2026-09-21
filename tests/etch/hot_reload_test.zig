@@ -241,8 +241,38 @@ const src_tags_wide =
     \\}
 ;
 
-/// Same width as `src_tags_narrow`, different tag NAMES. Feeds the adjacent
-/// case pinned below.
+/// Same width as `src_tags_narrow`, same NAMES, order SWAPPED. A reorder keeps
+/// the leaf count and therefore the size, while permuting every `bit_index`.
+const src_tags_reordered =
+    \\tags {
+    \\  a { t01, t00 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// One MORE tag than `src_tags_narrow`, still inside the first word. Every
+/// pre-existing bit keeps its index and its meaning, so this reload is SAFE and
+/// is nevertheless refused — the measured cost of a whole-table digest, pinned
+/// below rather than left to be discovered.
+const src_tags_appended =
+    \\tags {
+    \\  a { t00, t01, t02 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// Same width as `src_tags_narrow`, different tag NAMES. Feeds the refusal
+/// pinned below.
 const src_tags_renamed =
     \\tags {
     \\  a { u00, u01 }
@@ -272,7 +302,7 @@ test "a reload widening TagSet past a word boundary is refused" {
     try std.testing.expectEqual(size_before, world.registry.componentSize(cid));
 }
 
-test "a reload renaming tags within one word is accepted — the adjacent case" {
+test "a reload renaming tags within one word is REFUSED" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -280,20 +310,81 @@ test "a reload renaming tags within one word is accepted — the adjacent case" 
 
     const cid = world.registry.idOf("TagSet").?;
 
-    // ADJACENT CASE, ACCEPTED AND OUT OF THE REFUSAL'S SCOPE. `schemaDigestOf`
-    // hashes name, size, alignment and each FIELD's (name, kind, offset); the
-    // `TagSet` descriptor carries `fields = &.{}` because it is a bitfield and
-    // not a struct. So tag IDENTITY is not expressible in the digest at all:
-    // renaming or reordering tags without crossing a word boundary keeps the
-    // same size, hence the same digest, and the reload is accepted while the
-    // bit assignment of live entities now denotes different tags.
+    // `schemaDigestOf` hashes name, size, alignment and each FIELD's
+    // (name, kind, offset); the `TagSet` descriptor carries `fields = &.{}`
+    // because a bitfield is not a struct. So the four layout members say how
+    // many WORDS of tags exist and never WHICH tag owns which bit, and a rename
+    // inside one word used to keep the size, hence the digest, hence the reload
+    // — while every live entity's bits silently changed meaning.
     //
-    // Refusing it needs a digest over the tag table's own content — a different
-    // mechanism from the layout digest this test's sibling exercises, and NOT a
-    // gap in it. Pinned as accepted so the boundary is observable rather than
-    // asserted in prose.
-    try reloadOn(gpa, &world, src_tags_renamed);
+    // `ComponentDesc.content_digest` carries that identity now. The size is
+    // asserted UNCHANGED beside the refusal, which is what makes this a content
+    // refusal and not the sibling test's layout one: nothing about the layout
+    // moved.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_renamed));
     try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "a reload reordering tags within one word is REFUSED" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    const cid = world.registry.idOf("TagSet").?;
+
+    // The SECOND half of the defect, and not the same case as a rename: here
+    // every tag NAME survives and only the declaration order moves, which
+    // permutes `bit_index` and therefore what each live bit denotes. A digest
+    // over the names alone would pass this; the digest is over (index, path) in
+    // index order, so it does not.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_reordered));
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "an identical tag reload is still accepted — the green twin" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    // Without this the two refusals above are satisfied by a digest that refuses
+    // EVERY tag reload, which would be a blanket and not a discrimination. The
+    // same source reloads clean and the component keeps its identity.
+    const cid = world.registry.idOf("TagSet").?;
+    try reloadOn(gpa, &world, src_tags_narrow);
+    try std.testing.expectEqual(cid, world.registry.idOf("TagSet").?);
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "appending a tag inside one word is refused — the MEASURED COST, not a defect" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    // THE ADJACENT CASE, SHOWN RATHER THAN DECLARED, and it is a FALSE REFUSAL.
+    // Appending `t02` leaves `t00` at bit 0 and `t01` at bit 1: every live
+    // entity's bits keep their meaning, so this reload is safe and is refused
+    // anyway, because a digest over the whole table cannot distinguish "the
+    // prefix survived" from "the table changed".
+    //
+    // Accepted deliberately, in the direction this repository already chose: a
+    // refused reload costs a restart, a missed rename silently redefines live
+    // data. It is also less of a change in kind than it looks — an append
+    // CROSSING a word boundary was already refused, so "adding a tag may refuse
+    // your reload" was already the behaviour, just 1 time in 64 rather than
+    // always.
+    //
+    // What would remove it is a PREFIX check — compare the stored table against
+    // the new table's first N entries — and that needs the old table stored, not
+    // just its digest. The one slot that already stores a list, `desc.fields`,
+    // was measured and REFUSED for it: `componentFields` has ten readers,
+    // several on the scene-serialization path, which walk fields by `kind` to
+    // materialise values. Turning `TagSet`'s empty field list into 256 synthetic
+    // tag-named fields to buy an append allowance would change what that
+    // accessor means for every one of them.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_appended));
 }
 
 const src_r3_partial =

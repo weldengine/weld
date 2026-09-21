@@ -3726,12 +3726,27 @@ pub const TypeChecker = struct {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
         }
 
-        // Orphan rule (§7.4): trait OR type local to the impl's module. In single-file mode
-        // (single module) the trait is always local, so this holds — the check
-        // is structural for the cross-module future.
-        if (!trait_local and !type_local) {
-            try self.emit(.orphan_impl, .error_, span, "orphan impl: neither trait '{s}' nor type '{s}' is defined in this module", .{ trait_slice, type_slice });
-        }
+        // ORPHAN RULE (§7.4), AND IT HAS NO EXPRESSIBLE INSTANCE TODAY — stated
+        // here instead of standing as a condition that cannot hold.
+        //
+        // The rule is that an impl is legal only if the trait OR the type is
+        // local to this module, so its violation needs a trait or a type that
+        // resolves while being FOREIGN. Two things forbid that. First, the
+        // `!trait_local` arm above RETURNS, so any test placed here reads
+        // `trait_local == true` by construction and `!trait_local and …` is
+        // false whatever the type is. Second, and this survives moving the test
+        // above that return: with no cross-module trait resolution, `not local`
+        // and `not declared` are the same predicate, so the only programs that
+        // could reach it are ones naming two undeclared symbols — for which
+        // `undefined_symbol` is the true and more useful diagnostic, and
+        // `orphan impl` would be a worse one wearing the right name.
+        //
+        // So the emission is REMOVED rather than relocated: relocating it would
+        // buy reachability by giving the code a meaning §7.4 does not give it.
+        // `E0217` stays declared, with no producer, until a module can name a
+        // foreign trait — the same gap the resolver already records for
+        // imported-trait impls. What single-module mode answers is pinned by a test,
+        // so a later attempt to make this reachable by the wrong route reddens.
 
         // E0214: every abstract trait method (no default body) must be provided.
         const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];

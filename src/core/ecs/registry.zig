@@ -185,6 +185,23 @@ pub const ComponentDesc = struct {
     /// computed once by `finalizeRequires` and read per add, never re-walked per
     /// add (`engine-ecs-internals.md` §3).
     requires: []const []const u8 = &.{},
+    /// Digest of identity the four layout members CANNOT express, folded into
+    /// `schemaDigestOf`. Zero for every component whose identity is fully
+    /// described by its name, size, alignment and fields — which is all of them
+    /// but `TagSet`.
+    ///
+    /// `TagSet` is a bitfield and not a struct, so it carries `fields = &.{}`
+    /// and its size alone says how many WORDS of tags exist, never WHICH tag
+    /// owns which bit. Renaming or reordering tags inside one word therefore
+    /// left the digest identical while every live entity's bits changed meaning.
+    /// The producer is `TagTable.contentDigest`; nothing else sets this today.
+    ///
+    /// **Runtime-only, like the digest it feeds.** No cooked artifact carries
+    /// it: a `SchemaEntry` holds name, size and alignment, so widening this
+    /// tuple invalidates no scene and demands no re-cook. That is what makes it
+    /// safe to change the hash input at all — a confrontation is always between
+    /// two values of the SAME computation, never against a stored one.
+    content_digest: u64 = 0,
 };
 
 /// The 64-bit schema identity of `desc` (`engine-ecs-internals.md` §13), over
@@ -198,6 +215,19 @@ pub const ComponentDesc = struct {
 /// - **Storage mode is OUT of it.** `table` or `sparse` is a property of this
 ///   registry and not of the layout (`ARCH-005`), so changing it provokes
 ///   neither refusal nor migration.
+/// - **`requires` is OUT of it too, and the reason is measured rather than
+///   inherited from the line above.** It never appears beside a size, an
+///   alignment or an offset anywhere in this file: it changes NOTHING about
+///   layout, so a reload that only edits `@requires` leaves every live entity's
+///   bytes valid and meaning exactly what they meant. Every consumer of the
+///   closure — `World.addComponent*`, the removal guards, the observer arm — is
+///   FORWARD-looking and gates the next operation; nothing re-validates entities
+///   already spawned. So a newly added requisite is an invariant already-live
+///   entities may violate unchecked, which is a real residual and is NOT a
+///   layout problem: folding it in here would make this refusal fire under a
+///   message that names a layout that did not change.
+/// - **`content_digest` IS in it**, because it exists precisely to carry the
+///   identity the four members above cannot.
 ///
 /// Sensitive to a field added in EXISTING padding, since offsets enter the hash.
 ///
@@ -215,6 +245,7 @@ pub fn schemaDigestOf(desc: ComponentDesc) u64 {
         h.update(std.mem.asBytes(&k));
         h.update(std.mem.asBytes(&f.offset));
     }
+    h.update(std.mem.asBytes(&desc.content_digest));
     return h.final();
 }
 

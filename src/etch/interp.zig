@@ -1464,7 +1464,7 @@ pub const Interpreter = struct {
             const zeroed = try gpa.alloc(u8, size);
             defer gpa.free(zeroed);
             @memset(zeroed, 0);
-            const desc = tagSetDesc(size, zeroed);
+            const desc = tagSetDesc(size, zeroed, try tag_table.contentDigest(gpa));
             // Idempotent on a hot-reload re-compile: reuse the
             // already-registered `TagSet` instead of erroring DuplicateComponent.
             if (world.registry.idOf("TagSet")) |existing| {
@@ -1479,8 +1479,9 @@ pub const Interpreter = struct {
                 const stored = world.registry.schemaDigest(existing) orelse ~candidate;
                 if (stored != candidate) {
                     std.log.warn(
-                        "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
-                            "live: size={d}; new: size={d} ({d} tag(s))",
+                        "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
+                            "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
+                            "An unchanged size means the tags themselves were renamed or reordered.",
                         .{ world.registry.componentSize(existing), size, tag_table.leaf_count },
                     );
                     return error.SchemaChanged;
@@ -7295,13 +7296,20 @@ pub const RegKind = enum { component, resource };
 ///
 /// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
 /// digest does not read it (see `schemaDigestFor`).
-fn tagSetDesc(size: u16, default_bytes: []const u8) weld_core.ecs.registry.ComponentDesc {
+///
+/// `content_digest` is `TagTable.contentDigest` and carries WHICH TAG OWNS WHICH
+/// BIT, which no other member can: `size` says how many words exist and
+/// `fields` is empty because a bitfield is not a struct. Without it a reload
+/// renaming or reordering tags inside one word kept the digest and silently
+/// redefined every live entity's bits.
+fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_core.ecs.registry.ComponentDesc {
     return .{
         .name = "TagSet",
         .size = size,
         .alignment = 8,
         .default_bytes = default_bytes,
         .fields = &.{},
+        .content_digest = content_digest,
     };
 }
 
@@ -7417,11 +7425,14 @@ fn verifySchemas(
     if (tag_table.leaf_count > 0) {
         if (registry.idOf("TagSet")) |existing| {
             const size: u16 = @intCast(tag_table.words() * 8);
-            const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}));
+            const candidate = weld_core.ecs.registry.schemaDigestOf(
+                tagSetDesc(size, &.{}, try tag_table.contentDigest(gpa)),
+            );
             if ((registry.schemaDigest(existing) orelse ~candidate) != candidate) {
                 std.log.warn(
-                    "etch/hot-reload: 'TagSet' changed layout — reload REFUSED, previous image kept. " ++
-                        "live: size={d}; new: size={d} ({d} tag(s))",
+                    "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
+                        "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
+                        "An unchanged size means the tags themselves were renamed or reordered.",
                     .{ registry.componentSize(existing), size, tag_table.leaf_count },
                 );
                 return error.SchemaChanged;

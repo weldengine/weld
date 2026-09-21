@@ -1214,10 +1214,19 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
     // Register the builtin `TagSet` component when the program
     // declares any tag. The raw descriptor mirrors the interpreter's
     // `compileProgram` registration exactly (name "TagSet", size `@sizeOf`,
-    // align `@alignOf`, zeroed default, no named fields) so the runtime
-    // component id and layout are byte-identical across backends. The id is
-    // discarded — the rules look it up by name via `idOf("TagSet")`.
+    // align `@alignOf`, zeroed default, no named fields, and the tag-table
+    // content digest) so the runtime component id and layout are byte-identical
+    // across backends. The id is discarded — the rules look it up by name via
+    // `idOf("TagSet")`.
+    //
+    // The digest is emitted as a LITERAL because it is a pure function of the
+    // tag table this pass already holds, and it is emitted at all so this
+    // enumeration stays exhaustive: a member the interpreter sets and this one
+    // omits is the "mirrors exactly" claim above going quietly false. Nothing in
+    // a generated binary reloads, so it changes no behaviour here — which is the
+    // argument for keeping the two descriptors identical rather than against it.
     if (tag_table.leaf_count > 0) {
+        const content_digest = try tag_table.contentDigest(w.gpa);
         try w.line("{");
         w.indentBy(1);
         try w.line("var __tagset_default: TagSet = .{};");
@@ -1228,6 +1237,7 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
         try w.line(".alignment = @alignOf(TagSet),");
         try w.line(".default_bytes = std.mem.asBytes(&__tagset_default),");
         try w.line(".fields = &.{},");
+        try w.printLine(".content_digest = {d},", .{content_digest});
         w.indentBy(-1);
         try w.line("});");
         w.indentBy(-1);

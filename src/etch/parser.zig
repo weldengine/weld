@@ -948,6 +948,13 @@ pub const Parser = struct {
                         try self.arena.annot_args.append(self.gpa, arg);
                         args_len += 1;
                         if (!try self.match(.comma)) break;
+                        // Same optional trailing comma: `annotation = "@" ,
+                        // IDENT , [ "(" , [ arg_list ] , ")" ]` reaches the SAME
+                        // `arg_list` production. This loop is annotation-local
+                        // and does not go through `parseCallArgList`, which is
+                        // why enumerating the grammar's `arg_list` users rather
+                        // than that function's callers is what finds it.
+                        if (self.peek() == .rparen) break;
                     }
                 }
                 _ = try self.expect(.rparen, "expected ')' to close annotation args");
@@ -6425,6 +6432,18 @@ pub const Parser = struct {
             try out.args.append(self.gpa, a.raw());
             try out.names.append(self.gpa, name);
             if (!try self.match(.comma)) break;
+            // THE TRAILING COMMA IS PART OF THE GRAMMAR, not a tolerance:
+            // `arg_list = arg , { "," , arg } , [ "," ]`, and the same optional
+            // comma is already honoured in array, struct, map and match-arm
+            // literals. Without this break the loop went on to parse an argument
+            // that is not there, and the two diagnostics it produced both named
+            // the wrong cause — on a named list it reported the §3.3 ordering
+            // rule, which the program was obeying.
+            //
+            // Every argument shape passes through here — function call, method
+            // call, widget element — and all three expect `)` immediately after,
+            // so testing for it covers the set rather than a sample.
+            if (self.peek() == .rparen) break;
         }
     }
 
@@ -9290,6 +9309,44 @@ test "parser rejects a positional argument after a named one (§3.3)" {
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has C {
         \\  f(a: 1, 2)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parser accepts a trailing argument comma (grammar l.571)" {
+    const gpa = std.testing.allocator;
+    // `arg_list = arg , { "," , arg } , [ "," ]` — the trailing comma is
+    // OPTIONAL, and the same optional comma is already honoured in array,
+    // struct, map and match-arm literals.
+    //
+    // WHAT THIS EXERCISES AND WHAT IT DOES NOT, stated rather than implied: the
+    // function-call and method-call shapes are driven here directly, plus an
+    // annotation, whose arguments are parsed by a SEPARATE loop. The widget
+    // element shape is the third caller of `parseCallArgList` and is covered
+    // STRUCTURALLY — one function, three callers, each verified at the code to
+    // expect `)` immediately after — and not by a case of its own.
+    var result = try parse(gpa,
+        \\@tag(.a,)
+        \\rule r(entity: Entity) when entity has C {
+        \\  f(1, 2,)
+        \\  entity.m(1,)
+        \\  g(a: 1, b: 2,)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+}
+
+test "parser still rejects a positional argument after a named one, trailing comma or not" {
+    const gpa = std.testing.allocator;
+    // THE GREEN TWIN'S OTHER HALF. The trailing-comma fix works by breaking the
+    // loop when `)` follows the comma, so it must NOT weaken the §3.3 ordering
+    // rule — which is the rule whose message the defect was borrowing.
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) when entity has C {
+        \\  f(a: 1, 2,)
         \\}
     );
     defer result.deinit(gpa);

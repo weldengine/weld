@@ -561,3 +561,26 @@ test "W1740 empty track" {
     try std.testing.expect(parsedClean(c));
     try expectAnyCode(c.diags.items, .empty_track);
 }
+
+test "E0217 has no producer: an impl naming two undeclared symbols answers undefined_symbol" {
+    const gpa = std.testing.allocator;
+    // THE ARBITRATION PINNED. `E0217 OrphanImpl` is declared and deliberately
+    // emitted by nothing: §7.4's rule needs a trait or a type that RESOLVES
+    // while being foreign, and with no cross-module trait resolution `not
+    // local` and `not declared` are one predicate. So the nearest program to a
+    // violation — an impl whose trait AND type are both unknown — is answered
+    // by `undefined_symbol`, which is the true diagnostic.
+    //
+    // This test exists so that making `E0217` reachable by RELOCATING its
+    // emission above the `!trait_local` return reddens here: that route would
+    // buy reachability by reporting "orphan impl" for two typos.
+    var c = try check(gpa,
+        \\impl Missing for Absent { fn f(self) { } }
+    );
+    defer c.deinit(gpa);
+    try std.testing.expect(parsedClean(c));
+    try expectAnyCode(c.diags.items, .undefined_symbol);
+    for (c.diags.items) |d| {
+        try std.testing.expect(d.code != .orphan_impl);
+    }
+}
