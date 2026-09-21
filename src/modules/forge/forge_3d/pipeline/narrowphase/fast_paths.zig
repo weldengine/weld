@@ -44,6 +44,10 @@
 const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
+// Imported for the ONE margin, and the direction is safe: `gjk.zig` imports only
+// `support.zig`, so this closes no cycle — `epa.zig` and `shapecast.zig` already
+// depend on `gjk` the same way.
+const gjk = @import("gjk.zig");
 
 /// The contact seed a fast path hands to `manifold.generateManifold` — exactly
 /// the quantities the generic path's GJK/EPA block produces, so the generated
@@ -148,14 +152,6 @@ fn boxExtent(comptime T: type, he: math.Vec(3, T)) T {
     return he.length();
 }
 
-/// The `separated` contact margin, which must stay `gjk.zig`'s: a fast pair and
-/// its generic oracle have to classify the touch/separated boundary the same
-/// way, up to the flip band.
-fn contactMargin(comptime T: type, coord_scale: T) T {
-    const conv_k: T = 16;
-    return conv_k * std.math.floatEps(T) * coord_scale;
-}
-
 /// The sphere/sphere seed: cores are the two centres (radius excluded). Shallow
 /// for any non-zero centre distance (points are 0-D, never "deep" unless
 /// coincident); `.separated` past the inflated margin; a deterministic +X
@@ -165,7 +161,7 @@ fn sphereSphere(comptime T: type, ca: math.Vec(3, T), ra: T, cb: math.Vec(3, T),
     const dist_sq = d.dot(d);
     const dist = @sqrt(dist_sq);
     const r_sum = ra + rb;
-    if (dist - r_sum > contactMargin(T, dist)) return .separated;
+    if (dist - r_sum > gjk.contactMargin(T, dist)) return .separated;
     // `normalize(d)` is scale-EQUIVARIANT, so the only thing to guard is 0/0. The
     // fallback fires ONLY at true coincidence (`dist² ≤ floatMin` — the type's
     // underflow floor, NOT a geometric scale): translation- and scale-invariant by
@@ -225,7 +221,7 @@ fn sphereBox(
         const dist_sq = delta.dot(delta);
         const dist = @sqrt(dist_sq);
         const coord_scale = sphere_c.sub(box_c).length() + boxExtent(T, box_he);
-        if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
+        if (dist - r_sum > gjk.contactMargin(T, coord_scale)) return .separated;
         // Normal from the box surface toward the sphere centre; on the surface
         // (dist ≈ 0, the shallow↔deep seam) fall back to the least-penetration
         // face axis. `normalize(delta)` is scale-equivariant, so the fallback fires
@@ -326,7 +322,7 @@ fn boxBox(
     const heb = he_b.toArray();
     const dc = cb.sub(ca);
     const scale = dc.length() + he_a.length() + he_b.length();
-    const margin = contactMargin(T, scale);
+    const margin = gjk.contactMargin(T, scale);
 
     // Track the least-overlap FACE axis and least-overlap EDGE axis separately so
     // a small bias can prefer a face on a near-tie (edge cross products carry more
@@ -531,7 +527,7 @@ fn capsuleCapsule(
     const dist = @sqrt(dist_sq);
     const r_sum = r_a + r_b;
     const coord_scale = cb.sub(ca).length() + ha + hb;
-    if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
+    if (dist - r_sum > gjk.contactMargin(T, coord_scale)) return .separated;
     // `normalize(d)` is scale-equivariant ⇒ guard only 0/0: the fallback (radial /
     // mutual-perpendicular) fires ONLY at true coincidence (`dist² ≤ floatMin`,
     // e.g. collinear cores whose closest points coincide exactly).

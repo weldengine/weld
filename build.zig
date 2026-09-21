@@ -2338,7 +2338,21 @@ pub fn build(b: *std.Build) void {
     // only after `zig fmt` normalises identifier escapes (e.g. `@"undefined"` →
     // `undefined`) and trims trailing blank lines. Pipe through fmt in the same
     // step so the command is self-sufficient regardless of pre-commit hooks.
-    const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/core/platform/vk.zig" });
+    // THE ONE LIST. Every file a bindgen adapter writes, named here and nowhere
+    // else: the two `zig fmt` passes below take slices of it, and so does the
+    // `bindgen-verify` diff. Spelled twice, the gate and the generators drift —
+    // a new generated file would be formatted and then not gated, silently.
+    const generated_binding_files = [_][]const u8{
+        "src/core/platform/vk.zig",
+        "src/core/platform/window/wayland_protocols/core.zig",
+        "src/core/platform/window/wayland_protocols/xdg_shell.zig",
+        "src/core/platform/window/wayland_protocols/xdg_decoration.zig",
+    };
+    const vk_generated = generated_binding_files[0..1];
+    const wayland_generated = generated_binding_files[1..];
+
+    const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt" });
+    vk_gen_fmt.addArgs(vk_generated);
     vk_gen_fmt.step.dependOn(&vk_gen_run.step);
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
     vk_gen_step.dependOn(&vk_gen_fmt.step);
@@ -2357,13 +2371,8 @@ pub fn build(b: *std.Build) void {
     const wayland_gen_run = b.addRunArtifact(wayland_gen_exe);
     wayland_gen_run.has_side_effects = true;
     // Same fmt pass as vk_gen — see comment there.
-    const wayland_gen_fmt = b.addSystemCommand(&.{
-        b.graph.zig_exe,
-        "fmt",
-        "src/core/platform/window/wayland_protocols/core.zig",
-        "src/core/platform/window/wayland_protocols/xdg_shell.zig",
-        "src/core/platform/window/wayland_protocols/xdg_decoration.zig",
-    });
+    const wayland_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt" });
+    wayland_gen_fmt.addArgs(wayland_generated);
     wayland_gen_fmt.step.dependOn(&wayland_gen_run.step);
     const wayland_gen_step = b.step(
         "bindgen-wayland",
@@ -2429,29 +2438,37 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------- bindgen-verify gate --
     //
-    // The non-negotiable mechanical criterion: regenerate then
-    // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
+    // The non-negotiable mechanical criterion: regenerate then diff. Exit
     // 0 if the regen matches the committed output bit-for-bit; non-zero
     // (visible diff) signals a divergence and blocks the merge.
     //
     // KNOWN-GOOD CONTROL FIRST: `git diff --exit-code` answers 1 for a real diff
     // and a different non-zero when git cannot run at all, so the control must
     // establish that git answers before the diff's code is read as a verdict.
+    //
+    // THE PATHS ARE THE FOUR FILES THE GENERATORS WRITE, and nothing else. It
+    // used to name `bindings/generated/` and `src/core/platform/` wholesale,
+    // which is a superset of the generated set by a wide margin: the first holds
+    // two `.api.zig` sidecars that are maintained BY HAND and that no adapter
+    // writes, and the second holds `threading.zig`, `time.zig`, `fs.zig`,
+    // `window/`, `input/` and more. So an ordinary comment edit to
+    // `threading.zig` turned this gate red — observed, not imagined — and the
+    // gate answered a question about the working tree's cleanliness while
+    // reporting it as a verdict on generator drift.
+    //
+    // Against HEAD rather than the index, because "matches the COMMITTED output"
+    // is the criterion this comment states and the index is not the commit. The
+    // two agree on a clean tree and part company on a staged edit, where only
+    // this form still compares against what was committed.
     const bindgen_verify_control = b.addSystemCommand(&.{ "git", "--version" });
-    const bindgen_verify_diff = b.addSystemCommand(&.{
-        "git",
-        "diff",
-        "--quiet",
-        "--exit-code",
-        "bindings/generated/",
-        "src/core/platform/",
-    });
+    const bindgen_verify_diff = b.addSystemCommand(&.{ "git", "diff", "--quiet", "--exit-code", "HEAD", "--" });
+    bindgen_verify_diff.addArgs(&generated_binding_files);
     bindgen_verify_diff.step.dependOn(&bindgen_verify_control.step);
     bindgen_verify_diff.step.dependOn(&vk_gen_fmt.step);
     bindgen_verify_diff.step.dependOn(&wayland_gen_fmt.step);
     const bindgen_verify_step = b.step(
         "bindgen-verify",
-        "Regenerate bindings + assert `git diff --quiet` on bindings/generated + src/core/platform",
+        "Regenerate bindings + assert `git diff --quiet HEAD` on the four generated files",
     );
     bindgen_verify_step.dependOn(&bindgen_verify_diff.step);
 
