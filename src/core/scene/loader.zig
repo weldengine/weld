@@ -161,9 +161,7 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 /// lifetime is the caller's to end (`engine-scene-serialization.md` §4).
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
-/// the map, and closes `mmap` if present). Loaded resource `string` blocks are
-/// refcounted and owned by their `StringSlot`s, not by the `LoadResult`;
-/// `World.deinit` releases them.
+/// the map, and closes `mmap` if present).
 pub const LoadResult = struct {
     spawned: []EntityId,
     uuid_to_entity: UuidMap,
@@ -233,8 +231,8 @@ fn decrefResourceStrings(world: *const World, gpa: std.mem.Allocator, cid: Compo
 /// Commit the loader's resource writes. For each resource that
 /// REPLACED a prior value, decref the old string blocks the snapshot captured —
 /// they are no longer referenced (the live slot holds the new block). The new
-/// blocks stay live, owned by the resource slots, which `World.deinit`
-/// releases. Frees each snapshot and the journal. Infallible.
+/// blocks stay live, owned by the resource slots. Frees each snapshot and the
+/// journal. Infallible.
 fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
     for (journal.items) |edit| {
         if (edit.snapshot) |snap| {
@@ -699,12 +697,11 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
 
 /// Load the resources block — the load-side mirror of the non-POD
 /// resource path, following the `ecs_bridge` write discipline:
-/// for each resource, snapshot its current bytes, install the POD `data`
-/// (string-field slots are zeroed on disk), then for each `string` field intern
-/// the cooked value into the **Tier-0 persistent heap** as a **refcounted** block
+/// for each resource, snapshot its current bytes, install the POD `data` with
+/// every `string` slot zeroed, then for each `string` field intern the cooked
+/// value into the **Tier-0 persistent heap** as a **refcounted** block
 /// (`persistent.alloc`, not immortal) and write its `StringSlot`. The new blocks
-/// are owned by the slot, reclaimed by the resource owner's teardown (parity with
-/// interp-written strings); the old blocks the snapshot captured are decreffed at
+/// are owned by the slot; the old blocks the snapshot captured are decreffed at
 /// commit. Each touched resource is recorded in `journal` so the load is
 /// transactional. An empty string keeps the zeroed slot (`ptr == 0`).
 ///
@@ -745,8 +742,7 @@ fn loadResources(
         // after the resource is mutated (reserve-then-mutate).
         try journal.ensureUnusedCapacity(gpa, 1);
 
-        // Install the POD image (string slots zeroed on disk), capturing the
-        // pre-write snapshot. For an existing resource the snapshot holds the old
+        // Install the POD image, capturing the pre-write snapshot. For an existing resource the snapshot holds the old
         // string slots (decreffed at commit / restored at rollback); for a fresh
         // one the snapshot is null (rollback removes it).
         // Capture the pre-write dirty bit BEFORE `getMutResource`
@@ -769,6 +765,13 @@ fn loadResources(
         // Journal the edit BEFORE the fallible string writes, so a mid-field OOM
         // rolls the whole resource back (decref partial new blocks + restore).
         journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot, .dirty_before = dirty_before });
+
+        // A string slot of `data` is the file's bytes, and the rollback and the
+        // world decref whatever a slot holds: zero them all before any
+        // allocation can fail.
+        for (world.registry.componentFields(cid)) |fd| {
+            if (fd.kind == .string_) @memset(dst[fd.offset..][0..@sizeOf(persistent.StringSlot)], 0);
+        }
 
         // Per string field: alloc a REFCOUNTED block owned by the slot, copy
         // the cooked value, write the new `StringSlot`.
@@ -901,6 +904,31 @@ fn buildStringResourceScene(gpa: std.mem.Allocator, reg: *const Registry, res_ci
     }});
     var model: format.CookModel = .{
         .strings = strings,
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
+/// Test helper: cook a scene whose string resource carries `garbage` in its
+/// slot bytes and no string-table entry for them.
+fn buildGarbageStringSlotScene(gpa: std.mem.Allocator, reg: *const Registry, res_cid: ComponentId, garbage: u64) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const data = try a.alloc(u8, 16);
+    @memset(data, 0);
+    @memcpy(data[0..8], std.mem.asBytes(&garbage));
+    @memcpy(data[8..12], std.mem.asBytes(&@as(u32, 5)));
+    const resources = try a.dupe(format.ResourceEntry, &.{.{
+        .schema_id = res_cid,
+        .data = data,
+        .string_fields = &.{},
+    }});
+    var model: format.CookModel = .{
+        .strings = &.{},
         .uuids = &.{},
         .resources = resources,
         .archetypes = &.{},
@@ -1141,6 +1169,21 @@ test "resource strings outlive LoadResult.deinit" {
     try testing.expect(ss.ptr != 0);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("Verdant Keep", loaded[0..ss.len]);
+}
+
+test "a string slot's bytes in a scene file never reach the store" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+
+    const bytes = try buildGarbageStringSlotScene(gpa, &world.registry, settings, 0xDEAD_BEE0);
+    defer gpa.free(bytes);
+    var result = try loadFromBytes(&world, gpa, bytes, null);
+    result.deinit(gpa);
+
+    const buf = world.resources.getResource(settings).?;
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 16), buf[0..16]);
 }
 
 test "loading over an existing resource string releases the previous block" {

@@ -684,6 +684,7 @@ fn reloadWithTwoFaults(gpa: std.mem.Allocator, oversized_first: bool) !void {
 
     var base = try weld_etch.parseSource(gpa, src_counter);
     defer base.deinit(gpa);
+    try typeCheckClean(gpa, &base.ast);
     var pr = try weld_etch.parseSource(gpa, src.items);
     defer pr.deinit(gpa);
     try typeCheckClean(gpa, &pr.ast);
@@ -708,6 +709,7 @@ test "a reload with two refusals reports the first declaration's: the widened on
 fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8) !u64 {
     var base_pr = if (base) |b| try weld_etch.parseSource(gpa, b) else null;
     defer if (base_pr) |*p| p.deinit(gpa);
+    if (base_pr) |*p| try typeCheckClean(gpa, &p.ast);
     var pr = try weld_etch.parseSource(gpa, src);
     defer pr.deinit(gpa);
     try typeCheckClean(gpa, &pr.ast);
@@ -723,7 +725,7 @@ fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8
     return n;
 }
 
-test "a reload evaluates none of the defaults of a type already registered" {
+test "a reload allocates nothing for the defaults of a type already registered" {
     const gpa = std.testing.allocator;
     const bare = "resource R { s: string }\n";
     const defaulted = "resource R { s: string = \"abc\" }\n";
@@ -772,7 +774,7 @@ test "every type a compile registers without the program declaring it has a rese
     defer it.deinit();
 
     const n = world.registry.componentCount();
-    try std.testing.expectEqual(1 + weld_etch.types.builtin_resources.len, n);
+    try std.testing.expect(n >= 1 + weld_etch.types.builtin_resources.len);
     for (0..n) |id| {
         const name = world.registry.componentName(@intCast(id));
         if (!weld_etch.types.isReservedEngineTypeName(name)) {

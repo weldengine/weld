@@ -174,10 +174,6 @@ pub fn generateFile(
         try emitSetContainsPrelude(&w);
     }
 
-    // The builtin `TagSet` component: a fixed `[words]u64` bitfield,
-    // one slot per entity carrying tags. Emitted as an `extern struct` so its
-    // layout matches the registry's raw `words*8`-byte / align-8 component
-    // (`etch-abi-zig.md` §3) — byte-exact with the interpreter's `tagSetDesc`.
     if (tag_table.leaf_count > 0) {
         try emitTagSetStruct(&w, tag_table.words());
     }

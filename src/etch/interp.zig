@@ -7176,7 +7176,7 @@ fn stageBuiltinResource(
         .fields = fields_buf[0..br.fields.len],
     });
     errdefer entry.deinit(gpa);
-    var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, default_buf[0..size]), .collection_blocks = &.{} };
+    var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, entry.defaultBytes()), .collection_blocks = &.{} };
     errdefer resource.deinit(gpa);
     try bridge.mapResource(gpa, br.name, pending.nextId());
     try pending.push(gpa, entry, resource);
@@ -7575,9 +7575,8 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
         // store's copy at a container.
         if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
         if (fd.kind == .string_) {
-            // A literal default points at the AST's bytes, which `prepareEntry`
-            // copies into a block the entry owns. No default, or a non-literal
-            // one, leaves the empty string `{ptr=0,len=0}`.
+            // A non-empty literal points at the AST's bytes; `prepareEntry`
+            // copies them. Any other default leaves the empty string.
             if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .string_lit) {
                 const lit = ast.strings.slice(ast.exprData(f.default_value));
                 if (lit.len != 0) {
@@ -8673,8 +8672,8 @@ test "resource string[] whole-field reassignment releases previous backing" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Literal-array default `["a","b"]` (materialized at addResource), reassigned
-    // to `["x","y","z"]` on tick 1.
+    // Literal-array default `["a","b"]` (materialized with the store buffer),
+    // reassigned to `["x","y","z"]` on tick 1.
     const source =
         \\resource Inventory { items: string[] = ["a", "b"] }
         \\rule reset()

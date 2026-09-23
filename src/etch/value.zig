@@ -131,8 +131,8 @@ pub const Value = union(enum) {
     /// runtime discriminant, drop dispatched by `type_id`. The read path returns
     /// it without incref — safe for the rule body because the resource (hence the
     /// block) outlives it. Never `0` for a live field (the empty collection is a
-    /// real empty block allocated at `addResource`). String elements are stored
-    /// as owned `.string_persistent`; POD elements inline.
+    /// real empty block allocated with the resource's store buffer). String
+    /// elements are stored as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
     /// A borrowed view over a resource `[K: V]` field's persistent-heap block,
     /// whose payload is the owned insertion-ordered pair list. Same borrowing and

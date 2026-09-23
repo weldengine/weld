@@ -5,8 +5,8 @@
 //! fixtures a correctly wired `weld_core` without this file re-deriving the
 //! parent's module graph.
 //!
-//! **Why a sub-project and not four objects in the parent build.** Three of the
-//! four fixtures must FAIL to compile. A compile step that fails inside the
+//! **Why a sub-project and not seven objects in the parent build.** Six of the
+//! seven fixtures must FAIL to compile. A compile step that fails inside the
 //! parent graph fails the parent build, so the failures have to be driven as
 //! subprocesses — and a subprocess that re-enters the parent's own `build.zig`
 //! would contend with it for the build cache. Each case therefore gets its own

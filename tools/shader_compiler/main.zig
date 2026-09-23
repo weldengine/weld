@@ -14,7 +14,7 @@
 //! `shaders-check` mode:
 //! - Compiles into a temp folder.
 //! - Diff vs the committed `.spv`. Exit code 0 if diff empty, non-zero otherwise.
-//! - The CI step `shaders-check` blocks the merge on a diff.
+//! - No CI workflow runs `shaders-check`.
 
 const std = @import("std");
 const shader = @import("shader_pipeline_compiler");
@@ -46,9 +46,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("shader_compiler: glslc not in PATH — skipping ({s} mode)\n", .{
             if (args.check) "check" else "build",
         });
-        // In check mode, the absence of glslc is not blocking: we
-        // assume the committed .spv are valid (the Linux CI that has
-        // glslc is the authority).
+        // Without glslc, check mode compares nothing and still exits 0.
         return;
     }
 

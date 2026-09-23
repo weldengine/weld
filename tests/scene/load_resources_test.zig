@@ -1,9 +1,4 @@
-//! Resource `string` fields round-trip through the Tier-0 persistent
-//! heap. Cooks (in-memory, via the writer) a scene with one resource carrying a
-//! `string` field, loads it, and asserts the field reads back the cooked value:
-//! the loaded string is interned into `weld_core.memory.persistent` as a
-//! **refcounted** block owned by the resource's `StringSlot` and NOT by
-//! `LoadResult`, which `World.deinit` releases. `weld_core` only.
+//! `weld_core` only: cooks in memory through the writer, then loads.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

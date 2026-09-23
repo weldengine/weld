@@ -245,7 +245,7 @@ pub fn build(b: *std.Build) void {
     }
     const stub_plugins_step = b.step(
         "stub-plugins",
-        "Build the three stub plugin libraries used by the plugin_loader tests",
+        "Build the four stub plugin libraries used by the plugin_loader tests",
     );
     for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
 
@@ -302,9 +302,9 @@ pub fn build(b: *std.Build) void {
     // matching only the shared refusal marker would let any one case stand in
     // for any other.
     //
-    // The control runs in the SAME step and must SUCCEED. Without it the three
+    // The control runs in the SAME step and must SUCCEED. Without it the six
     // refusals prove nothing: a view that refused every access would satisfy
-    // all three.
+    // all six.
     const counterproof_dir = "tests/core/ecs/access_counterproof";
     const CounterproofCase = struct {
         step: ?[]const u8,
@@ -2627,16 +2627,6 @@ pub fn build(b: *std.Build) void {
     // (8) and `src/modules/audio/` (1). Found by counting source `test` blocks
     // against the suite's own per-target totals, then confirming each by
     // appending a deliberately failing test and watching the suite stay green.
-    // RENDER IS HELD, and the reason is what the sweep was for. Wiring its 49
-    // never-run tests turns two of them red, and a probe settled why: the
-    // render-graph passes return a `Pass` whose `reads`/`writes` slices point at
-    // an anonymous literal in `buildPass`'s OWN STACK FRAME. Measured on
-    // `depth_prepass`: `writes.ptr` is a stack address, `depth_attachment` reads
-    // `false` immediately after the call, and a fresh call at the SAME address
-    // reads `true` — a use-after-return, long-lived and invisible because
-    // nothing ever compiled the tests that assert it. `forward.zig` fails
-    // identically. The fix is an ownership decision in the render graph, not a
-    // determinism change, so it is reported rather than taken here.
     const render_tests = b.addTest(.{ .root_module = render_module });
     test_step.dependOn(&b.addRunArtifact(render_tests).step);
 

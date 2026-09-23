@@ -164,7 +164,7 @@ jobs:
 
       - name: zig build forge-asm-inventory
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build forge-asm-inventory -Dcpu=${{ env.ZIG_CPU }}
+        run: zig build forge-asm-inventory -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       - name: zig build lint
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'

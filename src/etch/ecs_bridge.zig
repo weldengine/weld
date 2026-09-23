@@ -42,11 +42,15 @@ comptime {
     // `StringSlot` layout (`persistent.zig`) the bridge reads/writes — one
     // source of truth across the Tier-0 / Etch boundary.
     std.debug.assert(@sizeOf(persistent.StringSlot) == FieldKind.string_.sizeBytes());
+    std.debug.assert(@alignOf(persistent.StringSlot) == FieldKind.string_.alignBytes());
     // Same one-source-of-truth guard for the collection slot stride:
     // `CollectionSlot { ptr }` must match `.array_`/`.map_`/`.set_` sizeBytes.
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.array_.sizeBytes());
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.map_.sizeBytes());
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.set_.sizeBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.array_.alignBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.map_.alignBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.set_.alignBytes());
 }
 
 /// Surfaced so callers of `Bridge.dispatchEntityGet` /
