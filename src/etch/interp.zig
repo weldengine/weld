@@ -325,20 +325,61 @@ fn freeSelection(gpa: std.mem.Allocator, selection: []QueryPlan) void {
     gpa.free(selection);
 }
 
+/// The persistent block a value holds a reference to, if any (§4.4). A
+/// `.string_view` has no block and is never counted.
+fn handleBlock(v: Value) ?[*]u8 {
+    return switch (v) {
+        .string_persistent => |s| if (s.ptr == 0) null else @ptrFromInt(s.ptr),
+        .array_persistent, .map_persistent, .set_persistent => |p| @ptrFromInt(p),
+        else => null,
+    };
+}
+
+fn retainHandle(v: Value) void {
+    if (handleBlock(v)) |b| persistent.incref(b);
+}
+
+fn releaseHandle(gpa: std.mem.Allocator, v: Value) void {
+    if (handleBlock(v)) |b| persistent.decref(gpa, b);
+}
+
+/// Store `v` in a slot that already holds a counted value.
+fn replaceHeld(gpa: std.mem.Allocator, slot: *Value, v: Value) void {
+    retainHandle(v);
+    releaseHandle(gpa, slot.*);
+    slot.* = v;
+}
+
 const Local = struct {
     value: Value,
     is_mut: bool,
 };
 
+/// A scope. Each local holding a persistent handle owns one reference.
 const Locals = struct {
     map: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
 
     pub fn deinit(self: *Locals, gpa: std.mem.Allocator) void {
+        self.releaseAll(gpa);
         self.map.deinit(gpa);
     }
 
+    /// Drop every local, keeping the map's capacity.
+    pub fn clear(self: *Locals, gpa: std.mem.Allocator) void {
+        self.releaseAll(gpa);
+        self.map.clearRetainingCapacity();
+    }
+
+    fn releaseAll(self: *Locals, gpa: std.mem.Allocator) void {
+        var it = self.map.valueIterator();
+        while (it.next()) |l| releaseHandle(gpa, l.value);
+    }
+
     pub fn put(self: *Locals, gpa: std.mem.Allocator, name: StringId, v: Value, is_mut: bool) !void {
-        try self.map.put(gpa, name, .{ .value = v, .is_mut = is_mut });
+        const gop = try self.map.getOrPut(gpa, name);
+        retainHandle(v);
+        if (gop.found_existing) releaseHandle(gpa, gop.value_ptr.value);
+        gop.value_ptr.* = .{ .value = v, .is_mut = is_mut };
     }
 
     pub fn get(self: *const Locals, name: StringId) ?Value {
@@ -853,9 +894,9 @@ const ForIter = union(enum) {
     array: struct { handle: u32, len: usize, idx: usize },
     map: struct { handle: u32, len: usize, idx: usize },
     /// A resource `T[]` iterated in an async body. Carries the
-    /// `type_array` block pointer (stable across suspend, unlike a rule-arena
-    /// handle) + a snapshotted length + cursor — same index-based semantics as
-    /// the `.array` variant.
+    /// `type_array` block pointer, on which the frame holds a reference, + a
+    /// snapshotted length + cursor — same index-based semantics as the `.array`
+    /// variant.
     array_persistent: struct { ptr: u64, len: usize, idx: usize },
     /// A resource `[K: V]` iterated in an async body, mirror of
     /// `.map` on a `type_map` block pointer.
@@ -971,17 +1012,29 @@ const AsyncTask = struct {
     returned: bool = false,
 
     fn deinit(self: *AsyncTask, gpa: std.mem.Allocator) void {
-        for (self.frames.items) |*f| switch (f.*) {
-            .call => |cf| {
-                cf.scope.deinit(gpa);
-                gpa.destroy(cf.scope);
-            },
-            else => {},
-        };
+        for (self.frames.items) |*f| releaseFrame(gpa, f);
         self.frames.deinit(gpa);
         self.locals.deinit(gpa);
+        releaseHandle(gpa, self.result);
     }
 };
+
+/// Release what a frame owns: a `call` frame's scope, and the reference a `for`
+/// frame holds on the persistent collection it iterates.
+fn releaseFrame(gpa: std.mem.Allocator, frame: *AsyncFrame) void {
+    switch (frame.*) {
+        .call => |cf| {
+            cf.scope.deinit(gpa);
+            gpa.destroy(cf.scope);
+        },
+        .for_ => |ff| switch (ff.iter) {
+            .array_persistent => |a| releaseHandle(gpa, .{ .array_persistent = a.ptr }),
+            .map_persistent => |m| releaseHandle(gpa, .{ .map_persistent = m.ptr }),
+            else => {},
+        },
+        else => {},
+    }
+}
 
 /// Outcome of one `driveTask` pass over a task's frame-stack.
 const AsyncOutcome = enum { suspended, completed };
@@ -1140,10 +1193,13 @@ pub const Interpreter = struct {
     /// values (arrays / structs / closures / `.string_run`) still held by the test
     /// body's locals — a use-after-free (the string class). `runTestBody` sets
     /// this for its whole duration; the driven bodies then accumulate into the shared
-    /// stores (test-scale, bounded), and `runTestBody`'s own end-defers (raw resets,
-    /// NOT `resetBodyStores`) free everything at once. `false` on every production path
-    /// — no behavior change.
+    /// stores (test-scale, bounded), and `runTestBody`'s own end-defer
+    /// (`resetArena`, NOT `resetBodyStores`) frees everything at once. `false` on
+    /// every production path — no behavior change.
     suppress_body_store_resets: bool = false,
+    /// Blocks arena values hold a reference to, released at the arena's reset
+    /// (`etch-memory-model.md` §4.4).
+    deferred_decrefs: std.ArrayListUnmanaged([*]u8) = .empty,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary.
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -1274,6 +1330,8 @@ pub const Interpreter = struct {
     /// the blocks they point into belong to the world and outlive this
     /// interpreter.
     pub fn deinit(self: *Interpreter) void {
+        self.drainDeferredDecrefs();
+        self.deferred_decrefs.deinit(self.gpa);
         self.event_sources.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
@@ -1654,11 +1712,7 @@ pub const Interpreter = struct {
         defer self.suppress_body_store_resets = false;
         self.in_test_body = true;
         defer self.in_test_body = false;
-        defer self.collections.reset(self.gpa);
-        defer self.closures.reset(self.gpa);
-        defer self.structs.reset(self.gpa);
-        defer self.optionals.clearRetainingCapacity();
-        defer self.resetRunStrings();
+        defer self.resetArena();
 
         self.control = .none;
         self.thrown = false;
@@ -2070,6 +2124,9 @@ pub const Interpreter = struct {
         // any extension hook's structural change (enqueued just above) drains in
         // the same boundary, with observers firing per op.
         try self.flushStructural(world);
+        // Every invocation of the tick has ended, async drives included, which
+        // never reset the arena.
+        if (!self.suppress_body_store_resets) self.drainDeferredDecrefs();
     }
 
     /// Advance the two clock accumulators and publish the three builtin time
@@ -2523,7 +2580,7 @@ pub const Interpreter = struct {
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         for (rd.resource_expr_filters) |rf| {
-            locals.map.clearRetainingCapacity();
+            locals.clear(self.gpa);
             const bytes = world.resources.getResource(rf.resource_id) orelse {
                 pass = false;
                 break;
@@ -2550,7 +2607,7 @@ pub const Interpreter = struct {
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         for (rd.expr_filters) |ef| {
-            locals.map.clearRetainingCapacity();
+            locals.clear(self.gpa);
             // The FOURTH per-slot guard to take the locator. Its
             // previous form asked the archetype for a column, which answers
             // null for a sparse id — so a `component T { expression }` guard on
@@ -2576,7 +2633,7 @@ pub const Interpreter = struct {
         if (pass) {
             const rule = self.ast.rule_decls.items[rd.rule_idx];
             for (rd.expr_conds) |expr| {
-                locals.map.clearRetainingCapacity();
+                locals.clear(self.gpa);
                 try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
                 if (!(try self.evalGuardExpr(world, &locals, expr))) {
                     pass = false;
@@ -2608,14 +2665,33 @@ pub const Interpreter = struct {
     /// rule / guard / timer / observer / hook bodies `tick(n)` drives, so their
     /// resets must not free heap-backed values its locals still hold (UAF, the
     /// string class). The single choke point for every per-body reset; a test's
-    /// own end-cleanup calls the raw resets directly (unconditional).
+    /// own end-cleanup calls `resetArena` directly (unconditional).
     fn resetBodyStores(self: *Interpreter) void {
         if (self.suppress_body_store_resets) return;
+        self.resetArena();
+    }
+
+    /// Free the rule-arena stores and return the references their values held.
+    fn resetArena(self: *Interpreter) void {
         self.collections.reset(self.gpa);
         self.closures.reset(self.gpa);
         self.structs.reset(self.gpa);
         self.optionals.clearRetainingCapacity();
         self.resetRunStrings();
+        self.drainDeferredDecrefs();
+    }
+
+    /// Count `v` as a copy an arena value holds; its reference returns at the
+    /// arena's reset.
+    fn retainArena(self: *Interpreter, v: Value) error{OutOfMemory}!void {
+        const block = handleBlock(v) orelse return;
+        try self.deferred_decrefs.append(self.gpa, block);
+        persistent.incref(block);
+    }
+
+    fn drainDeferredDecrefs(self: *Interpreter) void {
+        for (self.deferred_decrefs.items) |block| persistent.decref(self.gpa, block);
+        self.deferred_decrefs.clearRetainingCapacity();
     }
 
     /// Reset the rule-arena stores after a guard evaluation: guard
@@ -2780,16 +2856,9 @@ pub const Interpreter = struct {
         return &task.locals;
     }
 
-    /// Free a frame's owned resources: only a `call` frame owns heap
-    /// (its `async fn` scope). Called for every frame removal.
+    /// Free a frame's owned resources. Called for every frame removal.
     fn deinitFrame(self: *Interpreter, frame: *AsyncFrame) void {
-        switch (frame.*) {
-            .call => |cf| {
-                cf.scope.deinit(self.gpa);
-                self.gpa.destroy(cf.scope);
-            },
-            else => {},
-        }
+        releaseFrame(self.gpa, frame);
     }
 
     /// Pop the top frame, freeing its owned resources.
@@ -2815,7 +2884,7 @@ pub const Interpreter = struct {
             .bind => |b| try currentScope(task).put(self.gpa, b.name, v, b.is_mut),
             .assign_local => |name| {
                 const ptr = currentScope(task).getPtr(name) orelse return error.RuntimeFailure;
-                ptr.* = v;
+                replaceHeld(self.gpa, ptr, v);
             },
         }
     }
@@ -3316,6 +3385,7 @@ pub const Interpreter = struct {
             };
             cursor.* += 1;
             try task.frames.append(self.gpa, .{ .for_ = .{ .for_id = stmt, .iter = for_iter } });
+            retainHandle(iter);
             return .pushed;
         }
         // (2c) `try { } catch e { }` → push a try frame driving the `try` body; a
@@ -3503,7 +3573,7 @@ pub const Interpreter = struct {
     fn cloneLocalsInto(gpa: std.mem.Allocator, src: *const Locals, dest: *Locals) error{OutOfMemory}!void {
         var it = src.map.iterator();
         while (it.next()) |entry| {
-            try dest.map.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
+            try dest.put(gpa, entry.key_ptr.*, entry.value_ptr.value, entry.value_ptr.is_mut);
         }
     }
 
@@ -3551,6 +3621,7 @@ pub const Interpreter = struct {
                     // POD-across-suspend caveat.
                     task.returned = true;
                     task.result = self.return_value;
+                    retainHandle(task.result);
                     self.returning = false;
                     self.return_value = .{ .unit = {} };
                     return false;
@@ -3814,9 +3885,9 @@ pub const Interpreter = struct {
                 return true;
             },
             .array_persistent => {
-                // Resource `T[]` in an async body: the block pointer
-                // is stable across suspend; bounds-check the snapshotted length
-                // against the (possibly mutated) container, same as `.array`.
+                // Resource `T[]` in an async body: the frame holds a reference to
+                // the block; bounds-check the snapshotted length against the
+                // (possibly mutated) container, same as `.array`.
                 const a = &ff.iter.array_persistent;
                 if (a.idx >= a.len) return false;
                 const list = persistentArrayOf(a.ptr);
@@ -4733,7 +4804,7 @@ pub const Interpreter = struct {
             if (self.thrown) return; // see `assignRhsThrew`
             const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
-            ptr.* = new_v;
+            replaceHeld(self.gpa, ptr, new_v);
             return;
         }
         if (target_kind == .field_access) {
@@ -6011,7 +6082,19 @@ pub const Interpreter = struct {
         return Value{ .string_run = handle };
     }
 
+    /// Evaluate `id`. A persistent handle in the result is a copy an arena
+    /// value holds, whoever keeps it next; a call's result is the callee's
+    /// reference, transferred (§4.4).
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
+        const v = try self.evalExprValue(world, locals, id);
+        switch (self.ast.exprKind(id)) {
+            .fn_call, .method_call => {},
+            else => try self.retainArena(v),
+        }
+        return v;
+    }
+
+    fn evalExprValue(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
         const kind = self.ast.exprKind(id);
         const data = self.ast.exprData(id);
         switch (kind) {
@@ -6384,8 +6467,8 @@ pub const Interpreter = struct {
                 }
                 if (recv == .map_persistent) {
                     // `m[k] -> V?` on a resource map: byte/value key
-                    // match (keys are promoted `.string_persistent`); the found
-                    // value is a borrowed view (the map owns it, outlives the body).
+                    // match (keys are promoted `.string_persistent`); the optional
+                    // holding the found value counts it.
                     const key_v = try self.evalExpr(world, locals, ix.index);
                     var found: ?Value = null;
                     for (persistentMapOf(recv.map_persistent).items) |pair| {
@@ -6395,6 +6478,7 @@ pub const Interpreter = struct {
                         }
                     }
                     const oh: u32 = @intCast(self.optionals.items.len);
+                    if (found) |fv| try self.retainArena(fv);
                     try self.optionals.append(self.gpa, found);
                     return Value{ .optional = oh };
                 }
@@ -6441,7 +6525,12 @@ pub const Interpreter = struct {
                 var captured: std.AutoHashMapUnmanaged(StringId, Value) = .empty;
                 errdefer captured.deinit(self.gpa);
                 var it = locals.map.iterator();
-                while (it.next()) |e| try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                while (it.next()) |e| {
+                    // A captured local can hold a value no evaluation counted,
+                    // such as a loop element.
+                    try self.retainArena(e.value_ptr.value);
+                    try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                }
                 const handle = try self.closures.newClosure(self.gpa, id, captured);
                 return Value{ .closure = handle };
             },
@@ -13675,6 +13764,397 @@ test "a store-owned view and a resource string with the same bytes are one set e
     const report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
     try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "R", "n"));
+}
+
+/// One checked program, run for `ticks`, then `R.out` read back.
+fn expectCheckedOut(source: []const u8, ticks: u32, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, ticks);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try expectResourceStringField(&world, "R", "out", expected);
+}
+
+/// `expectCheckedOut` for a program the checker refuses, which is how a caller
+/// that skips it reaches these paths.
+fn expectUncheckedOut(source: []const u8, ticks: u32, expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, ticks);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try expectResourceStringField(&world, "R", "out", expected);
+}
+
+test "a string concatenation keeps its left operand alive while its right operand runs" {
+    try expectCheckedOut(
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    get_mut(R).out = get(R).name + if true {
+        \\      get_mut(R).name = "new"
+        \\      "!"
+        \\    } else {
+        \\      "?"
+        \\    }
+        \\  }
+        \\}
+    , 1, "old!");
+}
+
+test "an arena struct keeps the resource string it was built from" {
+    try expectCheckedOut(
+        \\struct P { a: string }
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    let p = P { a: get(R).name }
+        \\    get_mut(R).name = "new"
+        \\    get_mut(R).out = p.a
+        \\  }
+        \\}
+    , 1, "old");
+}
+
+test "a resource map lookup keeps the value it found after the key is replaced" {
+    try expectCheckedOut(
+        \\resource R { m: [string: string] = ["k": "x"], out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).m.insert("k", "old")
+        \\    let o = get(R).m["k"]
+        \\    get_mut(R).m.insert("k", "new")
+        \\    if let v = o {
+        \\      get_mut(R).out = v
+        \\    }
+        \\  }
+        \\}
+    , 1, "old");
+}
+
+test "a closure keeps a captured loop element its collection has dropped" {
+    try expectCheckedOut(
+        \\resource R { names: string[] = ["alpha", "beta"], out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    let mut c = |x: int| ""
+        \\    let mut first = true
+        \\    for s in get(R).names {
+        \\      if first {
+        \\        c = |x: int| s
+        \\        first = false
+        \\      }
+        \\    }
+        \\    let a = get_mut(R).names.pop()
+        \\    let b = get_mut(R).names.pop()
+        \\    get_mut(R).out = c(0)
+        \\  }
+        \\}
+    , 1, "alpha");
+}
+
+test "a local assigned a resource string holds its own reference" {
+    try expectCheckedOut(
+        \\resource R { a: string = "", b: string = "", out: string = "", stage: int = 0 }
+        \\rule copy() when resource R {
+        \\  if get(R).stage == 1 {
+        \\    get_mut(R).stage = 2
+        \\    get_mut(R).out = get(R).b
+        \\  }
+        \\}
+        \\rule r() when resource R {
+        \\  if get(R).stage == 0 {
+        \\    get_mut(R).stage = 1
+        \\    get_mut(R).a = "aa"
+        \\    get_mut(R).b = "bb"
+        \\    let mut s = get(R).a
+        \\    s = get(R).b
+        \\  }
+        \\}
+    , 2, "bb");
+}
+
+test "a local assigned an awaited resource string holds its own reference" {
+    try expectUncheckedOut(
+        \\resource R { a: string = "", b: string = "", out: string = "", stage: int = 0 }
+        \\async fn g() -> string {
+        \\  await wait(0.05s)
+        \\  return get(R).b
+        \\}
+        \\rule copy() when resource R {
+        \\  if get(R).stage == 2 {
+        \\    get_mut(R).stage = 3
+        \\    get_mut(R).out = get(R).b
+        \\  }
+        \\}
+        \\async rule r() when resource R {
+        \\  if get(R).stage == 0 {
+        \\    get_mut(R).stage = 1
+        \\    get_mut(R).a = "aa"
+        \\    get_mut(R).b = "bb"
+        \\    let mut s = get(R).a
+        \\    s = await g()
+        \\    get_mut(R).stage = 2
+        \\  }
+        \\}
+    , 6, "bb");
+}
+
+test "a task local keeps a resource string across a suspension" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", n: int = 0 }
+        \\async rule r() when resource R {
+        \\  if get(R).n == 0 {
+        \\    get_mut(R).name = "old"
+        \\    let s = get(R).name
+        \\    await wait(0.05s)
+        \\    get_mut(R).out = s
+        \\  }
+        \\}
+        \\rule rename() when resource R {
+        \\  get_mut(R).n = get(R).n + 1
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    , 5, "old");
+}
+
+test "a timer snapshot keeps a resource string until the timer fires" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", armed: bool = true }
+        \\rule sched() when resource R {
+        \\  if get(R).armed {
+        \\    get_mut(R).armed = false
+        \\    get_mut(R).name = "old"
+        \\    let s = get(R).name
+        \\    after(0.05s) {
+        \\      get_mut(R).name = "new"
+        \\      get_mut(R).out = s
+        \\    }
+        \\  }
+        \\}
+    , 5, "old");
+}
+
+test "a race winner's returned resource string survives until the race resumes" {
+    try expectUncheckedOut(
+        \\resource R { name: string = "", out: string = "", n: int = 0 }
+        \\async fn pick() -> string {
+        \\  race {
+        \\    {
+        \\      return get(R).name
+        \\    }
+        \\    {
+        \\      await wait(1.0s)
+        \\      return "late"
+        \\    }
+        \\  }
+        \\  return "none"
+        \\}
+        \\rule setup() when resource R {
+        \\  get_mut(R).n = get(R).n + 1
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "old"
+        \\  }
+        \\}
+        \\async rule r() when resource R {
+        \\  if get(R).n == 1 {
+        \\    let s = await pick()
+        \\    get_mut(R).out = s
+        \\  }
+        \\}
+        \\rule rename() when resource R {
+        \\  if get(R).n == 1 {
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    , 3, "old");
+}
+
+test "a loop variable releases each resource element it held" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { names: string[] = ["a", "b", "c"], n: int = 0 }
+        \\rule r() when resource R {
+        \\  for s in get(R).names {
+        \\    get_mut(R).n = get(R).n + 1
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceIntNamed(&world, "R", "n"));
+}
+
+test "a resource expression guard releases the fields it bound" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource A { s: string = "", ready: bool = false }
+        \\resource B { k: int = 1 }
+        \\resource Out { n: int = 0 }
+        \\rule setup() when resource A {
+        \\  if get(A).ready == false {
+        \\    get_mut(A).ready = true
+        \\    get_mut(A).s = "xy"
+        \\  }
+        \\}
+        \\rule gated() when resource A { ready } and resource B { k == 1 } and resource Out {
+        \\  get_mut(Out).n = get(Out).n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "Out", "n"));
+}
+
+test "a tick returns the arena references of its async drives" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "x", out: string = "" }
+        \\async rule r() when resource R {
+        \\  get_mut(R).out = get(R).name
+        \\  await wait(0.05s)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 0), interp.deferred_decrefs.items.len);
+}
+
+test "a rule body returns its arena references at its reset" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "x", out: string = "" }
+        \\rule r() when resource R {
+        \\  get_mut(R).out = get(R).name
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    var report: RuntimeReport = .{};
+    try interp.execBody(&world, interp.rule_descs[0], null, null, &report);
+    try std.testing.expectEqual(@as(usize, 0), interp.deferred_decrefs.items.len);
+}
+
+test "an interpreter returns the arena references still held when it is torn down" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { name: string = "", out: string = "", done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    get_mut(R).name = "old"
+        \\    get_mut(R).out = get(R).name
+        \\    get_mut(R).name = "new"
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    interp.suppress_body_store_resets = true;
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expect(interp.deferred_decrefs.items.len > 0);
+}
+
+/// The async walk of the two tests below: `swap` replaces the array at tick 2,
+/// while `walk` waits on its first element.
+const async_walk_source =
+    \\resource R { xs: int[] = [1, 2, 3], sum: int = 0, tick: int = 0 }
+    \\async rule walk() when resource R {
+    \\  for x in get(R).xs {
+    \\    await wait(0.05s)
+    \\    get_mut(R).sum = get(R).sum + x
+    \\  }
+    \\}
+    \\rule swap() when resource R {
+    \\  get_mut(R).tick = get(R).tick + 1
+    \\  if get(R).tick == 2 {
+    \\    get_mut(R).xs = [100]
+    \\  }
+    \\}
+;
+
+test "an async for suspended at teardown releases the array it iterates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, async_walk_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceIntNamed(&world, "R", "sum"));
+}
+
+test "an async for keeps iterating a resource array reassigned while it waits" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, async_walk_source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 12);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
+}
+
+test "a sync for keeps iterating a resource array its body reassigns" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { xs: int[] = [1, 2, 3], sum: int = 0, done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    for x in get(R).xs {
+        \\      get_mut(R).xs = [7]
+        \\      get_mut(R).sum = get(R).sum + x
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceIntNamed(&world, "R", "sum"));
 }
 
 test "a sync for over an arena array fails loud when its body shrinks it" {

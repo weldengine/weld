@@ -116,10 +116,9 @@ pub const Value = union(enum) {
     /// name (interned `StringId`) and the variant's declaration-order index.
     /// Value-typed: compared by `(type_name, variant)` equality.
     enum_value: EnumValue,
-    /// A borrowed view over a resource `string` field's persistent-heap bytes. The read
-    /// path returns this without incref'ing the block — safe for the rule body because
-    /// the resource (hence the bytes) outlives it (`etch-memory-model.md` §11).
-    /// Self-contained `{ptr,len}` so
+    /// A view over a resource `string` field's persistent-heap bytes. The read takes
+    /// no reference; every holder that keeps the value counts one
+    /// (`etch-memory-model.md` §4.4). Self-contained `{ptr,len}` so
     /// `readBytesAsValue` can build it with no allocator and no interpreter store;
     /// `ptr == 0` ⇔ the empty string. Additive — does not disturb `string_id` (AST
     /// pool) / `string_run` (rule-arena) semantics.
@@ -134,9 +133,8 @@ pub const Value = union(enum) {
     /// `persistent` `type_array` block whose payload is the owned
     /// `ArrayListUnmanaged(Value)`). Mirrors `.string_persistent`'s persistent-vs-
     /// rule-arena split against `.array_ref`: the zone is known at the tag, no
-    /// runtime discriminant, drop dispatched by `type_id`. The read path returns
-    /// it without incref — safe for the rule body because the resource (hence the
-    /// block) outlives it. Never `0` for a live field (the empty collection is a
+    /// runtime discriminant, drop dispatched by `type_id`. Counted like
+    /// `.string_persistent`. Never `0` for a live field (the empty collection is a
     /// real empty block allocated with the resource's store buffer). String
     /// elements are stored as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
