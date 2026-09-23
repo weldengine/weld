@@ -43,14 +43,15 @@ pub const BuildError = error{
 
 /// Owned ordered sequence of Level-B descriptors built from one AST, in
 /// top-level declaration order ACROSS construct kinds (the engraved
-/// canonical-form rule). Every string is gpa-owned (no arena borrows —
-/// the descriptors outlive nothing but the interpreter that holds them).
+/// canonical-form rule). Every allocation lives in `arena`, which the value
+/// owns and releases whole; nothing borrows from the AST.
 pub const Descriptors = struct {
     items: []types.Descriptor = &.{},
+    arena: ?std.heap.ArenaAllocator = null,
 
     pub fn deinit(self: *Descriptors, gpa: std.mem.Allocator) void {
-        for (self.items) |d| freeDescriptor(gpa, d);
-        gpa.free(self.items);
+        _ = gpa;
+        if (self.arena) |*a| a.deinit();
         self.* = .{};
     }
 
@@ -63,41 +64,6 @@ pub const Descriptors = struct {
         }
     }
 };
-
-fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
-    switch (d) {
-        .data => |t| freeData(gpa, t),
-        .routine => |r| freeRoutine(gpa, r),
-        .behavior => |b| freeBehavior(gpa, b),
-        .quest => |q| freeQuest(gpa, q),
-        .dialogue => |dlg| freeDialogue(gpa, dlg),
-        .ability => |a| freeAbility(gpa, a),
-        .theme => |t| freeTheme(gpa, t),
-        .motion => |m| freeMotion(gpa, m),
-        .input_mapping => |im| freeInputMapping(gpa, im),
-        .widget => |w| freeWidget(gpa, w),
-        .locale => |l| freeLocale(gpa, l),
-        .effect => |e| freeEffect(gpa, e),
-        .audio_graph => |ag| freeAudioGraph(gpa, ag),
-        .audio_score => |asc| freeAudioScore(gpa, asc),
-        .sequence => |seq| freeSequence(gpa, seq),
-        .anim_graph => |ag| freeAnimGraph(gpa, ag),
-        .shader => |sh| freeShader(gpa, sh),
-        .scene => |sc| freeScene(gpa, sc),
-        .prefab => |pf| freePrefab(gpa, pf),
-    }
-}
-
-fn freeInputMapping(gpa: std.mem.Allocator, m: types.InputMapping) void {
-    gpa.free(m.name);
-    gpa.free(m.context);
-    gpa.free(m.priority);
-    gpa.free(m.consume_input);
-    for (m.actions) |act| freeInputAction(gpa, act);
-    gpa.free(m.actions);
-    for (m.combos) |c| freeInputCombo(gpa, c);
-    gpa.free(m.combos);
-}
 
 fn freeInputAction(gpa: std.mem.Allocator, act: types.InputActionDesc) void {
     gpa.free(act.name);
@@ -119,49 +85,6 @@ fn freeInputCombo(gpa: std.mem.Allocator, c: types.InputComboDesc) void {
     gpa.free(c.type_name);
     gpa.free(c.sequence);
     gpa.free(c.window);
-}
-
-fn freeTheme(gpa: std.mem.Allocator, t: types.Theme) void {
-    gpa.free(t.name);
-    for (t.entries) |e| {
-        gpa.free(e.key);
-        gpa.free(e.value);
-    }
-    gpa.free(t.entries);
-}
-
-fn freeMotion(gpa: std.mem.Allocator, m: types.Motion) void {
-    gpa.free(m.name);
-    for (m.states) |st| {
-        gpa.free(st.name);
-        for (st.fields) |f| {
-            gpa.free(f.name);
-            gpa.free(f.value);
-        }
-        gpa.free(st.fields);
-    }
-    gpa.free(m.states);
-    for (m.transitions) |tr| {
-        gpa.free(tr.source);
-        gpa.free(tr.target);
-        gpa.free(tr.animator);
-    }
-    gpa.free(m.transitions);
-}
-
-fn freeAbility(gpa: std.mem.Allocator, a: types.Ability) void {
-    gpa.free(a.name);
-    for (a.properties) |prop| {
-        gpa.free(prop.name);
-        gpa.free(prop.value);
-    }
-    gpa.free(a.properties);
-    gpa.free(a.rule);
-}
-
-fn freeDialogue(gpa: std.mem.Allocator, d: types.Dialogue) void {
-    gpa.free(d.name);
-    freeDialogueElements(gpa, d.elements);
 }
 
 fn freeDialogueElements(gpa: std.mem.Allocator, elements: []const types.DialogueElementDesc) void {
@@ -197,17 +120,6 @@ fn freeDialogueElements(gpa: std.mem.Allocator, elements: []const types.Dialogue
     gpa.free(elements);
 }
 
-fn freeQuest(gpa: std.mem.Allocator, q: types.Quest) void {
-    gpa.free(q.name);
-    for (q.properties) |prop| {
-        gpa.free(prop.name);
-        gpa.free(prop.value);
-    }
-    gpa.free(q.properties);
-    for (q.stages) |stage| freeQuestStage(gpa, stage);
-    gpa.free(q.stages);
-}
-
 fn freeQuestStage(gpa: std.mem.Allocator, stage: types.QuestStageDesc) void {
     gpa.free(stage.name);
     for (stage.elements) |elem| {
@@ -233,11 +145,6 @@ fn freeQuestStage(gpa: std.mem.Allocator, stage: types.QuestStageDesc) void {
     gpa.free(stage.elements);
 }
 
-fn freeBehavior(gpa: std.mem.Allocator, b: types.Behavior) void {
-    gpa.free(b.name);
-    freeBTNode(gpa, b.root);
-}
-
 fn freeBTNode(gpa: std.mem.Allocator, node: types.BehaviorNode) void {
     gpa.free(node.when);
     gpa.free(node.payload);
@@ -245,49 +152,17 @@ fn freeBTNode(gpa: std.mem.Allocator, node: types.BehaviorNode) void {
     gpa.free(node.children);
 }
 
-fn freeRoutine(gpa: std.mem.Allocator, r: types.Routine) void {
-    gpa.free(r.name);
-    for (r.segments) |seg| {
-        gpa.free(seg.name);
-        for (seg.triggers) |t| gpa.free(t.value);
-        gpa.free(seg.triggers);
-        for (seg.actions) |a| gpa.free(a);
-        gpa.free(seg.actions);
-        for (seg.untils) |t| gpa.free(t.value);
-        gpa.free(seg.untils);
-    }
-    gpa.free(r.segments);
-    for (r.interrupts) |intr| {
-        gpa.free(intr.event);
-        gpa.free(intr.target);
-    }
-    gpa.free(r.interrupts);
-}
-
-fn freeData(gpa: std.mem.Allocator, t: types.Data) void {
-    gpa.free(t.name);
-    gpa.free(t.entry_type);
-    for (t.entries) |e| {
-        gpa.free(e.id);
-        for (e.fields) |f| {
-            gpa.free(f.name);
-            gpa.free(f.value);
-        }
-        gpa.free(e.fields);
-    }
-    gpa.free(t.entries);
-}
-
 /// Build every descriptor from `arena`, in declaration order — Level B AND the
 /// Level C scene/prefab arms, which have their own banner below. The
 /// AST is expected validated (the type-checker ran clean) — `build` does
 /// not re-validate, it constructs.
-pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descriptors {
+pub fn build(backing: std.mem.Allocator, arena: *const AstArena) BuildError!Descriptors {
+    // Every builder allocates here, so a failure part-way releases everything
+    // built so far at once.
+    var owner = std.heap.ArenaAllocator.init(backing);
+    errdefer owner.deinit();
+    const gpa = owner.allocator();
     var list: std.ArrayListUnmanaged(types.Descriptor) = .empty;
-    errdefer {
-        for (list.items) |d| freeDescriptor(gpa, d);
-        list.deinit(gpa);
-    }
     const kinds = arena.items.items(.kind);
     const datas = arena.items.items(.data);
     var i: u28 = 0;
@@ -320,7 +195,8 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             else => {},
         }
     }
-    return .{ .items = try list.toOwnedSlice(gpa) };
+    const items = try list.toOwnedSlice(gpa);
+    return .{ .items = items, .arena = owner };
 }
 
 fn buildRoutine(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.RoutineDecl) BuildError!types.Routine {
@@ -753,19 +629,6 @@ fn buildInputCombo(gpa: std.mem.Allocator, arena: *const AstArena, combo: ast_mo
 
 // ── widget ──────────────────────────────────────────────
 
-fn freeWidget(gpa: std.mem.Allocator, w: types.Widget) void {
-    gpa.free(w.name);
-    gpa.free(w.annotations);
-    gpa.free(w.when);
-    for (w.params) |p| {
-        gpa.free(p.name);
-        gpa.free(p.type_name);
-    }
-    gpa.free(w.params);
-    for (w.tree) |node| freeUiNode(gpa, node);
-    gpa.free(w.tree);
-}
-
 fn freeUiNode(gpa: std.mem.Allocator, node: types.UiNodeDesc) void {
     gpa.free(node.head);
     for (node.children) |child| freeUiNode(gpa, child);
@@ -945,15 +808,6 @@ pub fn renderUiCallAlloc(gpa: std.mem.Allocator, arena: *const AstArena, call_no
 
 // ── locale ──────────────────────────────────────────────
 
-fn freeLocale(gpa: std.mem.Allocator, l: types.Locale) void {
-    gpa.free(l.name);
-    for (l.entries) |e| {
-        gpa.free(e.key);
-        gpa.free(e.value);
-    }
-    gpa.free(l.entries);
-}
-
 /// Build a `locale` descriptor: flat `key = value` string entries (the
 /// `buildTheme` precedent, both sides decoded string-literal content).
 fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.LocaleDecl) BuildError!types.Locale {
@@ -1010,31 +864,6 @@ pub fn renderStmtRunAlloc(gpa: std.mem.Allocator, arena: *const AstArena, body_s
         try out.appendSlice(gpa, text);
     }
     return try out.toOwnedSlice(gpa);
-}
-
-fn freeEffect(gpa: std.mem.Allocator, e: types.Effect) void {
-    gpa.free(e.name);
-    for (e.params) |p| {
-        gpa.free(p.name);
-        gpa.free(p.type_name);
-        gpa.free(p.default);
-    }
-    gpa.free(e.params);
-    for (e.emitters) |em| {
-        gpa.free(em.name);
-        for (em.props) |pr| {
-            gpa.free(pr.name);
-            gpa.free(pr.value);
-        }
-        gpa.free(em.props);
-    }
-    gpa.free(e.emitters);
-    for (e.handlers) |h| {
-        gpa.free(h.emitter);
-        gpa.free(h.event);
-        gpa.free(h.body);
-    }
-    gpa.free(e.handlers);
 }
 
 /// Build an `effect` descriptor: optional annotated params, emitters
@@ -1133,18 +962,6 @@ fn buildEffect(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Eff
     };
 }
 
-fn freeAudioGraph(gpa: std.mem.Allocator, ag: types.AudioGraph) void {
-    gpa.free(ag.name);
-    for (ag.params) |p| {
-        gpa.free(p.name);
-        gpa.free(p.type_name);
-        gpa.free(p.default);
-    }
-    gpa.free(ag.params);
-    gpa.free(ag.body);
-    gpa.free(ag.output);
-}
-
 /// Build an `audio_graph` descriptor: optional annotated params, the
 /// DSP statements rendered "; "-joined, and the mandatory output sink — all
 /// through the shared canonical renderers (byte-identical with the emit side).
@@ -1216,24 +1033,6 @@ fn freeScorePropDescs(gpa: std.mem.Allocator, props: []const types.ScorePropDesc
         gpa.free(p.value);
     }
     gpa.free(props);
-}
-
-fn freeAudioScore(gpa: std.mem.Allocator, asc: types.AudioScore) void {
-    gpa.free(asc.name);
-    freeScorePropDescs(gpa, asc.props);
-    for (asc.sections) |sec| {
-        gpa.free(sec.name);
-        freeScorePropDescs(gpa, sec.props);
-        for (sec.can_transition_to) |t| gpa.free(t);
-        gpa.free(sec.can_transition_to);
-        gpa.free(sec.on_finish);
-    }
-    gpa.free(asc.sections);
-    for (asc.stems) |stem| {
-        gpa.free(stem.name);
-        freeScorePropDescs(gpa, stem.fields);
-    }
-    gpa.free(asc.stems);
 }
 
 /// Build an `audio_score` descriptor: score properties, sections
@@ -1344,24 +1143,6 @@ pub fn renderSequenceKeyframeValueAlloc(gpa: std.mem.Allocator, arena: *const As
             return try out.toOwnedSlice(gpa);
         },
     }
-}
-
-fn freeSequence(gpa: std.mem.Allocator, seq: types.Sequence) void {
-    gpa.free(seq.name);
-    freeScorePropDescs(gpa, seq.props);
-    gpa.free(seq.on_start);
-    gpa.free(seq.on_finish);
-    for (seq.tracks) |tr| {
-        gpa.free(tr.name);
-        gpa.free(tr.target);
-        gpa.free(tr.track_type);
-        for (tr.keyframes) |kf| {
-            gpa.free(kf.time);
-            gpa.free(kf.value);
-        }
-        gpa.free(tr.keyframes);
-    }
-    gpa.free(seq.tracks);
 }
 
 /// Build a `sequence` descriptor: properties, on_start/on_finish
@@ -1489,28 +1270,6 @@ fn freeSceneInstanceInner(gpa: std.mem.Allocator, inst: types.SceneInstanceDesc)
         gpa.free(o.value);
     }
     gpa.free(inst.overrides);
-}
-
-fn freeScene(gpa: std.mem.Allocator, sc: types.Scene) void {
-    gpa.free(sc.name);
-    gpa.free(sc.version);
-    freeComponentFields(gpa, sc.metadata);
-    freeComponentInstances(gpa, sc.resources);
-    freeSceneEntities(gpa, sc.entities);
-    for (sc.instances) |inst| freeSceneInstanceInner(gpa, inst);
-    gpa.free(sc.instances);
-}
-
-fn freePrefab(gpa: std.mem.Allocator, pf: types.Prefab) void {
-    gpa.free(pf.name);
-    gpa.free(pf.base);
-    for (pf.requires) |r| gpa.free(r);
-    gpa.free(pf.requires);
-    gpa.free(pf.version);
-    freeComponentFields(gpa, pf.metadata);
-    freeSceneEntities(gpa, pf.entities);
-    gpa.free(pf.on_attach);
-    gpa.free(pf.on_detach);
 }
 
 /// Render a `struct_lit_fields` run into `ComponentFieldDesc`s (name + rendered
@@ -1786,38 +1545,6 @@ pub fn renderAnimStateBodyAlloc(gpa: std.mem.Allocator, arena: *const AstArena, 
     return try out.toOwnedSlice(gpa);
 }
 
-fn freeAnimGraph(gpa: std.mem.Allocator, ag: types.AnimGraph) void {
-    gpa.free(ag.name);
-    for (ag.params) |p| {
-        gpa.free(p.name);
-        gpa.free(p.type_name);
-        gpa.free(p.default);
-    }
-    gpa.free(ag.params);
-    for (ag.states) |st| {
-        gpa.free(st.name);
-        gpa.free(st.body);
-        for (st.transitions) |tr| {
-            gpa.free(tr.target);
-            gpa.free(tr.when);
-        }
-        gpa.free(st.transitions);
-        gpa.free(st.on_finish);
-    }
-    gpa.free(ag.states);
-    for (ag.layers) |ly| {
-        gpa.free(ly.name);
-        for (ly.props) |p| {
-            gpa.free(p.condition);
-            gpa.free(p.clip);
-            for (p.bones) |b| gpa.free(b);
-            gpa.free(p.bones);
-        }
-        gpa.free(ly.props);
-    }
-    gpa.free(ag.layers);
-}
-
 /// Build an `anim_graph` descriptor: params, states (rendered body +
 /// transitions + on_finish), and layers — all through the shared canonical
 /// renderers (byte-identical with the codegen emit side).
@@ -1987,18 +1714,6 @@ pub fn renderShaderStageAlloc(gpa: std.mem.Allocator, arena: *const AstArena, he
     }
     try out.appendSlice(gpa, " }");
     return try out.toOwnedSlice(gpa);
-}
-
-fn freeShader(gpa: std.mem.Allocator, sh: types.Shader) void {
-    gpa.free(sh.name);
-    for (sh.params) |p| {
-        gpa.free(p.name);
-        gpa.free(p.type_name);
-        gpa.free(p.default);
-    }
-    gpa.free(sh.params);
-    gpa.free(sh.vertex);
-    gpa.free(sh.fragment);
 }
 
 /// Build a `shader` descriptor: uniforms + the optional vertex +

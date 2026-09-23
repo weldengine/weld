@@ -25,6 +25,7 @@ const std = @import("std");
 /// Imported only for `FieldKind.fromZigType`; `entity.zig` imports
 /// nothing of `registry.zig`, so this is acyclic.
 const EntityId = @import("entity.zig").EntityId;
+const persistent = @import("../memory/persistent.zig");
 
 /// Stable identifier assigned at registration. The first registered
 /// component gets `ComponentId(0)`; subsequent registrations get the next
@@ -247,6 +248,72 @@ const Entry = struct {
     /// Schema identity, derived at registration — beside the descriptor for the
     /// same reason `closure` is.
     schema_digest: u64 = 0,
+    /// Immortal `persistent` blocks that `desc.default_bytes` points into. The
+    /// entry owns them and destroys them with itself, so every copy of the
+    /// default bytes — a resource store slot included — stays valid for the
+    /// registry's lifetime.
+    owned_blocks: []const [*]u8 = &.{},
+};
+
+/// Free every allocation an entry owns.
+fn freeEntry(gpa: std.mem.Allocator, e: *Entry) void {
+    gpa.free(e.desc.name);
+    gpa.free(e.desc.default_bytes);
+    for (e.desc.fields) |f| gpa.free(f.name);
+    gpa.free(e.desc.fields);
+    for (e.desc.requires) |r| gpa.free(r);
+    gpa.free(e.desc.requires);
+    if (e.closure.len != 0) gpa.free(e.closure);
+    for (e.owned_blocks) |b| persistent.destroy(gpa, b);
+    if (e.owned_blocks.len != 0) gpa.free(e.owned_blocks);
+}
+
+/// A registration built in full and not yet visible: `Registry.prepareEntry`
+/// makes every allocation it needs, so `Registry.commitPrepared` cannot fail.
+pub const PreparedEntry = struct {
+    entry: Entry,
+
+    /// Release an entry that was never committed, its owned blocks included.
+    pub fn deinit(self: *PreparedEntry, gpa: std.mem.Allocator) void {
+        freeEntry(gpa, &self.entry);
+        self.* = undefined;
+    }
+
+    pub fn name(self: *const PreparedEntry) []const u8 {
+        return self.entry.desc.name;
+    }
+
+    pub fn schemaDigest(self: *const PreparedEntry) u64 {
+        return self.entry.schema_digest;
+    }
+
+    pub fn fields(self: *const PreparedEntry) []const FieldDesc {
+        return self.entry.desc.fields;
+    }
+
+    pub fn defaultBytes(self: *const PreparedEntry) []const u8 {
+        return self.entry.desc.default_bytes;
+    }
+
+    pub fn size(self: *const PreparedEntry) u16 {
+        return self.entry.desc.size;
+    }
+
+    pub fn alignment(self: *const PreparedEntry) u16 {
+        return self.entry.desc.alignment;
+    }
+};
+
+/// Transitive `@requires` closures computed apart from the registry, one per
+/// id, by `Registry.stageClosures`; `Registry.commitClosures` adopts them.
+pub const StagedClosures = struct {
+    closures: [][]const ComponentId,
+
+    pub fn deinit(self: *StagedClosures, gpa: std.mem.Allocator) void {
+        for (self.closures) |c| if (c.len != 0) gpa.free(c);
+        gpa.free(self.closures);
+        self.* = undefined;
+    }
 };
 
 /// Runtime registry of component (and resource) type descriptions.
@@ -273,15 +340,7 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
-        for (self.entries.items) |*e| {
-            gpa.free(e.desc.name);
-            gpa.free(e.desc.default_bytes);
-            for (e.desc.fields) |f| gpa.free(f.name);
-            gpa.free(e.desc.fields);
-            for (e.desc.requires) |r| gpa.free(r);
-            gpa.free(e.desc.requires);
-            if (e.closure.len != 0) gpa.free(e.closure);
-        }
+        for (self.entries.items) |*e| freeEntry(gpa, e);
         self.entries.deinit(gpa);
         self.by_name.deinit(gpa);
         for (self.aliases.items) |a| gpa.free(a);
@@ -292,8 +351,23 @@ pub const Registry = struct {
     /// Register a component described at runtime. The registry duplicates
     /// `desc.name`, `desc.default_bytes`, and each `FieldDesc.name`.
     pub fn registerComponentRaw(self: *Registry, gpa: std.mem.Allocator, desc: ComponentDesc) RegistryError!ComponentId {
+        var prepared = try self.prepareEntry(gpa, desc, &.{});
+        errdefer prepared.deinit(gpa);
+        try self.reserve(gpa, 1);
+        return self.commitPrepared(prepared);
+    }
+
+    /// Copy `desc` into an entry `commitPrepared` can adopt, without touching
+    /// the registry. On success the entry owns `owned_blocks`, which must be the
+    /// immortal blocks `desc.default_bytes` points into, allocated with `gpa`;
+    /// on error the caller keeps them. Refuses a name already registered.
+    pub fn prepareEntry(
+        self: *const Registry,
+        gpa: std.mem.Allocator,
+        desc: ComponentDesc,
+        owned_blocks: []const [*]u8,
+    ) RegistryError!PreparedEntry {
         if (self.by_name.contains(desc.name)) return RegistryError.DuplicateComponent;
-        const id: ComponentId = @intCast(self.entries.items.len);
 
         const name_owned = try gpa.dupe(u8, desc.name);
         errdefer gpa.free(name_owned);
@@ -325,7 +399,7 @@ pub const Registry = struct {
             dup_req += 1;
         }
 
-        try self.entries.append(gpa, .{
+        return .{ .entry = .{
             .desc = .{
                 .name = name_owned,
                 .size = desc.size,
@@ -334,13 +408,34 @@ pub const Registry = struct {
                 .fields = fields_owned,
                 .storage = desc.storage,
                 .requires = requires_owned,
+                .content_digest = desc.content_digest,
             },
             .schema_digest = schemaDigestOf(desc),
-        });
-        errdefer _ = self.entries.pop();
+            .owned_blocks = owned_blocks,
+        } };
+    }
 
-        try self.by_name.put(gpa, name_owned, id);
+    /// Make room for `n` more entries, so that many `commitPrepared` calls
+    /// cannot fail. Changes nothing a reader of the registry can observe.
+    pub fn reserve(self: *Registry, gpa: std.mem.Allocator, n: usize) error{OutOfMemory}!void {
+        try self.entries.ensureUnusedCapacity(gpa, n);
+        try self.by_name.ensureUnusedCapacity(gpa, @intCast(n));
+    }
+
+    /// Adopt `prepared` under the next id and return that id. Cannot fail:
+    /// requires room from `reserve` and a name registered neither before nor by
+    /// another entry committed since `prepareEntry`.
+    pub fn commitPrepared(self: *Registry, prepared: PreparedEntry) ComponentId {
+        const id: ComponentId = @intCast(self.entries.items.len);
+        self.entries.appendAssumeCapacity(prepared.entry);
+        self.by_name.putAssumeCapacityNoClobber(prepared.entry.desc.name, id);
         return id;
+    }
+
+    /// The immortal blocks entry `id` owns, which its default bytes point into.
+    pub fn ownedBlocks(self: *const Registry, id: ComponentId) []const [*]u8 {
+        if (id >= self.entries.items.len) return &.{};
+        return self.entries.items[id].owned_blocks;
     }
 
     /// The schema identity recorded for `id` at registration, or `null` when `id`
@@ -406,44 +501,94 @@ pub const Registry = struct {
     /// reduce it to a two-colour visited set: that cannot tell a cycle from a
     /// diamond (`A requires B, C`; `B requires D`; `C requires D`), and a
     /// diamond is legal.
+    ///
+    /// On error every closure keeps its previous value.
     pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
-        const n = self.entries.items.len;
+        const staged = try self.stageClosures(gpa, &.{});
+        self.commitClosures(gpa, staged);
+    }
+
+    /// Compute the closure of every committed entry and of every `pending`
+    /// entry, `pending[i]` standing at id `componentCount() + i` as if already
+    /// committed in order. Every allocation and every refusal happen here and
+    /// the registry is left untouched.
+    pub fn stageClosures(
+        self: *const Registry,
+        gpa: std.mem.Allocator,
+        pending: []const PreparedEntry,
+    ) error{ OutOfMemory, RequiresCycle, UnknownRequisite }!StagedClosures {
+        const graph: Graph = .{ .registry = self, .pending = pending };
+        const n = graph.count();
+        const out = try gpa.alloc([]const ComponentId, n);
+        for (out) |*c| c.* = &.{};
+        var staged: StagedClosures = .{ .closures = out };
+        errdefer staged.deinit(gpa);
+
         const colour = try gpa.alloc(Colour, n);
         defer gpa.free(colour);
         @memset(colour, .white);
-
-        for (self.entries.items, 0..) |*e, i| {
-            if (e.closure.len != 0) {
-                gpa.free(e.closure);
-                e.closure = &.{};
-            }
-            _ = i;
-        }
         for (0..n) |i| {
             if (colour[i] == .black) continue;
-            try self.closeOne(gpa, @intCast(i), colour);
+            try closeOne(gpa, graph, @intCast(i), colour, out);
         }
+        return staged;
     }
+
+    /// Adopt `staged` as the closures of every entry, then free the closures it
+    /// replaces. Cannot fail: requires the pending entries it was staged over to
+    /// have been committed since, and nothing else.
+    pub fn commitClosures(self: *Registry, gpa: std.mem.Allocator, staged: StagedClosures) void {
+        std.debug.assert(staged.closures.len == self.entries.items.len);
+        for (self.entries.items, staged.closures) |*e, c| {
+            if (e.closure.len != 0) gpa.free(e.closure);
+            e.closure = c;
+        }
+        gpa.free(staged.closures);
+    }
+
+    /// The committed entries followed by the pending ones, under one id space.
+    const Graph = struct {
+        registry: *const Registry,
+        pending: []const PreparedEntry,
+
+        fn count(g: Graph) usize {
+            return g.registry.entries.items.len + g.pending.len;
+        }
+
+        fn requiresOf(g: Graph, id: ComponentId) []const []const u8 {
+            const base = g.registry.entries.items.len;
+            if (id < base) return g.registry.entries.items[id].desc.requires;
+            return g.pending[id - base].entry.desc.requires;
+        }
+
+        fn idOf(g: Graph, name: []const u8) ?ComponentId {
+            if (g.registry.by_name.get(name)) |id| return id;
+            for (g.pending, 0..) |p, i| {
+                if (std.mem.eql(u8, p.entry.desc.name, name)) return @intCast(g.registry.entries.items.len + i);
+            }
+            return null;
+        }
+    };
 
     /// Sorts the closure ASCENDING by id: the add path applies it in that order, so
     /// the order must be a pure function of the program and never of the walk.
-    fn closeOne(self: *Registry, gpa: std.mem.Allocator, id: ComponentId, colour: []Colour) !void {
+    fn closeOne(gpa: std.mem.Allocator, graph: Graph, id: ComponentId, colour: []Colour, out: [][]const ComponentId) !void {
         if (colour[id] == .black) return;
         if (colour[id] == .grey) return error.RequiresCycle;
         colour[id] = .grey;
 
         var acc: std.ArrayListUnmanaged(ComponentId) = .empty;
         errdefer acc.deinit(gpa);
-        for (self.entries.items[id].desc.requires) |req_name| {
-            const req = self.by_name.get(req_name) orelse return error.UnknownRequisite;
+        for (graph.requiresOf(id)) |req_name| {
+            const req = graph.idOf(req_name) orelse return error.UnknownRequisite;
             if (req == id) return error.RequiresCycle;
-            try self.closeOne(gpa, req, colour);
+            try closeOne(gpa, graph, req, colour, out);
             try appendUnique(gpa, &acc, req);
-            for (self.entries.items[req].closure) |t| try appendUnique(gpa, &acc, t);
+            for (out[req]) |t| try appendUnique(gpa, &acc, t);
         }
         const flat = try acc.toOwnedSlice(gpa);
         std.mem.sort(ComponentId, flat, {}, std.sort.asc(ComponentId));
-        self.entries.items[id].closure = flat;
+        out[id] = flat;
         colour[id] = .black;
     }
 

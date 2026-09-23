@@ -40,6 +40,9 @@ const ComponentId = weld_core.ecs.registry.ComponentId;
 /// Storage backend recorded per component at registration — `table | sparse`,
 /// default `table` (`engine-ecs-internals.md` §2).
 const StorageKind = weld_core.ecs.registry.StorageKind;
+const ResourceStore = weld_core.ecs.resources.ResourceStore;
+const PreparedEntry = weld_core.ecs.registry.PreparedEntry;
+const StagedClosures = weld_core.ecs.registry.StagedClosures;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
@@ -1264,37 +1267,11 @@ pub const Interpreter = struct {
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
     /// never re-entrantly during the current one (the no-recursion contract).
     observer_deferred: ?*CommandBuffer = null,
-    /// The world this program was compiled against (`compile`), borrowed for the
-    /// persistent-string teardown in `deinit`. The interpreter is
-    /// already lifecycle-coupled to the world (its observer ctxs are registered
-    /// into the world's `ObserverRegistry`), so storing it here is consistent;
-    /// the world MUST outlive the interpreter (the existing contract — `deinit`
-    /// before `world.deinit`). `null` only before `compile` returns.
-    world: ?*World = null,
-    /// Immortal persistent-heap blocks holding compile-time `string` field
-    /// defaults. Allocated in `compileTypeDecl` via `allocImmortal`
-    /// (sentinel refcount, so slot decref never frees them) and `destroy`'d here
-    /// at `deinit` — they have no slot-owner to reclaim them, so the interpreter
-    /// (their allocator) does. Freed AFTER the per-slot decref so an un-overwritten
-    /// default (slot still points at its immortal block) is reclaimed exactly once.
-    persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty,
-
+    /// Touches nothing of the world: its registrations, resource payloads and
+    /// the blocks they point into belong to the world and outlive this
+    /// interpreter.
     pub fn deinit(self: *Interpreter) void {
-        // Uniform resource-payload teardown. The decref walk over every
-        // resource's `.string_`/`.array_`/`.map_`/`.set_` slots now lives on
-        // `World.releaseResourcePayloads`; run it here BEFORE destroying the
-        // immortal `persistent_literals` below. Ordering is load-bearing: the
-        // walk zeroes each slot after decref, so the later `World.deinit` call
-        // is a no-op and never re-reads a slot pointing at a freed immortal
-        // block (a use-after-free). `decref` no-ops on a sentinel (immortal
-        // default) and frees a refcounted user-written block; the immortal
-        // defaults are then reclaimed by `destroy` below (their allocator is
-        // the interpreter). The walk no longer needs `bridge.resources`, so it
-        // is decoupled from `bridge.deinit`.
-        if (self.world) |w| w.releaseResourcePayloads(self.gpa);
-        for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
         self.event_sources.deinit(self.gpa);
-        self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
         self.bridge.deinit(self.gpa);
@@ -1393,153 +1370,15 @@ pub const Interpreter = struct {
         var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
         errdefer tag_table.deinit(gpa);
 
-        // Immortal blocks backing compile-time `string` field defaults. Filled
-        // by `compileTypeDecl`; moved into the returned interpreter,
-        // which `destroy`s them at `deinit`. On a compile error path they are
-        // reclaimed here so no default literal leaks.
-        var persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty;
-        errdefer {
-            for (persistent_literals.items) |block| persistent.destroy(gpa, block);
-            persistent_literals.deinit(gpa);
-        }
-
-        // Register the collection block drops before any resource
-        // collection container is created (Pass A) or dropped (`deinit`).
-        // Idempotent: every interpreter init registers the same callback.
+        // Register the collection block drops before any collection container
+        // exists. Idempotent: every compile registers the same callbacks.
         persistent.registerDrop(persistent.type_array, dropPersistentArray);
         persistent.registerDrop(persistent.type_map, dropPersistentMap);
         // A set's payload is the same `ArrayListUnmanaged(Value)` as an array's,
         // so the array drop (decref string elements + deinit) applies verbatim.
         persistent.registerDrop(persistent.type_set, dropPersistentArray);
 
-        // PRE-VALIDATION, before the first mutation of the world. Pass A below
-        // registers as it walks, so a refusal raised where it is DETECTED leaves
-        // every earlier declaration of a rejected program in a live world. The
-        // confrontation therefore happens here, while the world is still the one
-        // the previous image left behind, and Pass A runs only once every declared
-        // schema is known to match.
-        try verifySchemas(gpa, ast, &world.registry, &tag_table);
-
-        // Pass A — register components and resources with the world.
-        var i: u28 = 0;
-        while (i < ast.items.len) : (i += 1) {
-            const kind = ast.items.items(.kind)[i];
-            const data = ast.items.items(.data)[i];
-            switch (kind) {
-                .component_decl => try compileComponent(gpa, ast, world, &bridge, ast.component_decls.items[data], &persistent_literals),
-                .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data], &persistent_literals),
-                else => {},
-            }
-        }
-
-        // After Pass A, resolve every `@requires` closure ONCE.
-        //
-        // At the END of the pass and not per declaration: a declaration may name
-        // a component registered later, Etch admitting forward references, which
-        // is why the descriptor carries NAMES rather than ids.
-        //
-        // A cycle or an unknown requisite here is a PROGRAM error the
-        // type-checker already reports with a span (E0505 / E0506). This arm is
-        // the registry's own refusal for the population the type-checker never
-        // sees — components a host registered from Zig — so reaching it from an
-        // Etch program means the type-check was skipped, and surfacing it as an
-        // ordinary error is the honest answer rather than a second diagnostic.
-        try world.registry.finalizeRequires(gpa);
-
-        // Register the builtin `TagSet` component when the program
-        // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
-        // carrying tags. It has no named scalar fields; the runtime reads/writes
-        // its raw bytes as bits.
-        var tagset_id: ?ComponentId = null;
-        if (tag_table.leaf_count > 0) {
-            // ONE DESCRIPTOR FOR BOTH ARMS. The reuse arm used to take the
-            // existing id with no confrontation while only the fresh arm derived
-            // the size from `tag_table.words()` — so a reload crossing a 64-tag
-            // word boundary kept the NARROWER `TagSet` and every entity's tag
-            // bitfield was silently too small. `etch-validation-ecs.md` §13 names
-            // this component as the case the size in the digest exists to
-            // protect. The two arms now cannot disagree about the layout,
-            // because there is one layout and they read it.
-            const size: u16 = @intCast(tag_table.words() * 8);
-            const zeroed = try gpa.alloc(u8, size);
-            defer gpa.free(zeroed);
-            @memset(zeroed, 0);
-            const desc = tagSetDesc(size, zeroed, try tag_table.contentDigest(gpa));
-            // Idempotent on a hot-reload re-compile: reuse the
-            // already-registered `TagSet` instead of erroring DuplicateComponent.
-            if (world.registry.idOf("TagSet")) |existing| {
-                const candidate = weld_core.ecs.registry.schemaDigestOf(desc);
-                // An ABSENT digest refuses. Measured: the registry has exactly
-                // one entry-append site and it always derives the digest, and
-                // `existing` came from `idOf` so it is in range — so the null
-                // arm is unreachable today and its direction costs nothing. It
-                // is a refusal rather than an accept because an unknown layout
-                // is not a matching layout, and refusing a reload leaves the
-                // running session on the program it already has.
-                const stored = world.registry.schemaDigest(existing) orelse ~candidate;
-                if (stored != candidate) {
-                    std.log.warn(
-                        "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
-                            "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
-                            "An unchanged size means the tags themselves were renamed or reordered.",
-                        .{ world.registry.componentSize(existing), size, tag_table.leaf_count },
-                    );
-                    return error.SchemaChanged;
-                }
-                try bridge.mapComponent(gpa, "TagSet", existing);
-                tagset_id = existing;
-            } else {
-                const id = try world.registry.registerComponentRaw(gpa, desc);
-                try bridge.mapComponent(gpa, "TagSet", id);
-                tagset_id = id;
-            }
-        }
-
-        // Register the three builtin engine time resources from
-        // the `types.zig` descriptor table — the same injection point as the
-        // builtin `TagSet` (after the user-decl registration loop). Idempotent
-        // on a hot-reload re-compile: the existing registration and the live
-        // resource values survive the AST swap (the `compileResource` seeding
-        // discipline).
-        for (&types_mod.builtin_resources) |*br| {
-            if (world.registry.idOf(br.name)) |existing| {
-                try bridge.mapResource(gpa, br.name, existing);
-                continue;
-            }
-            var fields_buf: [8]FieldDesc = undefined;
-            var default_buf: [64]u8 = @splat(0);
-            var size: usize = 0;
-            var max_align: usize = 1;
-            for (br.fields, 0..) |bf, fi| {
-                const kind: FieldKind = switch (bf.type_) {
-                    .float_ => .float_,
-                    .int_ => .int_,
-                    .bool_ => .bool_,
-                    else => unreachable, // the table holds POD scalars only
-                };
-                const align_b = kind.alignBytes();
-                if (align_b > max_align) max_align = align_b;
-                const off = std.mem.alignForward(usize, size, align_b);
-                size = off + kind.sizeBytes();
-                fields_buf[fi] = .{ .name = bf.name, .offset = @intCast(off), .kind = kind };
-                const v: Value = switch (bf.default) {
-                    .float_ => |x| .{ .float_ = x },
-                    .int_ => |x| .{ .int_ = x },
-                    .bool_ => |x| .{ .bool_ = x },
-                };
-                try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
-            }
-            size = std.mem.alignForward(usize, size, max_align);
-            const id = try world.registry.registerComponentRaw(gpa, .{
-                .name = br.name,
-                .size = @intCast(size),
-                .alignment = @intCast(max_align),
-                .default_bytes = default_buf[0..size],
-                .fields = fields_buf[0..br.fields.len],
-            });
-            try bridge.mapResource(gpa, br.name, id);
-            try world.addResource(gpa, id, default_buf[0..size]);
-        }
+        const tagset_id = try registerProgramTypes(gpa, ast, world, &bridge, &tag_table);
 
         // Resolve the population handles (ids + field offsets) once. The
         // lookups cannot miss: the resources were registered from the same
@@ -1590,13 +1429,13 @@ pub const Interpreter = struct {
             for (rule_descs.items) |*r| r.deinit(gpa);
             rule_descs.deinit(gpa);
         }
-        i = 0;
+        var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             if (kind != .rule_decl) continue;
-            const desc = try compileRule(gpa, ast, &bridge, world, &tag_table, tagset_id, data);
-            try rule_descs.append(gpa, desc);
+            try rule_descs.ensureUnusedCapacity(gpa, 1);
+            rule_descs.appendAssumeCapacity(try compileRule(gpa, ast, &bridge, world, &tag_table, tagset_id, data));
         }
 
         // Pass C — index top-level `fn` declarations by name for free-call
@@ -1692,6 +1531,10 @@ pub const Interpreter = struct {
         }
 
         const slice = try rule_descs.toOwnedSlice(gpa);
+        errdefer {
+            for (slice) |*r| r.deinit(gpa);
+            gpa.free(slice);
+        }
         // Enable the tick-based change-detection path iff some rule filters by
         // `changed` — keeps `changed`-free programs free of tick churn.
         var any_changed = false;
@@ -1716,6 +1559,7 @@ pub const Interpreter = struct {
             @memset(map, null);
             break :blk map;
         } else &.{};
+        errdefer if (any_async) gpa.free(rule_tasks);
         // Per-rule `(entity → live task)` maps for entity-bound async rules, parallel
         // to `rule_descs`. Empty for non-entity-bound rules.
         const entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = if (any_async) blk: {
@@ -1723,6 +1567,7 @@ pub const Interpreter = struct {
             for (maps) |*m| m.* = .empty;
             break :blk maps;
         } else &.{};
+        errdefer if (any_async) gpa.free(entity_rule_tasks);
 
         // Pass E — build the Level-B descriptors. Fail-loud on any
         // expression the canonical renderer does not support.
@@ -1751,8 +1596,6 @@ pub const Interpreter = struct {
             .rule_tasks = rule_tasks,
             .entity_rule_tasks = entity_rule_tasks,
             .descriptors = descriptors,
-            .world = world,
-            .persistent_literals = persistent_literals,
         };
     }
 
@@ -7057,48 +6900,291 @@ pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
 
 // ── Compilation passes ──
 
-fn compileComponent(
+/// Every registration one `compile` makes, prepared before the world is touched:
+/// `entries[i]` is committed under id `base_id + i`, and `resources[i]` holds its
+/// store buffer when it is a resource.
+const PendingTypes = struct {
+    base_id: ComponentId,
+    entries: std.ArrayListUnmanaged(PreparedEntry) = .empty,
+    resources: std.ArrayListUnmanaged(?PendingResource) = .empty,
+
+    /// Releases whatever is still owned: everything before `commit`, nothing after.
+    fn deinit(self: *PendingTypes, gpa: std.mem.Allocator) void {
+        for (self.entries.items) |*e| e.deinit(gpa);
+        for (self.resources.items) |*r| {
+            if (r.*) |*res| res.deinit(gpa);
+        }
+        self.entries.deinit(gpa);
+        self.resources.deinit(gpa);
+    }
+
+    fn nextId(self: *const PendingTypes) ComponentId {
+        return self.base_id + @as(ComponentId, @intCast(self.entries.items.len));
+    }
+
+    fn idOf(self: *const PendingTypes, name: []const u8) ?ComponentId {
+        for (self.entries.items, 0..) |*e, i| {
+            if (std.mem.eql(u8, e.name(), name)) return self.base_id + @as(ComponentId, @intCast(i));
+        }
+        return null;
+    }
+
+    fn entryOf(self: *PendingTypes, id: ComponentId) *PreparedEntry {
+        return &self.entries.items[id - self.base_id];
+    }
+
+    /// Takes ownership of `entry` and `resource` on success only.
+    fn push(self: *PendingTypes, gpa: std.mem.Allocator, entry: PreparedEntry, resource: ?PendingResource) !void {
+        try self.entries.ensureUnusedCapacity(gpa, 1);
+        try self.resources.ensureUnusedCapacity(gpa, 1);
+        self.entries.appendAssumeCapacity(entry);
+        self.resources.appendAssumeCapacity(resource);
+    }
+
+    fn resourceCount(self: *const PendingTypes) usize {
+        var n: usize = 0;
+        for (self.resources.items) |r| {
+            if (r != null) n += 1;
+        }
+        return n;
+    }
+
+    /// Adopt every entry, resource and closure into `world` and leave `self`
+    /// empty. Cannot fail: requires room reserved for every entry and resource,
+    /// and `closures` staged over `entries`.
+    fn commit(self: *PendingTypes, gpa: std.mem.Allocator, world: *World, closures: StagedClosures) void {
+        for (self.entries.items, self.resources.items, 0..) |e, r, i| {
+            const id = world.registry.commitPrepared(e);
+            std.debug.assert(id == self.base_id + i);
+            if (r) |res| {
+                world.resources.adoptAssumeCapacity(id, res.buf);
+                // A resource with a collection field starts dirty.
+                if (res.collection_blocks.len != 0) {
+                    world.resources.setDirty(id, true);
+                    gpa.free(res.collection_blocks);
+                }
+            }
+        }
+        world.registry.commitClosures(gpa, closures);
+        self.entries.clearRetainingCapacity();
+        self.resources.clearRetainingCapacity();
+    }
+};
+
+/// A resource's store buffer — its default bytes, each collection slot pointing
+/// at a fresh container — and those containers, released if never committed.
+const PendingResource = struct {
+    buf: ResourceStore.Buffer,
+    collection_blocks: []const [*]u8,
+
+    fn deinit(self: *PendingResource, gpa: std.mem.Allocator) void {
+        for (self.collection_blocks) |b| persistent.decref(gpa, b);
+        if (self.collection_blocks.len != 0) gpa.free(self.collection_blocks);
+        gpa.free(self.buf);
+    }
+};
+
+/// What registration reads of a `component` or `resource` declaration.
+const DeclShape = struct {
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    reg_kind: RegKind,
+    requires: []const []const u8,
+    storage: StorageKind,
+};
+
+/// Register every type the program declares, then the builtin `TagSet` and the
+/// builtin time resources, and compute every `@requires` closure — or fail
+/// having changed nothing in `world`. Returns the `TagSet` id when the program
+/// declares a tag.
+fn registerProgramTypes(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     world: *World,
     bridge: *Bridge,
-    decl: ast_mod.ComponentDecl,
-    literals: *std.ArrayListUnmanaged([*]u8),
-) !void {
-    const name = ast.strings.slice(decl.name);
-    const req = try types_mod.requiresNamesOf(gpa, ast, decl);
-    defer gpa.free(req);
-    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, req, types_mod.storageModeOf(ast, decl), literals);
+    tag_table: *const tags_mod.TagTable,
+) !?ComponentId {
+    var pending: PendingTypes = .{ .base_id = @intCast(world.registry.componentCount()) };
+    defer pending.deinit(gpa);
+
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        const data = ast.items.items(.data)[i];
+        switch (ast.items.items(.kind)[i]) {
+            .component_decl => {
+                const decl = ast.component_decls.items[data];
+                const req = try types_mod.requiresNamesOf(gpa, ast, decl);
+                defer gpa.free(req);
+                try stageDecl(gpa, ast, world, bridge, &pending, .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .component,
+                    .requires = req,
+                    .storage = types_mod.storageModeOf(ast, decl),
+                }, null);
+            },
+            .resource_decl => {
+                const decl = ast.resource_decls.items[data];
+                // `@storage` and `@requires` apply to `component` only.
+                try stageDecl(gpa, ast, world, bridge, &pending, .{
+                    .name = ast.strings.slice(decl.name),
+                    .fields_start = decl.fields_start,
+                    .fields_len = decl.fields_len,
+                    .reg_kind = .resource,
+                    .requires = &.{},
+                    .storage = .table,
+                }, decl);
+            },
+            else => {},
+        }
+    }
+    const tagset_id = try stageTagSet(gpa, world, bridge, &pending, tag_table);
+    for (&types_mod.builtin_resources) |*br| try stageBuiltinResource(gpa, world, bridge, &pending, br);
+
+    var closures = try world.registry.stageClosures(gpa, pending.entries.items);
+    errdefer closures.deinit(gpa);
+    try world.registry.reserve(gpa, pending.entries.items.len);
+    try world.resources.reserve(gpa, pending.resourceCount());
+    pending.commit(gpa, world, closures);
+    return tagset_id;
 }
 
-fn compileResource(
+/// Stage one declaration: confront it with the registered or already staged type
+/// holding its name, or prepare its entry and, for a resource, its store buffer.
+fn stageDecl(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     world: *World,
     bridge: *Bridge,
-    decl: ast_mod.ResourceDecl,
-    literals: *std.ArrayListUnmanaged([*]u8),
+    pending: *PendingTypes,
+    shape: DeclShape,
+    resource_decl: ?ast_mod.ResourceDecl,
 ) !void {
-    const name = ast.strings.slice(decl.name);
-    // On a hot-reload re-compile the resource is already registered
-    // AND already lives in the resource store with its current value — adding
-    // it again would reset it to defaults. Seed the store only on first compile.
-    const pre_existing = world.registry.idOf(name) != null;
-    // `.table` and not a resolved mode: `@storage` applies to `component` only
-    // (`annotationAppliesTo`, refused on a resource with `E0502`), so a resource
-    // has no mode to read. Passing the default here states that rather than
-    // leaving a reader to infer it from the absence of a call.
-    // A resource carries no `@requires`: the annotation's applicability is
-    // validated to `component` only (`types.zig`), so an empty list here is the
-    // domain's answer and not a shortcut.
-    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, &.{}, .table, literals);
-    if (!pre_existing) {
-        const default_bytes = world.registry.componentDefaultBytes(id);
-        try world.addResource(gpa, id, default_bytes);
-        // Allocate the resource's collection field containers now
-        // that the store slot exists. On a hot-reload re-compile (`pre_existing`)
-        // the resource keeps its live containers, so this runs first-compile only.
-        try initResourceCollections(gpa, ast, world, id, decl);
+    if (world.registry.idOf(shape.name)) |existing| {
+        try confrontLayout(gpa, ast, shape, liveLayoutOf(&world.registry, existing));
+        return mapName(gpa, bridge, shape.reg_kind, shape.name, existing);
+    }
+    if (pending.idOf(shape.name)) |staged| {
+        const e = pending.entryOf(staged);
+        try confrontLayout(gpa, ast, shape, .{
+            .digest = e.schemaDigest(),
+            .size = e.size(),
+            .alignment = e.alignment(),
+            .fields_len = e.fields().len,
+        });
+        return mapName(gpa, bridge, shape.reg_kind, shape.name, staged);
+    }
+    if (resource_decl != null and world.resources.contains(pending.nextId())) return error.DuplicateResource;
+    var entry = try prepareTypeEntry(gpa, ast, &world.registry, shape);
+    errdefer entry.deinit(gpa);
+    var resource: ?PendingResource = null;
+    errdefer if (resource) |*r| r.deinit(gpa);
+    if (resource_decl) |decl| resource = try prepareResourceBuffer(gpa, ast, &entry, decl);
+    try mapName(gpa, bridge, shape.reg_kind, shape.name, pending.nextId());
+    try pending.push(gpa, entry, resource);
+}
+
+/// Stage the builtin `TagSet` when the program declares any tag, confronting the
+/// type already holding the name. Returns its id, committed or staged.
+fn stageTagSet(
+    gpa: std.mem.Allocator,
+    world: *World,
+    bridge: *Bridge,
+    pending: *PendingTypes,
+    tag_table: *const tags_mod.TagTable,
+) !?ComponentId {
+    if (tag_table.leaf_count == 0) return null;
+    const size: u16 = @intCast(tag_table.words() * 8);
+    const content_digest = try tag_table.contentDigest(gpa);
+    const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}, content_digest));
+
+    const holder: ?ComponentId = world.registry.idOf("TagSet") orelse pending.idOf("TagSet");
+    if (holder) |id| {
+        const live: LiveLayout = if (id < pending.base_id) liveLayoutOf(&world.registry, id) else blk: {
+            const e = pending.entryOf(id);
+            break :blk .{ .digest = e.schemaDigest(), .size = e.size(), .alignment = e.alignment(), .fields_len = e.fields().len };
+        };
+        // An absent digest refuses: an unknown layout is not a matching one.
+        if ((live.digest orelse ~candidate) != candidate) {
+            std.log.warn(
+                "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
+                    "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
+                    "An unchanged size means the tags themselves were renamed or reordered.",
+                .{ live.size, size, tag_table.leaf_count },
+            );
+            return error.SchemaChanged;
+        }
+        try bridge.mapComponent(gpa, "TagSet", id);
+        return id;
+    }
+
+    const zeroed = try gpa.alloc(u8, size);
+    defer gpa.free(zeroed);
+    @memset(zeroed, 0);
+    var entry = try world.registry.prepareEntry(gpa, tagSetDesc(size, zeroed, content_digest), &.{});
+    errdefer entry.deinit(gpa);
+    const id = pending.nextId();
+    try bridge.mapComponent(gpa, "TagSet", id);
+    try pending.push(gpa, entry, null);
+    return id;
+}
+
+/// Stage a builtin time resource unless a type already holds its name.
+fn stageBuiltinResource(
+    gpa: std.mem.Allocator,
+    world: *World,
+    bridge: *Bridge,
+    pending: *PendingTypes,
+    br: *const types_mod.BuiltinResource,
+) !void {
+    if (world.registry.idOf(br.name) orelse pending.idOf(br.name)) |id| {
+        return bridge.mapResource(gpa, br.name, id);
+    }
+    if (world.resources.contains(pending.nextId())) return error.DuplicateResource;
+    var fields_buf: [8]FieldDesc = undefined;
+    var default_buf: [64]u8 = @splat(0);
+    var size: usize = 0;
+    var max_align: usize = 1;
+    for (br.fields, 0..) |bf, fi| {
+        const kind: FieldKind = switch (bf.type_) {
+            .float_ => .float_,
+            .int_ => .int_,
+            .bool_ => .bool_,
+            else => unreachable, // the table holds POD scalars only
+        };
+        const align_b = kind.alignBytes();
+        if (align_b > max_align) max_align = align_b;
+        const off = std.mem.alignForward(usize, size, align_b);
+        size = off + kind.sizeBytes();
+        fields_buf[fi] = .{ .name = bf.name, .offset = @intCast(off), .kind = kind };
+        const v: Value = switch (bf.default) {
+            .float_ => |x| .{ .float_ = x },
+            .int_ => |x| .{ .int_ = x },
+            .bool_ => |x| .{ .bool_ = x },
+        };
+        try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
+    }
+    size = std.mem.alignForward(usize, size, max_align);
+    var entry = try world.registry.prepareEntry(gpa, .{
+        .name = br.name,
+        .size = @intCast(size),
+        .alignment = @intCast(max_align),
+        .default_bytes = default_buf[0..size],
+        .fields = fields_buf[0..br.fields.len],
+    }, &.{});
+    errdefer entry.deinit(gpa);
+    var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, default_buf[0..size]), .collection_blocks = &.{} };
+    errdefer resource.deinit(gpa);
+    try bridge.mapResource(gpa, br.name, pending.nextId());
+    try pending.push(gpa, entry, resource);
+}
+
+fn mapName(gpa: std.mem.Allocator, bridge: *Bridge, reg_kind: RegKind, name: []const u8, id: ComponentId) !void {
+    switch (reg_kind) {
+        .component => try bridge.mapComponent(gpa, name, id),
+        .resource => try bridge.mapResource(gpa, name, id),
     }
 }
 
@@ -7222,7 +7308,10 @@ fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field
             // Reserve before promoting so a string allocation never dangles on an
             // append-time OOM (the block's errdefer drops appended elements).
             try list.ensureUnusedCapacity(gpa, 1);
-            const ev = constCollectionValue(gpa, ast, en) catch continue;
+            const ev = constCollectionValue(gpa, ast, en) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue,
+            };
             list.appendAssumeCapacity(ev);
         }
     }
@@ -7243,9 +7332,13 @@ fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) 
         while (e_i < ml.entries_len) : (e_i += 1) {
             const entry = ast.map_entries.items[ml.entries_start + e_i];
             try list.ensureUnusedCapacity(gpa, 1);
-            const kv = constCollectionValue(gpa, ast, entry.key) catch continue;
-            const vv = constCollectionValue(gpa, ast, entry.value) catch {
+            const kv = constCollectionValue(gpa, ast, entry.key) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue,
+            };
+            const vv = constCollectionValue(gpa, ast, entry.value) catch |e| {
                 if (kv == .string_persistent and kv.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(kv.string_persistent.ptr));
+                if (e == error.OutOfMemory) return error.OutOfMemory;
                 continue;
             };
             list.appendAssumeCapacity(.{ .key = kv, .value = vv });
@@ -7254,34 +7347,37 @@ fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) 
     return block;
 }
 
-/// Initialize a resource's collection fields right after the resource is seeded
-/// into the store: `.array_` → `type_array`,
-/// `.map_` → `type_map`. Each field gets a fresh container written into its
-/// `CollectionSlot` (empty or a literal default), so a live collection field's
-/// slot is never `ptr == 0` (the read path relies on this). Registry field order
-/// matches `decl.fields` 1:1.
-fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: *World, id: ComponentId, decl: ast_mod.ResourceDecl) !void {
-    const fields = world.registry.componentFields(id);
-    for (fields, 0..) |fd, i| {
+/// A resource's store buffer: its default bytes, with every collection slot
+/// pointing at a fresh container, empty or holding the field's literal default.
+/// Registry field order matches `decl.fields` 1:1.
+fn prepareResourceBuffer(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    entry: *const PreparedEntry,
+    decl: ast_mod.ResourceDecl,
+) !PendingResource {
+    const buf = try ResourceStore.allocBuffer(gpa, entry.defaultBytes());
+    errdefer gpa.free(buf);
+    var blocks: std.ArrayListUnmanaged([*]u8) = .empty;
+    errdefer {
+        for (blocks.items) |b| persistent.decref(gpa, b);
+        blocks.deinit(gpa);
+    }
+    for (entry.fields(), 0..) |fd, i| {
+        if (fd.kind != .array_ and fd.kind != .map_ and fd.kind != .set_) continue;
         const f = ast.fields.items[decl.fields_start + i];
+        try blocks.ensureUnusedCapacity(gpa, 1);
         const block: [*]u8 = switch (fd.kind) {
             .array_ => try initArrayBlock(gpa, ast, f),
             .map_ => try initMapBlock(gpa, ast, f),
-            // A set has no literal form (`etch-reference-part1.md` §3.3), so a set
-            // field always starts empty (a `= Set.new()`/`Set.from(...)` default
-            // is a non-const call, not materialized here).
-            .set_ => try allocEmptySetBlock(gpa),
-            else => continue,
+            // A set has no literal form, so it always starts empty.
+            else => try allocEmptySetBlock(gpa),
         };
-        errdefer persistent.decref(gpa, block);
-        const buf = world.resources.getMutResource(id) orelse {
-            persistent.decref(gpa, block);
-            return;
-        };
-        const slot = buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)];
+        blocks.appendAssumeCapacity(block);
         const cs = persistent.CollectionSlot{ .ptr = @intFromPtr(block) };
-        @memcpy(slot, std.mem.asBytes(&cs));
+        @memcpy(buf[fd.offset..][0..@sizeOf(persistent.CollectionSlot)], std.mem.asBytes(&cs));
     }
+    return .{ .buf = buf, .collection_blocks = try blocks.toOwnedSlice(gpa) };
 }
 
 /// Registration origin threaded into `compileTypeDecl`: `.resource` unlocks the
@@ -7289,15 +7385,9 @@ fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: 
 /// `pub` so the scene cook can drive `compileTypeDecl` against its own registry.
 pub const RegKind = enum { component, resource };
 
-/// The `TagSet` descriptor, derived in ONE place. Both the pre-pass and the
-/// registration arm read it, for the reason `schemaDigestFor` exists: a builtin
-/// whose layout is computed twice is a builtin whose two computations can differ,
-/// and that difference IS the defect this milestone closed at the reuse arm.
-///
-/// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
-/// digest does not read it (see `schemaDigestFor`).
-///
-/// `content_digest` is `TagTable.contentDigest` of the table `size` came from.
+/// The `TagSet` descriptor, for both the confrontation and the registration: one
+/// derivation, so the two cannot differ. `content_digest` must be
+/// `TagTable.contentDigest` of the table `size` came from.
 fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_core.ecs.registry.ComponentDesc {
     return .{
         .name = "TagSet",
@@ -7309,146 +7399,40 @@ fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_co
     };
 }
 
-/// Confront every schema this program declares against the live registry BEFORE
-/// the first registration.
-///
-/// **A refusal per declaration is not a refusal.** `compileTypeDecl` refuses a
-/// changed layout where it meets it, and Pass A walks declarations in order, so a
-/// program whose third type changed left the first two registered in a world that
-/// then kept running the PREVIOUS program — components belonging to an image that
-/// was rejected, permanently, with nothing announcing them. The `TagSet` arm is
-/// worse still: it runs AFTER the whole of Pass A, so a reload that merely crossed
-/// a 64-tag word boundary stranded every type the program declares.
-///
-/// The requirement a refusal exists to serve is that the previous image survive
-/// it. Intact is a property of the WORLD and not of the declaration being
-/// examined, so the check belongs where the world is still untouched.
-///
-/// WHAT THIS PASS DOES NOT COVER, and it is named rather than implied: an
-/// `OutOfMemory` in the middle of Pass A still leaves a half-registration. That is
-/// a different failure — exhaustion, not a layout change — with its own remedies,
-/// and closing it means a rollback path the registry has never had. This pass
-/// makes the SchemaChanged path total; it does not make registration
-/// transactional.
-///
-/// The builtin time resources are deliberately absent, and the honest reason is
-/// narrower than "their descriptor is a constant". It IS one — `types.zig`'s
-/// `builtin_resources` — but that says nothing about what is registered under
-/// those NAMES, since nothing reserves them. What excludes them is that this pass
-/// walks the PROGRAM's declarations and the builtins are not among them: their own
-/// registration arm is first-compile-only (`idOf` → map → `continue`), so a reload
-/// mutates nothing there and there is no half-registration to prevent.
-///
-/// A residual that is NOT this pass's and predates it: a program declaring a
-/// `resource GameTime` of its own registers under that name in Pass A, the builtin
-/// arm then takes its `continue`, and the `findField(gid, "dt").?` that follows
-/// unwraps a field the user's type need not have. That is a missing name
-/// reservation, and it fails by panic rather than by diagnostic.
-fn verifySchemas(
-    gpa: std.mem.Allocator,
-    ast: *const AstArena,
-    registry: *Registry,
-    tag_table: *const tags_mod.TagTable,
-) !void {
-    var i: u28 = 0;
-    while (i < ast.items.len) : (i += 1) {
-        const kind = ast.items.items(.kind)[i];
-        const data = ast.items.items(.data)[i];
-        const shape: struct {
-            name: []const u8,
-            fields_start: u32,
-            fields_len: u32,
-            reg_kind: RegKind,
-        } = switch (kind) {
-            .component_decl => blk: {
-                const decl = ast.component_decls.items[data];
-                break :blk .{
-                    .name = ast.strings.slice(decl.name),
-                    .fields_start = decl.fields_start,
-                    .fields_len = decl.fields_len,
-                    .reg_kind = .component,
-                };
-            },
-            .resource_decl => blk: {
-                const decl = ast.resource_decls.items[data];
-                break :blk .{
-                    .name = ast.strings.slice(decl.name),
-                    .fields_start = decl.fields_start,
-                    .fields_len = decl.fields_len,
-                    .reg_kind = .resource,
-                };
-            },
-            else => continue,
-        };
+/// The layout recorded for the type already holding a declaration's name.
+const LiveLayout = struct {
+    digest: ?u64,
+    size: u16,
+    alignment: u16,
+    fields_len: usize,
+};
 
-        // A name the registry does not hold cannot fail this check: the refusal
-        // lives in `compileTypeDecl`'s reuse arm and nowhere else. Skipping it is
-        // not an optimisation, it is the check's domain.
-        const existing_id = registry.idOf(shape.name) orelse continue;
-
-        var layout = computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind) catch |e| switch (e) {
-            // An invalid field type is a PROGRAM error the type-checker reports
-            // with a span. Letting it through here hands the same diagnosis to
-            // `compileTypeDecl`, which is where it has always been raised — this
-            // pass judges layout IDENTITY, never program validity.
-            error.InvalidProgram => continue,
-            else => return e,
-        };
-        defer layout.deinit(gpa);
-
-        const candidate = schemaDigestFor(shape.name, layout);
-        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
-            std.log.warn(
-                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
-                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
-                .{
-                    shape.name,
-                    registry.componentSize(existing_id),
-                    registry.componentAlignment(existing_id),
-                    registry.componentFields(existing_id).len,
-                    layout.size,
-                    layout.alignment,
-                    layout.fields.items.len,
-                },
-            );
-            return error.SchemaChanged;
-        }
-    }
-
-    // `TagSet` LAST among the checks and still BEFORE every mutation, which is the
-    // whole point: its own registration arm sits after Pass A, so confronting it
-    // there could never protect the types Pass A had already written.
-    if (tag_table.leaf_count > 0) {
-        if (registry.idOf("TagSet")) |existing| {
-            const size: u16 = @intCast(tag_table.words() * 8);
-            const candidate = weld_core.ecs.registry.schemaDigestOf(
-                tagSetDesc(size, &.{}, try tag_table.contentDigest(gpa)),
-            );
-            if ((registry.schemaDigest(existing) orelse ~candidate) != candidate) {
-                std.log.warn(
-                    "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
-                        "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
-                        "An unchanged size means the tags themselves were renamed or reordered.",
-                    .{ registry.componentSize(existing), size, tag_table.leaf_count },
-                );
-                return error.SchemaChanged;
-            }
-        }
-    }
+fn liveLayoutOf(registry: *const Registry, id: ComponentId) LiveLayout {
+    return .{
+        .digest = registry.schemaDigest(id),
+        .size = registry.componentSize(id),
+        .alignment = registry.componentAlignment(id),
+        .fields_len = registry.componentFields(id).len,
+    };
 }
 
-/// The LAYOUT half of a type declaration: field descriptors, size, alignment.
-/// Extracted because it is EXACTLY what a declaration's schema digest reads and
-/// nothing more — `Registry.schemaDigestOf` hashes name, size, alignment, each
-/// field's (name, kind, offset) and `content_digest`, which no declaration sets,
-/// and never `default_bytes`. Materialising the defaults is the other half of
-/// `compileTypeDecl`, it allocates immortal persistent blocks, and the digest
-/// never looks at them.
-///
-/// That split is what makes the pre-validation pass in `Interpreter.compile` cheap
-/// and side-effect-free: it can confront every declared schema against the live
-/// registry BEFORE the first registration, without materialising one default and
-/// without an intermediate to cache for the pass that follows.
+/// Refuse `shape` with `error.SchemaChanged` unless its layout has `live`'s
+/// digest. An absent digest refuses: an unknown layout is not a matching one.
+fn confrontLayout(gpa: std.mem.Allocator, ast: *const AstArena, shape: DeclShape, live: LiveLayout) !void {
+    var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
+    defer layout.deinit(gpa);
+    const candidate = schemaDigestFor(shape.name, layout);
+    if ((live.digest orelse ~candidate) == candidate) return;
+    std.log.warn(
+        "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
+            "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
+        .{ shape.name, live.size, live.alignment, live.fields_len, layout.size, layout.alignment, layout.fields.items.len },
+    );
+    return error.SchemaChanged;
+}
+
+/// The LAYOUT half of a type declaration — field descriptors, size, alignment —
+/// which is exactly what its schema digest reads: never its default bytes.
 const Layout = struct {
     fields: std.ArrayListUnmanaged(FieldDesc) = .empty,
     size: usize = 0,
@@ -7459,10 +7443,9 @@ const Layout = struct {
     }
 };
 
-/// Compute a declaration's layout. Mutates NOTHING outside the returned value —
-/// no registry write, no bridge mapping, no persistent allocation — which is the
-/// property the pre-pass rests on and the reason this is a function rather than a
-/// comment inside `compileTypeDecl`.
+/// Compute a declaration's layout. Mutates nothing outside the returned value,
+/// so it may run before anything is registered. `error.InvalidProgram` on a
+/// field type it cannot place, `error.LayoutTooLarge` past the registry's 64 KiB.
 fn computeLayout(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -7507,6 +7490,7 @@ fn computeLayout(
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
         size = off + kind.sizeBytes();
+        if (size > std.math.maxInt(u16)) return error.LayoutTooLarge;
         try out.fields.append(gpa, .{
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
@@ -7515,31 +7499,15 @@ fn computeLayout(
         });
     }
     out.size = std.mem.alignForward(usize, size, max_align);
+    if (out.size > std.math.maxInt(u16)) return error.LayoutTooLarge;
     out.alignment = max_align;
     return out;
 }
 
-/// The ONE derivation of a declaration's schema digest, read by the registration
-/// site and by the pre-pass alike. Two derivations of one quantity is how the two
-/// come to disagree, and a pre-pass that disagrees with the site it protects is
-/// worse than no pre-pass: it would refuse reloads the site accepts, or wave
-/// through the ones it refuses.
-///
-/// **It takes a name and a layout, and nothing else, because nothing else a
-/// declaration carries is hashed.** `schemaDigestOf` reads the name, the size, the
-/// alignment, each field's (name, kind, offset) and `content_digest`, which no
-/// declaration sets — measured, and pinned by `registry.zig`'s « the digest is
-/// blind to the default bytes », which names this function as its dependent.
-/// `default_bytes`, `storage` and `requires` are all absent from it.
-///
-/// Taking a `storage` and a `requires` this function cannot use would be a
-/// signature declaring an influence it does not have, and it cost the pre-pass an
-/// allocation of `@requires` names for a quantity that never reaches the hash.
-///
-/// The consequence is NOT hidden by that omission and is not this function's to
-/// repair: a reload that changes only a component's `@storage` mode or its
-/// `@requires` set produces the same digest and is ACCEPTED. Whether schema
-/// identity should cover them belongs to whoever owns `schemaDigestOf`.
+/// The ONE derivation of a declaration's schema digest, matching the digest the
+/// registry derives at registration. A reload changing only a component's
+/// `@storage` mode or its `@requires` set produces the same digest and is
+/// accepted.
 fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
     return weld_core.ecs.registry.schemaDigestOf(.{
         .name = name,
@@ -7550,17 +7518,11 @@ fn schemaDigestFor(name: []const u8, layout: Layout) u64 {
     });
 }
 
-/// Register one Etch `component`/`resource` declaration into `registry`,
-/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
-/// its compile-time default bytes (POD via `evalConst`, resource `string` via
-/// an immortal persistent block, resource `enum` via the variant discriminant).
-/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
-/// re-compile, idempotent). `bridge` records the name→id mapping.
-///
-/// Operates on a bare `*Registry` — World-free by construction (it never touches
-/// archetypes/entities). The interpreter passes `&world.registry`; the
-/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
-/// standalone `Registry` so registration is shared, not duplicated.
+/// Register one Etch `component`/`resource` declaration into `registry` and map
+/// it in `bridge`, returning its id. A name already registered is confronted
+/// with its layout and mapped, not registered again. Fails having changed
+/// neither. Shared with the scene cook, which drives it against its own
+/// registry.
 pub fn compileTypeDecl(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -7570,54 +7532,62 @@ pub fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
-    /// DIRECT `@requires` names, already read from the declaration. Passed
-    /// RESOLVED for the same reason `storage` is: this function receives no
-    /// declaration node, so it cannot read an annotation itself, and handing it
-    /// the names keeps the reading in ONE place shared by both callers.
     requires: []const []const u8,
-    /// Storage backend to record in the registry. Passed as a RESOLVED mode and
-    /// not as the annotation range, deliberately: this function receives no
-    /// declaration node — it takes `name`,
-    /// `fields_start`, `fields_len` and `reg_kind` and therefore cannot reach
-    /// `annotations_extra` at all — and widening it to take the node would give
-    /// the registry seam a dependency on AST item shape that its three callers
-    /// do not share. `storageModeOf` is the single resolver they share instead.
     storage: StorageKind,
-    literals: *std.ArrayListUnmanaged([*]u8),
 ) !ComponentId {
-    var layout = try computeLayout(gpa, ast, fields_start, fields_len, reg_kind);
+    const shape: DeclShape = .{
+        .name = name,
+        .fields_start = fields_start,
+        .fields_len = fields_len,
+        .reg_kind = reg_kind,
+        .requires = requires,
+        .storage = storage,
+    };
+    if (registry.idOf(name)) |existing| {
+        try confrontLayout(gpa, ast, shape, liveLayoutOf(registry, existing));
+        try mapName(gpa, bridge, reg_kind, name, existing);
+        return existing;
+    }
+    var entry = try prepareTypeEntry(gpa, ast, registry, shape);
+    errdefer entry.deinit(gpa);
+    try registry.reserve(gpa, 1);
+    try mapName(gpa, bridge, reg_kind, name, @intCast(registry.componentCount()));
+    return registry.commitPrepared(entry);
+}
+
+/// The registry entry of a declaration not yet registered: its layout, and its
+/// default bytes with the immortal blocks of its `string` defaults, which the
+/// entry owns.
+fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *const Registry, shape: DeclShape) !PreparedEntry {
+    var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
     defer layout.deinit(gpa);
     const fields = layout.fields;
-    const size = layout.size;
-    const max_align = layout.alignment;
-    var f_i: u32 = 0;
 
-    var default_buf: []u8 = try gpa.alloc(u8, size);
+    const default_buf: []u8 = try gpa.alloc(u8, layout.size);
     defer gpa.free(default_buf);
     @memset(default_buf, 0);
-    while (f_i < fields_len) : (f_i += 1) {
-        const f = ast.fields.items[fields_start + f_i];
+    var blocks: std.ArrayListUnmanaged([*]u8) = .empty;
+    errdefer {
+        for (blocks.items) |b| persistent.destroy(gpa, b);
+        blocks.deinit(gpa);
+    }
+    var f_i: u32 = 0;
+    while (f_i < shape.fields_len) : (f_i += 1) {
+        const f = ast.fields.items[shape.fields_start + f_i];
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        // a collection field's container is allocated at `addResource`
-        // (initResourceCollections), not here: the default slot stays `{ptr=0}`
-        // (zeroed), overwritten with the real block pointer then.
+        // A collection slot stays `{ptr=0}`; `prepareResourceBuffer` points the
+        // store's copy at a container.
         if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
         if (fd.kind == .string_) {
-            // Resource `string` default = compile-time literal → an immortal
-            // interned block (sentinel refcount): `addResource` copies only the
-            // 16-byte `{ptr,len}` slot, no per-instance allocation. No default ⇒
-            // slot stays `{ptr=0,len=0}` (the empty string; `default_buf` is
-            // zeroed). The block is owned by `literals` and `destroy`'d at the
-            // interpreter's `deinit`. Non-literal const string defaults are out
-            // of the surface; they leave the empty-string slot.
+            // A literal default → an immortal block (sentinel refcount) the entry
+            // owns, shared by every copy of the default bytes. No default, or a
+            // non-literal one, leaves the empty string `{ptr=0,len=0}`.
             if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .string_lit) {
                 const lit = ast.strings.slice(ast.exprData(f.default_value));
+                try blocks.ensureUnusedCapacity(gpa, 1);
                 const block = try persistent.allocImmortal(gpa, persistent.type_string, lit.len);
-                literals.append(gpa, block) catch |e| {
-                    persistent.destroy(gpa, block);
-                    return e;
-                };
+                blocks.appendAssumeCapacity(block);
                 if (lit.len > 0) @memcpy(block[0..lit.len], lit);
                 const ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = @intCast(lit.len) };
                 @memcpy(slot, std.mem.asBytes(&ss));
@@ -7654,53 +7624,20 @@ pub fn compileTypeDecl(
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    if (registry.idOf(name)) |existing_id| {
-        // THE LAST LINE OF DEFENCE, not the first. `Interpreter.compile` confronts
-        // every declared schema before it registers anything, so a hot-reload
-        // never reaches this arm with a changed layout. This check stays because
-        // `scene_cook.zig` drives this function against its own registry and does
-        // NOT go through that pass — and because a refusal that exists only in the
-        // caller is a refusal the next caller will not have.
-        //
-        // An ABSENT digest refuses, for the reason given at the `TagSet` arm.
-        const candidate = schemaDigestFor(name, layout);
-        if ((registry.schemaDigest(existing_id) orelse ~candidate) != candidate) {
-            std.log.warn(
-                "etch/hot-reload: '{s}' changed layout — reload REFUSED, previous image kept. " ++
-                    "live: size={d} align={d} fields={d}; new: size={d} align={d} fields={d}",
-                .{
-                    name,
-                    registry.componentSize(existing_id),
-                    registry.componentAlignment(existing_id),
-                    registry.componentFields(existing_id).len,
-                    size,
-                    max_align,
-                    fields.items.len,
-                },
-            );
-            return error.SchemaChanged;
-        }
-        switch (reg_kind) {
-            .component => try bridge.mapComponent(gpa, name, existing_id),
-            .resource => try bridge.mapResource(gpa, name, existing_id),
-        }
-        return existing_id;
+    const owned = try blocks.toOwnedSlice(gpa);
+    errdefer {
+        for (owned) |b| persistent.destroy(gpa, b);
+        gpa.free(owned);
     }
-
-    const id = try registry.registerComponentRaw(gpa, .{
-        .name = name,
-        .size = @intCast(size),
-        .alignment = @intCast(max_align),
+    return registry.prepareEntry(gpa, .{
+        .name = shape.name,
+        .size = @intCast(layout.size),
+        .alignment = @intCast(layout.alignment),
         .default_bytes = default_buf,
         .fields = fields.items,
-        .storage = storage,
-        .requires = requires,
-    });
-    switch (reg_kind) {
-        .component => try bridge.mapComponent(gpa, name, id),
-        .resource => try bridge.mapResource(gpa, name, id),
-    }
-    return id;
+        .storage = shape.storage,
+        .requires = shape.requires,
+    }, owned);
 }
 
 fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
@@ -7847,8 +7784,9 @@ fn dnfFromPool(gpa: std.mem.Allocator, pool: []const PredicateNode, root: u32, n
             if (cross) return try crossProduct(gpa, lhs, rhs);
             var out: Dnf = .empty;
             errdefer freeDnf(gpa, &out);
-            for (lhs.items) |t| try out.append(gpa, try t.clone(gpa));
-            for (rhs.items) |t| try out.append(gpa, try t.clone(gpa));
+            try out.ensureTotalCapacity(gpa, lhs.items.len + rhs.items.len);
+            for (lhs.items) |t| out.appendAssumeCapacity(try t.clone(gpa));
+            for (rhs.items) |t| out.appendAssumeCapacity(try t.clone(gpa));
             return out;
         },
     }
@@ -8018,22 +7956,42 @@ fn compileRule(
         &.{};
     errdefer freeSelection(gpa, selection);
 
+    const resource_deps = try res_deps.toOwnedSlice(gpa);
+    errdefer gpa.free(resource_deps);
+    const field_filter_slice = try field_filters.toOwnedSlice(gpa);
+    errdefer gpa.free(field_filter_slice);
+    const tag_predicates = try tag_preds.toOwnedSlice(gpa);
+    errdefer {
+        for (tag_predicates) |*tp| tp.deinit(gpa);
+        gpa.free(tag_predicates);
+    }
+    const changed_filter_slice = try changed_filters.toOwnedSlice(gpa);
+    errdefer gpa.free(changed_filter_slice);
+    const expr_filter_slice = try expr_filters.toOwnedSlice(gpa);
+    errdefer {
+        for (expr_filter_slice) |ef| gpa.free(ef.fields);
+        gpa.free(expr_filter_slice);
+    }
+    const expr_cond_slice = try expr_conds.toOwnedSlice(gpa);
+    errdefer gpa.free(expr_cond_slice);
+    const resource_expr_filter_slice = try resource_expr_filters.toOwnedSlice(gpa);
+
     return .{
         .rule_idx = rule_data,
         .name = rule.name,
         .selection = selection,
-        .resource_deps = try res_deps.toOwnedSlice(gpa),
-        .field_filters = try field_filters.toOwnedSlice(gpa),
-        .tag_predicates = try tag_preds.toOwnedSlice(gpa),
+        .resource_deps = resource_deps,
+        .field_filters = field_filter_slice,
+        .tag_predicates = tag_predicates,
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
         .event_type = event_type,
         .observer_kind = observer_kind,
         .observer_component = observer_component,
-        .changed_filters = try changed_filters.toOwnedSlice(gpa),
-        .expr_filters = try expr_filters.toOwnedSlice(gpa),
-        .expr_conds = try expr_conds.toOwnedSlice(gpa),
-        .resource_expr_filters = try resource_expr_filters.toOwnedSlice(gpa),
+        .changed_filters = changed_filter_slice,
+        .expr_filters = expr_filter_slice,
+        .expr_conds = expr_cond_slice,
+        .resource_expr_filters = resource_expr_filter_slice,
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
     };
@@ -8189,11 +8147,12 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             // scope, resolver-checked).
             const tname = ast.strings.slice(node.type_name);
             const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.expr_filters.ensureUnusedCapacity(ctx.gpa, 1);
+            try ctx.pool.ensureUnusedCapacity(ctx.gpa, 1);
             const fields = try captureBoundFields(ctx, node.type_name, id, false);
-            errdefer ctx.gpa.free(fields);
-            try ctx.expr_filters.append(ctx.gpa, .{ .component_id = id, .expr = node.filter_value, .fields = fields });
+            ctx.expr_filters.appendAssumeCapacity(.{ .component_id = id, .expr = node.filter_value, .fields = fields });
             const idx: u32 = @intCast(ctx.pool.items.len);
-            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.pool.appendAssumeCapacity(.{ .kind = .has, .component_id = id });
             ctx.has_component_ref.* = true;
             return idx;
         },
@@ -8231,7 +8190,8 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
                 const path_node = ast.tag_operands.items[tf.operand_start + oi];
                 try resolveTagOperandBits(ctx, path_node, &bits);
             }
-            try ctx.tag_preds.append(ctx.gpa, .{ .op = tf.op, .bits = try bits.toOwnedSlice(ctx.gpa) });
+            try ctx.tag_preds.ensureUnusedCapacity(ctx.gpa, 1);
+            ctx.tag_preds.appendAssumeCapacity(.{ .op = tf.op, .bits = try bits.toOwnedSlice(ctx.gpa) });
             ctx.has_component_ref.* = true;
             const positive = switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => true,
@@ -8555,15 +8515,8 @@ test "resource string field is mutable and the previous value is released" {
 }
 
 test "world+interp teardown frees resource strings once" {
-    // The resource-payload decref walk is owned by Tier-0
-    // `World.releaseResourcePayloads`, called from BOTH `Interpreter.deinit`
-    // (before its immortal `persistent_literals` are destroyed) and
-    // `World.deinit` (before `resources.deinit`). Slot zeroing makes the second
-    // call a no-op, so a written resource string is freed exactly once across
-    // the two-stage teardown. The teardown runs via LIFO defers below —
-    // `interp.deinit()` first, then `world.deinit(gpa)` — and
-    // `std.testing.allocator` flags either a leak (missed free) or a
-    // double-free (both stages freeing the same block).
+    // `std.testing.allocator` flags a leak or a double free of the written
+    // resource string across `interp.deinit()` then `world.deinit(gpa)`.
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);

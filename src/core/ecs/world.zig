@@ -274,9 +274,6 @@ pub const World = struct {
         self.archetype_by_signature.deinit(gpa);
         self.sparse_stores.deinit(gpa);
         self.entity_locations.deinit(gpa);
-        // Reclaim resource-owned persistent payloads (strings, collections)
-        // BEFORE freeing the byte buffers. Idempotent — a no-op
-        // when an interpreter already ran this in its own deinit.
         self.releaseResourcePayloads(gpa);
         self.resources.deinit(gpa);
         self.singleton_resources.deinit(gpa);
@@ -2420,27 +2417,12 @@ pub const World = struct {
     }
 
     /// Decref and zero every resource's persistent-heap payload slot
-    /// (`.string_` / `.array_` / `.map_` / `.set_`) — the uniform teardown of
-    /// resource-owned heap blocks. Tier-0 `World` owns this
-    /// walk so a world with no interpreter (e.g. the scene loader over a bare
-    /// world) and any resource outside the interpreter's `bridge.resources`
-    /// still reclaim their blocks. `ResourceStore` stays string-agnostic in
-    /// write — `resources.deinit` only frees the byte buffers — but `World`
-    /// owns this decref pass over them.
-    ///
-    /// Idempotent: each slot is zeroed (`ptr = 0`) after its decref, so a
-    /// second call no-ops. This is load-bearing for the interpreter teardown
-    /// order — `Interpreter.deinit` calls this BEFORE destroying its immortal
-    /// `persistent_literals`, and the subsequent `World.deinit` call then sees
-    /// zeroed slots and never re-reads a slot pointing at a freed immortal
-    /// block (which would be a use-after-free). `persistent.decref` no-ops on a
-    /// sentinel-refcount immortal default and frees a refcounted user block.
-    ///
-    /// Allocation-free (decrefs + in-place slot zeroing only); never fails.
-    /// Reaches into `resources.entries` directly rather than through a store
-    /// method: the enumeration is a `World`-level teardown concern, and
-    /// `ResourceStore` (FROZEN) exposes no all-resources iterator.
-    pub fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
+    /// (`.string_` / `.array_` / `.map_` / `.set_`), whoever wrote it. Called by
+    /// `deinit` only, before the store frees the buffers holding the slots and
+    /// before the registry destroys the immortal blocks a string slot may point
+    /// at, which `decref` leaves alone. Idempotent: each slot is zeroed after its
+    /// decref.
+    fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
         var it = self.resources.entries.iterator();
         while (it.next()) |kv| {
             const rid = kv.key_ptr.*;

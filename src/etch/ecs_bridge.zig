@@ -96,16 +96,24 @@ pub const Bridge = struct {
         self.* = undefined;
     }
 
+    /// Map `name` to `id`, replacing an earlier mapping of the same name.
     pub fn mapComponent(self: *Bridge, gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
-        const owned = try gpa.dupe(u8, name);
-        errdefer gpa.free(owned);
-        try self.components.put(gpa, owned, id);
+        try mapInto(&self.components, gpa, name, id);
     }
 
+    /// Map `name` to `id`, replacing an earlier mapping of the same name.
     pub fn mapResource(self: *Bridge, gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
+        try mapInto(&self.resources, gpa, name, id);
+    }
+
+    fn mapInto(map: *std.StringHashMapUnmanaged(ComponentId), gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
+        if (map.getPtr(name)) |v| {
+            v.* = id;
+            return;
+        }
         const owned = try gpa.dupe(u8, name);
         errdefer gpa.free(owned);
-        try self.resources.put(gpa, owned, id);
+        try map.put(gpa, owned, id);
     }
 
     pub fn componentIdOf(self: *const Bridge, name: []const u8) ?ComponentId {

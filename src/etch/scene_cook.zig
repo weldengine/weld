@@ -312,7 +312,6 @@ const Builder = struct {
 
     // Scratch (gpa-owned, freed by `deinitScratch`).
     bridge: Bridge,
-    literals: std.ArrayListUnmanaged([*]u8) = .empty,
     string_map: std.StringHashMapUnmanaged(u32) = .empty,
     uuid_map: std.AutoHashMapUnmanaged([16]u8, u32) = .empty,
     name_to_uuid_idx: std.StringHashMapUnmanaged(u32) = .empty,
@@ -346,12 +345,10 @@ const Builder = struct {
         };
     }
 
-    /// Free everything NOT owned by the produced model: the bridge, the immortal
-    /// persistent default blocks `compileTypeDecl` allocated, and the scratch
-    /// hashmaps. The model arena is transferred to the caller (not freed here).
+    /// Free everything NOT owned by the produced model: the bridge and the
+    /// scratch hashmaps. The model arena is transferred to the caller (not freed
+    /// here); the registry owns the default blocks `compileTypeDecl` allocated.
     fn deinitScratch(self: *Builder) void {
-        for (self.literals.items) |block| persistent.destroy(self.gpa, block);
-        self.literals.deinit(self.gpa);
         self.bridge.deinit(self.gpa);
         self.string_map.deinit(self.gpa);
         self.uuid_map.deinit(self.gpa);
@@ -409,7 +406,7 @@ const Builder = struct {
                 .resource_decl => {
                     const decl = self.ast.resource_decls.items[datas[i]];
                     // `.table`: `@storage` is component-only, so a resource has
-                    // no mode to read (mirror of `compileResource`).
+                    // no mode to read.
                     _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out) catch |e| return e;
                 },
                 else => {},
@@ -427,8 +424,9 @@ const Builder = struct {
         storage: weld_core.ecs.registry.StorageKind,
         diag_out: ?*[]const u8,
     ) CookError!ComponentId {
-        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage, &self.literals) catch |e| switch (e) {
+        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
+            error.LayoutTooLarge => fail(diag_out, error.UnsupportedFieldKind, "component/resource declaration exceeds the registry's 64 KiB"),
             error.DuplicateComponent => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
             else => error.OutOfMemory,
         };

@@ -431,9 +431,11 @@ pub fn planTableDriven(
 
     var inner = try world.queryDynamic(gpa, t_with.items, t_without.items);
     errdefer inner.deinit(gpa);
+    const sparse_with = try s_with.toOwnedSlice(gpa);
+    errdefer gpa.free(sparse_with);
     return .{
         .inner = inner,
-        .sparse_with = try s_with.toOwnedSlice(gpa),
+        .sparse_with = sparse_with,
         .sparse_without = try s_without.toOwnedSlice(gpa),
     };
 }
