@@ -328,6 +328,15 @@ test "a bound that is not finite is refused" {
     try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
 }
 
+test "a position that is not finite is refused under finite bounds" {
+    const gpa = std.testing.allocator;
+    // One vertex whose x is +inf; the accessor's own bounds are finite.
+    const src =
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AACAfwAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3","min":[0,0,0],"max":[1,1,1]}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+    ;
+    try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
+}
+
 test "decode rejects non-glTF json" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.NoMesh, decode(gpa, "{\"buffers\":[],\"bufferViews\":[],\"accessors\":[],\"meshes\":[]}"));
