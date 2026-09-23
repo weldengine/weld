@@ -50,12 +50,12 @@ jobs:
           use-cache: false
 
       - name: Restore Zig cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} -- --smoke
@@ -65,6 +65,13 @@ jobs:
       # its output is the deliverable and a red means the bench crashed.
       - name: zig build bench-ecs-hybrid (crossover sweep)
         run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
+
+      - name: Save Zig cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-v2-${{ github.job }}-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
       - name: Archive the crossover measurement
         uses: actions/upload-artifact@v6

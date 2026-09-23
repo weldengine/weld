@@ -244,8 +244,7 @@ jobs:
       - name: Save Zig cache (final)
         if: always()
           && matrix.mode != 'Debug'
-          && (github.event_name == 'push'
-              || github.head_ref == 'phase-1/debt/phase-1-debt')
+          && github.event_name == 'push'
           && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
@@ -270,12 +269,12 @@ jobs:
           use-cache: false
 
       - name: Restore Zig cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -342,6 +341,13 @@ jobs:
           set -euo pipefail
           zig build test-runtime-env -Dcpu=${{ env.ZIG_CPU }} --summary all
 
+      - name: Save Zig cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+
       - name: Upload capture artifact
         if: always()
         uses: actions/upload-artifact@v6
@@ -367,12 +373,12 @@ jobs:
           use-cache: false
 
       - name: Restore Zig cache (Debug)
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |
@@ -468,6 +474,13 @@ jobs:
           # construction + hardware (no false green from a lavapipe pass).
           grep -E "00067|pSignalSemaphores" vkblit.log || echo "  not observed on lavapipe (expected — hardware-only)"
           echo "=== end E6 blit validation ==="
+
+      - name: Save Zig cache (Debug)
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
       - name: Upload slice capture
         if: always()
