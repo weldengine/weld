@@ -16682,26 +16682,32 @@ test "a map default keeps the last value of a repeated key" {
     try std.testing.expectEqual(@as(i64, 2), map.items[0].value.int_);
 }
 
-test "a collection default of the wrong shape is refused at compile" {
+/// Asserts compiling `src`, unchecked, is refused as an invalid program.
+fn expectInvalidProgram(src: []const u8) !void {
     const gpa = std.testing.allocator;
-    const sources = [_][]const u8{
-        "resource R { xs: int[] = 5 }",
-        "resource R { m: [string: int] = [] }",
-        "resource R { s: Set<int> = [1] }",
-        "resource R { xs: int[] = [1 / 0] }",
-        "enum Mode { a }\nresource R { m: Mode = .nope }",
-    };
-    for (sources) |src| {
-        var world = World.init();
-        defer world.deinit(gpa);
-        var pr = try parser_mod.parse(gpa, src);
-        defer pr.deinit(gpa);
-        var interp = compileUnchecked(gpa, &pr, &world) catch |err| {
-            try std.testing.expectEqual(error.InvalidProgram, err);
-            continue;
-        };
-        interp.deinit();
-        std.debug.print("compiled: {s}\n", .{src});
-        return error.TestExpectedError;
-    }
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, src);
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "an array field default that is not an array literal is refused at compile" {
+    try expectInvalidProgram("resource R { xs: int[] = 5 }");
+}
+
+test "a map field default that is not a map literal is refused at compile" {
+    try expectInvalidProgram("resource R { m: [string: int] = [] }");
+}
+
+test "a set field default other than Set.new() is refused at compile" {
+    try expectInvalidProgram("resource R { s: Set<int> = [1] }");
+}
+
+test "a collection element that does not fold is refused at compile" {
+    try expectInvalidProgram("resource R { xs: int[] = [1 / 0] }");
+}
+
+test "an enum field default that names no variant is refused at compile" {
+    try expectInvalidProgram("enum Mode { a }\nresource R { m: Mode = .nope }");
 }

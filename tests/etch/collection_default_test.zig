@@ -84,7 +84,7 @@ test "an element that is not a constant is refused" {
 test "a default on an invalid element type is not checked a second time" {
     try std.testing.expect(try reportsOnly(
         \\component Health { hp: int = 0 }
-        \\resource R { xs: Health[] = [1] }
+        \\resource R { xs: Health[] = ["x"] }
     , "resource collection element type 'Health' is not supported"));
 }
 
