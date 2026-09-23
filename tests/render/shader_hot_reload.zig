@@ -35,12 +35,15 @@ const WAIT_TIMEOUT_NS: u64 = 5 * std.time.ns_per_s;
 
 const ProbeState = struct {
     fired: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// The recompile produced SPIR-V: a failed one fires the callback too.
+    compiled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     end_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 };
 
 fn onRecompile(ctx_opaque: ?*anyopaque, path: []const u8, spv: ?[]const u8, diag: ?[]const u8) void {
-    _ = .{ path, spv, diag };
+    _ = .{ path, diag };
     const state: *ProbeState = @ptrCast(@alignCast(ctx_opaque.?));
+    state.compiled.store(if (spv) |bytes| bytes.len > 0 else false, .release);
     state.end_ns.store(time_mod.nowNanos(), .release);
     state.fired.store(true, .release);
 }
@@ -96,5 +99,6 @@ test "filewatch triggers recompile under 200 ms" {
         @as(f64, @floatFromInt(elapsed_ns)) / 1e6,
         LATENCY_GATE_NS / std.time.ns_per_ms,
     });
+    try std.testing.expect(state.compiled.load(.acquire));
     try std.testing.expect(elapsed_ns < LATENCY_GATE_NS);
 }
