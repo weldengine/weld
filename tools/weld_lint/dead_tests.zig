@@ -208,6 +208,13 @@ pub const uncollected = [_]Uncollected{
             "attempts failed to localise: it was never dead and never missing, it was in a " ++
             "step the suite does not run",
     },
+    .{
+        .path = "tests/render/ppm_psnr_compare.zig",
+        .blocks = 3,
+        .reason = "the smoke-test PSNR gate hangs off `zig build test-ppm-psnr` and is kept " ++
+            "OUT of `zig build test`: it reads the capture `run-example-triangle` writes, " ++
+            "which only the lavapipe CI job produces, and fails where that capture is absent",
+    },
 };
 
 /// The number of test blocks `zig build test` COLLECTS on each platform.
@@ -237,8 +244,8 @@ pub fn expectedCollectedOn(os: std.Target.Os.Tag) usize {
     // line of `zig build test --summary all`, skipped tests included. Windows is
     // two lower, by the two `only_on = .windows` entries above.
     return switch (os) {
-        .windows => 2574,
-        else => 2576,
+        .windows => 2568,
+        else => 2570,
     };
 }
 

@@ -332,12 +332,6 @@ jobs:
       - name: Verify PSNR vs golden
         run: |
           set -euo pipefail
-          if [ ! -f tests/golden/smoke_test_software.ppm ]; then
-            echo "Golden PPM not yet committed — capture written to out/smoke_test.ppm." >&2
-            echo "First-run procedure: download out/smoke_test.ppm from this job, validate visually," >&2
-            echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
-            exit 0
-          fi
           zig build test-ppm-psnr -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} --summary all 2>&1 | tee test-output.txt
 
       - name: Upload capture artifact
@@ -346,7 +340,7 @@ jobs:
         with:
           name: runtime-smoke-test-capture
           path: |
-            out/smoke_test.ppm
+            examples/triangle/out/smoke_test.ppm
             test-output.txt
           retention-days: 30
 

@@ -872,12 +872,8 @@ pub fn build(b: *std.Build) void {
         /// when set, imports the `.d.etch` emitter and the toy
         /// service, so a test exercises the SAME functions `bindgen-check` runs.
         bindgen_detch: bool = false,
-        /// when set, create a dedicated `zig build
-        /// <name>` step that runs ONLY this test. Used by the CI
-        /// runtime-smoke-test job to gate strictly on the capture PSNR
-        /// without re-running every other test in the repo (some of
-        /// which have unrelated ReleaseSafe issues tracked as
-        /// out-of-scope debt).
+        /// when set, also create a `zig build <name>` step that runs ONLY
+        /// this test.
         dedicated_step: ?[]const u8 = null,
     };
     const test_specs = [_]TestSpec{
@@ -1091,23 +1087,9 @@ pub fn build(b: *std.Build) void {
         // Shader disk cache round-trip (hit/miss source change /
         // miss glslc version change).
         .{ .path = "tests/render/shader_cache.zig", .render = true },
-        // smoke-test capture PSNR vs golden.
-        // Skip if the platform has no Vulkan window backend or if the golden
-        // has not yet been committed.
-        // `dedicated_step` exposes `zig build test-render-capture` so
-        // the CI runtime-smoke-test job can run only this test (the
-        // generic `zig build test` pulls in the whole repo, including
-        // unrelated tests with current ReleaseSafe issues — tracked as
-        // housekeeping debt).
-        .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
         // GAL capture helper surface coverage (encodePpm +
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
-        // direct PSNR gate reading the pre-produced
-        // out/smoke_test.ppm with no rebuild and no triangle re-spawn.
-        // std-only (no .render), so `zig build test-ppm-psnr` compiles in
-        // seconds and replaces the rebuild-heavy `test-render-capture` in CI.
-        .{ .path = "tests/render/ppm_psnr_compare.zig", .dedicated_step = "test-ppm-psnr" },
         // hot-reload filewatch latency < 200 ms.
         // Skip if glslc absent from PATH.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
@@ -1218,6 +1200,21 @@ pub fn build(b: *std.Build) void {
             const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
             dedicated.dependOn(&t_run.step);
         }
+    }
+
+    // `zig build test-ppm-psnr` is OUT of `test_step`: it reads the capture
+    // `run-example-triangle` writes, which only the lavapipe CI job produces.
+    // `dead-tests` declares the file uncollected for that reason.
+    {
+        const psnr_mod = b.createModule(.{
+            .root_source_file = b.path("tests/render/ppm_psnr_compare.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const psnr_run = b.addRunArtifact(b.addTest(.{ .root_module = psnr_mod }));
+        psnr_run.has_side_effects = true;
+        const psnr_step = b.step("test-ppm-psnr", "Compare the smoke-test capture with the golden (after run-example-triangle)");
+        psnr_step.dependOn(&psnr_run.step);
     }
 
     // `zig build test-stress` builds and runs ONLY the
