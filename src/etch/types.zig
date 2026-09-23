@@ -388,9 +388,8 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 /// `validateFieldsInDecl.component_like`) — so the cross-arena field-TYPE check is
 /// complete for every valid imported component.
 fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
-    if (decl_arena.typeNodeKind(type_node) != .named) return null;
-    const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
-    const resolved = decl_arena.resolveTypeAliasName(named.name);
+    const name = decl_arena.namedTypeName(type_node) orelse return null;
+    const resolved = decl_arena.resolveTypeAliasName(name);
     const tname = decl_arena.strings.slice(resolved);
     if (std.mem.eql(u8, tname, "string")) return .string_;
     return BuiltinType.fromName(tname);
@@ -1071,9 +1070,8 @@ pub const TypeChecker = struct {
     /// same reason as `foreignReturnType`.
     fn foreignFieldType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
         _ = self;
-        if (a.typeNodeKind(type_node) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(type_node)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        const name = a.namedTypeName(type_node) orelse return ResolvedType.unknown;
+        const tname = a.strings.slice(a.resolveTypeAliasName(name));
         if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
         if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
         return ResolvedType.unknown;
@@ -1085,9 +1083,8 @@ pub const TypeChecker = struct {
         // "`unknown` ≈ unit, the house convention" (this file, `synthCall`).
         // `ResolvedType` has no unit variant to return instead.
         if (method.return_type.isNone()) return ResolvedType.unknown;
-        if (a.typeNodeKind(method.return_type) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(method.return_type)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        const name = a.namedTypeName(method.return_type) orelse return ResolvedType.unknown;
+        const tname = a.strings.slice(a.resolveTypeAliasName(name));
         if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
         if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
         return ResolvedType.unknown;
@@ -1747,8 +1744,7 @@ pub const TypeChecker = struct {
     /// the common set inlined, the open `…` treated as this fixed list). All
     /// resolve to a `.named` type node.
     fn isKnownAnimParamType(self: *TypeChecker, type_node: NodeId) bool {
-        if (self.arena.typeNodeKind(type_node) != .named) return false;
-        const name = self.arena.strings.slice(self.arena.named_types.items[self.arena.typeNodeData(type_node)].name);
+        const name = self.arena.strings.slice(self.arena.namedTypeName(type_node) orelse return false);
         const cat = [_][]const u8{ "bool", "float", "int", "i32", "u32", "f32", "f64", "Vec2", "Vec3", "Vec4", "Trajectory" };
         for (cat) |c| {
             if (std.mem.eql(u8, name, c)) return true;
@@ -3883,19 +3879,16 @@ pub const TypeChecker = struct {
 
             // Collection / composite field types (`T[]`, `[K: V]`, `Set<T>`,
             // and fixed `T[N]`) are not part of the component/resource
-            // surface — fields stay scalar POD. Reject anything non-named here
-            // rather than mis-indexing the `named_types` slab (collections
-            // land as locals, not fields).
+            // surface — fields stay scalar POD.
             const tspan = self.arena.typeNodeSpan(field.type_node);
-            if (self.arena.typeNodeKind(field.type_node) != .named) {
+            const field_type_name = self.arena.namedTypeName(field.type_node) orelse {
                 // One bounded exception: a `struct` field
                 // may be `Error?` — the builtin Error's `source` chaining field
                 // (part1 §10.2). General optional fields are unsupported.
                 if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
                     const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
-                    if (self.arena.typeNodeKind(payload) == .named) {
-                        const pn = self.arena.named_types.items[self.arena.typeNodeData(payload)];
-                        if (pn.name == self.arena.error_type_name) continue;
+                    if (self.arena.namedTypeName(payload)) |pn| {
+                        if (pn == self.arena.error_type_name) continue;
                     }
                 }
                 // Resource collection fields: `T[]` (`.slice`),
@@ -3930,14 +3923,12 @@ pub const TypeChecker = struct {
                 }
                 try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
                 continue;
-            }
-            const named_idx = self.arena.typeNodeData(field.type_node);
-            const named = self.arena.named_types.items[named_idx];
+            };
             // A field typed by an in-scope generic param (`min: T`) is a
             // generic field — accepted (type-erased). Only structs
             // are generic; component / resource fields never reach this branch.
-            if (self.generic_scope.contains(named.name)) continue;
-            const resolved_name = self.arena.resolveTypeAliasName(named.name);
+            if (self.generic_scope.contains(field_type_name)) continue;
+            const resolved_name = self.arena.resolveTypeAliasName(field_type_name);
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
@@ -4016,19 +4007,14 @@ pub const TypeChecker = struct {
     /// element STORAGE and promotion wiring live in the interpreter.
     fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
         const espan = self.arena.typeNodeSpan(elem);
-        switch (self.arena.typeNodeKind(elem)) {
-            .named => {},
-            .slice, .array, .map_type, .set_type => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{});
-                return;
-            },
-            else => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{});
-                return;
-            },
-        }
-        const named = self.arena.named_types.items[self.arena.typeNodeData(elem)];
-        const resolved = self.arena.resolveTypeAliasName(named.name);
+        const elem_name = self.arena.namedTypeName(elem) orelse {
+            switch (self.arena.typeNodeKind(elem)) {
+                .slice, .array, .map_type, .set_type => try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{}),
+                else => try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{}),
+            }
+            return;
+        };
+        const resolved = self.arena.resolveTypeAliasName(elem_name);
         const tname = self.arena.strings.slice(resolved);
         // Value-POD builtins + `string` + a declared enum are the supported
         // element set: they are stored inline (POD) or promoted into an owned
@@ -4157,13 +4143,12 @@ pub const TypeChecker = struct {
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         switch (self.arena.typeNodeKind(type_node)) {
             .named => {
-                const named_idx = self.arena.typeNodeData(type_node);
-                const named = self.arena.named_types.items[named_idx];
+                const name = self.arena.namedTypeName(type_node).?;
                 // A type-parameter name in scope resolves to a generic variable
                 // checked before alias / builtin / symbol.
-                if (self.generic_scope.contains(named.name)) return .{ .generic = named.name };
+                if (self.generic_scope.contains(name)) return .{ .generic = name };
                 // Resolve through any top-level `type` alias chain first.
-                const resolved_name = self.arena.resolveTypeAliasName(named.name);
+                const resolved_name = self.arena.resolveTypeAliasName(name);
                 const tname = self.arena.strings.slice(resolved_name);
                 // `string` in a declared-type position.
                 // Kept out of `fromName` so the component/resource POD
@@ -4560,14 +4545,12 @@ pub const TypeChecker = struct {
         while (i < rule.params_len) : (i += 1) {
             const p = self.arena.rule_params.items[rule.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
-                if (self.arena.typeNodeKind(p.type_node) == .named) {
-                    const tname_idx = self.arena.typeNodeData(p.type_node);
-                    const tname = self.arena.strings.slice(self.arena.named_types.items[tname_idx].name);
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{tname});
-                } else {
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
+            if (self.arena.namedTypeName(p.type_node)) |tn| {
+                if (ptype == .unknown) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{self.arena.strings.slice(tn)});
                 }
+            } else {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
             }
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
@@ -6968,15 +6951,15 @@ pub const TypeChecker = struct {
     fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
         switch (self.arena.typeNodeKind(formal)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(formal)];
-                if (!self.isGenericParamOf(decl, named.name)) return; // concrete formal — no binding
+                const name = self.arena.namedTypeName(formal).?;
+                if (!self.isGenericParamOf(decl, name)) return; // concrete formal — no binding
                 if (actual == .unknown) return; // don't pin a param to a post-error unknown
-                if (subst.get(named.name)) |prev| {
+                if (subst.get(name)) |prev| {
                     if (!ResolvedType.eql(prev, actual)) {
-                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(named.name)});
+                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(name)});
                     }
                 } else {
-                    try subst.put(self.gpa, named.name, actual);
+                    try subst.put(self.gpa, name, actual);
                 }
             },
             .array, .slice => {
@@ -6999,9 +6982,9 @@ pub const TypeChecker = struct {
     fn substituteGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, node: NodeId, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
         switch (self.arena.typeNodeKind(node)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(node)];
-                if (self.isGenericParamOf(decl, named.name)) {
-                    return subst.get(named.name) orelse ResolvedType{ .generic = named.name };
+                const name = self.arena.namedTypeName(node).?;
+                if (self.isGenericParamOf(decl, name)) {
+                    return subst.get(name) orelse ResolvedType{ .generic = name };
                 }
                 return self.namedTypeToResolved(node);
             },

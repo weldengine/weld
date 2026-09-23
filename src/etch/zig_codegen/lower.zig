@@ -335,11 +335,12 @@ fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: De
     var f_i: u32 = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        // A resource collection field has no lowering here.
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
         // Resolve through any `type` alias chain: `x: Meters` where
         // `type Meters = float` emits as `x: f64`, identical to the layout
         // the interpreter computes, keeping the differential byte-exact.
-        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(declared));
         const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         if (f.default_value.isNone()) {
@@ -533,10 +534,7 @@ fn isErrorName(name: StringId, err_id: ?StringId, code_id: ?StringId) bool {
 /// optional payload (`Error?`).
 fn typeNodeNamesError(ast: *const AstArena, type_node: NodeId, err_id: ?StringId, code_id: ?StringId) bool {
     switch (ast.typeNodeKind(type_node)) {
-        .named => {
-            const named = ast.named_types.items[ast.typeNodeData(type_node)];
-            return isErrorName(ast.resolveTypeAliasName(named.name), err_id, code_id);
-        },
+        .named => return isErrorName(ast.resolveTypeAliasName(ast.namedTypeName(type_node).?), err_id, code_id),
         .optional => {
             const payload: NodeId = @bitCast(ast.typeNodeData(type_node));
             return typeNodeNamesError(ast, payload, err_id, code_id);
@@ -976,9 +974,8 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
     var f_i: u32 = 0;
     while (f_i < decl.fields_len) : (f_i += 1) {
         const f = ast.fields.items[decl.fields_start + f_i];
-        if (ast.typeNodeKind(f.type_node) != .named) continue;
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        if (std.mem.eql(u8, ast.strings.slice(ast.resolveTypeAliasName(tnode.name)), "string")) has_string = true;
+        const declared = ast.namedTypeName(f.type_node) orelse continue;
+        if (std.mem.eql(u8, ast.strings.slice(ast.resolveTypeAliasName(declared)), "string")) has_string = true;
     }
     try w.printLine("pub const {s} = {s}struct {{", .{ name, if (has_string) "" else "extern " });
     w.indentBy(1);
@@ -986,11 +983,9 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
     while (f_i < decl.fields_len) : (f_i += 1) {
         const f = ast.fields.items[decl.fields_start + f_i];
         // Optional fields (`Error?`) have no codegen lowering yet — deferred
-        // to the Optional-ops tranche (interpreter reference). The guard also
-        // protects the `named_types` index below.
-        if (ast.typeNodeKind(f.type_node) != .named) return CodegenError.UnsupportedConstruct;
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const resolved = ast.resolveTypeAliasName(tnode.name);
+        // to the Optional-ops tranche (interpreter reference).
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
+        const resolved = ast.resolveTypeAliasName(declared);
         const etch_type = ast.strings.slice(resolved);
         const fname = ast.strings.slice(f.name);
         // `string` field: `[]const u8`, empty default;
@@ -1129,14 +1124,14 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
     while (p_i < method.params_len) : (p_i += 1) {
         if (wrote_param) try w.write(", ");
         const p = ast.fn_params.items[method.params_start + p_i];
-        const zig_t = fnTypeZig(ast, p.type_node);
+        const zig_t = try fnTypeZig(ast, p.type_node);
         try w.ident(ast.strings.slice(p.name));
         try w.print(": {s}", .{zig_t});
         wrote_param = true;
         try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
     }
     try w.write(") ");
-    try w.write(if (method.return_type.isNone()) "void" else fnTypeZig(ast, method.return_type));
+    try w.write(if (method.return_type.isNone()) "void" else try fnTypeZig(ast, method.return_type));
     try w.write(" {\n");
     w.indentBy(1);
     var s: u32 = 0;
@@ -1253,10 +1248,10 @@ fn emitRegisterCall(
     var f_i: u32 = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const declared = ast.namedTypeName(f.type_node) orelse return CodegenError.UnsupportedConstruct;
         // Resolve through any `type` alias chain, matching the struct
         // emission and the interpreter's FieldKind resolution.
-        const etch_t = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const etch_t = ast.strings.slice(ast.resolveTypeAliasName(declared));
         const zig_t = type_map.mapBuiltin(etch_t) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         const fkind = fieldKindLiteral(zig_t);
@@ -1412,14 +1407,14 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation is not emitted
     if (decl.is_async) return CodegenError.UnsupportedConstruct; // async is not emitted
 
-    const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else fnTypeZig(ast, decl.return_type);
+    const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else try fnTypeZig(ast, decl.return_type);
     if (decl.throws and !decl.return_type.isNone()) {
         // The throwing path returns `zeroDefault(ret)` — only meaningful for
         // builtin-mapped scalars (checked on the ETCH type name; `fnTypeZig`
         // passes user names through 1:1). A `throws` fn returning a user
         // type is deferred (interpreter reference).
-        const tnode = ast.named_types.items[ast.typeNodeData(decl.return_type)];
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const declared = ast.namedTypeName(decl.return_type) orelse return CodegenError.UnsupportedConstruct;
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
         if (type_map.mapBuiltin(tname) == null) return CodegenError.UnsupportedConstruct;
     }
 
@@ -1436,7 +1431,7 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     while (p_i < decl.params_len) : (p_i += 1) {
         if (p_i > 0) try w.write(", ");
         const p = ast.fn_params.items[decl.params_start + p_i];
-        const zig_t = fnTypeZig(ast, p.type_node);
+        const zig_t = try fnTypeZig(ast, p.type_node);
         try w.ident(ast.strings.slice(p.name));
         try w.print(": {s}", .{zig_t});
         try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
@@ -1529,9 +1524,9 @@ fn fnBodyCanThrow(ast: *const AstArena, decl: ast_mod.FnDecl) bool {
 /// Map a `fn` parameter / return type node to its Zig type name.
 /// Block-2 fns use named scalar types (alias-resolved); a builtin maps through
 /// `type_map`, a user type passes through 1:1 (same as rule params).
-fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
-    const tnode = ast.named_types.items[ast.typeNodeData(type_node)];
-    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+fn fnTypeZig(ast: *const AstArena, type_node: NodeId) CodegenError![]const u8 {
+    const declared = ast.namedTypeName(type_node) orelse return CodegenError.UnsupportedConstruct;
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
     // `string` params/returns lower to `[]const u8` — the same mapping the struct-field
     // emitter delivers. A raw-name fallback here would emit invalid Zig
     // (`name: string`), which is the no-silently-wrong-output doctrine breached. The
@@ -2516,8 +2511,8 @@ const LocalCtx = struct {
         var p_i: u32 = 0;
         while (p_i < rule.params_len) : (p_i += 1) {
             const p = ast.rule_params.items[rule.params_start + p_i];
-            const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-            const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+            const declared = ast.namedTypeName(p.type_node) orelse return CodegenError.UnsupportedConstruct;
+            const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
             if (std.mem.eql(u8, tname, "Entity")) {
                 // Entity params are handled by the iteration machinery; the
                 // ident never reaches `emitExpr` in a compliant program.
@@ -3022,7 +3017,7 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             try w.write(" = ");
             try emitThrowsCallExpr(w, ast, ctx, call, call_idx);
             try w.write(";\n");
-            const ret_zig = if (callee.return_type.isNone()) "" else fnTypeZig(ast, callee.return_type);
+            const ret_zig = if (callee.return_type.isNone()) "" else try fnTypeZig(ast, callee.return_type);
             try ctx.records.append(w.gpa, .{
                 .key = .{ .name = let.name },
                 .info = .{ .kind = .value, .zig_type = ret_zig, .is_mut = let.is_mut },
@@ -3210,9 +3205,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     if (ast.exprKind(let.value) == .struct_lit) {
         const sl = ast.struct_lits.items[ast.exprData(let.value)];
         if (sl.type_name == 0) {
-            if (let.type_annotation.isNone() or ast.typeNodeKind(let.type_annotation) != .named) return CodegenError.UnsupportedConstruct;
-            const named = ast.named_types.items[ast.typeNodeData(let.type_annotation)];
-            const sname = ast.resolveTypeAliasName(named.name);
+            if (let.type_annotation.isNone()) return CodegenError.UnsupportedConstruct;
+            const annotated = ast.namedTypeName(let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
+            const sname = ast.resolveTypeAliasName(annotated);
             if (!isStructName(ast, sname)) return CodegenError.UnsupportedConstruct;
             try w.writeIndent();
             try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
@@ -3945,8 +3940,8 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // in `@as(T, …)`. The conversion builtin
             // is picked from the operand's inferred domain vs the target's.
             const c = ast.casts.items[data];
-            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            const zig_t = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return CodegenError.UnsupportedConstruct;
+            const target = ast.namedTypeName(c.type_node) orelse return CodegenError.UnsupportedConstruct;
+            const zig_t = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(target))) orelse return CodegenError.UnsupportedConstruct;
             const target_is_float = std.mem.eql(u8, zig_t, "f32") or std.mem.eql(u8, zig_t, "f64");
             const src_zig = inferExprZigType(ast, ctx, c.operand);
             const src_is_float = std.mem.eql(u8, src_zig, "f32") or std.mem.eql(u8, src_zig, "f64");
@@ -4349,9 +4344,9 @@ fn emitIfChain(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Code
 /// expects annotated scalar params; a missing / non-scalar annotation falls
 /// back to `i64` (the interpreter is the reference for richer closures).
 fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8 {
-    if (p.type_node.isNone() or ast.typeNodeKind(p.type_node) != .named) return "i64";
-    const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-    return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(tnode.name))) orelse "i64";
+    if (p.type_node.isNone()) return "i64";
+    const declared = ast.namedTypeName(p.type_node) orelse return "i64";
+    return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(declared))) orelse "i64";
 }
 
 /// One captured outer binding of a closure: the Etch
@@ -4571,10 +4566,10 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
     // Only a named-type annotation maps to a scalar Zig type here; collection
     // annotations (`T[]`, `[K: V]`, `Set<T>`, `T[N]`) leave the binding
     // un-annotated so Zig infers the array / slice type.
-    if (!annotation.isNone() and ast.typeNodeKind(annotation) == .named) {
-        const tnode = ast.named_types.items[ast.typeNodeData(annotation)];
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-        if (type_map.mapBuiltin(tname)) |z| return z;
+    if (!annotation.isNone()) {
+        if (ast.namedTypeName(annotation)) |declared| {
+            if (type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(declared)))) |z| return z;
+        }
     }
     // `T?` optional annotation → `?<payload>`: used so `let o:
     // int? = none` emits `const o: ?i64 = null;`. A `some(...)` RHS self-types
@@ -4590,9 +4585,8 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
 /// payload (deferred) yields `null`.
 fn optionalAnnotationZig(ast: *const AstArena, type_node: NodeId) ?[]const u8 {
     const payload_node: NodeId = @bitCast(ast.typeNodeData(type_node));
-    if (ast.typeNodeKind(payload_node) != .named) return null;
-    const tnode = ast.named_types.items[ast.typeNodeData(payload_node)];
-    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    const declared = ast.namedTypeName(payload_node) orelse return null;
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
     // `string?`: `string` is deliberately not in
     // `type_map.mapBuiltin` (the let-routing leaves plain string bindings
     // un-annotated) — only the optional path needs its Zig spelling.
@@ -4683,9 +4677,8 @@ const map_types_table = .{
 /// element → the caller fails loud).
 fn sliceAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const at = ast.array_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(at.elem) != .named) return null;
-    const named = ast.named_types.items[ast.typeNodeData(at.elem)];
-    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    const elem = ast.namedTypeName(at.elem) orelse return null;
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(elem))) orelse return null;
     return dynArrayZigType(elem_zig);
 }
 
@@ -4693,11 +4686,10 @@ fn sliceAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8
 /// the key/value pair is outside the emitter's map table.
 fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const mt = ast.map_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(mt.key) != .named or ast.typeNodeKind(mt.value) != .named) return null;
-    const knamed = ast.named_types.items[ast.typeNodeData(mt.key)];
-    const vnamed = ast.named_types.items[ast.typeNodeData(mt.value)];
-    const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(knamed.name))) orelse return null;
-    const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(vnamed.name))) orelse return null;
+    const key = ast.namedTypeName(mt.key) orelse return null;
+    const value = ast.namedTypeName(mt.value) orelse return null;
+    const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(key))) orelse return null;
+    const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(value))) orelse return null;
     return mapZigType(key_zig, value_zig);
 }
 
@@ -4735,9 +4727,8 @@ const set_types_table = .{
 /// the element is outside the emitter's set table.
 fn setAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const st = ast.set_types.items[ast.typeNodeData(annotation)];
-    if (ast.typeNodeKind(st.elem) != .named) return null;
-    const named = ast.named_types.items[ast.typeNodeData(st.elem)];
-    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    const elem = ast.namedTypeName(st.elem) orelse return null;
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(elem))) orelse return null;
     return setZigType(elem_zig);
 }
 
@@ -4755,9 +4746,7 @@ fn structFieldEnumName(ast: *const AstArena, type_name: StringId, field_name: St
         while (f_i < sd.fields_len) : (f_i += 1) {
             const f = ast.fields.items[sd.fields_start + f_i];
             if (f.name != field_name) continue;
-            if (ast.typeNodeKind(f.type_node) != .named) return null;
-            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
-            const resolved = ast.resolveTypeAliasName(named.name);
+            const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
             if (!isEnumName(ast, resolved)) return null;
             return ast.strings.slice(resolved);
         }
@@ -4844,9 +4833,7 @@ fn structFieldStructName(ast: *const AstArena, type_name: StringId, field_name: 
         while (f_i < sd.fields_len) : (f_i += 1) {
             const f = ast.fields.items[sd.fields_start + f_i];
             if (f.name != field_name) continue;
-            if (ast.typeNodeKind(f.type_node) != .named) return null;
-            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
-            const resolved = ast.resolveTypeAliasName(named.name);
+            const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
             if (!isStructName(ast, resolved)) return null;
             return resolved;
         }
@@ -6405,8 +6392,8 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];
-            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse "i64";
+            const target = ast.namedTypeName(c.type_node) orelse break :blk "i64";
+            break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(target))) orelse "i64";
         },
         .match_expr => blk: {
             // The match result type is the (unified) type of its arm bodies;
@@ -6477,10 +6464,7 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
             if (std.mem.eql(u8, fname, field_name)) {
                 // A non-named field type (`Error?` — the builtin Error's
                 // `source`) has no scalar Zig name; the caller falls back.
-                // Guards the `named_types` mis-index too.
-                if (ast.typeNodeKind(f.type_node) != .named) return null;
-                const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-                const resolved = ast.resolveTypeAliasName(tnode.name);
+                const resolved = ast.resolveTypeAliasName(ast.namedTypeName(f.type_node) orelse return null);
                 const etch_t = ast.strings.slice(resolved);
                 // `string` fields (`Error.message`) → the codegen string type, driving
                 // `.len()` dispatch; enum-typed fields (`Error.code`) map 1:1, driving

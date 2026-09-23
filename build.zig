@@ -964,6 +964,8 @@ pub fn build(b: *std.Build) void {
         // and writes its row, and the codegen refuses a sparse program.
         // `.etch = true` for `weld_etch`; `weld_core` is unconditional here.
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
+        // Every reader of a type node's name decides its non-`.named` branch.
+        .{ .path = "tests/etch/type_node_kind_test.zig", .etch = true },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },

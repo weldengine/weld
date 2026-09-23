@@ -837,16 +837,11 @@ fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Loc
 /// `renderAbilityRuleAlloc` precedent; a generic/compound type fails loud).
 /// SHARED by both backends so a params-block field renders identically.
 pub fn renderFieldTypeAlloc(gpa: std.mem.Allocator, arena: *const AstArena, type_node: NodeId) BuildError![]u8 {
-    // A non-named field type (collection `.slice`/`.map_type`/`.set_type`, tuple,
-    // function, …) has no descriptor-construct surface: fail loud. Collections in
-    // particular type-check ONLY on `resource` (cooked via `interp.compileTypeDecl`,
-    // not this path), so a collection type node is unreachable here for a valid
-    // program — the rejection is the cook's defensive fail-loud contract. A
-    // collection-specific error was weighed and refused: it would ripple through
-    // ~15 codegen `BuildError` switches for zero behavioural gain, both mapping
-    // to `UnsupportedConstruct`.
-    if (arena.typeNodeKind(type_node) != .named) return error.UnsupportedDescriptorExpr;
-    return try gpa.dupe(u8, arena.strings.slice(arena.named_types.items[arena.typeNodeData(type_node)].name));
+    // A non-named field type has no descriptor-construct surface. Collections
+    // type-check only on `resource`, which cooks through `interp.compileTypeDecl`
+    // and not through this path.
+    const name = arena.namedTypeName(type_node) orelse return error.UnsupportedDescriptorExpr;
+    return try gpa.dupe(u8, arena.strings.slice(name));
 }
 
 /// Render a statement run (a `(start, len)` slice of `arena.extra`) to "; "-joined
@@ -1699,12 +1694,10 @@ pub fn renderShaderStageAlloc(gpa: std.mem.Allocator, arena: *const AstArena, he
         if (p != 0) try out.appendSlice(gpa, ", ");
         try out.appendSlice(gpa, arena.strings.slice(param.name));
         try out.appendSlice(gpa, ": ");
-        if (arena.typeNodeKind(param.type_node) != .named) return error.UnsupportedDescriptorExpr;
-        try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(param.type_node)].name));
+        try out.appendSlice(gpa, arena.strings.slice(arena.namedTypeName(param.type_node) orelse return error.UnsupportedDescriptorExpr));
     }
     try out.appendSlice(gpa, ") -> ");
-    if (arena.typeNodeKind(stage.return_type) != .named) return error.UnsupportedDescriptorExpr;
-    try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(stage.return_type)].name));
+    try out.appendSlice(gpa, arena.strings.slice(arena.namedTypeName(stage.return_type) orelse return error.UnsupportedDescriptorExpr));
     try out.appendSlice(gpa, " { ");
     var st: u32 = 0;
     while (st < stage.body_len) : (st += 1) {
@@ -2107,8 +2100,7 @@ pub fn renderAbilityRuleAlloc(gpa: std.mem.Allocator, arena: *const AstArena, ru
         if (p != 0) try out.appendSlice(gpa, ", ");
         try out.appendSlice(gpa, arena.strings.slice(param.name));
         try out.appendSlice(gpa, ": ");
-        if (arena.typeNodeKind(param.type_node) != .named) return error.UnsupportedDescriptorExpr;
-        try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(param.type_node)].name));
+        try out.appendSlice(gpa, arena.strings.slice(arena.namedTypeName(param.type_node) orelse return error.UnsupportedDescriptorExpr));
     }
     try out.appendSlice(gpa, ")");
     if (rule.when_root != ast_mod.RuleDecl.none_when) {

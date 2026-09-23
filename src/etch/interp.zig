@@ -4437,9 +4437,9 @@ pub const Interpreter = struct {
                     if (self.ast.exprKind(let.value) == .struct_lit) {
                         const sl = self.ast.struct_lits.items[self.ast.exprData(let.value)];
                         if (sl.type_name == 0) {
-                            if (let.type_annotation.isNone() or self.ast.typeNodeKind(let.type_annotation) != .named) return error.RuntimeFailure;
-                            const named = self.ast.named_types.items[self.ast.typeNodeData(let.type_annotation)];
-                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(named.name));
+                            if (let.type_annotation.isNone()) return error.RuntimeFailure;
+                            const annotated = self.ast.namedTypeName(let.type_annotation) orelse return error.RuntimeFailure;
+                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(annotated));
                         }
                     }
                     break :blk try self.evalExpr(world, locals, let.value);
@@ -4901,9 +4901,7 @@ pub const Interpreter = struct {
     /// `null` when the field is not enum-typed or the variant is unknown
     /// (the resolver has already rejected those programs).
     fn enumFieldShorthand(self: *Interpreter, f: ast_mod.Field, value: NodeId) ?Value {
-        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
-        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
-        const ename = self.ast.resolveTypeAliasName(named.name);
+        const ename = self.ast.resolveTypeAliasName(self.ast.namedTypeName(f.type_node) orelse return null);
         const edecl = self.enum_decls.get(ename) orelse return null;
         // Expression-position `tag_path` data IS the variant ident (the
         // parser interns it directly; multi-segment is a parse error there).
@@ -4933,9 +4931,7 @@ pub const Interpreter = struct {
     /// declared-type lookup as `enumFieldShorthand`, for the anonymous
     /// `.{ … }` field-value resolution.
     fn structFieldTypeName(self: *Interpreter, f: ast_mod.Field) ?StringId {
-        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
-        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
-        const sname = self.ast.resolveTypeAliasName(named.name);
+        const sname = self.ast.resolveTypeAliasName(self.ast.namedTypeName(f.type_node) orelse return null);
         if (self.struct_decls.get(sname) == null) return null;
         return sname;
     }
@@ -6245,8 +6241,8 @@ pub const Interpreter = struct {
                 // storage concern handled on write, not in the Value.
                 const c = self.ast.casts.items[data];
                 const v = try self.evalExpr(world, locals, c.operand);
-                const named = self.ast.named_types.items[self.ast.typeNodeData(c.type_node)];
-                const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(named.name));
+                const target = self.ast.namedTypeName(c.type_node) orelse return error.RuntimeFailure;
+                const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(target));
                 const to_float = std.mem.eql(u8, tname, "float") or std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64");
                 return switch (v) {
                     .int_ => |x| if (to_float) Value{ .float_ = @floatFromInt(x) } else Value{ .int_ = x },
@@ -6706,8 +6702,8 @@ fn bindParams(
     while (i < rule.params_len) : (i += 1) {
         const p = ast.rule_params.items[rule.params_start + i];
         const v: Value = blk: {
-            const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-            const tname = ast.strings.slice(tnode.name);
+            const declared = ast.namedTypeName(p.type_node) orelse break :blk Value{ .unit = {} };
+            const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
             if (std.mem.eql(u8, tname, "Entity")) {
                 if (entity_id) |id| break :blk Value{ .entity_id = id };
                 break :blk Value{ .entity_id = value_mod.invalid_entity };
@@ -7464,17 +7460,14 @@ fn computeLayout(
         const f = ast.fields.items[fields_start + f_i];
         var enum_type_id: u32 = 0;
         const kind: FieldKind = kb: {
-            // a resource `T[]` field is a `.slice` type node (NOT
-            // `.named`): map it to `.array_` (a CollectionSlot) BEFORE the named-
-            // type decode below, which would mis-index `named_types`. Resource-
-            // only (validator-gated). Fixed `T[N]` (`.array`) and `.map_type` /
-            // `.set_type` are out of the surface.
+            // A resource collection field (`T[]`, `[K: V]`, `Set<T>`) is a
+            // CollectionSlot. Resource-only (validator-gated).
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .map_type) break :kb .map_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .set_type) break :kb .set_;
-            const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+            const type_name = ast.namedTypeName(f.type_node) orelse return error.InvalidProgram;
             // Resolve through any top-level `type` alias chain.
-            const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
+            const resolved_name_id = ast.resolveTypeAliasName(type_name);
             const tname = ast.strings.slice(resolved_name_id);
             if (fieldKindFromTypeName(tname, reg_kind)) |k| break :kb k;
             // Enum resource field: a declared enum type, resource-only
@@ -7900,8 +7893,8 @@ fn compileRule(
     var p_i: u32 = 0;
     while (p_i < rule.params_len) : (p_i += 1) {
         const p = ast.rule_params.items[rule.params_start + p_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-        const tname = ast.strings.slice(tnode.name);
+        const declared = ast.namedTypeName(p.type_node) orelse continue;
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(declared));
         if (std.mem.eql(u8, tname, "Entity")) {
             entity_param_name = p.name;
             break;
@@ -16194,4 +16187,86 @@ test "a sync with no arena value in scope stays accepted" {
         \\  get_mut(S).n = count
         \\}
     , .rule_arena_value_escapes));
+}
+
+/// Compiles `source` with no type-check, which is how a caller that skips the
+/// checker reaches the interpreter.
+fn compileUnchecked(gpa: std.mem.Allocator, pr: *const parser_mod.ParseResult, world: *World) !Interpreter {
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    return Interpreter.compile(gpa, &pr.ast, world);
+}
+
+test "a component collection field is refused, not laid out as a named type" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "component C { xs: int[] }");
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "the same component with a named field type compiles" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "component C { xs: int }");
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    interp.deinit();
+}
+
+test "a non-named rule parameter is never taken for the entity parameter" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\rule q(e: Entity) {}
+        \\rule r(xs: int[]) {}
+    );
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.rule_descs[0].entity_param_name != null);
+    try std.testing.expectEqual(@as(?StringId, null), interp.rule_descs[1].entity_param_name);
+}
+
+test "a non-named rule parameter is bound as unit, not as the entity" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa, "rule r(e: Entity, xs: int[]) {}");
+    defer pr.deinit(gpa);
+    const rule = pr.ast.rule_decls.items[0];
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try bindParams(gpa, &pr.ast, rule, null, &locals);
+    const xs = pr.ast.rule_params.items[rule.params_start + 1].name;
+    try std.testing.expect(locals.get(xs).? == .unit);
+}
+
+test "a rule parameter typed by an alias of Entity is the entity parameter" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\type Ent = Entity
+        \\rule r(e: Ent) {}
+    );
+    defer pr.deinit(gpa);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.rule_descs[0].entity_param_name != null);
+}
+
+test "a rule parameter typed by an alias of a scalar is bound as that scalar" {
+    const gpa = std.testing.allocator;
+    var pr = try parser_mod.parse(gpa,
+        \\type Seconds = float
+        \\rule r(e: Entity, dt: Seconds) {}
+    );
+    defer pr.deinit(gpa);
+    const rule = pr.ast.rule_decls.items[0];
+    var locals: Locals = .{};
+    defer locals.deinit(gpa);
+    try bindParams(gpa, &pr.ast, rule, null, &locals);
+    const dt = pr.ast.rule_params.items[rule.params_start + 1].name;
+    try std.testing.expect(locals.get(dt).? == .float_);
 }

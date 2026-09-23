@@ -3089,15 +3089,11 @@ pub const AstArena = struct {
         outer: while (guard <= max) : (guard += 1) {
             for (self.type_alias_decls.items) |alias| {
                 if (alias.name == current) {
-                    // A `.path` alias target (`type HA = m.Member`)
-                    // has no single ultimate name in this arena — stop the
-                    // by-name chain here (returning `current`) rather than
-                    // mis-indexing `named_types`. The qualified target is
-                    // resolved by node kind at the consult sites (a `.path`
-                    // TypeNode → `resolvePathTypeNode`), not by this walk.
-                    if (self.typeNodeKind(alias.target) != .named) break :outer;
-                    const named = self.named_types.items[self.typeNodeData(alias.target)];
-                    current = named.name;
+                    // A `.path` alias target (`type HA = m.Member`) has no
+                    // single ultimate name in this arena: the chain stops at
+                    // `current`, and the consult sites resolve the qualified
+                    // target by node kind (`resolvePathTypeNode`).
+                    current = self.namedTypeName(alias.target) orelse break :outer;
                     continue :outer;
                 }
             }
@@ -3120,9 +3116,8 @@ pub const AstArena = struct {
     /// shape is NOT `Entity` — the `await entity_event` target must be a bare
     /// `Entity` (§9.4).
     pub fn fieldTypeIsEntity(self: *const AstArena, field: Field) bool {
-        if (self.typeNodeKind(field.type_node) != .named) return false;
-        const named = self.named_types.items[self.typeNodeData(field.type_node)];
-        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(named.name)), "Entity");
+        const name = self.namedTypeName(field.type_node) orelse return false;
+        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(name)), "Entity");
     }
 
     /// Resolve the event's designated `Entity` field for `await entity_event`
@@ -4001,6 +3996,14 @@ pub const AstArena = struct {
     pub fn typeNodeData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .type_node);
         return self.type_nodes.items(.data)[id.index];
+    }
+
+    /// The name a `.named` type node carries, or null for any other kind. Every
+    /// kind's `data` indexes its own slab, so reading `named_types` through the
+    /// data of a non-`.named` node selects an unrelated name.
+    pub fn namedTypeName(self: *const AstArena, id: NodeId) ?StringId {
+        if (self.typeNodeKind(id) != .named) return null;
+        return self.named_types.items[self.typeNodeData(id)].name;
     }
 
     pub fn isEmpty(self: *const AstArena) bool {
