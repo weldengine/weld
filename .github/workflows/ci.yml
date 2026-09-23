@@ -391,10 +391,15 @@ jobs:
       - name: Run vertical-slice smoke (Debug, validation layers active)
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          # The loader then logs each layer it inserts: without that line, an
+          # absent VUID says nothing about validation.
+          VK_LOADER_DEBUG: layer
         run: |
           set -euo pipefail
           mkdir -p out
           zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' slice-smoke.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "--- a frame was composed + captured ---"
           test -s out/vertical_slice.ppm
           echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
@@ -407,10 +412,13 @@ jobs:
       - name: Run vertical-slice C0.8 IPC edit (Debug, validation layers active)
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          VK_LOADER_DEBUG: layer
         run: |
           set -euo pipefail
           mkdir -p out
           zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' slice-c08.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "--- the post-edit frame composed + captured ---"
           test -s out/vertical_slice_ipc.ppm
           if grep -E "VUID-|Validation Error" slice-c08.log; then
@@ -423,13 +431,22 @@ jobs:
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+          VK_LOADER_DEBUG: layer
         run: |
           set -uo pipefail
           mkdir -p /tmp/weld-rt && chmod 700 /tmp/weld-rt
           XDG_RUNTIME_DIR=/tmp/weld-rt weston --backend=headless --width=1280 --height=720 &
           sleep 2
           export XDG_RUNTIME_DIR=/tmp/weld-rt WAYLAND_DISPLAY=wayland-1
-          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || true
+          rc=0
+          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ] || ! grep -q "ipc demo completed cleanly" vkblit.log; then
+            tail -n 60 vkblit.log
+            echo "::error::the ipc demo did not complete (exit $rc) — no validation verdict is implied"
+            exit 1
+          fi
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' vkblit.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "=== vk_blit GAL blit on lavapipe (E6) ==="
           echo "--- distinct VUIDs ---"
           grep -oE "VUID-[A-Za-z0-9-]+" vkblit.log | sort -u || echo "  (none)"
