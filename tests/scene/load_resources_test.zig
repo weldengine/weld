@@ -26,6 +26,7 @@ test "resource string fields round-trip through the persistent heap" {
         .fields = &[_]registry.FieldDesc{
             .{ .name = "title", .offset = 0, .kind = .string_ },
         },
+        .kind = .resource,
     });
 
     const title_value = "Verdant Keep";
@@ -84,6 +85,7 @@ test "loader rejects a resource collection field (guard)" {
         .fields = &[_]registry.FieldDesc{
             .{ .name = "items", .offset = 0, .kind = .array_ },
         },
+        .kind = .resource,
     });
 
     var arena = std.heap.ArenaAllocator.init(gpa);

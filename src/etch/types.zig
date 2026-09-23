@@ -5005,13 +5005,13 @@ pub const TypeChecker = struct {
             };
             const req_name = self.arena.strings.slice(name_id);
             if (self.requisiteDecl(name_id) == null) {
-                try self.emit(
-                    .unknown_requisite,
-                    .error_,
-                    annot.span,
-                    "@requires names `{s}`, which is not a declared component",
-                    .{req_name},
-                );
+                const is_resource = builtinResourceByName(req_name) != null or
+                    (if (self.symbols.get(name_id)) |sym| sym.kind == .resource else false);
+                if (is_resource) {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is a resource: no entity carries one", .{req_name});
+                } else {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is not a declared component", .{req_name});
+                }
                 return;
             }
         }

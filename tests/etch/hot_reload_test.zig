@@ -759,8 +759,25 @@ test "a Zig requisite on TagSet resolves at the first compile" {
     try std.testing.expect(try zigRequisiteResolves(std.testing.allocator, weld_etch.types.tagset_component_name, "tags {\n  a { t00 }\n}\n"));
 }
 
-test "a Zig requisite on a builtin time resource resolves at the first compile" {
-    try std.testing.expect(try zigRequisiteResolves(std.testing.allocator, "GameTime", "component Plain { x: int = 0 }\n"));
+test "a Zig requisite on a builtin time resource is refused at the first compile" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "component Plain { x: int = 0 }\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "ZigRequirer",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+        .requires = &.{"GameTime"},
+    });
+    const before = world.registry.componentCount();
+    try std.testing.expectError(error.RequisiteIsResource, Interpreter.compile(gpa, &pr.ast, &world));
+    try std.testing.expectEqual(before, world.registry.componentCount());
+    try std.testing.expect(world.registry.idOf("GameTime") == null);
 }
 
 test "every type a compile registers without the program declaring it has a reserved name" {
@@ -782,4 +799,57 @@ test "every type a compile registers without the program declaring it has a rese
             return error.TestUnexpectedResult;
         }
     }
+}
+
+/// Source A with `Counter` a resource of the same layout.
+const src_counter_resource =
+    \\resource Counter { value: int = 0 }
+;
+
+/// Source A with `Counter` requiring a new component.
+const src_requires_changed =
+    \\component Mark { m: int = 0 }
+    \\@requires(Mark)
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+test "a reload that makes a component a resource is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_counter_resource));
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a reload that changes a component's @requires is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_requires_changed));
+    try std.testing.expect(world.registry.idOf("Mark") == null);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a builtin resource name held by a component is refused at compile" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "component Plain { x: int = 0 }\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "GameTime",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+    });
+    try std.testing.expectError(error.SchemaChanged, Interpreter.compile(gpa, &pr.ast, &world));
 }

@@ -972,6 +972,8 @@ pub fn build(b: *std.Build) void {
         // A resource collection field's default is checked against its
         // element type.
         .{ .path = "tests/etch/collection_default_test.zig", .etch = true, .dedicated_step = "test-collection-default" },
+        // `@requires` naming a resource is refused on every path.
+        .{ .path = "tests/etch/requires_resource_test.zig", .etch = true, .dedicated_step = "test-requires-resource" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },

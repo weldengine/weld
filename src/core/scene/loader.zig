@@ -423,7 +423,11 @@ fn instantiate(
         // Per-block component ids (constant across the block's entities).
         const ids = try gpa.alloc(ComponentId, cc);
         defer gpa.free(ids);
-        for (0..cc) |c| ids[c] = remap[block.schemaIndex(c)];
+        for (0..cc) |c| {
+            ids[c] = remap[block.schemaIndex(c)];
+            // A resource is no entity column, whatever the file says.
+            if (world.registry.componentKind(ids[c]) == .resource) return error.SchemaMismatch;
+        }
 
         // Per-slot payload views, reused each slot.
         const payloads = try gpa.alloc([]const u8, cc);
@@ -722,6 +726,9 @@ fn loadResources(
     while (i < count) : (i += 1) {
         const r = acc.resource(i);
         const cid = remap[r.schema_index];
+        // Only a type registered as a resource is installed as one: a component
+        // named in the resource section is refused rather than turned into one.
+        if (world.registry.componentKind(cid) != .resource) return error.SchemaMismatch;
 
         // The loader reconstructs POD + interned `string` resource fields
         // only. A collection field (`.array_`/`.map_`/`.set_`) on disk is a zeroed
@@ -871,6 +878,7 @@ fn registerStringResource(gpa: std.mem.Allocator, reg: *Registry, name: []const 
         .fields = &[_]registry_mod.FieldDesc{
             .{ .name = "v", .offset = 0, .kind = .string_ },
         },
+        .kind = .resource,
     });
 }
 
@@ -885,6 +893,7 @@ fn registerArrayResource(gpa: std.mem.Allocator, reg: *Registry, name: []const u
         .fields = &[_]registry_mod.FieldDesc{
             .{ .name = "xs", .offset = 0, .kind = .array_ },
         },
+        .kind = .resource,
     });
 }
 
@@ -1659,4 +1668,50 @@ test "activateExtension rejects re-activation, including a hook-only extension (
     try activateExtension(&world, backing, e2, "HookOnly", hook_only);
     try testing.expect(world.hasEntityExtension(e2, "HookOnly"));
     try testing.expectError(error.ExtensionAlreadyActive, activateExtension(&world, backing, e2, "HookOnly", hook_only));
+}
+
+test "an archetype naming a type registered as a resource is refused" {
+    const gpa = testing.allocator;
+    var cook_reg = Registry.init();
+    defer cook_reg.deinit(gpa);
+    const pos_cook = try registerRaw(gpa, &cook_reg, "Pos", 8, 4);
+    const bytes = try buildOneCompScene(gpa, &cook_reg, pos_cook);
+    defer gpa.free(bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Pos",
+        .size = 8,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &.{},
+        .kind = .resource,
+    });
+    try testing.expectError(error.SchemaMismatch, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "a resource section naming a type registered as a component is refused" {
+    const gpa = testing.allocator;
+    var cook_reg = Registry.init();
+    defer cook_reg.deinit(gpa);
+    const res = try registerStringResource(gpa, &cook_reg, "Settings");
+    const bytes = try buildStringResourceScene(gpa, &cook_reg, res, "x");
+    defer gpa.free(bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    const cid = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Settings",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 16,
+        .fields = &[_]registry_mod.FieldDesc{
+            .{ .name = "v", .offset = 0, .kind = .string_ },
+        },
+    });
+    try testing.expectError(error.SchemaMismatch, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expect(!world.resources.contains(cid));
+    try testing.expectEqual(registry_mod.TypeKind.component, world.registry.componentKind(cid));
 }

@@ -85,6 +85,8 @@ pub const CookError = error{
     NonConstValue,
     /// A constant field value overflows, or does not fit its field's type.
     ValueOutOfRange,
+    /// `@requires` names a resource, or a resource carries `@requires`.
+    RequisiteIsResource,
     /// A value's type does not match the field's kind.
     TypeMismatch,
     /// A `uuid:`/`parent:` enum value referenced an unknown enum variant.
@@ -372,15 +374,17 @@ const Builder = struct {
     /// declaration may name a component registered later — Etch admits forward
     /// references, and the descriptor carries NAMES for exactly that reason.
     fn finalizeDecls(self: *Builder, diag_out: ?*[]const u8) CookError!void {
-        // Every arm named, no `else`: `finalizeRequires` returns exactly three
-        // errors and an `else` here would widen `CookError` with whatever it
-        // grows next, which is the opposite of what a typed error set is for.
+        // Every arm named, no `else`: an `else` here would widen `CookError`
+        // with whatever `finalizeRequires` grows next, which is the opposite of
+        // what a typed error set is for.
         self.registry.finalizeRequires(self.gpa) catch |e| switch (e) {
             error.RequiresCycle => return fail(diag_out, error.RequiresCycle, "`@requires` closure contains a cycle"),
             // `UndeclaredType` and not a new member: an unknown requisite IS a
             // type the program never declared, which is exactly what that
             // member already means.
             error.UnknownRequisite => return fail(diag_out, error.UndeclaredType, "`@requires` names a component that does not exist"),
+            error.RequisiteIsResource => return fail(diag_out, error.RequisiteIsResource, "`@requires` names a resource, which no entity carries"),
+            error.RequiresOnResource => return fail(diag_out, error.RequisiteIsResource, "a resource carries `@requires`, which only a component can"),
             error.OutOfMemory => return error.OutOfMemory,
         };
     }

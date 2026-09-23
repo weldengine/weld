@@ -117,6 +117,9 @@ pub fn generateFile(
                 if (types_mod.storageModeOf(ast, ast.component_decls.items[data]) != .table) {
                     return CodegenError.SparseStorageUnsupported;
                 }
+                const requisites = types_mod.requiresNamesOf(gpa, ast, ast.component_decls.items[data]) catch return CodegenError.OutOfMemory;
+                defer gpa.free(requisites);
+                if (requisites.len != 0) return CodegenError.RequiresUnsupported;
                 try emitComponentLikeStruct(&w, ast, data, .component);
                 stats.components += 1;
             },

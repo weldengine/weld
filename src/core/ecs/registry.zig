@@ -55,6 +55,11 @@ pub const StorageKind = enum {
     }
 };
 
+/// Whether a registered type is attached to entities or held once by the world.
+/// A resource is no entity column, so it is neither a requisite nor a requirer
+/// (`engine-ecs-internals.md` §3).
+pub const TypeKind = enum { component, resource };
+
 /// Coarse-grained tag for primitive fields, telling the interpreter how to read
 /// or write raw bytes. The Etch subset exercises only `int_`, `float_`, `bool_`.
 ///
@@ -183,6 +188,9 @@ pub const ComponentDesc = struct {
     /// Identity the other inputs of `schemaDigestOf` cannot express:
     /// `TagTable.contentDigest` on the builtin `TagSet`, `0` everywhere else.
     content_digest: u64 = 0,
+    /// Component or resource. A host that makes an id a resource through
+    /// `World.addResource` records the kind there.
+    kind: TypeKind = .component,
 };
 
 /// The 64-bit schema identity of `desc` (`engine-ecs-internals.md` §13), over
@@ -333,6 +341,14 @@ pub const PreparedEntry = struct {
         return self.entry.desc.size;
     }
 
+    pub fn kind(self: *const PreparedEntry) TypeKind {
+        return self.entry.desc.kind;
+    }
+
+    pub fn requires(self: *const PreparedEntry) []const []const u8 {
+        return self.entry.desc.requires;
+    }
+
     pub fn alignment(self: *const PreparedEntry) u16 {
         return self.entry.desc.alignment;
     }
@@ -455,6 +471,7 @@ pub const Registry = struct {
                 .storage = desc.storage,
                 .requires = requires_owned,
                 .content_digest = desc.content_digest,
+                .kind = desc.kind,
             },
             .schema_digest = schemaDigestOf(desc),
             .owned_blocks = blocks_owned,
@@ -548,6 +565,9 @@ pub const Registry = struct {
     /// diamond (`A requires B, C`; `B requires D`; `C requires D`), and a
     /// diamond is legal.
     ///
+    /// A requisite that is a resource, and a resource with requisites, are
+    /// errors too: a resource is no entity column.
+    ///
     /// On error every closure keeps its previous value.
     pub fn finalizeRequires(self: *Registry, gpa: std.mem.Allocator) !void {
         const staged = try self.stageClosures(gpa, &.{});
@@ -562,7 +582,7 @@ pub const Registry = struct {
         self: *const Registry,
         gpa: std.mem.Allocator,
         pending: []const PreparedEntry,
-    ) error{ OutOfMemory, RequiresCycle, UnknownRequisite }!StagedClosures {
+    ) error{ OutOfMemory, RequiresCycle, UnknownRequisite, RequisiteIsResource, RequiresOnResource }!StagedClosures {
         const graph: Graph = .{ .registry = self, .pending = pending };
         const n = graph.count();
         const out = try gpa.alloc([]const ComponentId, n);
@@ -607,6 +627,12 @@ pub const Registry = struct {
             return g.pending[id - base].entry.desc.requires;
         }
 
+        fn kindOf(g: Graph, id: ComponentId) TypeKind {
+            const base = g.registry.entries.items.len;
+            if (id < base) return g.registry.entries.items[id].desc.kind;
+            return g.pending[id - base].entry.desc.kind;
+        }
+
         fn idOf(g: Graph, name: []const u8) ?ComponentId {
             if (g.registry.by_name.get(name)) |id| return id;
             for (g.pending, 0..) |p, i| {
@@ -622,12 +648,14 @@ pub const Registry = struct {
         if (colour[id] == .black) return;
         if (colour[id] == .grey) return error.RequiresCycle;
         colour[id] = .grey;
+        if (graph.kindOf(id) == .resource and graph.requiresOf(id).len != 0) return error.RequiresOnResource;
 
         var acc: std.ArrayListUnmanaged(ComponentId) = .empty;
         errdefer acc.deinit(gpa);
         for (graph.requiresOf(id)) |req_name| {
             const req = graph.idOf(req_name) orelse return error.UnknownRequisite;
             if (req == id) return error.RequiresCycle;
+            if (graph.kindOf(req) == .resource) return error.RequisiteIsResource;
             try closeOne(gpa, graph, req, colour, out);
             try appendUnique(gpa, &acc, req);
             for (out[req]) |t| try appendUnique(gpa, &acc, t);
@@ -692,6 +720,29 @@ pub const Registry = struct {
     /// the Etch annotation is the mode's only producer.
     pub fn componentStorage(self: *const Registry, id: ComponentId) StorageKind {
         return self.entries.items[id].desc.storage;
+    }
+
+    /// The direct `@requires` names `id` was registered with.
+    pub fn componentRequires(self: *const Registry, id: ComponentId) []const []const u8 {
+        return self.entries.items[id].desc.requires;
+    }
+
+    /// Component or resource, as registered or as `markResource` set it.
+    pub fn componentKind(self: *const Registry, id: ComponentId) TypeKind {
+        return self.entries.items[id].desc.kind;
+    }
+
+    /// Refuses making `id` a resource when a closure requires it or it has
+    /// requisites. Mutates nothing, so `markResource` may follow a later
+    /// fallible step.
+    pub fn checkResource(self: *const Registry, id: ComponentId) error{ RequisiteIsResource, RequiresOnResource }!void {
+        if (self.entries.items[id].desc.requires.len != 0) return error.RequiresOnResource;
+        for (self.entries.items) |e| for (e.closure) |t| if (t == id) return error.RequisiteIsResource;
+    }
+
+    /// Records `id` as a resource. `checkResource` must have admitted it.
+    pub fn markResource(self: *Registry, id: ComponentId) void {
+        self.entries.items[id].desc.kind = .resource;
     }
 
     /// Lookup a field on a component by name. Returns `null` if the name

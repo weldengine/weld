@@ -2395,7 +2395,9 @@ pub const World = struct {
 
     /// Add a resource. `init_bytes` is duplicated by the store.
     pub fn addResource(self: *World, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) !void {
+        try self.registry.checkResource(id);
         try self.resources.addResource(gpa, id, init_bytes);
+        self.registry.markResource(id);
     }
 
     /// Tick boundary — reset resource dirty bits. Called once per tick

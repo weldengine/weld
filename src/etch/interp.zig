@@ -42,6 +42,7 @@ const ComponentId = weld_core.ecs.registry.ComponentId;
 /// Storage backend recorded per component at registration — `table | sparse`,
 /// default `table` (`engine-ecs-internals.md` §2).
 const StorageKind = weld_core.ecs.registry.StorageKind;
+const TypeKind = weld_core.ecs.registry.TypeKind;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 const PreparedEntry = weld_core.ecs.registry.PreparedEntry;
 const StagedClosures = weld_core.ecs.registry.StagedClosures;
@@ -7110,6 +7111,8 @@ fn stageDecl(
             .size = e.size(),
             .alignment = e.alignment(),
             .fields_len = e.fields().len,
+            .kind = e.kind(),
+            .requires = e.requires(),
         });
         return mapName(gpa, bridge, shape.reg_kind, shape.name, staged);
     }
@@ -7141,12 +7144,19 @@ fn stageTagSet(
     if (holder) |id| {
         const live: LiveLayout = if (id < pending.base_id) liveLayoutOf(&world.registry, id) else blk: {
             const e = pending.entryOf(id);
-            break :blk .{ .digest = e.schemaDigest(), .size = e.size(), .alignment = e.alignment(), .fields_len = e.fields().len };
+            break :blk .{
+                .digest = e.schemaDigest(),
+                .size = e.size(),
+                .alignment = e.alignment(),
+                .fields_len = e.fields().len,
+                .kind = e.kind(),
+                .requires = e.requires(),
+            };
         };
         // An absent digest refuses: an unknown layout is not a matching one.
-        if ((live.digest orelse ~candidate) != candidate) {
+        if (live.kind != .component or (live.digest orelse ~candidate) != candidate) {
             std.log.warn(
-                "etch/hot-reload: '" ++ tagset_name ++ "' changed layout or tag identity — reload REFUSED, " ++
+                "etch/hot-reload: '" ++ tagset_name ++ "' changed layout, kind or tag identity — reload REFUSED, " ++
                     "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
                     "An unchanged size means the tags themselves were renamed or reordered.",
                 .{ live.size, size, tag_table.leaf_count },
@@ -7176,10 +7186,6 @@ fn stageBuiltinResource(
     pending: *PendingTypes,
     br: *const types_mod.BuiltinResource,
 ) !void {
-    if (world.registry.idOf(br.name) orelse pending.idOf(br.name)) |id| {
-        return bridge.mapResource(gpa, br.name, id);
-    }
-    if (world.resources.contains(pending.nextId())) return error.DuplicateResource;
     var fields_buf: [8]FieldDesc = undefined;
     var default_buf: [64]u8 = @splat(0);
     var size: usize = 0;
@@ -7204,13 +7210,26 @@ fn stageBuiltinResource(
         try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
     }
     size = std.mem.alignForward(usize, size, max_align);
-    var entry = try world.registry.prepareEntry(gpa, .{
+    const desc: weld_core.ecs.registry.ComponentDesc = .{
         .name = br.name,
         .size = @intCast(size),
         .alignment = @intCast(max_align),
         .default_bytes = default_buf[0..size],
         .fields = fields_buf[0..br.fields.len],
-    });
+        .kind = .resource,
+    };
+    // The name may already be held; the holder must be this resource.
+    if (world.registry.idOf(br.name)) |id| {
+        if (world.registry.componentKind(id) != .resource or world.registry.schemaDigest(id) != weld_core.ecs.registry.schemaDigestOf(desc)) return error.SchemaChanged;
+        return bridge.mapResource(gpa, br.name, id);
+    }
+    if (pending.idOf(br.name)) |id| {
+        const e = pending.entryOf(id);
+        if (e.kind() != .resource or e.schemaDigest() != weld_core.ecs.registry.schemaDigestOf(desc)) return error.SchemaChanged;
+        return bridge.mapResource(gpa, br.name, id);
+    }
+    if (world.resources.contains(pending.nextId())) return error.DuplicateResource;
+    var entry = try world.registry.prepareEntry(gpa, desc);
     errdefer entry.deinit(gpa);
     var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, entry.defaultBytes()), .collection_blocks = &.{} };
     errdefer resource.deinit(gpa);
@@ -7481,12 +7500,14 @@ fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_co
     };
 }
 
-/// The layout recorded for the type already holding a declaration's name.
+/// What is recorded for the type already holding a declaration's name.
 const LiveLayout = struct {
     digest: ?u64,
     size: u16,
     alignment: u16,
     fields_len: usize,
+    kind: TypeKind,
+    requires: []const []const u8,
 };
 
 fn liveLayoutOf(registry: *const Registry, id: ComponentId) LiveLayout {
@@ -7495,12 +7516,38 @@ fn liveLayoutOf(registry: *const Registry, id: ComponentId) LiveLayout {
         .size = registry.componentSize(id),
         .alignment = registry.componentAlignment(id),
         .fields_len = registry.componentFields(id).len,
+        .kind = registry.componentKind(id),
+        .requires = registry.componentRequires(id),
     };
 }
 
+fn typeKindOf(reg_kind: RegKind) TypeKind {
+    return switch (reg_kind) {
+        .component => .component,
+        .resource => .resource,
+    };
+}
+
+/// Whether two `@requires` lists name the same types, in any order.
+fn sameRequisites(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    outer: for (a) |x| {
+        for (b) |y| if (std.mem.eql(u8, x, y)) continue :outer;
+        return false;
+    }
+    return true;
+}
+
 /// Refuse `shape` with `error.SchemaChanged` unless its layout has `live`'s
-/// digest. An absent digest refuses: an unknown layout is not a matching one.
+/// digest and it keeps `live`'s kind and requisites, which a reload does not
+/// apply. The storage mode is no part of the comparison: a changed mode is
+/// neither refused nor migrated (`engine-ecs-internals.md` §13). An absent
+/// digest refuses: an unknown layout is not a matching one.
 fn confrontLayout(gpa: std.mem.Allocator, ast: *const AstArena, shape: DeclShape, live: LiveLayout) !void {
+    if (live.kind != typeKindOf(shape.reg_kind) or !sameRequisites(live.requires, shape.requires)) {
+        std.log.warn("etch/hot-reload: '{s}' changed its kind or its @requires — reload REFUSED, previous image kept", .{shape.name});
+        return error.SchemaChanged;
+    }
     var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
     defer layout.deinit(gpa);
     const candidate = schemaDigestFor(shape.name, layout);
@@ -7707,6 +7754,7 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
         .fields = fields.items,
         .storage = shape.storage,
         .requires = shape.requires,
+        .kind = typeKindOf(shape.reg_kind),
     });
 }
 
