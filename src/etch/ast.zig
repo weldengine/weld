@@ -3953,6 +3953,7 @@ pub const AstArena = struct {
     pub fn onEventTypeName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the event type
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }
@@ -3979,6 +3980,7 @@ pub const AstArena = struct {
     pub fn observerComponentName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the component
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }

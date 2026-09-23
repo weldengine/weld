@@ -974,6 +974,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/collection_default_test.zig", .etch = true, .dedicated_step = "test-collection-default" },
         // `@requires` naming a resource is refused on every path.
         .{ .path = "tests/etch/requires_resource_test.zig", .etch = true, .dedicated_step = "test-requires-resource" },
+        // An annotation argument follows §1.5; positional readers refuse names.
+        .{ .path = "tests/etch/annotation_arg_test.zig", .etch = true, .dedicated_step = "test-annotation-arg" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },

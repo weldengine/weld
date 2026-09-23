@@ -929,10 +929,11 @@ pub const Parser = struct {
         const start: u32 = @intCast(self.arena.annot_pool.items.len);
         while (self.peek() == .at) {
             const at_tok = try self.advance();
-            const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+            // `annotation = "@" , IDENT` (`etch-grammar.md` §1.5).
+            const name_tok = if (self.peek() == .ident)
                 try self.advance()
             else
-                return self.parseErr(self.peekSpan(), "expected annotation name after '@'");
+                return self.parseErr(self.peekSpan(), "expected a lowercase annotation name after '@'");
 
             const name_slice = self.sliceOf(name_tok.span);
             const name_id = try self.internSlice(name_tok.span);
@@ -972,35 +973,16 @@ pub const Parser = struct {
         return .{ .start = start, .len = len };
     }
 
+    /// `annotation_arg = expression | IDENT ":" expression | IDENT`
+    /// (`etch-grammar.md` §1.5). A name followed by `:` is a named argument;
+    /// anything else is a positional expression.
     fn parseAnnotationArg(self: *Parser) ParseError!ast_mod.AnnotationArg {
-        // Named arg if `ident ':' expr`.
-        if (self.peek() == .ident) {
-            // Lookahead: if next non-ident token is `:`, treat as named.
-            // The lexer's one-token lookahead is `self.current`; we have
-            // to commit to the ident and check the following token.
-            const saved = self.current;
+        if ((self.peek() == .ident or self.peek() == .type_ident) and self.peekNext() == .colon) {
+            const name = try self.advance();
             _ = try self.advance();
-            if (self.peek() == .colon) {
-                _ = try self.advance();
-                const name_id = try self.internSlice(saved.span);
-                const value = try self.parseExpr(0);
-                return .{ .name = name_id, .value = value };
-            }
-            // Not named: this was the start of a positional expression
-            // beginning with an ident. Build the expr starting from here
-            // by emitting an ident expr and continuing through Pratt.
-            const ident_id = try self.internSlice(saved.span);
-            const lhs = try self.arena.addExpr(self.gpa, .ident, ident_id, saved.span);
-            // Route through the postfix chain first so `@requires(self.health)`
-            // (ident + `.field`) parses; then the binary continuation
-            // (the annotation field-access rule).
-            const after_postfix = try self.continuePostfix(lhs);
-            const continued = try self.continuePostfixAndBinary(after_postfix, 0);
-            return .{ .name = 0, .value = continued };
+            return .{ .name = try self.internSlice(name.span), .value = try self.parseExpr(0) };
         }
-        // Positional: bare expression.
-        const expr = try self.parseExpr(0);
-        return .{ .name = 0, .value = expr };
+        return .{ .name = 0, .value = try self.parseExpr(0) };
     }
 
     // ─── Component / Resource ───────────────────────────────────────────
@@ -6203,12 +6185,7 @@ pub const Parser = struct {
     }
 
     /// Continue a postfix `.field` / `.get(T)` / `.get_mut(T)` chain on an
-    /// already-parsed receiver. Extracted from `parsePostfix` so annotation
-    /// arguments that begin with an identifier (`@requires(self.health)`)
-    /// also pick up the postfix chain (the annotation field-access rule): the
-    /// named-arg lookahead in `parseAnnotationArg` consumes the leading
-    /// ident before the normal `parsePrimary` postfix path can run, so the
-    /// ident must be threaded back through this helper.
+    /// already-parsed receiver.
     fn continuePostfix(self: *Parser, expr_in: NodeId) ParseError!NodeId {
         var expr = expr_in;
         while (true) {
@@ -7401,10 +7378,6 @@ test "doc comments and leading comments attach to top-level items" {
 
 test "annotation arg accepts a field access expression" {
     const gpa = std.testing.allocator;
-    // `@requires(self.health)` — annotation positional arg that is a field
-    // access. Pre-fix, the annotation-arg path built the ident then called
-    // the binary-only continuation, leaving `.health` unconsumed and
-    // surfacing "expected ')'". Postfix routing now parses it cleanly.
     var result = try parse(gpa,
         \\@requires(self.health)
         \\component Inventory { gold: int = 0 }
@@ -7421,6 +7394,69 @@ test "annotation arg accepts a field access expression" {
     try std.testing.expectEqual(@as(u32, 1), annot.args_len);
     const arg = result.ast.annot_args.items[annot.args_start];
     try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
+}
+
+/// The single argument of `@tag(<arg>)` on a component, parsed: its name and
+/// the kind of its value. The caller owns `result`.
+fn parseTagArg(gpa: std.mem.Allocator, arg_src: []const u8, result: *ParseResult) !ast_mod.AnnotationArg {
+    const src = try std.fmt.allocPrint(gpa, "@tag({s})\ncomponent C {{ x: int = 0 }}\n", .{arg_src});
+    defer gpa.free(src);
+    result.* = try parse(gpa, src);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const cd = result.ast.component_decls.items[0];
+    const annot = result.ast.annot_pool.items[cd.annotations_extra];
+    try std.testing.expectEqual(@as(u32, 1), annot.args_len);
+    return result.ast.annot_args.items[annot.args_start];
+}
+
+test "an annotation argument may be a cast" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "v as f32", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.cast, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be none" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "none", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.none_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be some(value)" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "some(1)", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(ast_mod.ExprKind.some_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument may be named by a capitalised name" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "Name: 1", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqualStrings("Name", result.ast.strings.slice(arg.name));
+    try std.testing.expectEqual(ast_mod.ExprKind.int_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation argument named by a lowercase name keeps its name" {
+    const gpa = std.testing.allocator;
+    var result: ParseResult = undefined;
+    const arg = try parseTagArg(gpa, "reason: \"x\"", &result);
+    defer result.deinit(gpa);
+    try std.testing.expectEqualStrings("reason", result.ast.strings.slice(arg.name));
+    try std.testing.expectEqual(ast_mod.ExprKind.string_lit, result.ast.exprKind(arg.value));
+}
+
+test "an annotation name is an IDENT, never a TYPE_IDENT" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa, "@Unit(.meters)\ncomponent C { x: int = 0 }\n");
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.diagnostics[0].primary_message, "lowercase annotation name") != null);
 }
 
 test "parser builds array literals, fill, and index/slice access (collections)" {

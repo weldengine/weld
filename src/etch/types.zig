@@ -8535,7 +8535,8 @@ pub fn isEmptySetConstructor(arena: *const AstArena, id: NodeId) bool {
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {
-        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path => true,
+        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path, .none_lit => true,
+        .some_lit => isConstEvaluable(arena, @bitCast(arena.exprData(id))),
         .binary => blk: {
             const bin = arena.binary_exprs.items[arena.exprData(id)];
             // Arithmetic / comparison / logic on const-evaluable args is OK.
