@@ -127,9 +127,12 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Mesh {
         try sequentialIndices(gpa, vertex_count);
     errdefer gpa.free(indices);
 
+    // The intermediate document has no literal for a non-finite float.
+    for (positions) |v| if (!std.math.isFinite(v)) return error.MalformedGltf;
     var bmin: [3]f32 = .{ 0, 0, 0 };
     var bmax: [3]f32 = .{ 0, 0, 0 };
     computeBounds(try accessorAt(doc, pos_index), positions, &bmin, &bmax);
+    for (bmin, bmax) |lo, hi| if (!std.math.isFinite(lo) or !std.math.isFinite(hi)) return error.MalformedGltf;
 
     return .{
         .positions = positions,
