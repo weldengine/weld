@@ -38,6 +38,10 @@ const comment_scan = @import("comment_scan.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools", "build.zig" };
 
+/// Where `dead-tests` looks for test blocks: the lint paths and `examples/`, whose
+/// sources a test root can reach without the lint rules applying to them.
+const dead_test_paths = default_lint_paths ++ [_][]const u8{"examples"};
+
 /// Default subtrees for `census` and `fingerprint`.
 ///
 /// Narrower than `default_lint_paths` on purpose: `tests/` carries no content
@@ -398,7 +402,7 @@ fn runDeadTests(arena: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, argv_
 
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(arena);
-    for (default_lint_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
+    for (dead_test_paths) |p| try scan.collectZigFiles(arena, io, p, &files);
 
     // The reader closes over an arena and the io handle through a file-scope
     // slot: `analyze` takes a plain function pointer so its fixtures can drive

@@ -979,6 +979,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/requires_resource_test.zig", .etch = true, .dedicated_step = "test-requires-resource" },
         // An annotation argument follows §1.5; positional readers refuse names.
         .{ .path = "tests/etch/annotation_arg_test.zig", .etch = true, .dedicated_step = "test-annotation-arg" },
+        // The vertical slice's math is std-only and tested on its own: the
+        // slice module is imported across a module boundary, which collects
+        // none of its tests.
+        .{ .path = "examples/vertical_slice/math.zig" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },
