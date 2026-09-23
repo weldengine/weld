@@ -320,6 +320,14 @@ test "decode static cube glTF extracts positions, normals, uvs, indices" {
     try std.testing.expectEqual([3]u32{ 0, 1, 2 }, mesh.indices[0..3].*);
 }
 
+test "a bound that is not finite is refused" {
+    const gpa = std.testing.allocator;
+    const src = try std.mem.replaceOwned(u8, gpa, cube_gltf, "\"max\":[1,1,1]", "\"max\":[1,1,1e40]");
+    defer gpa.free(src);
+    try std.testing.expect(!std.mem.eql(u8, src, cube_gltf));
+    try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
+}
+
 test "decode rejects non-glTF json" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.NoMesh, decode(gpa, "{\"buffers\":[],\"bufferViews\":[],\"accessors\":[],\"meshes\":[]}"));
