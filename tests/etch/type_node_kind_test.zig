@@ -87,6 +87,10 @@ test "the codegen refuses a resource set field" {
     try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "resource R { s: Set<int> }", true));
 }
 
+test "the codegen refuses a non-named event field, even unchecked" {
+    try std.testing.expectError(error.UnsupportedConstruct, lowerSource(std.testing.allocator, "event E { xs: int[] }", false));
+}
+
 test "the same resource with a scalar field lowers" {
     try lowerSource(std.testing.allocator, "resource R { xs: int }", true);
 }
