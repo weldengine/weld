@@ -74,9 +74,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const physics_f64 = b.option(bool, "physics_f64", "Build the engine's forge_3d in f64 precision") orelse false;
     const weld = b.dependency("weld", .{
         .target = target,
         .optimize = optimize,
+        .physics_f64 = physics_f64,
     });
 
     for (cases) |case| {

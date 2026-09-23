@@ -13,9 +13,11 @@ pub fn build(b: *std.Build) void {
 
     // The engine, by local path while the repo is monolithic. It becomes a url
     // plus hash the day separable extraction is validated (`ARCH-017`).
+    const physics_f64 = b.option(bool, "physics_f64", "Build the engine's forge_3d in f64 precision") orelse false;
     const weld = b.dependency("weld", .{
         .target = target,
         .optimize = optimize,
+        .physics_f64 = physics_f64,
     });
 
     const main_module = b.createModule(.{

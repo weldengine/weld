@@ -268,6 +268,7 @@ pub fn build(b: *std.Build) void {
         "build",
         "run",
     });
+    addNestedOptions(b, ex_run, target, optimize, physics_f64);
     ex_run.setCwd(b.path("examples/triangle"));
     if (b.args) |args| {
         ex_run.addArg("--");
@@ -286,6 +287,7 @@ pub fn build(b: *std.Build) void {
         b.graph.zig_exe,
         "build",
     });
+    addNestedOptions(b, synth_verify, target, optimize, physics_f64);
     synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
     const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the standalone proof)");
     synth_verify_step.dependOn(&synth_verify.step);
@@ -370,6 +372,7 @@ pub fn build(b: *std.Build) void {
             b.addSystemCommand(&.{ b.graph.zig_exe, "build", name })
         else
             b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        addNestedOptions(b, run, target, optimize, physics_f64);
         run.setCwd(b.path(counterproof_dir));
         // ALWAYS RE-RUN, and this is not a precaution. A `Run` step with no file
         // argument is cached on its argv alone, and `setCwd` does not make the
@@ -2652,4 +2655,20 @@ pub fn build(b: *std.Build) void {
     });
     const bindgen_tests = b.addTest(.{ .root_module = bindgen_test_module });
     test_step.dependOn(&b.addRunArtifact(bindgen_tests).step);
+}
+
+/// Passes this build's target, CPU, mode and physics precision to a nested
+/// `zig build` of a sub-project, so it compiles for the cell that runs it
+/// (`ARCH-031` rule 6).
+fn addNestedOptions(
+    b: *std.Build,
+    run: *std.Build.Step.Run,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    physics_f64: bool,
+) void {
+    run.addArg(b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}));
+    run.addArg(b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}));
+    run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
+    run.addArg(if (physics_f64) "-Dphysics_f64=true" else "-Dphysics_f64=false");
 }
