@@ -83,6 +83,8 @@ pub const CookError = error{
     SpreadUnsupported,
     /// A field value expression is not constant-evaluable at cook time.
     NonConstValue,
+    /// A constant field value overflows, or does not fit its field's type.
+    ValueOutOfRange,
     /// A value's type does not match the field's kind.
     TypeMismatch,
     /// A `uuid:`/`parent:` enum value referenced an unknown enum variant.
@@ -427,8 +429,10 @@ const Builder = struct {
         return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
             error.LayoutTooLarge => fail(diag_out, error.UnsupportedFieldKind, "component/resource declaration exceeds the registry's 64 KiB"),
-            error.DuplicateComponent => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
-            else => error.OutOfMemory,
+            error.DuplicateComponent, error.SchemaChanged => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
+            error.FieldOutOfBounds, error.CollectionDefaultNotEmpty => fail(diag_out, error.UnsupportedFieldKind, "the registry refused the declaration's field layout or defaults"),
+            error.ValueOutOfRange => fail(diag_out, error.ValueOutOfRange, "a field default overflows its type"),
+            error.OutOfMemory => error.OutOfMemory,
         };
     }
 
@@ -950,7 +954,7 @@ const Builder = struct {
     /// version rides through to `SceneHeader.content_version` unchanged.
     fn versionFromNode(self: *Builder, version: NodeId, diag_out: ?*[]const u8) CookError!u16 {
         if (version.isNone()) return 0;
-        const v = interp.evalConst(self.ast, version) catch return fail(diag_out, error.NonConstValue, "version must be a constant int");
+        const v = interp.evalConst(self.gpa, self.ast, version) catch return fail(diag_out, error.NonConstValue, "version must be a constant int");
         const x: i64 = switch (v) {
             .int_ => |n| n,
             else => return fail(diag_out, error.NonConstValue, "version must be an int"),
@@ -1122,8 +1126,16 @@ const Builder = struct {
     /// POD scalar kinds shared by components and resources.
     fn encodeScalar(self: *Builder, blob: []u8, fd: FieldDesc, value: NodeId, diag_out: ?*[]const u8) CookError!void {
         const slot = blob[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        const v = interp.evalConst(self.ast, value) catch return fail(diag_out, error.NonConstValue, "field value is not constant at cook time");
-        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch return fail(diag_out, error.TypeMismatch, "field value type does not match the field kind");
+        const v = interp.evalConst(self.gpa, self.ast, value) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.LiteralOutOfRange, error.IntegerOverflow, error.FloatOverflow => fail(diag_out, error.ValueOutOfRange, "field value overflows its type"),
+            error.DivisionByZero => fail(diag_out, error.NonConstValue, "field value divides by zero"),
+            error.NotConstant, error.KindMismatch => fail(diag_out, error.NonConstValue, "field value is not constant at cook time"),
+        };
+        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch |err| return switch (err) {
+            error.IntegerOverflow => fail(diag_out, error.ValueOutOfRange, "field value does not fit the field's type"),
+            else => fail(diag_out, error.TypeMismatch, "field value type does not match the field kind"),
+        };
     }
 
     /// Group built entities by their FULL declared component set (sorted ids)

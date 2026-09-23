@@ -67,6 +67,8 @@ pub const BridgeError = error{
     /// detected at DEREFERENCE (§5.3 c). Distinct from `UnknownEntity` and
     /// `UnknownComponent`, which ask the same two questions at CONSTRUCTION.
     StaleComponentRef,
+    /// An integer outside the range of the field it is written to.
+    IntegerOverflow,
 };
 
 /// One bridge instance per Etch program run. Lives for the same
@@ -188,7 +190,7 @@ pub const Bridge = struct {
         const field = registry.findField(ref.component_id, field_name) orelse return BridgeError.UnknownField;
         const slot_bytes = try refBytes(world, ref);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        try writeValueAsBytes(field.kind, field_bytes, v);
+        try writeValueAsBytes(field.kind, field_bytes, narrowForStore(field.kind, v));
     }
 
     /// Stamp `ref`'s slot as modified at `tick` — writes the `changed_tick`
@@ -250,7 +252,7 @@ pub const Bridge = struct {
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const bytes = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        try writeValueAsBytes(field.kind, slice, v);
+        try writeValueAsBytes(field.kind, slice, narrowForStore(field.kind, v));
     }
 
     /// Promote `bytes` into a fresh persistent allocation and store it in a
@@ -408,8 +410,22 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     };
 }
 
+/// `v` as a store into a `kind` field at runtime writes it: wrapped to an `i32` /
+/// `u32` field's width where overflow wraps, unchanged otherwise, so that
+/// `writeValueAsBytes` refuses a value that does not fit
+/// (`etch-reference-part1.md` §12.4).
+pub fn narrowForStore(kind: FieldKind, v: Value) Value {
+    if (!value_mod.overflow_wraps or v != .int_) return v;
+    return switch (kind) {
+        .i32_ => .{ .int_ = value_mod.intNarrow(i32, v.int_).? },
+        .u32_ => .{ .int_ = value_mod.intNarrow(u32, v.int_).? },
+        else => v,
+    };
+}
+
 /// Encode an interpreter `Value` into the on-storage byte representation of a
-/// field. `bytes` must already be sized to the field's column stride.
+/// field. `bytes` must already be sized to the field's column stride. An
+/// integer outside an `i32` / `u32` field's range is `error.IntegerOverflow`.
 ///
 /// Returns `error.TypeMismatch` when `v`'s tag is incompatible with the
 /// field's `kind`: a type incoherence is a recoverable typed error propagated
@@ -440,14 +456,14 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
         },
         .i32_ => {
             const x: i32 = switch (v) {
-                .int_ => |a| @intCast(a),
+                .int_ => |a| std.math.cast(i32, a) orelse return error.IntegerOverflow,
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(i32)], std.mem.asBytes(&x));
         },
         .u32_ => {
             const x: u32 = switch (v) {
-                .int_ => |a| @intCast(a),
+                .int_ => |a| std.math.cast(u32, a) orelse return error.IntegerOverflow,
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&x));

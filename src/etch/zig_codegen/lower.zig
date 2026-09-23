@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
+const const_eval = @import("../const_eval.zig");
 const types_mod = @import("../types.zig");
 const tagset_name = types_mod.tagset_component_name;
 const tags_mod = @import("../tags.zig");
@@ -77,6 +78,7 @@ pub fn generateFile(
 
     try emitHeader(&w, source_path);
     try emitImports(&w);
+    try emitArithmeticPrelude(&w);
 
     var stats: GenerateStats = .{};
 
@@ -440,6 +442,73 @@ fn emitMapGetPrelude(w: *Writer) CodegenError!void {
     w.indentBy(-1);
     try w.line("}");
     try w.blankLine();
+}
+
+/// Emit the integer arithmetic helpers: overflow wraps in `ReleaseFast` and
+/// `ReleaseSmall` and panics in `Debug` and `ReleaseSafe`, and an integer
+/// division by zero panics in every mode (`etch-reference-part1.md` §12.4).
+/// Plain functions, so a literal operand is still checked when the program runs.
+fn emitArithmeticPrelude(w: *Writer) CodegenError!void {
+    const lines = [_][]const u8{
+        "const __etch_wraps = switch (@import(\"builtin\").mode) {",
+        "    .Debug, .ReleaseSafe => false,",
+        "    .ReleaseFast, .ReleaseSmall => true,",
+        "};",
+        "fn __etchAdd(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a +% b else a + b;",
+        "}",
+        "fn __etchSub(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a -% b else a - b;",
+        "}",
+        "fn __etchMul(comptime T: type, a: T, b: T) T {",
+        "    return if (__etch_wraps) a *% b else a * b;",
+        "}",
+        "fn __etchNeg(comptime T: type, x: T) T {",
+        "    return if (__etch_wraps) 0 -% x else -x;",
+        "}",
+        "fn __etchDiv(comptime T: type, a: T, b: T) T {",
+        "    if (b == 0) @panic(\"division by zero\");",
+        "    if (@typeInfo(T).int.signedness == .signed and a == std.math.minInt(T) and b == -1) {",
+        "        if (__etch_wraps) return a;",
+        "        @panic(\"integer overflow\");",
+        "    }",
+        "    return @divTrunc(a, b);",
+        "}",
+        "fn __etchRem(comptime T: type, a: T, b: T) T {",
+        "    if (b == 0) @panic(\"division by zero\");",
+        "    if (@typeInfo(T).int.signedness == .signed and b == -1) return 0;",
+        "    return @rem(a, b);",
+        "}",
+        "fn __etchNarrow(comptime T: type, x: anytype) T {",
+        "    if (std.math.cast(T, x)) |n| return n;",
+        "    if (!__etch_wraps) @panic(\"integer overflow\");",
+        "    const Src = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(x)));",
+        "    const Dst = std.meta.Int(.unsigned, @bitSizeOf(T));",
+        "    return @bitCast(@as(Dst, @truncate(@as(Src, @bitCast(x)))));",
+        "}",
+        "fn __etchIntFromFloat(comptime T: type, x: anytype) T {",
+        "    const F = @TypeOf(x);",
+        "    if (!std.math.isFinite(x)) @panic(\"integer overflow\");",
+        "    const t = @trunc(x);",
+        "    if (t < @as(F, @floatFromInt(std.math.minInt(T))) or t >= @as(F, @floatFromInt(@as(i128, std.math.maxInt(T)) + 1))) @panic(\"integer overflow\");",
+        "    return @intFromFloat(t);",
+        "}",
+    };
+    for (lines) |l| try w.line(l);
+    try w.blankLine();
+}
+
+/// The prelude helper that lowers integer operator `op`, or null for an operator
+/// Zig's own spelling serves.
+fn intArithHelper(op: ast_mod.BinaryOp) ?[]const u8 {
+    return switch (op) {
+        .add => "__etchAdd",
+        .sub => "__etchSub",
+        .mul => "__etchMul",
+        .div => "__etchDiv",
+        .rem => "__etchRem",
+        else => null,
+    };
 }
 
 /// Emit the set-insert helper (stdlib §15.2): one
@@ -3259,25 +3328,16 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.
     // co-located with the write — the same logical point as the
     // interpreter's `writeResourceField` (a pure read never dirties), so
     // `when resource R changed` gating is byte-exact by construction.
-    if (assignTargetResource(ast, ctx, assign.target)) |rname| {
-        const fa = ast.field_accesses.items[ast.exprData(assign.target)];
+    const resource = assignTargetResource(ast, ctx, assign.target);
+    if (resource != null) {
         try w.writeIndent();
-        try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
-        try w.ident(ast.strings.slice(fa.field_name));
-        try w.write(" ");
-        try w.write(assignOpText(assign.op));
-        try w.write(" ");
-        try emitExpr(w, ast, ctx, assign.value);
-        try w.write(";\n");
+        try emitAssignTarget(w, ast, ctx, assign.target, resource);
+        try emitAssignOperator(w, ast, ctx, assign, resource);
         return;
     }
     try w.writeIndent();
-    try emitExpr(w, ast, ctx, assign.target);
-    try w.write(" ");
-    try w.write(assignOpText(assign.op));
-    try w.write(" ");
-    try emitExpr(w, ast, ctx, assign.value);
-    try w.write(";\n");
+    try emitAssignTarget(w, ast, ctx, assign.target, null);
+    try emitAssignOperator(w, ast, ctx, assign, null);
     // Change detection: right after a component-field write, stamp
     // the slot's `changed_tick` so an `entity has T changed` rule sees it. The
     // marking is co-located with the assignment (so it executes exactly when
@@ -3340,6 +3400,46 @@ fn assignTargetComponent(ast: *const AstArena, ctx: *const LocalCtx, target: Nod
     }
 }
 
+/// The place an assignment writes: a resource field through `getMutResource`
+/// when `resource` names one, the target expression otherwise.
+fn emitAssignTarget(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, target: NodeId, resource: ?[]const u8) CodegenError!void {
+    const rname = resource orelse return emitExpr(w, ast, ctx, target);
+    const fa = ast.field_accesses.items[ast.exprData(target)];
+    try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
+    try w.ident(ast.strings.slice(fa.field_name));
+}
+
+/// The operator and value of an assignment, ending the statement. An integer
+/// compound assignment goes through the prelude helper of its operator, and a
+/// float `%=` through `@rem`, as the binary operators do.
+fn emitAssignOperator(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt, resource: ?[]const u8) CodegenError!void {
+    const bin: ?ast_mod.BinaryOp = switch (assign.op) {
+        .assign => null,
+        .add_assign => .add,
+        .sub_assign => .sub,
+        .mul_assign => .mul,
+        .div_assign => .div,
+        .rem_assign => .rem,
+    };
+    const target_zig = inferExprZigType(ast, ctx, assign.target);
+    if (bin) |op| {
+        const is_int = type_map.isIntLikeZigType(target_zig);
+        if (is_int or op == .rem) {
+            if (is_int) try w.print(" = {s}({s}, ", .{ intArithHelper(op).?, target_zig }) else try w.write(" = @rem(");
+            try emitAssignTarget(w, ast, ctx, assign.target, resource);
+            try w.write(", ");
+            try emitExpr(w, ast, ctx, assign.value);
+            try w.write(");\n");
+            return;
+        }
+    }
+    try w.write(" ");
+    try w.write(assignOpText(assign.op));
+    try w.write(" ");
+    try emitExpr(w, ast, ctx, assign.value);
+    try w.write(";\n");
+}
+
 fn assignOpText(op: ast_mod.AssignOp) []const u8 {
     return switch (op) {
         .assign => "=",
@@ -3355,8 +3455,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
     const kind = ast.exprKind(id);
     const data = ast.exprData(id);
     switch (kind) {
-        .int_lit => try w.write(ast.strings.slice(data)),
-        .float_lit => try w.write(ast.strings.slice(data)),
+        .int_lit, .float_lit => try writeLiteralDigits(w, ast.strings.slice(data)),
         .bool_lit => try w.write(ast.strings.slice(data)),
         .string_lit => {
             // String literal → a Zig `[]const u8`
@@ -3945,15 +4044,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const target_is_float = std.mem.eql(u8, zig_t, "f32") or std.mem.eql(u8, zig_t, "f64");
             const src_zig = inferExprZigType(ast, ctx, c.operand);
             const src_is_float = std.mem.eql(u8, src_zig, "f32") or std.mem.eql(u8, src_zig, "f64");
-            const conv: []const u8 = if (target_is_float and !src_is_float)
-                "@floatFromInt"
-            else if (!target_is_float and src_is_float)
-                "@intFromFloat"
-            else if (target_is_float)
-                "@floatCast"
-            else
-                "@intCast";
-            try w.print("@as({s}, {s}(", .{ zig_t, conv });
+            if (!target_is_float) {
+                try w.print("{s}({s}, ", .{ if (src_is_float) "__etchIntFromFloat" else "__etchNarrow", zig_t });
+                try emitExpr(w, ast, ctx, c.operand);
+                try w.write(")");
+                return;
+            }
+            try w.print("@as({s}, {s}(", .{ zig_t, if (src_is_float) "@floatCast" else "@floatFromInt" });
             try emitExpr(w, ast, ctx, c.operand);
             try w.write("))");
         },
@@ -3979,6 +4076,25 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(" }) catch unreachable)");
                 return;
             }
+            const operand_zig = inferExprZigType(ast, ctx, b.lhs);
+            if (intArithHelper(b.op)) |helper| {
+                if (type_map.isIntLikeZigType(operand_zig)) {
+                    try w.print("{s}({s}, ", .{ helper, operand_zig });
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+                if (b.op == .rem) {
+                    try w.write("@rem(");
+                    try emitExpr(w, ast, ctx, b.lhs);
+                    try w.write(", ");
+                    try emitExpr(w, ast, ctx, b.rhs);
+                    try w.write(")");
+                    return;
+                }
+            }
             try w.write("(");
             try emitExpr(w, ast, ctx, b.lhs);
             try w.print(" {s} ", .{binaryOpText(b.op)});
@@ -3989,7 +4105,12 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const u = ast.unary_exprs.items[data];
             switch (u.op) {
                 .neg => {
-                    try w.write("-(");
+                    const operand_zig = inferExprZigType(ast, ctx, u.operand);
+                    if (type_map.isIntLikeZigType(operand_zig)) {
+                        try w.print("__etchNeg({s}, ", .{operand_zig});
+                    } else {
+                        try w.write("-(");
+                    }
                     try emitExpr(w, ast, ctx, u.operand);
                     try w.write(")");
                 },
@@ -6480,49 +6601,47 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
 
 // ─── Const expressions (field defaults / filter values) ─────────────────────
 
+/// Emits a constant as the value `const_eval.fold` gives it, the value the
+/// interpreter stores. A float literal keeps its own digits, so Zig rounds it
+/// once to the slot's type as the source does.
 fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type: []const u8) CodegenError!void {
-    const kind = ast.exprKind(expr);
-    const data = ast.exprData(expr);
-    switch (kind) {
-        .int_lit => {
-            const text = ast.strings.slice(data);
-            // Coerce int literal to a float-typed slot by emitting
-            // `<text>.0` so Zig is happy with the field type.
-            if (type_map.isFloatLikeZigType(target_zig_type)) {
-                try w.print("@as({s}, {s})", .{ target_zig_type, text });
-            } else {
-                try w.write(text);
-            }
-        },
-        .float_lit => try w.write(ast.strings.slice(data)),
-        .bool_lit => try w.write(ast.strings.slice(data)),
-        .binary => {
-            const b = ast.binary_exprs.items[data];
-            try w.write("(");
-            try emitConstExpr(w, ast, b.lhs, target_zig_type);
-            try w.print(" {s} ", .{binaryOpText(b.op)});
-            try emitConstExpr(w, ast, b.rhs, target_zig_type);
-            try w.write(")");
-        },
-        .unary => {
-            const u = ast.unary_exprs.items[data];
-            switch (u.op) {
-                .neg => {
-                    try w.write("-(");
-                    try emitConstExpr(w, ast, u.operand, target_zig_type);
-                    try w.write(")");
-                },
-                .logical_not => {
-                    try w.write("!(");
-                    try emitConstExpr(w, ast, u.operand, target_zig_type);
-                    try w.write(")");
-                },
-                // `expr!` needs a runtime optional — never const-evaluable.
-                .force_unwrap => return CodegenError.UnsupportedConstruct,
-            }
-        },
+    const folded = const_eval.fold(w.gpa, ast, expr) catch |err| switch (err) {
+        error.OutOfMemory => return CodegenError.OutOfMemory,
         else => return CodegenError.UnsupportedConstruct,
+    };
+    switch (folded) {
+        .int_ => |v| if (type_map.isFloatLikeZigType(target_zig_type))
+            try w.print("@as({s}, {d})", .{ target_zig_type, v })
+        else
+            try w.print("{d}", .{v}),
+        .float_ => |v| {
+            var lit = expr;
+            var negated = false;
+            if (ast.exprKind(lit) == .unary) {
+                lit = ast.unary_exprs.items[ast.exprData(lit)].operand;
+                negated = true;
+            }
+            if (ast.exprKind(lit) == .float_lit) {
+                if (negated) try w.write("-");
+                try writeLiteralDigits(w, ast.strings.slice(ast.exprData(lit)));
+            } else {
+                try w.print("{e}", .{v});
+            }
+        },
+        .bool_ => |v| try w.write(if (v) "true" else "false"),
     }
+}
+
+/// Writes a numeric literal's text without its `_` separators, which the lexer
+/// admits anywhere in the digit run and Zig does not.
+fn writeLiteralDigits(w: *Writer, text: []const u8) CodegenError!void {
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c != '_') continue;
+        try w.write(text[start..i]);
+        start = i + 1;
+    }
+    try w.write(text[start..]);
 }
 
 // ─── `tick` ─────────────────────────────────────────────────────────────────

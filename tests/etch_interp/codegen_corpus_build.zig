@@ -119,4 +119,6 @@ pub const programs = [_]CodegenProgram{
     // Triple-quote with a multi-line interpolation: the dedent must touch the
     // literal segments and never the interpolation's own bytes.
     .{ .name = "p87_triple_quote_multiline_interp", .etch_path = "tests/etch_interp/programs/87_triple_quote_multiline_interp.etch" },
+    // Runtime integer division and remainder, float remainder, narrowing casts.
+    .{ .name = "p88_runtime_arith", .etch_path = "tests/etch_interp/programs/88_runtime_arith.etch" },
 };

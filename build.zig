@@ -966,6 +966,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
         // Every reader of a type node's name decides its non-`.named` branch.
         .{ .path = "tests/etch/type_node_kind_test.zig", .etch = true },
+        // A literal that overflows its type, and a constant whose folding
+        // overflows or divides by zero, are refused at check time.
+        .{ .path = "tests/etch/numeric_range_test.zig", .etch = true, .dedicated_step = "test-numeric-range" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },

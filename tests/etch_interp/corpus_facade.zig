@@ -95,6 +95,8 @@ const p86 = @import("programs/86_triple_quote_multiline.expected.zig");
 // the literal segments and never the interpolation's inner bytes. Byte-exact
 // across interp ↔ codegen.
 const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");
+// Runtime integer division and remainder, float remainder, narrowing casts.
+const p88 = @import("programs/88_runtime_arith.expected.zig");
 
 /// Embedded list of the differential corpus programs, consumed by the
 /// interpreter test and by the codegen parity test.
@@ -167,4 +169,5 @@ pub const programs = [_]Program{
     .{ .name = "85_match_binding", .source = @embedFile("programs/85_match_binding.etch"), .config = p85.config, .initial = p85.initial, .expected = p85.expected },
     .{ .name = "86_triple_quote_multiline", .source = @embedFile("programs/86_triple_quote_multiline.etch"), .config = p86.config, .initial = p86.initial, .expected = p86.expected },
     .{ .name = "87_triple_quote_multiline_interp", .source = @embedFile("programs/87_triple_quote_multiline_interp.etch"), .config = p87.config, .initial = p87.initial, .expected = p87.expected },
+    .{ .name = "88_runtime_arith", .source = @embedFile("programs/88_runtime_arith.etch"), .config = p88.config, .initial = p88.initial, .expected = p88.expected },
 };

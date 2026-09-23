@@ -21,6 +21,7 @@ const ast_mod = @import("ast.zig");
 const types_mod = @import("types.zig");
 const tagset_name = types_mod.tagset_component_name;
 const parser_mod = @import("parser.zig");
+const const_eval = @import("const_eval.zig");
 const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
@@ -685,9 +686,9 @@ fn writeI64At(bytes: []u8, off: u16, v: i64) void {
 /// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
 /// minimal Duration→seconds path `await wait` needs. `null` if the
 /// lexeme is malformed. General `Duration` arithmetic stays out of scope.
-fn durationLiteralSeconds(text: []const u8) ?f64 {
+fn durationLiteralSeconds(gpa: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!?f64 {
     if (text.len < 2 or text[text.len - 1] != 's') return null;
-    return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
+    return const_eval.floatLiteralValue(gpa, text[0 .. text.len - 1]);
 }
 
 // ─── Async suspension core (`etch-reference-part1.md §9.12`) ─────────
@@ -3796,7 +3797,9 @@ pub const Interpreter = struct {
                 const more = if (r.inclusive) r.next <= r.end else r.next < r.end;
                 if (!more) return false;
                 try locals.put(self.gpa, f.var_name, .{ .int_ = r.next }, false);
-                r.next += 1;
+                // An inclusive range can end at `i64` max, past which `next` has
+                // no successor: the range closes on its last value instead.
+                if (r.next == r.end) r.inclusive = false else r.next += 1;
                 return true;
             },
             .array => {
@@ -3988,7 +3991,7 @@ pub const Interpreter = struct {
         switch (aw.target_kind) {
             .wait, .wait_unscaled => {
                 if (self.ast.exprKind(aw.arg_expr) != .duration_lit) return error.RuntimeFailure;
-                const secs = durationLiteralSeconds(self.ast.strings.slice(self.ast.exprData(aw.arg_expr))) orelse return error.RuntimeFailure;
+                const secs = (try durationLiteralSeconds(self.gpa, self.ast.strings.slice(self.ast.exprData(aw.arg_expr)))) orelse return error.RuntimeFailure;
                 if (secs < 0) return error.RuntimeFailure;
                 const ticks = @round(secs * async_fixed_dt_hz);
                 return switch (aw.target_kind) {
@@ -4493,7 +4496,7 @@ pub const Interpreter = struct {
                 switch (iter) {
                     .range => |r| {
                         var i: i64 = r.start;
-                        range_loop: while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
+                        range_loop: while (if (r.inclusive) i <= r.end else i < r.end) {
                             try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
                             if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
@@ -4502,6 +4505,10 @@ pub const Interpreter = struct {
                                 .stop => break :range_loop,
                                 .propagate => return,
                             }
+                            // An inclusive range can end at `i64` max, past which
+                            // `i` has no successor.
+                            if (i == r.end) break :range_loop;
+                            i += 1;
                         }
                     },
                     .array_ref => |handle| {
@@ -4721,7 +4728,7 @@ pub const Interpreter = struct {
             const cur = locals.get(name_id) orelse return error.RuntimeFailure;
             const rhs = try self.evalExpr(world, locals, assign.value);
             if (self.thrown) return; // see `assignRhsThrew`
-            const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+            const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
             const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
             ptr.* = new_v;
             return;
@@ -4737,7 +4744,7 @@ pub const Interpreter = struct {
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     // Change detection: stamp `changed_tick = current_tick`
@@ -4801,7 +4808,7 @@ pub const Interpreter = struct {
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     return;
@@ -4823,7 +4830,7 @@ pub const Interpreter = struct {
                     const cur = self.structs.list.items[handle].fields.items[k].value;
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     if (self.thrown) return; // see `assignRhsThrew`
-                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return self.fail(assignFailureKind(assign.op, cur, rhs), self.ast.exprSpan(assign.target));
                     self.structs.list.items[handle].fields.items[k].value = new_v;
                     return;
                 },
@@ -4936,6 +4943,39 @@ pub const Interpreter = struct {
         return sname;
     }
 
+    /// The value of a struct field a literal omits: its declared default, or the
+    /// zero of its type, which is what the codegen's `zeroDefault` emits.
+    fn structFieldDefault(self: *Interpreter, f: ast_mod.Field) !Value {
+        // A struct-typed field has no agreed default: the resolver requires it
+        // provided (E0208).
+        if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
+        if (!f.default_value.isNone()) {
+            return switch (self.ast.exprKind(f.default_value)) {
+                .string_lit => Value{ .string_id = self.ast.exprData(f.default_value) },
+                .tag_path => self.enumFieldShorthand(f, f.default_value) orelse error.RuntimeFailure,
+                else => evalConst(self.gpa, self.ast, f.default_value) catch |err| switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.RuntimeFailure,
+                },
+            };
+        }
+        if (self.ast.typeNodeKind(f.type_node) == .optional) {
+            const handle: u32 = @intCast(self.optionals.items.len);
+            try self.optionals.append(self.gpa, null);
+            return Value{ .optional = handle };
+        }
+        const declared = self.ast.namedTypeName(f.type_node) orelse return error.RuntimeFailure;
+        const resolved = self.ast.resolveTypeAliasName(declared);
+        const tname = self.ast.strings.slice(resolved);
+        const eql = std.mem.eql;
+        if (eql(u8, tname, "int") or eql(u8, tname, "i32") or eql(u8, tname, "u32")) return Value{ .int_ = 0 };
+        if (eql(u8, tname, "float") or eql(u8, tname, "f32") or eql(u8, tname, "f64")) return Value{ .float_ = 0.0 };
+        if (eql(u8, tname, "bool")) return Value{ .bool_ = false };
+        if (eql(u8, tname, "string")) return Value{ .string_id = 0 };
+        if (self.enum_decls.get(resolved) != null) return Value{ .enum_value = .{ .type_name = resolved, .variant = 0 } };
+        return error.RuntimeFailure;
+    }
+
     /// Materialize a struct literal as a fresh `type_name` value in the
     /// rule-body struct store (split out so
     /// the anonymous `.{ … }` form evaluates through the same point with the
@@ -4982,14 +5022,7 @@ pub const Interpreter = struct {
                     break;
                 }
             }
-            const fval = provided orelse blk: {
-                // A struct-typed field has no agreed default (the resolver
-                // requires literal provision, E0208) — belt against the
-                // zero-fill below silently standing in for one.
-                if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
-                if (f.default_value.isNone()) break :blk Value{ .int_ = 0 };
-                break :blk evalConst(self.ast, f.default_value) catch Value{ .int_ = 0 };
-            };
+            const fval = provided orelse try self.structFieldDefault(f);
             try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = f.name, .value = fval });
         }
         return Value{ .struct_ref = handle };
@@ -5206,7 +5239,7 @@ pub const Interpreter = struct {
         const pred = try self.evalArg(world, locals, call, 0);
         const timeout = try self.evalArg(world, locals, call, 1);
         if (timeout != .duration) return error.RuntimeFailure;
-        const budget: i64 = @intFromFloat(@round(timeout.duration * async_fixed_dt_hz));
+        const budget = value_mod.floatTrunc(i64, @round(timeout.duration * async_fixed_dt_hz)) orelse return error.RuntimeFailure;
         // Keep the event store clean for a later `emit; tick` in the same test.
         defer self.events.clear(self.gpa);
         if (self.events.list.items.len > 0) self.suppress_event_clear = true;
@@ -5359,7 +5392,8 @@ pub const Interpreter = struct {
             const v = try self.evalExpr(world, locals, flit.value);
             const fsize: u16 = @intCast(fd.kind.sizeBytes());
             const field_bytes = buf[fd.offset .. fd.offset + fsize];
-            bridge_mod.writeValueAsBytes(fd.kind, field_bytes, v) catch return error.RuntimeFailure;
+            bridge_mod.writeValueAsBytes(fd.kind, field_bytes, bridge_mod.narrowForStore(fd.kind, v)) catch |e|
+                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(flit.value));
         }
         return .{ .cid = cid, .bytes = buf };
     }
@@ -5982,13 +6016,11 @@ pub const Interpreter = struct {
         const data = self.ast.exprData(id);
         switch (kind) {
             .int_lit => {
-                const text = self.ast.strings.slice(data);
-                const v = std.fmt.parseInt(i64, text, 10) catch return error.RuntimeFailure;
+                const v = const_eval.intLiteralValue(self.ast.strings.slice(data), false) orelse return error.RuntimeFailure;
                 return Value{ .int_ = v };
             },
             .float_lit => {
-                const text = self.ast.strings.slice(data);
-                const v = std.fmt.parseFloat(f64, text) catch return error.RuntimeFailure;
+                const v = (try const_eval.floatLiteralValue(self.gpa, self.ast.strings.slice(data))) orelse return error.RuntimeFailure;
                 return Value{ .float_ = v };
             },
             .bool_lit => {
@@ -6000,7 +6032,7 @@ pub const Interpreter = struct {
                 // carried so a timer argument can be a full expression
                 // (`after(d)`). `await wait` keeps its own literal-only path
                 // in `evalAwaitTarget`.
-                const secs = durationLiteralSeconds(self.ast.strings.slice(data)) orelse return error.RuntimeFailure;
+                const secs = (try durationLiteralSeconds(self.gpa, self.ast.strings.slice(data))) orelse return error.RuntimeFailure;
                 return Value{ .duration = secs };
             },
             .string_lit => return Value{ .string_id = data },
@@ -6152,10 +6184,14 @@ pub const Interpreter = struct {
             },
             .unary => {
                 const u = self.ast.unary_exprs.items[data];
+                if (u.op == .neg and self.ast.exprKind(u.operand) == .int_lit) {
+                    const text = self.ast.strings.slice(self.ast.exprData(u.operand));
+                    return Value{ .int_ = const_eval.intLiteralValue(text, true) orelse return error.RuntimeFailure };
+                }
                 const v = try self.evalExpr(world, locals, u.operand);
                 return switch (u.op) {
                     .neg => switch (v) {
-                        .int_ => |x| Value{ .int_ = -x },
+                        .int_ => |x| Value{ .int_ = value_mod.intNeg(x) orelse return self.fail(.IntegerOverflow, self.ast.exprSpan(id)) },
                         .float_ => |x| Value{ .float_ = -x },
                         else => error.RuntimeFailure,
                     },
@@ -6235,20 +6271,40 @@ pub const Interpreter = struct {
                 return error.RuntimeFailure;
             },
             .cast => {
-                // `operand as Type`. Runtime values
-                // carry int as i64 and float as f64; a cast only flips the
-                // numeric domain (int↔float). Integer width narrowing is a
-                // storage concern handled on write, not in the Value.
+                // `operand as Type` (`etch-grammar.md` §2.6). An int is held as
+                // `i64` and a float as `f64`: a cast to `i32` / `u32` narrows the
+                // value to that width, one to `f32` rounds it to that precision.
                 const c = self.ast.casts.items[data];
                 const v = try self.evalExpr(world, locals, c.operand);
                 const target = self.ast.namedTypeName(c.type_node) orelse return error.RuntimeFailure;
                 const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(target));
-                const to_float = std.mem.eql(u8, tname, "float") or std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64");
-                return switch (v) {
-                    .int_ => |x| if (to_float) Value{ .float_ = @floatFromInt(x) } else Value{ .int_ = x },
-                    .float_ => |x| if (to_float) Value{ .float_ = x } else Value{ .int_ = @intFromFloat(x) },
-                    else => error.RuntimeFailure,
+                const eql = std.mem.eql;
+                const span = self.ast.exprSpan(id);
+                if (eql(u8, tname, "float") or eql(u8, tname, "f64") or eql(u8, tname, "f32")) {
+                    const f: f64 = switch (v) {
+                        .int_ => |x| @floatFromInt(x),
+                        .float_ => |x| x,
+                        else => return error.RuntimeFailure,
+                    };
+                    return Value{ .float_ = if (eql(u8, tname, "f32")) @as(f32, @floatCast(f)) else f };
+                }
+                const narrow = eql(u8, tname, "i32") or eql(u8, tname, "u32");
+                const n: i64 = switch (v) {
+                    .int_ => |x| if (!narrow)
+                        x
+                    else if (eql(u8, tname, "i32"))
+                        value_mod.intNarrow(i32, x) orelse return self.fail(.IntegerOverflow, span)
+                    else
+                        value_mod.intNarrow(u32, x) orelse return self.fail(.IntegerOverflow, span),
+                    .float_ => |x| (if (!narrow)
+                        value_mod.floatTrunc(i64, x)
+                    else if (eql(u8, tname, "i32"))
+                        value_mod.floatTrunc(i32, x)
+                    else
+                        value_mod.floatTrunc(u32, x)) orelse return self.fail(.IntegerOverflow, span),
+                    else => return error.RuntimeFailure,
                 };
+                return Value{ .int_ = n };
             },
             .array_lit => {
                 // `[a, b, c]` / `[v; n]` → materialize a fresh array in the
@@ -6719,6 +6775,20 @@ fn bindParams(
     }
 }
 
+/// Classify an `applyAssignOp` failure the way `arithFailureKind` classifies the
+/// binary operator the assignment applies.
+fn assignFailureKind(op: ast_mod.AssignOp, cur: Value, rhs: Value) RuntimeErrorKind {
+    const bin: ast_mod.BinaryOp = switch (op) {
+        .assign => return .UnsupportedExpr,
+        .add_assign => .add,
+        .sub_assign => .sub,
+        .mul_assign => .mul,
+        .div_assign => .div,
+        .rem_assign => .rem,
+    };
+    return arithFailureKind(bin, cur, rhs);
+}
+
 fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
     return switch (op) {
         .assign => rhs,
@@ -6740,6 +6810,7 @@ fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
         error.StaleComponentRef => .StaleComponentRef,
+        error.IntegerOverflow => .IntegerOverflow,
         else => .UnsupportedExpr,
     };
 }
@@ -6780,9 +6851,9 @@ fn arithFailureKind(op: ast_mod.BinaryOp, a: Value, b: Value) RuntimeErrorKind {
 fn binaryArith(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
     if (a == .int_ and b == .int_) {
         return switch (op) {
-            .add => Value{ .int_ = value_mod.intAddChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
-            .sub => Value{ .int_ = value_mod.intSubChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
-            .mul => Value{ .int_ = value_mod.intMulChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .add => Value{ .int_ = value_mod.intAdd(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .sub => Value{ .int_ = value_mod.intSub(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .mul => Value{ .int_ = value_mod.intMul(a.int_, b.int_) orelse return error.RuntimeFailure },
             .div => Value{ .int_ = value_mod.intDiv(a.int_, b.int_) orelse return error.RuntimeFailure },
             .rem => Value{ .int_ = value_mod.intRem(a.int_, b.int_) orelse return error.RuntimeFailure },
             else => unreachable,
@@ -6854,45 +6925,14 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
 
 // ── Const evaluator ──
 
-/// Pure constant-folding evaluator over an Etch AST subtree. Used
-/// by the type-checker for `const` resolution and by `codegen` to
-/// pre-evaluate literal expressions during lowering.
-pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
-    const kind = ast.exprKind(node);
-    const data = ast.exprData(node);
-    switch (kind) {
-        .int_lit => return Value{ .int_ = try std.fmt.parseInt(i64, ast.strings.slice(data), 10) },
-        .float_lit => return Value{ .float_ = try std.fmt.parseFloat(f64, ast.strings.slice(data)) },
-        .bool_lit => return Value{ .bool_ = std.mem.eql(u8, ast.strings.slice(data), "true") },
-        .binary => {
-            const b = ast.binary_exprs.items[data];
-            const a = try evalConst(ast, b.lhs);
-            const c = try evalConst(ast, b.rhs);
-            return switch (b.op) {
-                .add, .sub, .mul, .div, .rem => binaryArith(b.op, a, c) catch return error.NotConstEvaluable,
-                .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, a, c) catch return error.NotConstEvaluable,
-                else => return error.NotConstEvaluable,
-            };
-        },
-        .unary => {
-            const u = ast.unary_exprs.items[data];
-            const v = try evalConst(ast, u.operand);
-            return switch (u.op) {
-                .neg => switch (v) {
-                    .int_ => |x| Value{ .int_ = -x },
-                    .float_ => |x| Value{ .float_ = -x },
-                    else => return error.NotConstEvaluable,
-                },
-                .logical_not => switch (v) {
-                    .bool_ => |x| Value{ .bool_ = !x },
-                    else => return error.NotConstEvaluable,
-                },
-                // `expr!` needs the runtime optional store — never const.
-                .force_unwrap => return error.NotConstEvaluable,
-            };
-        },
-        else => return error.UnsupportedExpr,
-    }
+/// Folds a constant expression through `const_eval.fold`, the folder the
+/// checker admits constants with.
+pub fn evalConst(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) const_eval.FoldError!Value {
+    return switch (try const_eval.fold(gpa, ast, node)) {
+        .int_ => |x| .{ .int_ = x },
+        .float_ => |x| .{ .float_ = x },
+        .bool_ => |x| .{ .bool_ = x },
+    };
 }
 
 // ── Compilation passes ──
@@ -7288,7 +7328,7 @@ fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
 /// const expression is `evalConst`'d (POD inline). Errors on a non-const entry.
 fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) !Value {
     if (ast.exprKind(node) == .string_lit) return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node)));
-    return evalConst(ast, node);
+    return evalConst(gpa, ast, node);
 }
 
 /// Build a `type_array` container for a resource field: empty, or a literal-array
@@ -7605,8 +7645,16 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
             continue;
         }
         if (f.default_value.isNone()) continue;
-        const v = evalConst(ast, f.default_value) catch continue;
-        try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
+        const v = evalConst(gpa, ast, f.default_value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.LiteralOutOfRange, error.IntegerOverflow, error.FloatOverflow => return error.ValueOutOfRange,
+            error.NotConstant, error.KindMismatch, error.DivisionByZero => return error.InvalidProgram,
+        };
+        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.IntegerOverflow => return error.ValueOutOfRange,
+            else => return error.InvalidProgram,
+        };
     }
 
     return registry.prepareEntry(gpa, .{
@@ -8079,7 +8127,10 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
             const fname = ast.strings.slice(node.field_name);
             const fd = ctx.registry.findField(id, fname) orelse return error.InvalidProgram;
-            const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
+            const v = evalConst(ctx.gpa, ast, node.filter_value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidProgram,
+            };
             // One filter per `has T { … }` clause — append, never
             // overwrite.
             try ctx.filters.append(ctx.gpa, .{
@@ -8232,7 +8283,7 @@ test "evalConst on int literal returns Value.int" {
     const lit_id = try ast.strings.intern(gpa, "42");
     const node = try ast.addExpr(gpa, .int_lit, lit_id, .{ .byte_start = 0, .byte_end = 2 });
 
-    const v = try evalConst(&ast, node);
+    const v = try evalConst(gpa, &ast, node);
     try std.testing.expectEqual(@as(i64, 42), v.int_);
 }
 
@@ -8247,18 +8298,18 @@ test "evalConst on arithmetic on literals folds correctly" {
     const b = try ast.addExpr(gpa, .int_lit, lit_b, .{ .byte_start = 0, .byte_end = 0 });
     const bin = try ast.addBinary(gpa, .add, a, b, .{ .byte_start = 0, .byte_end = 0 });
 
-    const v = try evalConst(&ast, bin);
+    const v = try evalConst(gpa, &ast, bin);
     try std.testing.expectEqual(@as(i64, 5), v.int_);
 }
 
-test "evalConst on tag_path returns UnsupportedExpr" {
+test "evalConst on tag_path is not a constant it folds" {
     const gpa = std.testing.allocator;
     var ast = try AstArena.init(gpa);
     defer ast.deinit(gpa);
 
     const lit_id = try ast.strings.intern(gpa, "update");
     const node = try ast.addExpr(gpa, .tag_path, lit_id, .{ .byte_start = 0, .byte_end = 0 });
-    try std.testing.expectError(error.UnsupportedExpr, evalConst(&ast, node));
+    try std.testing.expectError(error.NotConstant, evalConst(gpa, &ast, node));
 }
 
 test "runProgram on minimal component + rule mutates entity" {
@@ -16269,4 +16320,270 @@ test "a rule parameter typed by an alias of a scalar is bound as that scalar" {
     try bindParams(gpa, &pr.ast, rule, null, &locals);
     const dt = pr.ast.rule_params.items[rule.params_start + 1].name;
     try std.testing.expect(locals.get(dt).? == .float_);
+}
+
+/// One tick of `source` over one entity carrying `Acc`, unchecked. The caller
+/// owns the returned interpreter.
+fn tickOnAcc(gpa: std.mem.Allocator, world: *World, pr: *const parser_mod.ParseResult) !struct { interp: Interpreter, report: RuntimeReport, bytes: []u8 } {
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, world);
+    errdefer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(world, 1);
+    const off = world.registry.findField(cid, "out").?.offset;
+    return .{ .interp = interp, .report = report, .bytes = world.componentBytes(e, cid).?[off..] };
+}
+
+/// Asserts `report` holds exactly one runtime error, of `kind`.
+fn expectRuntimeError(report: RuntimeReport, kind: RuntimeErrorKind) !void {
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    try std.testing.expectEqual(kind, (report.last_error orelse return error.TestExpectedTypedError).kind);
+}
+
+test "an overflowing addition panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let big = 9223372036854775807
+        \\  entity.get_mut(Acc).out = big + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "an overflowing compound assignment reports IntegerOverflow" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let mut x = 9223372036854775807
+        \\  x += 1
+        \\  entity.get_mut(Acc).out = x
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "negating the int minimum panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let m = -9223372036854775808
+        \\  entity.get_mut(Acc).out = -m
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "the int minimum literal evaluates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = -9223372036854775808 }
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(std.math.minInt(i64), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a literal with a trailing separator evaluates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).out = 1_000_ }
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1000), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a narrowing cast panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let big = 3000000000
+        \\  entity.get_mut(Acc).out = big as i32
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(i32, -1294967296), std.mem.readInt(i32, run.bytes[0..4], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "a float beyond the integer range fails its cast in every mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let f = 100000000000000000000.0
+        \\  entity.get_mut(Acc).out = f as int
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "a cast to f32 rounds to f32" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: float = 0.0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let x = 0.1
+        \\  entity.get_mut(Acc).out = (x as f32) as float
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    const want: f64 = @as(f32, 0.1);
+    try std.testing.expectEqual(want, @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
+}
+
+test "a store outside an i32 field panics or wraps by build mode" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: i32 = 2147483647 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let a = entity.get(Acc).out
+        \\  entity.get_mut(Acc).out = a + a
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    if (value_mod.overflow_wraps) {
+        try std.testing.expectEqual(@as(i32, -2), std.mem.readInt(i32, run.bytes[0..4], .little));
+    } else try expectRuntimeError(run.report, .IntegerOverflow);
+}
+
+test "an inclusive range ending at the int maximum terminates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let mut n = 0
+        \\  for i in 9223372036854775806..=9223372036854775807 { n += 1 }
+        \\  entity.get_mut(Acc).out = n
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "an omitted struct field takes the zero of its type" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: float = 0.0 }
+        \\struct S {
+        \\  x: float
+        \\  n: int = 1
+        \\}
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let s = S { n: 2 }
+        \\  entity.get_mut(Acc).out = s.x + 1.5
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(std.mem.readInt(u64, run.bytes[0..8], .little))));
+}
+
+test "an omitted struct field takes its string default" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Acc { out: int = 0 }
+        \\struct S {
+        \\  name: string = "hi"
+        \\  n: int = 1
+        \\}
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let s = S { n: 2 }
+        \\  entity.get_mut(Acc).out = s.name.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var run = try tickOnAcc(gpa, &world, &pr);
+    defer run.interp.deinit();
+    try std.testing.expectEqual(@as(u64, 0), run.report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), std.mem.readInt(i64, run.bytes[0..8], .little));
+}
+
+test "a default of logic over constants is stored" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { flag: bool = true or false }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    try std.testing.expectEqual(@as(u8, 1), world.registry.componentDefaultBytes(cid)[0]);
+}
+
+test "a default that overflows its i32 field is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: i32 = 3000000000 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
 }

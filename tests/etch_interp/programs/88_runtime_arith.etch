@@ -1,0 +1,30 @@
+// Integer division and remainder on runtime operands, a float remainder, an
+// `i32` compound assignment and narrowing casts that fit: each lowers through
+// the codegen's arithmetic helpers, and both backends reach the same state.
+component Pair {
+  a: int = 17
+  b: int = -5
+  quot: int = 0
+  rem: int = 0
+  x: float = 7.5
+  frem: float = 0.0
+  acc: i32 = 100
+  step: i32 = 7
+  narrow: i32 = 0
+  whole: u32 = 0
+}
+
+rule update(entity: Entity)
+  when entity has Pair
+{
+  let a = entity.get(Pair).a
+  let b = entity.get(Pair).b
+  let x = entity.get(Pair).x
+  let step = entity.get(Pair).step
+  entity.get_mut(Pair).quot = a / b
+  entity.get_mut(Pair).rem = a % b
+  entity.get_mut(Pair).frem = x % 2.0
+  entity.get_mut(Pair).acc -= step
+  entity.get_mut(Pair).narrow = (a * b) as i32
+  entity.get_mut(Pair).whole = x as u32
+}
