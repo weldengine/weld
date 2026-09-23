@@ -4519,6 +4519,7 @@ pub const Interpreter = struct {
                         const len = self.collections.arrays.items[handle].items.len;
                         var k: usize = 0;
                         arr_loop: while (k < len) : (k += 1) {
+                            if (k >= self.collections.arrays.items[handle].items.len) return error.RuntimeFailure;
                             const elem = self.collections.arrays.items[handle].items[k];
                             try locals.put(self.gpa, f.var_name, elem, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
@@ -4538,6 +4539,7 @@ pub const Interpreter = struct {
                         const len = persistentArrayOf(ptr).items.len;
                         var k: usize = 0;
                         parr_loop: while (k < len) : (k += 1) {
+                            if (k >= persistentArrayOf(ptr).items.len) return error.RuntimeFailure;
                             const elem = persistentArrayOf(ptr).items[k];
                             try locals.put(self.gpa, f.var_name, elem, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
@@ -13673,6 +13675,51 @@ test "a store-owned view and a resource string with the same bytes are one set e
     const report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
     try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "R", "n"));
+}
+
+test "a sync for over an arena array fails loud when its body shrinks it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\resource R { done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    let mut xs = [1, 2, 3]
+        \\    for x in xs {
+        \\      let p = xs.pop()
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+}
+
+test "a sync for over a resource array fails loud when its body shrinks it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource R { xs: int[] = [1, 2, 3], done: bool = false }
+        \\rule r() when resource R {
+        \\  if get(R).done == false {
+        \\    get_mut(R).done = true
+        \\    for x in get(R).xs {
+        \\      let p = get_mut(R).xs.pop()
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
 }
 
 test "emit stabilizes a computed string so an @on_event observer reads it safely" {
