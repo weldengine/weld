@@ -528,8 +528,8 @@ const EventStore = struct {
     /// storage, released when the resource string field is reassigned).
     /// Neither survives an event that outlives the emitter's body (an `@on_event`
     /// observer or an awaiter's cross-tick poll), nor a mutation of its source,
-    /// so such a field value is deep-copied here at emit and re-tagged
-    /// `.string_persistent` over the copy; the copies are freed with the event
+    /// so such a field value is deep-copied here at emit and tagged
+    /// `.string_view` over the copy; the copies are freed with the event
     /// queue at the per-tick `clear`. (`.string_id` — the immortal AST table — is
     /// stable and never copied.)
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
@@ -554,7 +554,7 @@ const EventStore = struct {
     }
 
     /// Deep-copy `bytes` into store-owned memory and return a stable
-    /// `.string_persistent` view over the copy (freed at `clear`). Stabilizes a
+    /// `.string_view` over the copy (freed at `clear`). Stabilizes a
     /// non-AST string event field value (a per-body `.string_run` or a borrowed
     /// `.string_persistent`) that would otherwise dangle when the emitter's body
     /// ends or the source resource string is reassigned.
@@ -562,7 +562,7 @@ const EventStore = struct {
         const dup = try gpa.dupe(u8, bytes);
         errdefer gpa.free(dup);
         try self.owned_strings.append(gpa, dup);
-        return Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
+        return Value{ .string_view = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
     }
 
     /// Number of queued events of `type_name` (test / inspection helper).
@@ -1235,8 +1235,8 @@ pub const Interpreter = struct {
     /// `.entity_id`) are copy-stable across ticks; a NON-AST string filter — a
     /// computed `.string_run` (`prefix + "!"`) or a borrowed `.string_persistent`
     /// (`get(R).s`, released on resource reassignment) — is deep-copied into
-    /// `captured_filter_strings` at capture and re-tagged `.string_persistent`
-    /// over the copy (which also enforces capture-once §9.4).
+    /// `captured_filter_strings` at capture and tagged `.string_view` over the
+    /// copy (which also enforces capture-once §9.4).
     captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
     /// Buffer-owned deep copies of non-AST (`.string_run` / borrowed
     /// `.string_persistent`) filter-value bytes. Parallel to
@@ -3891,7 +3891,7 @@ pub const Interpreter = struct {
                 const dup = try self.gpa.dupe(u8, self.stringBytes(v0).?);
                 errdefer self.gpa.free(dup);
                 try self.captured_filter_strings.append(self.gpa, dup);
-                break :blk Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
+                break :blk Value{ .string_view = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
             } else v0;
             try self.captured_filters.append(self.gpa, .{ .name = flit.name, .value = v });
         }
@@ -5191,7 +5191,7 @@ pub const Interpreter = struct {
             .float_ => |x| try self.msgPrint("{d}", .{x}),
             .bool_ => |x| try self.msgAppend(if (x) "true" else "false"),
             .duration => |x| try self.msgPrint("{d}s", .{x}),
-            .string_id, .string_run, .string_persistent => try self.msgAppend(self.stringBytes(v) orelse ""),
+            .string_id, .string_run, .string_persistent, .string_view => try self.msgAppend(self.stringBytes(v) orelse ""),
             .entity_id => |e| try self.msgPrint("entity#{d}", .{e}),
             .unit => try self.msgAppend("()"),
             else => try self.msgAppend("<value>"),
@@ -5500,9 +5500,8 @@ pub const Interpreter = struct {
                     if (mc.args_len != 0) return error.RuntimeFailure;
                     const handle = try self.collections.newArray(self.gpa);
                     for (world.entityExtensions(@bitCast(eid))) |n| {
-                        // Wrap each owned name as a borrowed persistent-string view
-                        // (the names outlive the call — owned by the side-table).
-                        try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_persistent = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
+                        // The names are owned by the world's side table.
+                        try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_view = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
                     }
                     return Value{ .array_ref = handle };
                 }
@@ -5550,13 +5549,9 @@ pub const Interpreter = struct {
                 const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
                 return try self.callMethod(world, locals, method, mc, recv);
             },
-            .string_id, .string_run, .string_persistent => {
-                // Builtin string methods. `len` → byte length, on a
-                // literal (`string_id`), a runtime-produced string
-                // (`string_run`), or a borrowed resource-string
-                // view (`string_persistent`); any other §12 method
-                // is unimplemented stdlib → fail loud. `stringBytes` already covers
-                // all three forms.
+            .string_id, .string_run, .string_persistent, .string_view => {
+                // Builtin string methods: `len` → byte length; any other §12
+                // method is unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "len")) {
                     const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
@@ -5860,26 +5855,28 @@ pub const Interpreter = struct {
     /// Whether a string `Value`'s bytes must be deep-copied to outlive the
     /// current body OR survive a mutation of their source. Only
     /// `.string_id` (the immortal AST string table) is stable; a `.string_run`
-    /// (per-body `run_strings`, freed at the body boundary) and a NON-EMPTY
+    /// (per-body `run_strings`, freed at the body boundary), a NON-EMPTY
     /// borrowed `.string_persistent` (a view over resource storage, released when
-    /// the resource string field is reassigned) are NOT. The empty
-    /// `.string_persistent` sentinel (`ptr == 0`, `len == 0`) has no bytes to own.
+    /// the resource string field is reassigned) and a non-empty `.string_view`
+    /// (owned by whichever store copied it) are NOT. An empty view (`ptr == 0`,
+    /// `len == 0`) has no bytes to own.
     fn stringNeedsOwning(v: Value) bool {
         return switch (v) {
             .string_run => true,
-            .string_persistent => |s| s.len > 0,
+            .string_persistent, .string_view => |s| s.len > 0,
             else => false,
         };
     }
 
     /// The bytes of a string value — an AST-table literal (`string_id`), a
-    /// runtime-produced string (`string_run`), or a borrowed resource-string
-    /// view (`string_persistent`). Null for any non-string value.
+    /// runtime-produced string (`string_run`), a borrowed resource-string view
+    /// (`string_persistent`) or a store-owned view (`string_view`). Null for any
+    /// non-string value.
     fn stringBytes(self: *const Interpreter, v: Value) ?[]const u8 {
         return switch (v) {
             .string_id => |sid| self.ast.strings.slice(sid),
             .string_run => |handle| self.run_strings.items[handle],
-            .string_persistent => |s| blk: {
+            .string_persistent, .string_view => |s| blk: {
                 if (s.len == 0) break :blk &.{};
                 const p: [*]const u8 = @ptrFromInt(s.ptr);
                 break :blk p[0..s.len];
@@ -13582,6 +13579,100 @@ test "global_event filter is captured once at suspension, not re-evaluated at po
     const out = world.registry.idOf("Out").?;
     _ = try interp.runFor(&world, 4);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured 7 matched despite want→9
+}
+
+test "the event store's string copy is a view, not a persistent string" {
+    const gpa = std.testing.allocator;
+    var store: EventStore = .{};
+    defer store.deinit(gpa);
+    const v = try store.ownEscapingString(gpa, "abc");
+    try std.testing.expect(v == .string_view);
+    try std.testing.expectEqualStrings("abc", @as([*]const u8, @ptrFromInt(v.string_view.ptr))[0..v.string_view.len]);
+}
+
+test "a captured event filter string is a view, not a persistent string" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\event Ping { s: string }
+        \\resource Out { n: int = 0 }
+        \\async rule watch()
+        \\  when resource Out
+        \\{
+        \\  await global_event(Ping { s: "a" + "b" })
+        \\  get_mut(Out).n = 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 1), interp.captured_filters.items.len);
+    const v = interp.captured_filters.items[0].value;
+    try std.testing.expect(v == .string_view);
+    try std.testing.expectEqualStrings("ab", interp.stringBytes(v).?);
+}
+
+test "active_extensions yields views of the world's names" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Probe { count: i32 = 0 }
+        \\rule probe(entity: Entity) when entity has Probe {
+        \\  entity.get_mut(Probe).count = entity.active_extensions().len() as i32
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{world.componentId("Probe").?});
+    try world.addEntityExtension(gpa, eid, "Combat");
+    interp.suppress_body_store_resets = true;
+    _ = try interp.runFor(&world, 1);
+    var seen: usize = 0;
+    for (interp.collections.arrays.items) |arr| for (arr.items) |el| {
+        try std.testing.expect(el == .string_view);
+        try std.testing.expectEqualStrings("Combat", interp.stringBytes(el).?);
+        seen += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "a store-owned view and a resource string with the same bytes are one set element" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\event Named { name: string }
+        \\resource R { name: string = "x", n: int = 0 }
+        \\rule emitter() when resource R { emit Named { name: "a" + "b" } }
+        \\rule rename() when resource R { get_mut(R).name = "a" + "b" }
+        \\@on_event(Named)
+        \\rule seen() when resource R {
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert(event.name)
+        \\  s.insert(get(R).name)
+        \\  get_mut(R).n = s.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceIntNamed(&world, "R", "n"));
 }
 
 test "emit stabilizes a computed string so an @on_event observer reads it safely" {

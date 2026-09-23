@@ -124,6 +124,11 @@ pub const Value = union(enum) {
     /// `ptr == 0` ⇔ the empty string. Additive — does not disturb `string_id` (AST
     /// pool) / `string_run` (rule-arena) semantics.
     string_persistent: StrView,
+    /// A view over string bytes owned outside the persistent heap: an event
+    /// store copy, a captured event filter value, a world extension name. It
+    /// has no block header, so it is never incref'd or decref'd. `ptr == 0` ⇔
+    /// the empty string.
+    string_view: StrView,
     /// A borrowed view over a resource `T[]` field's persistent-heap container
     /// block. The `u64` is the block's exposed payload pointer (a
     /// `persistent` `type_array` block whose payload is the owned
@@ -192,6 +197,7 @@ pub const Value = union(enum) {
     /// bug or a value reaching the interpreter through an `unsupported`
     /// path the interpreter must reject.
     pub fn eql(self: Value, other: Value) bool {
+        if (byteView(self)) |a| if (byteView(other)) |b| return viewEql(a, b);
         if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
         return switch (self) {
             .int_ => |a| a == other.int_,
@@ -213,14 +219,7 @@ pub const Value = union(enum) {
             .struct_ref => false,
             .optional => false, // optional equality is unexercised (unwrap via if/while let)
             .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
-            .string_persistent => |a| blk: {
-                const b = other.string_persistent;
-                if (a.len != b.len) break :blk false;
-                if (a.len == 0) break :blk true;
-                const ab: [*]const u8 = @ptrFromInt(a.ptr);
-                const bb: [*]const u8 = @ptrFromInt(b.ptr);
-                break :blk std.mem.eql(u8, ab[0..a.len], bb[0..b.len]);
-            },
+            .string_persistent, .string_view => unreachable,
             // Handle equality is not an Etch v0.6 operation (no `==` on
             // TaskHandle/TimerHandle); identity comparison is reserved for a
             // later spec.
@@ -247,6 +246,23 @@ pub const StrView = struct {
     ptr: u64 = 0,
     len: u32 = 0,
 };
+
+/// The view of a string held outside the AST and the rule arena, whichever
+/// memory owns it; null for any other value.
+fn byteView(v: Value) ?StrView {
+    return switch (v) {
+        .string_persistent, .string_view => |s| s,
+        else => null,
+    };
+}
+
+fn viewEql(a: StrView, b: StrView) bool {
+    if (a.len != b.len) return false;
+    if (a.len == 0) return true;
+    const ab: [*]const u8 = @ptrFromInt(a.ptr);
+    const bb: [*]const u8 = @ptrFromInt(b.ptr);
+    return std.mem.eql(u8, ab[0..a.len], bb[0..b.len]);
+}
 
 /// Typed sum carrying a `SourceSpan` resolved from the AST `NodeId` that
 /// triggered the failure. The interpreter never silently masks runtime
