@@ -25,15 +25,20 @@ fn freeMessages(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8
     list.deinit(gpa);
 }
 
-/// Whether type-checking `src` reports the rule-parameter refusal.
-fn refusesRuleParam(gpa: std.mem.Allocator, src: []const u8) !bool {
+/// Whether type-checking `src` reports a diagnostic whose message holds `needle`.
+fn reports(gpa: std.mem.Allocator, src: []const u8, needle: []const u8) !bool {
     var msgs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer freeMessages(gpa, &msgs);
     try checkMessages(gpa, src, &msgs);
     for (msgs.items) |m| {
-        if (std.mem.indexOf(u8, m, "rule parameters must be scalar or Entity") != null) return true;
+        if (std.mem.indexOf(u8, m, needle) != null) return true;
     }
     return false;
+}
+
+/// Whether type-checking `src` reports the rule-parameter refusal.
+fn refusesRuleParam(gpa: std.mem.Allocator, src: []const u8) !bool {
+    return reports(gpa, src, "rule parameters must be scalar or Entity");
 }
 
 /// Lowers `src`, type-checking it first unless `checked` is false.
@@ -111,4 +116,25 @@ test "the codegen refuses an optional fn return" {
 
 test "the same fn with scalar types lowers" {
     try lowerSource(std.testing.allocator, "fn total(xs: int) -> int { 0 }", true);
+}
+
+test "an unknown fn return type is refused by the checker" {
+    try std.testing.expect(try reports(std.testing.allocator, "fn f() -> Nope { 0 }", "unsupported return type on function 'f'"));
+}
+
+test "an unknown method return type is refused by the checker" {
+    try std.testing.expect(try reports(std.testing.allocator,
+        \\struct V2 {
+        \\  x: int = 0
+        \\}
+        \\impl V2 {
+        \\  fn size(self) -> Nope {
+        \\    self.x
+        \\  }
+        \\}
+    , "unsupported return type on method 'size'"));
+}
+
+test "a known fn return type is accepted by the checker" {
+    try std.testing.expect(!try reports(std.testing.allocator, "fn f() -> int { 0 }", "unsupported return type"));
 }

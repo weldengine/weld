@@ -4390,6 +4390,9 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on method '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
@@ -4951,6 +4954,9 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on function '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
