@@ -224,7 +224,12 @@ fn runCookInProcess(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, paths: 
 }
 
 fn runZigBuildExe(gpa: std.mem.Allocator, io: std.Io) !u64 {
-    _ = gpa;
+    // The stub compiles for the target and CPU this bench was built for.
+    const query = std.Target.Query.fromTarget(&builtin.target);
+    const triple = try query.zigTriple(gpa);
+    defer gpa.free(triple);
+    const cpu = try query.serializeCpuAlloc(gpa);
+    defer gpa.free(cpu);
     // The Zig CLI applies `--dep X` to the NEXT `-MX=...` module
     // declaration, so the canonical incantation is
     //     --dep cooked --dep weld_core -Mroot=stub.zig
@@ -245,6 +250,10 @@ fn runZigBuildExe(gpa: std.mem.Allocator, io: std.Io) !u64 {
         "-Mweld_core=src/core/root.zig",
         "-fno-emit-bin",
         "-lc",
+        "-target",
+        triple,
+        "-mcpu",
+        cpu,
         "--cache-dir",
         cache_dir,
     };
