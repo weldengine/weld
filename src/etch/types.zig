@@ -250,8 +250,8 @@ pub const builtin_resources = [_]BuiltinResource{
     } },
 };
 
-/// The builtin component the interpreter injects when a program declares any
-/// tag. `interp.zig` spells it as a literal, which this must equal.
+/// The name of the builtin component both backends inject when a program
+/// declares any tag. The reservation and every injection read it here.
 pub const tagset_component_name = "TagSet";
 
 /// True iff the engine itself registers `name` in the ECS registry, so a user

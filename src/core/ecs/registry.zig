@@ -5,14 +5,14 @@
 //! metadata for the rest of the ECS (dynamic archetype storage, runtime
 //! queries, the Etch bridge) to operate on raw bytes.
 //!
-//! Two registration paths share the same backing storage:
+//! Every registration becomes an entry through `prepareEntry`:
 //!
 //! - `registerComponent(gpa, comptime T) ComponentId` — for types known at
 //!   Zig compile time. The descriptor is derived from `@typeInfo(T)`.
-//! - `registerComponentRaw(gpa, desc) ComponentId` — for types discovered
-//!   at runtime (the Etch bridge consumes this path from the parsed AST:
-//!   component names, field names, default bytes come from the source
-//!   file).
+//! - `registerComponentRaw(gpa, desc) ComponentId` — for one type described
+//!   at runtime.
+//! - `prepareEntry`, `reserve`, `commitPrepared` — for a batch that must be
+//!   registered whole or not at all, as an Etch compile registers its types.
 //!
 //! Coexists with the comptime `(Transform, Velocity)` archetype defined
 //! in `world.zig` — additive, never replaces it. The struct stores no
@@ -71,12 +71,13 @@ pub const FieldKind = enum {
     f64_,
     /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
     /// pointing into the Tier-0 persistent heap (`src/core/memory/persistent.zig`,
-    /// `StringSlot`). **Resource-only by construction**: the Etch
-    /// validator rejects `string` on `component` and `fieldKindFromTypeName`
-    /// only emits this kind for the `.resource` origin, so no component can ever
-    /// carry it — the component SoA/POD invariant (`ARCH-004`) is
-    /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
-    /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
+    /// `StringSlot`). **Resource-only in Etch**: the Etch validator rejects
+    /// `string` on `component` and `fieldKindFromTypeName` only emits this kind
+    /// for the `.resource` origin, so no Etch component carries it — the
+    /// component SoA/POD invariant (`ARCH-004`) is untouched. The string behind
+    /// a DEFAULT slot is copied at registration into a block the registry entry
+    /// owns; the one behind a live slot is its writer's, released through its
+    /// refcount.
     string_,
     /// An enum field slot: the variant's declaration-order index as a `u32`
     /// discriminant (4 bytes, 4-aligned). POD — no persistent heap, no decref,
@@ -96,8 +97,10 @@ pub const FieldKind = enum {
     entity_,
     /// A dynamic-array field slot (`T[]`): a `CollectionSlot` (`{ ptr: u64 }`,
     /// 8 bytes, 8-aligned) holding the persistent-heap pointer of the owned
-    /// container block. **Resource-only by construction** like `.string_`. Tier 0
-    /// copies the 8 raw slot bytes; the Etch runtime owns the container.
+    /// container block. **Resource-only in Etch** like `.string_`. Tier 0 copies
+    /// the 8 raw slot bytes, and `World.deinit` releases the container through
+    /// its refcount. A DEFAULT slot names no container: `prepareEntry` refuses
+    /// one that does.
     array_,
     /// A map field slot (`[K: V]`). Same 8-byte `CollectionSlot`
     /// discipline and resource-only gating as `.array_`.
@@ -232,11 +235,14 @@ pub fn schemaDigestOf(desc: ComponentDesc) u64 {
 /// and `registerAlias`; lookup paths never fail (return `?T`).
 pub const RegistryError = error{
     DuplicateComponent,
+    /// A collection field's default slot is not zero.
+    CollectionDefaultNotEmpty,
     OutOfMemory,
 };
 
-/// One owned entry. `name`, `default_bytes`, and `fields` are duplicated
-/// at registration time so the caller can free its inputs immediately.
+/// One owned entry. Every input of its descriptor is copied at registration,
+/// the strings its default bytes point at included, so the caller can free its
+/// inputs immediately.
 const Entry = struct {
     desc: ComponentDesc,
     /// The TRANSITIVE closure of `desc.requires`, flattened to ids, computed
@@ -248,12 +254,51 @@ const Entry = struct {
     /// Schema identity, derived at registration — beside the descriptor for the
     /// same reason `closure` is.
     schema_digest: u64 = 0,
-    /// Immortal `persistent` blocks that `desc.default_bytes` points into. The
-    /// entry owns them and destroys them with itself, so every copy of the
-    /// default bytes — a resource store slot included — stays valid for the
-    /// registry's lifetime.
+    /// The immortal `persistent` copies of the strings `desc.default_bytes`
+    /// points at. Destroyed with the entry, so every copy of the default bytes
+    /// — a resource store slot included — stays valid for the registry's
+    /// lifetime.
     owned_blocks: []const [*]u8 = &.{},
 };
+
+/// Point every non-empty `.string_` slot of `bytes` at an immortal copy of its
+/// string and write every empty one as `{ptr=0,len=0}`, returning the copies. On
+/// error `bytes` may be partly rewritten and no copy survives.
+fn copyStringDefaults(gpa: std.mem.Allocator, fields: []const FieldDesc, bytes: []u8) error{OutOfMemory}![]const [*]u8 {
+    const Slot = persistent.StringSlot;
+    var n: usize = 0;
+    for (fields) |f| {
+        if (f.kind != .string_) continue;
+        const slot = bytes[f.offset..][0..@sizeOf(Slot)];
+        const ss = std.mem.bytesToValue(Slot, slot);
+        if (ss.ptr != 0 and ss.len != 0) {
+            n += 1;
+        } else {
+            @memcpy(slot[@offsetOf(Slot, "ptr")..][0..@sizeOf(u64)], std.mem.asBytes(&@as(u64, 0)));
+            @memcpy(slot[@offsetOf(Slot, "len")..][0..@sizeOf(u32)], std.mem.asBytes(&@as(u32, 0)));
+        }
+    }
+    if (n == 0) return &.{};
+    const blocks = try gpa.alloc([*]u8, n);
+    var made: usize = 0;
+    errdefer {
+        for (blocks[0..made]) |b| persistent.destroy(gpa, b);
+        gpa.free(blocks);
+    }
+    for (fields) |f| {
+        if (f.kind != .string_) continue;
+        const slot = bytes[f.offset..][0..@sizeOf(Slot)];
+        const ss = std.mem.bytesToValue(Slot, slot);
+        if (ss.ptr == 0) continue;
+        const block = try persistent.allocImmortal(gpa, persistent.type_string, ss.len);
+        @memcpy(block[0..ss.len], @as([*]const u8, @ptrFromInt(ss.ptr))[0..ss.len]);
+        blocks[made] = block;
+        made += 1;
+        const ptr: u64 = @intFromPtr(block);
+        @memcpy(slot[@offsetOf(Slot, "ptr")..][0..@sizeOf(u64)], std.mem.asBytes(&ptr));
+    }
+    return blocks;
+}
 
 /// Free every allocation an entry owns.
 fn freeEntry(gpa: std.mem.Allocator, e: *Entry) void {
@@ -348,32 +393,40 @@ pub const Registry = struct {
         self.* = undefined;
     }
 
-    /// Register a component described at runtime. The registry duplicates
-    /// `desc.name`, `desc.default_bytes`, and each `FieldDesc.name`.
+    /// Register a component described at runtime, on `prepareEntry`'s terms.
     pub fn registerComponentRaw(self: *Registry, gpa: std.mem.Allocator, desc: ComponentDesc) RegistryError!ComponentId {
-        var prepared = try self.prepareEntry(gpa, desc, &.{});
+        var prepared = try self.prepareEntry(gpa, desc);
         errdefer prepared.deinit(gpa);
         try self.reserve(gpa, 1);
         return self.commitPrepared(prepared);
     }
 
     /// Copy `desc` into an entry `commitPrepared` can adopt, without touching
-    /// the registry. On success the entry owns `owned_blocks`, which must be the
-    /// immortal blocks `desc.default_bytes` points into, allocated with `gpa`;
-    /// on error the caller keeps them. Refuses a name already registered.
-    pub fn prepareEntry(
-        self: *const Registry,
-        gpa: std.mem.Allocator,
-        desc: ComponentDesc,
-        owned_blocks: []const [*]u8,
-    ) RegistryError!PreparedEntry {
+    /// the registry. The entry copies every input, and a non-zero `.string_`
+    /// default slot names `len` readable bytes at `ptr`, which it copies into a
+    /// block of its own: the caller keeps all it passed. Refuses a name already
+    /// registered, and a collection field whose default slot is not zero.
+    pub fn prepareEntry(self: *const Registry, gpa: std.mem.Allocator, desc: ComponentDesc) RegistryError!PreparedEntry {
         if (self.by_name.contains(desc.name)) return RegistryError.DuplicateComponent;
+        for (desc.fields) |f| switch (f.kind) {
+            .array_, .map_, .set_ => {
+                const slot = desc.default_bytes[f.offset..][0..@sizeOf(persistent.CollectionSlot)];
+                if (std.mem.bytesToValue(persistent.CollectionSlot, slot).ptr != 0) return RegistryError.CollectionDefaultNotEmpty;
+            },
+            else => {},
+        };
 
         const name_owned = try gpa.dupe(u8, desc.name);
         errdefer gpa.free(name_owned);
 
         const default_owned = try gpa.dupe(u8, desc.default_bytes);
         errdefer gpa.free(default_owned);
+
+        const blocks_owned = try copyStringDefaults(gpa, desc.fields, default_owned);
+        errdefer {
+            for (blocks_owned) |b| persistent.destroy(gpa, b);
+            if (blocks_owned.len != 0) gpa.free(blocks_owned);
+        }
 
         const fields_owned = try gpa.alloc(FieldDesc, desc.fields.len);
         errdefer gpa.free(fields_owned);
@@ -411,7 +464,7 @@ pub const Registry = struct {
                 .content_digest = desc.content_digest,
             },
             .schema_digest = schemaDigestOf(desc),
-            .owned_blocks = owned_blocks,
+            .owned_blocks = blocks_owned,
         } };
     }
 
@@ -689,15 +742,8 @@ pub const Registry = struct {
 };
 
 test "the digest is blind to the default bytes" {
-    // A DEPENDENT RESTS ON THIS. `interp.schemaDigestFor` passes `&.{}` for
-    // `default_bytes` so the hot-reload pre-validation pass can confront every
-    // declared schema WITHOUT materialising a single default — materialising them
-    // allocates immortal persistent blocks, which a pass that may refuse must not
-    // do. That shortcut is only sound while this property holds.
-    //
-    // If a future change makes the digest read the defaults, this test fires and
-    // names where to go: `schemaDigestFor` must then be given the real bytes, and
-    // the pre-pass must materialise them and own their rollback.
+    // `interp.schemaDigestFor` passes `&.{}` for `default_bytes`, so a reload
+    // confronts a declaration without evaluating its defaults.
     const fields = [_]FieldDesc{.{ .name = "v", .offset = 0, .kind = .int_ }};
     const a: ComponentDesc = .{
         .name = "T",
@@ -841,4 +887,42 @@ test "registerComponentRaw and findField roundtrip" {
     try std.testing.expectEqual(@as(u16, 8), f.offset);
     try std.testing.expectEqual(FieldKind.float_, f.kind);
     try std.testing.expect(reg.findField(id, "missing") == null);
+}
+
+test "registerComponentRaw copies a string default, so the caller may free its own" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const host = try gpa.dupe(u8, "hello");
+    var default_bytes = [_]u8{0} ** 16;
+    @memcpy(default_bytes[0..8], std.mem.asBytes(&@as(u64, @intFromPtr(host.ptr))));
+    @memcpy(default_bytes[8..12], std.mem.asBytes(&@as(u32, @intCast(host.len))));
+    const id = try reg.registerComponentRaw(gpa, .{
+        .name = "Titled",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{.{ .name = "title", .offset = 0, .kind = .string_ }},
+    });
+    @memset(host, 'x');
+    gpa.free(host);
+
+    const kept = std.mem.bytesToValue(persistent.StringSlot, reg.componentDefaultBytes(id)[0..16]);
+    try std.testing.expectEqualStrings("hello", @as([*]const u8, @ptrFromInt(kept.ptr))[0..kept.len]);
+}
+
+test "registerComponentRaw refuses a collection default that names a container" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const default_bytes = std.mem.toBytes(@as(u64, 0x1000));
+    try std.testing.expectError(RegistryError.CollectionDefaultNotEmpty, reg.registerComponentRaw(gpa, .{
+        .name = "Listed",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &default_bytes,
+        .fields = &[_]FieldDesc{.{ .name = "xs", .offset = 0, .kind = .array_ }},
+    }));
 }

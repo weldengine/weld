@@ -372,9 +372,9 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
         // borrowed `.array_persistent` view over the owned container block (no
         // incref — the resource, hence the block, outlives the rule body). `ptr`
         // is never 0 for a live field (the empty collection is a real block
-        // allocated at `addResource`). Components never carry a collection kind
-        // (validator-gated, resource-only), so this is reached only via
-        // `readResourceField`.
+        // allocated with the resource's store buffer). Components never carry a
+        // collection kind (validator-gated, resource-only), so this is reached
+        // only via `readResourceField`.
         .array_ => blk: {
             var cs: persistent.CollectionSlot = undefined;
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);

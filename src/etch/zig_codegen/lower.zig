@@ -34,6 +34,7 @@
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
 const types_mod = @import("../types.zig");
+const tagset_name = types_mod.tagset_component_name;
 const tags_mod = @import("../tags.zig");
 const diag_mod = @import("../diagnostics.zig");
 const descriptor_mod = @import("../descriptor.zig");
@@ -176,7 +177,7 @@ pub fn generateFile(
     // The builtin `TagSet` component: a fixed `[words]u64` bitfield,
     // one slot per entity carrying tags. Emitted as an `extern struct` so its
     // layout matches the registry's raw `words*8`-byte / align-8 component
-    // (`etch-abi-zig.md` §3) — byte-exact with the interpreter's `registerComponentRaw`.
+    // (`etch-abi-zig.md` §3) — byte-exact with the interpreter's `tagSetDesc`.
     if (tag_table.leaf_count > 0) {
         try emitTagSetStruct(&w, tag_table.words());
     }
@@ -305,7 +306,7 @@ fn emitImports(w: *Writer) CodegenError!void {
 /// command buffer. Layout matches the registry's raw component
 /// (size `words*8`, align 8, no named fields).
 fn emitTagSetStruct(w: *Writer, words: u32) CodegenError!void {
-    try w.printLine("pub const TagSet = extern struct {{ bits: [{d}]u64 = [_]u64{{0}} ** {d} }};", .{ words, words });
+    try w.printLine("pub const " ++ tagset_name ++ " = extern struct {{ bits: [{d}]u64 = [_]u64{{0}} ** {d} }};", .{ words, words });
     try w.blankLine();
 }
 
@@ -1218,12 +1219,12 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
         const content_digest = try tag_table.contentDigest(w.gpa);
         try w.line("{");
         w.indentBy(1);
-        try w.line("var __tagset_default: TagSet = .{};");
+        try w.line("var __tagset_default: " ++ tagset_name ++ " = .{};");
         try w.line("_ = try world.registry.registerComponentRaw(gpa, .{");
         w.indentBy(1);
-        try w.line(".name = \"TagSet\",");
-        try w.line(".size = @sizeOf(TagSet),");
-        try w.line(".alignment = @alignOf(TagSet),");
+        try w.line(".name = \"" ++ tagset_name ++ "\",");
+        try w.line(".size = @sizeOf(" ++ tagset_name ++ "),");
+        try w.line(".alignment = @alignOf(" ++ tagset_name ++ "),");
         try w.line(".default_bytes = std.mem.asBytes(&__tagset_default),");
         try w.line(".fields = &.{},");
         try w.printLine(".content_digest = {d},", .{content_digest});
@@ -1766,7 +1767,7 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
     // already added "TagSet" to `info.components` for the id + `has TagSet`
     // archetype predicate.
     if (info.tag_filters.len > 0) {
-        _ = try body_used.getOrPut(w.gpa, "TagSet");
+        _ = try body_used.getOrPut(w.gpa, tagset_name);
     }
 
     if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating or program_has_changed) {
@@ -2192,7 +2193,7 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
         .tag_filter => {
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
-                .has_tag, .has_any_tag, .has_all_tags => try w.write("arch.hasComponent(TagSet_id)"),
+                .has_tag, .has_any_tag, .has_all_tags => try w.write("arch.hasComponent(" ++ tagset_name ++ "_id)"),
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
             }
         },
@@ -2820,7 +2821,7 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             const bit = tagPathLeafBitCodegen(ast, table, tm.path) orelse return CodegenError.UnsupportedConstruct;
             const method = if (tm.kind == .add) "setTag" else "clearTag";
             try w.writeIndent();
-            try w.print("cmd.{s}(__entity, world.registry.idOf(\"TagSet\").?, {d}) catch {{}};\n", .{ method, bit });
+            try w.print("cmd.{s}(__entity, world.registry.idOf(\"" ++ tagset_name ++ "\").?, {d}) catch {{}};\n", .{ method, bit });
         },
         .throw_stmt => {
             // `throw expression` — the flag+branch
@@ -6811,8 +6812,8 @@ fn walkWhen(
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => {
-                    const gop = try seen.getOrPut(gpa, "TagSet");
-                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                    const gop = try seen.getOrPut(gpa, tagset_name);
+                    if (!gop.found_existing) try components.append(gpa, tagset_name);
                     has_component_ref.* = true;
                 },
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
@@ -6879,8 +6880,8 @@ fn collectComponents(
             const tf = ast.tag_filters.items[node.aux];
             switch (tf.op) {
                 .has_tag, .has_any_tag, .has_all_tags => {
-                    const gop = try seen.getOrPut(gpa, "TagSet");
-                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                    const gop = try seen.getOrPut(gpa, tagset_name);
+                    if (!gop.found_existing) try components.append(gpa, tagset_name);
                 },
                 .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
             }
@@ -7000,7 +7001,7 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
         .has_tag, .has_all_tags => {
             // Every listed bit must be set.
             for (entries.items) |e| {
-                try w.printLine("if ((TagSet_arr[slot].bits[{d}] & 0x{x}) != 0x{x}) continue;", .{ e.word, e.mask, e.mask });
+                try w.printLine("if ((" ++ tagset_name ++ "_arr[slot].bits[{d}] & 0x{x}) != 0x{x}) continue;", .{ e.word, e.mask, e.mask });
             }
         },
         .has_any_tag => {
@@ -7009,7 +7010,7 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
             try w.write("if (");
             for (entries.items, 0..) |e, idx| {
                 if (idx > 0) try w.write(" and ");
-                try w.print("(TagSet_arr[slot].bits[{d}] & 0x{x}) == 0", .{ e.word, e.mask });
+                try w.print("(" ++ tagset_name ++ "_arr[slot].bits[{d}] & 0x{x}) == 0", .{ e.word, e.mask });
             }
             try w.write(") continue;\n");
         },

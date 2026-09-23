@@ -7,9 +7,8 @@
 //! at init) and the open `TypeId` set are exactly what `string[]` / `[K: V]` /
 //! `Set<T>` register against, with no Etch coupling in this module.
 //!
-//! Tier 0, and the heap is tier-neutral (
-//! `runDrop` is a no-op, no Etch coupling — and resource `string` fields are a
-//! Tier-0 capability). API + on-storage layout unchanged.
+//! Tier 0 and tier-neutral: a container's drop is a callback the Etch runtime
+//! registers (`registerDrop`), so this module imports nothing of Etch.
 //!
 //! Layout (`etch-memory-model.md` §4.3 / §5.1). Each block is one system
 //! allocation laid out as:
@@ -35,14 +34,16 @@
 //! `@fence`-free idiom — `@fence` was removed in Zig 0.16, cf.
 //! `src/core/jobs/deque.zig`) followed by the type's drop + the block free.
 //! A block allocated immortal carries `refcount == sentinel` (`u32.max`):
-//! `incref` / `decref` are no-ops on it — compile-time string literals (resource
-//! field defaults) use this path so `addResource` allocates nothing.
+//! `incref` / `decref` are no-ops on it — the registry's copies of string
+//! defaults use this path, so a resource slot seeded from its default holds a
+//! block no `decref` frees.
 //!
 //! Self-contained: imports only `std` (no other `src/core` coupling), so it sits
-//! cleanly at Tier 0. Consumers are the scene loader and the Etch runtime
-//! (interp / bridge / cook, which reach it through `weld_core.memory`); the
-//! Tier-0 `ResourceStore` itself stays string-agnostic (it stores the raw
-//! `StringSlot` bytes).
+//! cleanly at Tier 0. Consumers are the registry (its string-default copies),
+//! the world (the resource payload release), the scene loader and the Etch
+//! runtime (interp / bridge / cook, through `weld_core.memory`); the Tier-0
+//! `ResourceStore` itself stays string-agnostic (it stores the raw `StringSlot`
+//! bytes).
 
 const std = @import("std");
 
@@ -99,11 +100,12 @@ comptime {
 /// `Set<T>`): a single `{ ptr }` (8 bytes, 8-aligned) holding the
 /// persistent block pointer of the owned container (a `type_array` / `type_map`
 /// / `type_set` block). Unlike `StringSlot`, `ptr` is never `0` for a live
-/// field: an empty collection is a real (empty) container block allocated at
-/// `addResource`, so a read always finds a valid container. The block pointer
-/// is stable across the container's internal realloc (the buffer moves inside
-/// the container, not the block). `Registry.FieldKind.{array_,map_,set_}` report
-/// `sizeBytes == 8` / `alignBytes == 8` to match (asserted in `ecs_bridge.zig`).
+/// field: an empty collection is a real (empty) container block allocated with
+/// the resource's store buffer, so a read always finds a valid container. The
+/// block pointer is stable across the container's internal realloc (the buffer
+/// moves inside the container, not the block).
+/// `Registry.FieldKind.{array_,map_,set_}` report `sizeBytes == 8` /
+/// `alignBytes == 8` to match (asserted in `ecs_bridge.zig`).
 pub const CollectionSlot = extern struct {
     ptr: u64 = 0,
 };

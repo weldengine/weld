@@ -413,14 +413,6 @@ pub fn build(b: *std.Build) void {
     const shaders_check_step = b.step("shaders-check", "Verify .spv on disk matches a fresh glslc regen");
     shaders_check_step.dependOn(&shaders_check_run.step);
 
-    // `zig build vk-gen-check`: regenerates vk.zig and verifies that
-    // the diff vs the commit is empty. Delegated to the existing `bindgen-verify`
-    // which covers all generated bindings.
-    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
-    if (b.top_level_steps.get("bindgen-verify")) |bv| {
-        vk_gen_check_step.dependOn(&bv.step);
-    }
-
     // -------------------------------------------------------------- Tests --
 
     const test_step = b.step("test", "Run all tests");
@@ -2456,6 +2448,8 @@ pub fn build(b: *std.Build) void {
         "Regenerate bindings + assert `git diff --quiet HEAD` on the four generated files",
     );
     bindgen_verify_step.dependOn(&bindgen_verify_diff.step);
+    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
+    vk_gen_check_step.dependOn(bindgen_verify_step);
 
     // -------------------------------------- weld_lint (custom linter) --
     //

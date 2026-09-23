@@ -19,6 +19,7 @@
 const std = @import("std");
 const ast_mod = @import("ast.zig");
 const types_mod = @import("types.zig");
+const tagset_name = types_mod.tagset_component_name;
 const parser_mod = @import("parser.zig");
 const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
@@ -7100,7 +7101,7 @@ fn stageTagSet(
     const content_digest = try tag_table.contentDigest(gpa);
     const candidate = weld_core.ecs.registry.schemaDigestOf(tagSetDesc(size, &.{}, content_digest));
 
-    const holder: ?ComponentId = world.registry.idOf("TagSet") orelse pending.idOf("TagSet");
+    const holder: ?ComponentId = world.registry.idOf(tagset_name) orelse pending.idOf(tagset_name);
     if (holder) |id| {
         const live: LiveLayout = if (id < pending.base_id) liveLayoutOf(&world.registry, id) else blk: {
             const e = pending.entryOf(id);
@@ -7109,24 +7110,24 @@ fn stageTagSet(
         // An absent digest refuses: an unknown layout is not a matching one.
         if ((live.digest orelse ~candidate) != candidate) {
             std.log.warn(
-                "etch/hot-reload: 'TagSet' changed layout or tag identity — reload REFUSED, " ++
+                "etch/hot-reload: '" ++ tagset_name ++ "' changed layout or tag identity — reload REFUSED, " ++
                     "previous image kept. live: size={d}; new: size={d} ({d} tag(s)). " ++
                     "An unchanged size means the tags themselves were renamed or reordered.",
                 .{ live.size, size, tag_table.leaf_count },
             );
             return error.SchemaChanged;
         }
-        try bridge.mapComponent(gpa, "TagSet", id);
+        try bridge.mapComponent(gpa, tagset_name, id);
         return id;
     }
 
     const zeroed = try gpa.alloc(u8, size);
     defer gpa.free(zeroed);
     @memset(zeroed, 0);
-    var entry = try world.registry.prepareEntry(gpa, tagSetDesc(size, zeroed, content_digest), &.{});
+    var entry = try world.registry.prepareEntry(gpa, tagSetDesc(size, zeroed, content_digest));
     errdefer entry.deinit(gpa);
     const id = pending.nextId();
-    try bridge.mapComponent(gpa, "TagSet", id);
+    try bridge.mapComponent(gpa, tagset_name, id);
     try pending.push(gpa, entry, null);
     return id;
 }
@@ -7173,7 +7174,7 @@ fn stageBuiltinResource(
         .alignment = @intCast(max_align),
         .default_bytes = default_buf[0..size],
         .fields = fields_buf[0..br.fields.len],
-    }, &.{});
+    });
     errdefer entry.deinit(gpa);
     var resource: PendingResource = .{ .buf = try ResourceStore.allocBuffer(gpa, default_buf[0..size]), .collection_blocks = &.{} };
     errdefer resource.deinit(gpa);
@@ -7390,7 +7391,7 @@ pub const RegKind = enum { component, resource };
 /// `TagTable.contentDigest` of the table `size` came from.
 fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_core.ecs.registry.ComponentDesc {
     return .{
-        .name = "TagSet",
+        .name = tagset_name,
         .size = size,
         .alignment = 8,
         .default_bytes = default_bytes,
@@ -7555,9 +7556,8 @@ pub fn compileTypeDecl(
     return registry.commitPrepared(entry);
 }
 
-/// The registry entry of a declaration not yet registered: its layout, and its
-/// default bytes with the immortal blocks of its `string` defaults, which the
-/// entry owns.
+/// The registry entry of a declaration not yet registered: its layout and its
+/// default bytes.
 fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *const Registry, shape: DeclShape) !PreparedEntry {
     var layout = try computeLayout(gpa, ast, shape.fields_start, shape.fields_len, shape.reg_kind);
     defer layout.deinit(gpa);
@@ -7566,11 +7566,6 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
     const default_buf: []u8 = try gpa.alloc(u8, layout.size);
     defer gpa.free(default_buf);
     @memset(default_buf, 0);
-    var blocks: std.ArrayListUnmanaged([*]u8) = .empty;
-    errdefer {
-        for (blocks.items) |b| persistent.destroy(gpa, b);
-        blocks.deinit(gpa);
-    }
     var f_i: u32 = 0;
     while (f_i < shape.fields_len) : (f_i += 1) {
         const f = ast.fields.items[shape.fields_start + f_i];
@@ -7580,17 +7575,15 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
         // store's copy at a container.
         if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
         if (fd.kind == .string_) {
-            // A literal default → an immortal block (sentinel refcount) the entry
-            // owns, shared by every copy of the default bytes. No default, or a
-            // non-literal one, leaves the empty string `{ptr=0,len=0}`.
+            // A literal default points at the AST's bytes, which `prepareEntry`
+            // copies into a block the entry owns. No default, or a non-literal
+            // one, leaves the empty string `{ptr=0,len=0}`.
             if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .string_lit) {
                 const lit = ast.strings.slice(ast.exprData(f.default_value));
-                try blocks.ensureUnusedCapacity(gpa, 1);
-                const block = try persistent.allocImmortal(gpa, persistent.type_string, lit.len);
-                blocks.appendAssumeCapacity(block);
-                if (lit.len > 0) @memcpy(block[0..lit.len], lit);
-                const ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = @intCast(lit.len) };
-                @memcpy(slot, std.mem.asBytes(&ss));
+                if (lit.len != 0) {
+                    const ss = persistent.StringSlot{ .ptr = @intFromPtr(lit.ptr), .len = @intCast(lit.len) };
+                    @memcpy(slot, std.mem.asBytes(&ss));
+                }
             }
             continue;
         }
@@ -7624,11 +7617,6 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
-    const owned = try blocks.toOwnedSlice(gpa);
-    errdefer {
-        for (owned) |b| persistent.destroy(gpa, b);
-        gpa.free(owned);
-    }
     return registry.prepareEntry(gpa, .{
         .name = shape.name,
         .size = @intCast(layout.size),
@@ -7637,7 +7625,7 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
         .fields = fields.items,
         .storage = shape.storage,
         .requires = shape.requires,
-    }, owned);
+    });
 }
 
 fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {

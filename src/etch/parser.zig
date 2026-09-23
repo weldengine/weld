@@ -948,8 +948,7 @@ pub const Parser = struct {
                         try self.arena.annot_args.append(self.gpa, arg);
                         args_len += 1;
                         if (!try self.match(.comma)) break;
-                        // `etch-grammar.md` §21.4 gives `annotation` an `arg_list`, whose
-                        // trailing comma is legal.
+                        // `annotation_args` (`etch-grammar.md` §1.5) admits a trailing comma.
                         if (self.peek() == .rparen) break;
                     }
                 }
@@ -9302,7 +9301,7 @@ test "parser rejects a positional argument after a named one (§3.3)" {
     try std.testing.expect(result.diagnostics.len > 0);
 }
 
-test "parser accepts a trailing argument comma (grammar l.571)" {
+test "parser accepts a trailing comma in call and annotation arguments" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\@tag(.a,)

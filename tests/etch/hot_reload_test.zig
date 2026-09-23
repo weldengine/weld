@@ -644,15 +644,21 @@ test "an interpreter torn down before the next compile takes no resource with it
     try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
 }
 
+/// Append `resource Big`, a declaration past the registry's 64 KiB.
+fn appendOversized(gpa: std.mem.Allocator, src: *std.ArrayListUnmanaged(u8)) !void {
+    try src.appendSlice(gpa, "resource Big { v0: int = 0");
+    for (1..8200) |i| try src.print(gpa, ", v{d}: int = 0", .{i});
+    try src.appendSlice(gpa, " }\n");
+}
+
 test "a declaration past 64 KiB is refused and registers nothing" {
     const gpa = std.testing.allocator;
     var src: std.ArrayListUnmanaged(u8) = .empty;
     defer src.deinit(gpa);
     // A declaration staged BEFORE the oversized one, so that a registration
     // committed per declaration would leave it behind.
-    try src.appendSlice(gpa, "component Small { x: int = 0 }\nresource Big { v0: int = 0");
-    for (1..8200) |i| try src.print(gpa, ", v{d}: int = 0", .{i});
-    try src.appendSlice(gpa, " }\n");
+    try src.appendSlice(gpa, "component Small { x: int = 0 }\n");
+    try appendOversized(gpa, &src);
 
     var pr = try weld_etch.parseSource(gpa, src.items);
     defer pr.deinit(gpa);
@@ -662,4 +668,116 @@ test "a declaration past 64 KiB is refused and registers nothing" {
     defer world.deinit(gpa);
     try std.testing.expectError(error.LayoutTooLarge, Interpreter.compile(gpa, &pr.ast, &world));
     try std.testing.expectEqual(@as(usize, 0), world.registry.componentCount());
+}
+
+const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
+const src_counter = "component Counter { value: int = 0 }\n";
+
+/// Reload, onto a world running `src_counter`, a program declaring an oversized
+/// resource and a widened `Counter`, in the order `oversized_first` gives.
+fn reloadWithTwoFaults(gpa: std.mem.Allocator, oversized_first: bool) !void {
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(gpa);
+    if (oversized_first) try appendOversized(gpa, &src);
+    try src.appendSlice(gpa, "component Counter { value: int = 0, extra: int = 0 }\n");
+    if (!oversized_first) try appendOversized(gpa, &src);
+
+    var base = try weld_etch.parseSource(gpa, src_counter);
+    defer base.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src.items);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var live = try Interpreter.compile(gpa, &base.ast, &world);
+    defer live.deinit();
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    it.deinit();
+}
+
+test "a reload with two refusals reports the first declaration's: the oversized one" {
+    try std.testing.expectError(error.LayoutTooLarge, reloadWithTwoFaults(std.testing.allocator, true));
+}
+
+test "a reload with two refusals reports the first declaration's: the widened one" {
+    try std.testing.expectError(error.SchemaChanged, reloadWithTwoFaults(std.testing.allocator, false));
+}
+
+/// Allocations `compile` makes for `src` onto a world already running `base`, or
+/// onto a fresh world when `base` is null.
+fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8) !u64 {
+    var base_pr = if (base) |b| try weld_etch.parseSource(gpa, b) else null;
+    defer if (base_pr) |*p| p.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var live = if (base_pr) |*p| try Interpreter.compile(gpa, &p.ast, &world) else null;
+    defer if (live) |*l| l.deinit();
+
+    var counting = CountingAllocator.init(gpa);
+    var it = try Interpreter.compile(counting.allocator(), &pr.ast, &world);
+    const n = counting.snapshot().alloc_count;
+    it.deinit();
+    return n;
+}
+
+test "a reload evaluates none of the defaults of a type already registered" {
+    const gpa = std.testing.allocator;
+    const bare = "resource R { s: string }\n";
+    const defaulted = "resource R { s: string = \"abc\" }\n";
+    // Control: on a fresh world the same count sees the default being copied.
+    try std.testing.expect(try compileAllocations(gpa, null, defaulted) > try compileAllocations(gpa, null, bare));
+    try std.testing.expectEqual(try compileAllocations(gpa, bare, bare), try compileAllocations(gpa, bare, defaulted));
+}
+
+/// Compile `src` onto a world where a Zig component requiring `requisite` was
+/// registered first, and report whether its closure reaches `requisite`.
+fn zigRequisiteResolves(gpa: std.mem.Allocator, requisite: []const u8, src: []const u8) !bool {
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const requirer = try world.registry.registerComponentRaw(gpa, .{
+        .name = "ZigRequirer",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+        .requires = &.{requisite},
+    });
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer it.deinit();
+    return world.registry.isRequiredBy(world.registry.idOf(requisite).?, requirer);
+}
+
+test "a Zig requisite on TagSet resolves at the first compile" {
+    try std.testing.expect(try zigRequisiteResolves(std.testing.allocator, weld_etch.types.tagset_component_name, "tags {\n  a { t00 }\n}\n"));
+}
+
+test "a Zig requisite on a builtin time resource resolves at the first compile" {
+    try std.testing.expect(try zigRequisiteResolves(std.testing.allocator, "GameTime", "component Plain { x: int = 0 }\n"));
+}
+
+test "every type a compile registers without the program declaring it has a reserved name" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "tags {\n  a { t00 }\n}\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer it.deinit();
+
+    const n = world.registry.componentCount();
+    try std.testing.expectEqual(1 + weld_etch.types.builtin_resources.len, n);
+    for (0..n) |id| {
+        const name = world.registry.componentName(@intCast(id));
+        if (!weld_etch.types.isReservedEngineTypeName(name)) {
+            std.debug.print("registered and not reserved: {s}\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
 }

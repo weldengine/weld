@@ -347,7 +347,7 @@ const Builder = struct {
 
     /// Free everything NOT owned by the produced model: the bridge and the
     /// scratch hashmaps. The model arena is transferred to the caller (not freed
-    /// here); the registry owns the default blocks `compileTypeDecl` allocated.
+    /// here); the registry owns the blocks its default bytes point at.
     fn deinitScratch(self: *Builder) void {
         self.bridge.deinit(self.gpa);
         self.string_map.deinit(self.gpa);

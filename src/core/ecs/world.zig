@@ -2417,8 +2417,8 @@ pub const World = struct {
     }
 
     /// Decref and zero every resource's persistent-heap payload slot
-    /// (`.string_` / `.array_` / `.map_` / `.set_`), whoever wrote it. Called by
-    /// `deinit` only, before the store frees the buffers holding the slots and
+    /// (`.string_` / `.array_` / `.map_` / `.set_`), whoever wrote it. Run by
+    /// `deinit`, before the store frees the buffers holding the slots and
     /// before the registry destroys the immortal blocks a string slot may point
     /// at, which `decref` leaves alone. Idempotent: each slot is zeroed after its
     /// decref.

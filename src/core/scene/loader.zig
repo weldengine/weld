@@ -162,8 +162,8 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
 /// the map, and closes `mmap` if present). Loaded resource `string` blocks are
-/// refcounted and owned by their `StringSlot`s, not by the
-/// `LoadResult` — the resource owner reclaims them at teardown.
+/// refcounted and owned by their `StringSlot`s, not by the `LoadResult`;
+/// `World.deinit` releases them.
 pub const LoadResult = struct {
     spawned: []EntityId,
     uuid_to_entity: UuidMap,
@@ -171,10 +171,8 @@ pub const LoadResult = struct {
 
     /// Free the loader-owned allocations and close the backing mmap (if any).
     /// Does **not** despawn the loaded entities — they belong to the `World` —
-    /// and does **not** free the loaded resource `string` blocks: those are
-    /// refcounted, owned by the resources' `StringSlot`s, and reclaimed by
-    /// the resource owner's teardown exactly like interp-written resource
-    /// strings (`interp.zig` deinit). Teardown parity — no new mechanism.
+    /// and does **not** free the loaded resource `string` blocks, which
+    /// `World.deinit` releases like every other resource payload.
     pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
         gpa.free(self.spawned);
         self.uuid_to_entity.deinit(gpa);
@@ -235,9 +233,8 @@ fn decrefResourceStrings(world: *const World, gpa: std.mem.Allocator, cid: Compo
 /// Commit the loader's resource writes. For each resource that
 /// REPLACED a prior value, decref the old string blocks the snapshot captured —
 /// they are no longer referenced (the live slot holds the new block). The new
-/// blocks stay live, owned by the resource slots (freed by the resource owner's
-/// teardown — parity with interp-written strings). Frees each snapshot and the
-/// journal. Infallible.
+/// blocks stay live, owned by the resource slots, which `World.deinit`
+/// releases. Frees each snapshot and the journal. Infallible.
 fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
     for (journal.items) |edit| {
         if (edit.snapshot) |snap| {
@@ -1144,10 +1141,6 @@ test "resource strings outlive LoadResult.deinit" {
     try testing.expect(ss.ptr != 0);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("Verdant Keep", loaded[0..ss.len]);
-
-    // Owner teardown (parity with the interp's resource-string deinit): release
-    // the slot's refcounted block so the testing allocator sees no leak.
-    decrefResourceStrings(&world, gpa, settings, buf);
 }
 
 test "loading over an existing resource string releases the previous block" {
@@ -1174,8 +1167,6 @@ test "loading over an existing resource string releases the previous block" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("second", loaded[0..ss.len]);
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "second"
 }
 
 test "a failed load leaves the world unchanged" {
@@ -1210,8 +1201,6 @@ test "a failed load leaves the world unchanged" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const held: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("old", held[0..ss.len]);
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "old"
 }
 
 test "rollback restores across duplicate resource entries" {
@@ -1241,8 +1230,6 @@ test "rollback restores across duplicate resource entries" {
     @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
     const held: [*]const u8 = @ptrFromInt(ss.ptr);
     try testing.expectEqualStrings("pre", held[0..ss.len]); // pre-load value restored
-
-    decrefResourceStrings(&world, gpa, settings, buf); // release "pre"
 }
 
 /// Test helper: cook a 2-archetype (`A` then `B`), one-entity-each `.scene.bin`.
