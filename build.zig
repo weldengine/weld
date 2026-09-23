@@ -420,6 +420,8 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all tests");
 
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shader_compiler_module })).step);
+
     // Inline tests living next to the core code.
     const core_tests = b.addTest(.{ .root_module = core_module });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
