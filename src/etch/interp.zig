@@ -16587,3 +16587,21 @@ test "a default that overflows its i32 field is refused at compile" {
     defer pr.deinit(gpa);
     try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
 }
+
+test "a default that divides by zero is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: int = 1 / 0 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.InvalidProgram, compileUnchecked(gpa, &pr, &world));
+}
+
+test "a default whose folding overflows is refused at compile" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "component C { v: int = 9223372036854775807 + 1 }");
+    defer pr.deinit(gpa);
+    try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
+}

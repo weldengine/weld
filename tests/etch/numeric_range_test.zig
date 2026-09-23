@@ -238,3 +238,45 @@ test "literal elements within their declared types are accepted" {
         \\}
     ));
 }
+
+test "a compound integer assignment lowers through its helper" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try lowered(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let mut t = 1
+        \\  t += 2
+        \\  entity.get_mut(Acc).n = t
+        \\}
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "t = __etchAdd(i64, t, 2);") != null);
+}
+
+test "a constant default lowers as its folded value" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try lowered(gpa,
+        \\component Acc {
+        \\  n: int = 1_000_
+        \\  m: int = 2 * 3
+        \\  lo: int = -9223372036854775808
+        \\}
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "n: i64 = 1000,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "m: i64 = 6,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "lo: i64 = -9223372036854775808,") != null);
+}
+
+test "a runtime literal lowers without its separators" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try lowered(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity) when entity has Acc { entity.get_mut(Acc).n = 1_000_ }
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "= 1000;") != null);
+}
