@@ -3,15 +3,11 @@
 //! Drops a probe `.frag.glsl` into `assets/shaders/`, starts the
 //! `shader_pipeline.hot_reload` watcher on a 10 ms poll interval, and measures
 //! the time between the probe's creation and the `on_recompile` callback. The
-//! specified gate is < 200 ms.
-//!
-//! Skipped when:
-//! - `glslc` is absent from PATH (the watcher's documented behavior in
-//!   that case is to log a warning and exit `start` without spawning the
-//!   thread — nothing to measure).
-//! - The probe file cannot be created (read-only checkout, CI quirks).
+//! specified gate is < 200 ms. Needs `glslc` (`test_env`): without it the
+//! watcher does not start.
 
 const std = @import("std");
+const test_env = @import("test_env");
 const builtin = @import("builtin");
 const hot_reload = @import("weld_render").shader_pipeline.hot_reload;
 const compiler_mod = @import("weld_render").shader_pipeline.compiler;
@@ -66,9 +62,9 @@ test "filewatch triggers recompile under 200 ms" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    if (!compiler_mod.isAvailable(allocator, io)) return error.SkipZigTest;
+    if (!compiler_mod.isAvailable(allocator, io)) return test_env.absent("glslc");
 
-    writeProbe(io) catch return error.SkipZigTest;
+    writeProbe(io) catch return test_env.absent("a writable assets/shaders");
     defer deleteProbe(io);
 
     var state = ProbeState{};

@@ -844,6 +844,10 @@ pub fn build(b: *std.Build) void {
         /// `stub_install_steps[]` so the three stub libraries are
         /// built before the test runs.
         needs_stub_plugins: bool = false,
+        /// when set, the test imports `test_env` and is compiled a second time,
+        /// with an absent environment made a failure, into
+        /// `zig build test-runtime-env`.
+        runtime_env: bool = false,
         /// when set, imports the `weld_audio` module.
         audio: bool = false,
         /// when set, imports the `weld_render` module (GAL public
@@ -937,7 +941,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
-        .{ .path = "tests/window/wayland_open_close_test.zig" },
+        .{ .path = "tests/window/wayland_open_close_test.zig", .runtime_env = true },
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
@@ -1062,9 +1066,9 @@ pub fn build(b: *std.Build) void {
         // Win32 thread safety stress (Windows runner only).
         .{ .path = "tests/platform/win32_thread_safety_test.zig" },
         // Wayland thread safety stress (Linux runner only).
-        .{ .path = "tests/platform/wayland_thread_safety_test.zig" },
+        .{ .path = "tests/platform/wayland_thread_safety_test.zig", .runtime_env = true },
         // Multi-monitor enumeration + current monitor + per-monitor DPI.
-        .{ .path = "tests/platform/multi_monitor_test.zig" },
+        .{ .path = "tests/platform/multi_monitor_test.zig", .runtime_env = true },
         // WindowEvent union surface validation.
         .{ .path = "tests/platform/window_events_test.zig" },
         // Input Tier 0 (event-driven path, runs on all OSes).
@@ -1075,7 +1079,7 @@ pub fn build(b: *std.Build) void {
         // GAL Null backend smoke + interface check (CI headless).
         .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
         // GAL Vulkan backend offline init test (skip if Vulkan absent).
-        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
+        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true, .runtime_env = true },
         // Render graph topological sort + cycle detection.
         .{ .path = "tests/render/render_graph_topo.zig", .render = true },
         // Render graph auto-tracking barriers (write-after-read,
@@ -1091,8 +1095,7 @@ pub fn build(b: *std.Build) void {
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
         // hot-reload filewatch latency < 200 ms.
-        // Skip if glslc absent from PATH.
-        .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
+        .{ .path = "tests/render/shader_hot_reload.zig", .render = true, .runtime_env = true },
         // vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
         .{ .path = "tests/vk_gen/whitelist_closure.zig" },
@@ -1126,79 +1129,100 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     watchdog_module.addImport("weld_core", core_module);
-    for (test_specs) |spec| {
-        const t_mod = b.createModule(.{
-            .root_source_file = b.path(spec.path),
+    var test_env_modules: [2]*std.Build.Module = undefined;
+    for (&test_env_modules, [_]bool{ false, true }) |*m, required| {
+        const env_options = b.addOptions();
+        env_options.addOption(bool, "required", required);
+        m.* = b.createModule(.{
+            .root_source_file = b.path("tests/support/test_env.zig"),
             .target = target,
             .optimize = optimize,
         });
-        t_mod.addImport("weld_core", core_module);
-        t_mod.addImport("test_watchdog", watchdog_module);
-        if (spec.wl_protocols) {
-            t_mod.addImport("wl_protocols", wl_protocols_test_module);
-        }
-        if (spec.etch) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("corpus_facade", etch_corpus_module);
-        }
-        if (spec.etch_interp) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("corpus_facade", etch_interp_corpus_module);
-            t_mod.addImport("diff_runner", etch_interp_driver_module);
-            t_mod.addImport("runner_interp", etch_interp_runner_module);
-        }
-        if (spec.audio) {
-            t_mod.addImport("weld_audio", audio_module);
-        }
-        if (spec.render) {
-            t_mod.addImport("weld_render", render_module);
-        }
-        if (spec.asset_pipeline) {
-            t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
-        }
-        if (spec.forge) {
-            t_mod.addImport("weld_forge", forge_api_module);
-            t_mod.addImport("forge_3d", forge_3d_module);
-            t_mod.addImport("forge_sync", forge_sync_module);
-            t_mod.addImport("forge_module", forge_module);
-            t_mod.addImport("foundation", foundation_module);
-            t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
-        }
-        if (spec.foundation) {
-            t_mod.addImport("foundation", foundation_module);
-        }
-        if (spec.scene) {
-            t_mod.addImport("weld_etch", etch_module);
-        }
-        if (spec.etch_events) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("toy_service", toy_service_module);
-        }
-        if (spec.arena_slice) {
-            t_mod.addImport("arena_slice", arena_slice_module);
-        }
-        if (spec.physics_service) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("forge_services", forge_services_module);
-            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
-            t_mod.addImport("forge_sync", forge_sync_module);
-        }
-        if (spec.bindgen_detch) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("emit_detch", emit_detch_module);
-            t_mod.addImport("toy_service", toy_service_module);
-            t_mod.addImport("forge_services", forge_services_module);
-            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
-        }
-        const t = b.addTest(.{ .root_module = t_mod });
-        const t_run = b.addRunArtifact(t);
-        if (spec.needs_stub_plugins) {
-            for (stub_install_steps) |s| t_run.step.dependOn(s);
-        }
-        test_step.dependOn(&t_run.step);
-        if (spec.dedicated_step) |name| {
-            const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
-            dedicated.dependOn(&t_run.step);
+        m.*.addOptions("test_env_options", env_options);
+    }
+    const runtime_env_step = b.step("test-runtime-env", "Run the tests that need a compositor, a Vulkan ICD or glslc; an absent one fails");
+    for (test_specs) |spec| {
+        for ([_]bool{ false, true }) |required| {
+            if (required and !spec.runtime_env) continue;
+            const t_mod = b.createModule(.{
+                .root_source_file = b.path(spec.path),
+                .target = target,
+                .optimize = optimize,
+            });
+            t_mod.addImport("weld_core", core_module);
+            t_mod.addImport("test_watchdog", watchdog_module);
+            if (spec.runtime_env) t_mod.addImport("test_env", test_env_modules[@intFromBool(required)]);
+            if (spec.wl_protocols) {
+                t_mod.addImport("wl_protocols", wl_protocols_test_module);
+            }
+            if (spec.etch) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("corpus_facade", etch_corpus_module);
+            }
+            if (spec.etch_interp) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("corpus_facade", etch_interp_corpus_module);
+                t_mod.addImport("diff_runner", etch_interp_driver_module);
+                t_mod.addImport("runner_interp", etch_interp_runner_module);
+            }
+            if (spec.audio) {
+                t_mod.addImport("weld_audio", audio_module);
+            }
+            if (spec.render) {
+                t_mod.addImport("weld_render", render_module);
+            }
+            if (spec.asset_pipeline) {
+                t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
+            }
+            if (spec.forge) {
+                t_mod.addImport("weld_forge", forge_api_module);
+                t_mod.addImport("forge_3d", forge_3d_module);
+                t_mod.addImport("forge_sync", forge_sync_module);
+                t_mod.addImport("forge_module", forge_module);
+                t_mod.addImport("foundation", foundation_module);
+                t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
+            }
+            if (spec.foundation) {
+                t_mod.addImport("foundation", foundation_module);
+            }
+            if (spec.scene) {
+                t_mod.addImport("weld_etch", etch_module);
+            }
+            if (spec.etch_events) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("toy_service", toy_service_module);
+            }
+            if (spec.arena_slice) {
+                t_mod.addImport("arena_slice", arena_slice_module);
+            }
+            if (spec.physics_service) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("forge_services", forge_services_module);
+                t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+                t_mod.addImport("forge_sync", forge_sync_module);
+            }
+            if (spec.bindgen_detch) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("emit_detch", emit_detch_module);
+                t_mod.addImport("toy_service", toy_service_module);
+                t_mod.addImport("forge_services", forge_services_module);
+                t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+            }
+            const t = b.addTest(.{ .root_module = t_mod });
+            const t_run = b.addRunArtifact(t);
+            if (spec.needs_stub_plugins) {
+                for (stub_install_steps) |s| t_run.step.dependOn(s);
+            }
+            if (required) {
+                t_run.has_side_effects = true;
+                runtime_env_step.dependOn(&t_run.step);
+                continue;
+            }
+            test_step.dependOn(&t_run.step);
+            if (spec.dedicated_step) |name| {
+                const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
+                dedicated.dependOn(&t_run.step);
+            }
         }
     }
 

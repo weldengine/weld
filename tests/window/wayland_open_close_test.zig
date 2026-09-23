@@ -1,29 +1,26 @@
-//! Mirrors the Win32 50× open/close gate, on the Wayland leg. Skips:
-//!   * On non-Linux hosts (no Wayland backend in scope).
-//!   * On Linux hosts without a running compositor (CI runners,
-//!     `WAYLAND_DISPLAY` unset, or `wl_display_connect` returning null) —
-//!     the actual hardware validation runs from a developer session via
-//!     `--smoke-test`, not from `zig build test`.
+//! Mirrors the Win32 50× open/close gate, on the Wayland leg. Needs a Linux
+//! host and a compositor (`test_env`).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const weld_core = @import("weld_core");
 const window = weld_core.platform.window;
+const test_env = @import("test_env");
 
 test "wayland backend opens and closes 50 windows without leaking" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) return test_env.absent("a Linux host");
 
     const gpa = std.testing.allocator;
 
-    // Probe before the 50× loop so a missing compositor short-circuits
-    // cleanly with `error.SkipZigTest` instead of failing the test.
+    // Probe first, so a missing compositor is reported as one and not as a
+    // failure of the loop.
     {
         var probe = window.Window.create(gpa, .{
             .title = "Weld S2 — probe",
             .width = 320,
             .height = 240,
         }) catch |err| switch (err) {
-            error.UnsupportedPlatform, error.BackendInitFailed => return error.SkipZigTest,
+            error.UnsupportedPlatform, error.BackendInitFailed => return test_env.absent("a Wayland compositor"),
             else => return err,
         };
         probe.destroy();

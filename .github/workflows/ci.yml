@@ -286,7 +286,8 @@ jobs:
             mesa-vulkan-drivers \
             libvulkan1 \
             libwayland-client0 \
-            libwayland-cursor0
+            libwayland-cursor0 \
+            glslc
 
       - name: Locate lavapipe ICD on the runner
         run: |
@@ -333,6 +334,13 @@ jobs:
         run: |
           set -euo pipefail
           zig build test-ppm-psnr -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} --summary all 2>&1 | tee test-output.txt
+
+      - name: zig build test-runtime-env
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          zig build test-runtime-env -Dcpu=${{ env.ZIG_CPU }} --summary all
 
       - name: Upload capture artifact
         if: always()
