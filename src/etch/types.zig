@@ -250,33 +250,20 @@ pub const builtin_resources = [_]BuiltinResource{
     } },
 };
 
-/// The builtin COMPONENT the interpreter injects when a program declares any
-/// tag. Named here rather than spelled at each site so the reservation below and
-/// the injection itself cannot disagree about which name is taken.
+/// The builtin component the interpreter injects when a program declares any
+/// tag. `interp.zig` spells it as a literal, which this must equal.
 pub const tagset_component_name = "TagSet";
 
-/// True iff `name` is one the engine itself registers into the ECS registry, so
-/// a program declaring a `component` or `resource` under it would collide.
-///
-/// DERIVED from `builtin_resources` rather than listed, so adding a builtin
-/// resource extends the reservation by itself — a second list is how the two
-/// come to disagree. The bound is `component` and `resource` and nothing else:
-/// those are the two declaration kinds that enter the registry by name, which is
-/// where `idOf` collides. A `struct` is by-value and never registered, and an
-/// `event` lives in its own namespace.
-///
-/// What the collision cost before this: the builtin injection arm in `interp.zig`
-/// finds the user's entry with `idOf`, takes its `continue`, and the offset
-/// resolution below it then unwraps `findField(gid, "dt").?` on a type that has
-/// no such field — a panic, with no diagnostic, on an ordinary program.
+/// True iff the engine itself registers `name` in the ECS registry, so a user
+/// `component` or `resource` of that name would collide.
 pub fn isReservedEngineTypeName(name: []const u8) bool {
     if (std.mem.eql(u8, name, tagset_component_name)) return true;
     return builtinResourceByName(name) != null;
 }
 
 /// Descriptor lookup by resource name bytes. Consulted by the
-/// receiver-less `get(T)` resolution and by the builtin-resource field
-/// lookup; `interp.zig` iterates `builtin_resources` directly.
+/// receiver-less `get(T)` resolution, the builtin-resource field lookup and
+/// `isReservedEngineTypeName`; `interp.zig` iterates `builtin_resources` directly.
 pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
     for (&builtin_resources) |*r| {
         if (std.mem.eql(u8, r.name, name)) return r;
@@ -3343,10 +3330,6 @@ pub const TypeChecker = struct {
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
-    /// Refuse a `component`/`resource` declaration that takes a name the engine
-    /// itself registers. Reuses `E0101` with a contextual message rather than
-    /// minting a code, on the precedent set for duplicate `test` names: the fault
-    /// IS a duplicate symbol, the other declarant simply being the engine.
     fn refuseReservedEngineName(self: *TypeChecker, name: StringId, span: SourceSpan, kind_word: []const u8) !void {
         const slice = self.arena.strings.slice(name);
         if (!isReservedEngineTypeName(slice)) return;
@@ -3709,8 +3692,7 @@ pub const TypeChecker = struct {
     }
 
     /// Validate every `impl`'s target type once all symbols are known: the target
-    /// must be a declared `struct` / `component` / `resource`. Coherence and orphan
-    /// rules (§7.4) apply to a trait impl, conditional impls included.
+    /// must be a declared `struct` / `component` / `resource`.
     fn validateImpls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3737,10 +3719,9 @@ pub const TypeChecker = struct {
     }
 
     /// Validate one `impl Trait for Type [when …]` (
-    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the orphan
-    /// rule (§7.4 — trait OR type local to this module); every abstract trait method is
-    /// provided (E0214, else the trait must supply a default); the target type is a
-    /// struct / component / resource / `Entity`.
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; every
+    /// abstract trait method is provided (E0214, else the trait must supply a
+    /// default); the target type is a struct / component / resource / `Entity`.
     fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         const trait_slice = self.arena.strings.slice(impl.trait_name);
         const type_slice = self.arena.strings.slice(impl.type_name);
@@ -3762,27 +3743,9 @@ pub const TypeChecker = struct {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
         }
 
-        // ORPHAN RULE (§7.4), AND IT HAS NO EXPRESSIBLE INSTANCE TODAY — stated
-        // here instead of standing as a condition that cannot hold.
-        //
-        // The rule is that an impl is legal only if the trait OR the type is
-        // local to this module, so its violation needs a trait or a type that
-        // resolves while being FOREIGN. Two things forbid that. First, the
-        // `!trait_local` arm above RETURNS, so any test placed here reads
-        // `trait_local == true` by construction and `!trait_local and …` is
-        // false whatever the type is. Second, and this survives moving the test
-        // above that return: with no cross-module trait resolution, `not local`
-        // and `not declared` are the same predicate, so the only programs that
-        // could reach it are ones naming two undeclared symbols — for which
-        // `undefined_symbol` is the true and more useful diagnostic, and
-        // `orphan impl` would be a worse one wearing the right name.
-        //
-        // So the emission is REMOVED rather than relocated: relocating it would
-        // buy reachability by giving the code a meaning §7.4 does not give it.
-        // `E0217` stays declared, with no producer, until a module can name a
-        // foreign trait — the same gap the resolver already records for
-        // imported-trait impls. What single-module mode answers is pinned by a test,
-        // so a later attempt to make this reachable by the wrong route reddens.
+        // Orphan rule (§7.4): not checked. A check above the `!trait_local`
+        // return would fire on undeclared names, which `undefined_symbol`
+        // already reports.
 
         // E0214: every abstract trait method (no default body) must be provided.
         const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];
@@ -5569,20 +5532,10 @@ pub const TypeChecker = struct {
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
                     const vt = self.synthHeadValue(value, ctx);
-                    // A `race` BRANCH'S RETURN IS A RETENTION POINT. The winner's
-                    // value is parked in `AsyncTask.result` and re-raised at the
-                    // race site several ticks later, after the rule arena has been
-                    // reset — and `result` is a bare `Value` that stabilises
-                    // nothing, where the sibling retention point at least
-                    // deep-copies a string.
-                    //
-                    // Keyed on what the point RETAINS and not on how the value was
-                    // written, which is the whole correction: `return a + "y"` was
-                    // already refused and `return "x" + "y"` was not, though both
-                    // park the same `.string_run` — the first only because `let a`
-                    // made it a local the sibling rule walks. The same predicate
-                    // as that rule, so the two cannot drift apart on which forms
-                    // count as arena-backed.
+                    // The winner's value is parked in `AsyncTask.result` and
+                    // re-raised at the race site several ticks later, after the
+                    // rule arena has been reset — and `result` is a bare `Value`
+                    // that stabilises nothing.
                     if (self.conc_branch) |ck| {
                         if (ck == .race and isRuleArenaType(vt)) {
                             try self.emit(.rule_arena_value_escapes, .error_, self.arena.exprSpan(value), "this 'race' branch returns a value stored in the rule arena; the winner's value is parked and re-raised at the race site after the arena has been reset", .{});
@@ -5971,7 +5924,6 @@ pub const TypeChecker = struct {
             //
             // The direction is `E0223`'s own: a false refusal is a compile error
             // the author reads, a missed capture is an abort in production.
-            // Measured at 0 false refusals over the whole suite.
             .unknown, .generic => true,
             .builtin => |b| b == .string_,
             else => false,
@@ -13210,9 +13162,8 @@ test "an optional whose payload is not a builtin is still refused" {
     try expectAnyCode(v.diagnostics.items, .rule_arena_value_escapes);
 }
 
-/// Build a one-rule program whose body is `body`, with optional extra `decls`.
-/// Shared by the race-return retention tests below so every case differs in
-/// exactly the expression under test and in nothing else.
+/// A one-rule program whose first `race` branch is `return <body>`, with
+/// `decls` inserted before the rule.
 fn raceReturnProgram(gpa: std.mem.Allocator, decls: []const u8, body: []const u8) ![:0]u8 {
     return std.fmt.allocPrintSentinel(
         gpa,
@@ -13225,17 +13176,6 @@ fn raceReturnProgram(gpa: std.mem.Allocator, decls: []const u8, body: []const u8
 test "a race branch returning a rule-arena value is refused, per form" {
     const gpa = std.testing.allocator;
 
-    // THE RETENTION POINT, NOT THE PRODUCTION SITE. A `race` branch's `return`
-    // value is parked in `AsyncTask.result` and re-raised at the race site
-    // several ticks later, after the rule arena has been reset. `result` is a
-    // bare `Value` and stabilises NOTHING — where `captureEventFilter` at least
-    // deep-copies a string.
-    //
-    // The refusal is keyed on what the point RETAINS, which is why every form
-    // is listed: before this, `return a + "y"` was refused and
-    // `return "x" + "y"` was not, though both park the same `.string_run` —
-    // the first only because `let a` made it a local that the sibling rule
-    // already walks. Coverage by accident of spelling.
     const forms = [_]struct { decls: []const u8, expr: []const u8 }{
         .{ .decls = "", .expr = "[1, 2, 3]" }, // array literal
         .{ .decls = "", .expr = "[1: 2]" }, // map literal
@@ -13260,11 +13200,6 @@ test "a race branch returning a rule-arena value is refused, per form" {
 test "a race branch returning a NON-arena value is still accepted — the green twin" {
     const gpa = std.testing.allocator;
 
-    // NAMED BEFORE RUNNING. Without this the refusal above is satisfied by a
-    // rule that refuses every `race` return whatsoever, which would key on the
-    // SUSPENSION and not on the STORAGE — the distinction the whole entry is
-    // about. A bare string literal is in the AST pool (`.string_id`), not the
-    // rule arena, so it belongs on this side.
     const forms = [_]struct { decls: []const u8, expr: []const u8 }{
         .{ .decls = "", .expr = "1" },
         .{ .decls = "", .expr = "2.5" },
@@ -13287,34 +13222,17 @@ test "a race branch returning a NON-arena value is still accepted — the green 
 test "a race branch returning a bare string literal is refused — the MEASURED COST" {
     const gpa = std.testing.allocator;
 
-    // THE FALSE REFUSAL, SHOWN RATHER THAN DECLARED. A bare `"x"` is an
-    // AST-pool handle (`.string_id`), copy-stable and outliving the arena, so
-    // parking it is safe and it is refused anyway.
-    //
-    // It is NOT separable at this point: `isRuleArenaType` answers on the
-    // RESOLVED type, and a literal, a concatenation and a resource-owned string
-    // are all `builtin .string_` — the zone is a property of the value, not of
-    // the type. Splitting them here would need the same thing the sibling rule
-    // needs and does not have.
-    //
-    // Taken deliberately, and for a reason beyond consistency: both retention
-    // points now consult ONE predicate, so a form can never count as
-    // arena-backed at one and not at the other. Measured cost on the repository:
-    // ZERO — the corpus contains no `race` construct at all, so nothing existing
-    // is refused by this. The cost is exactly this constructed case.
+    // A bare `"x"` is an AST-pool handle, safe to park, and refused anyway:
+    // `isRuleArenaType` sees only the resolved type, the same `string` as an
+    // arena-backed concatenation.
     const src = try raceReturnProgram(gpa, "", "\"x\"");
     defer gpa.free(src);
     var c = try parseAndCheck(gpa, src);
     defer c.deinit(gpa);
     try expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes);
 
-    // SECOND CASE, AND IT IS A DIFFERENT ARM. A bare enum shorthand in a
-    // `return` has no expected type to resolve against and comes back
-    // `.unknown`, which the shared predicate refuses on the arbitrated ground
-    // that safety cannot be ESTABLISHED for an unresolved type. So this one is
-    // not the string over-refusal repeated — it is the `.unknown` arm, reached
-    // here by a value that happens to be a POD discriminant at runtime. Found
-    // by the green twin rejecting it, not by reading the predicate.
+    // A bare enum shorthand has no expected type here and resolves `.unknown`,
+    // which `isRuleArenaType` refuses though the value is a discriminant.
     const en = try raceReturnProgram(gpa, "enum K { a, b }\n", ".b");
     defer gpa.free(en);
     var e2 = try parseAndCheck(gpa, en);
@@ -13325,15 +13243,9 @@ test "a race branch returning a bare string literal is refused — the MEASURED 
 test "a scalar event filter is still accepted, and only a string can reach one" {
     const gpa = std.testing.allocator;
 
-    // THE SECOND RETENTION POINT NEEDS NO REFUSAL, and this pins why rather
-    // than asserting it. `wake.filter` retains the captured filter values
-    // across ticks, and `captureEventFilter` stabilises STRINGS only — which is
-    // complete, because a string is the only rule-arena form that can reach an
-    // event field at all. Measured on the four other candidates: an `int?`
-    // field and an `int[]` field are refused as FIELD TYPES, a struct-valued
-    // filter is refused by the filter checker, and an enum filter carries a
-    // discriminant. If any of those four ever becomes legal, this test is where
-    // the assumption is written down.
+    // `captureEventFilter` copies only strings, and captured filters are kept
+    // across ticks: sound only while a string is the only rule-arena form that
+    // can reach an event filter.
     const scalar =
         \\component C { out: int = 0 }
         \\enum K { a, b }
@@ -13367,17 +13279,6 @@ test "a scalar event filter is still accepted, and only a string can reach one" 
 test "a component or resource may not take a name the engine registers" {
     const gpa = std.testing.allocator;
 
-    // THE COLLISION WAS ACCEPTED AND THEN PANICKED, not diagnosed. `interp.zig`
-    // injects the builtin time resources after the user-declaration loop and
-    // skips any name already in the registry — so a user's `resource GameTime`
-    // won the name, the builtin arm took its `continue`, and the offset
-    // resolution below it unwrapped `findField(gid, "dt").?` on a type with no
-    // such field. The comment there asserted the lookups "cannot miss", which
-    // the `continue` arm is exactly the case that makes false.
-    //
-    // Every name is exercised, and both declaration kinds for each, because the
-    // registry is ONE namespace: a `component GameTime` collides as surely as a
-    // `resource` one.
     const forms = [_][]const u8{
         "resource GameTime { dt: float = 0.0 }",
         "resource GameTime { zz: int = 0 }",
@@ -13404,10 +13305,6 @@ test "a component or resource may not take a name the engine registers" {
 test "an ordinary component or resource name is untouched — the green twin" {
     const gpa = std.testing.allocator;
 
-    // NAMED BEFORE RUNNING. Without it the refusal above is satisfied by a rule
-    // that refuses every declaration, and the reservation would be indistinguishable
-    // from a blanket. Includes two names that merely RESEMBLE the reserved ones —
-    // the predicate compares whole bytes, not a prefix.
     const forms = [_][]const u8{
         "resource Ordinary { zz: int = 0 }",
         "component Ordinary { zz: int = 0 }",
@@ -13428,9 +13325,6 @@ test "an ordinary component or resource name is untouched — the green twin" {
 }
 
 test "the reservation is DERIVED from the builtin table, not a second list" {
-    // If a builtin resource is added to `builtin_resources`, the reservation
-    // must extend by itself — a hand-kept list is how the two come to disagree,
-    // and the disagreement would be silent until a user picked the new name.
     for (&builtin_resources) |*br| {
         try std.testing.expect(isReservedEngineTypeName(br.name));
     }

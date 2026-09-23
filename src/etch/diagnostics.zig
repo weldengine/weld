@@ -47,12 +47,7 @@ pub const DiagnosticCode = enum {
     ambiguous_trait_method, // E0211 AmbiguousTraitMethod
     incomplete_trait_impl, // E0214 IncompleteTraitImpl
     conditional_impl_condition_not_proven, // E0215 ConditionalImplConditionNotProven
-    /// E0217 OrphanImpl. DECLARED WITH NO PRODUCER, deliberately: the §7.4
-    /// orphan rule needs a trait or type that RESOLVES while being foreign, and
-    /// with no cross-module trait resolution `not local` and `not declared`
-    /// coincide — so every program that could violate it is already answered by
-    /// `undefined_symbol`. The emission was removed from `validateTraitImpl`
-    /// rather than relocated; see the note there.
+    /// E0217 OrphanImpl. No producer while traits do not resolve across modules (`etch-resolver-types.md` §7.4).
     orphan_impl,
     immutable_receiver_for_mut_self, // E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // E0221 ClosureCannotMutateCapture

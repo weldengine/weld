@@ -36,17 +36,14 @@
 //! radius-0-box only).
 //!
 //! **Dependency discipline.** Imports `foundation` (math) and the
-//! sibling `support.zig` ONLY — never `manifold.zig` (that would be a cycle:
-//! `manifold.zig` imports THIS file, never the reverse), never `weld_forge`,
-//! `body*.zig`, `config.zig`, or `broadphase.zig`. The scalar is the comptime
-//! `T`; `forge_3d` instantiates it at `config.Real`.
+//! siblings `support.zig` and `gjk.zig` ONLY — never `manifold.zig` (that would
+//! be a cycle: `manifold.zig` imports THIS file, never the reverse), never
+//! `weld_forge`, `body*.zig`, `config.zig`, or `broadphase.zig`. The scalar is
+//! the comptime `T`; `forge_3d` instantiates it at `config.Real`.
 
 const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
-// Imported for the ONE margin, and the direction is safe: `gjk.zig` imports only
-// `support.zig`, so this closes no cycle — `epa.zig` and `shapecast.zig` already
-// depend on `gjk` the same way.
 const gjk = @import("gjk.zig");
 
 /// The contact seed a fast path hands to `manifold.generateManifold` — exactly

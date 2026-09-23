@@ -1,10 +1,9 @@
 //! One test per diagnostic code that the type-checker emits and that nothing
 //! asserted. The deliverable is coverage, not a count.
 //!
-//! Each test names ONE code and asserts it is PRESENT. That direction is the
-//! whole point: such a test goes red the day the checker stops emitting that
-//! code, which a test asserting absence cannot do. `expectNoCode` exists here
-//! only for the few cases that need to tell two neighbouring codes apart.
+//! Each test asserts its code is PRESENT. That direction is the whole point:
+//! such a test goes red the day the checker stops emitting that code, which a
+//! test asserting absence cannot do.
 //!
 //! WHAT THIS FILE DOES NOT COVER, and why none of it can be covered the same
 //! way. Of the 203 declared codes, 138 already carry an assertion elsewhere and
@@ -19,13 +18,8 @@
 //! else in the tree. `E1902` is the one with a reference, in the `.d.etch`
 //! drift tool, as a report LABEL rather than an emitted diagnostic.
 //!
-//! `E0217` is the 32nd and is a different case: it HAS an emit site, and that
-//! site is unreachable. `validateTraitImpl` returns on `!trait_local` fourteen
-//! lines before testing `!trait_local and !type_local`, so the conjunction is
-//! unsatisfiable in every configuration. The comment there attributes it to
-//! single-file mode, which is what makes the dead branch read as deliberate;
-//! an imported trait lands in `imported_symbols`, which that function never
-//! reads, so it takes the same early return.
+//! `E0217` is the 32nd, left off that list only because the last test here
+//! names it, to assert its absence.
 //!
 //! AND WHAT THE COUNT ITSELF DOES NOT SEE. The 138 is a STATIC reading of which
 //! tests name which code, and it is not verified per code: a test may name a
@@ -564,16 +558,8 @@ test "W1740 empty track" {
 
 test "E0217 has no producer: an impl naming two undeclared symbols answers undefined_symbol" {
     const gpa = std.testing.allocator;
-    // THE ARBITRATION PINNED. `E0217 OrphanImpl` is declared and deliberately
-    // emitted by nothing: §7.4's rule needs a trait or a type that RESOLVES
-    // while being foreign, and with no cross-module trait resolution `not
-    // local` and `not declared` are one predicate. So the nearest program to a
-    // violation — an impl whose trait AND type are both unknown — is answered
-    // by `undefined_symbol`, which is the true diagnostic.
-    //
-    // This test exists so that making `E0217` reachable by RELOCATING its
-    // emission above the `!trait_local` return reddens here: that route would
-    // buy reachability by reporting "orphan impl" for two typos.
+    // WRONG FIX when the loop below reddens: deleting it. An undeclared trait
+    // or type is not a foreign one, so `orphan_impl` never answers this program.
     var c = try check(gpa,
         \\impl Missing for Absent { fn f(self) { } }
     );

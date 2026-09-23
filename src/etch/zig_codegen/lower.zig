@@ -1211,20 +1211,9 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
         }
     }
 
-    // Register the builtin `TagSet` component when the program
-    // declares any tag. The raw descriptor mirrors the interpreter's
-    // `compileProgram` registration exactly (name "TagSet", size `@sizeOf`,
-    // align `@alignOf`, zeroed default, no named fields, and the tag-table
-    // content digest) so the runtime component id and layout are byte-identical
-    // across backends. The id is discarded — the rules look it up by name via
-    // `idOf("TagSet")`.
-    //
-    // The digest is emitted as a LITERAL because it is a pure function of the
-    // tag table this pass already holds, and it is emitted at all so this
-    // enumeration stays exhaustive: a member the interpreter sets and this one
-    // omits is the "mirrors exactly" claim above going quietly false. Nothing in
-    // a generated binary reloads, so it changes no behaviour here — which is the
-    // argument for keeping the two descriptors identical rather than against it.
+    // The emitted descriptor sets exactly what the interpreter's `tagSetDesc`
+    // sets, so the component's layout and schema digest match across backends.
+    // The id is discarded — the rules look it up by name via `idOf("TagSet")`.
     if (tag_table.leaf_count > 0) {
         const content_digest = try tag_table.contentDigest(w.gpa);
         try w.line("{");

@@ -370,6 +370,22 @@ Three criteria, in this order, at every comment added or modified.
   three lines below it, says nothing.
 - **Concision** — the load kept, stated short.
 
+Four flat prohibitions, with no judgement to make.
+
+- **No section banner** (`--- … ---`) and no narrative file or test header. A
+  test's title says what it measures; if the title is not enough, it is a bad
+  title.
+- **No narrative**: what the code did before a fix, what an earlier comment
+  claimed, how a defect was found, what a future implementer should do.
+- **No decision reasoning** — why this choice over another, what was refused and
+  why, what was measured to decide — **even when it passes the three criteria**:
+  it justifies the code instead of guarding it.
+- **No duplicate of a fact already written elsewhere.** The fact belongs at the
+  site where its absence would make the wrong fix possible.
+
+A code file is not a history. Narrative and decision reasoning have two homes: the
+brief's journal and the commit body.
+
 No numeric bound: no line ceiling, no density target. §12's former three-line cap
 is WITHDRAWN.
 

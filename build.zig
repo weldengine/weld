@@ -2334,14 +2334,9 @@ pub fn build(b: *std.Build) void {
     });
     const vk_gen_run = b.addRunArtifact(vk_gen_exe);
     vk_gen_run.has_side_effects = true;
-    // Generator output is unformatted, so `bindgen-vk` produces an empty diff
-    // only after `zig fmt` normalises identifier escapes (e.g. `@"undefined"` →
-    // `undefined`) and trims trailing blank lines. Pipe through fmt in the same
-    // step so the command is self-sufficient regardless of pre-commit hooks.
-    // THE ONE LIST. Every file a bindgen adapter writes, named here and nowhere
-    // else: the two `zig fmt` passes below take slices of it, and so does the
-    // `bindgen-verify` diff. Spelled twice, the gate and the generators drift —
-    // a new generated file would be formatted and then not gated, silently.
+    // Every file a bindgen adapter writes, and nothing else: no adapter writes
+    // `bindings/generated/*.api.zig`. Both `zig fmt` passes and the
+    // `bindgen-verify` diff read it, so a generated path is named here only.
     const generated_binding_files = [_][]const u8{
         "src/core/platform/vk.zig",
         "src/core/platform/window/wayland_protocols/core.zig",
@@ -2351,6 +2346,10 @@ pub fn build(b: *std.Build) void {
     const vk_generated = generated_binding_files[0..1];
     const wayland_generated = generated_binding_files[1..];
 
+    // Generator output is unformatted, so `bindgen-vk` produces an empty diff
+    // only after `zig fmt` normalises identifier escapes (e.g. `@"undefined"` →
+    // `undefined`) and trims trailing blank lines. Pipe through fmt in the same
+    // step so the command is self-sufficient regardless of pre-commit hooks.
     const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt" });
     vk_gen_fmt.addArgs(vk_generated);
     vk_gen_fmt.step.dependOn(&vk_gen_run.step);
@@ -2397,8 +2396,8 @@ pub fn build(b: *std.Build) void {
     //   - `zig build bindgen-detch` — regenerate in place (manual, §8.4.4)
     //   - `zig build bindgen-check` — compare and fail with a line-by-line diff
     //
-    // Distinct from `bindgen-verify` / `vk-gen-check`, which gate the Vulkan and
-    // Wayland `.api.zig` → Zig pipeline and have nothing to do with services.
+    // Distinct from `bindgen-verify`, which gates the Vulkan and Wayland XML → Zig
+    // generators and has nothing to do with services.
     const detch_module = b.createModule(.{
         .root_source_file = b.path("tools/bindgen/detch_main.zig"),
         .target = b.graph.host,
@@ -2438,28 +2437,14 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------- bindgen-verify gate --
     //
-    // The non-negotiable mechanical criterion: regenerate then diff. Exit
-    // 0 if the regen matches the committed output bit-for-bit; non-zero
-    // (visible diff) signals a divergence and blocks the merge.
+    // Regenerate, then diff: exit 0 only if the regen matches the committed
+    // output bit-for-bit; non-zero signals a divergence and blocks the merge.
+    // Against `HEAD`, not the index: on a staged edit only this form still
+    // compares against what was committed.
     //
     // KNOWN-GOOD CONTROL FIRST: `git diff --exit-code` answers 1 for a real diff
     // and a different non-zero when git cannot run at all, so the control must
     // establish that git answers before the diff's code is read as a verdict.
-    //
-    // THE PATHS ARE THE FOUR FILES THE GENERATORS WRITE, and nothing else. It
-    // used to name `bindings/generated/` and `src/core/platform/` wholesale,
-    // which is a superset of the generated set by a wide margin: the first holds
-    // two `.api.zig` sidecars that are maintained BY HAND and that no adapter
-    // writes, and the second holds `threading.zig`, `time.zig`, `fs.zig`,
-    // `window/`, `input/` and more. So an ordinary comment edit to
-    // `threading.zig` turned this gate red — observed, not imagined — and the
-    // gate answered a question about the working tree's cleanliness while
-    // reporting it as a verdict on generator drift.
-    //
-    // Against HEAD rather than the index, because "matches the COMMITTED output"
-    // is the criterion this comment states and the index is not the commit. The
-    // two agree on a clean tree and part company on a staged edit, where only
-    // this form still compares against what was committed.
     const bindgen_verify_control = b.addSystemCommand(&.{ "git", "--version" });
     const bindgen_verify_diff = b.addSystemCommand(&.{ "git", "diff", "--quiet", "--exit-code", "HEAD", "--" });
     bindgen_verify_diff.addArgs(&generated_binding_files);

@@ -142,23 +142,9 @@ pub const Archetype = struct {
     registry: *const Registry,
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
-    /// A LOWER BOUND on the index of any non-full chunk: every chunk below it is
-    /// full. Not "the first partial chunk" — that would be an equality nobody
-    /// could cheaply maintain, and stating it as a bound is what makes each
-    /// maintenance site decidable on its own. Lowering is ALWAYS safe (it can
-    /// only make the scan start earlier); advancing is what must be earned, and
-    /// `allocateSlot` earns it by walking past chunks it has just observed full.
-    ///
-    /// Without it `allocateSlot` filled only the TRAILING chunk, so a chunk left
-    /// half-empty by churn was never refilled and the count followed cumulative
-    /// appends rather than live population.
-    ///
-    /// **No entity moves to make this work.** `removeSwap` swaps the trailing
-    /// entity into the freed slot, so a chunk's occupants are always a dense
-    /// prefix and its free space is always at the tail — reuse appends there,
-    /// exactly as the trailing-chunk path already did. That is why this needs no
-    /// location repair and no `ComponentRef` change: nothing is invalidated
-    /// because nothing is displaced.
+    /// Every chunk below this index is full, and it never exceeds
+    /// `chunks.items.len`: a lower bound, not necessarily the first non-full
+    /// chunk. Lowering it is always safe; advance it only past chunks seen full.
     first_partial: u32 = 0,
     transitions: TransitionCache = .{},
     /// `true` iff this archetype hosts a singleton-entity
@@ -258,19 +244,15 @@ pub const Archetype = struct {
         return self.componentIndex(component_id) != null;
     }
 
-    /// Reserve a slot in the trailing chunk (allocating a new chunk when
-    /// the current one is full) without writing any component data. The
+    /// Reserve a slot at the tail of the first chunk with room, which need not
+    /// be the trailing chunk (allocating a new chunk when every chunk is full),
+    /// without writing any component data. The
     /// caller is responsible for filling the slot's component columns
     /// and the entity-id slot before any iteration touches them. The
     /// per-component `added_tick[col][slot]` and `changed_tick[col][slot]`
     /// sidecars are initialised to `tick`, and the slot's dirty bit is
     /// set — the entity is "fresh" for the current frame.
     pub fn allocateSlot(self: *Archetype, gpa: std.mem.Allocator, tick: Tick) ArchetypeError!SpawnResult {
-        // Walk forward from the bound, past chunks observed FULL, and record how
-        // far we got — that is the only place the bound advances, and it
-        // advances on an observation rather than on an assumption. The walk is
-        // amortised O(1): each step it takes is paid once per chunk until
-        // something lowers the bound again.
         var idx = self.first_partial;
         while (idx < self.chunks.items.len and
             self.chunks.items[idx].header().entity_count >= self.layout.capacity) : (idx += 1)
@@ -294,9 +276,6 @@ pub const Archetype = struct {
         }
         change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
 
-        // The CHOSEN index, not the trailing one. The old form was correct only
-        // because the only reachable destination was the last chunk; it becomes
-        // a wrong location the moment an earlier chunk can be the destination.
         return .{
             .chunk_idx = chunk_idx,
             .slot = slot,
@@ -360,11 +339,6 @@ pub const Archetype = struct {
         const chunk = self.chunks.items[chunk_idx];
         const hdr = chunk.header();
         std.debug.assert(slot < hdr.entity_count);
-        // This chunk is about to have room, so the bound cannot stay above it.
-        // Unconditional `@min` rather than a test on capacity: the bound is a
-        // LOWER bound, so lowering it when it was already low costs a comparison
-        // and can never be wrong, where a conditional would have to reason about
-        // the pre-removal count.
         self.first_partial = @min(self.first_partial, chunk_idx);
         const last = hdr.entity_count - 1;
         if (slot == last) {
@@ -409,11 +383,6 @@ pub const Archetype = struct {
     /// `null` covers two cases alike to the caller — "not empty" and "the
     /// trailing chunk was freed" — since neither renumbers anything. Only
     /// `chunks_released` tells them apart.
-    ///
-    /// Reclaiming at all matters because `allocateSlot` fills only the TRAILING
-    /// chunk: a chunk drained by churn is never refilled, so the count follows
-    /// cumulative appends rather than live population until `dispatchBatch`
-    /// refuses the archetype at its chunk ceiling.
     pub fn releaseChunkIfEmpty(self: *Archetype, gpa: std.mem.Allocator, chunk_idx: u32) ?u32 {
         const chunk = self.chunks.items[chunk_idx];
         if (chunk.header().entity_count != 0) return null;
@@ -423,17 +392,11 @@ pub const Archetype = struct {
         self.chunks_released += 1;
         if (chunk_idx == last_idx) {
             _ = self.chunks.pop();
-            // The list shrank; a bound past its end would make the walk skip the
-            // allocation branch's precondition. Clamp rather than reset, so what
-            // was earned about the chunks below is not thrown away.
             self.first_partial = @min(self.first_partial, @as(u32, @intCast(self.chunks.items.len)));
             return null;
         }
         self.chunks.items[chunk_idx] = self.chunks.items[last_idx];
         _ = self.chunks.pop();
-        // The trailing chunk moved DOWN into `chunk_idx` and may be partial, so
-        // the bound must not sit above its new home. Clamping to the new length
-        // in the same expression keeps the bound inside the list after a pop.
         self.first_partial = @min(self.first_partial, chunk_idx);
         return chunk_idx;
     }

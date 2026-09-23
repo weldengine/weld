@@ -7297,11 +7297,7 @@ pub const RegKind = enum { component, resource };
 /// `default_bytes` is the caller's, because `registerComponentRaw` stores it; the
 /// digest does not read it (see `schemaDigestFor`).
 ///
-/// `content_digest` is `TagTable.contentDigest` and carries WHICH TAG OWNS WHICH
-/// BIT, which no other member can: `size` says how many words exist and
-/// `fields` is empty because a bitfield is not a struct. Without it a reload
-/// renaming or reordering tags inside one word kept the digest and silently
-/// redefined every live entity's bits.
+/// `content_digest` is `TagTable.contentDigest` of the table `size` came from.
 fn tagSetDesc(size: u16, default_bytes: []const u8, content_digest: u64) weld_core.ecs.registry.ComponentDesc {
     return .{
         .name = "TagSet",
@@ -7442,11 +7438,12 @@ fn verifySchemas(
 }
 
 /// The LAYOUT half of a type declaration: field descriptors, size, alignment.
-/// Extracted because it is EXACTLY what a schema digest reads and nothing more —
-/// `Registry.schemaDigestOf` hashes name, size, alignment and each field's
-/// (name, kind, offset), and never `default_bytes`. Materialising the defaults is
-/// the other half of `compileTypeDecl`, it allocates immortal persistent blocks,
-/// and the digest never looks at them.
+/// Extracted because it is EXACTLY what a declaration's schema digest reads and
+/// nothing more — `Registry.schemaDigestOf` hashes name, size, alignment, each
+/// field's (name, kind, offset) and `content_digest`, which no declaration sets,
+/// and never `default_bytes`. Materialising the defaults is the other half of
+/// `compileTypeDecl`, it allocates immortal persistent blocks, and the digest
+/// never looks at them.
 ///
 /// That split is what makes the pre-validation pass in `Interpreter.compile` cheap
 /// and side-effect-free: it can confront every declared schema against the live
@@ -7528,11 +7525,12 @@ fn computeLayout(
 /// worse than no pre-pass: it would refuse reloads the site accepts, or wave
 /// through the ones it refuses.
 ///
-/// **It takes a name and a layout, and nothing else, because nothing else is
-/// hashed.** `schemaDigestOf` reads the name, the size, the alignment and each
-/// field's (name, kind, offset) — measured, and pinned by `registry.zig`'s « the
-/// digest is blind to the default bytes », which names this function as its
-/// dependent. `default_bytes`, `storage` and `requires` are all absent from it.
+/// **It takes a name and a layout, and nothing else, because nothing else a
+/// declaration carries is hashed.** `schemaDigestOf` reads the name, the size, the
+/// alignment, each field's (name, kind, offset) and `content_digest`, which no
+/// declaration sets — measured, and pinned by `registry.zig`'s « the digest is
+/// blind to the default bytes », which names this function as its dependent.
+/// `default_bytes`, `storage` and `requires` are all absent from it.
 ///
 /// Taking a `storage` and a `requires` this function cannot use would be a
 /// signature declaring an influence it does not have, and it cost the pre-pass an
