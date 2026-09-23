@@ -3916,25 +3916,35 @@ pub const TypeChecker = struct {
                 // part1.md` §5.5 (`recent_servers: string[]`), the persistent-heap
                 // `CollectionSlot`. Fixed `T[N]` (`.array`) stays out of scope
                 // (falls through to rejection). Element ∈ {POD scalar, string,
-                // enum}; nested collection / unsupported element → E0222. The
-                // collection default (`= []`) is unwired, so the accepted
-                // field skips the scalar-default check below.
+                // enum}; nested collection / unsupported element → E0222. A
+                // default is checked against the element type once the element
+                // is valid.
                 if (origin == .resource) {
+                    const default = field.default_value;
                     switch (self.arena.typeNodeKind(field.type_node)) {
                         .slice => {
                             const at = self.arena.array_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(at.elem);
+                            const elem = try self.checkResourceCollectionElement(at.elem);
+                            if (elem != null and !default.isNone()) try self.checkArrayDefault(default, elem.?);
                             continue;
                         },
                         .set_type => {
                             const st = self.arena.set_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(st.elem);
+                            const elem = try self.checkResourceCollectionElement(st.elem);
+                            if (elem) |e| {
+                                if (e == .builtin) try self.checkHashBound(e.builtin, "set element type", "T: Hash", self.arena.typeNodeSpan(st.elem));
+                                if (!default.isNone()) try self.checkSetDefault(default);
+                            }
                             continue;
                         },
                         .map_type => {
                             const mt = self.arena.map_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(mt.key);
-                            try self.checkResourceCollectionElement(mt.value);
+                            const key = try self.checkResourceCollectionElement(mt.key);
+                            const value = try self.checkResourceCollectionElement(mt.value);
+                            if (key) |k| {
+                                if (k == .builtin) try self.checkHashBound(k.builtin, "map key type", "K: Hash", self.arena.typeNodeSpan(mt.key));
+                            }
+                            if (key != null and value != null and !default.isNone()) try self.checkMapDefault(default, key.?, value.?);
                             continue;
                         },
                         else => {},
@@ -4024,14 +4034,14 @@ pub const TypeChecker = struct {
     /// element (component/resource/struct/unknown/optional/function/…), emits
     /// `E0222 CollectionFieldElementInvalid`. This is the type-check gate only;
     /// element STORAGE and promotion wiring live in the interpreter.
-    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
+    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !?CollectionElem {
         const espan = self.arena.typeNodeSpan(elem);
         const elem_name = self.arena.namedTypeName(elem) orelse {
             switch (self.arena.typeNodeKind(elem)) {
                 .slice, .array, .map_type, .set_type => try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{}),
                 else => try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{}),
             }
-            return;
+            return null;
         };
         const resolved = self.arena.resolveTypeAliasName(elem_name);
         const tname = self.arena.strings.slice(resolved);
@@ -4045,15 +4055,102 @@ pub const TypeChecker = struct {
         // collection element is out of scope (rejected here rather than
         // becoming a silent load-time gap).
         if (BuiltinType.fromName(tname)) |bt| {
-            if (bt == .entity) {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
-                return;
+            switch (bt) {
+                .int_, .float_, .bool_, .i32_, .u32_, .f32_, .f64_ => return .{ .builtin = bt },
+                .entity => {
+                    try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
+                    return null;
+                },
+                else => {},
             }
-            return; // value-POD builtin, stored inline
+        } else {
+            if (std.mem.eql(u8, tname, "string")) return .string;
+            if (self.declaredEnumName(resolved)) return .{ .enum_ = resolved };
         }
-        if (std.mem.eql(u8, tname, "string")) return;
-        if (self.declaredEnumName(resolved)) return;
         try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
+        return null;
+    }
+
+    /// The element type a resource collection field holds.
+    const CollectionElem = union(enum) {
+        builtin: BuiltinType,
+        string,
+        enum_: StringId,
+    };
+
+    /// A `T[]` field default: an array literal whose every element is a
+    /// constant of `T`.
+    fn checkArrayDefault(self: *TypeChecker, value: NodeId, elem: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .array_lit) return self.refuseCollectionShape(value, "an array field default must be an array literal");
+        const al = self.arena.array_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            try self.checkCollectionDefaultElement(@bitCast(self.arena.extra.items[al.elements_start + i]), elem);
+        }
+        if (al.is_fill and self.constArrayLen(al.fill_count) == null) {
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
+        }
+    }
+
+    /// A `[K: V]` field default: a map literal whose every key and value is a
+    /// constant of `K` and `V`.
+    fn checkMapDefault(self: *TypeChecker, value: NodeId, key: CollectionElem, val: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .map_lit) return self.refuseCollectionShape(value, "a map field default must be a map literal");
+        const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < ml.entries_len) : (i += 1) {
+            const entry = self.arena.map_entries.items[ml.entries_start + i];
+            try self.checkCollectionDefaultElement(entry.key, key);
+            try self.checkCollectionDefaultElement(entry.value, val);
+        }
+    }
+
+    /// A `Set<T>` field default: a set has no literal, and the one default is
+    /// the empty `Set.new()` (`etch-stdlib.md` §4.5).
+    fn checkSetDefault(self: *TypeChecker, value: NodeId) !void {
+        if (isEmptySetConstructor(self.arena, value)) return;
+        return self.refuseCollectionShape(value, "a set field default must be `Set.new()`");
+    }
+
+    /// Refuses a collection default of the wrong shape: E0200 for a constant,
+    /// E1101 for anything that is not one, as for a scalar field.
+    fn refuseCollectionShape(self: *TypeChecker, value: NodeId, comptime message: []const u8) !void {
+        const span = self.arena.exprSpan(value);
+        const constant = switch (self.arena.exprKind(value)) {
+            .string_lit, .tag_path, .array_lit, .map_lit => true,
+            else => if (const_eval.fold(self.gpa, self.arena, value)) |_| true else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NotConstant => false,
+                else => true,
+            },
+        };
+        if (constant) {
+            try self.emit(.type_mismatch, .error_, span, message, .{});
+        } else {
+            try self.emit(.not_const_evaluable, .error_, span, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+        }
+    }
+
+    /// One element of a collection default against its declared type: a
+    /// constant (E1101 otherwise) of that type, or a known variant of that enum.
+    fn checkCollectionDefaultElement(self: *TypeChecker, e: NodeId, elem: CollectionElem) !void {
+        if (!try self.foldsAsConstant(e, "a collection default element must be a constant expression")) return;
+        const span = self.arena.exprSpan(e);
+        switch (elem) {
+            .enum_ => |ename| {
+                if (self.arena.exprKind(e) == .tag_path) {
+                    _ = try self.checkEnumShorthand(e, ename);
+                } else try self.emit(.type_mismatch, .error_, span, "a '{s}' element must be a variant of that enum", .{self.arena.strings.slice(ename)});
+            },
+            .string => if (self.arena.exprKind(e) != .string_lit) {
+                try self.emit(.type_mismatch, .error_, span, "a string element must be a string literal", .{});
+            },
+            .builtin => |bt| {
+                const et = self.synthExpr(e, null);
+                const fits = et == .builtin and try self.literalTypeFits(bt, e, et.builtin);
+                if (!fits) try self.emit(.type_mismatch, .error_, span, "collection element type does not match the declared element type", .{});
+            },
+        }
     }
 
     /// `true` if `name` is a declared `enum`, checked against the AST slab
@@ -4114,6 +4211,12 @@ pub const TypeChecker = struct {
     fn checkFieldDefault(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
         if (!try self.foldsAsConstant(value, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
         const declared = self.namedTypeToResolved(type_node);
+        if (declared == .enum_t) {
+            if (self.arena.exprKind(value) == .tag_path) {
+                _ = try self.checkEnumShorthand(value, declared.enum_t);
+            } else try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "an enum field default must be a variant of that enum", .{});
+            return;
+        }
         const actual = self.synthExpr(value, null);
         if (declared == .builtin and actual == .builtin) {
             if (!try self.literalTypeFits(declared.builtin, value, actual.builtin)) {
@@ -8415,6 +8518,15 @@ pub const TypeChecker = struct {
 };
 
 // ─── Helpers reachable from tests ───────────────────────────────────────
+
+/// Whether the expression at `id` is `Set.new()`, the empty set.
+pub fn isEmptySetConstructor(arena: *const AstArena, id: NodeId) bool {
+    if (arena.exprKind(id) != .method_call) return false;
+    const mc = arena.method_calls.items[arena.exprData(id)];
+    return arena.exprKind(mc.receiver) == .path and
+        std.mem.eql(u8, arena.strings.slice(arena.exprData(mc.receiver)), "Set") and
+        std.mem.eql(u8, arena.strings.slice(mc.method_name), "new") and mc.args_len == 0;
+}
 
 /// Return `true` if the expression at `id` can be folded to a value
 /// at type-check time (literals + arithmetic/comparison/logic on

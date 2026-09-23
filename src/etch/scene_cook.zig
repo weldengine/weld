@@ -1220,6 +1220,12 @@ const Builder = struct {
     }
 
     fn buildResourceEntry(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, diag_out: ?*[]const u8) CookError!format.ResourceEntry {
+        // The loader refuses a collection field (`CollectionResourceFieldUnsupported`),
+        // so a scene carrying one would cook and never load.
+        for (self.registry.componentFields(id)) |fd| switch (fd.kind) {
+            .array_, .map_, .set_ => return fail(diag_out, error.UnsupportedFieldKind, "a resource with a collection field cannot be cooked into a scene: the loader refuses it"),
+            else => {},
+        };
         const size = self.registry.componentSize(id);
         const blob = try self.a().alloc(u8, size);
         @memcpy(blob, self.registry.componentDefaultBytes(id));

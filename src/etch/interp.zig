@@ -7323,63 +7323,106 @@ fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     list.deinit(gpa);
 }
 
-/// Const-evaluate a literal-default collection entry for storage: a
-/// string literal is deep-copied into an owned persistent string; any other
-/// const expression is `evalConst`'d (POD inline). Errors on a non-const entry.
-fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) !Value {
-    if (ast.exprKind(node) == .string_lit) return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node)));
-    return evalConst(gpa, ast, node);
+/// One element of a collection default, stored: a string literal as an owned
+/// persistent string, a `.variant` as its value in the element enum
+/// `elem_enum`, any other constant as `evalConst` folds it. The checker admits
+/// nothing else, so anything else is `error.InvalidProgram`.
+fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId, elem_enum: ?StringId) !Value {
+    switch (ast.exprKind(node)) {
+        .string_lit => return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node))),
+        .tag_path => {
+            const ename = elem_enum orelse return error.InvalidProgram;
+            const edecl = findEnumDecl(ast, ename) orelse return error.InvalidProgram;
+            const vidx = enumVariantIndex(ast, edecl, ast.exprData(node)) orelse return error.InvalidProgram;
+            return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+        },
+        else => return evalConst(gpa, ast, node) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidProgram,
+        },
+    }
 }
 
-/// Build a `type_array` container for a resource field: empty, or a literal-array
-/// default (`= [...]`) with elements deep-copied.
-fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+/// The declared enum a collection element type node names, or null.
+fn collectionElemEnum(ast: *const AstArena, elem: NodeId) ?StringId {
+    const name = ast.resolveTypeAliasName(ast.namedTypeName(elem) orelse return null);
+    return if (findEnumDecl(ast, name) != null) name else null;
+}
+
+/// Bytes of a `.string_persistent` value (empty otherwise).
+fn persistentStrBytes(v: Value) []const u8 {
+    return switch (v) {
+        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
+        else => "",
+    };
+}
+
+/// Whether two keys of a default map are one key: strings by their bytes.
+fn defaultKeyEql(a: Value, b: Value) bool {
+    if (a == .string_persistent and b == .string_persistent) return std.mem.eql(u8, persistentStrBytes(a), persistentStrBytes(b));
+    return a.eql(b);
+}
+
+fn dropDefaultValue(gpa: std.mem.Allocator, v: Value) void {
+    if (v == .string_persistent and v.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(v.string_persistent.ptr));
+}
+
+/// Build a `type_array` container for a resource field: empty, or its array
+/// literal default (`[a, b]`, or `[v; n]` as `n` copies) with elements
+/// deep-copied.
+fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) ![*]u8 {
     const block = try allocEmptyArrayBlock(gpa);
     errdefer persistent.decref(gpa, block);
-    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .array_lit) {
-        const al = ast.array_lits.items[ast.exprData(f.default_value)];
-        const list: *PersistentArray = @ptrCast(@alignCast(block));
-        var e_i: u32 = 0;
-        while (e_i < al.elements_len) : (e_i += 1) {
-            const en: NodeId = @bitCast(ast.extra.items[al.elements_start + e_i]);
-            // Reserve before promoting so a string allocation never dangles on an
-            // append-time OOM (the block's errdefer drops appended elements).
-            try list.ensureUnusedCapacity(gpa, 1);
-            const ev = constCollectionValue(gpa, ast, en) catch |e| switch (e) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => continue,
-            };
-            list.appendAssumeCapacity(ev);
-        }
+    if (f.default_value.isNone()) return block;
+    if (ast.exprKind(f.default_value) != .array_lit) return error.InvalidProgram;
+    const al = ast.array_lits.items[ast.exprData(f.default_value)];
+    const elem_enum = collectionElemEnum(ast, ast.array_types.items[ast.typeNodeData(f.type_node)].elem);
+    const count: usize = if (!al.is_fill) al.elements_len else blk: {
+        if (ast.exprKind(al.fill_count) != .int_lit) return error.InvalidProgram;
+        break :blk const_eval.intLiteralMagnitude(ast.strings.slice(ast.exprData(al.fill_count))) orelse return error.InvalidProgram;
+    };
+    const list: *PersistentArray = @ptrCast(@alignCast(block));
+    var e_i: usize = 0;
+    while (e_i < count) : (e_i += 1) {
+        const en: NodeId = @bitCast(ast.extra.items[al.elements_start + if (al.is_fill) 0 else e_i]);
+        // Reserve before promoting so a string allocation never dangles on an
+        // append-time OOM (the block's errdefer drops appended elements).
+        try list.ensureUnusedCapacity(gpa, 1);
+        list.appendAssumeCapacity(try constCollectionValue(gpa, ast, en, elem_enum));
     }
     return block;
 }
 
-/// Build a `type_map` container for a resource field: empty, or a literal-map
-/// default (`= [k: v, …]`) with keys+values deep-copied. Entries are
-/// appended in order; a degenerate duplicate key in the literal yields duplicate
-/// pairs (runtime `insert` is the last-write-wins path).
-fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+/// Build a `type_map` container for a resource field: empty, or its map
+/// literal default with keys and values deep-copied. A repeated key keeps its
+/// last value, as the runtime map literal does.
+fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) ![*]u8 {
     const block = try allocEmptyMapBlock(gpa);
     errdefer persistent.decref(gpa, block);
-    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .map_lit) {
-        const ml = ast.map_lits.items[ast.exprData(f.default_value)];
-        const list: *PersistentMap = @ptrCast(@alignCast(block));
-        var e_i: u32 = 0;
-        while (e_i < ml.entries_len) : (e_i += 1) {
-            const entry = ast.map_entries.items[ml.entries_start + e_i];
-            try list.ensureUnusedCapacity(gpa, 1);
-            const kv = constCollectionValue(gpa, ast, entry.key) catch |e| switch (e) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => continue,
-            };
-            const vv = constCollectionValue(gpa, ast, entry.value) catch |e| {
-                if (kv == .string_persistent and kv.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(kv.string_persistent.ptr));
-                if (e == error.OutOfMemory) return error.OutOfMemory;
-                continue;
-            };
-            list.appendAssumeCapacity(.{ .key = kv, .value = vv });
+    if (f.default_value.isNone()) return block;
+    if (ast.exprKind(f.default_value) != .map_lit) return error.InvalidProgram;
+    const mt = ast.map_types.items[ast.typeNodeData(f.type_node)];
+    const key_enum = collectionElemEnum(ast, mt.key);
+    const value_enum = collectionElemEnum(ast, mt.value);
+    const ml = ast.map_lits.items[ast.exprData(f.default_value)];
+    const list: *PersistentMap = @ptrCast(@alignCast(block));
+    var e_i: u32 = 0;
+    entries: while (e_i < ml.entries_len) : (e_i += 1) {
+        const entry = ast.map_entries.items[ml.entries_start + e_i];
+        try list.ensureUnusedCapacity(gpa, 1);
+        const kv = try constCollectionValue(gpa, ast, entry.key, key_enum);
+        const vv = constCollectionValue(gpa, ast, entry.value, value_enum) catch |e| {
+            dropDefaultValue(gpa, kv);
+            return e;
+        };
+        for (list.items) |*pair| {
+            if (!defaultKeyEql(pair.key, kv)) continue;
+            dropDefaultValue(gpa, kv);
+            dropDefaultValue(gpa, pair.value);
+            pair.value = vv;
+            continue :entries;
         }
+        list.appendAssumeCapacity(.{ .key = kv, .value = vv });
     }
     return block;
 }
@@ -7407,8 +7450,10 @@ fn prepareResourceBuffer(
         const block: [*]u8 = switch (fd.kind) {
             .array_ => try initArrayBlock(gpa, ast, f),
             .map_ => try initMapBlock(gpa, ast, f),
-            // A set has no literal form, so it always starts empty.
-            else => try allocEmptySetBlock(gpa),
+            else => blk: {
+                if (!f.default_value.isNone() and !types_mod.isEmptySetConstructor(ast, f.default_value)) return error.InvalidProgram;
+                break :blk try allocEmptySetBlock(gpa);
+            },
         };
         blocks.appendAssumeCapacity(block);
         const cs = persistent.CollectionSlot{ .ptr = @intFromPtr(block) };
@@ -7623,14 +7668,11 @@ fn prepareTypeEntry(gpa: std.mem.Allocator, ast: *const AstArena, registry: *con
             // Enum default = a bare `.variant` shorthand → its declaration-order
             // discriminant (consistent with `EnumValue.variant`). No default ⇒
             // discriminant 0, the first variant (`default_buf` is zeroed).
-            if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .tag_path) {
-                const variant = ast.exprData(f.default_value);
-                if (findEnumDecl(ast, fd.enum_type_name_id)) |edecl| {
-                    if (enumVariantIndex(ast, edecl, variant)) |vidx| {
-                        const disc: u32 = vidx;
-                        @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
-                    }
-                }
+            if (!f.default_value.isNone()) {
+                if (ast.exprKind(f.default_value) != .tag_path) return error.InvalidProgram;
+                const edecl = findEnumDecl(ast, fd.enum_type_name_id) orelse return error.InvalidProgram;
+                const disc: u32 = enumVariantIndex(ast, edecl, ast.exprData(f.default_value)) orelse return error.InvalidProgram;
+                @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
             }
             continue;
         }
@@ -8944,14 +8986,6 @@ fn resourceCollectionPtr(world: *World, res_name: []const u8, field_name: []cons
     var cs: persistent.CollectionSlot = undefined;
     @memcpy(std.mem.asBytes(&cs), bytes[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
     return cs.ptr;
-}
-
-/// Bytes of a `.string_persistent` value (empty otherwise). Test helper.
-fn persistentStrBytes(v: Value) []const u8 {
-    return switch (v) {
-        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
-        else => "",
-    };
 }
 
 fn expectResourceMapLen(world: *World, res_name: []const u8, field_name: []const u8, expected: usize) !void {
@@ -16604,4 +16638,70 @@ test "a default whose folding overflows is refused at compile" {
     var pr = try parser_mod.parse(gpa, "component C { v: int = 9223372036854775807 + 1 }");
     defer pr.deinit(gpa);
     try std.testing.expectError(error.ValueOutOfRange, compileUnchecked(gpa, &pr, &world));
+}
+
+test "a fill default materialises its count" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "resource R { xs: int[] = [7; 3] }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const list = persistentArrayOf(resourceCollectionPtr(&world, "R", "xs"));
+    try std.testing.expectEqual(@as(usize, 3), list.items.len);
+    for (list.items) |v| try std.testing.expectEqual(@as(i64, 7), v.int_);
+}
+
+test "an enum element default is stored as its variant" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\enum Mode { a, b }
+        \\resource R { xs: Mode[] = [.b] }
+    );
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const list = persistentArrayOf(resourceCollectionPtr(&world, "R", "xs"));
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqual(@as(u32, 1), list.items[0].enum_value.variant);
+}
+
+test "a map default keeps the last value of a repeated key" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, "resource R { m: [string: int] = [\"a\": 1, \"a\": 2] }");
+    defer pr.deinit(gpa);
+    var interp = try compileUnchecked(gpa, &pr, &world);
+    defer interp.deinit();
+    const map = persistentMapOf(resourceCollectionPtr(&world, "R", "m"));
+    try std.testing.expectEqual(@as(usize, 1), map.items.len);
+    try std.testing.expectEqual(@as(i64, 2), map.items[0].value.int_);
+}
+
+test "a collection default of the wrong shape is refused at compile" {
+    const gpa = std.testing.allocator;
+    const sources = [_][]const u8{
+        "resource R { xs: int[] = 5 }",
+        "resource R { m: [string: int] = [] }",
+        "resource R { s: Set<int> = [1] }",
+        "resource R { xs: int[] = [1 / 0] }",
+        "enum Mode { a }\nresource R { m: Mode = .nope }",
+    };
+    for (sources) |src| {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa, src);
+        defer pr.deinit(gpa);
+        var interp = compileUnchecked(gpa, &pr, &world) catch |err| {
+            try std.testing.expectEqual(error.InvalidProgram, err);
+            continue;
+        };
+        interp.deinit();
+        std.debug.print("compiled: {s}\n", .{src});
+        return error.TestExpectedError;
+    }
 }

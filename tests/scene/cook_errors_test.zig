@@ -117,3 +117,12 @@ test "a component collection field is rejected" {
         \\}
     );
 }
+
+test "a resource with a collection field is rejected" {
+    try expectCookError(error.UnsupportedFieldKind,
+        \\resource R { xs: int[] = [1] }
+        \\scene "S" {
+        \\  resources { R { } }
+        \\}
+    );
+}

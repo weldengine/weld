@@ -969,6 +969,9 @@ pub fn build(b: *std.Build) void {
         // A literal that overflows its type, and a constant whose folding
         // overflows or divides by zero, are refused at check time.
         .{ .path = "tests/etch/numeric_range_test.zig", .etch = true, .dedicated_step = "test-numeric-range" },
+        // A resource collection field's default is checked against its
+        // element type.
+        .{ .path = "tests/etch/collection_default_test.zig", .etch = true, .dedicated_step = "test-collection-default" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },
