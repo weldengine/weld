@@ -28,9 +28,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025]
     runs-on: ${{ matrix.os }}
-    # 1 h fuzz + ReleaseSafe build (~3 min on the 2-vCPU Windows runner) +
-    # overhead. 90 min leaves headroom without risking a runaway hang
-    # masquerading as a pass.
+    # 1 h fuzz + ReleaseSafe build + overhead. 90 min leaves headroom without
+    # risking a runaway hang masquerading as a pass.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
