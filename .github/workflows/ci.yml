@@ -24,6 +24,9 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
       week: ${{ steps.week.outputs.week }}
@@ -36,6 +39,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Probe check-run read access
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV: ${{ github.event.before }}
+        run: |
+          set +e
+          url="https://api.github.com/repos/${{ github.repository }}/commits/$PREV/check-runs?check_name=ci-gate"
+          for auth in token none; do
+            hdr=()
+            [ "$auth" = token ] && hdr=(-H "Authorization: Bearer $GH_TOKEN")
+            code="$(curl -sS -o body.json -D head.txt -w '%{http_code}' "${hdr[@]}" -H 'Accept: application/vnd.github+json' "$url")"
+            echo "auth=$auth prev=$PREV http=$code"
+            grep -i -E '^x-ratelimit-limit|^x-accepted-github-permissions' head.txt | tr -d '\r'
+            grep -o -E '"(total_count|status|conclusion)": *("[a-z_]*"|[0-9]+)' body.json | head -3
+          done
+          true
+
       - name: Detect non-doc changes
         id: detect
         shell: bash
@@ -65,6 +86,26 @@ jobs:
           done <<< "$files"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "--- verdict: code=$code ---"
+
+  token-probe-control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Probe check-run read access with contents read only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV: ${{ github.event.before }}
+        run: |
+          set +e
+          url="https://api.github.com/repos/${{ github.repository }}/commits/$PREV/check-runs?check_name=ci-gate"
+          code="$(curl -sS -o body.json -D head.txt -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$url")"
+          echo "auth=token-contents-only prev=$PREV http=$code"
+          grep -i -E '^x-ratelimit-limit|^x-accepted-github-permissions' head.txt | tr -d '\r'
+          grep -o -E '"(total_count|status|conclusion)": *("[a-z_]*"|[0-9]+)' body.json | head -3
+          true
 
   build-and-test:
     needs: changes
