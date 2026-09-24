@@ -19,6 +19,7 @@ permissions:
 env:
   ZIG_VERSION: "0.16.0"
   ZIG_CPU: "baseline"
+  ZIG_CACHE_CAP: "10737418240"
 
 jobs:
   changes:
@@ -221,7 +222,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          limit=10737418240
+          limit="$ZIG_CACHE_CAP"
           bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
           bytes=$((bytes * 1024))
           echo "zig cache (final): $bytes bytes (cap $limit)"
@@ -334,8 +335,25 @@ jobs:
           set -euo pipefail
           zig build test-runtime-env -Dcpu=${{ env.ZIG_CPU }} --summary all
 
+      - name: Measure the Zig cache before the save
+        if: always()
+        id: cache-size
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit="$ZIG_CACHE_CAP"
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache: $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Save Zig cache
-        if: always() && github.event_name == 'push'
+        if: always() && github.event_name == 'push' && steps.cache-size.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
@@ -362,16 +380,8 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
-          # use-cache: false — the action caches .zig-cache itself; this workflow owns it
+          # use-cache: false — the action caches .zig-cache itself; a Debug job stays cold
           use-cache: false
-
-      - name: Restore Zig cache (Debug)
-        uses: actions/cache/restore@v5
-        with:
-          path: .zig-cache
-          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
-          restore-keys: |
-            zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |
@@ -467,13 +477,6 @@ jobs:
           # construction + hardware (no false green from a lavapipe pass).
           grep -E "00067|pSignalSemaphores" vkblit.log || echo "  not observed on lavapipe (expected — hardware-only)"
           echo "=== end E6 blit validation ==="
-
-      - name: Save Zig cache (Debug)
-        if: always() && github.event_name == 'push'
-        uses: actions/cache/save@v5
-        with:
-          path: .zig-cache
-          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
       - name: Upload slice capture
         if: always()
