@@ -3,7 +3,9 @@
 
 const std = @import("std");
 
-/// Path prefixes no CI job reads. The digest leaves them out.
+/// Path prefixes no CI job reads. The digest leaves them out. `guard.zig` checks
+/// that claim for literal paths only: a path computed at run time or passed to a
+/// system command is not seen.
 pub const excluded_prefixes = [_][]const u8{"briefs/"};
 /// Whole paths no CI job reads. The digest leaves them out.
 pub const excluded_files = [_][]const u8{"CLAUDE.md"};
