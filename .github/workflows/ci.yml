@@ -29,6 +29,7 @@ jobs:
       checks: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
+      reason: ${{ steps.detect.outputs.reason }}
       week: ${{ steps.week.outputs.week }}
     steps:
       - name: Compute the lineage window
@@ -39,73 +40,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Probe check-run read access
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREV: ${{ github.event.before }}
-        run: |
-          set +e
-          url="https://api.github.com/repos/${{ github.repository }}/commits/$PREV/check-runs?check_name=ci-gate"
-          for auth in token none; do
-            hdr=()
-            [ "$auth" = token ] && hdr=(-H "Authorization: Bearer $GH_TOKEN")
-            code="$(curl -sS -o body.json -D head.txt -w '%{http_code}' "${hdr[@]}" -H 'Accept: application/vnd.github+json' "$url")"
-            echo "auth=$auth prev=$PREV http=$code"
-            grep -i -E '^x-ratelimit-limit|^x-accepted-github-permissions' head.txt | tr -d '\r'
-            grep -o -E '"(total_count|status|conclusion)": *("[a-z_]*"|[0-9]+)' body.json | head -3
-          done
-          true
 
-      - name: Detect non-doc changes
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Decide whether this tree needs a run
         id: detect
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            head="${{ github.event.pull_request.head.sha }}"
-          else
-            base="${{ github.event.before }}"
-            head="${{ github.sha }}"
-          fi
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-            echo "base unknown -> code=true"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          files="$(git diff --name-only "$base" "$head")"
-          echo "--- changed files ---"; echo "$files"
-          code=false
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              *.md|briefs/*|docs/*|LICENSE|.gitignore) : ;;
-              *) code=true ;;
-            esac
-          done <<< "$files"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "--- verdict: code=$code ---"
-
-  token-probe-control:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Probe check-run read access with contents read only
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREV: ${{ github.event.before }}
-        run: |
-          set +e
-          url="https://api.github.com/repos/${{ github.repository }}/commits/$PREV/check-runs?check_name=ci-gate"
-          code="$(curl -sS -o body.json -D head.txt -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$url")"
-          echo "auth=token-contents-only prev=$PREV http=$code"
-          grep -i -E '^x-ratelimit-limit|^x-accepted-github-permissions' head.txt | tr -d '\r'
-          grep -o -E '"(total_count|status|conclusion)": *("[a-z_]*"|[0-9]+)' body.json | head -3
-          true
+          zig run tools/ci_verdict/main.zig -- decide --event "$EVENT" --base "$BASE" --head "$HEAD" \
+            --tested HEAD --repo "${{ github.repository }}" --check ci-gate >> "$GITHUB_OUTPUT"
 
   build-and-test:
     needs: changes
@@ -692,9 +644,8 @@ jobs:
   # A doc-only pull request therefore merges in seconds, while one carrying code
   # stays gated on the whole matrix and both smokes.
   #
-  # `skipped` counts as green because the fast path above is what produces it.
-  # That makes the allow-list load-bearing: a path added to it stops being
-  # verified, so it is widened only for files no build reads.
+  # `skipped` counts as green because `changes` skips only a tree whose code was
+  # already verified green (tools/ci_verdict).
   ci-gate:
     needs: [changes, build-and-test, runtime-smoke-test, vertical-slice-smoke]
     if: always()
@@ -703,6 +654,8 @@ jobs:
     steps:
       - name: Aggregate required results
         shell: bash
+        env:
+          REASON: ${{ needs.changes.outputs.reason }}
         run: |
           set -euo pipefail
           changes="${{ needs.changes.result }}"
@@ -710,6 +663,7 @@ jobs:
           rst="${{ needs.runtime-smoke-test.result }}"
           vss="${{ needs.vertical-slice-smoke.result }}"
           echo "changes=$changes build-and-test=$bt runtime-smoke-test=$rst vertical-slice-smoke=$vss"
+          echo "::notice::$REASON"
           if [ "$changes" != "success" ]; then
             echo "::error::changes job did not succeed ($changes)"; exit 1
           fi

@@ -2682,6 +2682,14 @@ pub fn build(b: *std.Build) void {
     });
     const bindgen_tests = b.addTest(.{ .root_module = bindgen_test_module });
     test_step.dependOn(&b.addRunArtifact(bindgen_tests).step);
+
+    const ci_verdict_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/ci_verdict/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const ci_verdict_tests = b.addTest(.{ .root_module = ci_verdict_test_module });
+    test_step.dependOn(&b.addRunArtifact(ci_verdict_tests).step);
 }
 
 /// Passes this build's target, CPU, mode and physics precision to a nested

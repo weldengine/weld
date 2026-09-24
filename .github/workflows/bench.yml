@@ -4,20 +4,8 @@ name: Bench
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'briefs/**'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'briefs/**'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
 
 concurrency:
   group: bench-${{ github.ref }}
@@ -31,7 +19,41 @@ env:
   ZIG_CPU: "baseline"
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+      reason: ${{ steps.detect.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Decide whether this tree needs a run
+        id: detect
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          zig run tools/ci_verdict/main.zig -- decide --event "$EVENT" --base "$BASE" --head "$HEAD" \
+            --tested HEAD --repo "${{ github.repository }}" --check bench-gate >> "$GITHUB_OUTPUT"
+
   bench-ecs-smoke:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -80,3 +102,29 @@ jobs:
           path: bench/results/ecs_hybrid_crossover.md
           if-no-files-found: error
           retention-days: 90
+
+  # The verdict `changes` inherits: green when the bench ran green or was skipped
+  # because the same code already was.
+  bench-gate:
+    needs: [changes, bench-ecs-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate the bench results
+        shell: bash
+        env:
+          REASON: ${{ needs.changes.outputs.reason }}
+        run: |
+          set -euo pipefail
+          changes="${{ needs.changes.result }}"
+          bench="${{ needs.bench-ecs-smoke.result }}"
+          echo "changes=$changes bench-ecs-smoke=$bench"
+          echo "::notice::$REASON"
+          if [ "$changes" != "success" ]; then
+            echo "::error::changes job did not succeed ($changes)"; exit 1
+          fi
+          case "$bench" in
+            success|skipped) : ;;
+            *) echo "::error::bench-ecs-smoke is $bench"; exit 1 ;;
+          esac
