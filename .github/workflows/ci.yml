@@ -237,7 +237,6 @@ jobs:
       - name: Save Zig cache (final)
         if: always()
           && matrix.mode != 'Debug'
-          && github.event_name == 'push'
           && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
@@ -335,7 +334,7 @@ jobs:
           zig build test-runtime-env -Dcpu=${{ env.ZIG_CPU }} --summary all
 
       - name: Save Zig cache
-        if: always() && github.event_name == 'push'
+        if: always()
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
@@ -469,7 +468,7 @@ jobs:
           echo "=== end E6 blit validation ==="
 
       - name: Save Zig cache (Debug)
-        if: always() && github.event_name == 'push'
+        if: always()
         uses: actions/cache/save@v5
         with:
           path: .zig-cache

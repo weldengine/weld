@@ -89,7 +89,7 @@ jobs:
         run: zig build bench-ecs-hybrid -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }}
 
       - name: Save Zig cache
-        if: always() && github.event_name == 'push'
+        if: always()
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
