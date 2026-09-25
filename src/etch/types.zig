@@ -6497,6 +6497,11 @@ pub const TypeChecker = struct {
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
                         return ResolvedType.unknown;
                     }
+                } else if (self.imported_symbols.get(mg.type_name)) |entry| {
+                    if (entry.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
                 } else {
                     try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown component '{s}'", .{tname});
                     return ResolvedType.unknown;

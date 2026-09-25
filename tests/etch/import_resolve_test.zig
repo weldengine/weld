@@ -173,3 +173,22 @@ test "a test block is not exported (E0104 on import)" {
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .unknown_export));
 }
+
+test "entity.get reaches an imported component in a test body" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
+        .{ .name = "main.etch", .source =
+        \\import lib { Health }
+        \\test "t" {
+        \\  let w = test_world()
+        \\  let e = w.spawn_with([Health { current: 1.0 }])
+        \\  let v = e.get(Health).current
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
+}
