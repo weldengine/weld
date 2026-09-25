@@ -34,6 +34,7 @@ const std = @import("std");
 const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
 const types_mod = @import("types.zig");
+const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
 // `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
@@ -118,6 +119,8 @@ pub const CookError = error{
     /// An `extends` prefab's `on_attach`/`on_detach` body could not be rendered to
     /// canonical Etch text (a construct outside the descriptor renderer's surface).
     HookRenderFailed,
+    /// An extension hook, or its `requires` clause, fails the type checker.
+    HookRefused,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -245,6 +248,20 @@ pub const BaseResolver = struct {
     }
 };
 
+/// Refuse an extension hook or `requires` clause the type checker refuses, so
+/// a cooked hook is one `etch check` accepts (decision 3 point 4).
+fn checkHooks(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    types_mod.TypeChecker.checkPrefabHooks(gpa, ast, &diags) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    if (diags.items.len > 0) return fail(diag_out, error.HookRefused, "an extension hook or its requires clause fails the type checker");
+}
+
 /// Cook a `.prefab.etch` source into the neutral model + its registry, the same
 /// way `cook` handles `.scene.etch`. A prefab is a mini-scene (one `prefab`
 /// construct, body = `{ entity_decl }`, no `resources`/`instance`), serialized to
@@ -271,6 +288,7 @@ pub fn cookPrefab(
     defer pr.deinit(gpa);
     if (pr.diagnostics.len > 0) return fail(diag_out, error.ParseFailed, "Etch parse failed");
     const ast = &pr.ast;
+    try checkHooks(gpa, ast, diag_out);
 
     var registry = Registry.init();
     errdefer registry.deinit(gpa);

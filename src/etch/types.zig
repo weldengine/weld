@@ -547,6 +547,10 @@ pub const TypeChecker = struct {
     /// through to E0102 (`test_world`/`tick_until`) or E0910 (`measure`). Set/restored
     /// around the body in `checkTest`.
     in_test_body: bool = false,
+    /// Whether the statements being checked are an `on_attach` / `on_detach`
+    /// body: a `return` there is E1798, and the E1210 / E1213 messages name the
+    /// hook's scope. Set/restored in `checkPrefabHook`.
+    in_hook_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked, `null` outside any.
     /// Drives E0906 (a `return` is legal only in a `race` branch —
@@ -771,7 +775,8 @@ pub const TypeChecker = struct {
         // Builtin `Error` / `ErrorCode` declarations (
         // part1 §10.2) join the arena before pass 1 so they register like
         // ordinary declarations. Every interp / codegen driver runs through
-        // `check`, so the injection point is unique.
+        // `check`, and the cook through `checkPrefabHooks`; the injection is
+        // idempotent.
         try arena.ensureErrorBuiltins(gpa);
         var tc: TypeChecker = .{
             .gpa = gpa,
@@ -780,39 +785,76 @@ pub const TypeChecker = struct {
             .project = project,
         };
         defer tc.deinit();
+        try tc.runDeclarationPasses();
+        try tc.validatePrefabDecls();
+        try tc.pass2Resolve();
+    }
+
+    /// Every pass `check` runs before the prefab validation: the symbols,
+    /// imports, impls, tags, services and events a statement check reads, and
+    /// the construct validators. Shared with `checkPrefabHooks`.
+    fn runDeclarationPasses(self: *TypeChecker) !void {
         // E1901 runs FIRST: it decides whether the file is even allowed to
         // contain what it contains, and a `.d.etch` carrying a `rule` would
         // otherwise produce a cascade of resolution errors on a body that had
         // no business being parsed. Cheap either way — one walk of the item
         // column, and an immediate return in `.standard` mode.
-        try tc.checkDeclarationFileConstructs();
-        try tc.checkLiteralRanges();
-        try tc.collectServices();
-        try tc.collectDeclaredEvents();
-        try tc.pass1Collect();
-        try tc.bindImports();
-        try tc.validateTypeAliases();
-        try tc.validateImpls();
-        try tc.validateDataDecls();
-        try tc.validateRoutineDecls();
-        try tc.buildTags();
-        try tc.validateBehaviorDecls();
-        try tc.validateQuestDecls();
-        try tc.validateDialogueDecls();
-        try tc.validateAbilityDecls();
-        try tc.validateThemeDecls();
-        try tc.validateMotionDecls();
-        try tc.validateInputMappingDecls();
-        try tc.validateWidgetDecls();
-        try tc.validateLocaleDecls();
-        try tc.validateEffectDecls();
-        try tc.validateAudioScoreDecls();
-        try tc.validateSequenceDecls();
-        try tc.validateAnimGraphDecls();
-        try tc.validateShaderDecls();
-        try tc.validateSceneDecls();
-        try tc.validatePrefabDecls();
-        try tc.pass2Resolve();
+        try self.checkDeclarationFileConstructs();
+        try self.checkLiteralRanges();
+        try self.collectServices();
+        try self.collectDeclaredEvents();
+        try self.pass1Collect();
+        try self.bindImports();
+        try self.validateTypeAliases();
+        try self.validateImpls();
+        try self.validateDataDecls();
+        try self.validateRoutineDecls();
+        try self.buildTags();
+        try self.validateBehaviorDecls();
+        try self.validateQuestDecls();
+        try self.validateDialogueDecls();
+        try self.validateAbilityDecls();
+        try self.validateThemeDecls();
+        try self.validateMotionDecls();
+        try self.validateInputMappingDecls();
+        try self.validateWidgetDecls();
+        try self.validateLocaleDecls();
+        try self.validateEffectDecls();
+        try self.validateAudioScoreDecls();
+        try self.validateSequenceDecls();
+        try self.validateAnimGraphDecls();
+        try self.validateShaderDecls();
+        try self.validateSceneDecls();
+    }
+
+    /// The prefab half of `check`, for the cook (decision 3 point 4): the
+    /// declarations are collected by `check`'s own passes, and only `requires`
+    /// names and hook bodies are reported into `diagnostics`. A cook source
+    /// reaches its base prefab through a resolver, so the rest of `check`
+    /// (E1791 first) does not apply to it.
+    pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.runDeclarationPasses();
+        tc.diagnostics = diagnostics;
+        const kinds = arena.items.items(.kind);
+        const datas = arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < arena.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            try tc.checkPrefabRequiresAndHooks(arena.prefab_decls.items[datas[i]]);
+        }
     }
 
     /// `E1901 ConstructNotAllowedInDeclarationFile` (`etch-grammar.md`
@@ -2381,6 +2423,79 @@ pub const TypeChecker = struct {
             while (f < ent.components_len) : (f += 1) {
                 try self.checkComponentInstance(self.arena.component_instances.items[ent.components_start + f], .prefab_component_type_unknown, .prefab_component_field_unknown, .prefab_component_field_type_invalid);
             }
+        }
+        try self.checkPrefabRequiresAndHooks(decl);
+    }
+
+    /// Whether `name` is a declared component, looked up as
+    /// `checkComponentInstance` does: a local symbol shadows an import.
+    fn isComponentName(self: *TypeChecker, name: StringId) bool {
+        if (self.symbols.get(name)) |sym| return sym.kind == .component;
+        if (self.imported_symbols.get(name)) |entry| return entry.kind == .component;
+        return false;
+    }
+
+    /// E1793 on a `requires` name that is no component, then each hook body.
+    /// `requires` keeps no span per name, so the diagnostic sits on the prefab
+    /// name, as E1790/E1791 do.
+    fn checkPrefabRequiresAndHooks(self: *TypeChecker, decl: ast_mod.PrefabDecl) !void {
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            const req = self.arena.prefab_requires.items[decl.requires_start + r];
+            if (!self.isComponentName(req)) {
+                try self.emit(.prefab_component_type_unknown, .error_, decl.name_span, "prefab '{s}' requires '{s}', which is not a declared component", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(req) });
+            }
+        }
+        if (decl.has_on_attach) try self.checkPrefabHook(decl, decl.on_attach_start, decl.on_attach_len);
+        if (decl.has_on_detach) try self.checkPrefabHook(decl, decl.on_detach_start, decl.on_detach_len);
+    }
+
+    /// One hook body (part2 §30.3): gated like a `when` clause on `requires` ∪
+    /// the extension's own components, synchronous and unable to throw, with an
+    /// implicit `entity: Entity`. User resources stay unreachable, engine ones
+    /// readable, as in a rule with no `when resource`. Each hook gets a fresh
+    /// context.
+    fn checkPrefabHook(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            try ctx.components_in_when.put(self.gpa, self.arena.prefab_requires.items[decl.requires_start + r], {});
+        }
+        var e: u32 = 0;
+        while (e < decl.entities_len) : (e += 1) {
+            const ent = self.arena.scene_entities.items[decl.entities_start + e];
+            var c: u32 = 0;
+            while (c < ent.components_len) : (c += 1) {
+                try ctx.components_in_when.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
+            }
+        }
+        if (self.arena.strings.find("entity")) |eid| {
+            try ctx.locals.put(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+        }
+        const saved_async = self.current_is_async;
+        const saved_susp = self.await_suspendable;
+        const saved_throw = self.current_can_throw;
+        const saved_ret = self.current_fn_return;
+        const saved_branch = self.conc_branch;
+        const saved_hook = self.in_hook_body;
+        self.current_is_async = false;
+        self.await_suspendable = true;
+        self.current_can_throw = false;
+        self.current_fn_return = null;
+        self.conc_branch = null;
+        self.in_hook_body = true;
+        defer {
+            self.current_is_async = saved_async;
+            self.await_suspendable = saved_susp;
+            self.current_can_throw = saved_throw;
+            self.current_fn_return = saved_ret;
+            self.conc_branch = saved_branch;
+            self.in_hook_body = saved_hook;
+        }
+        var s: u32 = 0;
+        while (s < len) : (s += 1) {
+            try self.checkStmt(&ctx, @bitCast(self.arena.extra.items[start + s]));
         }
     }
 
@@ -5779,6 +5894,9 @@ pub const TypeChecker = struct {
                 // parent has potentially already advanced — no propagation
                 // site (`etch-resolver-types.md` §9.2). Asymmetric by design
                 // — do NOT generalize.
+                if (self.in_hook_body) {
+                    try self.emit(.illegal_return_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in an extension hook (on_attach / on_detach): a hook has no caller to return to", .{});
+                }
                 if (self.conc_branch) |ck| {
                     if (ck != .race) {
                         try self.emit(.illegal_return_in_concurrency_branch, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in a '{s}' {s} (only a 'race' branch may return — the winner's return propagates at the race site)", .{ @tagName(ck), if (ck == .sync) "branch" else "body" });
@@ -6474,7 +6592,11 @@ pub const TypeChecker = struct {
                     }
                     if (ctx_opt) |ctx| {
                         if (!ctx.unrestricted_ecs_access and !ctx.resources_in_when.contains(mg.type_name)) {
-                            try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            if (self.in_hook_body) {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — an extension hook reads engine resources only", .{tname});
+                            } else {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            }
                         }
                     }
                     return .{ .resource = mg.type_name };
@@ -6508,7 +6630,11 @@ pub const TypeChecker = struct {
                 }
                 if (ctx_opt) |ctx| {
                     if (!ctx.unrestricted_ecs_access and !ctx.components_in_when.contains(mg.type_name)) {
-                        try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        if (self.in_hook_body) {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the prefab's requires clause", .{tname});
+                        } else {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        }
                     }
                 }
                 return .{ .component = mg.type_name };
@@ -8885,6 +9011,145 @@ test "prefab E1793/E1794/E1795: component type + field-name + field-type checks"
     );
     defer r3.deinit(gpa);
     try expectAnyCode(r3.diagnostics.items, .prefab_component_field_type_invalid);
+}
+
+const hook_base =
+    \\component Health { current: float = 1.0, max: float = 1.0 }
+    \\component Weapon { damage: float = 1.0 }
+    \\component Mana { v: float = 0.0 }
+    \\prefab "Base" { entity "r" { Health {} } }
+    \\
+;
+
+/// Check `hook_base ++ src`, requiring the source to parse clean.
+fn checkHookSource(gpa: std.mem.Allocator, src: []const u8) !CheckOutcome {
+    var r = try parseAndCheck(gpa, src);
+    errdefer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    return r;
+}
+
+test "a hook reaching a component outside requires and its own is E1210" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Mana).v += 1.0 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unknown_component_in_when);
+}
+
+test "a hook reaching its requires and its own components is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Health).max += entity.get(Weapon).damage }
+        \\  on_detach { entity.get_mut(Health).max -= entity.get(Weapon).damage }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a requires naming no component is E1793" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Ghost {
+        \\  entity "m" { Weapon {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .prefab_component_type_unknown);
+}
+
+test "a return in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { return }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .illegal_return_in_extension_hook);
+}
+
+test "an await in a hook is E0901" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { await wait(1.0s) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "a hook emitting an undeclared event is E0102" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { emit Undeclared {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
+}
+
+test "a hook calling a throws fn outside a try is E0902" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\fn risky(n: int) throws -> int { return n }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = risky(1) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unhandled_throws_call);
+}
+
+test "a hook reading a user resource is E1213" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\resource Settings { v: int = 0 }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = get(Settings).v }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .resource_expected_in_when);
+}
+
+test "a hook reading an engine resource is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let t = get(GameTime).dt }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "on_detach does not see a let of on_attach" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let x = 1 }
+        \\  on_detach { let y = x }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
 }
 
 test "type-checker emits E0102 on field referencing unknown type" {

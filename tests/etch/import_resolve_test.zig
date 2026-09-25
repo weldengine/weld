@@ -192,3 +192,25 @@ test "entity.get reaches an imported component in a test body" {
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
 }
+
+test "a hook reaches imported requires and own components" {
+    const gpa = std.testing.allocator;
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source =
+        \\component Health { current: float = 100.0 }
+        \\component Weapon { damage: float = 1.0 }
+        },
+        .{ .name = "main.etch", .source =
+        \\import lib { Health, Weapon }
+        \\prefab "Base" { entity "r" { Health {} } }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Health).current += entity.get(Weapon).damage }
+        \\}
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
