@@ -6493,6 +6493,13 @@ pub const TypeChecker = struct {
                         try self.emit(.component_expected_resource_given, .error_, self.arena.exprSpan(id), "'{s}' is a resource — entity.get(...) accesses a component; use get({s})", .{ tname, tname });
                         return ResolvedType.unknown;
                     }
+                    if (sym.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown component '{s}'", .{tname});
+                    return ResolvedType.unknown;
                 }
                 if (ctx_opt) |ctx| {
                     if (!ctx.unrestricted_ecs_access and !ctx.components_in_when.contains(mg.type_name)) {
@@ -13602,6 +13609,43 @@ test "an emit value holding a nested struct literal is checked against the event
     );
     defer filtered.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), filtered.diagnostics.items.len);
+}
+
+fn countMessage(diagnostics: []const Diagnostic, code: DiagnosticCode, needle: []const u8) usize {
+    var n: usize = 0;
+    for (diagnostics) |d| {
+        if (d.code == code and std.mem.indexOf(u8, d.primary_message, needle) != null) n += 1;
+    }
+    return n;
+}
+
+test "entity.get of a struct is refused as not a component" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\struct A0 { x: int }
+        \\struct A1 { x: int }
+        \\struct S { v: int }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let x = entity.get(S).v
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "'S' is not a component"));
+}
+
+test "entity.get of an undeclared name is refused in an unrestricted body" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\test "t" {
+        \\  let w = test_world()
+        \\  let e = w.spawn_with([C { out: 1 }])
+        \\  let v = e.get(Nope).out
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "unknown component 'Nope'"));
 }
 
 test "a component or resource may not take a name the engine registers" {
