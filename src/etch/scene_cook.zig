@@ -77,6 +77,10 @@ pub const CookError = error{
     DuplicateType,
     /// A scene component/resource instance names a type that was never declared.
     UndeclaredType,
+    /// An entity instance names a resource, which is no entity component.
+    ResourceAsComponent,
+    /// A `resources` block names an entity component, which is no resource.
+    ComponentAsResource,
     /// A field name in an instance body is not a field of the resolved type.
     UnknownField,
     /// A `..spread` field appeared in a component/resource instance body.
@@ -836,8 +840,7 @@ const Builder = struct {
             var c: usize = 0;
             while (c < arch.component_count) : (c += 1) {
                 const sch = acc.schema(arch.schemaIndex(c));
-                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component the variant does not declare");
-                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "base prefab component size disagrees with the variant registry layout");
+                const id = try self.baseColumnId(sch, diag_out);
                 ids0[c] = id;
             }
             var slot: usize = 0;
@@ -903,7 +906,7 @@ const Builder = struct {
 
         for (instances) |ci| {
             const type_name = self.ast.strings.slice(ci.type_name);
-            const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "variant entity references an undeclared component type");
+            const id = try self.entityComponentId(type_name, "variant entity references an undeclared component type", diag_out);
             if (indexOfId(ids.items, id)) |ci_idx| {
                 // Prefab cook (`collect_crossrefs` false) → `source_uuid_idx` is
                 // unused (Entity slots stay `dead`, no pending recorded).
@@ -984,7 +987,7 @@ const Builder = struct {
         var blobs = try self.a().alloc([]u8, instances.len);
         for (instances, 0..) |ci, k| {
             const type_name = self.ast.strings.slice(ci.type_name);
-            const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "entity references an undeclared component type");
+            const id = try self.entityComponentId(type_name, "entity references an undeclared component type", diag_out);
             ids[k] = id;
             blobs[k] = try self.buildComponentBlob(id, ci, uuid_idx, diag_out);
         }
@@ -1037,7 +1040,7 @@ const Builder = struct {
         for (members) |m| switch (m.kind) {
             .component => {
                 const ci = self.ast.component_instances.items[m.index];
-                const id = self.registry.idOf(self.ast.strings.slice(ci.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance component references an undeclared component type");
+                const id = try self.entityComponentId(self.ast.strings.slice(ci.type_name), "instance component references an undeclared component type", diag_out);
                 if (indexOfId(ids.items, id)) |idx| {
                     blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, uuid_idx, diag_out);
                 } else {
@@ -1092,12 +1095,29 @@ const Builder = struct {
             var c: usize = 0;
             while (c < arch.component_count) : (c += 1) {
                 const sch = acc.schema(arch.schemaIndex(c));
-                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab uses a component the scene does not declare");
-                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab component size disagrees with the scene registry layout");
+                const id = try self.baseColumnId(sch, diag_out);
                 try ids.append(self.gpa, id);
                 try blobs.append(self.gpa, try self.a().dupe(u8, arch.componentSlot(c, 0)));
             }
         }
+    }
+
+    /// Resolve an instance's type name to an entity component id; a resource is
+    /// refused, since the loader refuses it as a column.
+    fn entityComponentId(self: *Builder, name: []const u8, undeclared_msg: []const u8, diag_out: ?*[]const u8) CookError!ComponentId {
+        const id = self.registry.idOf(name) orelse return fail(diag_out, error.UndeclaredType, undeclared_msg);
+        if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.ResourceAsComponent, "entity instance names a resource, which is no entity component");
+        return id;
+    }
+
+    /// Resolve a base prefab's on-disk column to this registry's entity component
+    /// of the same size and alignment, the predicate the loader applies.
+    fn baseColumnId(self: *Builder, sch: accessor.Accessor.Schema, diag_out: ?*[]const u8) CookError!ComponentId {
+        const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component this source does not declare");
+        if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.BaseSchemaMismatch, "base prefab column is declared a resource here");
+        if (self.registry.componentSize(id) != sch.size or self.registry.componentAlignment(id) != sch.alignment)
+            return fail(diag_out, error.BaseSchemaMismatch, "base prefab column layout disagrees with this source's declaration");
+        return id;
     }
 
     /// Build one component blob (`componentSize` bytes) from the type defaults
@@ -1218,6 +1238,7 @@ const Builder = struct {
         for (insts, 0..) |ci, ri| {
             const type_name = self.ast.strings.slice(ci.type_name);
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "resources block references an undeclared resource type");
+            if (self.registry.componentKind(id) != .resource) return fail(diag_out, error.ComponentAsResource, "resources block names an entity component, which is no resource");
             out[ri] = try self.buildResourceEntry(id, ci, diag_out);
         }
         return out;

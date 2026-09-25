@@ -590,7 +590,13 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
     while (c < comp_count) : (c += 1) {
         const sch = ext.schema(arch.schemaIndex(c));
         const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
-        if (sch.size != world.registry.componentSize(cid)) return error.SchemaMismatch;
+        if (sch.size != world.registry.componentSize(cid) or
+            sch.alignment != world.registry.componentAlignment(cid))
+        {
+            return error.SchemaMismatch;
+        }
+        // A resource is no entity column, whatever the file says.
+        if (world.registry.componentKind(cid) == .resource) return error.SchemaMismatch;
         if (world.componentBytes(entity, cid) != null) return error.ExtensionComponentConflict;
         cids[c] = cid;
         values[c] = arch.componentSlot(c, 0);
@@ -1491,6 +1497,55 @@ fn buildExtPrefab(gpa: std.mem.Allocator) ![]u8 {
     var model: format.CookModel = .{ .strings = names, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .arena = arena };
     defer model.deinit();
     return writer.write(gpa, model, &reg);
+}
+
+/// Build a mono-entity extension `.prefab.bin` carrying one zeroed component
+/// `name` of the given layout, as a cook with that registry would write it.
+fn buildOneComponentExt(gpa: std.mem.Allocator, name: []const u8, size: u16, alignment: u16) ![]u8 {
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const id = try registerRaw(gpa, &reg, name, size, alignment);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "ext_entity")});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{9} ** 16});
+    const col = try a.alloc(u8, size);
+    @memset(col, 0);
+    const ids = try a.dupe(ComponentId, &.{id});
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    var model: format.CookModel = .{ .strings = names, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .arena = arena };
+    defer model.deinit();
+    return writer.write(gpa, model, &reg);
+}
+
+test "activateExtension refuses an extension naming a resource" {
+    const gpa = testing.allocator;
+    const ext_bytes = try buildOneComponentExt(gpa, "Settings", 16, 8);
+    defer gpa.free(ext_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const base = try registerRaw(gpa, &world.registry, "ExtBase", 4, 4);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{base});
+    try testing.expectError(error.SchemaMismatch, activateExtension(&world, gpa, e, "Forged", ext_bytes));
+    try testing.expect(world.componentBytes(e, settings) == null);
+    try testing.expect(!world.hasEntityExtension(e, "Forged"));
+}
+
+test "activateExtension refuses a component whose alignment differs" {
+    const gpa = testing.allocator;
+    const ext_bytes = try buildOneComponentExt(gpa, "ExtX", 4, 4);
+    defer gpa.free(ext_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const base = try registerRaw(gpa, &world.registry, "ExtBase", 4, 4);
+    const x = try registerRaw(gpa, &world.registry, "ExtX", 4, 2);
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{base});
+    try testing.expectError(error.SchemaMismatch, activateExtension(&world, gpa, e, "Forged", ext_bytes));
+    try testing.expect(world.componentBytes(e, x) == null);
+    try testing.expect(!world.hasEntityExtension(e, "Forged"));
 }
 
 test "activateExtension is all-or-nothing under injected OOM" {

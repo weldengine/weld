@@ -234,3 +234,99 @@ test "instancing a multi-entity prefab is rejected" {
     var diag: []const u8 = "";
     try std.testing.expectError(error.MultiEntityInstanceUnsupported, scene_cook.cookScene(gpa, src, resolver.base(), &diag));
 }
+
+/// Cook `src` as a variant prefab `of "Torch"`, expecting the refusal `want`.
+fn expectVariantRefused(src: []const u8, want: anyerror) !void {
+    const gpa = std.testing.allocator;
+    var torch = try cookTorch(gpa);
+    defer torch.deinit(gpa);
+    const torch_bytes = try scene.writer.write(gpa, torch.model, &torch.registry);
+    defer gpa.free(torch_bytes);
+    var resolver = OneResolver{ .name = "Torch", .bytes = torch_bytes };
+    if (scene_cook.cookPrefab(gpa, src, resolver.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(want, err);
+}
+
+/// Cook `src` as a scene instancing "Torch", expecting the refusal `want`.
+fn expectSceneRefused(src: []const u8, want: anyerror) !void {
+    const gpa = std.testing.allocator;
+    var torch = try cookTorch(gpa);
+    defer torch.deinit(gpa);
+    const torch_bytes = try scene.writer.write(gpa, torch.model, &torch.registry);
+    defer gpa.free(torch_bytes);
+    var resolver = OneResolver{ .name = "Torch", .bytes = torch_bytes };
+    if (scene_cook.cookScene(gpa, src, resolver.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(want, err);
+}
+
+test "a variant entity naming a resource does not cook" {
+    try expectVariantRefused(scene_decls ++
+        \\resource Settings { x: i32 = 0 }
+        \\prefab "V" of "Torch" { entity "root" { Settings { x: 1 } } }
+    , error.ResourceAsComponent);
+}
+
+test "an instance body naming a resource does not cook" {
+    try expectSceneRefused(scene_decls ++
+        \\resource Settings { x: i32 = 0 }
+        \\scene "S" {
+        \\  instance of "Torch" "I" { uuid: "00000000-0000-0000-0000-0000000000a1" Settings { x: 1 } }
+        \\}
+    , error.ResourceAsComponent);
+}
+
+test "a variant declaring a base column as a resource does not cook" {
+    try expectVariantRefused(
+        \\component Transform { x: f32 = 0.0, y: f32 = 0.0, z: f32 = 0.0 }
+        \\resource Light { intensity: f32 = 2000.0, radius: f32 = 8.0 }
+        \\prefab "V" of "Torch" { entity "root" { Transform { x: 2.0 } } }
+    , error.BaseSchemaMismatch);
+}
+
+test "a scene declaring an instanced column as a resource does not cook" {
+    try expectSceneRefused(
+        \\component Transform { x: f32 = 0.0, y: f32 = 0.0, z: f32 = 0.0 }
+        \\resource Light { intensity: f32 = 2000.0, radius: f32 = 8.0 }
+        \\scene "S" {
+        \\  instance of "Torch" "I" { uuid: "00000000-0000-0000-0000-0000000000a1" }
+        \\}
+    , error.BaseSchemaMismatch);
+}
+
+test "a scene resources block naming a component does not cook" {
+    const gpa = std.testing.allocator;
+    const src = scene_decls ++
+        \\scene "S" {
+        \\  resources { Transform { x: 1.0 } }
+        \\}
+    ;
+    if (scene_cook.cook(gpa, src, null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ComponentAsResource, err);
+}
+
+test "a variant whose base column alignment differs does not cook" {
+    try expectVariantRefused(
+        \\component Transform { x: f32 = 0.0, y: f32 = 0.0, z: f32 = 0.0 }
+        \\component Light { a: f64 = 0.0 }
+        \\prefab "V" of "Torch" { entity "root" { Transform { x: 2.0 } } }
+    , error.BaseSchemaMismatch);
+}
+
+test "a scene whose instanced column alignment differs does not cook" {
+    try expectSceneRefused(
+        \\component Transform { x: f32 = 0.0, y: f32 = 0.0, z: f32 = 0.0 }
+        \\component Light { a: f64 = 0.0 }
+        \\scene "S" {
+        \\  instance of "Torch" "I" { uuid: "00000000-0000-0000-0000-0000000000a1" }
+        \\}
+    , error.BaseSchemaMismatch);
+}
