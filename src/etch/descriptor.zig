@@ -2168,6 +2168,56 @@ pub fn renderStmtAlloc(gpa: std.mem.Allocator, arena: *const AstArena, stmt: Nod
     return try buf.toOwnedSlice(gpa);
 }
 
+/// Render a type node back to its source form: every kind `parseType` produces.
+fn renderType(gpa: std.mem.Allocator, arena: *const AstArena, t: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    const data = arena.typeNodeData(t);
+    switch (arena.typeNodeKind(t)) {
+        .named => try out.appendSlice(gpa, arena.strings.slice(arena.namedTypeName(t).?)),
+        .path => {
+            const p = arena.path_types.items[data];
+            try out.appendSlice(gpa, arena.strings.slice(p.alias));
+            try out.append(gpa, '.');
+            try out.appendSlice(gpa, arena.strings.slice(p.member));
+        },
+        .generic => {
+            const g = arena.generic_type_nodes.items[data];
+            try out.appendSlice(gpa, arena.strings.slice(g.name));
+            try out.append(gpa, '<');
+            var i: u32 = 0;
+            while (i < g.args_len) : (i += 1) {
+                if (i != 0) try out.appendSlice(gpa, ", ");
+                try renderType(gpa, arena, @bitCast(arena.extra.items[g.args_start + i]), out);
+            }
+            try out.append(gpa, '>');
+        },
+        .array, .slice => {
+            const a = arena.array_types.items[data];
+            try renderType(gpa, arena, a.elem, out);
+            try out.append(gpa, '[');
+            if (!a.size.isNone()) try renderExpr(gpa, arena, a.size, out);
+            try out.append(gpa, ']');
+        },
+        .map_type => {
+            const m = arena.map_types.items[data];
+            try out.append(gpa, '[');
+            try renderType(gpa, arena, m.key, out);
+            try out.appendSlice(gpa, ": ");
+            try renderType(gpa, arena, m.value, out);
+            try out.append(gpa, ']');
+        },
+        .set_type => {
+            try out.appendSlice(gpa, "Set<");
+            try renderType(gpa, arena, arena.set_types.items[data].elem, out);
+            try out.append(gpa, '>');
+        },
+        .optional => {
+            try renderType(gpa, arena, @bitCast(data), out);
+            try out.append(gpa, '?');
+        },
+        .tuple, .function, .self, .trait_bound => return error.UnsupportedDescriptorExpr,
+    }
+}
+
 fn renderStmt(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
     switch (arena.stmtKind(stmt)) {
         .let_stmt => {
@@ -2175,6 +2225,10 @@ fn renderStmt(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId, out:
             try out.appendSlice(gpa, "let ");
             if (let.is_mut) try out.appendSlice(gpa, "mut ");
             try out.appendSlice(gpa, arena.strings.slice(let.name));
+            if (!let.type_annotation.isNone()) {
+                try out.appendSlice(gpa, ": ");
+                try renderType(gpa, arena, let.type_annotation, out);
+            }
             try out.appendSlice(gpa, " = ");
             try renderExpr(gpa, arena, let.value, out);
         },
@@ -2728,4 +2782,15 @@ test "renderFieldTypeAlloc rejects a collection field type" {
     const elem = try arena.addNamedType(gpa, try arena.strings.intern(gpa, "string"), span);
     const slice = try arena.addArrayType(gpa, elem, NodeId.none, span); // `string[]` → .slice
     try std.testing.expectError(error.UnsupportedDescriptorExpr, renderFieldTypeAlloc(gpa, &arena, slice));
+}
+
+test "a let keeps its type annotation when rendered" {
+    const gpa = std.testing.allocator;
+    const source = "let a: int = 5; let b: int[] = []; let c: [string: int] = [\"k\": 1]; let d: Set<string> = Set.new(); let e: int? = none; let f: m.Health = x; let g: Box<int> = y; let h: int[3] = z";
+    var block = try parser_mod.parseStmtBlock(gpa, source);
+    defer block.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), block.diagnostics.len);
+    const text = try renderStmtRunAlloc(gpa, &block.ast, block.body_start, block.body_len);
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings(source, text);
 }
