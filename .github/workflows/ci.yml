@@ -125,7 +125,9 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
+          # --test-timeout raises Zig's 60 s response floor: on windows a compiler spawned beside a
+          # test can inherit its pipe and hold the end of stream until that compiler exits.
+          zig build test --summary all --test-timeout 180s -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           collected="$(sed -n 's/.*[0-9][0-9]* of \([0-9][0-9]*\) tests passed.*/\1/p;s#.*[^0-9]\([0-9][0-9]*\)/\([0-9][0-9]*\) tests passed.*#\2#p' test-out.txt | tail -1)"
