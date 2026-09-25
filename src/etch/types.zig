@@ -3386,8 +3386,8 @@ pub const TypeChecker = struct {
                     // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
                     // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict is
                     // component-only (part1 §5.5, SoA storage). Event fields therefore
-                    // follow the `struct` field surface (`string`/enum accepted,
-                    // nested-struct deferred) via the `.event_` origin.
+                    // follow the `struct` field surface (`string`/enum accepted)
+                    // via the `.event_` origin; a struct-typed event field is refused.
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
@@ -3850,10 +3850,10 @@ pub const TypeChecker = struct {
     /// non-POD surface with `struct_` / `event_` for `string` (the
     /// alignment; part1 §5.5 "no POD
     /// constraint for resources"); enum-typed resource fields are accepted too,
-    /// nested-struct fields stay deferred. `struct_` and `event_` accept `string`
+    /// nested-struct fields stay refused. `struct_` and `event_` accept `string`
     /// + enum-typed fields (the builtin `Error` forces them on structs; events
-    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5).
-    /// POD-strict is component-only.
+    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5);
+    /// only `struct_` accepts a struct-typed field. POD-strict is component-only.
     const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
@@ -3978,14 +3978,14 @@ pub const TypeChecker = struct {
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
                     // incrementally. Components stay enum-rejected (POD-strict).
-                } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
-                    // Struct-typed STRUCT / event fields are deferred: the
-                    // anonymous `.{ … }` field-value context
-                    // carries them — part1 §5.5 allows nested POD structs; the
-                    // literal must PROVIDE such a field (E0208, checked at the
-                    // struct literal) because it has no declared default the two
-                    // backends could agree on. Component / resource fields stay
-                    // builtin-POD-bounded.
+                } else if (origin == .event_ and self.declaredStructName(resolved_name)) {
+                    try self.emit(.undefined_symbol, .error_, tspan, "an event field cannot be of struct type '{s}'", .{tname});
+                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
+                    // Struct-typed struct fields: the anonymous `.{ … }`
+                    // field-value context carries them — part1 §5.5 allows
+                    // nested POD structs; the literal must PROVIDE such a field
+                    // (E0208, checked at the struct literal) because it has no
+                    // declared default the two backends could agree on.
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
@@ -13542,6 +13542,66 @@ test "a scalar event filter is still accepted, and only a string can reach one" 
     );
     defer arr.deinit(gpa);
     try expectAnyCode(arr.diagnostics.items, .undefined_symbol);
+}
+
+fn expectStructEventFieldRefused(gpa: std.mem.Allocator, source: []const u8) !void {
+    var outcome = try parseAndCheck(gpa, source);
+    defer outcome.deinit(gpa);
+    var refused: usize = 0;
+    for (outcome.diagnostics.items) |d| {
+        if (d.code == .undefined_symbol and std.mem.indexOf(u8, d.primary_message, "cannot be of struct type") != null) refused += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), refused);
+}
+
+test "an event field of struct type is refused at the declaration" {
+    const gpa = std.testing.allocator;
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\event E { p: P }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { p: P }
+        \\struct P { v: int }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\type Q = P
+        \\event E { q: Q }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { e: Error }
+    );
+    var nested = try parseAndCheck(gpa,
+        \\struct P { v: int }
+        \\struct S { p: P }
+    );
+    defer nested.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), nested.diagnostics.items.len);
+}
+
+test "an emit value holding a nested struct literal is checked against the event" {
+    const gpa = std.testing.allocator;
+    var emitted = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  emit Hit { n: Payload { v: 5 }.v }
+        \\}
+    );
+    defer emitted.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), emitted.diagnostics.items.len);
+    var filtered = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\async rule r(entity: Entity) when entity has C {
+        \\  await global_event(Hit { n: Payload { v: 5 }.v })
+        \\}
+    );
+    defer filtered.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), filtered.diagnostics.items.len);
 }
 
 test "a component or resource may not take a name the engine registers" {
