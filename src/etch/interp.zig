@@ -130,6 +130,7 @@ const BoundField = struct {
     name: StringId,
     offset: u16,
     kind: FieldKind,
+    enum_type_name_id: u32,
 };
 
 /// One `has T { expression }` general filter.
@@ -2586,7 +2587,7 @@ pub const Interpreter = struct {
                 break;
             };
             for (rf.fields) |bf| {
-                const v = bridge_mod.readBytesAsValue(bf.kind, bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
+                const v = bridge_mod.readFieldValue(bf.kind, bf.enum_type_name_id, bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
                 try locals.put(self.gpa, bf.name, v, false);
             }
             if (!(try self.evalGuardExpr(world, &locals, rf.expr))) {
@@ -3813,7 +3814,7 @@ pub const Interpreter = struct {
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_v = try self.evalExpr(world, locals, lit);
-                    if (scrut.eql(lit_v)) return arm.body;
+                    if (self.valueEql(scrut, lit_v)) return arm.body;
                 },
                 .enum_variant => {
                     if (scrut != .enum_value) return error.RuntimeFailure;
@@ -4027,22 +4028,9 @@ pub const Interpreter = struct {
         while (i < filter.start + filter.len) : (i += 1) {
             const want = self.captured_filters.items[i];
             const fv = eventFieldByName(ev, want.name) orelse return false;
-            if (!self.eventValueEql(want.value, fv)) return false;
+            if (!self.valueEql(want.value, fv)) return false;
         }
         return true;
-    }
-
-    /// Equality for an event-field comparison. Strings compare by
-    /// BYTES (a filter literal is `.string_id`, but an emitted string may be
-    /// `.string_run` / `.string_persistent` — `Value.eql` only matches same tag
-    /// + same pool index); every other admitted kind (int/float/bool/entity/
-    /// enum) uses `Value.eql`.
-    fn eventValueEql(self: *const Interpreter, a: Value, b: Value) bool {
-        if (self.stringBytes(a)) |ab| {
-            const bb = self.stringBytes(b) orelse return false;
-            return std.mem.eql(u8, ab, bb);
-        }
-        return a.eql(b);
     }
 
     /// Resolve a wake-condition `await` target to a `WakeCond`. Only
@@ -5366,14 +5354,9 @@ pub const Interpreter = struct {
             if (call.args_len < 2) return error.RuntimeFailure;
             const a = try self.evalArg(world, locals, call, 0);
             const b = try self.evalArg(world, locals, call, 1);
-            // String-aware equality: `Value.eql` compares
-            // strings only by pool identity (`.string_run` is always unequal, and
-            // a `.string_id` literal never matches a `.string_persistent` /
-            // `.string_run`), which would false-fail `assert_eq` and — worse —
-            // false-PASS `assert_neq`. `eventValueEql` byte-compares strings and
-            // falls back to `Value.eql` otherwise. Aggregates are rejected at
-            // type-check (`synthBuiltinCall`), so only comparable values arrive.
-            if (self.eventValueEql(a, b) != want_eq) {
+            // Aggregates are rejected at type-check (`synthBuiltinCall`), so only
+            // comparable values arrive.
+            if (self.valueEql(a, b) != want_eq) {
                 self.test_msg_buf.clearRetainingCapacity();
                 try self.msgAssertPrefix(world, locals, call, 2, name);
                 try self.msgAppend(": ");
@@ -5753,7 +5736,7 @@ pub const Interpreter = struct {
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
                     for (persistentSetOf(ptr).items) |existing| {
-                        if (self.collectionKeyEql(existing, v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -5768,7 +5751,7 @@ pub const Interpreter = struct {
                 // of stdlib §15.2). `insert` is the same
                 // scan-skip-or-append as the `Set.from` seeding (its `bool`
                 // return is out of the subset — statement use only, the
-                // value here is unit); `contains` scans with `Value.eql`;
+                // value here is unit); `contains` scans with `valueEql`;
                 // `len` is the element count; any other §15 method is
                 // unimplemented stdlib → fail loud.
                 const mname = self.ast.strings.slice(mc.method_name);
@@ -5784,7 +5767,7 @@ pub const Interpreter = struct {
                     const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
                     const v = try self.evalExpr(world, locals, arg);
                     for (self.collections.sets.items[handle].items) |existing| {
-                        if (existing.eql(v)) return Value{ .bool_ = true };
+                        if (self.valueEql(existing, v)) return Value{ .bool_ = true };
                     }
                     return Value{ .bool_ = false };
                 }
@@ -5813,7 +5796,7 @@ pub const Interpreter = struct {
                     // could have grown the outer store vector).
                     var replaced = false;
                     for (self.collections.maps.items[handle].items) |*pair| {
-                        if (pair.key.eql(k)) {
+                        if (self.valueEql(pair.key, k)) {
                             pair.value = v;
                             replaced = true;
                             break;
@@ -5852,6 +5835,14 @@ pub const Interpreter = struct {
             if (mc.args_len != 1) return error.RuntimeFailure;
             const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
             const av = try self.evalExpr(world, locals, arg);
+            if (av == .array_persistent) {
+                const handle = try self.collections.newSet(self.gpa);
+                for (persistentArrayOf(av.array_persistent).items) |v| {
+                    try self.retainArena(v);
+                    try self.setInsert(handle, v);
+                }
+                return Value{ .set_ref = handle };
+            }
             if (av != .array_ref) return error.RuntimeFailure;
             const handle = try self.collections.newSet(self.gpa);
             var i: usize = 0;
@@ -5873,7 +5864,7 @@ pub const Interpreter = struct {
     /// byte-exact across the two backends by construction.
     fn setInsert(self: *Interpreter, handle: u32, item: Value) !void {
         for (self.collections.sets.items[handle].items) |existing| {
-            if (existing.eql(item)) return;
+            if (self.valueEql(existing, item)) return;
         }
         try self.collections.sets.items[handle].append(self.gpa, item);
     }
@@ -5996,11 +5987,10 @@ pub const Interpreter = struct {
         return block;
     }
 
-    /// Collection key equality: string keys compared BY BYTES (a
-    /// stored key is always a promoted `.string_persistent`, an incoming key may
-    /// be `.string_id`/`.string_run` — `Value.eql` would false-mismatch across
-    /// tags), POD keys by value. Load-bearing for the `[K:V]` unique-key policy.
-    fn collectionKeyEql(self: *const Interpreter, a: Value, b: Value) bool {
+    /// Runtime value equality: two strings compare by bytes, whatever their
+    /// tags; anything else by `Value.eql`, which compares a `.string_id` by pool
+    /// id and never matches a `.string_run`.
+    fn valueEql(self: *const Interpreter, a: Value, b: Value) bool {
         const ab = self.stringBytes(a);
         const bb = self.stringBytes(b);
         if (ab != null and bb != null) return std.mem.eql(u8, ab.?, bb.?);
@@ -6013,7 +6003,7 @@ pub const Interpreter = struct {
     /// AND value, append. Leak-safe (reserve → promote → commit).
     fn mapInsertPromoted(self: *Interpreter, list: *PersistentMap, k: Value, v: Value) !void {
         for (list.items) |*pair| {
-            if (self.collectionKeyEql(pair.key, k)) {
+            if (self.valueEql(pair.key, k)) {
                 const new_v = try self.promoteForCollection(v);
                 if (pair.value == .string_persistent and pair.value.string_persistent.ptr != 0) {
                     persistent.decref(self.gpa, @ptrFromInt(pair.value.string_persistent.ptr));
@@ -6052,7 +6042,7 @@ pub const Interpreter = struct {
     /// subtlety as map keys), else promote + append. Leak-safe.
     fn setInsertPromoted(self: *Interpreter, list: *PersistentSet, v: Value) !void {
         for (list.items) |existing| {
-            if (self.collectionKeyEql(existing, v)) return;
+            if (self.valueEql(existing, v)) return;
         }
         try list.ensureUnusedCapacity(self.gpa, 1);
         const owned = try self.promoteForCollection(v);
@@ -6077,6 +6067,7 @@ pub const Interpreter = struct {
     /// Take ownership of `bytes` into the per-body runtime-string store,
     /// returning its `string_run` handle value.
     fn newRunString(self: *Interpreter, bytes: []u8) !Value {
+        errdefer self.gpa.free(bytes);
         const handle: u32 = @intCast(self.run_strings.items.len);
         try self.run_strings.append(self.gpa, bytes);
         return Value{ .string_run = handle };
@@ -6147,7 +6138,7 @@ pub const Interpreter = struct {
                             try out.appendSlice(self.gpa, piece);
                         },
                         .bool_ => |x| try out.appendSlice(self.gpa, if (x) "true" else "false"),
-                        .string_id, .string_run => try out.appendSlice(self.gpa, self.stringBytes(v).?),
+                        .string_id, .string_run, .string_persistent, .string_view => try out.appendSlice(self.gpa, self.stringBytes(v).?),
                         // Any other type is resolver-gated (minimal Display
                         // subset) — fail loud if one slips through.
                         else => return error.RuntimeFailure,
@@ -6320,7 +6311,7 @@ pub const Interpreter = struct {
                         .literal => {
                             const lit: NodeId = @bitCast(arm.pattern_payload);
                             const lit_v = try self.evalExpr(world, locals, lit);
-                            if (scrut.eql(lit_v)) return try self.evalExpr(world, locals, arm.body);
+                            if (self.valueEql(scrut, lit_v)) return try self.evalExpr(world, locals, arm.body);
                         },
                         .enum_variant => {
                             // Compare the scrutinee's enum value against the
@@ -6432,7 +6423,7 @@ pub const Interpreter = struct {
                     const v = try self.evalExpr(world, locals, entry.value);
                     var replaced = false;
                     for (self.collections.maps.items[handle].items) |*pair| {
-                        if (pair.key.eql(k)) {
+                        if (self.valueEql(pair.key, k)) {
                             pair.value = v;
                             replaced = true;
                             break;
@@ -6456,7 +6447,7 @@ pub const Interpreter = struct {
                     const key_v = try self.evalExpr(world, locals, ix.index);
                     var found: ?Value = null;
                     for (self.collections.maps.items[recv.map_ref].items) |pair| {
-                        if (pair.key.eql(key_v)) {
+                        if (self.valueEql(pair.key, key_v)) {
                             found = pair.value;
                             break;
                         }
@@ -6472,7 +6463,7 @@ pub const Interpreter = struct {
                     const key_v = try self.evalExpr(world, locals, ix.index);
                     var found: ?Value = null;
                     for (persistentMapOf(recv.map_persistent).items) |pair| {
-                        if (self.collectionKeyEql(pair.key, key_v)) {
+                        if (self.valueEql(pair.key, key_v)) {
                             found = pair.value;
                             break;
                         }
@@ -6483,10 +6474,21 @@ pub const Interpreter = struct {
                     return Value{ .optional = oh };
                 }
                 if (recv == .array_persistent) {
-                    // Single-element read `xs[i]` on a resource collection. Slicing
-                    // a persistent array (`xs[0..3]`) is out of the
-                    // surface (it would need a fresh rule-arena copy).
-                    if (self.ast.exprKind(ix.index) == .range) return error.RuntimeFailure;
+                    if (self.ast.exprKind(ix.index) == .range) {
+                        const r = self.ast.ranges.items[self.ast.exprData(ix.index)];
+                        const start_v = try self.evalExpr(world, locals, r.start);
+                        const end_v = try self.evalExpr(world, locals, r.end);
+                        if (start_v != .int_ or end_v != .int_) return error.RuntimeFailure;
+                        const lo = std.math.cast(usize, start_v.int_) orelse return error.RuntimeFailure;
+                        var hi = std.math.cast(usize, end_v.int_) orelse return error.RuntimeFailure;
+                        if (r.inclusive) hi += 1;
+                        const src = persistentArrayOf(recv.array_persistent).items;
+                        if (lo > hi or hi > src.len) return error.RuntimeFailure;
+                        const handle = try self.collections.newArray(self.gpa);
+                        for (src[lo..hi]) |v| try self.retainArena(v);
+                        try self.collections.arrays.items[handle].appendSlice(self.gpa, src[lo..hi]);
+                        return Value{ .array_ref = handle };
+                    }
                     const list = persistentArrayOf(recv.array_persistent);
                     const idx_v = try self.evalExpr(world, locals, ix.index);
                     if (idx_v != .int_) return error.RuntimeFailure;
@@ -8259,7 +8261,7 @@ fn captureBoundFields(ctx: *LowerWhenCtx, type_name: StringId, id: ComponentId, 
     while (f < fields_len) : (f += 1) {
         const field = ast.fields.items[fields_start + f];
         const fd = ctx.registry.findField(id, ast.strings.slice(field.name)) orelse return error.InvalidProgram;
-        try out.append(ctx.gpa, .{ .name = field.name, .offset = fd.offset, .kind = fd.kind });
+        try out.append(ctx.gpa, .{ .name = field.name, .offset = fd.offset, .kind = fd.kind, .enum_type_name_id = fd.enum_type_name_id });
     }
     return try out.toOwnedSlice(ctx.gpa);
 }
@@ -17376,4 +17378,191 @@ test "a collection element that does not fold is refused at compile" {
 
 test "an enum field default that names no variant is refused at compile" {
     try expectInvalidProgram("enum Mode { a }\nresource R { m: Mode = .nope }");
+}
+
+fn runOneTickOut(gpa: std.mem.Allocator, source: []const u8) !i64 {
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa, source);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    return readResourceIntNamed(&world, "Out", "n");
+}
+
+test "a match literal arm matches a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let s = "a" + ""
+        \\  let o = get_mut(Out)
+        \\  o.n = match s { "a" => 1, _ => 2 }
+        \\}
+    ));
+}
+
+test "a match literal arm matches a resource string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, name: string = "a" }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let v = match get(Out).name { "a" => 1, _ => 2 }
+        \\  get_mut(Out).n = v
+        \\}
+    ));
+}
+
+test "an async match statement's literal arm matches a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let s = "a" + ""
+        \\  match s {
+        \\    "a" => { get_mut(Out).n = 1 },
+        \\    _ => { get_mut(Out).n = 2 }
+        \\  }
+        \\}
+    ));
+}
+
+test "a rule-arena map keeps one entry per runtime-built string key" {
+    try std.testing.expectEqual(@as(i64, 2), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut m = ["x": 0]
+        \\  m.insert("k" + "", 1)
+        \\  m.insert("k" + "", 2)
+        \\  get_mut(Out).n = m.len()
+        \\}
+    ));
+}
+
+test "a rule-arena map finds a runtime-built string key" {
+    try std.testing.expectEqual(@as(i64, 7), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut m = ["x": 0]
+        \\  m.insert("k" + "", 7)
+        \\  get_mut(Out).n = m["k" + ""] ?? 0
+        \\}
+    ));
+}
+
+test "a rule-arena set keeps one element per runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert("k" + "")
+        \\  s.insert("k" + "")
+        \\  get_mut(Out).n = s.len()
+        \\}
+    ));
+}
+
+test "a rule-arena set contains a runtime-built string" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut s: Set<string> = Set.new()
+        \\  s.insert("k" + "")
+        \\  get_mut(Out).n = if s.contains("k" + "") { 1 } else { 0 }
+        \\}
+    ));
+}
+
+test "a resource string interpolates" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, name: string = "a" }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).name = "{get(Out).name}!"
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 1);
+    try expectResourceStringField(&world, "Out", "name", "a!");
+}
+
+test "Set.from takes a resource array" {
+    try std.testing.expectEqual(@as(i64, 3), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, items: string[] = ["a", "b", "c"] }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = Set.from(get(Out).items).len()
+        \\}
+    ));
+}
+
+test "a resource array slices" {
+    try std.testing.expectEqual(@as(i64, 2), try runOneTickOut(std.testing.allocator,
+        \\resource Out { n: int = 0, items: string[] = ["a", "b", "c"] }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = get(Out).items[0..2].len()
+        \\}
+    ));
+}
+
+test "a resource filter runs on a resource carrying an enum field" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\enum Mode { a, b }
+        \\resource Out { n: int = 0, m: Mode = .a }
+        \\rule r()
+        \\  when resource Out { n == 0 }
+        \\{
+        \\  get_mut(Out).n = 1
+        \\}
+    ));
+}
+
+test "a resource filter reads an enum field typed" {
+    try std.testing.expectEqual(@as(i64, 1), try runOneTickOut(std.testing.allocator,
+        \\enum Mode { a, b }
+        \\resource Out { n: int = 0, m: Mode = .b }
+        \\rule r()
+        \\  when resource Out { match m { Mode.a => false, Mode.b => true } }
+        \\{
+        \\  get_mut(Out).n = 1
+        \\}
+    ));
+}
+
+test "newRunString frees the bytes it takes on an allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const gpa = failing.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0 }
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try std.testing.expectEqual(interp.run_strings.items.len, interp.run_strings.capacity);
+    const bytes = try gpa.dupe(u8, "abc");
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, interp.newRunString(bytes));
 }

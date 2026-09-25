@@ -229,17 +229,7 @@ pub const Bridge = struct {
         const bytes = store.getResource(resource_id) orelse return BridgeError.UnknownResource;
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        // Enum read: rebuild a typed `enum_value` from the slot's
-        // discriminant + the declared enum type's interned id on `FieldDesc`
-        // (the byte-only `readBytesAsValue` has no access to the latter). The
-        // `type_name` id matches the rest of the interpreter's enum machinery
-        // (`enum_decls` is keyed by it), so the value compares/matches correctly.
-        if (field.kind == .enum_) {
-            var disc: u32 = 0;
-            @memcpy(std.mem.asBytes(&disc), slice[0..@sizeOf(u32)]);
-            return .{ .enum_value = .{ .type_name = field.enum_type_name_id, .variant = disc } };
-        }
-        return readBytesAsValue(field.kind, slice);
+        return readFieldValue(field.kind, field.enum_type_name_id, slice);
     }
 
     pub fn writeResourceField(
@@ -324,6 +314,19 @@ pub const Bridge = struct {
     }
 };
 
+/// Decode one field slot. An enum slot rebuilds a typed `enum_value` from its
+/// discriminant and the declared enum type's interned id on `FieldDesc`, which
+/// `readBytesAsValue` has no access to; the id matches the interpreter's
+/// `enum_decls` keys, so the value compares and matches correctly.
+pub fn readFieldValue(kind: FieldKind, enum_type_name_id: u32, bytes: []const u8) Value {
+    if (kind == .enum_) {
+        var disc: u32 = 0;
+        @memcpy(std.mem.asBytes(&disc), bytes[0..@sizeOf(u32)]);
+        return .{ .enum_value = .{ .type_name = enum_type_name_id, .variant = disc } };
+    }
+    return readBytesAsValue(kind, bytes);
+}
+
 /// Decode the on-storage byte representation of a field into the
 /// interpreter's tagged `Value`. The width to read is dictated by
 /// `kind` — the slice must already be sized to the field's column
@@ -370,9 +373,8 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             break :blk .{ .string_persistent = .{ .ptr = ss.ptr, .len = ss.len } };
         },
         // Enum reads need the declared type's id (on `FieldDesc`), which this
-        // byte-only decoder lacks — `readResourceField` handles `.enum_` before
-        // delegating here, and components never carry `.enum_` (validator-gated).
-        // Proven invariant: this arm is never reached.
+        // byte-only decoder lacks: resource reads go through `readFieldValue`,
+        // and components never carry `.enum_` (validator-gated).
         .enum_ => unreachable,
         // Collection read: decode the `CollectionSlot { ptr }` into a
         // borrowed `.array_persistent` view over the owned container block,
