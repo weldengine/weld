@@ -121,4 +121,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p87_triple_quote_multiline_interp", .etch_path = "tests/etch_interp/programs/87_triple_quote_multiline_interp.etch" },
     // Runtime integer division and remainder, float remainder, narrowing casts.
     .{ .name = "p88_runtime_arith", .etch_path = "tests/etch_interp/programs/88_runtime_arith.etch" },
+    // A match on a runtime-built string, expression and statement.
+    .{ .name = "p89_string_match", .etch_path = "tests/etch_interp/programs/89_string_match.etch" },
 };

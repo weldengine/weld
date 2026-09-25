@@ -4185,9 +4185,15 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
         switch (arm.pattern_kind) {
             .literal => {
                 const lit: NodeId = @bitCast(arm.pattern_payload);
-                try w.print("if (__m{d} == ", .{lbl});
-                try emitExpr(w, ast, ctx, lit);
-                try w.print(") break :blk{d} ", .{lbl});
+                if (isStringPattern(ast, lit)) {
+                    try w.print("if (std.mem.eql(u8, __m{d}, ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.print(")) break :blk{d} ", .{lbl});
+                } else {
+                    try w.print("if (__m{d} == ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.print(") break :blk{d} ", .{lbl});
+                }
                 try emitExpr(w, ast, ctx, arm.body);
                 try w.write("; ");
             },
@@ -4276,9 +4282,15 @@ fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) 
         switch (arm.pattern_kind) {
             .literal => {
                 const lit: NodeId = @bitCast(arm.pattern_payload);
-                try w.print("if (__ms{d} == ", .{lbl});
-                try emitExpr(w, ast, ctx, lit);
-                try w.write(") ");
+                if (isStringPattern(ast, lit)) {
+                    try w.print("if (std.mem.eql(u8, __ms{d}, ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.write(")) ");
+                } else {
+                    try w.print("if (__ms{d} == ", .{lbl});
+                    try emitExpr(w, ast, ctx, lit);
+                    try w.write(") ");
+                }
                 try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
                 chained = true;
             },
@@ -7123,3 +7135,11 @@ fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
 // Dedicated lowering tests live under `src/etch/zig_codegen/tests/lower_test.zig`.
 // They are pulled into the import graph by `zig_codegen/root.zig` and run as
 // part of `zig build test`.
+
+/// A string pattern compares by bytes: Zig refuses `==` on a slice.
+fn isStringPattern(ast: *const AstArena, lit: NodeId) bool {
+    return switch (ast.exprKind(lit)) {
+        .string_lit, .string_interp => true,
+        else => false,
+    };
+}
