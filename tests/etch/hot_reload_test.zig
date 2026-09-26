@@ -1,8 +1,8 @@
 //! Interpreter hot-reload — edit a rule body → AST swap → behaviour change,
 //! measured under 500 ms.
 //!
-//! There is no in-place AST swap: the Interpreter borrows `*const AstArena`
-//! and derives its compiled tables eagerly, so a reload re-parses the edited
+//! There is no in-place AST swap: the Interpreter compiles its own copy of the
+//! AST and derives its compiled tables eagerly, so a reload re-parses the edited
 //! source into a fresh AST and re-runs `Interpreter.compile` on the SAME
 //! `World`. Live world state (entities, component bytes) survives because the
 //! world is external to the interpreter and `compile` is idempotent w.r.t.
@@ -148,6 +148,25 @@ const src_no_counter =
     \\  entity.get_mut(Other).n += 1
     \\}
 ;
+
+test "an interpreter outlives the parse result it was compiled from" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src_a);
+    var pr_live = true;
+    defer if (pr_live) pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    pr.deinit(gpa);
+    pr_live = false;
+
+    const cid = world.registry.idOf("Counter").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
 
 /// Compile `src` on `world`, returning the error rather than the interpreter.
 fn reloadOn(gpa: std.mem.Allocator, world: *World, src: []const u8) !void {
@@ -705,7 +724,8 @@ test "a reload with two refusals reports the first declaration's: the widened on
 }
 
 /// Allocations `compile` makes for `src` onto a world already running `base`, or
-/// onto a fresh world when `base` is null.
+/// onto a fresh world when `base` is null, less those of the interpreter's copy
+/// of the arena, which follow the source text.
 fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8) !u64 {
     var base_pr = if (base) |b| try weld_etch.parseSource(gpa, b) else null;
     defer if (base_pr) |*p| p.deinit(gpa);
@@ -722,7 +742,10 @@ fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8
     var it = try Interpreter.compile(counting.allocator(), &pr.ast, &world);
     const n = counting.snapshot().alloc_count;
     it.deinit();
-    return n;
+    var copying = CountingAllocator.init(gpa);
+    var copy = try pr.ast.clone(copying.allocator());
+    copy.deinit(copying.allocator());
+    return n - copying.snapshot().alloc_count;
 }
 
 test "a reload allocates nothing for the defaults of a type already registered" {

@@ -184,6 +184,9 @@ const PendingTag = struct {
 /// direct-programmatic paths, which run outside any query iteration.
 const ExtOp = enum { activate, deactivate };
 
+/// A hook's statement run, `extra[start .. start + len]` of the interpreter's arena.
+const HookRun = struct { start: u32, len: u32 };
+
 const PendingExtension = struct {
     entity: CoreEntityId,
     /// Owned copy of the extension name (the AST / run-string source may not
@@ -1067,7 +1070,15 @@ const ObserverCtx = struct {
 /// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
     gpa: std.mem.Allocator,
+    /// The program, read-only; the arena `owned_ast` owns.
     ast: *const AstArena,
+    /// A copy of the caller's arena the interpreter owns, into which every
+    /// hook text is parsed: every id the interpreter or a hook holds indexes
+    /// it, and it lives as long as they do.
+    owned_ast: *AstArena,
+    /// Each hook text run so far, parsed once into `owned_ast`: its statement
+    /// run, or null when the text does not parse. The keys are owned.
+    hook_runs: std.StringHashMapUnmanaged(?HookRun) = .empty,
     bridge: Bridge,
     rule_descs: []RuleDesc,
     /// Top-level `fn` declarations keyed by name, for
@@ -1379,6 +1390,11 @@ pub const Interpreter = struct {
         self.merge_seen.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
         self.test_msg_buf.deinit(self.gpa);
+        var hook_keys = self.hook_runs.keyIterator();
+        while (hook_keys.next()) |k| self.gpa.free(k.*);
+        self.hook_runs.deinit(self.gpa);
+        self.owned_ast.deinit(self.gpa);
+        self.gpa.destroy(self.owned_ast);
         self.* = undefined;
     }
 
@@ -1416,7 +1432,15 @@ pub const Interpreter = struct {
         return try interp.runFor(world, ticks);
     }
 
-    pub fn compile(gpa: std.mem.Allocator, ast: *const AstArena, world: *World) !Interpreter {
+    /// Compile a copy of `program` the interpreter owns, so `program` may be
+    /// freed as soon as this returns.
+    pub fn compile(gpa: std.mem.Allocator, program: *const AstArena, world: *World) !Interpreter {
+        const owned_ast = try gpa.create(AstArena);
+        errdefer gpa.destroy(owned_ast);
+        owned_ast.* = try program.clone(gpa);
+        errdefer owned_ast.deinit(gpa);
+        const ast: *const AstArena = owned_ast;
+
         var bridge = Bridge.init();
         errdefer bridge.deinit(gpa);
 
@@ -1639,6 +1663,7 @@ pub const Interpreter = struct {
         return .{
             .gpa = gpa,
             .ast = ast,
+            .owned_ast = owned_ast,
             .bridge = bridge,
             .rule_descs = slice,
             .fns = fns,
@@ -1920,46 +1945,50 @@ pub const Interpreter = struct {
         }
     }
 
+    /// The statement run of `text` in the interpreter's arena, parsed on the
+    /// first call and cached by text; `MalformedExtensionHook` when it does
+    /// not parse.
+    fn prepareHook(self: *Interpreter, text: []const u8) !HookRun {
+        if (self.hook_runs.get(text)) |cached| return cached orelse error.MalformedExtensionHook;
+        const key = try self.gpa.dupe(u8, text);
+        self.hook_runs.ensureUnusedCapacity(self.gpa, 1) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        var entry: ?HookRun = null;
+        if (parser_mod.parseStmtBlockInto(self.gpa, self.owned_ast, text)) |parsed| {
+            var hook_run = parsed;
+            defer hook_run.deinit(self.gpa);
+            if (hook_run.diagnostics.len == 0) entry = .{ .start = hook_run.start, .len = hook_run.len };
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                self.gpa.free(key);
+                return error.OutOfMemory;
+            },
+            else => {},
+        }
+        self.hook_runs.putAssumeCapacityNoClobber(key, entry);
+        return entry orelse error.MalformedExtensionHook;
+    }
+
     /// Execute a cooked extension hook body. `hook_text` is the
     /// canonical Etch statement run a `.prefab.bin` carries for an `on_attach` /
     /// `on_detach` hook (`descriptor.renderStmtRunAlloc`): statements joined by
-    /// `"; "`, no braces. Parse it into a transient `AstArena`, rebind `self.ast`
-    /// to it for the body's duration (the executor resolves identifiers via
-    /// `self.ast.strings`, so the body MUST run with `ast` pointing at the hook
-    /// arena), bind the implicit `entity`, run the body with the same
-    /// `execStmtRun` that drives every rule, and route any deferred structural
+    /// `"; "`, no braces. It runs from the interpreter's own arena
+    /// (`prepareHook`) with the implicit `entity` bound, through the same
+    /// `execStmtRun` that drives every rule, and routes any deferred structural
     /// change into the world's shared observer-deferred buffer (drained by the
     /// loader before `on_spawned`). Mirrors `runObserverBody` — same fresh-scope
     /// + store-reset discipline. No re-entrancy: a hook runs at a load/flush
     /// boundary, never nested inside another running hook.
     fn execHookText(self: *Interpreter, world: *World, entity: CoreEntityId, hook_text: []const u8) !void {
-        var block = parser_mod.parseStmtBlock(self.gpa, hook_text) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // A cooked hook that fails to re-parse is a corrupt asset (the cook
-            // validated it via `renderStmtRunAlloc` → `HookRenderFailed`), so this
-            // should be unreachable in practice — surface it clearly regardless.
-            else => return error.MalformedExtensionHook,
-        };
-        defer block.deinit(self.gpa);
-        if (block.diagnostics.len > 0) return error.MalformedExtensionHook;
-
-        // Rebind the program AST to the hook arena for the body's duration. Safe:
-        // `ast` is a reassignable `*const AstArena` field; nothing on the executor
-        // path dereferences a *program*-arena `NodeId` while rebound (component /
-        // resource field access + enum shorthand resolve by NAME via the registry,
-        // `emit` enqueues by event-name id, and hook-arena `StringId`s resolve
-        // through `self.ast.strings`).
-        const saved_ast = self.ast;
-        self.ast = &block.ast;
-        defer self.ast = saved_ast;
+        const hook_run = try self.prepareHook(hook_text);
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
         defer self.resetBodyStores();
 
-        // Bind the implicit `entity` — only if the body references it (else the
-        // name is not interned in the hook arena and no binding is needed).
-        if (block.ast.strings.find("entity")) |eid| {
+        if (self.ast.strings.find("entity")) |eid| {
             try locals.put(self.gpa, eid, .{ .entity_id = @bitCast(entity) }, false);
         }
 
@@ -1979,7 +2008,7 @@ pub const Interpreter = struct {
         self.returning = false;
         self.pending_error = null;
 
-        self.execStmtRun(world, &locals, block.body_start, block.body_len) catch |err| switch (err) {
+        self.execStmtRun(world, &locals, hook_run.start, hook_run.len) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.RuntimeFailure => {
                 self.pending_error = null;
@@ -16101,7 +16130,7 @@ test "execHookText mutates a component on the live world" {
     try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
 }
 
-test "execHookText restores self.ast and the program still steps" {
+test "a hook runs in the interpreter's own arena and the program still steps" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -16115,20 +16144,107 @@ test "execHookText restores self.ast and the program still steps" {
 
     var interp = try Interpreter.compile(gpa, &pr.ast, &world);
     defer interp.deinit();
+    try std.testing.expect(interp.ast != &pr.ast);
     const cid = world.registry.idOf("Health").?;
     var hv = [_]i32{ 100, 100 };
     const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
 
-    const program_ast = interp.ast; // == &pr.ast
     try interp.execHookText(&world, eid, "entity.get_mut(Health).max += 50");
-    // The hook ran against a transient arena; the program AST pointer is restored.
-    try std.testing.expectEqual(program_ast, interp.ast);
-
-    // The program still steps on the restored AST: the rule bumps current 100→101.
     _ = try interp.runFor(&world, 1);
     const hb = world.componentBytes(eid, cid).?;
     try std.testing.expectEqual(@as(i32, 101), std.mem.readInt(i32, hb[0..4], .little)); // current @0
-    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4 (hook effect persisted)
+    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
+}
+
+/// A world holding one `Health { current: 100, max: 100 }` entity, and an
+/// interpreter compiled from `source` onto it.
+const HookFixture = struct {
+    world: World,
+    pr: parser_mod.ParseResult,
+    interp: Interpreter,
+    health: ComponentId,
+    entity: CoreEntityId,
+
+    fn init(self: *HookFixture, gpa: std.mem.Allocator, source: []const u8) !void {
+        self.world = World.init();
+        errdefer self.world.deinit(gpa);
+        self.pr = try parser_mod.parse(gpa, source);
+        errdefer self.pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), self.pr.diagnostics.len);
+        self.interp = try Interpreter.compile(gpa, &self.pr.ast, &self.world);
+        errdefer self.interp.deinit();
+        self.health = self.world.registry.idOf("Health").?;
+        var hv = [_]i32{ 100, 100 };
+        self.entity = try self.world.spawnDynamicWithValues(gpa, &[_]ComponentId{self.health}, &[_][]const u8{std.mem.asBytes(&hv)});
+    }
+
+    fn deinit(self: *HookFixture, gpa: std.mem.Allocator) void {
+        self.interp.deinit();
+        self.pr.deinit(gpa);
+        self.world.deinit(gpa);
+    }
+
+    fn max(self: *HookFixture) i32 {
+        return std.mem.readInt(i32, self.world.componentBytes(self.entity, self.health).?[4..8], .little);
+    }
+};
+
+test "an event a hook emits carries the program's name for its type" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\event Boosted { amount: int }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "emit Boosted { amount: 7 }");
+    try std.testing.expectEqual(@as(usize, 1), f.interp.events.count(f.pr.ast.strings.find("Boosted").?));
+}
+
+test "a string literal a hook emits reads back its own bytes" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Armor { plates: i32 = 0, weight: i32 = 0 }
+        \\event Named { who: string }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "emit Named { who: \"hero\" }");
+    const v = f.interp.events.list.items[0].fields.items[0].value;
+    try std.testing.expectEqualStrings("hero", f.interp.stringBytes(v).?);
+}
+
+test "a hook calls a function of the program" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\fn seven() -> int { return 7 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max = seven()");
+    try std.testing.expectEqual(@as(i32, 7), f.max());
+}
+
+test "a hook text is parsed once, however often it runs" {
+    const gpa = std.testing.allocator;
+    var f: HookFixture = undefined;
+    try f.init(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    );
+    defer f.deinit(gpa);
+    const before = f.interp.ast.extra.items.len;
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max += 1");
+    const after_first = f.interp.ast.extra.items.len;
+    try f.interp.execHookText(&f.world, f.entity, "entity.get_mut(Health).max += 1");
+    try std.testing.expect(after_first > before);
+    try std.testing.expectEqual(after_first, f.interp.ast.extra.items.len);
+    try std.testing.expectEqual(@as(i32, 102), f.max());
 }
 
 test "execHookText emit enqueues into the dynamic event store" {

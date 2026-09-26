@@ -185,10 +185,37 @@ pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode
 /// between statements. An empty fragment yields a zero-statement block with no
 /// diagnostics. Caller owns the arena + diagnostics (`StmtBlockResult.deinit`).
 pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResult {
-    var lexer = Lexer.init(source);
-    errdefer lexer.deinit(gpa);
     var arena = try AstArena.init(gpa);
     errdefer arena.deinit(gpa);
+    const run = try parseStmtBlockInto(gpa, &arena, source);
+    return .{
+        .ast = arena,
+        .body_start = run.start,
+        .body_len = run.len,
+        .diagnostics = run.diagnostics,
+    };
+}
+
+/// A statement run parsed into an existing arena: `extra[start .. start + len]`
+/// and the parse diagnostics, which the caller owns.
+pub const StmtRunResult = struct {
+    start: u32,
+    len: u32,
+    diagnostics: []Diagnostic,
+
+    pub fn deinit(self: *StmtRunResult, gpa: std.mem.Allocator) void {
+        for (self.diagnostics) |*d| d.deinit(gpa);
+        gpa.free(self.diagnostics);
+    }
+};
+
+/// `parseStmtBlock` appending into `arena`: every name is interned into
+/// `arena.strings`, so a name the arena already holds keeps its id. On an
+/// error or a diagnostic the nodes already appended stay in the arena,
+/// unreferenced.
+pub fn parseStmtBlockInto(gpa: std.mem.Allocator, arena: *AstArena, source: []const u8) !StmtRunResult {
+    var lexer = Lexer.init(source);
+    defer lexer.deinit(gpa);
 
     const c0 = try lexer.next(gpa);
     const c1 = try lexer.next(gpa);
@@ -197,7 +224,7 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
         .gpa = gpa,
         .source = source,
         .lexer = &lexer,
-        .arena = &arena,
+        .arena = arena,
         .current = c0,
         .next_tok = c1,
         .next2_tok = c2,
@@ -209,14 +236,10 @@ pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResu
     defer parser.active_labels.deinit(gpa);
 
     const body = try parser.parseStmtFragment();
-
-    const diags = try parser.diagnostics.toOwnedSlice(gpa);
-    lexer.deinit(gpa);
     return .{
-        .ast = arena,
-        .body_start = body.start,
-        .body_len = body.len,
-        .diagnostics = diags,
+        .start = body.start,
+        .len = body.len,
+        .diagnostics = try parser.diagnostics.toOwnedSlice(gpa),
     };
 }
 
