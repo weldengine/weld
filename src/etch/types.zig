@@ -827,11 +827,10 @@ pub const TypeChecker = struct {
         try self.validateSceneDecls();
     }
 
-    /// The prefab half of `check`, for the cook (decision 3 point 4): the
-    /// declarations are collected by `check`'s own passes, and only `requires`
-    /// names and hook bodies are reported into `diagnostics`. A cook source
-    /// reaches its base prefab through a resolver, so the rest of `check`
-    /// (E1791 first) does not apply to it.
+    /// The prefab half of `check`, for the cook: the declarations are collected
+    /// by `check`'s own passes, and only `requires` names and hook bodies are
+    /// reported into `diagnostics`. A cook source reaches its base prefab through
+    /// a resolver, so the rest of `check` (E1791 first) does not apply to it.
     pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
         try arena.ensureErrorBuiltins(gpa);
         var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
@@ -848,13 +847,56 @@ pub const TypeChecker = struct {
         defer tc.deinit();
         try tc.runDeclarationPasses();
         tc.diagnostics = diagnostics;
+        tc.range_reported.clearRetainingCapacity();
         const kinds = arena.items.items(.kind);
         const datas = arena.items.items(.data);
         var i: u28 = 0;
         while (i < arena.items.len) : (i += 1) {
             if (kinds[i] != .prefab_decl) continue;
-            try tc.checkPrefabRequiresAndHooks(arena.prefab_decls.items[datas[i]]);
+            const decl = arena.prefab_decls.items[datas[i]];
+            if (decl.has_on_attach) try tc.checkLiteralRangesIn(tc.bodyBytes(decl.on_attach_start, decl.on_attach_len));
+            if (decl.has_on_detach) try tc.checkLiteralRangesIn(tc.bodyBytes(decl.on_detach_start, decl.on_detach_len));
+            try tc.checkPrefabRequiresAndHooks(decl);
         }
+    }
+
+    /// A statement run already in `arena`: `extra[start .. start + len]`, and the
+    /// expression and type-node indices its parse appended.
+    pub const HookRun = struct { start: u32, len: u32, expr_from: u32, expr_to: u32, type_from: u32, type_to: u32 };
+
+    /// A hook run checked as a prefab hook is, against `arena`'s declarations,
+    /// its scope the components `scope` names. Only the run's diagnostics reach
+    /// `diagnostics`.
+    pub fn checkHookRun(gpa: std.mem.Allocator, arena: *AstArena, run: HookRun, scope: []const []const u8, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.runDeclarationPasses();
+        tc.diagnostics = diagnostics;
+        tc.range_reported.clearRetainingCapacity();
+        try tc.checkLiteralRangesIn(.{ .indices = .{ .expr_from = run.expr_from, .expr_to = run.expr_to, .type_from = run.type_from, .type_to = run.type_to } });
+        var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer names.deinit(gpa);
+        for (scope) |name| if (arena.strings.find(name)) |id| try names.put(gpa, id, {});
+        try tc.checkHookBody(&names, run.start, run.len);
+    }
+
+    /// The source bytes a statement run spans.
+    fn bodyBytes(self: *TypeChecker, start: u32, len: u32) LiteralWindow {
+        if (len == 0) return .{ .bytes = .{ .from = 0, .to = 0 } };
+        const first = self.arena.stmtSpan(@bitCast(self.arena.extra.items[start]));
+        const last = self.arena.stmtSpan(@bitCast(self.arena.extra.items[start + len - 1]));
+        return .{ .bytes = .{ .from = first.byte_start, .to = last.byte_end } };
     }
 
     /// `E1901 ConstructNotAllowedInDeclarationFile` (`etch-grammar.md`
@@ -2456,20 +2498,29 @@ pub const TypeChecker = struct {
     /// readable, as in a rule with no `when resource`. Each hook gets a fresh
     /// context.
     fn checkPrefabHook(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
-        var ctx: RuleCtx = .{};
-        defer ctx.deinit(self.gpa);
+        var scope: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer scope.deinit(self.gpa);
         var r: u32 = 0;
         while (r < decl.requires_len) : (r += 1) {
-            try ctx.components_in_when.put(self.gpa, self.arena.prefab_requires.items[decl.requires_start + r], {});
+            try scope.put(self.gpa, self.arena.prefab_requires.items[decl.requires_start + r], {});
         }
         var e: u32 = 0;
         while (e < decl.entities_len) : (e += 1) {
             const ent = self.arena.scene_entities.items[decl.entities_start + e];
             var c: u32 = 0;
             while (c < ent.components_len) : (c += 1) {
-                try ctx.components_in_when.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
+                try scope.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
             }
         }
+        try self.checkHookBody(&scope, start, len);
+    }
+
+    /// A hook body gated on the components `scope` holds, in a hook's context.
+    fn checkHookBody(self: *TypeChecker, scope: *const std.AutoHashMapUnmanaged(StringId, void), start: u32, len: u32) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        var names = scope.keyIterator();
+        while (names.next()) |id| try ctx.components_in_when.put(self.gpa, id.*, {});
         if (self.arena.strings.find("entity")) |eid| {
             try ctx.locals.put(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
         }
@@ -4437,8 +4488,38 @@ pub const TypeChecker = struct {
     /// lexer never includes the sign, so a literal under a unary minus is judged
     /// negated: `-9223372036854775808` fits.
     fn checkLiteralRanges(self: *TypeChecker) !void {
+        return self.checkLiteralRangesIn(.all);
+    }
+
+    /// Which literals a range check covers.
+    const LiteralWindow = union(enum) {
+        all,
+        /// Expression and type-node indices: a run parsed on its own.
+        indices: struct { expr_from: u32, expr_to: u32, type_from: u32, type_to: u32 },
+        /// Source bytes: a body inside a parsed source.
+        bytes: struct { from: u32, to: u32 },
+
+        fn holdsExpr(w: LiteralWindow, index: usize, span: SourceSpan) bool {
+            return switch (w) {
+                .all => true,
+                .indices => |r| index >= r.expr_from and index < r.expr_to,
+                .bytes => |r| span.byte_start >= r.from and span.byte_end <= r.to,
+            };
+        }
+
+        fn holdsType(w: LiteralWindow, index: usize, size_span: SourceSpan) bool {
+            return switch (w) {
+                .all => true,
+                .indices => |r| index >= r.type_from and index < r.type_to,
+                .bytes => |r| size_span.byte_start >= r.from and size_span.byte_end <= r.to,
+            };
+        }
+    };
+
+    fn checkLiteralRangesIn(self: *TypeChecker, window: LiteralWindow) !void {
         const kinds = self.arena.exprs.items(.kind);
         const datas = self.arena.exprs.items(.data);
+        const spans = self.arena.exprs.items(.span);
         var negated: std.AutoHashMapUnmanaged(u32, void) = .empty;
         defer negated.deinit(self.gpa);
         for (kinds, datas) |k, d| {
@@ -4446,7 +4527,8 @@ pub const TypeChecker = struct {
             const u = self.arena.unary_exprs.items[d];
             if (u.op == .neg and self.arena.exprKind(u.operand) == .int_lit) try negated.put(self.gpa, u.operand.index, {});
         }
-        for (kinds, datas, 0..) |k, d, i| {
+        for (kinds, datas, spans, 0..) |k, d, span, i| {
+            if (!window.holdsExpr(i, span)) continue;
             const id: NodeId = .{ .category = .expr, .index = @intCast(i) };
             const text = self.arena.strings.slice(d);
             const fits = switch (k) {
@@ -4462,9 +4544,10 @@ pub const TypeChecker = struct {
         }
         const tkinds = self.arena.type_nodes.items(.kind);
         const tdatas = self.arena.type_nodes.items(.data);
-        for (tkinds, tdatas) |k, d| {
+        for (tkinds, tdatas, 0..) |k, d, i| {
             if (k != .array) continue;
             const size = self.arena.array_types.items[d].size;
+            if (!window.holdsType(i, self.arena.exprSpan(size))) continue;
             if (self.constArrayLen(size) != null) continue;
             try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(size), "array size must be a non-negative integer literal", .{});
         }
@@ -9137,6 +9220,18 @@ test "a hook reading an engine resource is clean" {
     );
     defer r.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a hook literal out of range is refused at the source" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let big = 99999999999999999999 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .type_mismatch);
 }
 
 test "on_detach does not see a let of on_attach" {

@@ -52,6 +52,7 @@ const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const World = weld_core.ecs.world.World;
 const DynamicQuery = weld_core.ecs.world.DynamicQuery;
+const ExtensionHooks = weld_core.ecs.world.ExtensionHooks;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
 const initial_tick = weld_core.ecs.tick.initial_tick;
@@ -184,8 +185,24 @@ const PendingTag = struct {
 /// direct-programmatic paths, which run outside any query iteration.
 const ExtOp = enum { activate, deactivate };
 
-/// A hook's statement run, `extra[start .. start + len]` of the interpreter's arena.
-const HookRun = struct { start: u32, len: u32 };
+const HookRun = types_mod.TypeChecker.HookRun;
+
+/// `text` and each scope name, each behind its `u32` length: one key per
+/// (text, scope) pair, whatever bytes they hold.
+fn hookVerdictKey(gpa: std.mem.Allocator, text: []const u8, scope: []const []const u8) ![]u8 {
+    var len: usize = 4 + text.len;
+    for (scope) |name| len += 4 + name.len;
+    const key = try gpa.alloc(u8, len);
+    var at = putPart(key, 0, text);
+    for (scope) |name| at = putPart(key, at, name);
+    return key;
+}
+
+fn putPart(key: []u8, at: usize, part: []const u8) usize {
+    std.mem.writeInt(u32, key[at..][0..4], @intCast(part.len), .little);
+    @memcpy(key[at + 4 ..][0..part.len], part);
+    return at + 4 + part.len;
+}
 
 const PendingExtension = struct {
     entity: CoreEntityId,
@@ -1079,6 +1096,9 @@ pub const Interpreter = struct {
     /// Each hook text run so far, parsed once into `owned_ast`: its statement
     /// run, or null when the text does not parse. The keys are owned.
     hook_runs: std.StringHashMapUnmanaged(?HookRun) = .empty,
+    /// Whether the type checker accepts a hook text in a scope: keyed by the
+    /// owned text and scope names (`hookVerdictKey`).
+    hook_verdicts: std.StringHashMapUnmanaged(bool) = .empty,
     bridge: Bridge,
     rule_descs: []RuleDesc,
     /// Top-level `fn` declarations keyed by name, for
@@ -1393,6 +1413,9 @@ pub const Interpreter = struct {
         var hook_keys = self.hook_runs.keyIterator();
         while (hook_keys.next()) |k| self.gpa.free(k.*);
         self.hook_runs.deinit(self.gpa);
+        var verdict_keys = self.hook_verdicts.keyIterator();
+        while (verdict_keys.next()) |k| self.gpa.free(k.*);
+        self.hook_verdicts.deinit(self.gpa);
         self.owned_ast.deinit(self.gpa);
         self.gpa.destroy(self.owned_ast);
         self.* = undefined;
@@ -1822,6 +1845,7 @@ pub const Interpreter = struct {
         // so a program with no observer rules still wires its hook execution.
         world.registerOnAttach(self, &extensionAttachTrampoline);
         world.registerOnDetach(self, &extensionDetachTrampoline);
+        world.registerExtensionCheck(self, &extensionCheckTrampoline);
 
         var n: usize = 0;
         for (self.rule_descs) |rd| {
@@ -1956,10 +1980,19 @@ pub const Interpreter = struct {
             return err;
         };
         var entry: ?HookRun = null;
+        const expr_from: u32 = @intCast(self.owned_ast.exprs.len);
+        const type_from: u32 = @intCast(self.owned_ast.type_nodes.len);
         if (parser_mod.parseStmtBlockInto(self.gpa, self.owned_ast, text)) |parsed| {
             var hook_run = parsed;
             defer hook_run.deinit(self.gpa);
-            if (hook_run.diagnostics.len == 0) entry = .{ .start = hook_run.start, .len = hook_run.len };
+            if (hook_run.diagnostics.len == 0) entry = .{
+                .start = hook_run.start,
+                .len = hook_run.len,
+                .expr_from = expr_from,
+                .expr_to = @intCast(self.owned_ast.exprs.len),
+                .type_from = type_from,
+                .type_to = @intCast(self.owned_ast.type_nodes.len),
+            };
         } else |err| switch (err) {
             error.OutOfMemory => {
                 self.gpa.free(key);
@@ -2041,6 +2074,44 @@ pub const Interpreter = struct {
         _ = name;
         const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
         if (text) |t| try self.execHookText(world, entity, t);
+    }
+
+    /// Top-level trampoline matching `World.ExtensionCheckFn`: refuse, with
+    /// `ExtensionHookRefused`, any of the extension's hooks this program's type
+    /// checker refuses in the hooks' scope.
+    fn extensionCheckTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, hooks: ExtensionHooks) anyerror!void {
+        _ = .{ world, entity, name };
+        const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
+        if (hooks.on_attach) |t| try self.checkHook(t, hooks.scope);
+        if (hooks.on_detach) |t| try self.checkHook(t, hooks.scope);
+    }
+
+    /// `text` checked once per scope against this program, from the
+    /// interpreter's own arena.
+    fn checkHook(self: *Interpreter, text: []const u8, scope: []const []const u8) !void {
+        const hook_run = try self.prepareHook(text);
+        const key = try hookVerdictKey(self.gpa, text, scope);
+        if (self.hook_verdicts.get(key)) |accepted| {
+            self.gpa.free(key);
+            if (!accepted) return error.ExtensionHookRefused;
+            return;
+        }
+        self.hook_verdicts.ensureUnusedCapacity(self.gpa, 1) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(self.gpa);
+            diags.deinit(self.gpa);
+        }
+        types_mod.TypeChecker.checkHookRun(self.gpa, self.owned_ast, hook_run, scope, &diags) catch |err| {
+            self.gpa.free(key);
+            return err;
+        };
+        const accepted = diags.items.len == 0;
+        self.hook_verdicts.putAssumeCapacityNoClobber(key, accepted);
+        if (!accepted) return error.ExtensionHookRefused;
     }
 
     /// Materialise an observer value binding (`value`/`old`/`new`) as a struct

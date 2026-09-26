@@ -106,8 +106,8 @@ const EntityIdentityStore = entity_mod.EntityIdentityStore;
 /// pointer the Etch bridge registers; the scene loader fires it after adding an
 /// extension's components, passing the entity, the extension name, and the cooked
 /// `on_attach` Etch source text (`null` if absent). The
-/// Etch bridge registers the callback, which re-parses + runs the
-/// text — the seam itself still only fires whatever callback is registered.
+/// Etch bridge registers the callback, which parses the text once and runs it
+/// — the seam itself only fires whatever callback is registered.
 pub const ExtensionAttachFn = *const fn (
     ctx: ?*anyopaque,
     world: *World,
@@ -134,6 +134,29 @@ pub const ExtensionDetachFn = *const fn (
 
 /// A registered `on_detach` callback + its opaque context.
 const DetachHook = struct { ctx: ?*anyopaque, func: ExtensionDetachFn };
+
+/// An extension's hook texts and the component names its hooks may reach: its
+/// own components and its `requires`.
+pub const ExtensionHooks = struct {
+    on_attach: ?[]const u8,
+    on_detach: ?[]const u8,
+    scope: []const []const u8,
+};
+
+/// The extension hook check seam. The Etch bridge registers a callback that
+/// refuses a hook its type checker refuses against the loaded program; the
+/// loader fires it before any mutation, at activation, at deactivation, and for
+/// every activation of a load before the load runs a hook.
+pub const ExtensionCheckFn = *const fn (
+    ctx: ?*anyopaque,
+    world: *World,
+    entity: EntityId,
+    extension_name: []const u8,
+    hooks: ExtensionHooks,
+) anyerror!void;
+
+/// A registered hook check + its opaque context.
+const CheckHook = struct { ctx: ?*anyopaque, func: ExtensionCheckFn };
 
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
@@ -214,6 +237,10 @@ pub const World = struct {
     /// Registered by the Etch bridge; fired by the runtime deactivate path before
     /// removing an extension's components. `null` until registered (last wins).
     detach_hook: ?DetachHook = null,
+
+    /// The extension hook check seam. `null` until the Etch bridge registers it
+    /// (last wins); unregistered, no hook is checked.
+    check_hook: ?CheckHook = null,
 
     /// Per-entity active-extension set: an entity → the OWNED copies of
     /// the names of the extensions currently active on it, in activation order.
@@ -386,8 +413,8 @@ pub const World = struct {
     /// extension `extension_name`, passing the cooked `on_attach_text` (the Etch
     /// hook source; `null` if the extension has no `on_attach`). No-op if no hook
     /// is registered. The loader calls this after adding the extension's
-    /// components. The registered callback (the Etch bridge) re-parses +
-    /// executes the text; here the seam just fires it.
+    /// components. The registered callback (the Etch bridge) runs the text; here
+    /// the seam just fires it.
     pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
         if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
     }
@@ -404,6 +431,17 @@ pub const World = struct {
     /// components, so the hook still sees them. No-op if no hook is registered.
     pub fn dispatchOnDetach(self: *World, entity: EntityId, extension_name: []const u8, on_detach_text: ?[]const u8) anyerror!void {
         if (self.detach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_detach_text);
+    }
+
+    /// Register the extension hook check (one per world, last registration wins).
+    pub fn registerExtensionCheck(self: *World, ctx: ?*anyopaque, callback: ExtensionCheckFn) void {
+        self.check_hook = .{ .ctx = ctx, .func = callback };
+    }
+
+    /// Fire the extension hook check for `entity`'s extension `extension_name`.
+    /// No-op if no check is registered.
+    pub fn dispatchExtensionCheck(self: *World, entity: EntityId, extension_name: []const u8, hooks: ExtensionHooks) anyerror!void {
+        if (self.check_hook) |h| try h.func(h.ctx, self, entity, extension_name, hooks);
     }
 
     /// Record `name` as an active extension on `entity` (storing an

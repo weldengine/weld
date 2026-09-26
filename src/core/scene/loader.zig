@@ -502,12 +502,15 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
 /// active extensions** (so an extension-free scene needs no resolver). The
 /// `on_attach` hook EXECUTION runs inside the registered seam's callback
 /// (the Etch bridge); here `dispatchOnAttach` fires it with the cooked hook text.
+/// Every activation is checked first (`preflightExtensions`), so no hook runs
+/// when one would be refused.
 fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
     const count = acc.extensionsCount();
     if (count == 0) return;
     const ucount = uuidCount(acc);
     const resolver = ext_resolver orelse return error.MissingExtensionResolver;
     const pid_count = acc.prefabIdCount();
+    try preflightExtensions(world, gpa, acc, uuid_to_entity, resolver);
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
@@ -521,6 +524,36 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
             const name = acc.prefabName(pid);
             const ext_bytes = resolver.resolve(name) orelse return error.UnknownExtension;
             try activateExtension(world, gpa, entity, name, ext_bytes);
+        }
+    }
+}
+
+/// Every activation of the Entity Extensions Table, checked before the first
+/// runs: the extension resolves and opens, its requirements are met by the
+/// entity or by an extension listed before it on that entity, and the world's
+/// hook check accepts its hooks.
+fn preflightExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, resolver: ExtensionResolver) !void {
+    const ucount = uuidCount(acc);
+    const pid_count = acc.prefabIdCount();
+    var provided: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer provided.deinit(gpa);
+    var i: u32 = 0;
+    while (i < acc.extensionsCount()) : (i += 1) {
+        const e = acc.extension(i);
+        if (e.uuid_ordinal >= ucount) return error.MalformedScene;
+        const entity = uuid_to_entity.get(acc.uuidAt(e.uuid_ordinal).*) orelse return error.MalformedScene;
+        provided.clearRetainingCapacity();
+        var j: u32 = 0;
+        while (j < e.extension_count) : (j += 1) {
+            const pid = e.extensionId(j);
+            if (pid >= pid_count) return error.MalformedScene;
+            const name = acc.prefabName(pid);
+            const ext = try openVerified(resolver.resolve(name) orelse return error.UnknownExtension);
+            _ = try extEntityArchetype(ext);
+            if (!requiresMet(world, entity, ext, provided.items)) return error.RequiresNotSatisfied;
+            try checkHooks(world, gpa, entity, name, ext, true);
+            var s: u32 = 0;
+            while (s < ext.schemaCount()) : (s += 1) try provided.append(gpa, ext.schema(s).name);
         }
     }
 }
@@ -555,7 +588,8 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 ///      (`extEntityArchetype`: `total == 0`/`> 1` rejected).
 ///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; check its
 ///      size, alignment and kind; conflict-check each against the entity; check
-///      the entity carries every component the extension requires.
+///      the entity carries every component the extension requires; fire the
+///      world's hook check on both hooks.
 ///   2. Reserve the extension-record capacity (fallible, no observable mutation).
 ///   3. Grouped add — the SINGLE fallible component mutation, itself atomic
 ///      (`world.addComponentsDynamic`): at most ONE archetype migration, never
@@ -602,7 +636,8 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
         cids[c] = cid;
         values[c] = arch.componentSlot(c, 0);
     }
-    if (!requiresMet(world, entity, ext)) return error.RequiresNotSatisfied;
+    if (!requiresMet(world, entity, ext, &.{})) return error.RequiresNotSatisfied;
+    try checkHooks(world, gpa, entity, name, ext, true);
 
     // Step 2 — reserve the extension-record capacity (fallible, no observable
     // mutation). `owned` is freed if we abort before committing it.
@@ -622,14 +657,42 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
     try world.dispatchOnAttach(entity, name, on_attach_text);
 }
 
-/// Whether `entity` carries every component the extension `ext` requires.
-fn requiresMet(world: *World, entity: EntityId, ext: Accessor) bool {
+/// Whether every component the extension `ext` requires is carried by `entity`
+/// or named in `provided`.
+fn requiresMet(world: *World, entity: EntityId, ext: Accessor, provided: []const []const u8) bool {
     var ri: u32 = 0;
-    while (ri < ext.requiresCount()) : (ri += 1) {
-        const cid = world.componentId(ext.requiredName(ri)) orelse return false;
+    next: while (ri < ext.requiresCount()) : (ri += 1) {
+        const name = ext.requiredName(ri);
+        for (provided) |p| if (std.mem.eql(u8, p, name)) continue :next;
+        const cid = world.componentId(name) orelse return false;
         if (world.componentBytes(entity, cid) == null) return false;
     }
     return true;
+}
+
+/// Fire the world's hook check on the hooks of `ext` — its `on_attach` only
+/// when `with_attach` — in the scope of its own components and its requires.
+fn checkHooks(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext: Accessor, with_attach: bool) !void {
+    if (ext.hookCount() == 0) return;
+    const hook = ext.hook(0);
+    const scope = try gpa.alloc([]const u8, ext.schemaCount() + ext.requiresCount());
+    defer gpa.free(scope);
+    var n: usize = 0;
+    var s: u32 = 0;
+    while (s < ext.schemaCount()) : (s += 1) {
+        scope[n] = ext.schema(s).name;
+        n += 1;
+    }
+    var r: u32 = 0;
+    while (r < ext.requiresCount()) : (r += 1) {
+        scope[n] = ext.requiredName(r);
+        n += 1;
+    }
+    try world.dispatchExtensionCheck(entity, name, .{
+        .on_attach = if (with_attach) hook.on_attach else null,
+        .on_detach = hook.on_detach,
+        .scope = scope,
+    });
 }
 
 /// Runtime extension activation entry, reached from Etch
@@ -652,7 +715,8 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 /// Prepare/commit order — the hook-ordering guarantee is REAL:
 ///   1. Prevalidate with ZERO mutation: extension active (`ExtensionNotActive`),
 ///      bytes valid, strict mono-entity archetype, declared components resolvable;
-///      collect the ones currently present.
+///      collect the ones currently present; fire the world's hook check on
+///      `on_detach`.
 ///   2. PREPARE the grouped remove — all the fallible work (target archetype,
 ///      capacity, reserved dst slot), no observable mutation yet.
 ///   3. Fire `on_detach` FIRST (it still reads the present components). If it
@@ -687,6 +751,7 @@ pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: Entity
             n += 1;
         }
     }
+    try checkHooks(world, gpa, entity, name, ext, false);
 
     const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
 

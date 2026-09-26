@@ -260,7 +260,7 @@ pub const BaseResolver = struct {
 };
 
 /// Refuse an extension hook or `requires` clause the type checker refuses, so
-/// a cooked hook is one `etch check` accepts (decision 3 point 4).
+/// a cooked hook is one `etch check` accepts.
 fn checkHooks(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {
