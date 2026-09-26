@@ -171,3 +171,16 @@ test "of variant without a resolver errors BasePrefabMissing" {
     var diag: []const u8 = "";
     try std.testing.expectError(error.BasePrefabMissing, scene_cook.cookPrefab(gpa, variant_src, null, &diag));
 }
+
+test "an of variant over a malformed but rehashed base does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, standalone_src, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    const bad = try gpa.dupe(u8, base_bytes);
+    defer gpa.free(bad);
+    std.mem.writeInt(u32, bad[20..24], 0xFFFF, .little); // schema_count, outside the hashed bytes
+    var resolver = OneResolver{ .name = "WallTorch", .bytes = bad };
+    try std.testing.expectError(error.BasePrefabCorrupt, scene_cook.cookPrefab(gpa, variant_src, resolver.base(), null));
+}

@@ -185,7 +185,7 @@ test "extends prefab cooks with components, hooks and requires" {
 
     var acc = try Accessor.open(bytes);
     try std.testing.expect(acc.verifyHash());
-    try std.testing.expectEqual(@as(u16, 2), acc.header.version); // format v2
+    try std.testing.expectEqual(@as(u16, 3), acc.header.version);
 
     // The added component (Weapon) is in an archetype.
     try std.testing.expectEqual(@as(u32, 1), acc.archetypeCount());
@@ -705,18 +705,6 @@ fn cookCombatModule(gpa: std.mem.Allocator) ![]const u8 {
     return scene.writer.write(gpa, cooked.model, &cooked.registry);
 }
 
-/// Compile + bind an interpreter declaring `Health` + `Weapon` (WITH fields, so a
-/// hook's `Health.max` resolves) into `world`, registering the real on_attach /
-/// on_detach execution seam. The caller owns `pr` (parse result) and `interp`.
-const HookEnv = struct {
-    pr: parser.ParseResult,
-    interp: Interpreter,
-    fn deinit(self: *HookEnv, gpa: std.mem.Allocator) void {
-        self.interp.deinit();
-        self.pr.deinit(gpa);
-    }
-};
-
 fn spawnHealth(world: *World, gpa: std.mem.Allocator, current: i32, max: i32) !EntityId {
     const cid = world.componentId("Health").?;
     var hv = [_]i32{ current, max };
@@ -1151,4 +1139,124 @@ test "an extension whose hook fails the checker does not cook" {
         c.deinit(gpa);
         return error.TestUnexpectedResult;
     } else |err| try std.testing.expectEqual(error.HookRefused, err);
+}
+
+const ext_healthy = // Healthy: declares Health
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\prefab "Healthy" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c5" Health { current: 10, max: 10 } }
+    \\}
+;
+
+/// Cook a one-entity scene carrying `Marker` and activating `extensions`, the
+/// extension bytes resolved from `ext_healthy` and `cookCombatModule`.
+fn cookMarkerScene(gpa: std.mem.Allocator, extensions: []const u8) !scene_cook.Cooked {
+    const healthy = try prefabBytes(gpa, ext_healthy);
+    defer gpa.free(healthy);
+    const combat = try cookCombatModule(gpa);
+    defer gpa.free(combat);
+    var mr = MultiResolver{ .names = &.{ "Healthy", "CombatModule" }, .blobs = &.{ healthy, combat } };
+    const src = try std.fmt.allocPrint(gpa,
+        \\component Marker {{ v: i32 = 0 }}
+        \\scene "S" {{
+        \\  entity "npc" {{
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: {s}
+        \\    Marker {{ v: 1 }}
+        \\  }}
+        \\}}
+    , .{extensions});
+    defer gpa.free(src);
+    return scene_cook.cookScene(gpa, src, mr.base(), null);
+}
+
+test "a cooked extends prefab carries its requires in source order" {
+    const gpa = std.testing.allocator;
+    const base_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Mana { v: i32 = 0 }
+        \\prefab "Caster" {
+        \\  entity "root" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4f" Health { current: 1, max: 1 } Mana { v: 1 } }
+        \\}
+    ;
+    const base_bytes = try prefabBytes(gpa, base_src);
+    defer gpa.free(base_bytes);
+    var res = OneResolver{ .name = "Caster", .bytes = base_bytes };
+    const src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Mana { v: i32 = 0 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Spells" extends "Caster" requires Mana, Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\}
+    ;
+    var cooked = try scene_cook.cookPrefab(gpa, src, res.base(), null);
+    defer cooked.deinit(gpa);
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+    const acc = try Accessor.open(bytes);
+    try std.testing.expectEqual(@as(u32, 2), acc.requiresCount());
+    try std.testing.expectEqualStrings("Mana", acc.requiredName(0));
+    try std.testing.expectEqualStrings("Health", acc.requiredName(1));
+}
+
+test "activation refuses an entity missing a required component" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    const weapon_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    const marker_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{marker_id});
+
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    try std.testing.expectError(error.RequiresNotSatisfied, scene.loader.runtimeActivate(&world, gpa, eid, "CombatModule", res.ext()));
+    try std.testing.expect(world.componentBytes(eid, weapon_id) == null);
+    try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
+}
+
+test "a scene activating an extension whose requirement the entity lacks does not cook" {
+    const gpa = std.testing.allocator;
+    if (cookMarkerScene(gpa, "[\"CombatModule\"]")) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.RequiresNotSatisfied, err);
+}
+
+test "a requirement an earlier extension provides is satisfied" {
+    const gpa = std.testing.allocator;
+    var cooked = try cookMarkerScene(gpa, "[\"Healthy\", \"CombatModule\"]");
+    cooked.deinit(gpa);
+}
+
+test "a requirement only a later extension provides does not cook" {
+    const gpa = std.testing.allocator;
+    if (cookMarkerScene(gpa, "[\"CombatModule\", \"Healthy\"]")) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.RequiresNotSatisfied, err);
+}
+
+test "an extends requires over a malformed but rehashed base does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    const bad = try gpa.dupe(u8, base_bytes);
+    defer gpa.free(bad);
+    std.mem.writeInt(u32, bad[20..24], 0xFFFF, .little); // schema_count, outside the hashed bytes
+    var res = OneResolver{ .name = "BaseCharacter", .bytes = bad };
+    const src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\}
+    ;
+    try std.testing.expectError(error.BasePrefabCorrupt, scene_cook.cookPrefab(gpa, src, res.base(), null));
 }

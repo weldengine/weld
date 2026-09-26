@@ -553,8 +553,9 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 ///      (`error.ExtensionAlreadyActive` — closes the hook-only
 ///      re-activation gap); resolve the strict mono-entity archetype
 ///      (`extEntityArchetype`: `total == 0`/`> 1` rejected).
-///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; size-check;
-///      conflict-check each against the entity.
+///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; check its
+///      size, alignment and kind; conflict-check each against the entity; check
+///      the entity carries every component the extension requires.
 ///   2. Reserve the extension-record capacity (fallible, no observable mutation).
 ///   3. Grouped add — the SINGLE fallible component mutation, itself atomic
 ///      (`world.addComponentsDynamic`): at most ONE archetype migration, never
@@ -601,6 +602,7 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
         cids[c] = cid;
         values[c] = arch.componentSlot(c, 0);
     }
+    if (!requiresMet(world, entity, ext)) return error.RequiresNotSatisfied;
 
     // Step 2 — reserve the extension-record capacity (fallible, no observable
     // mutation). `owned` is freed if we abort before committing it.
@@ -620,13 +622,24 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
     try world.dispatchOnAttach(entity, name, on_attach_text);
 }
 
+/// Whether `entity` carries every component the extension `ext` requires.
+fn requiresMet(world: *World, entity: EntityId, ext: Accessor) bool {
+    var ri: u32 = 0;
+    while (ri < ext.requiresCount()) : (ri += 1) {
+        const cid = world.componentId(ext.requiredName(ri)) orelse return false;
+        if (world.componentBytes(entity, cid) == null) return false;
+    }
+    return true;
+}
+
 /// Runtime extension activation entry, reached from Etch
 /// `entity.activate_extension("X")` (the interpreter resolves the name through
 /// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
 /// path (atomic prevalidate → reserve → grouped add → record → `on_attach`).
 /// Unknown name → `error.UnknownExtension`; a component the entity already
 /// carries → `error.ExtensionComponentConflict` (the normative additive-conflict
-/// reject policy — see `engine-scene-serialization.md`).
+/// reject policy — see `engine-scene-serialization.md`); a required component
+/// the entity lacks → `error.RequiresNotSatisfied`.
 pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
     const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
     try activateExtension(world, gpa, entity, name, bytes);

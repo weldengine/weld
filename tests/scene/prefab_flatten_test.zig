@@ -330,3 +330,21 @@ test "a scene whose instanced column alignment differs does not cook" {
         \\}
     , error.BaseSchemaMismatch);
 }
+
+test "an instance of a malformed but rehashed prefab does not cook" {
+    const gpa = std.testing.allocator;
+    var torch = try cookTorch(gpa);
+    defer torch.deinit(gpa);
+    const torch_bytes = try scene.writer.write(gpa, torch.model, &torch.registry);
+    defer gpa.free(torch_bytes);
+    const bad = try gpa.dupe(u8, torch_bytes);
+    defer gpa.free(bad);
+    std.mem.writeInt(u32, bad[20..24], 0xFFFF, .little); // schema_count, outside the hashed bytes
+    var resolver = OneResolver{ .name = "Torch", .bytes = bad };
+    const src = scene_decls ++
+        \\scene "S" {
+        \\  instance of "Torch" "I" { uuid: "00000000-0000-0000-0000-0000000000a1" }
+        \\}
+    ;
+    try std.testing.expectError(error.BasePrefabCorrupt, scene_cook.cookScene(gpa, src, resolver.base(), null));
+}

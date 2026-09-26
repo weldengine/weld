@@ -124,7 +124,8 @@ pub const CookError = error{
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
-    /// The resolved base `.prefab.bin` bytes failed `accessor.open`/`verifyHash`.
+    /// The resolved base `.prefab.bin` bytes failed `accessor.open`, `verifyHash`
+    /// or structure validation.
     BasePrefabCorrupt,
     /// A base prefab component's name is unknown to the variant's registry, or
     /// its on-disk size disagrees with the variant registry's layout.
@@ -220,6 +221,16 @@ pub fn cookScene(
     // share one arena. Adding `errdefer model.deinit()` double-frees it; the
     // `errdefer b.arena.deinit()` above already covers every failure path.
     return .{ .model = model, .registry = registry };
+}
+
+/// Open resolver-supplied `.prefab.bin` bytes for the accessor's getters:
+/// magic and version, content hash, then structure (`accessor.zig`'s trust
+/// contract).
+fn openResolvedPrefab(bytes: []const u8, diag_out: ?*[]const u8) CookError!accessor.Accessor {
+    const acc = accessor.Accessor.open(bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "a resolved .prefab.bin failed to open (magic/version)");
+    if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "a resolved .prefab.bin fails its content hash");
+    validate.structure(acc.bytes, acc.header) catch return fail(diag_out, error.BasePrefabCorrupt, "a resolved .prefab.bin is structurally invalid");
+    return acc;
 }
 
 fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
@@ -662,6 +673,13 @@ const Builder = struct {
             // invalid) would otherwise panic on `schemaCount`/`schema` reads.
             validate.structure(acc.bytes, acc.header) catch continue;
 
+            // A required component comes from the base or an extension listed
+            // earlier, the order in which the loader activates them.
+            var ri: u32 = 0;
+            while (ri < acc.requiresCount()) : (ri += 1) {
+                if (!counts.contains(acc.requiredName(ri))) return fail(diag_out, error.RequiresNotSatisfied, "an entity activates an extension requiring a component that neither the entity nor an extension listed before it carries");
+            }
+
             // Each component the extension declares (its `.prefab.bin` schema table;
             // names unique per prefab) bumps that name's distinct-declarant count.
             // Reaching 2 is the conflict — form (a) if the prior declarant was another
@@ -747,8 +765,7 @@ const Builder = struct {
             const base_name = self.ast.strings.slice(pd.relation_target);
             const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "`of` variant cooked without a base-prefab resolver");
             const base_bytes = resolver.resolve(base_name) orelse return fail(diag_out, error.BasePrefabMissing, "`of` variant references a base prefab the resolver does not know");
-            var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin failed to open (magic/version)");
-            if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin content hash mismatch");
+            const acc = try openResolvedPrefab(base_bytes, diag_out);
             try self.reconstructBase(acc, &entities, diag_out);
             try self.mergeVariantEntities(prefab_entities, &entities, diag_out);
         } else {
@@ -770,6 +787,8 @@ const Builder = struct {
         const archetypes = try self.groupArchetypes(entities.items);
         const content_version = try self.versionFromNode(pd.version, diag_out);
         const hooks = if (pd.relation == .extends) try self.buildExtendsHooks(pd, base_resolver, diag_out) else &[_]format.HookSet{};
+        const requires = try self.a().alloc(u32, pd.requires_len);
+        for (requires, 0..) |*r, ri| r.* = try self.internString(self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]));
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -778,6 +797,7 @@ const Builder = struct {
             .archetypes = archetypes,
             .content_version = content_version,
             .hooks = hooks,
+            .requires = requires,
             .arena = self.arena,
         };
     }
@@ -816,8 +836,7 @@ const Builder = struct {
         const base_name = self.ast.strings.slice(pd.relation_target);
         const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "`extends … requires` needs a base-prefab resolver to validate against X");
         const base_bytes = resolver.resolve(base_name) orelse return fail(diag_out, error.BasePrefabMissing, "`extends` references a base prefab the resolver does not know");
-        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin failed to open (magic/version)");
-        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin content hash mismatch");
+        const acc = try openResolvedPrefab(base_bytes, diag_out);
         var ri: u32 = 0;
         while (ri < pd.requires_len) : (ri += 1) {
             const req = self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]);
@@ -1037,8 +1056,7 @@ const Builder = struct {
         const prefab_name = self.ast.strings.slice(inst.prefab_name);
         const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "scene `instance of` cooked without a prefab resolver (no --prefab-dir?)");
         const base_bytes = resolver.resolve(prefab_name) orelse return fail(diag_out, error.BasePrefabMissing, "`instance of` references a prefab the resolver does not know");
-        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin failed to open (magic/version)");
-        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin content hash mismatch");
+        const acc = try openResolvedPrefab(base_bytes, diag_out);
 
         // Identity next — cross-ref pendings recorded while applying the body need
         // the source entity's uuid ordinal (the instance's, not the prefab's).
