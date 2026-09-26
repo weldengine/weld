@@ -274,9 +274,6 @@ pub const World = struct {
         self.archetype_by_signature.deinit(gpa);
         self.sparse_stores.deinit(gpa);
         self.entity_locations.deinit(gpa);
-        // Reclaim resource-owned persistent payloads (strings, collections)
-        // BEFORE freeing the byte buffers. Idempotent — a no-op
-        // when an interpreter already ran this in its own deinit.
         self.releaseResourcePayloads(gpa);
         self.resources.deinit(gpa);
         self.singleton_resources.deinit(gpa);
@@ -2398,7 +2395,9 @@ pub const World = struct {
 
     /// Add a resource. `init_bytes` is duplicated by the store.
     pub fn addResource(self: *World, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) !void {
+        try self.registry.checkResource(id);
         try self.resources.addResource(gpa, id, init_bytes);
+        self.registry.markResource(id);
     }
 
     /// Tick boundary — reset resource dirty bits. Called once per tick
@@ -2420,27 +2419,12 @@ pub const World = struct {
     }
 
     /// Decref and zero every resource's persistent-heap payload slot
-    /// (`.string_` / `.array_` / `.map_` / `.set_`) — the uniform teardown of
-    /// resource-owned heap blocks. Tier-0 `World` owns this
-    /// walk so a world with no interpreter (e.g. the scene loader over a bare
-    /// world) and any resource outside the interpreter's `bridge.resources`
-    /// still reclaim their blocks. `ResourceStore` stays string-agnostic in
-    /// write — `resources.deinit` only frees the byte buffers — but `World`
-    /// owns this decref pass over them.
-    ///
-    /// Idempotent: each slot is zeroed (`ptr = 0`) after its decref, so a
-    /// second call no-ops. This is load-bearing for the interpreter teardown
-    /// order — `Interpreter.deinit` calls this BEFORE destroying its immortal
-    /// `persistent_literals`, and the subsequent `World.deinit` call then sees
-    /// zeroed slots and never re-reads a slot pointing at a freed immortal
-    /// block (which would be a use-after-free). `persistent.decref` no-ops on a
-    /// sentinel-refcount immortal default and frees a refcounted user block.
-    ///
-    /// Allocation-free (decrefs + in-place slot zeroing only); never fails.
-    /// Reaches into `resources.entries` directly rather than through a store
-    /// method: the enumeration is a `World`-level teardown concern, and
-    /// `ResourceStore` (FROZEN) exposes no all-resources iterator.
-    pub fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
+    /// (`.string_` / `.array_` / `.map_` / `.set_`), whoever wrote it. Run by
+    /// `deinit`, before the store frees the buffers holding the slots and
+    /// before the registry destroys the immortal blocks a string slot may point
+    /// at, which `decref` leaves alone. Idempotent: each slot is zeroed after its
+    /// decref.
+    fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
         var it = self.resources.entries.iterator();
         while (it.next()) |kv| {
             const rid = kv.key_ptr.*;
@@ -2837,16 +2821,6 @@ test "grouped ops reject duplicate / absent components (R11c) without panicking"
     try std.testing.expect(world.componentBytes(e, c) != null);
 }
 
-//
-// `allocateSlot` fills only the TRAILING chunk, so a chunk drained by churn is
-// never refilled, and without reclamation the chunk count follows the cumulative
-// number of appends rather than the live population — until `dispatchBatch`
-// refuses the archetype at its chunk ceiling.
-//
-// Every assertion below is on `chunks_released` or on a survivor's bytes, never
-// on the absence of a crash: an implementation that reclaims nothing passes
-// every OTHER test in this file.
-
 /// A four-byte probe, so one chunk holds many entities and the capacity is the
 /// test's own parameter rather than a literal that a layout change would rot.
 fn reclaimProbe(name: []const u8) ComponentDesc {
@@ -2938,4 +2912,94 @@ test "sustained churn keeps the chunk count on the live population" {
     try std.testing.expectEqual(@as(usize, 2 * cap), live.items.len);
     try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
     try std.testing.expect(arch.chunks_released >= 4);
+}
+
+test "a chunk left partial by churn is refilled, and nothing is reclaimed" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PA"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    const holes = cap / 4;
+    try std.testing.expect(holes > 0);
+    for (0..holes) |i| try world.despawn(gpa, ids.items[i]);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+
+    // The trailing chunk must be FULL here, or the count below passes without reuse.
+    for (0..holes) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+    try std.testing.expectEqual(@as(usize, 3), arch.chunks.items.len);
+    try std.testing.expectEqual(@as(u64, 0), arch.chunks_released);
+}
+
+test "a reused slot is reported at the chunk it actually landed in" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PB"));
+    const first = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 2 * cap) {
+        try ids.append(gpa, try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 7, 0, 0, 0 }}));
+    }
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    try world.despawn(gpa, ids.items[0]);
+
+    const reused = try world.spawnDynamicWithValues(gpa, &.{cid}, &.{&[_]u8{ 9, 0, 0, 0 }});
+    const loc = world.entity_locations.get(reused).?;
+    try std.testing.expectEqual(@as(u32, 0), loc.chunk_idx);
+    try std.testing.expectEqual(@as(usize, 2), arch.chunks.items.len);
+
+    const bytes = world.componentBytes(reused, cid).?;
+    try std.testing.expectEqual(@as(u8, 9), bytes[0]);
+
+    for (ids.items[1..]) |e| {
+        const b = world.componentBytes(e, cid) orelse return error.SurvivorLost;
+        try std.testing.expectEqual(@as(u8, 7), b[0]);
+    }
+}
+
+test "first_partial is a lower bound: every chunk below it is full" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try world.registerComponentRaw(gpa, reclaimProbe("PC"));
+    const first = try world.spawnDynamic(gpa, &.{cid});
+    const arch = world.archetypes.items[world.entity_locations.get(first).?.archetype_idx];
+    const cap = arch.layout.capacity;
+
+    var ids: std.ArrayListUnmanaged(EntityId) = .empty;
+    defer ids.deinit(gpa);
+    try ids.append(gpa, first);
+    while (ids.items.len < 3 * cap) try ids.append(gpa, try world.spawnDynamic(gpa, &.{cid}));
+
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        for (0..cap / 8) |i| try world.despawn(gpa, ids.items[round * cap + i]);
+        for (0..cap / 8) |_| _ = try world.spawnDynamic(gpa, &.{cid});
+
+        for (arch.chunks.items[0..arch.first_partial]) |c| {
+            try std.testing.expectEqual(arch.layout.capacity, c.header().entity_count);
+        }
+        try std.testing.expect(arch.first_partial <= arch.chunks.items.len);
+    }
 }

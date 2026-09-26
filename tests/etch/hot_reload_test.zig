@@ -1,8 +1,8 @@
 //! Interpreter hot-reload — edit a rule body → AST swap → behaviour change,
 //! measured under 500 ms.
 //!
-//! There is no in-place AST swap: the Interpreter borrows `*const AstArena`
-//! and derives its compiled tables eagerly, so a reload re-parses the edited
+//! There is no in-place AST swap: the Interpreter compiles its own copy of the
+//! AST and derives its compiled tables eagerly, so a reload re-parses the edited
 //! source into a fresh AST and re-runs `Interpreter.compile` on the SAME
 //! `World`. Live world state (entities, component bytes) survives because the
 //! world is external to the interpreter and `compile` is idempotent w.r.t.
@@ -149,6 +149,25 @@ const src_no_counter =
     \\}
 ;
 
+test "an interpreter outlives the parse result it was compiled from" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src_a);
+    var pr_live = true;
+    defer if (pr_live) pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    pr.deinit(gpa);
+    pr_live = false;
+
+    const cid = world.registry.idOf("Counter").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
 /// Compile `src` on `world`, returning the error rather than the interpreter.
 fn reloadOn(gpa: std.mem.Allocator, world: *World, src: []const u8) !void {
     var pr = try weld_etch.parseSource(gpa, src);
@@ -241,8 +260,35 @@ const src_tags_wide =
     \\}
 ;
 
-/// Same width as `src_tags_narrow`, different tag NAMES. Feeds the adjacent
-/// case pinned below.
+/// Same width and NAMES as `src_tags_narrow`, order SWAPPED, which permutes
+/// every `bit_index`.
+const src_tags_reordered =
+    \\tags {
+    \\  a { t01, t00 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// One MORE tag than `src_tags_narrow`, still inside the first word; every
+/// existing tag keeps its `bit_index`.
+const src_tags_appended =
+    \\tags {
+    \\  a { t00, t01, t02 }
+    \\}
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+/// Same width as `src_tags_narrow`, different tag NAMES.
 const src_tags_renamed =
     \\tags {
     \\  a { u00, u01 }
@@ -272,7 +318,7 @@ test "a reload widening TagSet past a word boundary is refused" {
     try std.testing.expectEqual(size_before, world.registry.componentSize(cid));
 }
 
-test "a reload renaming tags within one word is accepted — the adjacent case" {
+test "a reload renaming tags within one word is REFUSED" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -280,20 +326,46 @@ test "a reload renaming tags within one word is accepted — the adjacent case" 
 
     const cid = world.registry.idOf("TagSet").?;
 
-    // ADJACENT CASE, ACCEPTED AND OUT OF THE REFUSAL'S SCOPE. `schemaDigestOf`
-    // hashes name, size, alignment and each FIELD's (name, kind, offset); the
-    // `TagSet` descriptor carries `fields = &.{}` because it is a bitfield and
-    // not a struct. So tag IDENTITY is not expressible in the digest at all:
-    // renaming or reordering tags without crossing a word boundary keeps the
-    // same size, hence the same digest, and the reload is accepted while the
-    // bit assignment of live entities now denotes different tags.
-    //
-    // Refusing it needs a digest over the tag table's own content — a different
-    // mechanism from the layout digest this test's sibling exercises, and NOT a
-    // gap in it. Pinned as accepted so the boundary is observable rather than
-    // asserted in prose.
-    try reloadOn(gpa, &world, src_tags_renamed);
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_renamed));
     try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "a reload reordering tags within one word is REFUSED" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    const cid = world.registry.idOf("TagSet").?;
+
+    // Catches a digest over the tag names that ignores their order, which the
+    // rename refusal misses.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_reordered));
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "an identical tag reload is still accepted — the green twin" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    // Catches a digest that refuses every tag reload, which both refusals miss.
+    const cid = world.registry.idOf("TagSet").?;
+    try reloadOn(gpa, &world, src_tags_narrow);
+    try std.testing.expectEqual(cid, world.registry.idOf("TagSet").?);
+    try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(cid));
+}
+
+test "appending a tag inside one word is refused — the MEASURED COST, not a defect" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try reloadOn(gpa, &world, src_tags_narrow);
+
+    // A false refusal: the reload is safe, but a whole-table digest cannot tell
+    // a surviving prefix from a changed table.
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_tags_appended));
 }
 
 const src_r3_partial =
@@ -359,4 +431,448 @@ test "a TagSet refusal leaves no half-registered type behind either" {
 
     try std.testing.expect(world.registry.idOf("Extra") == null);
     try std.testing.expectEqual(@as(usize, 8), world.registry.componentSize(world.registry.idOf("TagSet").?));
+}
+
+const OneShotFailing = weld_core.testing.alloc_counting.OneShotFailing;
+test "OneShotFailing fails exactly the chosen allocation and none after it" {
+    const gpa = std.testing.allocator;
+    var failing: OneShotFailing = .{ .backing = gpa, .fail_at = 1 };
+    const a = failing.allocator();
+    const first = try a.alloc(u8, 4);
+    defer a.free(first);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 4));
+    const third = try a.alloc(u8, 4);
+    defer a.free(third);
+    try std.testing.expect(failing.failed);
+    try std.testing.expectEqual(@as(usize, 3), failing.count);
+    try std.testing.expect(!a.resize(third, 8));
+}
+
+// Reaches every world mutation of `compile` (a component with a requisite, a
+// resource with a string and three collection fields, `TagSet`, the builtins),
+// every rule-lowering path, a sparse selection, and a descriptor built after the
+// rules.
+const src_registration =
+    \\tags {
+    \\  a { t00, t01 }
+    \\}
+    \\component Transform { x: int = 0 }
+    \\@requires(Transform)
+    \\component Mesh { v: i32 = 0 }
+    \\component Tag2 { k: int = 0 }
+    \\@storage(.sparse)
+    \\component Hot { h: int = 0 }
+    \\@storage(.sparse)
+    \\component Cold { c: int = 0 }
+    \\struct Item { value: int }
+    \\data Db: Item { a: { value: 1 }, b: { value: 2 } }
+    \\resource Inventory { n: int = 0, items: string[] = ["a", "b"], label: string = "hi", counts: [string: int] = ["x": 1], seen: Set<int> }
+    \\rule tick(entity: Entity)
+    \\  when entity has Transform
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+    \\rule either(entity: Entity)
+    \\  when entity has Transform or entity has Tag2
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+    \\rule filtered(entity: Entity)
+    \\  when entity has Transform { x * 2 < 10 }
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+    \\rule gated(entity: Entity)
+    \\  when resource Inventory { n < 10 } and entity has Transform
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+    \\rule tagged(entity: Entity)
+    \\  when entity has_tag .a.t00 and entity has Transform
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+    \\rule sparse(entity: Entity)
+    \\  when entity has Hot and not entity has Cold
+    \\{
+    \\  entity.get_mut(Hot).h += 1
+    \\}
+    \\async rule waits(entity: Entity)
+    \\  when entity has Mesh
+    \\{
+    \\  await wait(1.0s)
+    \\}
+;
+// A strict subset of `src_registration`, so a reload onto it adds types.
+const src_registration_base =
+    \\tags {
+    \\  a { t00, t01 }
+    \\}
+    \\component Transform { x: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Transform
+    \\{
+    \\  entity.get_mut(Transform).x += 1
+    \\}
+;
+
+const WorldShape = struct { components: usize, resources: u32, closures: u64 };
+
+fn worldShape(world: *World) WorldShape {
+    var h = std.hash.Wyhash.init(0);
+    const n = world.registry.componentCount();
+    for (0..n) |id| {
+        const c = world.registry.requiresClosure(@intCast(id));
+        h.update(std.mem.asBytes(&id));
+        h.update(std.mem.asBytes(&c.len));
+        h.update(std.mem.sliceAsBytes(c));
+    }
+    return .{ .components = n, .resources = world.resources.entries.count(), .closures = h.final() };
+}
+
+const Health = enum { healthy, missing_store_entry, null_collection, unowned_string, missing_closure };
+
+fn slotWord(bytes: []const u8, offset: u16) u64 {
+    return std.mem.bytesToValue(u64, bytes[offset..][0..8]);
+}
+
+/// What `src_registration` leaves in a world once compiled.
+fn registrationHealth(world: *World) Health {
+    for ([_][]const u8{ "GameTime", "UnscaledTime", "RealTime", "Inventory" }) |name| {
+        const id = world.registry.idOf(name) orelse return .missing_store_entry;
+        if (world.resources.getResource(id) == null) return .missing_store_entry;
+    }
+    const inv = world.registry.idOf("Inventory").?;
+    const bytes = world.resources.getResource(inv).?;
+    for ([_][]const u8{ "items", "counts", "seen" }) |field| {
+        if (slotWord(bytes, world.registry.findField(inv, field).?.offset) == 0) return .null_collection;
+    }
+    const label = world.registry.findField(inv, "label").?;
+    const ptr = slotWord(bytes, label.offset);
+    const len = std.mem.bytesToValue(u32, bytes[label.offset + 8 ..][0..4]);
+    const owned = for (world.registry.ownedBlocks(inv)) |b| {
+        if (@intFromPtr(b) == ptr) break true;
+    } else false;
+    if (!owned or len != 2) return .unowned_string;
+    if (!std.mem.eql(u8, @as([*]const u8, @ptrFromInt(ptr))[0..len], "hi")) return .unowned_string;
+    const mesh = world.registry.idOf("Mesh") orelse return .missing_closure;
+    if (!world.registry.isRequiredBy(world.registry.idOf("Transform").?, mesh)) return .missing_closure;
+    return .healthy;
+}
+
+/// Fail every allocation of one `compile` in turn, onto a world `base` left live.
+/// Each failure must surface as `OutOfMemory` and leave the world as it found it
+/// or exactly as a successful compile would, and a retry on that world must
+/// produce a healthy one. Returns the number of allocations swept.
+fn sweepCompile(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8) !usize {
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var base_ast = if (base) |b| try weld_etch.parseSource(gpa, b) else null;
+    defer if (base_ast) |*p| p.deinit(gpa);
+    if (base_ast) |*p| try typeCheckClean(gpa, &p.ast);
+
+    // CONTROLS, same apparatus, same execution: a clean compile reads healthy,
+    // and the same world with a store entry removed does not.
+    const committed = blk: {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var live = if (base_ast) |*p| try Interpreter.compile(gpa, &p.ast, &world) else null;
+        defer if (live) |*l| l.deinit();
+        var it = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer it.deinit();
+        try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+        const inv = world.registry.idOf("Inventory").?;
+        const kept = world.resources.entries.fetchRemove(inv).?;
+        try std.testing.expectEqual(Health.missing_store_entry, registrationHealth(&world));
+        world.resources.entries.putAssumeCapacity(inv, kept.value);
+        break :blk worldShape(&world);
+    };
+
+    var k: usize = 0;
+    while (true) : (k += 1) {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var live = if (base_ast) |*p| try Interpreter.compile(gpa, &p.ast, &world) else null;
+        defer if (live) |*l| l.deinit();
+        const before = worldShape(&world);
+
+        var failing: OneShotFailing = .{ .backing = gpa, .fail_at = k };
+        if (Interpreter.compile(failing.allocator(), &pr.ast, &world)) |compiled| {
+            var it = compiled;
+            it.deinit();
+            // Success after an injected failure means an OutOfMemory was swallowed.
+            try std.testing.expect(!failing.failed);
+            return k;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            const after = worldShape(&world);
+            try std.testing.expect(std.meta.eql(after, before) or std.meta.eql(after, committed));
+        }
+        var retried = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer retried.deinit();
+        try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+    }
+}
+
+test "a compile failing at any allocation leaves the world whole, first compile" {
+    try std.testing.expect(try sweepCompile(std.testing.allocator, null, src_registration) > 50);
+}
+
+test "a compile failing at any allocation leaves the world whole, reload adding types" {
+    try std.testing.expect(try sweepCompile(std.testing.allocator, src_registration_base, src_registration) > 50);
+}
+
+test "a compile failing at any allocation leaves the world whole, reload of the same program" {
+    try std.testing.expect(try sweepCompile(std.testing.allocator, src_registration, src_registration) > 50);
+}
+
+test "compiling B, then tearing A down, leaves B's session its resources" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src_registration);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+
+    var a = try Interpreter.compile(gpa, &pr.ast, &world);
+    var b = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer b.deinit();
+    a.deinit();
+
+    try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+    _ = try b.runFor(&world, 1);
+    try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+}
+
+test "an interpreter torn down before the next compile takes no resource with it" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try weld_etch.parseSource(gpa, src_registration);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+
+    var a = try Interpreter.compile(gpa, &pr.ast, &world);
+    a.deinit();
+    var b = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer b.deinit();
+
+    try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+    _ = try b.runFor(&world, 1);
+    try std.testing.expectEqual(Health.healthy, registrationHealth(&world));
+}
+
+/// Append `resource Big`, a declaration past the registry's 64 KiB.
+fn appendOversized(gpa: std.mem.Allocator, src: *std.ArrayListUnmanaged(u8)) !void {
+    try src.appendSlice(gpa, "resource Big { v0: int = 0");
+    for (1..8200) |i| try src.print(gpa, ", v{d}: int = 0", .{i});
+    try src.appendSlice(gpa, " }\n");
+}
+
+test "a declaration past 64 KiB is refused and registers nothing" {
+    const gpa = std.testing.allocator;
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(gpa);
+    // A declaration staged BEFORE the oversized one, so that a registration
+    // committed per declaration would leave it behind.
+    try src.appendSlice(gpa, "component Small { x: int = 0 }\n");
+    try appendOversized(gpa, &src);
+
+    var pr = try weld_etch.parseSource(gpa, src.items);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    try std.testing.expectError(error.LayoutTooLarge, Interpreter.compile(gpa, &pr.ast, &world));
+    try std.testing.expectEqual(@as(usize, 0), world.registry.componentCount());
+}
+
+const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
+const src_counter = "component Counter { value: int = 0 }\n";
+
+/// Reload, onto a world running `src_counter`, a program declaring an oversized
+/// resource and a widened `Counter`, in the order `oversized_first` gives.
+fn reloadWithTwoFaults(gpa: std.mem.Allocator, oversized_first: bool) !void {
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(gpa);
+    if (oversized_first) try appendOversized(gpa, &src);
+    try src.appendSlice(gpa, "component Counter { value: int = 0, extra: int = 0 }\n");
+    if (!oversized_first) try appendOversized(gpa, &src);
+
+    var base = try weld_etch.parseSource(gpa, src_counter);
+    defer base.deinit(gpa);
+    try typeCheckClean(gpa, &base.ast);
+    var pr = try weld_etch.parseSource(gpa, src.items);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var live = try Interpreter.compile(gpa, &base.ast, &world);
+    defer live.deinit();
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    it.deinit();
+}
+
+test "a reload with two refusals reports the first declaration's: the oversized one" {
+    try std.testing.expectError(error.LayoutTooLarge, reloadWithTwoFaults(std.testing.allocator, true));
+}
+
+test "a reload with two refusals reports the first declaration's: the widened one" {
+    try std.testing.expectError(error.SchemaChanged, reloadWithTwoFaults(std.testing.allocator, false));
+}
+
+/// Allocations `compile` makes for `src` onto a world already running `base`, or
+/// onto a fresh world when `base` is null, less those of the interpreter's copy
+/// of the arena, which follow the source text.
+fn compileAllocations(gpa: std.mem.Allocator, base: ?[]const u8, src: []const u8) !u64 {
+    var base_pr = if (base) |b| try weld_etch.parseSource(gpa, b) else null;
+    defer if (base_pr) |*p| p.deinit(gpa);
+    if (base_pr) |*p| try typeCheckClean(gpa, &p.ast);
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var live = if (base_pr) |*p| try Interpreter.compile(gpa, &p.ast, &world) else null;
+    defer if (live) |*l| l.deinit();
+
+    var counting = CountingAllocator.init(gpa);
+    var it = try Interpreter.compile(counting.allocator(), &pr.ast, &world);
+    const n = counting.snapshot().alloc_count;
+    it.deinit();
+    var copying = CountingAllocator.init(gpa);
+    var copy = try pr.ast.clone(copying.allocator());
+    copy.deinit(copying.allocator());
+    return n - copying.snapshot().alloc_count;
+}
+
+test "a reload allocates nothing for the defaults of a type already registered" {
+    const gpa = std.testing.allocator;
+    const bare = "resource R { s: string }\n";
+    const defaulted = "resource R { s: string = \"abc\" }\n";
+    // Control: on a fresh world the same count sees the default being copied.
+    try std.testing.expect(try compileAllocations(gpa, null, defaulted) > try compileAllocations(gpa, null, bare));
+    try std.testing.expectEqual(try compileAllocations(gpa, bare, bare), try compileAllocations(gpa, bare, defaulted));
+}
+
+/// Compile `src` onto a world where a Zig component requiring `requisite` was
+/// registered first, and report whether its closure reaches `requisite`.
+fn zigRequisiteResolves(gpa: std.mem.Allocator, requisite: []const u8, src: []const u8) !bool {
+    var pr = try weld_etch.parseSource(gpa, src);
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    const requirer = try world.registry.registerComponentRaw(gpa, .{
+        .name = "ZigRequirer",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+        .requires = &.{requisite},
+    });
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer it.deinit();
+    return world.registry.isRequiredBy(world.registry.idOf(requisite).?, requirer);
+}
+
+test "a Zig requisite on TagSet resolves at the first compile" {
+    try std.testing.expect(try zigRequisiteResolves(std.testing.allocator, weld_etch.types.tagset_component_name, "tags {\n  a { t00 }\n}\n"));
+}
+
+test "a Zig requisite on a builtin time resource is refused at the first compile" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "component Plain { x: int = 0 }\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "ZigRequirer",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+        .requires = &.{"GameTime"},
+    });
+    const before = world.registry.componentCount();
+    try std.testing.expectError(error.RequisiteIsResource, Interpreter.compile(gpa, &pr.ast, &world));
+    try std.testing.expectEqual(before, world.registry.componentCount());
+    try std.testing.expect(world.registry.idOf("GameTime") == null);
+}
+
+test "every type a compile registers without the program declaring it has a reserved name" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "tags {\n  a { t00 }\n}\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    var it = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer it.deinit();
+
+    const n = world.registry.componentCount();
+    try std.testing.expect(n >= 1 + weld_etch.types.builtin_resources.len);
+    for (0..n) |id| {
+        const name = world.registry.componentName(@intCast(id));
+        if (!weld_etch.types.isReservedEngineTypeName(name)) {
+            std.debug.print("registered and not reserved: {s}\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// Source A with `Counter` a resource of the same layout.
+const src_counter_resource =
+    \\resource Counter { value: int = 0 }
+;
+
+/// Source A with `Counter` requiring a new component.
+const src_requires_changed =
+    \\component Mark { m: int = 0 }
+    \\@requires(Mark)
+    \\component Counter { value: int = 0 }
+    \\rule tick(entity: Entity)
+    \\  when entity has Counter
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+test "a reload that makes a component a resource is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_counter_resource));
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a reload that changes a component's @requires is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try liveSessionAt3(gpa, &world);
+    try std.testing.expectError(error.SchemaChanged, reloadOn(gpa, &world, src_requires_changed));
+    try std.testing.expect(world.registry.idOf("Mark") == null);
+    try std.testing.expectEqual(@as(i64, 3), readCounter(&world));
+}
+
+test "a builtin resource name held by a component is refused at compile" {
+    const gpa = std.testing.allocator;
+    var pr = try weld_etch.parseSource(gpa, "component Plain { x: int = 0 }\n");
+    defer pr.deinit(gpa);
+    try typeCheckClean(gpa, &pr.ast);
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{
+        .name = "GameTime",
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{0} ** 4,
+        .fields = &.{},
+    });
+    try std.testing.expectError(error.SchemaChanged, Interpreter.compile(gpa, &pr.ast, &world));
 }

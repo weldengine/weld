@@ -631,3 +631,109 @@ test "P4: an add with no closure and no listener allocates nothing of its own" {
     try testing.expectEqual(@as(usize, 10), Seen.n);
     try testing.expect(listener_ops > 0);
 }
+
+fn regKind(world: *World, gpa: std.mem.Allocator, name: []const u8, requires: []const []const u8, kind: ecs.TypeKind) !ComponentId {
+    return world.registry.registerComponentRaw(gpa, .{
+        .name = name,
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &zero8,
+        .fields = &.{},
+        .requires = requires,
+        .kind = kind,
+    });
+}
+
+test "a registration records the kind it declares" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const r = try regKind(&world, gpa, "R", &.{}, .resource);
+    const c = try regKind(&world, gpa, "C", &.{}, .component);
+    try testing.expectEqual(ecs.TypeKind.resource, world.registry.componentKind(r));
+    try testing.expectEqual(ecs.TypeKind.component, world.registry.componentKind(c));
+}
+
+test "a requisite that is a resource is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try regKind(&world, gpa, "C", &.{"R"}, .component);
+    _ = try regKind(&world, gpa, "R", &.{}, .resource);
+    try testing.expectError(error.RequisiteIsResource, world.registry.finalizeRequires(gpa));
+}
+
+test "the same requisite registered as a component resolves" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try regKind(&world, gpa, "C", &.{"R"}, .component);
+    const r = try regKind(&world, gpa, "R", &.{}, .component);
+    try world.registry.finalizeRequires(gpa);
+    try testing.expect(world.registry.isRequiredBy(r, c));
+}
+
+test "a resource reached through a requisite's own requisite is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try regKind(&world, gpa, "C", &.{"B"}, .component);
+    _ = try regKind(&world, gpa, "B", &.{"R"}, .component);
+    _ = try regKind(&world, gpa, "R", &.{}, .resource);
+    try testing.expectError(error.RequisiteIsResource, world.registry.finalizeRequires(gpa));
+}
+
+test "a refused finalization keeps the closures it had" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const a = try regKind(&world, gpa, "A", &.{"B"}, .component);
+    const b = try regKind(&world, gpa, "B", &.{}, .component);
+    try world.registry.finalizeRequires(gpa);
+    _ = try regKind(&world, gpa, "C", &.{"R"}, .component);
+    _ = try regKind(&world, gpa, "R", &.{}, .resource);
+    try testing.expectError(error.RequisiteIsResource, world.registry.finalizeRequires(gpa));
+    try testing.expect(world.registry.isRequiredBy(b, a));
+}
+
+test "a resource carrying requisites is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try regKind(&world, gpa, "R", &.{"C"}, .resource);
+    _ = try regKind(&world, gpa, "C", &.{}, .component);
+    try testing.expectError(error.RequiresOnResource, world.registry.finalizeRequires(gpa));
+}
+
+test "adding as a resource a type a closure requires is refused, and changes nothing" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try regKind(&world, gpa, "C", &.{"R"}, .component);
+    const r = try regKind(&world, gpa, "R", &.{}, .component);
+    try world.registry.finalizeRequires(gpa);
+    try testing.expectError(error.RequisiteIsResource, world.addResource(gpa, r, &zero8));
+    try testing.expect(!world.resources.contains(r));
+    try testing.expectEqual(ecs.TypeKind.component, world.registry.componentKind(r));
+}
+
+test "a type added as a resource is refused as a later requisite" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const r = try regKind(&world, gpa, "R", &.{}, .component);
+    try world.addResource(gpa, r, &zero8);
+    try testing.expectEqual(ecs.TypeKind.resource, world.registry.componentKind(r));
+    _ = try regKind(&world, gpa, "C", &.{"R"}, .component);
+    try testing.expectError(error.RequisiteIsResource, world.registry.finalizeRequires(gpa));
+}
+
+test "adding as a resource a type carrying requisites is refused" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const c = try regKind(&world, gpa, "C", &.{"B"}, .component);
+    _ = try regKind(&world, gpa, "B", &.{}, .component);
+    try world.registry.finalizeRequires(gpa);
+    try testing.expectError(error.RequiresOnResource, world.addResource(gpa, c, &zero8));
+}

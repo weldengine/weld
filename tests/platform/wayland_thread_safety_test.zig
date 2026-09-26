@@ -10,6 +10,7 @@
 //! Skipped on non-Linux runners.
 
 const std = @import("std");
+const test_env = @import("test_env");
 const builtin = @import("builtin");
 const weld = @import("weld_core");
 
@@ -54,15 +55,14 @@ fn workerStress(ctx: *Ctx) void {
 // tested pattern. Phase 0+ multi-window cleanup (cf. wayland.zig live_state
 // comment) will address this tension.
 test "concurrent createWindow + destroyWindow" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) return test_env.absent("a Linux host");
 
     const gpa = std.heap.page_allocator;
 
-    // CI runners that lack a Wayland compositor would fail on
-    // create() and trip err_count. We probe once to detect that case
-    // and skip cleanly.
+    // Probe first, so a missing compositor is reported as one and not as
+    // worker errors.
     var probe = weld.platform.window.Window.create(gpa, .{}) catch {
-        return error.SkipZigTest;
+        return test_env.absent("a Wayland compositor");
     };
     probe.destroy();
 

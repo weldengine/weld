@@ -16,6 +16,9 @@
         "control.zig",
         "case_undeclared.zig",
         "case_mutable_on_read.zig",
-        "case_missing_accesses.zig",
+        "case_mismatched_pair.zig",
+        "case_view_promotion.zig",
+        "case_erased_in_job.zig",
+        "case_erased_wrapped_in_job.zig",
     },
 }

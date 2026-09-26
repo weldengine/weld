@@ -65,6 +65,7 @@ comptime {
     _ = @import("interp.zig");
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
+    _ = @import("const_eval.zig");
     // `persistent.zig` lives in Tier 0 (`src/core/memory`) and is pinned by
     // `src/core/memory/root.zig`, reached here via `weld_core.memory` — so it
     // needs no entry of its own below.

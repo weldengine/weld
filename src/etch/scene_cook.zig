@@ -34,6 +34,7 @@ const std = @import("std");
 const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
 const types_mod = @import("types.zig");
+const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
 // `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
@@ -77,12 +78,20 @@ pub const CookError = error{
     DuplicateType,
     /// A scene component/resource instance names a type that was never declared.
     UndeclaredType,
+    /// An entity instance names a resource, which is no entity component.
+    ResourceAsComponent,
+    /// A `resources` block names an entity component, which is no resource.
+    ComponentAsResource,
     /// A field name in an instance body is not a field of the resolved type.
     UnknownField,
     /// A `..spread` field appeared in a component/resource instance body.
     SpreadUnsupported,
     /// A field value expression is not constant-evaluable at cook time.
     NonConstValue,
+    /// A constant field value overflows, or does not fit its field's type.
+    ValueOutOfRange,
+    /// `@requires` names a resource, or a resource carries `@requires`.
+    RequisiteIsResource,
     /// A value's type does not match the field's kind.
     TypeMismatch,
     /// A `uuid:`/`parent:` enum value referenced an unknown enum variant.
@@ -110,6 +119,8 @@ pub const CookError = error{
     /// An `extends` prefab's `on_attach`/`on_detach` body could not be rendered to
     /// canonical Etch text (a construct outside the descriptor renderer's surface).
     HookRenderFailed,
+    /// An extension hook, or its `requires` clause, fails the type checker.
+    HookRefused,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -237,6 +248,20 @@ pub const BaseResolver = struct {
     }
 };
 
+/// Refuse an extension hook or `requires` clause the type checker refuses, so
+/// a cooked hook is one `etch check` accepts (decision 3 point 4).
+fn checkHooks(gpa: std.mem.Allocator, ast: *AstArena, diag_out: ?*[]const u8) CookError!void {
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    types_mod.TypeChecker.checkPrefabHooks(gpa, ast, &diags) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    if (diags.items.len > 0) return fail(diag_out, error.HookRefused, "an extension hook or its requires clause fails the type checker");
+}
+
 /// Cook a `.prefab.etch` source into the neutral model + its registry, the same
 /// way `cook` handles `.scene.etch`. A prefab is a mini-scene (one `prefab`
 /// construct, body = `{ entity_decl }`, no `resources`/`instance`), serialized to
@@ -263,6 +288,7 @@ pub fn cookPrefab(
     defer pr.deinit(gpa);
     if (pr.diagnostics.len > 0) return fail(diag_out, error.ParseFailed, "Etch parse failed");
     const ast = &pr.ast;
+    try checkHooks(gpa, ast, diag_out);
 
     var registry = Registry.init();
     errdefer registry.deinit(gpa);
@@ -312,7 +338,6 @@ const Builder = struct {
 
     // Scratch (gpa-owned, freed by `deinitScratch`).
     bridge: Bridge,
-    literals: std.ArrayListUnmanaged([*]u8) = .empty,
     string_map: std.StringHashMapUnmanaged(u32) = .empty,
     uuid_map: std.AutoHashMapUnmanaged([16]u8, u32) = .empty,
     name_to_uuid_idx: std.StringHashMapUnmanaged(u32) = .empty,
@@ -346,12 +371,10 @@ const Builder = struct {
         };
     }
 
-    /// Free everything NOT owned by the produced model: the bridge, the immortal
-    /// persistent default blocks `compileTypeDecl` allocated, and the scratch
-    /// hashmaps. The model arena is transferred to the caller (not freed here).
+    /// Free everything NOT owned by the produced model: the bridge and the
+    /// scratch hashmaps. The model arena is transferred to the caller (not freed
+    /// here).
     fn deinitScratch(self: *Builder) void {
-        for (self.literals.items) |block| persistent.destroy(self.gpa, block);
-        self.literals.deinit(self.gpa);
         self.bridge.deinit(self.gpa);
         self.string_map.deinit(self.gpa);
         self.uuid_map.deinit(self.gpa);
@@ -373,15 +396,17 @@ const Builder = struct {
     /// declaration may name a component registered later — Etch admits forward
     /// references, and the descriptor carries NAMES for exactly that reason.
     fn finalizeDecls(self: *Builder, diag_out: ?*[]const u8) CookError!void {
-        // Every arm named, no `else`: `finalizeRequires` returns exactly three
-        // errors and an `else` here would widen `CookError` with whatever it
-        // grows next, which is the opposite of what a typed error set is for.
+        // Every arm named, no `else`: an `else` here would widen `CookError`
+        // with whatever `finalizeRequires` grows next, which is the opposite of
+        // what a typed error set is for.
         self.registry.finalizeRequires(self.gpa) catch |e| switch (e) {
             error.RequiresCycle => return fail(diag_out, error.RequiresCycle, "`@requires` closure contains a cycle"),
             // `UndeclaredType` and not a new member: an unknown requisite IS a
             // type the program never declared, which is exactly what that
             // member already means.
             error.UnknownRequisite => return fail(diag_out, error.UndeclaredType, "`@requires` names a component that does not exist"),
+            error.RequisiteIsResource => return fail(diag_out, error.RequisiteIsResource, "`@requires` names a resource, which no entity carries"),
+            error.RequiresOnResource => return fail(diag_out, error.RequisiteIsResource, "a resource carries `@requires`, which only a component can"),
             error.OutOfMemory => return error.OutOfMemory,
         };
     }
@@ -409,7 +434,7 @@ const Builder = struct {
                 .resource_decl => {
                     const decl = self.ast.resource_decls.items[datas[i]];
                     // `.table`: `@storage` is component-only, so a resource has
-                    // no mode to read (mirror of `compileResource`).
+                    // no mode to read.
                     _ = self.registerOne(self.ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, .resource, &.{}, .table, diag_out) catch |e| return e;
                 },
                 else => {},
@@ -427,10 +452,13 @@ const Builder = struct {
         storage: weld_core.ecs.registry.StorageKind,
         diag_out: ?*[]const u8,
     ) CookError!ComponentId {
-        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage, &self.literals) catch |e| switch (e) {
+        return interp.compileTypeDecl(self.gpa, self.ast, self.registry, &self.bridge, name, fields_start, fields_len, reg_kind, requires, storage) catch |e| switch (e) {
             error.InvalidProgram => fail(diag_out, error.UnsupportedFieldKind, "component/resource field has an unsupported type (only scalars, plus resource string/enum, are cookable)"),
-            error.DuplicateComponent => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
-            else => error.OutOfMemory,
+            error.LayoutTooLarge => fail(diag_out, error.UnsupportedFieldKind, "component/resource declaration exceeds the registry's 64 KiB"),
+            error.DuplicateComponent, error.SchemaChanged => fail(diag_out, error.DuplicateType, "component/resource type declared more than once"),
+            error.FieldOutOfBounds, error.CollectionDefaultNotEmpty => fail(diag_out, error.UnsupportedFieldKind, "the registry refused the declaration's field layout or defaults"),
+            error.ValueOutOfRange => fail(diag_out, error.ValueOutOfRange, "a field default overflows its type"),
+            error.OutOfMemory => error.OutOfMemory,
         };
     }
 
@@ -830,8 +858,7 @@ const Builder = struct {
             var c: usize = 0;
             while (c < arch.component_count) : (c += 1) {
                 const sch = acc.schema(arch.schemaIndex(c));
-                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component the variant does not declare");
-                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "base prefab component size disagrees with the variant registry layout");
+                const id = try self.baseColumnId(sch, diag_out);
                 ids0[c] = id;
             }
             var slot: usize = 0;
@@ -897,7 +924,7 @@ const Builder = struct {
 
         for (instances) |ci| {
             const type_name = self.ast.strings.slice(ci.type_name);
-            const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "variant entity references an undeclared component type");
+            const id = try self.entityComponentId(type_name, "variant entity references an undeclared component type", diag_out);
             if (indexOfId(ids.items, id)) |ci_idx| {
                 // Prefab cook (`collect_crossrefs` false) → `source_uuid_idx` is
                 // unused (Entity slots stay `dead`, no pending recorded).
@@ -952,7 +979,7 @@ const Builder = struct {
     /// version rides through to `SceneHeader.content_version` unchanged.
     fn versionFromNode(self: *Builder, version: NodeId, diag_out: ?*[]const u8) CookError!u16 {
         if (version.isNone()) return 0;
-        const v = interp.evalConst(self.ast, version) catch return fail(diag_out, error.NonConstValue, "version must be a constant int");
+        const v = interp.evalConst(self.gpa, self.ast, version) catch return fail(diag_out, error.NonConstValue, "version must be a constant int");
         const x: i64 = switch (v) {
             .int_ => |n| n,
             else => return fail(diag_out, error.NonConstValue, "version must be an int"),
@@ -978,7 +1005,7 @@ const Builder = struct {
         var blobs = try self.a().alloc([]u8, instances.len);
         for (instances, 0..) |ci, k| {
             const type_name = self.ast.strings.slice(ci.type_name);
-            const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "entity references an undeclared component type");
+            const id = try self.entityComponentId(type_name, "entity references an undeclared component type", diag_out);
             ids[k] = id;
             blobs[k] = try self.buildComponentBlob(id, ci, uuid_idx, diag_out);
         }
@@ -1031,7 +1058,7 @@ const Builder = struct {
         for (members) |m| switch (m.kind) {
             .component => {
                 const ci = self.ast.component_instances.items[m.index];
-                const id = self.registry.idOf(self.ast.strings.slice(ci.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance component references an undeclared component type");
+                const id = try self.entityComponentId(self.ast.strings.slice(ci.type_name), "instance component references an undeclared component type", diag_out);
                 if (indexOfId(ids.items, id)) |idx| {
                     blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, uuid_idx, diag_out);
                 } else {
@@ -1086,12 +1113,29 @@ const Builder = struct {
             var c: usize = 0;
             while (c < arch.component_count) : (c += 1) {
                 const sch = acc.schema(arch.schemaIndex(c));
-                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab uses a component the scene does not declare");
-                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab component size disagrees with the scene registry layout");
+                const id = try self.baseColumnId(sch, diag_out);
                 try ids.append(self.gpa, id);
                 try blobs.append(self.gpa, try self.a().dupe(u8, arch.componentSlot(c, 0)));
             }
         }
+    }
+
+    /// Resolve an instance's type name to an entity component id; a resource is
+    /// refused, since the loader refuses it as a column.
+    fn entityComponentId(self: *Builder, name: []const u8, undeclared_msg: []const u8, diag_out: ?*[]const u8) CookError!ComponentId {
+        const id = self.registry.idOf(name) orelse return fail(diag_out, error.UndeclaredType, undeclared_msg);
+        if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.ResourceAsComponent, "entity instance names a resource, which is no entity component");
+        return id;
+    }
+
+    /// Resolve a base prefab's on-disk column to this registry's entity component
+    /// of the same size and alignment, the predicate the loader applies.
+    fn baseColumnId(self: *Builder, sch: accessor.Accessor.Schema, diag_out: ?*[]const u8) CookError!ComponentId {
+        const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component this source does not declare");
+        if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.BaseSchemaMismatch, "base prefab column is declared a resource here");
+        if (self.registry.componentSize(id) != sch.size or self.registry.componentAlignment(id) != sch.alignment)
+            return fail(diag_out, error.BaseSchemaMismatch, "base prefab column layout disagrees with this source's declaration");
+        return id;
     }
 
     /// Build one component blob (`componentSize` bytes) from the type defaults
@@ -1124,8 +1168,16 @@ const Builder = struct {
     /// POD scalar kinds shared by components and resources.
     fn encodeScalar(self: *Builder, blob: []u8, fd: FieldDesc, value: NodeId, diag_out: ?*[]const u8) CookError!void {
         const slot = blob[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        const v = interp.evalConst(self.ast, value) catch return fail(diag_out, error.NonConstValue, "field value is not constant at cook time");
-        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch return fail(diag_out, error.TypeMismatch, "field value type does not match the field kind");
+        const v = interp.evalConst(self.gpa, self.ast, value) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.LiteralOutOfRange, error.IntegerOverflow, error.FloatOverflow => fail(diag_out, error.ValueOutOfRange, "field value overflows its type"),
+            error.DivisionByZero => fail(diag_out, error.NonConstValue, "field value divides by zero"),
+            error.NotConstant, error.KindMismatch => fail(diag_out, error.NonConstValue, "field value is not constant at cook time"),
+        };
+        bridge_mod.writeValueAsBytes(fd.kind, slot, v) catch |err| return switch (err) {
+            error.IntegerOverflow => fail(diag_out, error.ValueOutOfRange, "field value does not fit the field's type"),
+            else => fail(diag_out, error.TypeMismatch, "field value type does not match the field kind"),
+        };
     }
 
     /// Group built entities by their FULL declared component set (sorted ids)
@@ -1204,12 +1256,19 @@ const Builder = struct {
         for (insts, 0..) |ci, ri| {
             const type_name = self.ast.strings.slice(ci.type_name);
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "resources block references an undeclared resource type");
+            if (self.registry.componentKind(id) != .resource) return fail(diag_out, error.ComponentAsResource, "resources block names an entity component, which is no resource");
             out[ri] = try self.buildResourceEntry(id, ci, diag_out);
         }
         return out;
     }
 
     fn buildResourceEntry(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, diag_out: ?*[]const u8) CookError!format.ResourceEntry {
+        // The loader refuses a collection field (`CollectionResourceFieldUnsupported`),
+        // so a scene carrying one would cook and never load.
+        for (self.registry.componentFields(id)) |fd| switch (fd.kind) {
+            .array_, .map_, .set_ => return fail(diag_out, error.UnsupportedFieldKind, "a resource with a collection field cannot be cooked into a scene: the loader refuses it"),
+            else => {},
+        };
         const size = self.registry.componentSize(id);
         const blob = try self.a().alloc(u8, size);
         @memcpy(blob, self.registry.componentDefaultBytes(id));

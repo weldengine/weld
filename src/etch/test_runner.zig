@@ -573,6 +573,20 @@ test "tick_until stops on the predicate and on timeout" {
     try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
 
+test "a tick_until budget beyond the int range fails the test" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\resource Counter { n: int = 0 }
+        \\test "huge timeout" {
+        \\  let world = test_world()
+        \\  let hit = tick_until(|| false, 1000000000000000000000.0s)
+        \\  assert(not hit)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.failed);
+}
+
 // ─── regressions: stale assert message, string-aware compare, throwing pred ─
 
 test "a rule-body assert failure during tick does not leak into the test's message" {

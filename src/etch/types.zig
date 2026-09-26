@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ast_mod = @import("ast.zig");
+const const_eval = @import("const_eval.zig");
 const diag_mod = @import("diagnostics.zig");
 const tags_mod = @import("tags.zig");
 const token_mod = @import("token.zig");
@@ -250,9 +251,20 @@ pub const builtin_resources = [_]BuiltinResource{
     } },
 };
 
+/// The name of the builtin component both backends inject when a program
+/// declares any tag. The reservation and every injection read it here.
+pub const tagset_component_name = "TagSet";
+
+/// True iff the engine itself registers `name` in the ECS registry, so a user
+/// `component` or `resource` of that name would collide.
+pub fn isReservedEngineTypeName(name: []const u8) bool {
+    if (std.mem.eql(u8, name, tagset_component_name)) return true;
+    return builtinResourceByName(name) != null;
+}
+
 /// Descriptor lookup by resource name bytes. Consulted by the
-/// receiver-less `get(T)` resolution and by the builtin-resource field
-/// lookup; `interp.zig` iterates `builtin_resources` directly.
+/// receiver-less `get(T)` resolution, the builtin-resource field lookup and
+/// `isReservedEngineTypeName`; `interp.zig` iterates `builtin_resources` directly.
 pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
     for (&builtin_resources) |*r| {
         if (std.mem.eql(u8, r.name, name)) return r;
@@ -377,9 +389,8 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 /// `validateFieldsInDecl.component_like`) — so the cross-arena field-TYPE check is
 /// complete for every valid imported component.
 fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
-    if (decl_arena.typeNodeKind(type_node) != .named) return null;
-    const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
-    const resolved = decl_arena.resolveTypeAliasName(named.name);
+    const name = decl_arena.namedTypeName(type_node) orelse return null;
+    const resolved = decl_arena.resolveTypeAliasName(name);
     const tname = decl_arena.strings.slice(resolved);
     if (std.mem.eql(u8, tname, "string")) return .string_;
     return BuiltinType.fromName(tname);
@@ -409,19 +420,22 @@ fn isKnownTrackType(name: []const u8) bool {
 /// FLOAT_LITERAL "s"`, §1.4 — single `s` suffix). Distinct from the deferred
 /// RUNTIME duration eval (fail-loud both backends). `null` if not a duration
 /// literal. Backs E1744 KeyframeOutOfRange + E1745 KeyframesUnordered.
-fn durationLitSeconds(arena: *const AstArena, expr_id: NodeId) ?f64 {
+fn durationLitSeconds(gpa: std.mem.Allocator, arena: *const AstArena, expr_id: NodeId) !?f64 {
     if (arena.exprKind(expr_id) != .duration_lit) return null;
     const lex = arena.strings.slice(arena.exprData(expr_id));
     if (lex.len < 2 or lex[lex.len - 1] != 's') return null;
-    return std.fmt.parseFloat(f64, lex[0 .. lex.len - 1]) catch null;
+    return const_eval.floatLiteralValue(gpa, lex[0 .. lex.len - 1]);
 }
 
 /// Parse an int / float literal expr's numeric value at validation time. `null`
 /// if not a numeric literal. Backs E1749 FPSInvalid + E1750 DurationInvalid.
-fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
-    const k = arena.exprKind(expr_id);
-    if (k != .int_lit and k != .float_lit) return null;
-    return std.fmt.parseFloat(f64, arena.strings.slice(arena.exprData(expr_id))) catch null;
+fn numericLitValue(gpa: std.mem.Allocator, arena: *const AstArena, expr_id: NodeId) !?f64 {
+    const text = arena.strings.slice(arena.exprData(expr_id));
+    return switch (arena.exprKind(expr_id)) {
+        .int_lit => @floatFromInt(const_eval.intLiteralValue(text, false) orelse return null),
+        .float_lit => const_eval.floatLiteralValue(gpa, text),
+        else => null,
+    };
 }
 
 /// Target categories the annotation-applicability check distinguishes. The first set held
@@ -498,6 +512,9 @@ pub const TypeChecker = struct {
     /// to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
+    /// Literals already reported out of range, so a literal checked in two
+    /// contexts is reported once.
+    range_reported: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// The `await_expr` node that is the statement-head `await` of the statement
     /// currently being checked, or `NodeId.none`. Set at the top of
     /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
@@ -530,6 +547,10 @@ pub const TypeChecker = struct {
     /// through to E0102 (`test_world`/`tick_until`) or E0910 (`measure`). Set/restored
     /// around the body in `checkTest`.
     in_test_body: bool = false,
+    /// Whether the statements being checked are an `on_attach` / `on_detach`
+    /// body: a `return` there is E1798, and the E1210 / E1213 messages name the
+    /// hook's scope. Set/restored in `checkPrefabHook`.
+    in_hook_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked, `null` outside any.
     /// Drives E0906 (a `return` is legal only in a `race` branch —
@@ -725,6 +746,7 @@ pub const TypeChecker = struct {
         self.imported_aliases.deinit(self.gpa);
         self.services.deinit(self.gpa);
         self.foreign_events.deinit(self.gpa);
+        self.range_reported.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -753,7 +775,8 @@ pub const TypeChecker = struct {
         // Builtin `Error` / `ErrorCode` declarations (
         // part1 §10.2) join the arena before pass 1 so they register like
         // ordinary declarations. Every interp / codegen driver runs through
-        // `check`, so the injection point is unique.
+        // `check`, and the cook through `checkPrefabHooks`; the injection is
+        // idempotent.
         try arena.ensureErrorBuiltins(gpa);
         var tc: TypeChecker = .{
             .gpa = gpa,
@@ -762,38 +785,76 @@ pub const TypeChecker = struct {
             .project = project,
         };
         defer tc.deinit();
+        try tc.runDeclarationPasses();
+        try tc.validatePrefabDecls();
+        try tc.pass2Resolve();
+    }
+
+    /// Every pass `check` runs before the prefab validation: the symbols,
+    /// imports, impls, tags, services and events a statement check reads, and
+    /// the construct validators. Shared with `checkPrefabHooks`.
+    fn runDeclarationPasses(self: *TypeChecker) !void {
         // E1901 runs FIRST: it decides whether the file is even allowed to
         // contain what it contains, and a `.d.etch` carrying a `rule` would
         // otherwise produce a cascade of resolution errors on a body that had
         // no business being parsed. Cheap either way — one walk of the item
         // column, and an immediate return in `.standard` mode.
-        try tc.checkDeclarationFileConstructs();
-        try tc.collectServices();
-        try tc.collectDeclaredEvents();
-        try tc.pass1Collect();
-        try tc.bindImports();
-        try tc.validateTypeAliases();
-        try tc.validateImpls();
-        try tc.validateDataDecls();
-        try tc.validateRoutineDecls();
-        try tc.buildTags();
-        try tc.validateBehaviorDecls();
-        try tc.validateQuestDecls();
-        try tc.validateDialogueDecls();
-        try tc.validateAbilityDecls();
-        try tc.validateThemeDecls();
-        try tc.validateMotionDecls();
-        try tc.validateInputMappingDecls();
-        try tc.validateWidgetDecls();
-        try tc.validateLocaleDecls();
-        try tc.validateEffectDecls();
-        try tc.validateAudioScoreDecls();
-        try tc.validateSequenceDecls();
-        try tc.validateAnimGraphDecls();
-        try tc.validateShaderDecls();
-        try tc.validateSceneDecls();
-        try tc.validatePrefabDecls();
-        try tc.pass2Resolve();
+        try self.checkDeclarationFileConstructs();
+        try self.checkLiteralRanges();
+        try self.collectServices();
+        try self.collectDeclaredEvents();
+        try self.pass1Collect();
+        try self.bindImports();
+        try self.validateTypeAliases();
+        try self.validateImpls();
+        try self.validateDataDecls();
+        try self.validateRoutineDecls();
+        try self.buildTags();
+        try self.validateBehaviorDecls();
+        try self.validateQuestDecls();
+        try self.validateDialogueDecls();
+        try self.validateAbilityDecls();
+        try self.validateThemeDecls();
+        try self.validateMotionDecls();
+        try self.validateInputMappingDecls();
+        try self.validateWidgetDecls();
+        try self.validateLocaleDecls();
+        try self.validateEffectDecls();
+        try self.validateAudioScoreDecls();
+        try self.validateSequenceDecls();
+        try self.validateAnimGraphDecls();
+        try self.validateShaderDecls();
+        try self.validateSceneDecls();
+    }
+
+    /// The prefab half of `check`, for the cook (decision 3 point 4): the
+    /// declarations are collected by `check`'s own passes, and only `requires`
+    /// names and hook bodies are reported into `diagnostics`. A cook source
+    /// reaches its base prefab through a resolver, so the rest of `check`
+    /// (E1791 first) does not apply to it.
+    pub fn checkPrefabHooks(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
+        var tc: TypeChecker = .{
+            .gpa = gpa,
+            .arena = arena,
+            .diagnostics = &scratch,
+            .project = null,
+        };
+        defer tc.deinit();
+        try tc.runDeclarationPasses();
+        tc.diagnostics = diagnostics;
+        const kinds = arena.items.items(.kind);
+        const datas = arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < arena.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            try tc.checkPrefabRequiresAndHooks(arena.prefab_decls.items[datas[i]]);
+        }
     }
 
     /// `E1901 ConstructNotAllowedInDeclarationFile` (`etch-grammar.md`
@@ -1060,9 +1121,8 @@ pub const TypeChecker = struct {
     /// same reason as `foreignReturnType`.
     fn foreignFieldType(self: *TypeChecker, a: *const AstArena, type_node: NodeId) ResolvedType {
         _ = self;
-        if (a.typeNodeKind(type_node) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(type_node)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        const name = a.namedTypeName(type_node) orelse return ResolvedType.unknown;
+        const tname = a.strings.slice(a.resolveTypeAliasName(name));
         if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
         if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
         return ResolvedType.unknown;
@@ -1074,9 +1134,8 @@ pub const TypeChecker = struct {
         // "`unknown` ≈ unit, the house convention" (this file, `synthCall`).
         // `ResolvedType` has no unit variant to return instead.
         if (method.return_type.isNone()) return ResolvedType.unknown;
-        if (a.typeNodeKind(method.return_type) != .named) return ResolvedType.unknown;
-        const named = a.named_types.items[a.typeNodeData(method.return_type)];
-        const tname = a.strings.slice(a.resolveTypeAliasName(named.name));
+        const name = a.namedTypeName(method.return_type) orelse return ResolvedType.unknown;
+        const tname = a.strings.slice(a.resolveTypeAliasName(name));
         if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
         if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
         return ResolvedType.unknown;
@@ -1540,6 +1599,7 @@ pub const TypeChecker = struct {
     /// structural checks; the Ember-semantic ones (E1602/E1603/E1605/E1606/
     /// W1600/W1601) are DEFERRED-no-variant (catalogue not attached).
     fn validateEffect(self: *TypeChecker, decl: ast_mod.EffectDecl) !void {
+        try self.checkParamDefaults(decl.params_start, decl.params_len);
         // E1601 — emitter names unique within the effect; the set also backs E1604.
         var emitters: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer emitters.deinit(self.gpa);
@@ -1672,12 +1732,12 @@ pub const TypeChecker = struct {
             const prop = self.arena.struct_lit_fields.items[decl.props_start + p];
             const pname = self.arena.strings.slice(prop.name);
             if (std.mem.eql(u8, pname, "duration")) {
-                const v = numericLitValue(self.arena, prop.value);
+                const v = try numericLitValue(self.gpa, self.arena, prop.value);
                 if (v == null or v.? <= 0) {
                     try self.emit(.sequence_duration_invalid, .error_, decl.name_span, "sequence duration must be a positive number", .{});
                 } else duration_secs = v;
             } else if (std.mem.eql(u8, pname, "fps")) {
-                const v = numericLitValue(self.arena, prop.value);
+                const v = try numericLitValue(self.gpa, self.arena, prop.value);
                 if (v == null or v.? <= 0) {
                     try self.emit(.fps_invalid, .error_, decl.name_span, "sequence fps must be a positive number", .{});
                 }
@@ -1712,7 +1772,7 @@ pub const TypeChecker = struct {
             var k: u32 = 0;
             while (k < track.keyframes_len) : (k += 1) {
                 const kf = self.arena.sequence_keyframes.items[track.keyframes_start + k];
-                if (durationLitSeconds(self.arena, kf.time)) |secs| {
+                if (try durationLitSeconds(self.gpa, self.arena, kf.time)) |secs| {
                     if (duration_secs) |d| {
                         if (secs > d) try self.emit(.keyframe_out_of_range, .error_, kf.span, "keyframe time exceeds the sequence duration", .{});
                     }
@@ -1736,8 +1796,7 @@ pub const TypeChecker = struct {
     /// the common set inlined, the open `…` treated as this fixed list). All
     /// resolve to a `.named` type node.
     fn isKnownAnimParamType(self: *TypeChecker, type_node: NodeId) bool {
-        if (self.arena.typeNodeKind(type_node) != .named) return false;
-        const name = self.arena.strings.slice(self.arena.named_types.items[self.arena.typeNodeData(type_node)].name);
+        const name = self.arena.strings.slice(self.arena.namedTypeName(type_node) orelse return false);
         const cat = [_][]const u8{ "bool", "float", "int", "i32", "u32", "f32", "f64", "Vec2", "Vec3", "Vec4", "Trajectory" };
         for (cat) |c| {
             if (std.mem.eql(u8, name, c)) return true;
@@ -1769,6 +1828,7 @@ pub const TypeChecker = struct {
     /// DEFERRED-no-variant: E1684/E1685/E1686/E1687 (clip/db/clip/bone assets),
     /// E1693 LayerMaskInvalid (Kinesis bone mask).
     fn validateAnimGraph(self: *TypeChecker, decl: ast_mod.AnimGraphDecl) !void {
+        try self.checkParamDefaults(decl.params_start, decl.params_len);
         // E1695 + a params scope for the transition when-clause typing (E1690).
         var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
@@ -1868,6 +1928,7 @@ pub const TypeChecker = struct {
     /// emission is deferred. SPIR-V/MSL/DXIL emission is out of scope; eval of a
     /// shader body is fail-loud both backends (the descriptor is the Level-B output).
     fn validateShader(self: *TypeChecker, decl: ast_mod.ShaderDecl) !void {
+        try self.checkParamDefaults(decl.params_start, decl.params_len);
         if (decl.has_vertex) try self.checkShaderBody(decl.vertex.body_start, decl.vertex.body_len);
         try self.checkShaderBody(decl.fragment.body_start, decl.fragment.body_len);
     }
@@ -1966,7 +2027,13 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, self.arena.strings.slice(field.name) });
             return;
         };
-        const tcode = code_type orelse return; // field-name-only check (resources)
+        const tcode = code_type orelse {
+            // A resource instance value is checked by field name, and for range.
+            if (d != .builtin) return;
+            const actual = try self.synthExprE(field.value, null);
+            if (actual == .builtin) _ = try self.literalTypeFits(d.builtin, field.value, actual.builtin);
+            return;
+        };
         const actual = blk: {
             if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
                 break :blk try self.checkEnumShorthand(field.value, d.enum_t);
@@ -1980,7 +2047,7 @@ pub const TypeChecker = struct {
             break :blk try self.synthExprE(field.value, null);
         };
         const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
+            .builtin => |db| actual == .builtin and !try self.literalTypeFits(db, field.value, actual.builtin),
             .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
             .enum_t => |dn| switch (actual) {
                 .enum_t => |an| an != dn,
@@ -2064,7 +2131,7 @@ pub const TypeChecker = struct {
         // valid component (forward-compat headroom).
         const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
         const actual = try self.synthExprE(field.value, null);
-        if (actual == .builtin and !self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
+        if (actual == .builtin and !try self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
             try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
@@ -2357,6 +2424,79 @@ pub const TypeChecker = struct {
                 try self.checkComponentInstance(self.arena.component_instances.items[ent.components_start + f], .prefab_component_type_unknown, .prefab_component_field_unknown, .prefab_component_field_type_invalid);
             }
         }
+        try self.checkPrefabRequiresAndHooks(decl);
+    }
+
+    /// Whether `name` is a declared component, looked up as
+    /// `checkComponentInstance` does: a local symbol shadows an import.
+    fn isComponentName(self: *TypeChecker, name: StringId) bool {
+        if (self.symbols.get(name)) |sym| return sym.kind == .component;
+        if (self.imported_symbols.get(name)) |entry| return entry.kind == .component;
+        return false;
+    }
+
+    /// E1793 on a `requires` name that is no component, then each hook body.
+    /// `requires` keeps no span per name, so the diagnostic sits on the prefab
+    /// name, as E1790/E1791 do.
+    fn checkPrefabRequiresAndHooks(self: *TypeChecker, decl: ast_mod.PrefabDecl) !void {
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            const req = self.arena.prefab_requires.items[decl.requires_start + r];
+            if (!self.isComponentName(req)) {
+                try self.emit(.prefab_component_type_unknown, .error_, decl.name_span, "prefab '{s}' requires '{s}', which is not a declared component", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(req) });
+            }
+        }
+        if (decl.has_on_attach) try self.checkPrefabHook(decl, decl.on_attach_start, decl.on_attach_len);
+        if (decl.has_on_detach) try self.checkPrefabHook(decl, decl.on_detach_start, decl.on_detach_len);
+    }
+
+    /// One hook body (part2 §30.3): gated like a `when` clause on `requires` ∪
+    /// the extension's own components, synchronous and unable to throw, with an
+    /// implicit `entity: Entity`. User resources stay unreachable, engine ones
+    /// readable, as in a rule with no `when resource`. Each hook gets a fresh
+    /// context.
+    fn checkPrefabHook(self: *TypeChecker, decl: ast_mod.PrefabDecl, start: u32, len: u32) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        var r: u32 = 0;
+        while (r < decl.requires_len) : (r += 1) {
+            try ctx.components_in_when.put(self.gpa, self.arena.prefab_requires.items[decl.requires_start + r], {});
+        }
+        var e: u32 = 0;
+        while (e < decl.entities_len) : (e += 1) {
+            const ent = self.arena.scene_entities.items[decl.entities_start + e];
+            var c: u32 = 0;
+            while (c < ent.components_len) : (c += 1) {
+                try ctx.components_in_when.put(self.gpa, self.arena.component_instances.items[ent.components_start + c].type_name, {});
+            }
+        }
+        if (self.arena.strings.find("entity")) |eid| {
+            try ctx.locals.put(self.gpa, eid, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+        }
+        const saved_async = self.current_is_async;
+        const saved_susp = self.await_suspendable;
+        const saved_throw = self.current_can_throw;
+        const saved_ret = self.current_fn_return;
+        const saved_branch = self.conc_branch;
+        const saved_hook = self.in_hook_body;
+        self.current_is_async = false;
+        self.await_suspendable = true;
+        self.current_can_throw = false;
+        self.current_fn_return = null;
+        self.conc_branch = null;
+        self.in_hook_body = true;
+        defer {
+            self.current_is_async = saved_async;
+            self.await_suspendable = saved_susp;
+            self.current_can_throw = saved_throw;
+            self.current_fn_return = saved_ret;
+            self.conc_branch = saved_branch;
+            self.in_hook_body = saved_hook;
+        }
+        var s: u32 = 0;
+        while (s < len) : (s += 1) {
+            try self.checkStmt(&ctx, @bitCast(self.arena.extra.items[start + s]));
+        }
     }
 
     fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
@@ -2462,7 +2602,7 @@ pub const TypeChecker = struct {
             break :blk try self.synthExprE(field.value, null);
         };
         const mismatch = switch (d) {
-            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
+            .builtin => |db| actual == .builtin and !try self.literalTypeFits(db, field.value, actual.builtin),
             .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
             .enum_t => |dn| switch (actual) {
                 .enum_t => |an| an != dn,
@@ -3319,6 +3459,12 @@ pub const TypeChecker = struct {
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
+    fn refuseReservedEngineName(self: *TypeChecker, name: StringId, span: SourceSpan, kind_word: []const u8) !void {
+        const slice = self.arena.strings.slice(name);
+        if (!isReservedEngineTypeName(slice)) return;
+        try self.emit(.duplicate_symbol, .error_, span, "'{s}' is registered by the engine; a {s} may not take that name", .{ slice, kind_word });
+    }
+
     fn pass1Collect(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3332,6 +3478,7 @@ pub const TypeChecker = struct {
             switch (kind) {
                 .component_decl => {
                     const decl = self.arena.component_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "component");
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.checkStorageAnnotation(decl);
@@ -3342,6 +3489,7 @@ pub const TypeChecker = struct {
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
+                    try self.refuseReservedEngineName(decl.name, span, "resource");
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
@@ -3353,8 +3501,8 @@ pub const TypeChecker = struct {
                     // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
                     // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict is
                     // component-only (part1 §5.5, SoA storage). Event fields therefore
-                    // follow the `struct` field surface (`string`/enum accepted,
-                    // nested-struct deferred) via the `.event_` origin.
+                    // follow the `struct` field surface (`string`/enum accepted)
+                    // via the `.event_` origin; a struct-typed event field is refused.
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
@@ -3569,6 +3717,7 @@ pub const TypeChecker = struct {
                     const decl = self.arena.audio_graph_decls.items[data];
                     try self.registerSymbol(.audio_graph_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
+                    try self.checkParamDefaults(decl.params_start, decl.params_len);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -3673,8 +3822,7 @@ pub const TypeChecker = struct {
     }
 
     /// Validate every `impl`'s target type once all symbols are known: the target
-    /// must be a declared `struct` / `component` / `resource`. Coherence and orphan
-    /// rules (§7.4) apply to a trait impl, conditional impls included.
+    /// must be a declared `struct` / `component` / `resource`.
     fn validateImpls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -3701,10 +3849,9 @@ pub const TypeChecker = struct {
     }
 
     /// Validate one `impl Trait for Type [when …]` (
-    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the orphan
-    /// rule (§7.4 — trait OR type local to this module); every abstract trait method is
-    /// provided (E0214, else the trait must supply a default); the target type is a
-    /// struct / component / resource / `Entity`.
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; every
+    /// abstract trait method is provided (E0214, else the trait must supply a
+    /// default); the target type is a struct / component / resource / `Entity`.
     fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
         const trait_slice = self.arena.strings.slice(impl.trait_name);
         const type_slice = self.arena.strings.slice(impl.type_name);
@@ -3726,12 +3873,9 @@ pub const TypeChecker = struct {
             try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
         }
 
-        // Orphan rule (§7.4): trait OR type local to the impl's module. In single-file mode
-        // (single module) the trait is always local, so this holds — the check
-        // is structural for the cross-module future.
-        if (!trait_local and !type_local) {
-            try self.emit(.orphan_impl, .error_, span, "orphan impl: neither trait '{s}' nor type '{s}' is defined in this module", .{ trait_slice, type_slice });
-        }
+        // Orphan rule (§7.4): not checked. A check above the `!trait_local`
+        // return would fire on undeclared names, which `undefined_symbol`
+        // already reports.
 
         // E0214: every abstract trait method (no default body) must be provided.
         const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];
@@ -3821,10 +3965,10 @@ pub const TypeChecker = struct {
     /// non-POD surface with `struct_` / `event_` for `string` (the
     /// alignment; part1 §5.5 "no POD
     /// constraint for resources"); enum-typed resource fields are accepted too,
-    /// nested-struct fields stay deferred. `struct_` and `event_` accept `string`
+    /// nested-struct fields stay refused. `struct_` and `event_` accept `string`
     /// + enum-typed fields (the builtin `Error` forces them on structs; events
-    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5).
-    /// POD-strict is component-only.
+    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5);
+    /// only `struct_` accepts a struct-typed field. POD-strict is component-only.
     const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
@@ -3869,19 +4013,16 @@ pub const TypeChecker = struct {
 
             // Collection / composite field types (`T[]`, `[K: V]`, `Set<T>`,
             // and fixed `T[N]`) are not part of the component/resource
-            // surface — fields stay scalar POD. Reject anything non-named here
-            // rather than mis-indexing the `named_types` slab (collections
-            // land as locals, not fields).
+            // surface — fields stay scalar POD.
             const tspan = self.arena.typeNodeSpan(field.type_node);
-            if (self.arena.typeNodeKind(field.type_node) != .named) {
+            const field_type_name = self.arena.namedTypeName(field.type_node) orelse {
                 // One bounded exception: a `struct` field
                 // may be `Error?` — the builtin Error's `source` chaining field
                 // (part1 §10.2). General optional fields are unsupported.
                 if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
                     const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
-                    if (self.arena.typeNodeKind(payload) == .named) {
-                        const pn = self.arena.named_types.items[self.arena.typeNodeData(payload)];
-                        if (pn.name == self.arena.error_type_name) continue;
+                    if (self.arena.namedTypeName(payload)) |pn| {
+                        if (pn == self.arena.error_type_name) continue;
                     }
                 }
                 // Resource collection fields: `T[]` (`.slice`),
@@ -3890,25 +4031,35 @@ pub const TypeChecker = struct {
                 // part1.md` §5.5 (`recent_servers: string[]`), the persistent-heap
                 // `CollectionSlot`. Fixed `T[N]` (`.array`) stays out of scope
                 // (falls through to rejection). Element ∈ {POD scalar, string,
-                // enum}; nested collection / unsupported element → E0222. The
-                // collection default (`= []`) is unwired, so the accepted
-                // field skips the scalar-default check below.
+                // enum}; nested collection / unsupported element → E0222. A
+                // default is checked against the element type once the element
+                // is valid.
                 if (origin == .resource) {
+                    const default = field.default_value;
                     switch (self.arena.typeNodeKind(field.type_node)) {
                         .slice => {
                             const at = self.arena.array_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(at.elem);
+                            const elem = try self.checkResourceCollectionElement(at.elem);
+                            if (elem != null and !default.isNone()) try self.checkArrayDefault(default, elem.?);
                             continue;
                         },
                         .set_type => {
                             const st = self.arena.set_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(st.elem);
+                            const elem = try self.checkResourceCollectionElement(st.elem);
+                            if (elem) |e| {
+                                if (e == .builtin) try self.checkHashBound(e.builtin, "set element type", "T: Hash", self.arena.typeNodeSpan(st.elem));
+                                if (!default.isNone()) try self.checkSetDefault(default);
+                            }
                             continue;
                         },
                         .map_type => {
                             const mt = self.arena.map_types.items[self.arena.typeNodeData(field.type_node)];
-                            try self.checkResourceCollectionElement(mt.key);
-                            try self.checkResourceCollectionElement(mt.value);
+                            const key = try self.checkResourceCollectionElement(mt.key);
+                            const value = try self.checkResourceCollectionElement(mt.value);
+                            if (key) |k| {
+                                if (k == .builtin) try self.checkHashBound(k.builtin, "map key type", "K: Hash", self.arena.typeNodeSpan(mt.key));
+                            }
+                            if (key != null and value != null and !default.isNone()) try self.checkMapDefault(default, key.?, value.?);
                             continue;
                         },
                         else => {},
@@ -3916,14 +4067,12 @@ pub const TypeChecker = struct {
                 }
                 try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
                 continue;
-            }
-            const named_idx = self.arena.typeNodeData(field.type_node);
-            const named = self.arena.named_types.items[named_idx];
+            };
             // A field typed by an in-scope generic param (`min: T`) is a
             // generic field — accepted (type-erased). Only structs
             // are generic; component / resource fields never reach this branch.
-            if (self.generic_scope.contains(named.name)) continue;
-            const resolved_name = self.arena.resolveTypeAliasName(named.name);
+            if (self.generic_scope.contains(field_type_name)) continue;
+            const resolved_name = self.arena.resolveTypeAliasName(field_type_name);
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
@@ -3944,14 +4093,14 @@ pub const TypeChecker = struct {
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
                     // incrementally. Components stay enum-rejected (POD-strict).
-                } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
-                    // Struct-typed STRUCT / event fields are deferred: the
-                    // anonymous `.{ … }` field-value context
-                    // carries them — part1 §5.5 allows nested POD structs; the
-                    // literal must PROVIDE such a field (E0208, checked at the
-                    // struct literal) because it has no declared default the two
-                    // backends could agree on. Component / resource fields stay
-                    // builtin-POD-bounded.
+                } else if (origin == .event_ and self.declaredStructName(resolved_name)) {
+                    try self.emit(.undefined_symbol, .error_, tspan, "an event field cannot be of struct type '{s}'", .{tname});
+                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
+                    // Struct-typed struct fields: the anonymous `.{ … }`
+                    // field-value context carries them — part1 §5.5 allows
+                    // nested POD structs; the literal must PROVIDE such a field
+                    // (E0208, checked at the struct literal) because it has no
+                    // declared default the two backends could agree on.
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
@@ -4000,21 +4149,16 @@ pub const TypeChecker = struct {
     /// element (component/resource/struct/unknown/optional/function/…), emits
     /// `E0222 CollectionFieldElementInvalid`. This is the type-check gate only;
     /// element STORAGE and promotion wiring live in the interpreter.
-    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
+    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !?CollectionElem {
         const espan = self.arena.typeNodeSpan(elem);
-        switch (self.arena.typeNodeKind(elem)) {
-            .named => {},
-            .slice, .array, .map_type, .set_type => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{});
-                return;
-            },
-            else => {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{});
-                return;
-            },
-        }
-        const named = self.arena.named_types.items[self.arena.typeNodeData(elem)];
-        const resolved = self.arena.resolveTypeAliasName(named.name);
+        const elem_name = self.arena.namedTypeName(elem) orelse {
+            switch (self.arena.typeNodeKind(elem)) {
+                .slice, .array, .map_type, .set_type => try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{}),
+                else => try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{}),
+            }
+            return null;
+        };
+        const resolved = self.arena.resolveTypeAliasName(elem_name);
         const tname = self.arena.strings.slice(resolved);
         // Value-POD builtins + `string` + a declared enum are the supported
         // element set: they are stored inline (POD) or promoted into an owned
@@ -4026,15 +4170,102 @@ pub const TypeChecker = struct {
         // collection element is out of scope (rejected here rather than
         // becoming a silent load-time gap).
         if (BuiltinType.fromName(tname)) |bt| {
-            if (bt == .entity) {
-                try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
-                return;
+            switch (bt) {
+                .int_, .float_, .bool_, .i32_, .u32_, .f32_, .f64_ => return .{ .builtin = bt },
+                .entity => {
+                    try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
+                    return null;
+                },
+                else => {},
             }
-            return; // value-POD builtin, stored inline
+        } else {
+            if (std.mem.eql(u8, tname, "string")) return .string;
+            if (self.declaredEnumName(resolved)) return .{ .enum_ = resolved };
         }
-        if (std.mem.eql(u8, tname, "string")) return;
-        if (self.declaredEnumName(resolved)) return;
         try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
+        return null;
+    }
+
+    /// The element type a resource collection field holds.
+    const CollectionElem = union(enum) {
+        builtin: BuiltinType,
+        string,
+        enum_: StringId,
+    };
+
+    /// A `T[]` field default: an array literal whose every element is a
+    /// constant of `T`.
+    fn checkArrayDefault(self: *TypeChecker, value: NodeId, elem: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .array_lit) return self.refuseCollectionShape(value, "an array field default must be an array literal");
+        const al = self.arena.array_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            try self.checkCollectionDefaultElement(@bitCast(self.arena.extra.items[al.elements_start + i]), elem);
+        }
+        if (al.is_fill and self.constArrayLen(al.fill_count) == null) {
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
+        }
+    }
+
+    /// A `[K: V]` field default: a map literal whose every key and value is a
+    /// constant of `K` and `V`.
+    fn checkMapDefault(self: *TypeChecker, value: NodeId, key: CollectionElem, val: CollectionElem) !void {
+        if (self.arena.exprKind(value) != .map_lit) return self.refuseCollectionShape(value, "a map field default must be a map literal");
+        const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+        var i: u32 = 0;
+        while (i < ml.entries_len) : (i += 1) {
+            const entry = self.arena.map_entries.items[ml.entries_start + i];
+            try self.checkCollectionDefaultElement(entry.key, key);
+            try self.checkCollectionDefaultElement(entry.value, val);
+        }
+    }
+
+    /// A `Set<T>` field default: a set has no literal, and the one default is
+    /// the empty `Set.new()` (`etch-stdlib.md` §4.5).
+    fn checkSetDefault(self: *TypeChecker, value: NodeId) !void {
+        if (isEmptySetConstructor(self.arena, value)) return;
+        return self.refuseCollectionShape(value, "a set field default must be `Set.new()`");
+    }
+
+    /// Refuses a collection default of the wrong shape: E0200 for a constant,
+    /// E1101 for anything that is not one, as for a scalar field.
+    fn refuseCollectionShape(self: *TypeChecker, value: NodeId, comptime message: []const u8) !void {
+        const span = self.arena.exprSpan(value);
+        const constant = switch (self.arena.exprKind(value)) {
+            .string_lit, .tag_path, .array_lit, .map_lit => true,
+            else => if (const_eval.fold(self.gpa, self.arena, value)) |_| true else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NotConstant => false,
+                else => true,
+            },
+        };
+        if (constant) {
+            try self.emit(.type_mismatch, .error_, span, message, .{});
+        } else {
+            try self.emit(.not_const_evaluable, .error_, span, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+        }
+    }
+
+    /// One element of a collection default against its declared type: a
+    /// constant (E1101 otherwise) of that type, or a known variant of that enum.
+    fn checkCollectionDefaultElement(self: *TypeChecker, e: NodeId, elem: CollectionElem) !void {
+        if (!try self.foldsAsConstant(e, "a collection default element must be a constant expression")) return;
+        const span = self.arena.exprSpan(e);
+        switch (elem) {
+            .enum_ => |ename| {
+                if (self.arena.exprKind(e) == .tag_path) {
+                    _ = try self.checkEnumShorthand(e, ename);
+                } else try self.emit(.type_mismatch, .error_, span, "a '{s}' element must be a variant of that enum", .{self.arena.strings.slice(ename)});
+            },
+            .string => if (self.arena.exprKind(e) != .string_lit) {
+                try self.emit(.type_mismatch, .error_, span, "a string element must be a string literal", .{});
+            },
+            .builtin => |bt| {
+                const et = self.synthExpr(e, null);
+                const fits = et == .builtin and try self.literalTypeFits(bt, e, et.builtin);
+                if (!fits) try self.emit(.type_mismatch, .error_, span, "collection element type does not match the declared element type", .{});
+            },
+        }
     }
 
     /// `true` if `name` is a declared `enum`, checked against the AST slab
@@ -4082,29 +4313,28 @@ pub const TypeChecker = struct {
     /// `namedTypeToResolved` + `synthExpr` + `literalTypeFits`); the only
     /// difference is the const-specific diagnostic wording.
     fn checkConstValue(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
-        if (!isConstEvaluable(self.arena, value)) {
-            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(value), "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
-            return;
-        }
+        if (!try self.foldsAsConstant(value, "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
         const declared = self.namedTypeToResolved(type_node);
         const actual = self.synthExpr(value, null);
         if (declared == .builtin and actual == .builtin) {
-            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
+            if (!try self.literalTypeFits(declared.builtin, value, actual.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
             }
         }
     }
 
     fn checkFieldDefault(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
-        // Const-evaluability check.
-        if (!isConstEvaluable(self.arena, value)) {
-            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(value), "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+        if (!try self.foldsAsConstant(value, "field default value must be a constant expression (literal, arithmetic on literals, or parenthesized)")) return;
+        const declared = self.namedTypeToResolved(type_node);
+        if (declared == .enum_t) {
+            if (self.arena.exprKind(value) == .tag_path) {
+                _ = try self.checkEnumShorthand(value, declared.enum_t);
+            } else try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "an enum field default must be a variant of that enum", .{});
             return;
         }
-        const declared = self.namedTypeToResolved(type_node);
         const actual = self.synthExpr(value, null);
         if (declared == .builtin and actual == .builtin) {
-            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
+            if (!try self.literalTypeFits(declared.builtin, value, actual.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
             }
         }
@@ -4112,27 +4342,177 @@ pub const TypeChecker = struct {
         // diagnostic during field-type resolution — skip cascade.
     }
 
-    /// Polymorphic int / float literal rule (cf. `etch-reference-part1.md`
-    /// §4.3). When the declared context type is given and the value is a
-    /// literal of the same numeric family (int family → any integer
-    /// builtin, float family → any float builtin), the literal fits. All
-    /// other forms require exact equality (no implicit numeric coercion).
-    fn literalTypeFits(self: *TypeChecker, declared: BuiltinType, actual_expr: NodeId, actual: BuiltinType) bool {
-        if (declared == actual) return true;
-        const kind = self.arena.exprKind(actual_expr);
-        if (kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
-        if (kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
-        // Negative literals via unary minus on a literal also fit when the
-        // operand is a matching numeric literal.
-        if (kind == .unary) {
-            const un = self.arena.unary_exprs.items[self.arena.exprData(actual_expr)];
-            if (un.op == .neg) {
-                const inner_kind = self.arena.exprKind(un.operand);
-                if (inner_kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
-                if (inner_kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
-            }
+    /// A collection literal against the element types a `let` annotation
+    /// declares. The literal's own type follows its first element, so a numeric
+    /// literal element is judged against the declared type directly, and any
+    /// other element carries the literal's type.
+    fn checkCollectionLitAgainst(self: *TypeChecker, value: NodeId, declared: ResolvedType, inferred: ResolvedType) !void {
+        switch (self.arena.exprKind(value)) {
+            .array_lit => {
+                const elem: BuiltinType = switch (declared) {
+                    .array_dyn => |e| e,
+                    .array_fixed => |info| info.elem,
+                    else => return,
+                };
+                const lit_elem: ?BuiltinType = switch (inferred) {
+                    .array_dyn => |e| e,
+                    .array_fixed => |info| info.elem,
+                    else => null,
+                };
+                const al = self.arena.array_lits.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    try self.checkElementAgainst(elem, @bitCast(self.arena.extra.items[al.elements_start + i]), lit_elem);
+                }
+            },
+            .map_lit => {
+                if (declared != .map_t) return;
+                const lit: ?MapInfo = if (inferred == .map_t) inferred.map_t else null;
+                const ml = self.arena.map_lits.items[self.arena.exprData(value)];
+                var i: u32 = 0;
+                while (i < ml.entries_len) : (i += 1) {
+                    const entry = self.arena.map_entries.items[ml.entries_start + i];
+                    try self.checkElementAgainst(declared.map_t.key, entry.key, if (lit) |m| m.key else null);
+                    try self.checkElementAgainst(declared.map_t.value, entry.value, if (lit) |m| m.value else null);
+                }
+            },
+            else => {},
         }
-        return false;
+    }
+
+    fn checkElementAgainst(self: *TypeChecker, declared: BuiltinType, e: NodeId, lit_type: ?BuiltinType) !void {
+        var lit = e;
+        if (self.arena.exprKind(lit) == .unary and self.arena.unary_exprs.items[self.arena.exprData(lit)].op == .neg) {
+            lit = self.arena.unary_exprs.items[self.arena.exprData(lit)].operand;
+        }
+        const fits = switch (self.arena.exprKind(lit)) {
+            .int_lit => try self.literalTypeFits(declared, e, .int_),
+            .float_lit => try self.literalTypeFits(declared, e, .float_),
+            else => (lit_type orelse return) == declared,
+        };
+        if (!fits) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "collection element type does not match the declared element type", .{});
+    }
+
+    /// A params-block default renders into its descriptor as written, so a
+    /// literal default is range-checked against its declared type.
+    fn checkParamDefaults(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const f = self.arena.fields.items[start + i];
+            if (f.default_value.isNone()) continue;
+            const declared = self.namedTypeToResolved(f.type_node);
+            if (declared != .builtin) continue;
+            const actual = self.synthExpr(f.default_value, null);
+            if (actual == .builtin) _ = try self.literalTypeFits(declared.builtin, f.default_value, actual.builtin);
+        }
+    }
+
+    /// Whether `value` folds as a constant, emitting E1101 when it does not or
+    /// when its folding overflows, divides by zero or leaves the finite floats
+    /// (`etch-resolver-types.md` §11). A string literal or `.variant` is a
+    /// constant with nothing to fold. A kind mismatch or an out-of-range literal
+    /// folds `true`: the type check and the literal pass report those.
+    fn foldsAsConstant(self: *TypeChecker, value: NodeId, not_constant: []const u8) !bool {
+        switch (self.arena.exprKind(value)) {
+            .string_lit, .tag_path => return true,
+            else => {},
+        }
+        _ = const_eval.fold(self.gpa, self.arena, value) catch |err| {
+            const span = self.arena.exprSpan(value);
+            switch (err) {
+                error.NotConstant => try self.emit(.not_const_evaluable, .error_, span, "{s}", .{not_constant}),
+                error.IntegerOverflow => try self.emit(.not_const_evaluable, .error_, span, "the constant overflows int", .{}),
+                error.DivisionByZero => try self.emit(.not_const_evaluable, .error_, span, "the constant divides by zero", .{}),
+                error.FloatOverflow => try self.emit(.not_const_evaluable, .error_, span, "the constant is not a finite float", .{}),
+                error.KindMismatch, error.LiteralOutOfRange => return true,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+            return false;
+        };
+        return true;
+    }
+
+    /// Every integer literal fits `int` and every float or duration literal is
+    /// finite, whatever context it sits in (`etch-resolver-types.md` §4.3). The
+    /// lexer never includes the sign, so a literal under a unary minus is judged
+    /// negated: `-9223372036854775808` fits.
+    fn checkLiteralRanges(self: *TypeChecker) !void {
+        const kinds = self.arena.exprs.items(.kind);
+        const datas = self.arena.exprs.items(.data);
+        var negated: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer negated.deinit(self.gpa);
+        for (kinds, datas) |k, d| {
+            if (k != .unary) continue;
+            const u = self.arena.unary_exprs.items[d];
+            if (u.op == .neg and self.arena.exprKind(u.operand) == .int_lit) try negated.put(self.gpa, u.operand.index, {});
+        }
+        for (kinds, datas, 0..) |k, d, i| {
+            const id: NodeId = .{ .category = .expr, .index = @intCast(i) };
+            const text = self.arena.strings.slice(d);
+            const fits = switch (k) {
+                .int_lit => const_eval.intLiteralValue(text, negated.contains(id.index)) != null,
+                .float_lit => try const_eval.floatLiteralValue(self.gpa, text) != null,
+                .duration_lit => text.len < 2 or try const_eval.floatLiteralValue(self.gpa, text[0 .. text.len - 1]) != null,
+                else => continue,
+            };
+            if (fits) continue;
+            try self.range_reported.put(self.gpa, id.raw(), {});
+            const family = if (k == .int_lit) "int" else "float";
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "literal {s} does not fit in {s}", .{ text, family });
+        }
+        const tkinds = self.arena.type_nodes.items(.kind);
+        const tdatas = self.arena.type_nodes.items(.data);
+        for (tkinds, tdatas) |k, d| {
+            if (k != .array) continue;
+            const size = self.arena.array_types.items[d].size;
+            if (self.constArrayLen(size) != null) continue;
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(size), "array size must be a non-negative integer literal", .{});
+        }
+    }
+
+    /// Polymorphic int / float literal rule (`etch-resolver-types.md` §4.3).
+    /// When the declared context type is given and the value is a literal of
+    /// the same numeric family (int family → any integer builtin, float family
+    /// → any float builtin), the literal fits its family, and a literal outside
+    /// the declared type's range is refused here. All other forms require exact
+    /// equality (no implicit numeric coercion).
+    fn literalTypeFits(self: *TypeChecker, declared: BuiltinType, actual_expr: NodeId, actual: BuiltinType) !bool {
+        if (declared == actual) return true;
+        var lit = actual_expr;
+        var negated = false;
+        if (self.arena.exprKind(actual_expr) == .unary) {
+            const un = self.arena.unary_exprs.items[self.arena.exprData(actual_expr)];
+            if (un.op != .neg) return false;
+            lit = un.operand;
+            negated = true;
+        }
+        const kind = self.arena.exprKind(lit);
+        const int_family = kind == .int_lit and actual == .int_ and declared.isInteger();
+        const float_family = kind == .float_lit and actual == .float_ and declared.isFloat();
+        if (!int_family and !float_family) return false;
+        if (self.range_reported.contains(lit.raw())) return true;
+        const text = self.arena.strings.slice(self.arena.exprData(lit));
+        const fits = if (int_family) blk: {
+            const v = const_eval.intLiteralValue(text, negated) orelse return true;
+            break :blk switch (declared) {
+                .i32_ => std.math.cast(i32, v) != null,
+                .u32_ => std.math.cast(u32, v) != null,
+                else => true,
+            };
+        } else blk: {
+            const v = (try const_eval.floatLiteralValue(self.gpa, text)) orelse return true;
+            break :blk declared != .f32_ or std.math.isFinite(@as(f32, @floatCast(v)));
+        };
+        if (!fits) {
+            try self.range_reported.put(self.gpa, lit.raw(), {});
+            const type_name: []const u8 = switch (declared) {
+                .i32_ => "i32",
+                .u32_ => "u32",
+                else => "f32",
+            };
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(actual_expr), "literal {s}{s} does not fit in {s}", .{ if (negated) "-" else "", text, type_name });
+        }
+        return true;
     }
 
     /// Resolve a type node to a `ResolvedType`. Despite the historical name it
@@ -4143,13 +4523,12 @@ pub const TypeChecker = struct {
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         switch (self.arena.typeNodeKind(type_node)) {
             .named => {
-                const named_idx = self.arena.typeNodeData(type_node);
-                const named = self.arena.named_types.items[named_idx];
+                const name = self.arena.namedTypeName(type_node).?;
                 // A type-parameter name in scope resolves to a generic variable
                 // checked before alias / builtin / symbol.
-                if (self.generic_scope.contains(named.name)) return .{ .generic = named.name };
+                if (self.generic_scope.contains(name)) return .{ .generic = name };
                 // Resolve through any top-level `type` alias chain first.
-                const resolved_name = self.arena.resolveTypeAliasName(named.name);
+                const resolved_name = self.arena.resolveTypeAliasName(name);
                 const tname = self.arena.strings.slice(resolved_name);
                 // `string` in a declared-type position.
                 // Kept out of `fromName` so the component/resource POD
@@ -4296,8 +4675,7 @@ pub const TypeChecker = struct {
     fn constArrayLen(self: *TypeChecker, size_node: NodeId) ?u64 {
         if (size_node.isNone()) return null;
         if (self.arena.exprKind(size_node) != .int_lit) return null;
-        const text = self.arena.strings.slice(self.arena.exprData(size_node));
-        return std.fmt.parseInt(u64, text, 10) catch null;
+        return const_eval.intLiteralMagnitude(self.arena.strings.slice(self.arena.exprData(size_node)));
     }
 
     // ─── Pass 2 ──────────────────────────────────────────────────────────
@@ -4391,6 +4769,9 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on method '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
@@ -4416,7 +4797,7 @@ pub const TypeChecker = struct {
 
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !try self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -4546,14 +4927,12 @@ pub const TypeChecker = struct {
         while (i < rule.params_len) : (i += 1) {
             const p = self.arena.rule_params.items[rule.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            if (ptype == .unknown) {
-                if (self.arena.typeNodeKind(p.type_node) == .named) {
-                    const tname_idx = self.arena.typeNodeData(p.type_node);
-                    const tname = self.arena.strings.slice(self.arena.named_types.items[tname_idx].name);
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{tname});
-                } else {
-                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
+            if (self.arena.namedTypeName(p.type_node)) |tn| {
+                if (ptype == .unknown) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{self.arena.strings.slice(tn)});
                 }
+            } else {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
             }
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
@@ -4741,13 +5120,13 @@ pub const TypeChecker = struct {
             };
             const req_name = self.arena.strings.slice(name_id);
             if (self.requisiteDecl(name_id) == null) {
-                try self.emit(
-                    .unknown_requisite,
-                    .error_,
-                    annot.span,
-                    "@requires names `{s}`, which is not a declared component",
-                    .{req_name},
-                );
+                const is_resource = builtinResourceByName(req_name) != null or
+                    (if (self.symbols.get(name_id)) |sym| sym.kind == .resource else false);
+                if (is_resource) {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is a resource: no entity carries one", .{req_name});
+                } else {
+                    try self.emit(.unknown_requisite, .error_, annot.span, "@requires names `{s}`, which is not a declared component", .{req_name});
+                }
                 return;
             }
         }
@@ -4954,6 +5333,9 @@ pub const TypeChecker = struct {
             ResolvedType.unknown
         else
             self.namedTypeToResolved(decl.return_type);
+        if (!decl.return_type.isNone() and ret_t == .unknown) {
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.return_type), "unknown or unsupported return type on function '{s}'", .{self.arena.strings.slice(decl.name)});
+        }
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
@@ -4983,7 +5365,7 @@ pub const TypeChecker = struct {
         // declared return type (E0200, consistent with the closure-call path).
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
-            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !try self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
                 try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -5158,9 +5540,10 @@ pub const TypeChecker = struct {
             try self.emit(.invalid_field_filter, .error_, node.span, "component '{s}' has no field '{s}'", .{ tname, fname });
             return;
         }
+        if (!try self.foldsAsConstant(node.filter_value, "field filter value must be a constant expression")) return;
         const declared = self.namedTypeToResolved(found.?.type_node);
         const actual = self.synthExpr(node.filter_value, null);
-        if (declared == .builtin and actual == .builtin and !declared.eql(actual)) {
+        if (declared == .builtin and actual == .builtin and !try self.literalTypeFits(declared.builtin, node.filter_value, actual.builtin)) {
             try self.emit(.invalid_field_filter, .error_, node.span, "field filter type does not match field declared type", .{});
         }
     }
@@ -5187,7 +5570,7 @@ pub const TypeChecker = struct {
             }
             const actual = self.synthExpr(flit.value, ctx_opt);
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                if (d == .builtin and actual == .builtin and !try self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
             } else {
@@ -5276,9 +5659,10 @@ pub const TypeChecker = struct {
                     break :blk self.synthHeadValue(let.value, ctx);
                 };
                 const final = if (declared) |d| blk: {
-                    if (d == .builtin and inferred == .builtin and !self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
+                    if (d == .builtin and inferred == .builtin and !try self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
                     }
+                    try self.checkCollectionLitAgainst(let.value, d, inferred);
                     break :blk d;
                 } else inferred;
                 // A binding to `entity.get_mut(T)` aliases the mutable
@@ -5312,7 +5696,7 @@ pub const TypeChecker = struct {
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
                         const rhs_type = self.synthHeadValue(assign.value, ctx);
-                        if (local.type_ == .builtin and rhs_type == .builtin and !self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
+                        if (local.type_ == .builtin and rhs_type == .builtin and !try self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                         // Compound assignment on strings (`s += t`) is not in
@@ -5339,7 +5723,7 @@ pub const TypeChecker = struct {
                     // Synthesize the field type and check the value matches it.
                     const lhs_type = self.synthExpr(assign.target, ctx);
                     const rhs_type = self.synthExpr(assign.value, ctx);
-                    if (lhs_type == .builtin and rhs_type == .builtin and !self.literalTypeFits(lhs_type.builtin, assign.value, rhs_type.builtin)) {
+                    if (lhs_type == .builtin and rhs_type == .builtin and !try self.literalTypeFits(lhs_type.builtin, assign.value, rhs_type.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
                     }
                 } else {
@@ -5510,6 +5894,9 @@ pub const TypeChecker = struct {
                 // parent has potentially already advanced — no propagation
                 // site (`etch-resolver-types.md` §9.2). Asymmetric by design
                 // — do NOT generalize.
+                if (self.in_hook_body) {
+                    try self.emit(.illegal_return_in_extension_hook, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in an extension hook (on_attach / on_detach): a hook has no caller to return to", .{});
+                }
                 if (self.conc_branch) |ck| {
                     if (ck != .race) {
                         try self.emit(.illegal_return_in_concurrency_branch, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in a '{s}' {s} (only a 'race' branch may return — the winner's return propagates at the race site)", .{ @tagName(ck), if (ck == .sync) "branch" else "body" });
@@ -5518,8 +5905,17 @@ pub const TypeChecker = struct {
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
                     const vt = self.synthHeadValue(value, ctx);
+                    // The winner's value is parked in `AsyncTask.result` and
+                    // re-raised at the race site several ticks later, after the
+                    // rule arena has been reset — and `result` is a bare `Value`
+                    // that stabilises nothing.
+                    if (self.conc_branch) |ck| {
+                        if (ck == .race and isRuleArenaType(vt)) {
+                            try self.emit(.rule_arena_value_escapes, .error_, self.arena.exprSpan(value), "this 'race' branch returns a value stored in the rule arena; the winner's value is parked and re-raised at the race site after the arena has been reset", .{});
+                        }
+                    }
                     if (self.current_fn_return) |ret| {
-                        if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
+                        if (ret == .builtin and vt == .builtin and !try self.literalTypeFits(ret.builtin, value, vt.builtin)) {
                             try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
                         }
                     }
@@ -5901,7 +6297,6 @@ pub const TypeChecker = struct {
             //
             // The direction is `E0223`'s own: a false refusal is a compile error
             // the author reads, a missed capture is an abort in production.
-            // Measured at 0 false refusals over the whole suite.
             .unknown, .generic => true,
             .builtin => |b| b == .string_,
             else => false,
@@ -6197,7 +6592,11 @@ pub const TypeChecker = struct {
                     }
                     if (ctx_opt) |ctx| {
                         if (!ctx.unrestricted_ecs_access and !ctx.resources_in_when.contains(mg.type_name)) {
-                            try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            if (self.in_hook_body) {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — an extension hook reads engine resources only", .{tname});
+                            } else {
+                                try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                            }
                         }
                     }
                     return .{ .resource = mg.type_name };
@@ -6216,10 +6615,26 @@ pub const TypeChecker = struct {
                         try self.emit(.component_expected_resource_given, .error_, self.arena.exprSpan(id), "'{s}' is a resource — entity.get(...) accesses a component; use get({s})", .{ tname, tname });
                         return ResolvedType.unknown;
                     }
+                    if (sym.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                } else if (self.imported_symbols.get(mg.type_name)) |entry| {
+                    if (entry.kind != .component) {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a component", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown component '{s}'", .{tname});
+                    return ResolvedType.unknown;
                 }
                 if (ctx_opt) |ctx| {
                     if (!ctx.unrestricted_ecs_access and !ctx.components_in_when.contains(mg.type_name)) {
-                        try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        if (self.in_hook_body) {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the prefab's requires clause", .{tname});
+                        } else {
+                            try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        }
                     }
                 }
                 return .{ .component = mg.type_name };
@@ -6380,7 +6795,10 @@ pub const TypeChecker = struct {
                 if (elem_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array elements must be a builtin primitive in E1", .{});
                 return ResolvedType.unknown;
             }
-            const len = self.constArrayLen(al.fill_count) orelse 0;
+            const len = self.constArrayLen(al.fill_count) orelse {
+                try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be a non-negative integer literal", .{});
+                return ResolvedType.unknown;
+            };
             return .{ .array_fixed = .{ .elem = elem_t.builtin, .len = len } };
         }
         if (al.elements_len == 0) return ResolvedType.unknown; // empty: type from annotation
@@ -6394,7 +6812,7 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             }
             if (elem_bt) |bt| {
-                if (!self.literalTypeFits(bt, e, et.builtin)) {
+                if (!try self.literalTypeFits(bt, e, et.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must all have the same type", .{});
                 }
             } else elem_bt = et.builtin;
@@ -6437,13 +6855,13 @@ pub const TypeChecker = struct {
                 continue;
             }
             if (key_bt) |kb| {
-                if (!self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
+                if (!try self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
             } else {
                 key_bt = kt.builtin;
                 try self.checkHashBound(kt.builtin, "map key type", "K: Hash", self.arena.exprSpan(entry.key));
             }
             if (val_bt) |vb| {
-                if (!self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
+                if (!try self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
             } else val_bt = vt.builtin;
         }
         if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
@@ -6768,7 +7186,7 @@ pub const TypeChecker = struct {
             var ptype = arg_t;
             if (!p.type_node.isNone()) {
                 ptype = self.namedTypeToResolved(p.type_node);
-                if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+                if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
                 }
             }
@@ -6885,7 +7303,7 @@ pub const TypeChecker = struct {
             const ptype = self.namedTypeToResolved(p.type_node);
             const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+            if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
         }
@@ -6946,15 +7364,15 @@ pub const TypeChecker = struct {
     fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
         switch (self.arena.typeNodeKind(formal)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(formal)];
-                if (!self.isGenericParamOf(decl, named.name)) return; // concrete formal — no binding
+                const name = self.arena.namedTypeName(formal).?;
+                if (!self.isGenericParamOf(decl, name)) return; // concrete formal — no binding
                 if (actual == .unknown) return; // don't pin a param to a post-error unknown
-                if (subst.get(named.name)) |prev| {
+                if (subst.get(name)) |prev| {
                     if (!ResolvedType.eql(prev, actual)) {
-                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(named.name)});
+                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(name)});
                     }
                 } else {
-                    try subst.put(self.gpa, named.name, actual);
+                    try subst.put(self.gpa, name, actual);
                 }
             },
             .array, .slice => {
@@ -6977,9 +7395,9 @@ pub const TypeChecker = struct {
     fn substituteGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, node: NodeId, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
         switch (self.arena.typeNodeKind(node)) {
             .named => {
-                const named = self.arena.named_types.items[self.arena.typeNodeData(node)];
-                if (self.isGenericParamOf(decl, named.name)) {
-                    return subst.get(named.name) orelse ResolvedType{ .generic = named.name };
+                const name = self.arena.namedTypeName(node).?;
+                if (self.isGenericParamOf(decl, name)) {
+                    return subst.get(name) orelse ResolvedType{ .generic = name };
                 }
                 return self.namedTypeToResolved(node);
             },
@@ -7102,7 +7520,7 @@ pub const TypeChecker = struct {
                 break :blk try self.synthExprE(flit.value, ctx_opt);
             };
             if (declared) |d| {
-                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                if (d == .builtin and actual == .builtin and !try self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
                 if (d == .struct_t and actual == .struct_t and d.struct_t != actual.struct_t) {
@@ -7496,7 +7914,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.array_dyn, arg, arg_t.builtin)) {
+                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.array_dyn, arg, arg_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "pushed value type does not match the array element type", .{});
                     }
                 }
@@ -7536,10 +7954,10 @@ pub const TypeChecker = struct {
                     const varg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + 1]);
                     const k_t = try self.synthExprE(karg, ctx_opt);
                     const v_t = try self.synthExprE(varg, ctx_opt);
-                    if (k_t == .builtin and !self.literalTypeFits(recv_t.map_t.key, karg, k_t.builtin)) {
+                    if (k_t == .builtin and !try self.literalTypeFits(recv_t.map_t.key, karg, k_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(karg), "inserted key type does not match the map key type", .{});
                     }
-                    if (v_t == .builtin and !self.literalTypeFits(recv_t.map_t.value, varg, v_t.builtin)) {
+                    if (v_t == .builtin and !try self.literalTypeFits(recv_t.map_t.value, varg, v_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(varg), "inserted value type does not match the map value type", .{});
                     }
                 }
@@ -7569,7 +7987,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "inserted item type does not match the set element type", .{});
                     }
                 }
@@ -7582,7 +8000,7 @@ pub const TypeChecker = struct {
                 } else {
                     const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
                     const arg_t = try self.synthExprE(arg, ctx_opt);
-                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                    if (arg_t == .builtin and !try self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "item type does not match the set element type", .{});
                     }
                 }
@@ -7875,7 +8293,7 @@ pub const TypeChecker = struct {
             const ptype = self.namedTypeToResolved(p.type_node);
             const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
-            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+            if (ptype == .builtin and arg_t == .builtin and !try self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
             }
         }
@@ -7911,7 +8329,7 @@ pub const TypeChecker = struct {
                 // the optional-returning accessor unlocked by the Optional
                 // ops — lifts the earlier rejection. The key must fit the
                 // map's key type.
-                if (idx_t == .builtin and !self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
+                if (idx_t == .builtin and !try self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
                 }
                 return .{ .optional = mi.value };
@@ -7969,7 +8387,7 @@ pub const TypeChecker = struct {
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_t = try self.synthExprE(lit, ctx_opt);
-                    if (scrut_t == .builtin and lit_t == .builtin and !self.literalTypeFits(scrut_t.builtin, lit, lit_t.builtin)) {
+                    if (scrut_t == .builtin and lit_t == .builtin and !try self.literalTypeFits(scrut_t.builtin, lit, lit_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(lit), "match pattern literal type does not match the scrutinee type", .{});
                     }
                     if (scrut_t == .builtin and scrut_t.builtin == .bool_ and self.arena.exprKind(lit) == .bool_lit) {
@@ -8104,7 +8522,7 @@ pub const TypeChecker = struct {
                 // the default must fit the payload type; the result is the
                 // unwrapped payload.
                 if (lhs_t == .optional) {
-                    if (rhs_t == .builtin and !self.literalTypeFits(lhs_t.optional, bin.rhs, rhs_t.builtin)) {
+                    if (rhs_t == .builtin and !try self.literalTypeFits(lhs_t.optional, bin.rhs, rhs_t.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(bin.rhs), "'??' default type does not match the optional payload type", .{});
                     }
                     return .{ .builtin = lhs_t.optional };
@@ -8239,6 +8657,15 @@ pub const TypeChecker = struct {
 
 // ─── Helpers reachable from tests ───────────────────────────────────────
 
+/// Whether the expression at `id` is `Set.new()`, the empty set.
+pub fn isEmptySetConstructor(arena: *const AstArena, id: NodeId) bool {
+    if (arena.exprKind(id) != .method_call) return false;
+    const mc = arena.method_calls.items[arena.exprData(id)];
+    return arena.exprKind(mc.receiver) == .path and
+        std.mem.eql(u8, arena.strings.slice(arena.exprData(mc.receiver)), "Set") and
+        std.mem.eql(u8, arena.strings.slice(mc.method_name), "new") and mc.args_len == 0;
+}
+
 /// Return `true` if the expression at `id` can be folded to a value
 /// at type-check time (literals + arithmetic/comparison/logic on
 /// const-evaluable operands). Drives the `component` default-value
@@ -8246,7 +8673,8 @@ pub const TypeChecker = struct {
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {
-        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path => true,
+        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path, .none_lit => true,
+        .some_lit => isConstEvaluable(arena, @bitCast(arena.exprData(id))),
         .binary => blk: {
             const bin = arena.binary_exprs.items[arena.exprData(id)];
             // Arithmetic / comparison / logic on const-evaluable args is OK.
@@ -8583,6 +9011,145 @@ test "prefab E1793/E1794/E1795: component type + field-name + field-type checks"
     );
     defer r3.deinit(gpa);
     try expectAnyCode(r3.diagnostics.items, .prefab_component_field_type_invalid);
+}
+
+const hook_base =
+    \\component Health { current: float = 1.0, max: float = 1.0 }
+    \\component Weapon { damage: float = 1.0 }
+    \\component Mana { v: float = 0.0 }
+    \\prefab "Base" { entity "r" { Health {} } }
+    \\
+;
+
+/// Check `hook_base ++ src`, requiring the source to parse clean.
+fn checkHookSource(gpa: std.mem.Allocator, src: []const u8) !CheckOutcome {
+    var r = try parseAndCheck(gpa, src);
+    errdefer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.parse_diags.len);
+    return r;
+}
+
+test "a hook reaching a component outside requires and its own is E1210" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Mana).v += 1.0 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unknown_component_in_when);
+}
+
+test "a hook reaching its requires and its own components is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { entity.get_mut(Health).max += entity.get(Weapon).damage }
+        \\  on_detach { entity.get_mut(Health).max -= entity.get(Weapon).damage }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "a requires naming no component is E1793" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Ghost {
+        \\  entity "m" { Weapon {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .prefab_component_type_unknown);
+}
+
+test "a return in a hook is E1798" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { return }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .illegal_return_in_extension_hook);
+}
+
+test "an await in a hook is E0901" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { await wait(1.0s) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "a hook emitting an undeclared event is E0102" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { emit Undeclared {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
+}
+
+test "a hook calling a throws fn outside a try is E0902" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\fn risky(n: int) throws -> int { return n }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = risky(1) }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .unhandled_throws_call);
+}
+
+test "a hook reading a user resource is E1213" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\resource Settings { v: int = 0 }
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let v = get(Settings).v }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .resource_expected_in_when);
+}
+
+test "a hook reading an engine resource is clean" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let t = get(GameTime).dt }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.items.len);
+}
+
+test "on_detach does not see a let of on_attach" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Mod" extends "Base" requires Health {
+        \\  entity "m" { Weapon {} }
+        \\  on_attach { let x = 1 }
+        \\  on_detach { let y = x }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .undefined_symbol);
 }
 
 test "type-checker emits E0102 on field referencing unknown type" {
@@ -13138,4 +13705,272 @@ test "an optional whose payload is not a builtin is still refused" {
     );
     defer v.deinit(gpa);
     try expectAnyCode(v.diagnostics.items, .rule_arena_value_escapes);
+}
+
+/// A one-rule program whose first `race` branch is `return <body>`, with
+/// `decls` inserted before the rule.
+fn raceReturnProgram(gpa: std.mem.Allocator, decls: []const u8, body: []const u8) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(
+        gpa,
+        "component C {{ out: int = 0 }}\n{s}async rule r(entity: Entity)\n  when entity has C\n{{\n  race {{ {{ return {s} }} await wait(1.0s) }}\n}}\n",
+        .{ decls, body },
+        0,
+    );
+}
+
+test "a race branch returning a rule-arena value is refused, per form" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "[1, 2, 3]" }, // array literal
+        .{ .decls = "", .expr = "[1: 2]" }, // map literal
+        .{ .decls = "struct S { v: int = 0 }\n", .expr = "S { v: 1 }" }, // struct literal
+        .{ .decls = "", .expr = "Set.from([1, 2])" }, // set
+        .{ .decls = "", .expr = "some(41)" }, // optional
+        .{ .decls = "", .expr = "|x: int| x * 2" }, // closure
+        .{ .decls = "", .expr = "\"x\" + \"y\"" }, // string with NO local
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("form not refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a NON-arena value is still accepted — the green twin" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_]struct { decls: []const u8, expr: []const u8 }{
+        .{ .decls = "", .expr = "1" },
+        .{ .decls = "", .expr = "2.5" },
+        .{ .decls = "", .expr = "true" },
+        .{ .decls = "", .expr = "1 + 2" },
+        .{ .decls = "", .expr = "entity" },
+    };
+    for (forms) |f| {
+        const src = try raceReturnProgram(gpa, f.decls, f.expr);
+        defer gpa.free(src);
+        var c = try parseAndCheck(gpa, src);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .rule_arena_value_escapes) catch |e| {
+            std.debug.print("green twin wrongly refused: return {s}\n", .{f.expr});
+            return e;
+        };
+    }
+}
+
+test "a race branch returning a bare string literal is refused — the MEASURED COST" {
+    const gpa = std.testing.allocator;
+
+    // A bare `"x"` is an AST-pool handle, safe to park, and refused anyway:
+    // `isRuleArenaType` sees only the resolved type, the same `string` as an
+    // arena-backed concatenation.
+    const src = try raceReturnProgram(gpa, "", "\"x\"");
+    defer gpa.free(src);
+    var c = try parseAndCheck(gpa, src);
+    defer c.deinit(gpa);
+    try expectAnyCode(c.diagnostics.items, .rule_arena_value_escapes);
+
+    // A bare enum shorthand has no expected type here and resolves `.unknown`,
+    // which `isRuleArenaType` refuses though the value is a discriminant.
+    const en = try raceReturnProgram(gpa, "enum K { a, b }\n", ".b");
+    defer gpa.free(en);
+    var e2 = try parseAndCheck(gpa, en);
+    defer e2.deinit(gpa);
+    try expectAnyCode(e2.diagnostics.items, .rule_arena_value_escapes);
+}
+
+test "a scalar event filter is still accepted, and only a string can reach one" {
+    const gpa = std.testing.allocator;
+
+    // `captureEventFilter` copies only strings, and captured filters are kept
+    // across ticks: sound only while a string is the only rule-arena form that
+    // can reach an event filter.
+    const scalar =
+        \\component C { out: int = 0 }
+        \\enum K { a, b }
+        \\event E { n: int = 0, k: K = .a }
+        \\async rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  await global_event(E { n: 1, k: .b })
+        \\}
+    ;
+    var ok = try parseAndCheck(gpa, scalar);
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .rule_arena_value_escapes);
+
+    // An OPTIONAL event field is refused at the field type, so `some(…)` never
+    // reaches a captured filter.
+    var opt = try parseAndCheck(gpa,
+        \\event E { n: int? }
+    );
+    defer opt.deinit(gpa);
+    try expectAnyCode(opt.diagnostics.items, .undefined_symbol);
+
+    // A COLLECTION event field likewise — collections are resource-only.
+    var arr = try parseAndCheck(gpa,
+        \\event E { xs: int[] }
+    );
+    defer arr.deinit(gpa);
+    try expectAnyCode(arr.diagnostics.items, .undefined_symbol);
+}
+
+fn expectStructEventFieldRefused(gpa: std.mem.Allocator, source: []const u8) !void {
+    var outcome = try parseAndCheck(gpa, source);
+    defer outcome.deinit(gpa);
+    var refused: usize = 0;
+    for (outcome.diagnostics.items) |d| {
+        if (d.code == .undefined_symbol and std.mem.indexOf(u8, d.primary_message, "cannot be of struct type") != null) refused += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), refused);
+}
+
+test "an event field of struct type is refused at the declaration" {
+    const gpa = std.testing.allocator;
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\event E { p: P }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { p: P }
+        \\struct P { v: int }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\struct P { v: int }
+        \\type Q = P
+        \\event E { q: Q }
+    );
+    try expectStructEventFieldRefused(gpa,
+        \\event E { e: Error }
+    );
+    var nested = try parseAndCheck(gpa,
+        \\struct P { v: int }
+        \\struct S { p: P }
+    );
+    defer nested.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), nested.diagnostics.items.len);
+}
+
+test "an emit value holding a nested struct literal is checked against the event" {
+    const gpa = std.testing.allocator;
+    var emitted = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  emit Hit { n: Payload { v: 5 }.v }
+        \\}
+    );
+    defer emitted.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), emitted.diagnostics.items.len);
+    var filtered = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\struct Payload { v: int }
+        \\event Hit { n: int = 0 }
+        \\async rule r(entity: Entity) when entity has C {
+        \\  await global_event(Hit { n: Payload { v: 5 }.v })
+        \\}
+    );
+    defer filtered.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), filtered.diagnostics.items.len);
+}
+
+fn countMessage(diagnostics: []const Diagnostic, code: DiagnosticCode, needle: []const u8) usize {
+    var n: usize = 0;
+    for (diagnostics) |d| {
+        if (d.code == code and std.mem.indexOf(u8, d.primary_message, needle) != null) n += 1;
+    }
+    return n;
+}
+
+test "entity.get of a struct is refused as not a component" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\struct A0 { x: int }
+        \\struct A1 { x: int }
+        \\struct S { v: int }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let x = entity.get(S).v
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "'S' is not a component"));
+}
+
+test "entity.get of an undeclared name is refused in an unrestricted body" {
+    const gpa = std.testing.allocator;
+    var outcome = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\test "t" {
+        \\  let w = test_world()
+        \\  let e = w.spawn_with([C { out: 1 }])
+        \\  let v = e.get(Nope).out
+        \\}
+    );
+    defer outcome.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(outcome.diagnostics.items, .undefined_symbol, "unknown component 'Nope'"));
+}
+
+test "a component or resource may not take a name the engine registers" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_][]const u8{
+        "resource GameTime { dt: float = 0.0 }",
+        "resource GameTime { zz: int = 0 }",
+        "resource UnscaledTime { zz: int = 0 }",
+        "resource RealTime { zz: int = 0 }",
+        "component GameTime { zz: int = 0 }",
+        "component UnscaledTime { zz: int = 0 }",
+        "component RealTime { zz: int = 0 }",
+        "component TagSet { zz: int = 0 }",
+        "resource TagSet { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectAnyCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("reserved name not refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "an ordinary component or resource name is untouched — the green twin" {
+    const gpa = std.testing.allocator;
+
+    const forms = [_][]const u8{
+        "resource Ordinary { zz: int = 0 }",
+        "component Ordinary { zz: int = 0 }",
+        "resource GameTimer { zz: int = 0 }",
+        "component TagSetup { zz: int = 0 }",
+        "resource Time { zz: int = 0 }",
+    };
+    for (forms) |src| {
+        const z = try std.fmt.allocPrintSentinel(gpa, "{s}", .{src}, 0);
+        defer gpa.free(z);
+        var c = try parseAndCheck(gpa, z);
+        defer c.deinit(gpa);
+        expectNoCode(c.diagnostics.items, .duplicate_symbol) catch |e| {
+            std.debug.print("green twin wrongly refused: {s}\n", .{src});
+            return e;
+        };
+    }
+}
+
+test "the reservation is DERIVED from the builtin table, not a second list" {
+    for (&builtin_resources) |*br| {
+        try std.testing.expect(isReservedEngineTypeName(br.name));
+    }
+    try std.testing.expect(isReservedEngineTypeName(tagset_component_name));
+    try std.testing.expect(!isReservedEngineTypeName("GameTimer"));
+    try std.testing.expect(!isReservedEngineTypeName(""));
 }

@@ -112,16 +112,13 @@ fn cookOne(gpa: std.mem.Allocator, fx: Fixture, doc: assets.AssetDoc, blob: []co
 /// Reuse the uuid of an existing intermediate `.asset.etch`, else generate a
 /// fresh UUIDv7. The result is written into `buf` (lives across the import).
 fn resolveUuid(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, etch_name: []const u8, buf: *[36]u8) ![]const u8 {
-    if (try readFileOpt(gpa, io, dir, etch_name)) |text| {
-        defer gpa.free(text);
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-        if (assets.format.intermediate.parseEtch(arena.allocator(), text)) |doc| {
-            if (doc.uuid.len == 36) {
-                @memcpy(buf, doc.uuid[0..36]);
-                return buf;
-            }
-        } else |_| {}
+    const text = try readFileOpt(gpa, io, dir, etch_name);
+    defer if (text) |t| gpa.free(t);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    if (try assets.format.intermediate.existingUuid(arena.allocator(), text)) |uuid| {
+        @memcpy(buf, uuid[0..36]);
+        return buf;
     }
     @memcpy(buf, &assets.uuid.toString(assets.uuid.generateV7(io)));
     return buf;

@@ -42,11 +42,15 @@ comptime {
     // `StringSlot` layout (`persistent.zig`) the bridge reads/writes — one
     // source of truth across the Tier-0 / Etch boundary.
     std.debug.assert(@sizeOf(persistent.StringSlot) == FieldKind.string_.sizeBytes());
+    std.debug.assert(@alignOf(persistent.StringSlot) == FieldKind.string_.alignBytes());
     // Same one-source-of-truth guard for the collection slot stride:
     // `CollectionSlot { ptr }` must match `.array_`/`.map_`/`.set_` sizeBytes.
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.array_.sizeBytes());
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.map_.sizeBytes());
     std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.set_.sizeBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.array_.alignBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.map_.alignBytes());
+    std.debug.assert(@alignOf(persistent.CollectionSlot) == FieldKind.set_.alignBytes());
 }
 
 /// Surfaced so callers of `Bridge.dispatchEntityGet` /
@@ -63,6 +67,8 @@ pub const BridgeError = error{
     /// detected at DEREFERENCE (§5.3 c). Distinct from `UnknownEntity` and
     /// `UnknownComponent`, which ask the same two questions at CONSTRUCTION.
     StaleComponentRef,
+    /// An integer outside the range of the field it is written to.
+    IntegerOverflow,
 };
 
 /// One bridge instance per Etch program run. Lives for the same
@@ -96,16 +102,24 @@ pub const Bridge = struct {
         self.* = undefined;
     }
 
+    /// Map `name` to `id`, replacing an earlier mapping of the same name.
     pub fn mapComponent(self: *Bridge, gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
-        const owned = try gpa.dupe(u8, name);
-        errdefer gpa.free(owned);
-        try self.components.put(gpa, owned, id);
+        try mapInto(&self.components, gpa, name, id);
     }
 
+    /// Map `name` to `id`, replacing an earlier mapping of the same name.
     pub fn mapResource(self: *Bridge, gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
+        try mapInto(&self.resources, gpa, name, id);
+    }
+
+    fn mapInto(map: *std.StringHashMapUnmanaged(ComponentId), gpa: std.mem.Allocator, name: []const u8, id: ComponentId) !void {
+        if (map.getPtr(name)) |v| {
+            v.* = id;
+            return;
+        }
         const owned = try gpa.dupe(u8, name);
         errdefer gpa.free(owned);
-        try self.resources.put(gpa, owned, id);
+        try map.put(gpa, owned, id);
     }
 
     pub fn componentIdOf(self: *const Bridge, name: []const u8) ?ComponentId {
@@ -176,7 +190,7 @@ pub const Bridge = struct {
         const field = registry.findField(ref.component_id, field_name) orelse return BridgeError.UnknownField;
         const slot_bytes = try refBytes(world, ref);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        try writeValueAsBytes(field.kind, field_bytes, v);
+        try writeValueAsBytes(field.kind, field_bytes, narrowForStore(field.kind, v));
     }
 
     /// Stamp `ref`'s slot as modified at `tick` — writes the `changed_tick`
@@ -215,17 +229,7 @@ pub const Bridge = struct {
         const bytes = store.getResource(resource_id) orelse return BridgeError.UnknownResource;
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        // Enum read: rebuild a typed `enum_value` from the slot's
-        // discriminant + the declared enum type's interned id on `FieldDesc`
-        // (the byte-only `readBytesAsValue` has no access to the latter). The
-        // `type_name` id matches the rest of the interpreter's enum machinery
-        // (`enum_decls` is keyed by it), so the value compares/matches correctly.
-        if (field.kind == .enum_) {
-            var disc: u32 = 0;
-            @memcpy(std.mem.asBytes(&disc), slice[0..@sizeOf(u32)]);
-            return .{ .enum_value = .{ .type_name = field.enum_type_name_id, .variant = disc } };
-        }
-        return readBytesAsValue(field.kind, slice);
+        return readFieldValue(field.kind, field.enum_type_name_id, slice);
     }
 
     pub fn writeResourceField(
@@ -238,7 +242,7 @@ pub const Bridge = struct {
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const bytes = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        try writeValueAsBytes(field.kind, slice, v);
+        try writeValueAsBytes(field.kind, slice, narrowForStore(field.kind, v));
     }
 
     /// Promote `bytes` into a fresh persistent allocation and store it in a
@@ -310,6 +314,19 @@ pub const Bridge = struct {
     }
 };
 
+/// Decode one field slot. An enum slot rebuilds a typed `enum_value` from its
+/// discriminant and the declared enum type's interned id on `FieldDesc`, which
+/// `readBytesAsValue` has no access to; the id matches the interpreter's
+/// `enum_decls` keys, so the value compares and matches correctly.
+pub fn readFieldValue(kind: FieldKind, enum_type_name_id: u32, bytes: []const u8) Value {
+    if (kind == .enum_) {
+        var disc: u32 = 0;
+        @memcpy(std.mem.asBytes(&disc), bytes[0..@sizeOf(u32)]);
+        return .{ .enum_value = .{ .type_name = enum_type_name_id, .variant = disc } };
+    }
+    return readBytesAsValue(kind, bytes);
+}
+
 /// Decode the on-storage byte representation of a field into the
 /// interpreter's tagged `Value`. The width to read is dictated by
 /// `kind` — the slice must already be sized to the field's column
@@ -356,17 +373,15 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             break :blk .{ .string_persistent = .{ .ptr = ss.ptr, .len = ss.len } };
         },
         // Enum reads need the declared type's id (on `FieldDesc`), which this
-        // byte-only decoder lacks — `readResourceField` handles `.enum_` before
-        // delegating here, and components never carry `.enum_` (validator-gated).
-        // Proven invariant: this arm is never reached.
+        // byte-only decoder lacks: resource reads go through `readFieldValue`,
+        // and components never carry `.enum_` (validator-gated).
         .enum_ => unreachable,
         // Collection read: decode the `CollectionSlot { ptr }` into a
-        // borrowed `.array_persistent` view over the owned container block (no
-        // incref — the resource, hence the block, outlives the rule body). `ptr`
-        // is never 0 for a live field (the empty collection is a real block
-        // allocated at `addResource`). Components never carry a collection kind
-        // (validator-gated, resource-only), so this is reached only via
-        // `readResourceField`.
+        // borrowed `.array_persistent` view over the owned container block,
+        // without incref'ing it. `ptr` is never 0 for a live field (the empty
+        // collection is a real block allocated with the resource's store
+        // buffer). Components never carry a collection kind (validator-gated,
+        // resource-only), so this is reached only via `readResourceField`.
         .array_ => blk: {
             var cs: persistent.CollectionSlot = undefined;
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
@@ -396,8 +411,22 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     };
 }
 
+/// `v` as a store into a `kind` field at runtime writes it: wrapped to an `i32` /
+/// `u32` field's width where overflow wraps, unchanged otherwise, so that
+/// `writeValueAsBytes` refuses a value that does not fit
+/// (`etch-reference-part1.md` §12.4).
+pub fn narrowForStore(kind: FieldKind, v: Value) Value {
+    if (!value_mod.overflow_wraps or v != .int_) return v;
+    return switch (kind) {
+        .i32_ => .{ .int_ = value_mod.intNarrow(i32, v.int_).? },
+        .u32_ => .{ .int_ = value_mod.intNarrow(u32, v.int_).? },
+        else => v,
+    };
+}
+
 /// Encode an interpreter `Value` into the on-storage byte representation of a
-/// field. `bytes` must already be sized to the field's column stride.
+/// field. `bytes` must already be sized to the field's column stride. An
+/// integer outside an `i32` / `u32` field's range is `error.IntegerOverflow`.
 ///
 /// Returns `error.TypeMismatch` when `v`'s tag is incompatible with the
 /// field's `kind`: a type incoherence is a recoverable typed error propagated
@@ -428,14 +457,14 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
         },
         .i32_ => {
             const x: i32 = switch (v) {
-                .int_ => |a| @intCast(a),
+                .int_ => |a| std.math.cast(i32, a) orelse return error.IntegerOverflow,
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(i32)], std.mem.asBytes(&x));
         },
         .u32_ => {
             const x: u32 = switch (v) {
-                .int_ => |a| @intCast(a),
+                .int_ => |a| std.math.cast(u32, a) orelse return error.IntegerOverflow,
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&x));

@@ -1094,3 +1094,61 @@ test "an ALL-SPARSE extension activates without touching the archetype" {
     const hb = world.componentBytes(npc, health_id).?;
     try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, hb[4..8], .little));
 }
+
+test "an extension naming a resource does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\resource Settings { x: i32 = 0 }
+        \\prefab "Bad" extends "BaseCharacter" {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Settings { x: 1 } }
+        \\}
+    ;
+    if (scene_cook.cookPrefab(gpa, source, base_res.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ResourceAsComponent, err);
+}
+
+test "a scene entity naming a resource does not cook" {
+    const gpa = std.testing.allocator;
+    const source =
+        \\resource Settings { x: i32 = 0 }
+        \\scene "S" {
+        \\  entity "e" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Settings { x: 1 } }
+        \\}
+    ;
+    if (scene_cook.cook(gpa, source, null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.ResourceAsComponent, err);
+}
+
+test "an extension whose hook fails the checker does not cook" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\component Mana { v: i32 = 0 }
+        \\prefab "Bad" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach { entity.get_mut(Mana).v += 1 }
+        \\}
+    ;
+    if (scene_cook.cookPrefab(gpa, source, base_res.base(), null)) |cooked| {
+        var c = cooked;
+        c.deinit(gpa);
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.HookRefused, err);
+}

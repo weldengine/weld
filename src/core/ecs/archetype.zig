@@ -142,6 +142,10 @@ pub const Archetype = struct {
     registry: *const Registry,
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
+    /// Every chunk below this index is full, and it never exceeds
+    /// `chunks.items.len`: a lower bound, not necessarily the first non-full
+    /// chunk. Lowering it is always safe; advance it only past chunks seen full.
+    first_partial: u32 = 0,
     transitions: TransitionCache = .{},
     /// `true` iff this archetype hosts a singleton-entity
     /// resource. Set by `resources.setResource` after spawning the
@@ -240,21 +244,26 @@ pub const Archetype = struct {
         return self.componentIndex(component_id) != null;
     }
 
-    /// Reserve a slot in the trailing chunk (allocating a new chunk when
-    /// the current one is full) without writing any component data. The
+    /// Reserve a slot at the tail of the first chunk with room, which need not
+    /// be the trailing chunk (allocating a new chunk when every chunk is full),
+    /// without writing any component data. The
     /// caller is responsible for filling the slot's component columns
     /// and the entity-id slot before any iteration touches them. The
     /// per-component `added_tick[col][slot]` and `changed_tick[col][slot]`
     /// sidecars are initialised to `tick`, and the slot's dirty bit is
     /// set — the entity is "fresh" for the current frame.
     pub fn allocateSlot(self: *Archetype, gpa: std.mem.Allocator, tick: Tick) ArchetypeError!SpawnResult {
-        const chunk = blk: {
-            if (self.chunks.items.len > 0) {
-                const last = self.chunks.items[self.chunks.items.len - 1];
-                if (last.header().entity_count < self.layout.capacity) break :blk last;
-            }
-            break :blk try self.allocChunk(gpa);
-        };
+        var idx = self.first_partial;
+        while (idx < self.chunks.items.len and
+            self.chunks.items[idx].header().entity_count >= self.layout.capacity) : (idx += 1)
+        {}
+        self.first_partial = idx;
+
+        const chunk = if (idx < self.chunks.items.len)
+            self.chunks.items[idx]
+        else
+            try self.allocChunk(gpa);
+        const chunk_idx: u32 = @intCast(idx);
         const hdr = chunk.header();
         const slot = hdr.entity_count;
         hdr.entity_count = slot + 1;
@@ -268,7 +277,7 @@ pub const Archetype = struct {
         change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
 
         return .{
-            .chunk_idx = @intCast(self.chunks.items.len - 1),
+            .chunk_idx = chunk_idx,
             .slot = slot,
         };
     }
@@ -330,6 +339,7 @@ pub const Archetype = struct {
         const chunk = self.chunks.items[chunk_idx];
         const hdr = chunk.header();
         std.debug.assert(slot < hdr.entity_count);
+        self.first_partial = @min(self.first_partial, chunk_idx);
         const last = hdr.entity_count - 1;
         if (slot == last) {
             hdr.entity_count = last;
@@ -373,11 +383,6 @@ pub const Archetype = struct {
     /// `null` covers two cases alike to the caller — "not empty" and "the
     /// trailing chunk was freed" — since neither renumbers anything. Only
     /// `chunks_released` tells them apart.
-    ///
-    /// Reclaiming at all matters because `allocateSlot` fills only the TRAILING
-    /// chunk: a chunk drained by churn is never refilled, so the count follows
-    /// cumulative appends rather than live population until `dispatchBatch`
-    /// refuses the archetype at its chunk ceiling.
     pub fn releaseChunkIfEmpty(self: *Archetype, gpa: std.mem.Allocator, chunk_idx: u32) ?u32 {
         const chunk = self.chunks.items[chunk_idx];
         if (chunk.header().entity_count != 0) return null;
@@ -387,10 +392,12 @@ pub const Archetype = struct {
         self.chunks_released += 1;
         if (chunk_idx == last_idx) {
             _ = self.chunks.pop();
+            self.first_partial = @min(self.first_partial, @as(u32, @intCast(self.chunks.items.len)));
             return null;
         }
         self.chunks.items[chunk_idx] = self.chunks.items[last_idx];
         _ = self.chunks.pop();
+        self.first_partial = @min(self.first_partial, chunk_idx);
         return chunk_idx;
     }
 

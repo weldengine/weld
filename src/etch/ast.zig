@@ -166,6 +166,21 @@ pub const StringPool = struct {
         return self.slices.items[id];
     }
 
+    /// A copy owning its own bytes, every id unchanged. The map keys point at
+    /// the copy's slices, never at the source's.
+    pub fn clone(self: *const StringPool, gpa: std.mem.Allocator) !StringPool {
+        var out: StringPool = .{};
+        errdefer out.deinit(gpa);
+        try out.slices.ensureTotalCapacity(gpa, self.slices.items.len);
+        try out.map.ensureTotalCapacity(gpa, @intCast(self.slices.items.len));
+        for (self.slices.items, 0..) |s, id| {
+            const owned = try gpa.dupe(u8, s);
+            out.slices.appendAssumeCapacity(owned);
+            out.map.putAssumeCapacityNoClobber(owned, @intCast(id));
+        }
+        return out;
+    }
+
     /// Look up an already-interned string's id without inserting. Returns
     /// `null` if `s` was never interned. Used by consumers
     /// that only hold a `*const AstArena` (e.g. the interpreter resolving the
@@ -2964,6 +2979,22 @@ pub const AstArena = struct {
         self.doc_comments.deinit(gpa);
     }
 
+    /// A deep copy owning every buffer, with every `NodeId`, `StringId` and
+    /// `(start, len)` run unchanged. A field of a type with no copy rule is a
+    /// compile error, so no field is copied by reference or left out.
+    pub fn clone(self: *const AstArena, gpa: std.mem.Allocator) !AstArena {
+        var out: AstArena = .{};
+        errdefer out.deinit(gpa);
+        inline for (@typeInfo(AstArena).@"struct".fields) |f| {
+            switch (@typeInfo(f.type)) {
+                .int, .@"enum" => @field(out, f.name) = @field(self, f.name),
+                .@"struct" => @field(out, f.name) = try @field(self, f.name).clone(gpa),
+                else => @compileError("AstArena.clone has no copy rule for field " ++ f.name),
+            }
+        }
+        return out;
+    }
+
     pub fn addItem(self: *AstArena, gpa: std.mem.Allocator, kind: ItemKind, data: u32, span: SourceSpan) !NodeId {
         const idx: u28 = @intCast(self.items.len);
         try self.items.append(gpa, .{ .kind = kind, .data = data, .span = span });
@@ -3089,15 +3120,11 @@ pub const AstArena = struct {
         outer: while (guard <= max) : (guard += 1) {
             for (self.type_alias_decls.items) |alias| {
                 if (alias.name == current) {
-                    // A `.path` alias target (`type HA = m.Member`)
-                    // has no single ultimate name in this arena — stop the
-                    // by-name chain here (returning `current`) rather than
-                    // mis-indexing `named_types`. The qualified target is
-                    // resolved by node kind at the consult sites (a `.path`
-                    // TypeNode → `resolvePathTypeNode`), not by this walk.
-                    if (self.typeNodeKind(alias.target) != .named) break :outer;
-                    const named = self.named_types.items[self.typeNodeData(alias.target)];
-                    current = named.name;
+                    // A `.path` alias target (`type HA = m.Member`) has no
+                    // single ultimate name in this arena: the chain stops at
+                    // `current`, and the consult sites resolve the qualified
+                    // target by node kind (`resolvePathTypeNode`).
+                    current = self.namedTypeName(alias.target) orelse break :outer;
                     continue :outer;
                 }
             }
@@ -3120,9 +3147,8 @@ pub const AstArena = struct {
     /// shape is NOT `Entity` — the `await entity_event` target must be a bare
     /// `Entity` (§9.4).
     pub fn fieldTypeIsEntity(self: *const AstArena, field: Field) bool {
-        if (self.typeNodeKind(field.type_node) != .named) return false;
-        const named = self.named_types.items[self.typeNodeData(field.type_node)];
-        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(named.name)), "Entity");
+        const name = self.namedTypeName(field.type_node) orelse return false;
+        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(name)), "Entity");
     }
 
     /// Resolve the event's designated `Entity` field for `await entity_event`
@@ -3958,6 +3984,7 @@ pub const AstArena = struct {
     pub fn onEventTypeName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the event type
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }
@@ -3984,6 +4011,7 @@ pub const AstArena = struct {
     pub fn observerComponentName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
+        if (arg.name != 0) return null; // a named argument is not the component
         if (self.exprKind(arg.value) != .path) return null;
         return self.exprData(arg.value);
     }
@@ -4001,6 +4029,14 @@ pub const AstArena = struct {
     pub fn typeNodeData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .type_node);
         return self.type_nodes.items(.data)[id.index];
+    }
+
+    /// The name a `.named` type node carries, or null for any other kind. Every
+    /// kind's `data` indexes its own slab, so reading `named_types` through the
+    /// data of a non-`.named` node selects an unrelated name.
+    pub fn namedTypeName(self: *const AstArena, id: NodeId) ?StringId {
+        if (self.typeNodeKind(id) != .named) return null;
+        return self.named_types.items[self.typeNodeData(id)].name;
     }
 
     pub fn isEmpty(self: *const AstArena) bool {
@@ -4115,4 +4151,95 @@ test "AnnotationKind.fromName recognises builtin names" {
     try std.testing.expectEqual(AnnotationKind.range, AnnotationKind.fromName("range"));
     try std.testing.expectEqual(AnnotationKind.entity_target, AnnotationKind.fromName("entity_target"));
     try std.testing.expectEqual(AnnotationKind.custom, AnnotationKind.fromName("totally_unknown"));
+}
+
+/// Every field of `a` holds the same contents as the same field of `b`.
+fn expectArenasEqual(a: *const AstArena, b: *const AstArena) !void {
+    inline for (@typeInfo(AstArena).@"struct".fields) |f| {
+        const x = @field(a, f.name);
+        const y = @field(b, f.name);
+        if (comptime f.type == StringPool) {
+            try std.testing.expectEqual(x.slices.items.len, y.slices.items.len);
+            for (x.slices.items, y.slices.items) |p, q| try std.testing.expectEqualStrings(p, q);
+            try std.testing.expectEqual(x.map.count(), y.map.count());
+            for (x.slices.items, 0..) |p, id| try std.testing.expectEqual(@as(?StringId, @intCast(id)), y.map.get(p));
+        } else switch (@typeInfo(f.type)) {
+            .int, .@"enum" => try std.testing.expectEqual(x, y),
+            .@"struct" => if (comptime @hasField(f.type, "items")) {
+                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(x.items), std.mem.sliceAsBytes(y.items));
+            } else if (comptime @hasField(f.type, "bytes")) {
+                try std.testing.expectEqual(x.len, y.len);
+                for (0..x.len) |i| try std.testing.expectEqual(x.get(i), y.get(i));
+            } else {
+                try std.testing.expectEqual(x.count(), y.count());
+                var it = x.iterator();
+                while (it.next()) |e| try std.testing.expectEqual(e.value_ptr.*, y.get(e.key_ptr.*).?);
+            },
+            else => comptime unreachable,
+        }
+    }
+}
+
+const clone_fixture =
+    \\/// A doc comment.
+    \\component Health { current: i32 = 100, max: i32 = 100 }
+    \\event Hit { amount: int, who: string }
+    \\// A plain comment.
+    \\@phase(.update)
+    \\rule regen(entity: Entity) when entity has Health {
+    \\  entity.get_mut(Health).current += 1
+    \\  emit Hit { amount: 1, who: "regen" }
+    \\}
+;
+
+test "a cloned arena equals its source and outlives it" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var reference = try parser.parse(gpa, clone_fixture);
+    defer reference.deinit(gpa);
+    var source = try parser.parse(gpa, clone_fixture);
+    try source.ast.ensureErrorBuiltins(gpa);
+    try reference.ast.ensureErrorBuiltins(gpa);
+    var copy = copy: {
+        defer source.deinit(gpa);
+        break :copy try source.ast.clone(gpa);
+    };
+    defer copy.deinit(gpa);
+    try std.testing.expect(reference.ast.doc_comments.count() > 0);
+    try std.testing.expect(reference.ast.leading_comments.count() > 0);
+    try std.testing.expect(reference.ast.error_type_name != 0);
+    try expectArenasEqual(&reference.ast, &copy);
+}
+
+test "a cloned arena is independent of its source" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var source = try parser.parse(gpa, clone_fixture);
+    defer source.deinit(gpa);
+    var copy = try source.ast.clone(gpa);
+    defer copy.deinit(gpa);
+    const strings_before = source.ast.strings.slices.items.len;
+    const extra_before = source.ast.extra.items.len;
+    _ = try copy.strings.intern(gpa, "only_in_the_copy");
+    try copy.extra.append(gpa, 7);
+    try std.testing.expectEqual(strings_before, source.ast.strings.slices.items.len);
+    try std.testing.expectEqual(extra_before, source.ast.extra.items.len);
+    try std.testing.expect(source.ast.strings.find("only_in_the_copy") == null);
+}
+
+test "a clone that fails to allocate frees what it took" {
+    const parser = @import("parser.zig");
+    const gpa = std.testing.allocator;
+    var source = try parser.parse(gpa, clone_fixture);
+    defer source.deinit(gpa);
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = index });
+        if (source.ast.clone(failing.allocator())) |copy| {
+            var c = copy;
+            c.deinit(failing.allocator());
+            try std.testing.expect(index > 0);
+            break;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+    }
 }

@@ -92,6 +92,36 @@ pub const TagTable = struct {
         return (self.leaf_count + 63) / 64;
     }
 
+    /// Digest of which leaf path owns which bit. Requires a table `build`
+    /// returned without diagnostics, else two leaves can share a `bit_index`.
+    /// Hashed in `bit_index` order, never in `map` iteration order; the length
+    /// prefix stops adjacent paths trading bytes (`n.ab`,`n.c` vs `n.a`,`bn.c`).
+    pub fn contentDigest(self: *const TagTable, gpa: std.mem.Allocator) !u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&self.leaf_count));
+        if (self.leaf_count == 0) return h.final();
+
+        const slots = try gpa.alloc([]const u8, self.leaf_count);
+        defer gpa.free(slots);
+        for (slots) |*sl| sl.* = &.{};
+
+        var it = self.map.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (!e.is_leaf) continue;
+            std.debug.assert(e.bit_index < self.leaf_count);
+            slots[e.bit_index] = kv.key_ptr.*;
+        }
+
+        for (slots) |path| {
+            std.debug.assert(path.len != 0);
+            const len: u32 = @intCast(path.len);
+            h.update(std.mem.asBytes(&len));
+            h.update(path);
+        }
+        return h.final();
+    }
+
     /// Look up a dotted path; `null` if it names neither a leaf nor a namespace.
     pub fn lookup(self: *const TagTable, path: []const u8) ?Entry {
         return self.map.get(path);

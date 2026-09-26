@@ -60,10 +60,33 @@ pub const ResourceStore = struct {
     /// is `false`; an already-present id returns `error.DuplicateResource`.
     pub fn addResource(self: *ResourceStore, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) ResourceError!void {
         if (self.entries.contains(id)) return ResourceError.DuplicateResource;
-        const buf = try gpa.alignedAlloc(u8, comptime .fromByteUnits(BufferAlignment), init_bytes.len);
+        const buf = try allocBuffer(gpa, init_bytes);
         errdefer gpa.free(buf);
+        try self.reserve(gpa, 1);
+        self.adoptAssumeCapacity(id, buf);
+    }
+
+    /// The buffer type the store holds a resource in.
+    pub const Buffer = []align(BufferAlignment) u8;
+
+    /// A buffer `adoptAssumeCapacity` accepts, filled with `init_bytes`. The
+    /// caller owns it until adopted.
+    pub fn allocBuffer(gpa: std.mem.Allocator, init_bytes: []const u8) error{OutOfMemory}!Buffer {
+        const buf = try gpa.alignedAlloc(u8, comptime .fromByteUnits(BufferAlignment), init_bytes.len);
         @memcpy(buf, init_bytes);
-        try self.entries.put(gpa, id, .{ .bytes = buf, .dirty = false });
+        return buf;
+    }
+
+    /// Make room for `n` more resources, so that many `adoptAssumeCapacity`
+    /// calls cannot fail. Changes nothing a reader of the store can observe.
+    pub fn reserve(self: *ResourceStore, gpa: std.mem.Allocator, n: usize) error{OutOfMemory}!void {
+        try self.entries.ensureUnusedCapacity(gpa, @intCast(n));
+    }
+
+    /// Store `buf` as resource `id`, not dirty, taking ownership of it. Cannot
+    /// fail: requires room from `reserve` and an `id` the store does not hold.
+    pub fn adoptAssumeCapacity(self: *ResourceStore, id: ComponentId, buf: Buffer) void {
+        self.entries.putAssumeCapacityNoClobber(id, .{ .bytes = buf, .dirty = false });
     }
 
     /// Immutable view of the resource bytes. Returns `null` if absent.

@@ -19,13 +19,18 @@ permissions:
 env:
   ZIG_VERSION: "0.16.0"
   ZIG_CPU: "baseline"
+  ZIG_CACHE_CAP: "10737418240"
 
 jobs:
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
+      reason: ${{ steps.detect.outputs.reason }}
       week: ${{ steps.week.outputs.week }}
     steps:
       - name: Compute the lineage window
@@ -36,35 +41,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Detect non-doc changes
+
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Decide whether this tree needs a run
         id: detect
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            head="${{ github.event.pull_request.head.sha }}"
-          else
-            base="${{ github.event.before }}"
-            head="${{ github.sha }}"
-          fi
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-            echo "base unknown -> code=true"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          files="$(git diff --name-only "$base" "$head")"
-          echo "--- changed files ---"; echo "$files"
-          code=false
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              *.md|briefs/*|docs/*|LICENSE|.gitignore) : ;;
-              *) code=true ;;
-            esac
-          done <<< "$files"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "--- verdict: code=$code ---"
+          zig run tools/ci_verdict/main.zig -- decide --event "$EVENT" --base "$BASE" --head "$HEAD" \
+            --tested HEAD --repo "${{ github.repository }}" --check ci-gate >> "$GITHUB_OUTPUT"
 
   build-and-test:
     needs: changes
@@ -131,7 +125,9 @@ jobs:
         run: |
           set -euo pipefail
           s=$SECONDS
-          zig build test --summary all -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
+          # --test-timeout raises Zig's 60 s response floor: on windows a compiler spawned beside a
+          # test can inherit its pipe and hold the end of stream until that compiler exits.
+          zig build test --summary all --test-timeout 180s -Doptimize=${{ matrix.mode }} -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }} 2>&1 | tee test-out.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           collected="$(sed -n 's/.*[0-9][0-9]* of \([0-9][0-9]*\) tests passed.*/\1/p;s#.*[^0-9]\([0-9][0-9]*\)/\([0-9][0-9]*\) tests passed.*#\2#p' test-out.txt | tail -1)"
@@ -160,11 +156,11 @@ jobs:
 
       - name: zig build verify-synth-100
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build verify-synth-100 -Dcpu=${{ env.ZIG_CPU }}
+        run: zig build verify-synth-100 -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       - name: zig build forge-asm-inventory
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build forge-asm-inventory -Dcpu=${{ env.ZIG_CPU }}
+        run: zig build forge-asm-inventory -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       - name: zig build lint
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
@@ -172,7 +168,7 @@ jobs:
 
       - name: zig build ecs-access-counterproof
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
-        run: zig build ecs-access-counterproof -Dcpu=${{ env.ZIG_CPU }}
+        run: zig build ecs-access-counterproof -Dphysics_f64=${{ matrix.precision }} -Dcpu=${{ env.ZIG_CPU }}
 
       - name: zig build ecs-access-zero-cost
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
@@ -228,7 +224,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          limit=10737418240
+          limit="$ZIG_CACHE_CAP"
           bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
           bytes=$((bytes * 1024))
           echo "zig cache (final): $bytes bytes (cap $limit)"
@@ -244,8 +240,7 @@ jobs:
       - name: Save Zig cache (final)
         if: always()
           && matrix.mode != 'Debug'
-          && (github.event_name == 'push'
-              || github.head_ref == 'phase-1/debt/phase-1-debt')
+          && github.event_name == 'push'
           && steps.cache-size-final.outputs.save == 'true'
         uses: actions/cache/save@v5
         with:
@@ -270,12 +265,12 @@ jobs:
           use-cache: false
 
       - name: Restore Zig cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
+            zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -286,7 +281,8 @@ jobs:
             mesa-vulkan-drivers \
             libvulkan1 \
             libwayland-client0 \
-            libwayland-cursor0
+            libwayland-cursor0 \
+            glslc
 
       - name: Locate lavapipe ICD on the runner
         run: |
@@ -332,13 +328,38 @@ jobs:
       - name: Verify PSNR vs golden
         run: |
           set -euo pipefail
-          if [ ! -f tests/golden/smoke_test_software.ppm ]; then
-            echo "Golden PPM not yet committed — capture written to out/smoke_test.ppm." >&2
-            echo "First-run procedure: download out/smoke_test.ppm from this job, validate visually," >&2
-            echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
-            exit 0
-          fi
           zig build test-ppm-psnr -Doptimize=ReleaseSafe -Dcpu=${{ env.ZIG_CPU }} --summary all 2>&1 | tee test-output.txt
+
+      - name: zig build test-runtime-env
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          zig build test-runtime-env -Dcpu=${{ env.ZIG_CPU }} --summary all
+
+      - name: Measure the Zig cache before the save
+        if: always()
+        id: cache-size
+        shell: bash
+        run: |
+          set -euo pipefail
+          limit="$ZIG_CACHE_CAP"
+          bytes=$(du -sk .zig-cache 2>/dev/null | cut -f1 || echo 0)
+          bytes=$((bytes * 1024))
+          echo "zig cache: $bytes bytes (cap $limit)"
+          if [ "$bytes" -gt "$limit" ]; then
+            echo "::warning::Zig cache is $bytes bytes, over the $limit cap — SKIPPING the save."
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Zig cache
+        if: always() && github.event_name == 'push' && steps.cache-size.outputs.save == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-v2-${{ needs.changes.outputs.week }}-${{ github.job }}-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
       - name: Upload capture artifact
         if: always()
@@ -346,7 +367,7 @@ jobs:
         with:
           name: runtime-smoke-test-capture
           path: |
-            out/smoke_test.ppm
+            examples/triangle/out/smoke_test.ppm
             test-output.txt
           retention-days: 30
 
@@ -361,16 +382,8 @@ jobs:
       - uses: weldengine/setup-zig@v0.1.0
         with:
           version: ${{ env.ZIG_VERSION }}
-          # use-cache: false — the action caches .zig-cache itself; this workflow owns it
+          # use-cache: false — the action caches .zig-cache itself; a Debug job stays cold
           use-cache: false
-
-      - name: Restore Zig cache (Debug)
-        uses: actions/cache@v5
-        with:
-          path: .zig-cache
-          key: zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
-          restore-keys: |
-            zig-v2-ubuntu-24.04-Debug-${{ env.ZIG_CPU }}-${{ env.ZIG_VERSION }}-
 
       - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |
@@ -389,10 +402,15 @@ jobs:
       - name: Run vertical-slice smoke (Debug, validation layers active)
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          # The loader then logs each layer it inserts: without that line, an
+          # absent VUID says nothing about validation.
+          VK_LOADER_DEBUG: layer
         run: |
           set -euo pipefail
           mkdir -p out
           zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' slice-smoke.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "--- a frame was composed + captured ---"
           test -s out/vertical_slice.ppm
           echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
@@ -405,10 +423,13 @@ jobs:
       - name: Run vertical-slice C0.8 IPC edit (Debug, validation layers active)
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          VK_LOADER_DEBUG: layer
         run: |
           set -euo pipefail
           mkdir -p out
           zig build run-vertical-slice -Dcpu=${{ env.ZIG_CPU }} -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' slice-c08.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "--- the post-edit frame composed + captured ---"
           test -s out/vertical_slice_ipc.ppm
           if grep -E "VUID-|Validation Error" slice-c08.log; then
@@ -421,13 +442,22 @@ jobs:
         env:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+          VK_LOADER_DEBUG: layer
         run: |
           set -uo pipefail
           mkdir -p /tmp/weld-rt && chmod 700 /tmp/weld-rt
           XDG_RUNTIME_DIR=/tmp/weld-rt weston --backend=headless --width=1280 --height=720 &
           sleep 2
           export XDG_RUNTIME_DIR=/tmp/weld-rt WAYLAND_DISPLAY=wayland-1
-          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || true
+          rc=0
+          zig build run-ipc-demo -Dcpu=${{ env.ZIG_CPU }} -- --frames=120 > vkblit.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ] || ! grep -q "ipc demo completed cleanly" vkblit.log; then
+            tail -n 60 vkblit.log
+            echo "::error::the ipc demo did not complete (exit $rc) — no validation verdict is implied"
+            exit 1
+          fi
+          grep -qE 'Insert instance layer.*VK_LAYER_KHRONOS_validation' vkblit.log \
+            || { echo "::error::the validation layer was not loaded — no validation verdict is implied"; exit 1; }
           echo "=== vk_blit GAL blit on lavapipe (E6) ==="
           echo "--- distinct VUIDs ---"
           grep -oE "VUID-[A-Za-z0-9-]+" vkblit.log | sort -u || echo "  (none)"
@@ -619,9 +649,8 @@ jobs:
   # A doc-only pull request therefore merges in seconds, while one carrying code
   # stays gated on the whole matrix and both smokes.
   #
-  # `skipped` counts as green because the fast path above is what produces it.
-  # That makes the allow-list load-bearing: a path added to it stops being
-  # verified, so it is widened only for files no build reads.
+  # `skipped` counts as green because `changes` skips only a tree whose code was
+  # already verified green (tools/ci_verdict).
   ci-gate:
     needs: [changes, build-and-test, runtime-smoke-test, vertical-slice-smoke]
     if: always()
@@ -630,6 +659,8 @@ jobs:
     steps:
       - name: Aggregate required results
         shell: bash
+        env:
+          REASON: ${{ needs.changes.outputs.reason }}
         run: |
           set -euo pipefail
           changes="${{ needs.changes.result }}"
@@ -637,6 +668,7 @@ jobs:
           rst="${{ needs.runtime-smoke-test.result }}"
           vss="${{ needs.vertical-slice-smoke.result }}"
           echo "changes=$changes build-and-test=$bt runtime-smoke-test=$rst vertical-slice-smoke=$vss"
+          echo "::notice::$REASON"
           if [ "$changes" != "success" ]; then
             echo "::error::changes job did not succeed ($changes)"; exit 1
           fi

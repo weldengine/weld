@@ -81,3 +81,48 @@ test "malformed uuid is rejected" {
         \\}
     );
 }
+
+test "an instance value outside its i32 field is rejected" {
+    try expectCookError(error.ValueOutOfRange,
+        \\component C { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "E" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 3000000000 } }
+        \\}
+    );
+}
+
+test "an instance value whose folding overflows is rejected" {
+    try expectCookError(error.ValueOutOfRange,
+        \\component C { v: int = 0 }
+        \\scene "S" {
+        \\  entity "E" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { v: 9223372036854775807 + 1 } }
+        \\}
+    );
+}
+
+test "a component default outside its i32 field is rejected" {
+    try expectCookError(error.ValueOutOfRange,
+        \\component C { v: i32 = 3000000000 }
+        \\scene "S" {
+        \\  entity "E" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { } }
+        \\}
+    );
+}
+
+test "a component collection field is rejected" {
+    try expectCookError(error.UnsupportedFieldKind,
+        \\component C { xs: int[] }
+        \\scene "S" {
+        \\  entity "E" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" C { } }
+        \\}
+    );
+}
+
+test "a resource with a collection field is rejected" {
+    try expectCookError(error.UnsupportedFieldKind,
+        \\resource R { xs: int[] = [1] }
+        \\scene "S" {
+        \\  resources { R { } }
+        \\}
+    );
+}

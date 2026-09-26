@@ -245,7 +245,7 @@ pub fn build(b: *std.Build) void {
     }
     const stub_plugins_step = b.step(
         "stub-plugins",
-        "Build the three stub plugin libraries used by the plugin_loader tests",
+        "Build the four stub plugin libraries used by the plugin_loader tests",
     );
     for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
 
@@ -268,6 +268,7 @@ pub fn build(b: *std.Build) void {
         "build",
         "run",
     });
+    addNestedOptions(b, ex_run, target, optimize, physics_f64);
     ex_run.setCwd(b.path("examples/triangle"));
     if (b.args) |args| {
         ex_run.addArg("--");
@@ -286,6 +287,7 @@ pub fn build(b: *std.Build) void {
         b.graph.zig_exe,
         "build",
     });
+    addNestedOptions(b, synth_verify, target, optimize, physics_f64);
     synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
     const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the standalone proof)");
     synth_verify_step.dependOn(&synth_verify.step);
@@ -302,9 +304,9 @@ pub fn build(b: *std.Build) void {
     // matching only the shared refusal marker would let any one case stand in
     // for any other.
     //
-    // The control runs in the SAME step and must SUCCEED. Without it the three
+    // The control runs in the SAME step and must SUCCEED. Without it the six
     // refusals prove nothing: a view that refused every access would satisfy
-    // all three.
+    // all six.
     const counterproof_dir = "tests/core/ecs/access_counterproof";
     const CounterproofCase = struct {
         step: ?[]const u8,
@@ -370,6 +372,7 @@ pub fn build(b: *std.Build) void {
             b.addSystemCommand(&.{ b.graph.zig_exe, "build", name })
         else
             b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        addNestedOptions(b, run, target, optimize, physics_f64);
         run.setCwd(b.path(counterproof_dir));
         // ALWAYS RE-RUN, and this is not a precaution. A `Run` step with no file
         // argument is cached on its argv alone, and `setCwd` does not make the
@@ -413,17 +416,11 @@ pub fn build(b: *std.Build) void {
     const shaders_check_step = b.step("shaders-check", "Verify .spv on disk matches a fresh glslc regen");
     shaders_check_step.dependOn(&shaders_check_run.step);
 
-    // `zig build vk-gen-check`: regenerates vk.zig and verifies that
-    // the diff vs the commit is empty. Delegated to the existing `bindgen-verify`
-    // which covers all generated bindings.
-    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
-    if (b.top_level_steps.get("bindgen-verify")) |bv| {
-        vk_gen_check_step.dependOn(&bv.step);
-    }
-
     // -------------------------------------------------------------- Tests --
 
     const test_step = b.step("test", "Run all tests");
+
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shader_compiler_module })).step);
 
     // Inline tests living next to the core code.
     const core_tests = b.addTest(.{ .root_module = core_module });
@@ -849,6 +846,10 @@ pub fn build(b: *std.Build) void {
         /// `stub_install_steps[]` so the three stub libraries are
         /// built before the test runs.
         needs_stub_plugins: bool = false,
+        /// when set, the test imports `test_env` and is compiled a second time,
+        /// with an absent environment made a failure, into
+        /// `zig build test-runtime-env`.
+        runtime_env: bool = false,
         /// when set, imports the `weld_audio` module.
         audio: bool = false,
         /// when set, imports the `weld_render` module (GAL public
@@ -877,12 +878,8 @@ pub fn build(b: *std.Build) void {
         /// when set, imports the `.d.etch` emitter and the toy
         /// service, so a test exercises the SAME functions `bindgen-check` runs.
         bindgen_detch: bool = false,
-        /// when set, create a dedicated `zig build
-        /// <name>` step that runs ONLY this test. Used by the CI
-        /// runtime-smoke-test job to gate strictly on the capture PSNR
-        /// without re-running every other test in the repo (some of
-        /// which have unrelated ReleaseSafe issues tracked as
-        /// out-of-scope debt).
+        /// when set, also create a `zig build <name>` step that runs ONLY
+        /// this test.
         dedicated_step: ?[]const u8 = null,
     };
     const test_specs = [_]TestSpec{
@@ -946,7 +943,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
-        .{ .path = "tests/window/wayland_open_close_test.zig" },
+        .{ .path = "tests/window/wayland_open_close_test.zig", .runtime_env = true },
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
@@ -972,6 +969,22 @@ pub fn build(b: *std.Build) void {
         // and writes its row, and the codegen refuses a sparse program.
         // `.etch = true` for `weld_etch`; `weld_core` is unconditional here.
         .{ .path = "tests/etch/storage_mode_test.zig", .etch = true },
+        // Every reader of a type node's name decides its non-`.named` branch.
+        .{ .path = "tests/etch/type_node_kind_test.zig", .etch = true },
+        // A literal that overflows its type, and a constant whose folding
+        // overflows or divides by zero, are refused at check time.
+        .{ .path = "tests/etch/numeric_range_test.zig", .etch = true, .dedicated_step = "test-numeric-range" },
+        // A resource collection field's default is checked against its
+        // element type.
+        .{ .path = "tests/etch/collection_default_test.zig", .etch = true, .dedicated_step = "test-collection-default" },
+        // `@requires` naming a resource is refused on every path.
+        .{ .path = "tests/etch/requires_resource_test.zig", .etch = true, .dedicated_step = "test-requires-resource" },
+        // An annotation argument follows §1.5; positional readers refuse names.
+        .{ .path = "tests/etch/annotation_arg_test.zig", .etch = true, .dedicated_step = "test-annotation-arg" },
+        // The vertical slice's math is std-only and tested on its own: the
+        // slice module is imported across a module boundary, which collects
+        // none of its tests.
+        .{ .path = "examples/vertical_slice/math.zig" },
         // one test per type-checker diagnostic code: each names its code and
         // asserts PRESENCE, so it reddens the day emission stops.
         .{ .path = "tests/etch/diagnostic_coverage_test.zig", .etch = true },
@@ -1055,9 +1068,9 @@ pub fn build(b: *std.Build) void {
         // Win32 thread safety stress (Windows runner only).
         .{ .path = "tests/platform/win32_thread_safety_test.zig" },
         // Wayland thread safety stress (Linux runner only).
-        .{ .path = "tests/platform/wayland_thread_safety_test.zig" },
+        .{ .path = "tests/platform/wayland_thread_safety_test.zig", .runtime_env = true },
         // Multi-monitor enumeration + current monitor + per-monitor DPI.
-        .{ .path = "tests/platform/multi_monitor_test.zig" },
+        .{ .path = "tests/platform/multi_monitor_test.zig", .runtime_env = true },
         // WindowEvent union surface validation.
         .{ .path = "tests/platform/window_events_test.zig" },
         // Input Tier 0 (event-driven path, runs on all OSes).
@@ -1068,7 +1081,7 @@ pub fn build(b: *std.Build) void {
         // GAL Null backend smoke + interface check (CI headless).
         .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
         // GAL Vulkan backend offline init test (skip if Vulkan absent).
-        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
+        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true, .runtime_env = true },
         // Render graph topological sort + cycle detection.
         .{ .path = "tests/render/render_graph_topo.zig", .render = true },
         // Render graph auto-tracking barriers (write-after-read,
@@ -1080,26 +1093,11 @@ pub fn build(b: *std.Build) void {
         // Shader disk cache round-trip (hit/miss source change /
         // miss glslc version change).
         .{ .path = "tests/render/shader_cache.zig", .render = true },
-        // smoke-test capture PSNR vs golden.
-        // Skip if the platform has no Vulkan window backend or if the golden
-        // has not yet been committed.
-        // `dedicated_step` exposes `zig build test-render-capture` so
-        // the CI runtime-smoke-test job can run only this test (the
-        // generic `zig build test` pulls in the whole repo, including
-        // unrelated tests with current ReleaseSafe issues — tracked as
-        // housekeeping debt).
-        .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
         // GAL capture helper surface coverage (encodePpm +
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
-        // direct PSNR gate reading the pre-produced
-        // out/smoke_test.ppm with no rebuild and no triangle re-spawn.
-        // std-only (no .render), so `zig build test-ppm-psnr` compiles in
-        // seconds and replaces the rebuild-heavy `test-render-capture` in CI.
-        .{ .path = "tests/render/ppm_psnr_compare.zig", .dedicated_step = "test-ppm-psnr" },
         // hot-reload filewatch latency < 200 ms.
-        // Skip if glslc absent from PATH.
-        .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
+        .{ .path = "tests/render/shader_hot_reload.zig", .render = true, .runtime_env = true },
         // vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
         .{ .path = "tests/vk_gen/whitelist_closure.zig" },
@@ -1133,80 +1131,116 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     watchdog_module.addImport("weld_core", core_module);
-    for (test_specs) |spec| {
-        const t_mod = b.createModule(.{
-            .root_source_file = b.path(spec.path),
+    var test_env_modules: [2]*std.Build.Module = undefined;
+    for (&test_env_modules, [_]bool{ false, true }) |*m, required| {
+        const env_options = b.addOptions();
+        env_options.addOption(bool, "required", required);
+        m.* = b.createModule(.{
+            .root_source_file = b.path("tests/support/test_env.zig"),
             .target = target,
             .optimize = optimize,
         });
-        t_mod.addImport("weld_core", core_module);
-        t_mod.addImport("test_watchdog", watchdog_module);
-        if (spec.wl_protocols) {
-            t_mod.addImport("wl_protocols", wl_protocols_test_module);
+        m.*.addOptions("test_env_options", env_options);
+    }
+    const runtime_env_step = b.step("test-runtime-env", "Run the tests that need a compositor, a Vulkan ICD or glslc; an absent one fails");
+    for (test_specs) |spec| {
+        for ([_]bool{ false, true }) |required| {
+            if (required and !spec.runtime_env) continue;
+            const t_mod = b.createModule(.{
+                .root_source_file = b.path(spec.path),
+                .target = target,
+                .optimize = optimize,
+            });
+            t_mod.addImport("weld_core", core_module);
+            t_mod.addImport("test_watchdog", watchdog_module);
+            if (spec.runtime_env) t_mod.addImport("test_env", test_env_modules[@intFromBool(required)]);
+            if (spec.wl_protocols) {
+                t_mod.addImport("wl_protocols", wl_protocols_test_module);
+            }
+            if (spec.etch) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("corpus_facade", etch_corpus_module);
+            }
+            if (spec.etch_interp) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("corpus_facade", etch_interp_corpus_module);
+                t_mod.addImport("diff_runner", etch_interp_driver_module);
+                t_mod.addImport("runner_interp", etch_interp_runner_module);
+            }
+            if (spec.audio) {
+                t_mod.addImport("weld_audio", audio_module);
+            }
+            if (spec.render) {
+                t_mod.addImport("weld_render", render_module);
+            }
+            if (spec.asset_pipeline) {
+                t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
+            }
+            if (spec.forge) {
+                t_mod.addImport("weld_forge", forge_api_module);
+                t_mod.addImport("forge_3d", forge_3d_module);
+                t_mod.addImport("forge_sync", forge_sync_module);
+                t_mod.addImport("forge_module", forge_module);
+                t_mod.addImport("foundation", foundation_module);
+                t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
+            }
+            if (spec.foundation) {
+                t_mod.addImport("foundation", foundation_module);
+            }
+            if (spec.scene) {
+                t_mod.addImport("weld_etch", etch_module);
+            }
+            if (spec.etch_events) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("toy_service", toy_service_module);
+            }
+            if (spec.arena_slice) {
+                t_mod.addImport("arena_slice", arena_slice_module);
+            }
+            if (spec.physics_service) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("forge_services", forge_services_module);
+                t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+                t_mod.addImport("forge_sync", forge_sync_module);
+            }
+            if (spec.bindgen_detch) {
+                t_mod.addImport("weld_etch", etch_module);
+                t_mod.addImport("emit_detch", emit_detch_module);
+                t_mod.addImport("toy_service", toy_service_module);
+                t_mod.addImport("forge_services", forge_services_module);
+                t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
+            }
+            const t = b.addTest(.{ .root_module = t_mod });
+            const t_run = b.addRunArtifact(t);
+            if (spec.needs_stub_plugins) {
+                for (stub_install_steps) |s| t_run.step.dependOn(s);
+            }
+            if (required) {
+                t_run.has_side_effects = true;
+                runtime_env_step.dependOn(&t_run.step);
+                continue;
+            }
+            test_step.dependOn(&t_run.step);
+            if (spec.dedicated_step) |name| {
+                const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
+                dedicated.dependOn(&t_run.step);
+            }
         }
-        if (spec.etch) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("corpus_facade", etch_corpus_module);
-        }
-        if (spec.etch_interp) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("corpus_facade", etch_interp_corpus_module);
-            t_mod.addImport("diff_runner", etch_interp_driver_module);
-            t_mod.addImport("runner_interp", etch_interp_runner_module);
-        }
-        if (spec.audio) {
-            t_mod.addImport("weld_audio", audio_module);
-        }
-        if (spec.render) {
-            t_mod.addImport("weld_render", render_module);
-        }
-        if (spec.asset_pipeline) {
-            t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
-        }
-        if (spec.forge) {
-            t_mod.addImport("weld_forge", forge_api_module);
-            t_mod.addImport("forge_3d", forge_3d_module);
-            t_mod.addImport("forge_sync", forge_sync_module);
-            t_mod.addImport("forge_module", forge_module);
-            t_mod.addImport("foundation", foundation_module);
-            t_mod.addImport("weld_interfaces_physics", interfaces_physics_module);
-        }
-        if (spec.foundation) {
-            t_mod.addImport("foundation", foundation_module);
-        }
-        if (spec.scene) {
-            t_mod.addImport("weld_etch", etch_module);
-        }
-        if (spec.etch_events) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("toy_service", toy_service_module);
-        }
-        if (spec.arena_slice) {
-            t_mod.addImport("arena_slice", arena_slice_module);
-        }
-        if (spec.physics_service) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("forge_services", forge_services_module);
-            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
-            t_mod.addImport("forge_sync", forge_sync_module);
-        }
-        if (spec.bindgen_detch) {
-            t_mod.addImport("weld_etch", etch_module);
-            t_mod.addImport("emit_detch", emit_detch_module);
-            t_mod.addImport("toy_service", toy_service_module);
-            t_mod.addImport("forge_services", forge_services_module);
-            t_mod.addImport("forge_sensor_events", forge_sensor_events_module);
-        }
-        const t = b.addTest(.{ .root_module = t_mod });
-        const t_run = b.addRunArtifact(t);
-        if (spec.needs_stub_plugins) {
-            for (stub_install_steps) |s| t_run.step.dependOn(s);
-        }
-        test_step.dependOn(&t_run.step);
-        if (spec.dedicated_step) |name| {
-            const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
-            dedicated.dependOn(&t_run.step);
-        }
+    }
+
+    // `zig build test-ppm-psnr` is OUT of `test_step`: it reads the capture
+    // `run-example-triangle` writes, which only the lavapipe CI job produces.
+    // `dead-tests` declares the file uncollected for that reason.
+    {
+        const psnr_mod = b.createModule(.{
+            .root_source_file = b.path("tests/render/ppm_psnr_compare.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const psnr_run = b.addRunArtifact(b.addTest(.{ .root_module = psnr_mod }));
+        psnr_run.has_side_effects = true;
+        const psnr_step = b.step("test-ppm-psnr", "Compare the smoke-test capture with the golden (after run-example-triangle)");
+        psnr_step.dependOn(&psnr_run.step);
     }
 
     // `zig build test-stress` builds and runs ONLY the
@@ -2334,11 +2368,24 @@ pub fn build(b: *std.Build) void {
     });
     const vk_gen_run = b.addRunArtifact(vk_gen_exe);
     vk_gen_run.has_side_effects = true;
+    // Every file a bindgen adapter writes, and nothing else: no adapter writes
+    // `bindings/generated/*.api.zig`. Both `zig fmt` passes and the
+    // `bindgen-verify` diff read it, so a generated path is named here only.
+    const generated_binding_files = [_][]const u8{
+        "src/core/platform/vk.zig",
+        "src/core/platform/window/wayland_protocols/core.zig",
+        "src/core/platform/window/wayland_protocols/xdg_shell.zig",
+        "src/core/platform/window/wayland_protocols/xdg_decoration.zig",
+    };
+    const vk_generated = generated_binding_files[0..1];
+    const wayland_generated = generated_binding_files[1..];
+
     // Generator output is unformatted, so `bindgen-vk` produces an empty diff
     // only after `zig fmt` normalises identifier escapes (e.g. `@"undefined"` →
     // `undefined`) and trims trailing blank lines. Pipe through fmt in the same
     // step so the command is self-sufficient regardless of pre-commit hooks.
-    const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/core/platform/vk.zig" });
+    const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt" });
+    vk_gen_fmt.addArgs(vk_generated);
     vk_gen_fmt.step.dependOn(&vk_gen_run.step);
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
     vk_gen_step.dependOn(&vk_gen_fmt.step);
@@ -2357,13 +2404,8 @@ pub fn build(b: *std.Build) void {
     const wayland_gen_run = b.addRunArtifact(wayland_gen_exe);
     wayland_gen_run.has_side_effects = true;
     // Same fmt pass as vk_gen — see comment there.
-    const wayland_gen_fmt = b.addSystemCommand(&.{
-        b.graph.zig_exe,
-        "fmt",
-        "src/core/platform/window/wayland_protocols/core.zig",
-        "src/core/platform/window/wayland_protocols/xdg_shell.zig",
-        "src/core/platform/window/wayland_protocols/xdg_decoration.zig",
-    });
+    const wayland_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt" });
+    wayland_gen_fmt.addArgs(wayland_generated);
     wayland_gen_fmt.step.dependOn(&wayland_gen_run.step);
     const wayland_gen_step = b.step(
         "bindgen-wayland",
@@ -2388,8 +2430,8 @@ pub fn build(b: *std.Build) void {
     //   - `zig build bindgen-detch` — regenerate in place (manual, §8.4.4)
     //   - `zig build bindgen-check` — compare and fail with a line-by-line diff
     //
-    // Distinct from `bindgen-verify` / `vk-gen-check`, which gate the Vulkan and
-    // Wayland `.api.zig` → Zig pipeline and have nothing to do with services.
+    // Distinct from `bindgen-verify`, which gates the Vulkan and Wayland XML → Zig
+    // generators and has nothing to do with services.
     const detch_module = b.createModule(.{
         .root_source_file = b.path("tools/bindgen/detch_main.zig"),
         .target = b.graph.host,
@@ -2429,31 +2471,27 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------- bindgen-verify gate --
     //
-    // The non-negotiable mechanical criterion: regenerate then
-    // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
-    // 0 if the regen matches the committed output bit-for-bit; non-zero
-    // (visible diff) signals a divergence and blocks the merge.
+    // Regenerate, then diff: exit 0 only if the regen matches the committed
+    // output bit-for-bit; non-zero signals a divergence and blocks the merge.
+    // Against `HEAD`, not the index: on a staged edit only this form still
+    // compares against what was committed.
     //
     // KNOWN-GOOD CONTROL FIRST: `git diff --exit-code` answers 1 for a real diff
     // and a different non-zero when git cannot run at all, so the control must
     // establish that git answers before the diff's code is read as a verdict.
     const bindgen_verify_control = b.addSystemCommand(&.{ "git", "--version" });
-    const bindgen_verify_diff = b.addSystemCommand(&.{
-        "git",
-        "diff",
-        "--quiet",
-        "--exit-code",
-        "bindings/generated/",
-        "src/core/platform/",
-    });
+    const bindgen_verify_diff = b.addSystemCommand(&.{ "git", "diff", "--quiet", "--exit-code", "HEAD", "--" });
+    bindgen_verify_diff.addArgs(&generated_binding_files);
     bindgen_verify_diff.step.dependOn(&bindgen_verify_control.step);
     bindgen_verify_diff.step.dependOn(&vk_gen_fmt.step);
     bindgen_verify_diff.step.dependOn(&wayland_gen_fmt.step);
     const bindgen_verify_step = b.step(
         "bindgen-verify",
-        "Regenerate bindings + assert `git diff --quiet` on bindings/generated + src/core/platform",
+        "Regenerate bindings + assert `git diff --quiet HEAD` on the four generated files",
     );
     bindgen_verify_step.dependOn(&bindgen_verify_diff.step);
+    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
+    vk_gen_check_step.dependOn(bindgen_verify_step);
 
     // -------------------------------------- weld_lint (custom linter) --
     //
@@ -2631,16 +2669,6 @@ pub fn build(b: *std.Build) void {
     // (8) and `src/modules/audio/` (1). Found by counting source `test` blocks
     // against the suite's own per-target totals, then confirming each by
     // appending a deliberately failing test and watching the suite stay green.
-    // RENDER IS HELD, and the reason is what the sweep was for. Wiring its 49
-    // never-run tests turns two of them red, and a probe settled why: the
-    // render-graph passes return a `Pass` whose `reads`/`writes` slices point at
-    // an anonymous literal in `buildPass`'s OWN STACK FRAME. Measured on
-    // `depth_prepass`: `writes.ptr` is a stack address, `depth_attachment` reads
-    // `false` immediately after the call, and a fresh call at the SAME address
-    // reads `true` — a use-after-return, long-lived and invisible because
-    // nothing ever compiled the tests that assert it. `forward.zig` fails
-    // identically. The fix is an ownership decision in the render graph, not a
-    // determinism change, so it is reported rather than taken here.
     const render_tests = b.addTest(.{ .root_module = render_module });
     test_step.dependOn(&b.addRunArtifact(render_tests).step);
 
@@ -2654,4 +2682,28 @@ pub fn build(b: *std.Build) void {
     });
     const bindgen_tests = b.addTest(.{ .root_module = bindgen_test_module });
     test_step.dependOn(&b.addRunArtifact(bindgen_tests).step);
+
+    const ci_verdict_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/ci_verdict/tests.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const ci_verdict_tests = b.addTest(.{ .root_module = ci_verdict_test_module });
+    test_step.dependOn(&b.addRunArtifact(ci_verdict_tests).step);
+}
+
+/// Passes this build's target, CPU, mode and physics precision to a nested
+/// `zig build` of a sub-project, so it compiles for the cell that runs it
+/// (`ARCH-031` rule 6).
+fn addNestedOptions(
+    b: *std.Build,
+    run: *std.Build.Step.Run,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    physics_f64: bool,
+) void {
+    run.addArg(b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}));
+    run.addArg(b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}));
+    run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
+    run.addArg(if (physics_f64) "-Dphysics_f64=true" else "-Dphysics_f64=false");
 }

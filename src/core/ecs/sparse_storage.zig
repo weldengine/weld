@@ -389,8 +389,7 @@ pub const SparseStores = struct {
 
     /// Declare `component_id` sparse. Idempotent: a second call for the same id
     /// keeps the existing storage, so a hot-reload re-compile does not discard
-    /// live rows (the treatment `compileResource` already gives a re-registered
-    /// resource).
+    /// live rows.
     pub fn ensure(
         self: *SparseStores,
         gpa: std.mem.Allocator,

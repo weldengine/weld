@@ -2,32 +2,32 @@
 //!
 //! `enumerateMonitors`, `currentMonitor` and per-monitor DPI.
 //!
-//! Skipped on platforms without a window subsystem (the stub backend
-//! returns error.UnsupportedPlatform for both query functions).
+//! Needs a Win32 or Wayland host with a compositor (`test_env`); the stub
+//! backend returns error.UnsupportedPlatform for both query functions.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const weld = @import("weld_core");
 const window_api = weld.platform.window;
+const test_env = @import("test_env");
 
 test "enumerateMonitors + currentMonitor + per-monitor DPI" {
     // Only Win32 and Wayland implement multi-monitor; the macOS stub
     // returns UnsupportedPlatform.
     if (builtin.os.tag != .windows and builtin.os.tag != .linux) {
-        return error.SkipZigTest;
+        return test_env.absent("a Win32 or Wayland host");
     }
 
     const gpa = std.testing.allocator;
 
-    // Try to open a window — the Wayland backend needs a live compositor,
-    // which CI runners (headless) may not have. Skip gracefully.
+    // The Wayland backend needs a live compositor.
     var win = window_api.Window.create(gpa, .{ .width = 320, .height = 240 }) catch {
-        return error.SkipZigTest;
+        return test_env.absent("a compositor");
     };
     defer win.destroy();
 
     const monitors = window_api.enumerateMonitors(gpa) catch |err| switch (err) {
-        error.UnsupportedPlatform => return error.SkipZigTest,
+        error.UnsupportedPlatform => return test_env.absent("monitor enumeration"),
         else => return err,
     };
     defer gpa.free(monitors);

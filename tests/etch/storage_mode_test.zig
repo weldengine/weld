@@ -915,6 +915,15 @@ fn freeCodes(gpa: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) 
     list.deinit(gpa);
 }
 
+test "@storage(none) is a value outside the domain, not a non-constant" {
+    const gpa = std.testing.allocator;
+    var codes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer freeCodes(gpa, &codes);
+    try diagCodes(gpa, "@storage(none)\ncomponent C { x: int = 0 }", &codes);
+    try std.testing.expectEqual(@as(usize, 1), codes.items.len);
+    try std.testing.expectEqualStrings("E0503", codes.items[0]);
+}
+
 // `E1216` IS RETIRED, AND THIS FAMILY IS ITS RECORD.
 //
 // A STATIC refusal of a dead `@requires` removal refused CORRECT CODE five
