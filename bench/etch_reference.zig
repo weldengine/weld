@@ -19,12 +19,15 @@ const weld_core = @import("weld_core");
 const report = @import("report_header.zig");
 
 const World = weld_core.ecs.world.World;
+const EntityId = weld_core.ecs.entity.EntityId;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const Interpreter = weld_etch.Interpreter;
 const Diagnostic = weld_etch.Diagnostic;
 
 const reference_src = @embedFile("reference_500_lines");
 
+/// What each rule-body reload adds to `Counter.value` in its one tick.
+const counter_steps = [2]i64{ 1, 5 };
 const counter_bodies = [2][]const u8{
     \\component Counter { value: int = 0 }
     \\rule tick(entity: Entity)
@@ -100,16 +103,30 @@ const Session = struct {
     }
 };
 
+/// An `int` field of the one entity `benchReload` spawns.
+fn readField(world: *World, component: []const u8, field: []const u8) !i64 {
+    const loc = world.dynamicLocation(EntityId{ .index = 0, .generation = 0 }) orelse return error.MissingEntity;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const cid = world.registry.idOf(component) orelse return error.MissingComponent;
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    const fd = world.registry.findField(cid, field) orelse return error.MissingField;
+    var v: i64 = 0;
+    @memcpy(std.mem.asBytes(&v), slot[fd.offset .. fd.offset + 8]);
+    return v;
+}
+
 /// Reloads `sources[i % sources.len]` onto a world first running `sources[0]`
-/// with one entity carrying `entity_component`.
+/// with one entity carrying `entity_component`, and returns the entity's
+/// `field` after the last reload's tick.
 fn benchReload(
     gpa: std.mem.Allocator,
     io: std.Io,
     sources: []const []const u8,
     entity_component: []const u8,
+    field: []const u8,
     warmup: usize,
     samples: []u64,
-) !void {
+) !i64 {
     var world = World.init();
     defer world.deinit(gpa);
     var sessions: [2]Session = undefined;
@@ -132,6 +149,7 @@ fn benchReload(
         live[slot] = true;
         if (i >= warmup) samples[i - warmup] = report.elapsedNs(t0, t1);
     }
+    return readField(&world, entity_component, field);
 }
 
 fn writeReport(gpa: std.mem.Allocator, io: std.Io, rows: []const Row, protocol: bool) ![]const u8 {
@@ -180,8 +198,13 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(reference_samples);
 
     try benchParse(gpa, io, warmup, parse_samples);
-    try benchReload(gpa, io, &counter_bodies, "Counter", warmup, counter_samples);
-    try benchReload(gpa, io, &.{reference_src}, "RefProbe", warmup, reference_samples);
+    // Every reload's tick ran the program it compiled, or these differ.
+    const counter_value = try benchReload(gpa, io, &counter_bodies, "Counter", "value", warmup, counter_samples);
+    var counter_expected: i64 = 0;
+    for (0..warmup + counter_n) |i| counter_expected += counter_steps[(i + 1) % 2];
+    if (counter_value != counter_expected) return error.ReloadDidNotRun;
+    const probe_ticks = try benchReload(gpa, io, &.{reference_src}, "RefProbe", "ticks", warmup, reference_samples);
+    if (probe_ticks != @as(i64, @intCast(warmup + reference_n))) return error.ReloadDidNotRun;
 
     const rows = [_]Row{
         .{ .name = "parse, reference file", .gate_ns = parse_gate_ns, .dist = .of(parse_samples), .samples = parse_n },
