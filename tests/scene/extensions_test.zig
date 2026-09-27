@@ -1763,3 +1763,36 @@ test "an event a hook emits outside a tick reaches the next tick's observers" {
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i32, 1), seenCount(&world));
 }
+
+test "an activation whose on_attach no interpreter would run is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, hook_program);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, "emit Attached { }", null);
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try std.testing.expectError(error.ExtensionHookUnbound, scene.loader.activateExtension(&world, gpa, e, "Forged", bytes));
+    try std.testing.expect(world.componentBytes(e, world.componentId("Weapon").?) == null);
+    try std.testing.expect(!world.hasEntityExtension(e, "Forged"));
+}
+
+test "a deactivation whose on_detach no interpreter would run is refused" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa, hook_program);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const bytes = try forgedExtension(gpa, "Weapon", 4, &.{}, null, "emit Attached { }");
+    defer gpa.free(bytes);
+    const e = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.activateExtension(&world, gpa, e, "Forged", bytes);
+    try std.testing.expectError(error.ExtensionHookUnbound, scene.loader.deactivateExtension(&world, gpa, e, "Forged", bytes));
+    try std.testing.expect(world.componentBytes(e, world.componentId("Weapon").?) != null);
+    try std.testing.expect(world.hasEntityExtension(e, "Forged"));
+}

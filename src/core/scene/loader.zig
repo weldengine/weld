@@ -672,9 +672,13 @@ fn requiresMet(world: *World, entity: EntityId, ext: Accessor, provided: []const
 
 /// Fire the world's hook check on the hooks of `ext` — its `on_attach` only
 /// when `with_attach` — in the scope of its own components and its requires.
+/// The hook the activation or deactivation dispatches is refused when no seam
+/// would run it.
 fn checkHooks(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext: Accessor, with_attach: bool) !void {
     if (ext.hookCount() == 0) return;
     const hook = ext.hook(0);
+    if (with_attach and hook.on_attach != null and world.attach_hook == null) return error.ExtensionHookUnbound;
+    if (!with_attach and hook.on_detach != null and world.detach_hook == null) return error.ExtensionHookUnbound;
     const scope = try gpa.alloc([]const u8, ext.schemaCount() + ext.requiresCount());
     defer gpa.free(scope);
     var n: usize = 0;
