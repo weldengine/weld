@@ -408,6 +408,7 @@ pub const DiagnosticCode = enum {
     // `etch-grammar.md` §20.3 describes keys on a `.etchc`, which does not exist. ──
     declaration_file_body_not_allowed, // E1900 DeclarationFileBodyNotAllowed (a `fn` carries a body inside a `.d.etch`)
     construct_not_allowed_in_declaration_file, // E1901 ConstructNotAllowedInDeclarationFile (a behavioural top-level construct appears in a `.d.etch`)
+    typed_extension_mismatch, // E0858 TypedExtensionMismatch (a construct in the wrong typed extension, `etch-grammar.md` §21.2)
     declaration_file_implementation_mismatch, // E1902 DeclarationFileImplementationMismatch (a committed `.d.etch` diverges from what the emitter produces on the current Zig `ServiceSpec`)
 
     /// Canonical short code, e.g. `"E0001"`.
@@ -616,6 +617,7 @@ pub const DiagnosticCode = enum {
             .measure_outside_test => "E0910",
             .declaration_file_body_not_allowed => "E1900",
             .construct_not_allowed_in_declaration_file => "E1901",
+            .typed_extension_mismatch => "E0858",
             .declaration_file_implementation_mismatch => "E1902",
         };
     }
@@ -826,6 +828,7 @@ pub const DiagnosticCode = enum {
             .measure_outside_test => "MeasureOutsideTest",
             .declaration_file_body_not_allowed => "DeclarationFileBodyNotAllowed",
             .construct_not_allowed_in_declaration_file => "ConstructNotAllowedInDeclarationFile",
+            .typed_extension_mismatch => "TypedExtensionMismatch",
             .declaration_file_implementation_mismatch => "DeclarationFileImplementationMismatch",
         };
     }

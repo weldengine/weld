@@ -324,7 +324,7 @@ test "a local declaration shadows an import of its name, as in etch check" {
         .{ .name = "src/combat.etch", .source = combat },
         .{ .name = "src/goblin.prefab.etch", .source = "import combat { Health }\n" ++ local },
     };
-    try expectChecked(&files);
+    try expectCheckReports(&files, .typed_extension_mismatch);
     const imported = try prefabBytes(&files, 1, null);
     defer gpa.free(imported);
     const declared = try inlinePrefabBytes(local, null);
@@ -366,7 +366,9 @@ test "a requisite the file imports rather than declares refuses the cook, as it 
         diags.deinit(gpa);
     }
     try weld_etch.validateProject(gpa, &files, &diags);
-    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(@as(usize, 2), diags.items.len);
+    try expectCheckReports(&files, .unknown_requisite);
+    try expectCheckReports(&files, .typed_extension_mismatch);
     try expectPrefabRefused(error.UndeclaredType, &files, 1);
 }
 

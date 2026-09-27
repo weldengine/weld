@@ -57,7 +57,8 @@ pub const Project = struct {
         @memset(self.parse_failed, false);
         try self.arenas.ensureTotalCapacity(gpa, n);
         for (files, 0..) |f, idx| {
-            const pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
+            var pr = try parser.parseWithMode(gpa, f.source, parser.modeForPath(f.name));
+            pr.ast.typed_extension = parser.typedExtensionForPath(f.name);
             // Each parse diagnostic moves into `diags_out` (its message
             // transfers), then only the vacated slice is freed — never
             // `pr.deinit`, which would free the arena kept below.

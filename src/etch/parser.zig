@@ -56,6 +56,16 @@ pub fn modeForPath(path: []const u8) ParseMode {
     return .standard;
 }
 
+/// The typed extension `path` names; `unknown` for a path that is no `.etch`.
+pub fn typedExtensionForPath(path: []const u8) ast_mod.TypedExtension {
+    if (std.mem.endsWith(u8, path, ".scene.etch")) return .scene;
+    if (std.mem.endsWith(u8, path, ".prefab.etch")) return .prefab;
+    if (std.mem.endsWith(u8, path, ".layer.etch")) return .layer;
+    if (std.mem.endsWith(u8, path, ".manifest.etch")) return .manifest;
+    if (std.mem.endsWith(u8, path, ".etch")) return .plain;
+    return .unknown;
+}
+
 /// Container returned by `parse` — the populated arena plus the list of
 /// diagnostics collected during the parse. With the top-level
 /// recovery sync-point the parser no longer stops at the first error:

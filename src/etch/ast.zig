@@ -95,6 +95,11 @@ pub const ParseMode = enum {
     declaration_file,
 };
 
+/// The extension of the file an arena was parsed from, for `E0858`
+/// (`etch-grammar.md` §21). `unknown` when the parse had no path, which
+/// `E0858` does not judge.
+pub const TypedExtension = enum { unknown, plain, scene, prefab, layer, manifest };
+
 /// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
 /// 28-bit index. Used as the universal pointer between AST nodes.
 pub const NodeId = packed struct(u32) {
@@ -2563,6 +2568,7 @@ pub const AstArena = struct {
     /// The type-checker reads it to decide `E1901`, which is a question about
     /// the file's IDENTITY and cannot be answered from the node columns alone.
     mode: ParseMode = .standard,
+    typed_extension: TypedExtension = .unknown,
 
     items: std.MultiArrayList(Item) = .empty,
     stmts: std.MultiArrayList(Stmt) = .empty,

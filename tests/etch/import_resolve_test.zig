@@ -200,9 +200,12 @@ test "a hook reaches imported requires and own components" {
         \\component Health { current: float = 100.0 }
         \\component Weapon { damage: float = 1.0 }
         },
-        .{ .name = "main.etch", .source =
-        \\import lib { Health, Weapon }
+        .{ .name = "base.prefab.etch", .source =
+        \\import lib { Health }
         \\prefab "Base" { entity "r" { Health {} } }
+        },
+        .{ .name = "mod.prefab.etch", .source =
+        \\import lib { Health, Weapon }
         \\prefab "Mod" extends "Base" requires Health {
         \\  entity "m" { Weapon {} }
         \\  on_attach { entity.get_mut(Health).current += entity.get(Weapon).damage }

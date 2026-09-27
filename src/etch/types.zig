@@ -891,6 +891,7 @@ pub const TypeChecker = struct {
         // no business being parsed. Cheap either way — one walk of the item
         // column, and an immediate return in `.standard` mode.
         try self.checkDeclarationFileConstructs();
+        try self.checkTypedExtension();
         try self.checkLiteralRanges();
         try self.collectServices();
         try self.collectDeclaredEvents();
@@ -1145,6 +1146,44 @@ pub const TypeChecker = struct {
                 .{@tagName(k)},
             );
         }
+    }
+
+    /// E0858 (`etch-grammar.md` §21.2): a typed file holds exactly one construct
+    /// of its type and imports, and a `scene` or `prefab` lives only in its own
+    /// typed file.
+    fn checkTypedExtension(self: *TypeChecker) !void {
+        const ext = self.arena.typed_extension;
+        if (ext == .unknown) return;
+        const main: ?ast_mod.ItemKind = switch (ext) {
+            .scene => .scene_decl,
+            .prefab => .prefab_decl,
+            .layer, .manifest, .plain, .unknown => null,
+        };
+        const kinds = self.arena.items.items(.kind);
+        var mains: u32 = 0;
+        for (kinds, 0..) |k, i| {
+            if (i >= self.arena.builtin_items_from) break;
+            const item_id = NodeId{ .category = .item, .index = @intCast(i) };
+            const span = self.arena.itemSpan(item_id);
+            if (ext == .plain) {
+                const own: ?[]const u8 = switch (k) {
+                    .scene_decl => "scene",
+                    .prefab_decl => "prefab",
+                    else => null,
+                };
+                if (own) |o| try self.emit(.typed_extension_mismatch, .error_, span, "a {s} belongs in its own .{s}.etch file", .{ o, o });
+                continue;
+            }
+            if (k == .import_decl) continue;
+            if (main != null and k == main.?) {
+                mains += 1;
+                if (mains > 1) try self.emit(.typed_extension_mismatch, .error_, span, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), @tagName(ext) });
+                continue;
+            }
+            try self.emit(.typed_extension_mismatch, .error_, span, "'{s}' is not allowed in a .{s}.etch file, which holds one {s} and its imports", .{ @tagName(k), @tagName(ext), @tagName(ext) });
+        }
+        if (ext != .plain and mains == 0)
+            try self.emit(.typed_extension_mismatch, .error_, .{ .byte_start = 0, .byte_end = 0 }, "a .{s}.etch file holds exactly one {s}", .{ @tagName(ext), @tagName(ext) });
     }
 
     /// Index every `service` this check can see. With a

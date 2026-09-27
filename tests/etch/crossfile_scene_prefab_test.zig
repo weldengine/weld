@@ -116,14 +116,15 @@ test "E1782 cross-scene duplicate uuid" {
 test "cross-file project green path resolves clean" {
     const gpa = std.testing.allocator;
     const files = [_]etch.ProjectFile{
-        .{ .name = "prefabs.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "markers.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "wall_torch.prefab.etch", .source =
+        \\import markers { Marker }
         \\prefab "WallTorch" {
         \\  entity "torch" { Marker { id: 1 } }
         \\}
         },
-        .{ .name = "level.etch", .source =
-        \\component Marker { id: int = 0 }
+        .{ .name = "level.scene.etch", .source =
+        \\import markers { Marker }
         \\scene "Level" {
         \\  entity "light" {
         \\    uuid: "aaaaaaaa-0000-0000-0000-000000000001"
@@ -142,4 +143,58 @@ test "cross-file project green path resolves clean" {
     // Prefab resolves cross-file, UUIDs unique, entities have components → no
     // diagnostic of any severity.
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+fn e0858Count(files: []const etch.ProjectFile) !usize {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try validate(gpa, files, &diags);
+    return countCode(diags.items, .typed_extension_mismatch);
+}
+
+test "E0858 on a type declared in a scene file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/level.scene.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 on a scene in a plain source file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/combat.etch", .source =
+        \\component Marker { id: int = 0 }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
+}
+
+test "E0858 on two prefabs in one prefab file" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/two.prefab.etch", .source =
+        \\import marker { Marker }
+        \\prefab "A" { entity "e" { Marker { id: 1 } } }
+        \\prefab "B" { entity "e" { Marker { id: 2 } } }
+        },
+    }));
+}
+
+test "E0858 on a scene file holding no scene" {
+    try std.testing.expectEqual(@as(usize, 1), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/empty.scene.etch", .source = "import marker { Marker }" },
+    }));
+}
+
+test "no E0858 on a scene file holding one scene and its imports" {
+    try std.testing.expectEqual(@as(usize, 0), try e0858Count(&.{
+        .{ .name = "src/marker.etch", .source = "component Marker { id: int = 0 }" },
+        .{ .name = "src/level.scene.etch", .source =
+        \\import marker { Marker }
+        \\scene "Level" { entity "e" { Marker { id: 1 } } }
+        },
+    }));
 }
