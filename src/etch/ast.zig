@@ -4166,7 +4166,7 @@ fn expectArenasEqual(a: *const AstArena, b: *const AstArena) !void {
         } else switch (@typeInfo(f.type)) {
             .int, .@"enum" => try std.testing.expectEqual(x, y),
             .@"struct" => if (comptime @hasField(f.type, "items")) {
-                try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(x.items), std.mem.sliceAsBytes(y.items));
+                try std.testing.expectEqualDeep(x.items, y.items);
             } else if (comptime @hasField(f.type, "bytes")) {
                 try std.testing.expectEqual(x.len, y.len);
                 for (0..x.len) |i| try std.testing.expectEqual(x.get(i), y.get(i));
