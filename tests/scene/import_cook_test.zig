@@ -542,3 +542,50 @@ test "an alias spelling a builtin type name refuses a hook's cook" {
     try expectChecked(&files);
     try std.testing.expectError(error.HookRenderFailed, scene_cook.cookPrefabInProject(gpa, &files, 2, base_res.base(), null));
 }
+
+test "a hook names what the last import of a name binds, as in etch check" {
+    const gpa = std.testing.allocator;
+    const a = "component Pos { x: i32 = 0 }\ncomponent Mark { m: i32 = 0 }";
+    const base_bytes = try inlinePrefabBytes(a ++
+        \\
+        \\prefab "Base" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000003" Pos { x: 0 } }
+        \\}
+    , null);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "Base", .bytes = base_bytes };
+    const files = [_]ProjectFile{
+        .{ .name = "src/a.etch", .source = a },
+        .{ .name = "src/b.etch", .source = "component Other { x: i32 = 0 }" },
+        .{ .name = "src/base.prefab.etch", .source =
+        \\import a { Pos }
+        \\prefab "Base" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000003" Pos { x: 0 } }
+        \\}
+        },
+        .{ .name = "src/mod.prefab.etch", .source =
+        \\import b { Other as Pos }
+        \\import a { Pos, Mark }
+        \\prefab "Mod" extends "Base" requires Pos {
+        \\  entity "m" { uuid: "00000000-0000-0000-0000-000000000004" Mark { m: 1 } }
+        \\  on_attach { entity.get_mut(Pos).x += 7 }
+        \\}
+        },
+    };
+    try expectChecked(&files);
+    const mod_bytes = try prefabBytes(&files, 3, base_res.base());
+    defer gpa.free(mod_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try weld_etch.parser.parse(gpa, a);
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    const pos = world.componentId("Pos").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{pos});
+    var ext_res = OneResolver{ .name = "Mod", .bytes = mod_bytes };
+    try scene.loader.runtimeActivate(&world, gpa, e, "Mod", ext_res.ext());
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, world.componentBytes(e, pos).?[0..4], .little));
+}
