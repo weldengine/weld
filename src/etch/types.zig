@@ -2638,6 +2638,9 @@ pub const TypeChecker = struct {
     fn validatePrefab(self: *TypeChecker, decl: ast_mod.PrefabDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, usize)) !void {
         try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .prefab);
 
+        if (decl.relation != .extends and (decl.requires_len != 0 or decl.has_on_attach or decl.has_on_detach))
+            try self.emit(.prefab_hook_not_allowed, .error_, decl.name_span, "prefab '{s}': `requires`, `on_attach` and `on_detach` are valid only on an `extends` prefab", .{self.arena.strings.slice(decl.name)});
+
         // E1790 — a prefab needs at least one component (across its entities).
         var total_components: u32 = 0;
         var e: u32 = 0;
@@ -9388,6 +9391,29 @@ test "a return in a hook is E1798" {
     );
     defer r.deinit(gpa);
     try expectAnyCode(r.diagnostics.items, .illegal_return_in_extension_hook);
+}
+
+test "a hook on an of prefab is E1799" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Variant" of "Base" {
+        \\  entity "r" { Health {} }
+        \\  on_attach { entity.get_mut(Health).max += 1.0 }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .prefab_hook_not_allowed, "extends"));
+}
+
+test "a requires on a standalone prefab is E1799" {
+    const gpa = std.testing.allocator;
+    var r = try checkHookSource(gpa, hook_base ++
+        \\prefab "Loner" requires Health {
+        \\  entity "r" { Health {} }
+        \\}
+    );
+    defer r.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), countMessage(r.diagnostics.items, .prefab_hook_not_allowed, "extends"));
 }
 
 test "an await in a hook is E0901" {

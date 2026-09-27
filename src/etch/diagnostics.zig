@@ -378,6 +378,7 @@ pub const DiagnosticCode = enum {
     prefab_remove_base_component, // W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
     extension_additive_conflict, // E1797 ExtensionAdditiveConflict (fatal cook error, strictly-additive `extends` → reject: (a) two extensions declare the same component, (b) an extension declares a component already carried by the base/an earlier extension, (c) the same extension is listed twice; guarantees `cooked ⇒ loadable`; runtime backstops `error.ExtensionComponentConflict` (a/b) / `error.ExtensionAlreadyActive` (c))
     illegal_return_in_extension_hook, // E1798 IllegalReturnInExtensionHook (`return` in an `on_attach` / `on_detach` body: a hook has no caller)
+    prefab_hook_not_allowed, // E1799 PrefabHookNotAllowed (`requires`, `on_attach` or `on_detach` on a prefab without `extends`)
 
     // ── async / effects (9xx, etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)
@@ -606,6 +607,7 @@ pub const DiagnosticCode = enum {
             .prefab_remove_base_component => "W1790",
             .extension_additive_conflict => "E1797",
             .illegal_return_in_extension_hook => "E1798",
+            .prefab_hook_not_allowed => "E1799",
             .async_call_in_non_async_context => "E0901",
             .unhandled_throws_call => "E0902",
             .await_not_statement_head => "E0904",
@@ -817,6 +819,7 @@ pub const DiagnosticCode = enum {
             .prefab_remove_base_component => "PrefabRemoveBaseComponent",
             .extension_additive_conflict => "ExtensionAdditiveConflict",
             .illegal_return_in_extension_hook => "IllegalReturnInExtensionHook",
+            .prefab_hook_not_allowed => "PrefabHookNotAllowed",
             .async_call_in_non_async_context => "AsyncCallInNonAsyncContext",
             .unhandled_throws_call => "UnhandledThrowsCall",
             .await_not_statement_head => "AwaitNotStatementHead",
@@ -938,4 +941,6 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("ExtensionAdditiveConflict", DiagnosticCode.extension_additive_conflict.name());
     try std.testing.expectEqualStrings("E1798", DiagnosticCode.illegal_return_in_extension_hook.code());
     try std.testing.expectEqualStrings("IllegalReturnInExtensionHook", DiagnosticCode.illegal_return_in_extension_hook.name());
+    try std.testing.expectEqualStrings("E1799", DiagnosticCode.prefab_hook_not_allowed.code());
+    try std.testing.expectEqualStrings("PrefabHookNotAllowed", DiagnosticCode.prefab_hook_not_allowed.name());
 }
