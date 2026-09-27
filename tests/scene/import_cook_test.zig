@@ -206,6 +206,12 @@ test "an aliased extension hook runs at load under the component's own name" {
     var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
     const files = [_]ProjectFile{
         .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/base.prefab.etch", .source =
+        \\import combat { Health }
+        \\prefab "BaseCharacter" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000003" Health { current: 100, max: 100 } }
+        \\}
+        },
         .{ .name = "src/combat_module.prefab.etch", .source =
         \\import combat { Health as HP, Weapon }
         \\prefab "CombatModule" extends "BaseCharacter" requires HP {
@@ -214,7 +220,8 @@ test "an aliased extension hook runs at load under the component's own name" {
         \\}
         },
     };
-    const module_bytes = try prefabBytes(&files, 1, base_res.base());
+    try expectChecked(&files);
+    const module_bytes = try prefabBytes(&files, 2, base_res.base());
     defer gpa.free(module_bytes);
 
     var world = World.init();
@@ -402,4 +409,136 @@ test "two imported components under one name refuse the cook" {
     };
     try expectChecked(&files);
     try expectPrefabRefused(error.DuplicateType, &files, 2);
+}
+
+fn expectCheckRefused(files: []const ProjectFile) !void {
+    const gpa = std.testing.allocator;
+    var diags: std.ArrayListUnmanaged(weld_etch.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try weld_etch.validateProject(gpa, files, &diags);
+    try std.testing.expect(diags.items.len > 0);
+}
+
+test "the last import of a name binds it, as in etch check" {
+    const gpa = std.testing.allocator;
+    const body =
+        \\prefab "Goblin" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Pos { x: 1 } }
+        \\}
+    ;
+    const files = [_]ProjectFile{
+        .{ .name = "src/a.etch", .source = "component Pos { x: i32 = 0 }" },
+        .{ .name = "src/b.etch", .source = "component Other { x: i32 = 0, y: i32 = 0 }" },
+        .{ .name = "src/goblin.prefab.etch", .source = "import b { Other as Pos }\nimport a { Pos }\n" ++ body },
+    };
+    try expectChecked(&files);
+    const imported = try prefabBytes(&files, 2, null);
+    defer gpa.free(imported);
+    const declared = try inlinePrefabBytes("component Pos { x: i32 = 0 }\n" ++ body, null);
+    defer gpa.free(declared);
+    try std.testing.expectEqualSlices(u8, declared, imported);
+}
+
+test "a name the last import binds to no component names none, as in etch check" {
+    const files = [_]ProjectFile{
+        .{ .name = "src/a.etch", .source = "component Health { current: i32 = 100 }" },
+        .{ .name = "src/b.etch", .source = "struct Stats { v: i32 = 0 }" },
+        .{ .name = "src/goblin.prefab.etch", .source =
+        \\import a { Health }
+        \\import b { Stats as Health }
+        \\prefab "Goblin" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { current: 5 } }
+        \\}
+        },
+    };
+    try expectCheckRefused(&files);
+    try expectPrefabRefused(error.UndeclaredType, &files, 2);
+}
+
+test "two imports of one name bind the later, as in etch check" {
+    const gpa = std.testing.allocator;
+    const body =
+        \\prefab "Goblin" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { hp: 5 } }
+        \\}
+    ;
+    const files = [_]ProjectFile{
+        .{ .name = "src/a.etch", .source = "component Health { current: i32 = 100 }" },
+        .{ .name = "src/b.etch", .source = "component Health { hp: i32 = 7, max: i32 = 7 }" },
+        .{ .name = "src/goblin.prefab.etch", .source = "import a { Health }\nimport b { Health }\n" ++ body },
+    };
+    try expectChecked(&files);
+    const imported = try prefabBytes(&files, 2, null);
+    defer gpa.free(imported);
+    const declared = try inlinePrefabBytes("component Health { hp: i32 = 7, max: i32 = 7 }\n" ++ body, null);
+    defer gpa.free(declared);
+    try std.testing.expectEqualSlices(u8, declared, imported);
+}
+
+test "a requisite reached only through an import is not the file's to name, as in etch check" {
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source =
+        \\component Transform { x: i32 = 0 }
+        \\@requires(Transform)
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        },
+        .{ .name = "src/goblin.prefab.etch", .source =
+        \\import combat { Health }
+        \\prefab "Goblin" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { current: 5 } Transform { x: 3 } }
+        \\}
+        },
+    };
+    try expectCheckRefused(&files);
+    try expectPrefabRefused(error.UndeclaredType, &files, 1);
+}
+
+test "a builtin declaration shadows an import of its name, as in etch check" {
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/goblin.prefab.etch", .source =
+        \\import combat { Health as Error }
+        \\prefab "Goblin" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Error { current: 5 } }
+        \\}
+        },
+    };
+    try expectCheckRefused(&files);
+    try expectPrefabRefused(error.UndeclaredType, &files, 1);
+}
+
+test "an alias spelling a builtin type name refuses a hook's cook" {
+    const gpa = std.testing.allocator;
+    const base_bytes = try inlinePrefabBytes(combat ++
+        \\
+        \\prefab "BaseCharacter" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000003" Health { current: 100, max: 100 } }
+        \\}
+    , null);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const files = [_]ProjectFile{
+        .{ .name = "src/combat.etch", .source = combat },
+        .{ .name = "src/base.prefab.etch", .source =
+        \\import combat { Health }
+        \\prefab "BaseCharacter" {
+        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000003" Health { current: 100, max: 100 } }
+        \\}
+        },
+        .{ .name = "src/combat_module.prefab.etch", .source =
+        \\import combat { Health as Entity, Weapon }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Entity {
+        \\  entity "mod" { uuid: "00000000-0000-0000-0000-000000000004" Weapon { damage: 25 } }
+        \\  on_attach {
+        \\    let e: Entity = entity
+        \\    e.get_mut(Entity).max += 50
+        \\  }
+        \\}
+        },
+    };
+    try expectChecked(&files);
+    try std.testing.expectError(error.HookRenderFailed, scene_cook.cookPrefabInProject(gpa, &files, 2, base_res.base(), null));
 }

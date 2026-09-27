@@ -213,7 +213,9 @@ const PendingExtension = struct {
     /// resolver's backing outlives the tick.
     bytes: []const u8,
     op: ExtOp,
-    /// The extension name at the call, where a refusal at the flush is reported.
+    /// The extension name at the call, where a refusal at the flush is
+    /// reported; empty for a call a cooked hook made, its text being no program
+    /// source.
     span: SourceSpan,
 };
 
@@ -1356,6 +1358,8 @@ pub const Interpreter = struct {
     /// The address `bindToWorld` registered into the world, which holds it as
     /// the hooks' and observers' context. Non-null once bound.
     bound_at: ?*const Interpreter = null,
+    /// Set while a cooked hook text runs: its spans index that text.
+    in_hook_text: bool = false,
     /// Non-null while an observer body runs: the registry's deferred
     /// command buffer. Structural mutations issued by the body (tag mutations)
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
@@ -1713,10 +1717,6 @@ pub const Interpreter = struct {
     }
 
     pub fn runFor(self: *Interpreter, world: *World, ticks: u32) !RuntimeReport {
-        // Bound here and not in `compile`, which returns by value: the world
-        // keeps this address, so the interpreter must not move once it runs. A
-        // test that drives a Tier-0 flush directly calls `bindToWorld` itself
-        // before flushing.
         try self.bindToWorld(world);
         var report: RuntimeReport = .{};
         var t: u32 = 0;
@@ -2044,6 +2044,9 @@ pub const Interpreter = struct {
         const prev_deferred = self.observer_deferred;
         self.observer_deferred = &world.observer_registry.deferred.?;
         defer self.observer_deferred = prev_deferred;
+        const prev_in_hook = self.in_hook_text;
+        self.in_hook_text = true;
+        defer self.in_hook_text = prev_in_hook;
 
         self.control = .none;
         self.thrown = false;
@@ -5230,7 +5233,7 @@ pub const Interpreter = struct {
     /// dup'd (the AST / run-string source may not outlive the flush).
     fn enqueueExtension(self: *Interpreter, world: *World, locals: *Locals, entity: CoreEntityId, mc: ast_mod.MethodCall, op: ExtOp) StmtError!void {
         const name = try self.extensionNameArg(world, locals, mc);
-        const span = self.ast.exprSpan(@bitCast(self.ast.extra.items[mc.args_start]));
+        const span: SourceSpan = if (self.in_hook_text) .{ .byte_start = 0, .byte_end = 0 } else self.ast.exprSpan(@bitCast(self.ast.extra.items[mc.args_start]));
         const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
         const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
         const name_dup = try self.gpa.dupe(u8, name);

@@ -794,6 +794,13 @@ pub const TypeChecker = struct {
     /// imports, impls, tags, services and events a statement check reads, and
     /// the construct validators. Shared with `checkPrefabHooks`.
     fn runDeclarationPasses(self: *TypeChecker) !void {
+        try self.collectDeclarations();
+        try self.bindImports();
+        try self.validateDeclarations();
+    }
+
+    /// The passes before the imports bind: the file's own symbols.
+    fn collectDeclarations(self: *TypeChecker) !void {
         // E1901 runs FIRST: it decides whether the file is even allowed to
         // contain what it contains, and a `.d.etch` carrying a `rule` would
         // otherwise produce a cascade of resolution errors on a body that had
@@ -804,7 +811,9 @@ pub const TypeChecker = struct {
         try self.collectServices();
         try self.collectDeclaredEvents();
         try self.pass1Collect();
-        try self.bindImports();
+    }
+
+    fn validateDeclarations(self: *TypeChecker) !void {
         try self.validateTypeAliases();
         try self.validateImpls();
         try self.validateDataDecls();
@@ -827,18 +836,53 @@ pub const TypeChecker = struct {
         try self.validateSceneDecls();
     }
 
-    /// The import half of `check`, for the cook: every `import` of `arena` is
-    /// resolved against `project`, and what `check` refuses is reported into
-    /// `diagnostics`.
-    pub fn checkImports(gpa: std.mem.Allocator, arena: *AstArena, project: *const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+    /// How a file names its components and what its imports bind, as `check`
+    /// resolves them, for the cook.
+    pub const CookScope = struct {
+        /// Each name the file uses for a component → that component.
+        components: std.AutoHashMapUnmanaged(StringId, ComponentRef) = .empty,
+        /// Each name an import binds → the export it binds, a declaration of the
+        /// file shadowing the import of its name.
+        imports: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
+
+        pub fn deinit(self: *CookScope, gpa: std.mem.Allocator) void {
+            self.components.deinit(gpa);
+            self.imports.deinit(gpa);
+        }
+    };
+
+    /// `arena`'s scope resolved against `project`; what `check` refuses on an
+    /// `import` is reported into `diagnostics`.
+    pub fn cookScope(gpa: std.mem.Allocator, arena: *AstArena, project: *const ProjectContext, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !CookScope {
+        try arena.ensureErrorBuiltins(gpa);
+        var scratch: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (scratch.items) |*d| d.deinit(gpa);
+            scratch.deinit(gpa);
+        }
         var tc: TypeChecker = .{
             .gpa = gpa,
             .arena = arena,
-            .diagnostics = diagnostics,
+            .diagnostics = &scratch,
             .project = project,
         };
         defer tc.deinit();
+        try tc.collectDeclarations();
+        tc.diagnostics = diagnostics;
         try tc.bindImports();
+        var scope: CookScope = .{};
+        errdefer scope.deinit(gpa);
+        var locals = tc.symbols.keyIterator();
+        while (locals.next()) |name| {
+            if (tc.componentNamed(name.*)) |c| try scope.components.put(gpa, name.*, c);
+        }
+        var bound = tc.imported_symbols.keyIterator();
+        while (bound.next()) |name| {
+            const entry = tc.importedBinding(name.*) orelse continue;
+            try scope.imports.put(gpa, name.*, entry);
+            if (tc.componentNamed(name.*)) |c| try scope.components.put(gpa, name.*, c);
+        }
+        return scope;
     }
 
     /// The prefab half of `check`, for the cook: the declarations are collected
@@ -2133,19 +2177,25 @@ pub const TypeChecker = struct {
     }
 
     /// A component declaration and the arena it lives in.
-    const ComponentRef = struct { arena: *const AstArena, decl: ast_mod.ComponentDecl };
+    pub const ComponentRef = struct { arena: *const AstArena, decl: ast_mod.ComponentDecl };
 
-    /// The component `name` names: a local symbol shadows an import, and a
-    /// symbol that is no component names none.
+    /// The export an import binds `name` to, unless a declaration of the file
+    /// shadows it.
+    fn importedBinding(self: *TypeChecker, name: StringId) ?ExportEntry {
+        if (self.symbols.contains(name)) return null;
+        return self.imported_symbols.get(name);
+    }
+
+    /// The component `name` names; a symbol that is no component names none.
     fn componentNamed(self: *TypeChecker, name: StringId) ?ComponentRef {
-        if (self.symbols.get(name)) |sym| {
-            if (sym.kind != .component) return null;
-            return .{ .arena = self.arena, .decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)] };
+        if (self.importedBinding(name)) |entry| {
+            if (entry.kind != .component) return null;
+            const decl_arena = &self.project.?.arenas[entry.arena_index];
+            return .{ .arena = decl_arena, .decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)] };
         }
-        const entry = self.imported_symbols.get(name) orelse return null;
-        if (entry.kind != .component) return null;
-        const decl_arena = &self.project.?.arenas[entry.arena_index];
-        return .{ .arena = decl_arena, .decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)] };
+        const sym = self.symbols.get(name) orelse return null;
+        if (sym.kind != .component) return null;
+        return .{ .arena = self.arena, .decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)] };
     }
 
     /// One instance field against `component`'s declared fields, the imported

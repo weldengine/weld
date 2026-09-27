@@ -110,11 +110,6 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
 /// Callers that know the file's path pass `modeForPath(path)`; callers
 /// that hold only a buffer keep using `parse`, which is this function at
 /// `.standard`.
-///
-/// The mode is a parameter here rather than on `parse` for a measured reason:
-/// `parse` has about twenty call sites across `src/`, `tools/` and `tests/`,
-/// and only `project.zig`'s `Project.init` holds a filename at all. Threading a
-/// parameter through the others would buy nothing.
 pub fn parseWithMode(gpa: std.mem.Allocator, source: []const u8, mode: ParseMode) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or

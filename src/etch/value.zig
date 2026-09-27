@@ -293,7 +293,7 @@ pub const RuntimeErrorKind = enum {
     StaleComponentRef,
     /// A deferred `activate_extension` / `deactivate_extension` the tick
     /// boundary refused, or whose hook failed. The span covers the extension name
-    /// at the call.
+    /// at the call, and is empty when a cooked hook made the call.
     ExtensionOpFailed,
 };
 

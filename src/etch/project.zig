@@ -81,8 +81,7 @@ pub const Project = struct {
         for (files, 0..) |f, idx| {
             const mp = try deriveModulePath(gpa, f.name);
             self.module_paths.appendAssumeCapacity(mp);
-            // A duplicate module path maps to the last file; the graph only
-            // needs a consistent node identity.
+            // A duplicate module path maps to the last file.
             try self.module_index.put(gpa, mp, idx);
         }
 

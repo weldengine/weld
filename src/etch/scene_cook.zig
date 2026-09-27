@@ -61,6 +61,7 @@ const validate = weld_core.scene.validate;
 const AstArena = ast_mod.AstArena;
 const ProjectContext = types_mod.TypeChecker.ProjectContext;
 const ExportEntry = types_mod.TypeChecker.ExportEntry;
+const CookScope = types_mod.TypeChecker.CookScope;
 const StringId = ast_mod.StringId;
 const NodeId = ast_mod.NodeId;
 const Bridge = bridge_mod.Bridge;
@@ -248,13 +249,14 @@ fn cookInProject(
     if (project.has_cycle) return fail(diag_out, error.ImportRefused, "the project's imports form a cycle");
     const ctx = project.context();
     const ast = &project.arenas.items[index];
-    try checkImports(gpa, ast, &ctx, diag_out);
+    var scope = try resolveScope(gpa, ast, &ctx, diag_out);
+    defer scope.deinit(gpa);
     if (kind == .prefab) try checkHooks(gpa, ast, &ctx, diag_out);
 
     var registry = Registry.init();
     errdefer registry.deinit(gpa);
 
-    var b = Builder.init(gpa, ast, &registry, &ctx, index);
+    var b = Builder.init(gpa, ast, &registry, &ctx, &scope);
     defer b.deinitScratch();
     errdefer b.arena.deinit();
 
@@ -307,17 +309,20 @@ pub const BaseResolver = struct {
     }
 };
 
-/// Refuse an `import` the type checker refuses.
-fn checkImports(gpa: std.mem.Allocator, ast: *AstArena, project: *const ProjectContext, diag_out: ?*[]const u8) CookError!void {
+/// The file's names as the type checker resolves them, refusing an `import` it
+/// refuses.
+fn resolveScope(gpa: std.mem.Allocator, ast: *AstArena, project: *const ProjectContext, diag_out: ?*[]const u8) CookError!CookScope {
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {
         for (diags.items) |*d| d.deinit(gpa);
         diags.deinit(gpa);
     }
-    types_mod.TypeChecker.checkImports(gpa, ast, project, &diags) catch |err| return switch (err) {
+    var scope = types_mod.TypeChecker.cookScope(gpa, ast, project, &diags) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
     };
+    errdefer scope.deinit(gpa);
     if (diags.items.len > 0) return fail(diag_out, error.ImportRefused, "an import names a module the project lacks, or an item its module does not export or keeps private");
+    return scope;
 }
 
 /// Refuse an extension hook or `requires` clause the type checker refuses, so
@@ -389,10 +394,9 @@ const Builder = struct {
     registry: *Registry,
     arena: std.heap.ArenaAllocator,
     project: *const ProjectContext,
-    /// `ast`'s file in `project`.
-    file_index: usize,
-    /// Each alias of an imported component → the component's own name. Keys
-    /// and values point into the project's string pools.
+    scope: *const CookScope,
+    /// Each import alias → the name it aliases. Keys and values point into the
+    /// file's string pool.
     aliases: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// Each imported component registered, by its own name → its declaration.
     imported: std.StringHashMapUnmanaged(ImportedDecl) = .empty,
@@ -424,14 +428,14 @@ const Builder = struct {
 
     const ImportedDecl = struct { arena_index: usize, item_index: u32 };
 
-    fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry, project: *const ProjectContext, file_index: usize) Builder {
+    fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry, project: *const ProjectContext, scope: *const CookScope) Builder {
         return .{
             .gpa = gpa,
             .ast = ast,
             .registry = registry,
             .arena = std.heap.ArenaAllocator.init(gpa),
             .project = project,
-            .file_index = file_index,
+            .scope = scope,
             .bridge = Bridge.init(),
         };
     }
@@ -454,11 +458,14 @@ const Builder = struct {
         self.imported.deinit(self.gpa);
     }
 
-    /// The component a type name of this file names, by the component's own
-    /// name: an import alias spells the name it aliases.
-    fn nameOf(self: *const Builder, id: StringId) []const u8 {
-        const local = self.ast.strings.slice(id);
-        return self.aliases.get(local) orelse local;
+    /// The registry's name for what a type name of this file names: an imported
+    /// component's own name, else the name as written. Null for a component
+    /// registered only as another one's requisite, which the file cannot name.
+    fn nameOf(self: *const Builder, id: StringId) ?[]const u8 {
+        if (self.scope.components.get(id)) |c| return c.arena.strings.slice(c.decl.name);
+        const written = self.ast.strings.slice(id);
+        if (self.imported.contains(written)) return null;
+        return written;
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -522,8 +529,8 @@ const Builder = struct {
         }
     }
 
-    /// Register each component this file imports by name, under the
-    /// component's own name.
+    /// Register, under its own name and in import order, each component the
+    /// file's imports bind, and record each alias the scope keeps.
     fn registerImports(self: *Builder, diag_out: ?*[]const u8) CookError!void {
         const kinds = self.ast.items.items(.kind);
         const datas = self.ast.items.items(.data);
@@ -533,18 +540,16 @@ const Builder = struct {
             const decl = self.ast.import_decls.items[datas[i]];
             const path = types_mod.TypeChecker.importPath(self.gpa, self.ast, decl) catch return error.OutOfMemory;
             defer self.gpa.free(path);
-            // `checkImports` refused an import that resolves to no module.
-            const target = self.project.module_index.get(path) orelse unreachable;
+            const target = self.project.module_index.get(path) orelse continue;
             var j: u32 = 0;
             while (j < decl.items_len) : (j += 1) {
                 const item = self.ast.import_items.items[decl.items_start + j];
-                const local = self.ast.strings.slice(types_mod.TypeChecker.importLocalName(item));
-                // A declaration of the file shadows an import of its name.
-                if (self.project.exports[self.file_index].contains(local)) continue;
-                const entry = types_mod.TypeChecker.importedExport(self.project, self.ast, target, item) orelse unreachable;
-                if (entry.kind != .component) continue;
-                const name = try self.registerImported(entry, diag_out);
-                if (item.alias != 0) try self.aliases.put(self.gpa, local, name);
+                const bound = self.scope.imports.get(types_mod.TypeChecker.importLocalName(item)) orelse continue;
+                if (bound.kind == .component) _ = try self.registerImported(bound, diag_out);
+                if (item.alias == 0) continue;
+                // The item that binds its alias last is the one the scope kept.
+                const own = types_mod.TypeChecker.importedExport(self.project, self.ast, target, item) orelse continue;
+                if (std.meta.eql(own, bound)) try self.aliases.put(self.gpa, self.ast.strings.slice(item.alias), self.ast.strings.slice(item.name));
             }
         }
     }
@@ -913,7 +918,7 @@ const Builder = struct {
         const content_version = try self.versionFromNode(pd.version, diag_out);
         const hooks = if (pd.relation == .extends) try self.buildExtendsHooks(pd, base_resolver, diag_out) else &[_]format.HookSet{};
         const requires = try self.a().alloc(u32, pd.requires_len);
-        for (requires, 0..) |*r, ri| r.* = try self.internString(self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]));
+        for (requires, 0..) |*r, ri| r.* = try self.internString(self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]) orelse return fail(diag_out, error.UndeclaredType, "`requires` names a component the file neither declares nor imports"));
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -950,15 +955,16 @@ const Builder = struct {
             else => return fail(diag_out, error.HookRenderFailed, "extension hook body could not be rendered to text"),
         };
         defer self.gpa.free(text);
-        const spelled = try self.withOwnNames(text);
+        const spelled = try self.withOwnNames(text, diag_out);
         defer self.gpa.free(spelled);
         return self.internString(spelled);
     }
 
     /// `text` with each import alias spelled by the name it aliases: the loader
-    /// checks and runs a hook against a program that declares the component
-    /// under that name.
-    fn withOwnNames(self: *Builder, text: []const u8) error{OutOfMemory}![]u8 {
+    /// checks and runs a hook against a program that declares it under that
+    /// name. An alias spelled like a builtin type or resource refuses the cook,
+    /// the text no longer telling the two apart.
+    fn withOwnNames(self: *Builder, text: []const u8, diag_out: ?*[]const u8) CookError![]u8 {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.gpa);
         var lx = lexer.Lexer.init(text);
@@ -968,7 +974,10 @@ const Builder = struct {
             const tok = try lx.next(self.gpa);
             if (tok.kind == .eof) break;
             if (tok.kind != .type_ident) continue;
-            const own = self.aliases.get(text[tok.span.byte_start..tok.span.byte_end]) orelse continue;
+            const alias = text[tok.span.byte_start..tok.span.byte_end];
+            const own = self.aliases.get(alias) orelse continue;
+            if (types_mod.BuiltinType.fromName(alias) != null or types_mod.builtinResourceByName(alias) != null)
+                return fail(diag_out, error.HookRenderFailed, "an import alias spelled like a builtin type or resource names the extension hook's component ambiguously");
             try out.appendSlice(self.gpa, text[copied..tok.span.byte_start]);
             try out.appendSlice(self.gpa, own);
             copied = tok.span.byte_end;
@@ -988,7 +997,7 @@ const Builder = struct {
         const acc = try openResolvedPrefab(base_bytes, diag_out);
         var ri: u32 = 0;
         while (ri < pd.requires_len) : (ri += 1) {
-            const req = self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]);
+            const req = self.nameOf(self.ast.prefab_requires.items[pd.requires_start + ri]) orelse return fail(diag_out, error.UndeclaredType, "`requires` names a component the file neither declares nor imports");
             if (!baseHasComponent(acc, req)) return fail(diag_out, error.RequiresNotSatisfied, "`extends … requires` a component the base prefab does not declare");
         }
     }
@@ -1235,7 +1244,8 @@ const Builder = struct {
             },
             .field_override => {
                 const fo = self.ast.field_overrides.items[m.index];
-                const id = self.registry.idOf(self.nameOf(fo.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
+                const name = self.nameOf(fo.type_name) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
+                const id = self.registry.idOf(name) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
                 const idx = indexOfId(ids.items, id) orelse return fail(diag_out, error.OverrideTargetMissing, "per-field override targets a component the instance does not carry");
                 const fname = self.ast.strings.slice(fo.field);
                 const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "per-field override sets a field the component does not declare");
@@ -1289,8 +1299,8 @@ const Builder = struct {
 
     /// Resolve an instance's type name to an entity component id; a resource is
     /// refused, since the loader refuses it as a column.
-    fn entityComponentId(self: *Builder, name: []const u8, undeclared_msg: []const u8, diag_out: ?*[]const u8) CookError!ComponentId {
-        const id = self.registry.idOf(name) orelse return fail(diag_out, error.UndeclaredType, undeclared_msg);
+    fn entityComponentId(self: *Builder, name: ?[]const u8, undeclared_msg: []const u8, diag_out: ?*[]const u8) CookError!ComponentId {
+        const id = self.registry.idOf(name orelse return fail(diag_out, error.UndeclaredType, undeclared_msg)) orelse return fail(diag_out, error.UndeclaredType, undeclared_msg);
         if (self.registry.componentKind(id) == .resource) return fail(diag_out, error.ResourceAsComponent, "entity instance names a resource, which is no entity component");
         return id;
     }

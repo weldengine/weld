@@ -973,6 +973,48 @@ test "a refused deferred activation leaves the rest of its tick applied" {
     try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, prog, "\"CombatModule\"").?)), failure.span.byte_start);
 }
 
+test "a refused op a cooked hook queued reports no program position" {
+    const gpa = std.testing.allocator;
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    var looped = try scene_cook.cookPrefab(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "Loop" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach { entity.activate_extension("Loop") }
+        \\}
+    , base_res.base(), null);
+    defer looped.deinit(gpa);
+    const loop_bytes = try scene.writer.write(gpa, looped.model, &looped.registry);
+    defer gpa.free(loop_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser.parse(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "Loop", .bytes = loop_bytes };
+    interp.setExtensionResolver(res.ext());
+    const npc = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.runtimeActivate(&world, gpa, npc, "Loop", res.ext());
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const failure = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqualStrings("ExtensionOpFailed", @tagName(failure.kind));
+    try std.testing.expectEqual(@as(u32, 0), failure.span.byte_start);
+    try std.testing.expectEqual(@as(u32, 0), failure.span.byte_end);
+}
+
 test "an allocation failure in a deferred activation ends the tick" {
     const gpa = std.testing.allocator;
     const combat_bytes = try cookCombatModule(gpa);
