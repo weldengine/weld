@@ -17382,7 +17382,8 @@ test "a replaced interpreter freed leaves its successor bound" {
     try second.bindToWorld(&world);
     first.deinit();
     try std.testing.expectEqual(@as(usize, 1), onAddListeners(&world, world.registry.idOf("Health").?));
-    try std.testing.expect(world.check_hook.?.ctx == @as(?*anyopaque, &second));
+    const hook = world.check_hook orelse return error.TestExpectedSeam;
+    try std.testing.expect(hook.ctx == @as(?*anyopaque, &second));
 }
 
 fn standInAttach(_: ?*anyopaque, _: *World, _: CoreEntityId, _: []const u8, _: ?[]const u8) anyerror!void {}
@@ -17398,7 +17399,8 @@ test "a freed interpreter leaves in place a seam another registered" {
     var other: u8 = 0;
     world.registerOnAttach(&other, &standInAttach);
     interp.deinit();
-    try std.testing.expect(world.attach_hook.?.ctx == @as(?*anyopaque, &other));
+    const hook = world.attach_hook orelse return error.TestExpectedSeam;
+    try std.testing.expect(hook.ctx == @as(?*anyopaque, &other));
 }
 
 test "an interpreter bound to a world replaces the one bound before it through any of its seams" {
