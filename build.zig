@@ -1099,7 +1099,7 @@ pub fn build(b: *std.Build) void {
         // GAL capture helper surface coverage (encodePpm +
         // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
         .{ .path = "tests/render/capture_helper.zig", .render = true },
-        // hot-reload filewatch latency < 200 ms.
+        // hot-reload filewatch compiles a dropped shader.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true, .runtime_env = true },
         // vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
